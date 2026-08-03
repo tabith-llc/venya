@@ -1,0 +1,226 @@
+"""Executor configuration.
+
+Loaded from environment variables and/or config file.
+Environment variables are prefixed with VENYA_EXECUTOR_.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from pydantic import BaseModel, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class MtlsConfig(BaseModel):
+    """mTLS configuration for executor-to-server communication."""
+
+    ca_cert: str = Field(default="/etc/venya/executor/ca.crt", description="Path to CA certificate")
+    cert: str = Field(default="/etc/venya/executor/executor.crt", description="Path to executor certificate")
+    key: str = Field(default="/etc/venya/executor/executor.key", description="Path to executor private key")
+
+
+class CertificateRotationConfig(BaseModel):
+    """Certificate rotation configuration."""
+
+    rotation_days: int = Field(
+        default=30,
+        description="Certificate validity period in days",
+    )
+    rotate_before_days: int = Field(
+        default=3,
+        description="Request new certificate N days before expiry",
+    )
+    revocation_poll_seconds: int = Field(
+        default=60,
+        description="Poll revocation status every N seconds",
+    )
+
+
+class SessionConfig(BaseModel):
+    """Session configuration for executor sessions."""
+
+    session_timeout: int = Field(
+        default=900,
+        description="Idle timeout in seconds before session expires (default: 15 min)",
+    )
+    access_token_ttl: int = Field(
+        default=300,
+        description="Access token lifetime in seconds (default: 5 min)",
+    )
+    max_session_duration: int = Field(
+        default=14400,
+        description="Hard cap on session duration in seconds (default: 4 hours)",
+    )
+
+
+class OutputCaptureConfig(BaseModel):
+    """Output capture configuration."""
+
+    max_output_bytes: int = Field(
+        default=262144,  # 256 KB
+        description="Maximum output bytes per stream (stdout/stderr)",
+    )
+    hash_window_size: int = Field(
+        default=20,
+        description="Sliding window size for content hash matching",
+    )
+    min_match_length: int = Field(
+        default=8,
+        description="Minimum match length for content hash detection",
+    )
+
+
+class CommandValidatorConfig(BaseModel):
+    """Command validator configuration."""
+
+    preset: str = Field(
+        default="balanced",
+        description="Policy preset: strict, balanced, or permissive",
+    )
+    allowed_commands: list[str] | None = Field(
+        default=None,
+        description="Explicit allowlist of commands (strict mode)",
+    )
+
+
+class AuditForwarderConfig(BaseModel):
+    """Audit log forwarder configuration."""
+
+    remote_url: str | None = Field(
+        default=None,
+        description="Remote syslog URL (tls://host:port)",
+    )
+    max_buffer_size: int = Field(
+        default=10_000,
+        description="Local event buffer size",
+    )
+    alert_threshold: float = Field(
+        default=0.8,
+        description="Buffer occupancy threshold for backlog alert",
+    )
+    retry_base_delay: float = Field(
+        default=2.0,
+        description="Retry base delay in seconds",
+    )
+    retry_max_delay: float = Field(
+        default=300.0,
+        description="Retry max delay in seconds",
+    )
+    local_retention_days: int = Field(
+        default=90,
+        description="Local audit log retention days",
+    )
+
+
+class ReaperConfig(BaseModel):
+    """Reaper loop configuration for orphaned resources."""
+
+    check_interval: float = Field(
+        default=5.0,
+        description="Check interval in seconds for orphaned resources",
+    )
+    secret_ttl_seconds: int = Field(
+        default=300,
+        description="Secret TTL in seconds (cleanup if not consumed)",
+    )
+
+
+class ExecutorConfig(BaseSettings):
+    """Executor configuration.
+
+    Loaded from environment variables and/or config file.
+    Environment variables are prefixed with VENYA_EXECUTOR_.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="VENYA_EXECUTOR_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Server connection
+    server_url: str = Field(
+        default="https://localhost:8080",
+        description="Vault server URL",
+    )
+
+    # Executor identity
+    executor_id: str = Field(
+        default="default",
+        description="Unique executor identifier",
+    )
+
+    # mTLS
+    mtls: MtlsConfig = Field(default_factory=MtlsConfig)
+
+    # Certificate rotation
+    cert_rotation: CertificateRotationConfig = Field(default_factory=CertificateRotationConfig)
+
+    # Sessions
+    session: SessionConfig = Field(default_factory=SessionConfig)
+
+    # Output capture
+    output_capture: OutputCaptureConfig = Field(default_factory=OutputCaptureConfig)
+
+    # Command validation
+    command_validator: CommandValidatorConfig = Field(default_factory=CommandValidatorConfig)
+
+    # Audit forwarding
+    audit: AuditForwarderConfig = Field(default_factory=AuditForwarderConfig)
+
+    # Reaper
+    reaper: ReaperConfig = Field(default_factory=ReaperConfig)
+
+    # Logging
+    log_level: str = Field(default="info", description="Logging level")
+
+    # Daemon mode
+    daemonize: bool = Field(default=False, description="Run as daemon (fork to background)")
+    pid_file: str = Field(default="/var/run/venya-executor.pid", description="PID file path")
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> ExecutorConfig:
+        """Load configuration from a TOML file.
+
+        Args:
+            path: Path to config file.
+
+        Returns:
+            Configured ExecutorConfig.
+        """
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
+
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+
+        return cls(**data)
+
+    def save_file(self, path: str | Path) -> None:
+        """Save current configuration to a TOML file.
+
+        Args:
+            path: Path to write config file.
+        """
+        try:
+            import tomli_w as tomli_w  # type: ignore[import-not-found]
+        except ImportError:
+            import tomli_w  # type: ignore[import-not-found]
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        import json
+
+        data = json.loads(self.model_dump_json())
+        with open(path, "w") as f:
+            tomli_w.dump(data, f)

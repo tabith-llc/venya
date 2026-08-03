@@ -1,0 +1,316 @@
+"""Secret CRUD endpoints."""
+
+import base64
+import hashlib
+import logging
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
+
+router = APIRouter()
+logger = logging.getLogger("venya.server")
+
+
+# --- Request/Response models ---
+
+
+class SecretCreateRequest(BaseModel):
+    key: str = Field(..., description="Secret key")
+    value: str = Field(..., description="Secret value (plaintext)")
+    roles: list[str] = Field(..., description="Role IDs to scope the secret to")
+    key_version_id: str = Field(
+        ..., description="Key version ID for encryption"
+    )
+
+
+class SecretCreateResponse(BaseModel):
+    id: int
+    key: str
+    role_ids: list[str]
+
+
+class SecretGetRequest(BaseModel):
+    unmask: bool = Field(False, description="Return plaintext instead of masked")
+    caller: str = Field("human", description="Caller type: human or executor")
+
+
+class SecretGetResponse(BaseModel):
+    key: str
+    value: str
+    masked: bool
+
+
+class SecretListResponse(BaseModel):
+    secrets: list[dict[str, Any]]
+
+
+class SecretDeleteResponse(BaseModel):
+    deleted: bool
+    key: str
+
+
+class SentinelWrappedResponse(BaseModel):
+    """Sentinel-wrapped secret for executor injection."""
+
+    secret_id: str
+    wrapped_value: str  # [VENYA:{hash}]base64_data[/VENYA]
+    detection_hashes: list[str]  # SHA-256 hex digests in multiple encodings
+
+
+class RevokeSecretsRequest(BaseModel):
+    """Request body for secret credential revocation."""
+
+    secret_ids: list[str] = Field(
+        ...,
+        description="List of secret IDs whose scoped credentials should be revoked",
+        min_length=1,
+    )
+
+
+class RevokeSecretsResponse(BaseModel):
+    """Response for secret credential revocation."""
+
+    revoked: bool
+    count: int
+    session_id: str
+
+
+# --- Helper functions ---
+
+
+def wrap_with_sentinel(secret_id: str, secret_value: bytes) -> str:
+    """Wrap a secret value with sentinels for executor injection.
+
+    Format: [VENYA:{8-char-hex-hash}]base64_data[/VENYA]
+
+    Args:
+        secret_id: The secret identifier.
+        secret_value: The plaintext secret value.
+
+    Returns:
+        Sentinel-wrapped string.
+    """
+    hash_prefix = hashlib.sha256(secret_id.encode()).hexdigest()[:8]
+    encoded = base64.b64encode(secret_value).decode("ascii")
+    return f"[VENYA:{hash_prefix}]{encoded}[/VENYA]"
+
+
+def compute_detection_hashes(value: bytes) -> list[str]:
+    """Compute SHA-256 hashes for secret value in multiple encodings.
+
+    Returns list of hex digests for: raw, base64, hex, trimmed.
+
+    Args:
+        value: The secret value bytes.
+
+    Returns:
+        List of SHA-256 hex digest strings.
+    """
+    import hashlib
+    import base64 as b64
+
+    hashes = []
+    hashes.append(hashlib.sha256(value).hexdigest())  # raw bytes
+    hashes.append(
+        hashlib.sha256(b64.b64encode(value)).hexdigest()
+    )  # base64 encoding
+    hashes.append(
+        hashlib.sha256(value.hex().encode()).hexdigest()
+    )  # hex encoding
+    trimmed = value.strip()
+    if trimmed != value:
+        hashes.append(hashlib.sha256(trimmed).hexdigest())  # whitespace-stripped
+    return hashes
+
+
+# --- Endpoints ---
+
+
+@router.post(
+    "/secrets",
+    response_model=SecretCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def secrets_create(
+    req: SecretCreateRequest,
+    request: Request,
+) -> SecretCreateResponse:
+    """Store a new secret.
+
+    Requires read-write permission on all specified roles.
+    """
+    user_info = await _get_user_info(request)
+
+    # TODO: Check RBAC permissions
+    # TODO: Encrypt and store via vault backend
+
+    return SecretCreateResponse(
+        id=0,  # TODO: Get from DB
+        key=req.key,
+        role_ids=req.roles,
+    )
+
+
+@router.get(
+    "/secrets/{key}",
+    response_model=SecretGetResponse,
+)
+async def secrets_get(
+    key: str,
+    request: Request,
+    unmask: bool = False,
+    caller: str = "human",
+) -> SecretGetResponse:
+    """Retrieve a secret value.
+
+    Returns masked value by default for humans.
+    Executor (mTLS) gets plaintext.
+    """
+    # TODO: Implement actual secret retrieval via vault
+    return SecretGetResponse(key=key, value="\u2022" * 8, masked=not unmask)
+
+
+@router.get(
+    "/secrets/{key}/executor",
+    response_model=SentinelWrappedResponse,
+)
+async def secrets_get_executor(
+    key: str,
+    request: Request,
+) -> SentinelWrappedResponse:
+    """Retrieve a secret for executor injection.
+
+    Returns sentinel-wrapped plaintext with detection hashes.
+    This endpoint is for executor (mTLS) use only.
+    """
+    # TODO: Retrieve plaintext secret, wrap with sentinel, compute hashes
+    return SentinelWrappedResponse(
+        secret_id=key,
+        wrapped_value=wrap_with_sentinel(key, b"placeholder"),
+        detection_hashes=compute_detection_hashes(b"placeholder"),
+    )
+
+
+@router.get(
+    "/secrets",
+    response_model=SecretListResponse,
+)
+async def secrets_list(
+    request: Request,
+    prefix: str | None = None,
+) -> SecretListResponse:
+    """List secrets, optionally filtered by key prefix.
+
+    Only shows secrets the authenticated user has read access to.
+    """
+    # TODO: Query secrets with role-based filtering
+    return SecretListResponse(secrets=[])
+
+
+@router.delete(
+    "/secrets/{key}",
+    response_model=SecretDeleteResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def secrets_delete(
+    key: str,
+    request: Request,
+) -> SecretDeleteResponse:
+    """Delete a secret.
+
+    Requires read-write permission on the secret's role(s).
+    """
+    # TODO: Implement actual deletion with RBAC check
+    return SecretDeleteResponse(deleted=True, key=key)
+
+
+async def _get_user_info(request: Request) -> dict:
+    """Extract user info from request (auth middleware sets this)."""
+    user_info = getattr(request.state, "auth_user", None)
+    if user_info is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+        )
+    return user_info
+
+
+def _get_db(request: Request):
+    """Get a database session from the backend on app state."""
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backend not initialized",
+        )
+    return backend.get_session()
+
+
+@router.post(
+    "/sessions/{session_id}/secrets/revoke",
+    response_model=RevokeSecretsResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def revoke_session_secrets(
+    session_id: str,
+    req: RevokeSecretsRequest,
+    request: Request,
+) -> RevokeSecretsResponse:
+    """Revoke scoped credentials for secrets injected during this session.
+
+    Called automatically by the executor after command execution completes.
+    Uses mTLS auth (executor identity), not bearer token auth.
+
+    Args:
+        session_id: The executor session ID.
+        req: List of secret IDs to revoke.
+        request: The FastAPI request (mTLS cert info).
+
+    Returns:
+        Confirmation of revocation with count.
+    """
+    from datetime import datetime, timezone
+
+    from ..iam.models import AuditEvent
+
+    # Verify caller is executor (mTLS)
+    caller = getattr(request.state, "auth_user", {})
+    if caller.get("caller") != "executor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Executor mTLS authentication required",
+        )
+
+    db = _get_db(request)
+    try:
+        # Log audit event for each revoked secret
+        for secret_id in req.secret_ids:
+            audit_event = AuditEvent(
+                event_type="credential_revoked",
+                user_id=caller.get("executor_id"),
+                fields={
+                    "session_id": session_id,
+                    "secret_id": secret_id,
+                },
+                timestamp=datetime.now(timezone.utc),
+            )
+            db.add(audit_event)
+
+        db.commit()
+        logger.info(
+            "Revoked %d secret credentials for session %s",
+            len(req.secret_ids),
+            session_id,
+        )
+
+        return RevokeSecretsResponse(
+            revoked=True,
+            count=len(req.secret_ids),
+            session_id=session_id,
+        )
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()

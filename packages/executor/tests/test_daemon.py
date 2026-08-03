@@ -1,0 +1,564 @@
+"""Tests for executor daemon CertificateManager.
+
+Tests registration, rotation, revocation checking, and fingerprint
+computation using real ECDSA P-256 cryptography with mocked HTTP.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import stat
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import httpx
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+
+from venya_executor.config import ExecutorConfig, MtlsConfig, CertificateRotationConfig
+from venya_executor.daemon import (
+    CertificateManager,
+    _create_csr,
+    _extract_executor_id_from_cert,
+    _generate_ecdsa_p256_keypair,
+    _validate_ca_signature,
+)
+
+
+# --- Fixtures ---
+
+
+def _make_ca_pair() -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
+    """Generate a CA keypair and self-signed certificate."""
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(timezone.utc)
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "Venya Root CA"),
+    ])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=3650))
+        .add_extension(
+            x509.BasicConstraints(ca=True, path_length=None),
+            critical=True,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                key_encipherment=False,
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    return ca_key, cert
+
+
+def _make_executor_cert(
+    ca_key: ec.EllipticCurvePrivateKey,
+    ca_cert: x509.Certificate,
+    executor_id: str,
+    validity_days: int = 30,
+) -> x509.Certificate:
+    """Sign an executor certificate with the CA."""
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(timezone.utc)
+    subject = x509.Name([
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+    ])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=validity_days))
+        .add_extension(
+            x509.BasicConstraints(ca=False, path_length=None),
+            critical=True,
+        )
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=False,
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(executor_id)]),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    return cert
+
+
+@pytest.fixture()
+def tmp_ca_dir(tmp_path: Path) -> Path:
+    """Create a temporary CA directory with a valid CA cert."""
+    ca_key, ca_cert = _make_ca_pair()
+    ca_dir = tmp_path / "ca"
+    ca_dir.mkdir()
+    ca_dir.chmod(0o700)
+    (ca_dir / "ca.key").write_bytes(
+        ca_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    (ca_dir / "ca.crt").write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
+    return ca_dir
+
+
+@pytest.fixture()
+def config(tmp_path: Path, tmp_ca_dir: Path) -> ExecutorConfig:
+    """Create an executor config pointing to the temporary CA."""
+    return ExecutorConfig(
+        server_url="https://example.com",
+        executor_id="test-executor",
+        mtls=MtlsConfig(
+            ca_cert=str(tmp_ca_dir / "ca.crt"),
+            cert=str(tmp_path / "executor.crt"),
+            key=str(tmp_path / "executor.key"),
+        ),
+        cert_rotation=CertificateRotationConfig(
+            rotation_days=30,
+            rotate_before_days=3,
+        ),
+    )
+
+
+@pytest.fixture()
+def client() -> httpx.Client:
+    """Create a temporary httpx client."""
+    return httpx.Client(base_url="https://example.com", verify=False)
+
+
+@pytest.fixture()
+def cert_manager(config: ExecutorConfig, client: httpx.Client) -> CertificateManager:
+    """Create a CertificateManager instance."""
+    return CertificateManager(config, client)
+
+
+# --- Helper: create mock server response ---
+
+
+def _make_mock_response(cert: x509.Certificate, ca_cert: x509.Certificate, serial: int) -> httpx.Response:
+    """Create a mocked httpx.Response for a successful registration."""
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+    ca_cert_pem = ca_cert.public_bytes(serialization.Encoding.PEM).decode()
+    serial_hex = format(serial, "016x")
+    not_after = cert.not_valid_after_utc.isoformat()
+
+    json_data = {
+        "executor_id": "test-executor",
+        "cert_pem": cert_pem,
+        "ca_cert_pem": ca_cert_pem,
+        "serial_number": serial_hex,
+        "not_after": not_after,
+    }
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 201
+    mock_response.json.return_value = json_data
+    mock_response.raise_for_status.return_value = None
+    return mock_response
+
+
+# --- Tests: register ---
+
+
+class TestRegister:
+    """Tests for CertificateManager.register()."""
+
+    def test_register_generates_and_stores_cert(self, cert_manager: CertificateManager, tmp_ca_dir: Path):
+        """Registration generates keypair, CSR, gets signed cert, and saves to disk."""
+        ca_key, ca_cert = _make_ca_pair()
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor")
+
+        mock_response = _make_mock_response(executor_cert, ca_cert, executor_cert.serial_number)
+
+        with patch.object(cert_manager.client, "post", return_value=mock_response):
+            cert_manager.register("test-executor")
+
+        # Verify files were created
+        assert os.path.exists(cert_manager.cert_path)
+        assert os.path.exists(cert_manager.key_path)
+
+        # Verify file permissions (private key should be 0o600)
+        key_mode = stat.S_IMODE(os.stat(cert_manager.key_path).st_mode)
+        assert key_mode == 0o600
+
+        # Verify certificate was saved correctly
+        saved_cert = x509.load_pem_x509_certificate(Path(cert_manager.cert_path).read_bytes())
+        assert saved_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == "test-executor"
+
+        # Verify serial was stored
+        assert cert_manager.serial == format(executor_cert.serial_number, "016x")
+
+    def test_register_saves_ca_cert(self, cert_manager: CertificateManager, tmp_ca_dir: Path):
+        """Registration saves the CA cert from the server response."""
+        ca_key, ca_cert = _make_ca_pair()
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor")
+
+        mock_response = _make_mock_response(executor_cert, ca_cert, executor_cert.serial_number)
+
+        with patch.object(cert_manager.client, "post", return_value=mock_response):
+            cert_manager.register("test-executor")
+
+        # CA cert should be saved
+        assert os.path.exists(cert_manager.ca_cert_path)
+        saved_ca = x509.load_pem_x509_certificate(Path(cert_manager.ca_cert_path).read_bytes())
+        assert saved_ca.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == "Venya Root CA"
+
+    def test_register_skips_when_cert_exists(self, cert_manager: CertificateManager):
+        """Registration is skipped if cert and key already exist on disk."""
+        # Pre-create cert and key files
+        Path(cert_manager.cert_path).write_bytes(b"-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----")
+        Path(cert_manager.key_path).write_bytes(b"-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----")
+
+        with patch.object(cert_manager.client, "post") as mock_post:
+            cert_manager.register("test-executor")
+            mock_post.assert_not_called()
+
+        # Serial should be loaded from existing cert (even if fake, no error)
+        # With a fake cert, _load_metadata will fail, but register should
+        # still skip the server call
+        assert not mock_post.called
+
+
+class TestRegisterErrors:
+    """Error cases for CertificateManager.register()."""
+
+    def test_register_server_error(self, cert_manager: CertificateManager):
+        """Registration raises HTTPError when server returns error."""
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "400 Bad Request",
+            request=MagicMock(),
+            response=MagicMock(),
+        )
+
+        with patch.object(cert_manager.client, "post", return_value=mock_response):
+            with pytest.raises(httpx.HTTPStatusError):
+                cert_manager.register("test-executor")
+
+    def test_register_invalid_ca_signature(self, config: ExecutorConfig, client: httpx.Client):
+        """Registration raises RuntimeError when cert is not signed by CA."""
+        # Create a cert signed by a DIFFERENT CA
+        ca_key1, ca_cert1 = _make_ca_pair()
+        other_ca_key, other_ca_cert = _make_ca_pair()
+        executor_cert = _make_executor_cert(other_ca_key, other_ca_cert, "test-executor")
+
+        mock_response = _make_mock_response(executor_cert, ca_cert1, executor_cert.serial_number)
+
+        mgr = CertificateManager(config, client)
+        with patch.object(mgr.client, "post", return_value=mock_response):
+            with pytest.raises(RuntimeError, match="CA validation failed"):
+                mgr.register("test-executor")
+
+
+# --- Tests: needs_rotation ---
+
+
+class TestNeedsRotation:
+    """Tests for CertificateManager.needs_rotation()."""
+
+    def test_needs_rotation_no_cert(self, cert_manager: CertificateManager):
+        """Returns True when no certificate exists."""
+        assert cert_manager.needs_rotation() is True
+
+    def test_needs_rotation_not_expired(self, cert_manager: CertificateManager, tmp_ca_dir: Path):
+        """Returns False when certificate expires well in the future."""
+        ca_key, ca_cert = _make_ca_pair()
+        # Certificate valid for 35 days (beyond 3-day rotation threshold)
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=35)
+
+        Path(cert_manager.cert_path).write_bytes(
+            executor_cert.public_bytes(serialization.Encoding.PEM)
+        )
+
+        assert cert_manager.needs_rotation() is False
+
+    def test_needs_rotation_expiring_soon(self, cert_manager: CertificateManager, tmp_ca_dir: Path):
+        """Returns True when certificate expires within rotate_before_days."""
+        ca_key, ca_cert = _make_ca_pair()
+        # Certificate valid for 2 days (within 3-day rotation threshold)
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=2)
+
+        Path(cert_manager.cert_path).write_bytes(
+            executor_cert.public_bytes(serialization.Encoding.PEM)
+        )
+
+        assert cert_manager.needs_rotation() is True
+
+    def test_needs_rotation_expired(self, cert_manager: CertificateManager, tmp_ca_dir: Path):
+        """Returns True when certificate has already expired."""
+        ca_key, ca_cert = _make_ca_pair()
+        # Certificate valid for 1 day (already expired relative to threshold)
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=1)
+
+        Path(cert_manager.cert_path).write_bytes(
+            executor_cert.public_bytes(serialization.Encoding.PEM)
+        )
+
+        assert cert_manager.needs_rotation() is True
+
+
+# --- Tests: rotate ---
+
+
+class TestRotate:
+    """Tests for CertificateManager.rotate()."""
+
+    def test_rotate_success(self, cert_manager: CertificateManager, tmp_ca_dir: Path):
+        """Rotation generates new keypair, submits CSR, installs new cert."""
+        ca_key, ca_cert = _make_ca_pair()
+
+        # Create initial cert
+        initial_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
+        Path(cert_manager.cert_path).write_bytes(
+            initial_cert.public_bytes(serialization.Encoding.PEM)
+        )
+        Path(cert_manager.key_path).write_bytes(
+            ec.generate_private_key(ec.SECP256R1()).private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+        )
+
+        # Create new cert (simulating server response after rotation)
+        new_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
+        mock_response = _make_mock_response(new_cert, ca_cert, new_cert.serial_number)
+
+        with patch.object(cert_manager.client, "post", return_value=mock_response):
+            cert_manager.rotate()
+
+        # Verify new cert was installed
+        saved_cert = x509.load_pem_x509_certificate(Path(cert_manager.cert_path).read_bytes())
+        assert saved_cert.serial_number == new_cert.serial_number
+
+        # Verify new key was installed
+        saved_key = serialization.load_pem_private_key(
+            Path(cert_manager.key_path).read_bytes(),
+            password=None,
+        )
+        assert isinstance(saved_key, ec.EllipticCurvePrivateKey)
+
+        # Verify serial updated
+        assert cert_manager.serial == format(new_cert.serial_number, "016x")
+
+        # Verify key permissions
+        key_mode = stat.S_IMODE(os.stat(cert_manager.key_path).st_mode)
+        assert key_mode == 0o600
+
+    def test_rotate_no_existing_cert(self, cert_manager: CertificateManager):
+        """Rotation raises RuntimeError when no certificate exists."""
+        with pytest.raises(RuntimeError, match="must register first"):
+            cert_manager.rotate()
+
+
+# --- Tests: get_fingerprint ---
+
+
+class TestGetFingerprint:
+    """Tests for CertificateManager.get_fingerprint()."""
+
+    def test_get_fingerprint_with_cert(self, cert_manager: CertificateManager, tmp_ca_dir: Path):
+        """Fingerprint matches server CAManager.compute_fingerprint for same cert."""
+        ca_key, ca_cert = _make_ca_pair()
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor")
+
+        Path(cert_manager.cert_path).write_bytes(
+            executor_cert.public_bytes(serialization.Encoding.PEM)
+        )
+
+        fingerprint = cert_manager.get_fingerprint()
+
+        # Verify it's a valid hex string
+        assert isinstance(fingerprint, str)
+        assert len(fingerprint) == 64  # SHA-256 hex digest
+        int(fingerprint, 16)  # Should not raise
+
+        # Verify it matches direct computation
+        der = executor_cert.public_bytes(serialization.Encoding.DER)
+        expected = hashlib.sha256(der).hexdigest()
+        assert fingerprint == expected
+
+    def test_get_fingerprint_no_cert(self, cert_manager: CertificateManager):
+        """Returns empty string when no certificate exists."""
+        assert cert_manager.get_fingerprint() == ""
+
+
+# --- Tests: check_revocation ---
+
+
+class TestCheckRevocation:
+    """Tests for CertificateManager.check_revocation()."""
+
+    def test_check_revocation_revoked(self, cert_manager: CertificateManager):
+        """Returns True when serial is in the revocation list."""
+        cert_manager.serial = "0000000000000001"
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.json.return_value = {
+            "revoked_serials": ["0000000000000001", "0000000000000002"]
+        }
+        mock_response.raise_for_status.return_value = None
+
+        with patch.object(cert_manager.client, "get", return_value=mock_response):
+            assert cert_manager.check_revocation() is True
+
+    def test_check_revocation_not_revoked(self, cert_manager: CertificateManager):
+        """Returns False when serial is not in the revocation list."""
+        cert_manager.serial = "0000000000000001"
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.json.return_value = {"revoked_serials": ["0000000000000002"]}
+        mock_response.raise_for_status.return_value = None
+
+        with patch.object(cert_manager.client, "get", return_value=mock_response):
+            assert cert_manager.check_revocation() is False
+
+    def test_check_revocation_empty_list(self, cert_manager: CertificateManager):
+        """Returns False when revocation list is empty."""
+        cert_manager.serial = "0000000000000001"
+
+        mock_response = MagicMock(spec=httpx.Response)
+        mock_response.json.return_value = {"revoked_serials": []}
+        mock_response.raise_for_status.return_value = None
+
+        with patch.object(cert_manager.client, "get", return_value=mock_response):
+            assert cert_manager.check_revocation() is False
+
+    def test_check_revocation_no_serial(self, cert_manager: CertificateManager):
+        """Returns False when serial is not set."""
+        cert_manager.serial = None
+
+        with patch.object(cert_manager.client, "get") as mock_get:
+            assert cert_manager.check_revocation() is False
+            mock_get.assert_not_called()
+
+    def test_check_revocation_server_unreachable(self, cert_manager: CertificateManager):
+        """Returns False (graceful degradation) when server is unreachable."""
+        cert_manager.serial = "0000000000000001"
+
+        with patch.object(cert_manager.client, "get", side_effect=httpx.RequestError("Connection refused", request=MagicMock())):
+            assert cert_manager.check_revocation() is False
+
+
+# --- Tests: helper functions ---
+
+
+class TestHelperFunctions:
+    """Tests for CertificateManager helper functions."""
+
+    def test_generate_ecdsa_p256_keypair(self):
+        """Generates an ECDSA P-256 private key."""
+        key = _generate_ecdsa_p256_keypair()
+        assert isinstance(key, ec.EllipticCurvePrivateKey)
+        assert isinstance(key.curve, ec.SECP256R1)
+
+    def test_create_csr(self):
+        """Creates a valid CSR with the given executor_id as CN."""
+        key = _generate_ecdsa_p256_keypair()
+        csr_pem = _create_csr(key, "my-executor")
+
+        csr = x509.load_pem_x509_csr(csr_pem)
+        cn = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        assert cn == "my-executor"
+
+    def test_validate_ca_signature_valid(self):
+        """Accepts a certificate signed by the given CA."""
+        ca_key, ca_cert = _make_ca_pair()
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor")
+
+        # Should not raise
+        _validate_ca_signature(
+            executor_cert.public_bytes(serialization.Encoding.PEM),
+            ca_cert.public_bytes(serialization.Encoding.PEM),
+        )
+
+    def test_validate_ca_signature_invalid(self):
+        """Rejects a certificate signed by a different CA."""
+        ca_key1, ca_cert1 = _make_ca_pair()
+        ca_key2, ca_cert2 = _make_ca_pair()
+        executor_cert = _make_executor_cert(ca_key2, ca_cert2, "test-executor")
+
+        with pytest.raises(RuntimeError, match="CA validation failed"):
+            _validate_ca_signature(
+                executor_cert.public_bytes(serialization.Encoding.PEM),
+                ca_cert1.public_bytes(serialization.Encoding.PEM),
+            )
+
+    def test_extract_executor_id_from_cert(self):
+        """Extracts the CN from a certificate."""
+        ca_key, ca_cert = _make_ca_pair()
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "my-special-executor")
+
+        tmp_cert = Path("/tmp/test_extract_cert.pem")
+        tmp_cert.write_bytes(executor_cert.public_bytes(serialization.Encoding.PEM))
+        try:
+            result = _extract_executor_id_from_cert(str(tmp_cert))
+            assert result == "my-special-executor"
+        finally:
+            tmp_cert.unlink()
+
+    def test_extract_executor_id_from_cert_no_cn(self):
+        """Raises ValueError when certificate has no CN."""
+        ca_key, ca_cert = _make_ca_pair()
+        # Create cert without CN
+        now = datetime.now(timezone.utc)
+        cert_no_cn = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=30))
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        tmp_cert = Path("/tmp/test_extract_no_cn.pem")
+        tmp_cert.write_bytes(cert_no_cn.public_bytes(serialization.Encoding.PEM))
+        try:
+            with pytest.raises(ValueError, match="no CN"):
+                _extract_executor_id_from_cert(str(tmp_cert))
+        finally:
+            tmp_cert.unlink()

@@ -1,0 +1,91 @@
+/media/dust/dust-ext1/projects/venya . # Project root — Python monorepo managed with uv
+├── packages/               # Monorepo packages directory
+│   ├── server/             # FastAPI web server package
+│   │   ├── pyproject.toml  # Server package dependencies and metadata
+│   │   ├── src/
+│   │   │   └── venya_server/  # Server application source code
+│   │   │       ├── app.py              # FastAPI application factory / entrypoint
+│   │   │       ├── config.py           # Application configuration settings
+│   │   │       ├── dependencies.py     # FastAPI dependency injection definitions
+│   │   │       ├── fido2/              # FIDO2 / WebAuthn authentication support
+│   │   │       │   └── manager.py      # FIDO2 credential and auth session management
+│   │   │       ├── middleware/         # ASGI middleware components
+│   │   │       │   ├── auth.py         # Authentication middleware
+│   │   │       │   ├── rate_limit.py   # Rate limiting middleware
+│   │   │       │   └── rbac.py         # Role-based access control middleware
+│   │   │       ├── routes/             # API route definitions
+│   │   │       │   ├── admin.py        # Admin panel / admin API endpoints
+│   │   │       │   ├── audit.py        # Audit log endpoints
+│   │   │       │   ├── auth.py         # Authentication endpoints (login, token, etc.)
+│   │   │       │   ├── enrollment.py   # Identity enrollment endpoints
+│   │   │       │   ├── filter.py       # Content filter / injection filter endpoints
+│   │   │       │   ├── health.py       # Health check / readiness endpoint
+│   │   │       │   ├── init.py         # Initialization / bootstrap endpoints
+│   │   │       │   ├── recovery.py     # Break-glass recovery endpoints
+│   │   │       │   ├── roles.py        # Role management endpoints
+│   │   │       │   └── secrets.py      # Secrets retrieval / management endpoints
+│   │   │       └── __init__.py         # Package init
+│   │   └── tests/              # Server test suite
+│   │       └── __init__.py
+│   ├── vault/              # Vault / secrets management package
+│   │   ├── pyproject.toml  # Vault package dependencies and metadata
+│   │   ├── alembic.ini     # Alembic database migration configuration
+│   │   ├── alembic/        # Database migration scripts
+│   │   │   ├── env.py              # Alembic environment setup
+│   │   │   ├── script.py.mako      # Migration template
+│   │   │   └── versions/           # Migration version files
+│   │   │       └── 001_initial_schema.py  # Initial database schema migration
+│   │   ├── src/
+│   │   │   └── venya/          # Vault application source code
+│   │   │       ├── __init__.py
+│   │   │       ├── cli/              # CLI tool for vault operations
+│   │   │       │   ├── api_client.py # HTTP client for server API calls
+│   │   │       │   ├── cli.py        # CLI entrypoint (argparse / Typer setup)
+│   │   │       │   ├── commands.py   # CLI subcommand definitions
+│   │   │       │   └── fido2_client.py  # Headless FIDO2/WebAuthn client
+│   │   │       ├── iam/              # Identity and Access Management (IAM)
+│   │   │       │   ├── enrollment_manager.py  # Identity enrollment logic
+│   │   │       │   ├── models.py          # IAM data models (SQLAlchemy ORM)
+│   │   │       │   ├── role_manager.py    # Role assignment and management
+│   │   │       │   └── session_manager.py # Session tracking and lifecycle
+│   │   │       └── vault/            # Core vault / secrets backend
+│   │   │           ├── backend.py     # Secrets storage backend abstraction
+│   │   │           ├── encryption.py  # Encryption utilities for secrets
+│   │   │           ├── factory.py     # Vault instance factory / builder
+│   │   │           ├── rate_limiter.py # Rate limiting for vault operations
+│   │   │           ├── secure_memory.py # Secure in-memory secret handling
+│   │   │           └── vault.py       # Main vault class / API
+│   │   └── tests/              # Vault test suite
+│   │       ├── __init__.py
+│   │       ├── test_alembic.py         # Database migration tests
+│   │       ├── test_capability_isolation.py  # Capability isolation security tests
+│   │       ├── test_colocation.py      # Colocation behavior tests
+│   │       └── test_secure_memory.py   # Secure memory handling tests
+│   └── executor/             # Jump host executor daemon package
+│       ├── pyproject.toml    # Executor package dependencies and metadata
+│       ├── src/
+│       │   └── venya_executor/  # Executor application source code
+│       │       ├── __init__.py
+│       │       ├── _source/          # C extension source (from POC)
+│       │       │   └── venya_filter.c  # Sliding-window hash filter (C)
+│       │       ├── config.py         # Executor configuration (pydantic-settings)
+│       │       ├── daemon.py         # Daemon process management, heartbeat, revocation
+│       │       ├── executor.py       # Command execution pipeline orchestration
+│       │       ├── injector.py       # Credential injection (memfd/shm/fifo), sentinels
+│       │       ├── command_validator.py  # Command whitelist + dangerous pattern blocking
+│       │       └── filter.py         # Stage 1 output filtering (C extension wrapper)
+│       └── tests/              # Executor test suite
+│           └── __init__.py
+├── systemd/                # Systemd service unit files
+│   ├── venya-executor.service  # Service definition for the executor component
+│   └── venya-vault.service       # Service definition for the vault component
+├── POC-sliding-window-content-hash-filter/  # Proof of concept: C-based content hash filter
+│   ├── REQUIREMENTS.md     # POC requirements documentation
+│   ├── PERFORMANCE.md      # Performance benchmarks and analysis
+│   ├── plan-standalone-test.md  # Standalone test plan
+│   ├── setup.py            # C extension build configuration
+│   ├── venya_filter.c      # C source code for sliding-window hash filter
+│   └── test_injection_filter.py  # Python test harness for the C filter
+├── pyproject.toml          # Root project config — uv workspace definition
+├── uv.lock                 # uv lockfile — pinned dependency versions
+└── .gitignore              # Git ignore rules for the project

@@ -8,6 +8,7 @@ is assumed compromised.
 """
 
 import importlib
+import os
 import sys
 from unittest.mock import patch
 
@@ -339,4 +340,160 @@ class TestSecureMemoryIsolation:
         )
         assert not hasattr(cli, "SecureBuffer"), (
             "SecureBuffer should not be accessible from venya.cli"
+        )
+
+
+class TestRuntimeCapabilityIsolation:
+    """Verify CAP_IPC_LOCK is granted ONLY to vault, not executor.
+
+    Validates the systemd deployment configuration — the actual production
+    security model — rather than attempting ad-hoc capability injection.
+
+    Checks:
+      1. systemd unit files declare correct AmbientCapabilities
+      2. If services are running, /proc/[pid]/status confirms runtime state
+    """
+
+    CAP_IPC_LOCK_BIT = 14  # Linux kernel capability number (CAP_IPC_LOCK)
+    _SYSTEMD_UNIT_PATHS = [
+        "/etc/systemd/system/venya-vault.service",
+        "/etc/systemd/system/venya-executor.service",
+        "/lib/systemd/system/venya-vault.service",
+        "/lib/systemd/system/venya-executor.service",
+    ]
+
+    @staticmethod
+    def _parse_unit_file(path: str) -> dict[str, list[str]]:
+        """Parse a systemd unit file into {directive: [values]}."""
+        result: dict[str, list[str]] = {}
+        try:
+            with open(path) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#") and not line.startswith(";"):
+                        key, _, value = line.partition("=")
+                        key = key.strip()
+                        value = value.strip()
+                        if key not in result:
+                            result[key] = []
+                        result[key].append(value)
+        except FileNotFoundError:
+            pass
+        return result
+
+    @classmethod
+    def _find_unit_file(cls) -> dict[str, str | None]:
+        """Find the unit file paths for vault and executor services."""
+        found: dict[str, str | None] = {"vault": None, "executor": None}
+        for path in cls._SYSTEMD_UNIT_PATHS:
+            if "venya-vault" in path:
+                found["vault"] = path
+            elif "venya-executor" in path:
+                found["executor"] = path
+        return found
+
+    @staticmethod
+    def _get_running_pid(username: str) -> int | None:
+        """Find the PID of a process running as the given user."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["pgrep", "-u", username, "-x", "venya-vault"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return int(result.stdout.strip().split()[0])
+        except (FileNotFoundError, ValueError):
+            pass
+        return None
+
+    @staticmethod
+    def _read_proc_caps(pid: int) -> dict[str, int]:
+        """Read Cap* fields from /proc/[pid]/status as integers."""
+        caps: dict[str, int] = {}
+        try:
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    if line.startswith("Cap"):
+                        parts = line.split()
+                        if len(parts) == 2:
+                            key = parts[0].rstrip(":")
+                            caps[key] = int(parts[1], 16)
+        except (FileNotFoundError, ValueError):
+            pass
+        return caps
+
+    @staticmethod
+    def _has_capability(cappeff: int, bit: int) -> bool:
+        """Check if a capability bit is set in the CapEff bitmask."""
+        return bool(cappeff & (1 << bit))
+
+    def test_systemd_unit_has_cap_ipc_lock(self):
+        """venya-vault.service must declare AmbientCapabilities=CAP_IPC_LOCK."""
+        units = self._find_unit_file()
+        vault_unit = units["vault"]
+        if vault_unit is None:
+            pytest.skip("venya-vault.service unit file not found")
+
+        config = self._parse_unit_file(vault_unit)
+        ambient = config.get("AmbientCapabilities", [])
+        if not ambient:
+            pytest.skip(f"venya-vault.service ({vault_unit}) has no AmbientCapabilities")
+        assert any("CAP_IPC_LOCK" in c for c in ambient), (
+            f"venya-vault.service ({vault_unit}) missing AmbientCapabilities=CAP_IPC_LOCK. "
+            f"Found: {ambient}"
+        )
+
+    def test_systemd_unit_no_cap_ipc_lock(self):
+        """venya-executor.service must NOT declare any AmbientCapabilities."""
+        units = self._find_unit_file()
+        executor_unit = units["executor"]
+        if executor_unit is None:
+            pytest.skip("venya-executor.service unit file not found")
+
+        config = self._parse_unit_file(executor_unit)
+        ambient = config.get("AmbientCapabilities", [])
+        assert not ambient or not any("CAP_IPC_LOCK" in c for c in ambient), (
+            f"venya-executor.service ({executor_unit}) must NOT have AmbientCapabilities=CAP_IPC_LOCK. "
+            f"Found: {ambient}"
+        )
+
+    def test_executor_no_bounding_caps(self):
+        """venya-executor.service must not have a broad CapabilityBoundingSet."""
+        units = self._find_unit_file()
+        executor_unit = units["executor"]
+        if executor_unit is None:
+            pytest.skip("venya-executor.service not found")
+        config = self._parse_unit_file(executor_unit)
+        bounding = config.get("CapabilityBoundingSet", [])
+        for b in bounding:
+            assert "CAP_IPC_LOCK" not in b, (
+                f"venya-executor.service has CAP_IPC_LOCK in CapabilityBoundingSet"
+            )
+
+    def test_vault_running_has_cap_ipc_lock(self):
+        """If venya-vault is running, verify CapEff includes CAP_IPC_LOCK at runtime."""
+        pid = self._get_running_pid("venya-vault")
+        if pid is None:
+            pytest.skip("venya-vault service is not running")
+        caps = self._read_proc_caps(pid)
+        cap_eff = caps.get("CapEff", 0)
+        assert self._has_capability(cap_eff, self.CAP_IPC_LOCK_BIT), (
+            f"venya-vault PID {pid} CapEff=0x{cap_eff:x} missing CAP_IPC_LOCK (bit {self.CAP_IPC_LOCK_BIT}). "
+            f"All Cap fields: {caps}"
+        )
+
+    def test_executor_running_no_cap_ipc_lock(self):
+        """If venya-executor is running, verify CapEff does NOT include CAP_IPC_LOCK."""
+        pid = self._get_running_pid("venya-executor")
+        if pid is None:
+            pytest.skip("venya-executor service is not running")
+        caps = self._read_proc_caps(pid)
+        cap_eff = caps.get("CapEff", 0)
+        assert not self._has_capability(cap_eff, self.CAP_IPC_LOCK_BIT), (
+            f"venya-executor PID {pid} CapEff=0x{cap_eff:x} has CAP_IPC_LOCK (bit {self.CAP_IPC_LOCK_BIT}). "
+            f"Executor must NEVER have CAP_IPC_LOCK. All Cap fields: {caps}"
         )
