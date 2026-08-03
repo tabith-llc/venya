@@ -24,9 +24,10 @@ from venya.iam.models import Base  # noqa: E402
 
 target_metadata = Base.metadata
 
-# Placeholder passphrase for pysqlcipher dialect initialization.
-# The real key is applied via PRAGMA rekey in the connect event listener.
-_PLACEHOLDER_PASSPHRASE = "venya-alembic-placeholder"
+# Use the real DB key as the passphrase in the URL.
+# The pysqlcipher dialect's on_connect handler will set PRAGMA key
+# to this value. Our connect event listener then sets additional PRAGMAs.
+# This avoids the rekey issue while ensuring the real key is used.
 
 
 def _get_db_path():
@@ -44,7 +45,10 @@ def run_migrations_offline():
 
     Generates SQL without connecting to the database.
     """
-    url = f"sqlite+pysqlcipher://:{_PLACEHOLDER_PASSPHRASE}@//:memory:"
+    db_key = _get_db_key()
+    if not db_key:
+        db_key = "venya-default-key"
+    url = f"sqlite+pysqlcipher://:{db_key}@//:memory:"
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -73,8 +77,7 @@ def run_migrations_online():
             "alembic upgrade head"
         )
 
-    db_key_hex = db_key.encode("utf-8").hex()
-    url = f"sqlite+pysqlcipher://:{_PLACEHOLDER_PASSPHRASE}@//{db_path}"
+    url = f"sqlite+pysqlcipher://:{db_key}@//{db_path}"
 
     configuration = context.config.get_section(context.config.config_ini_section)
     configuration["sqlalchemy.url"] = url
@@ -90,11 +93,13 @@ def run_migrations_online():
     # BEFORE Alembic calls inspect() on the connection.
     @event.listens_for(connectable, "connect")
     def set_sqlcipher_pragmas(dbapi_connection, connection_record):
-        """Set SQLCipher PRAGMAs on every new connection."""
+        """Set additional SQLCipher PRAGMAs on every new connection.
+
+        The pysqlcipher dialect's on_connect handler has already set
+        PRAGMA key to the real passphrase (from the URL). We just need
+        to set journal_mode and foreign_keys.
+        """
         cursor = dbapi_connection.cursor()
-        # Set real key, then rekey the entire database to use it
-        cursor.execute(f"PRAGMA key = \"x'{db_key_hex}'\"")
-        cursor.execute(f"PRAGMA rekey = '{db_key}'")
         cursor.execute("PRAGMA journal_mode = WAL")
         cursor.execute("PRAGMA foreign_keys = ON")
         cursor.close()
