@@ -3,10 +3,67 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from .api_client import APIClient
+
+
+def _run_migrations(db_path: str | None, db_key: str | None) -> None:
+    """Run Alembic migrations programmatically.
+
+    This is called by `venya init` to ensure the database schema is up to date
+    before bootstrapping. Users never need to run `alembic` directly.
+
+    Args:
+        db_path: Path to the database file. Falls back to VENYA_DB_PATH env var
+                 or ./venya.db.
+        db_key: Database encryption key. Falls back to VENYA_DB_KEY env var.
+
+    Raises:
+        RuntimeError: If VENYA_DB_KEY is not set or migrations fail.
+    """
+    from alembic.config import Config
+    from alembic import command
+
+    resolved_db_path = db_path or os.environ.get("VENYA_DB_PATH", "./venya.db")
+    resolved_db_key = db_key or os.environ.get("VENYA_DB_KEY", "")
+
+    if not resolved_db_key:
+        raise RuntimeError(
+            "Database key not found. Set --db-key or VENYA_DB_KEY environment "
+            "variable. Example:\n"
+            "  venya init admin --db-key mysecret\n"
+            "  VENYA_DB_KEY=mysecret venya init admin"
+        )
+
+    # Set env vars that alembic env.py reads
+    os.environ["VENYA_DB_PATH"] = str(resolved_db_path)
+    os.environ["VENYA_DB_KEY"] = resolved_db_key
+
+    # Find alembic.ini relative to the vault package root
+    # __file__ = .../src/venya/cli/commands.py
+    # parent x4 = .../packages/vault/
+    _pkg_root = Path(__file__).resolve().parent.parent.parent.parent
+    _alembic_ini = _pkg_root / "alembic.ini"
+    if not _alembic_ini.exists():
+        raise RuntimeError(f"alembic.ini not found at {_alembic_ini}")
+
+    alembic_cfg = Config(str(_alembic_ini))
+
+    # Resolve script_location relative to the alembic.ini directory
+    # (Alembic doesn't do this automatically when run programmatically)
+    ini_dir = _alembic_ini.parent
+    current_script = alembic_cfg.get_main_option("script_location")
+    if current_script and not Path(current_script).is_absolute():
+        alembic_cfg.set_main_option(
+            "script_location", str(ini_dir / current_script)
+        )
+    print(f"Running database migrations...")
+    command.upgrade(alembic_cfg, "head")
+    print("Database migrations complete.")
 
 
 def run_command(args: Any) -> int:
@@ -47,6 +104,17 @@ def run_command(args: Any) -> int:
 
 def cmd_init(client: APIClient, args: Any) -> int:
     """Bootstrap the vault."""
+    # Run migrations unless skipped
+    if not getattr(args, "skip_migrations", False):
+        try:
+            _run_migrations(getattr(args, "db_path", None), getattr(args, "db_key", None))
+        except RuntimeError as e:
+            print(f"Migration failed: {e}", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"Migration failed: {e}", file=sys.stderr)
+            return 1
+
     try:
         result = client.post("/api/v1/init", json={"user_id": args.user_id})
         print(f"Initialization complete. User '{args.user_id}' enrolled as admin.")
