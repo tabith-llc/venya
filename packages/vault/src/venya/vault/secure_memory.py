@@ -49,7 +49,7 @@ def secure_mlock(data: bytearray) -> None:
     if lib is None:
         raise RuntimeError("Cannot find system C library for mlock")
 
-    ret = lib.mlock(data.buffer, len(data))
+    ret = lib.mlock(ctypes.addressof(ctypes.c_char.from_buffer(data)), len(data))
     if ret != 0:
         errno = ctypes.get_errno()
         import os as _os
@@ -75,7 +75,7 @@ def secure_munlock(data: bytearray) -> None:
     if lib is None:
         return
 
-    ret = lib.munlock(data.buffer, len(data))
+    ret = lib.munlock(ctypes.addressof(ctypes.c_char.from_buffer(data)), len(data))
     if ret != 0:
         errno = ctypes.get_errno()
         import os as _os
@@ -212,5 +212,6 @@ class SecureBuffer:
                         secure_munlock(self._data)
                     except OSError:
                         pass
+                    self._locked = False
             except Exception:
                 pass  # Best effort in __del__
