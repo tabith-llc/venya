@@ -47,6 +47,7 @@ EXPECTED_TABLES = [
     "audit_events",
     "command_policies",
     "enrollment_tokens",
+    "executor_cert_revocations",
     "executor_certs",
     "key_rotation_jobs",
     "key_rotation_secrets",

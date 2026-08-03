@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .api_client import APIClient
+from .api_client import APIClient, APIClientAuthenticationError, APIClientError
 
 
 def _run_migrations(db_path: str | None, db_key: str | None) -> None:
@@ -77,7 +77,20 @@ def run_command(args: Any) -> int:
     """
     client = APIClient()
 
+    # Authenticate if no token is available (init and recovery are public)
     command = args.command
+    if command not in ("init", "recovery") and not client.access_token:
+        user_id = getattr(args, "user_id", None)
+        try:
+            print("Authenticating with security key...")
+            client.authenticate(user_id=user_id)
+            print("Authentication successful.")
+        except APIClientAuthenticationError as e:
+            print(f"Authentication failed: {e}", file=sys.stderr)
+            return 1
+        except APIClientError as e:
+            print(f"Authentication failed: {e}", file=sys.stderr)
+            return 1
 
     if command == "init":
         return cmd_init(client, args)

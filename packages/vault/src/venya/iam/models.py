@@ -286,3 +286,22 @@ class ExecutorCert(Base):
         Index("ix_executor_certs_serial_number", "serial_number"),
         Index("ix_executor_certs_not_after", "not_after"),
     )
+
+
+class ExecutorCertRevocation(Base):
+    """Revoked executor certificate serial numbers."""
+
+    __tablename__ = "executor_cert_revocations"
+
+    id = Column(Integer, primary_key=True)
+    serial_number = Column(String(64), unique=True, nullable=False)
+    executor_id = Column(String(64), nullable=True)  # Which executor this cert belonged to
+    revoked_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    reason = Column(Text, nullable=True)  # Why it was revoked
+
+    __table_args__ = (
+        Index("ix_executor_cert_revocations_serial_number", "serial_number"),
+        Index("ix_executor_cert_revocations_revoked_at", "revoked_at"),
+    )
