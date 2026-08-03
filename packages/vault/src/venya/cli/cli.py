@@ -37,6 +37,19 @@ def create_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init", help="Bootstrap the vault")
     init_parser.add_argument("user_id", help="User ID for first admin")
     init_parser.add_argument(
+        "--db-path",
+        help="Path to the vault database (default: $VENYA_DB_PATH or ./venya.db)",
+    )
+    init_parser.add_argument(
+        "--db-key",
+        help="Database encryption key (default: $VENYA_DB_KEY)",
+    )
+    init_parser.add_argument(
+        "--skip-migrations",
+        action="store_true",
+        help="Skip running database migrations",
+    )
+    init_parser.add_argument(
         "--force",
         action="store_true",
         help="Force re-initialization",
