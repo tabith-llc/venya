@@ -1,0 +1,30 @@
+[Unit]
+Description=Venya Executor Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=venya-executor
+Group=venya-executor
+ExecStart=/usr/bin/venya-executor --config /etc/venya/executor.toml
+Restart=always
+
+# Executor must NOT have CAP_IPC_LOCK — jump host is untrusted
+# All capabilities dropped by default (NoNewPrivileges=true)
+
+# Additional hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/venya/executor
+ReadOnlyPaths=/etc/venya
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target
