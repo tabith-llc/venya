@@ -1,8 +1,6 @@
-"""Tests for the Stage 1 C extension filter (_venya_filter).
+"""Tests for the Stage 1 Rust extension filter (venya_filter).
 
-Adapted from POC-sliding-window-content-hash-filter/test_injection_filter.py.
-Tests hash computation, sentinel operations, Stage 1 filtering, performance,
-and false positive rates.
+Tests hash computation, Stage 1 filtering, performance, and false positive rates.
 """
 
 from __future__ import annotations
@@ -10,29 +8,19 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-import subprocess
-import sys
 import time
-from typing import TYPE_CHECKING
+from typing import Callable, List, Tuple, Union, cast
 
 import pytest
 
-if TYPE_CHECKING:
-    from venya_executor import _venya_filter  # type: ignore
-else:
-    _venya_filter = None
-
 try:
-    from venya_executor import _venya_filter
-    C_EXTENSION_AVAILABLE = True
+    from venya_filter import compute_detection_hashes as _compute_detection_hashes  # type: ignore
+    from venya_filter import filter_output as _filter_output  # type: ignore
 except ImportError:
-    C_EXTENSION_AVAILABLE = False
+    pytest.skip("venya_filter Rust extension not available", allow_module_level=True)
 
-# Skip all tests if C extension is not available
-pytestmark = pytest.mark.skipif(
-    not C_EXTENSION_AVAILABLE,
-    reason="C extension _venya_filter not available",
-)
+_compute_detection_hashes = cast(Callable[[bytes], List[str]], _compute_detection_hashes)
+_filter_output = cast(Callable[[bytes, list], Tuple[bytes, List[str]]], _filter_output)
 
 
 # ---------------------------------------------------------------------------
@@ -45,51 +33,51 @@ class TestHashComputation:
 
     def test_produces_three_hashes_no_whitespace(self):
         """3 hashes for secret without leading/trailing whitespace."""
-        hashes = _venya_filter.compute_detection_hashes(b"no-whitespace")
+        hashes = _compute_detection_hashes(b"no-whitespace")
         assert len(hashes) == 3
 
     def test_produces_four_hashes_with_whitespace(self):
         """4 hashes when secret has leading/trailing whitespace."""
-        hashes = _venya_filter.compute_detection_hashes(b"  padded  ")
+        hashes = _compute_detection_hashes(b"  padded  ")
         assert len(hashes) == 4
 
     def test_raw_hash_matches_python(self):
         """First hash = SHA-256 of raw bytes."""
         secret = b"verify-raw-hash"
-        hashes = _venya_filter.compute_detection_hashes(secret)
+        hashes = _compute_detection_hashes(secret)
         expected = hashlib.sha256(secret).hexdigest()
         assert hashes[0] == expected
 
     def test_base64_hash_matches_python(self):
         """Second hash = SHA-256 of base64-encoded bytes."""
         secret = b"verify-b64-hash"
-        hashes = _venya_filter.compute_detection_hashes(secret)
+        hashes = _compute_detection_hashes(secret)
         expected = hashlib.sha256(base64.b64encode(secret)).hexdigest()
         assert hashes[1] == expected
 
     def test_hex_hash_matches_python(self):
         """Third hash = SHA-256 of hex-encoded bytes."""
         secret = b"verify-hex-hash"
-        hashes = _venya_filter.compute_detection_hashes(secret)
+        hashes = _compute_detection_hashes(secret)
         expected = hashlib.sha256(secret.hex().encode()).hexdigest()
         assert hashes[2] == expected
 
     def test_trimmed_hash_strips_whitespace(self):
         """Fourth hash = SHA-256 of stripped value."""
         secret = b"  trimmed value  "
-        hashes = _venya_filter.compute_detection_hashes(secret)
+        hashes = _compute_detection_hashes(secret)
         expected = hashlib.sha256(b"trimmed value").hexdigest()
         assert hashes[3] == expected
 
     def test_empty_secret(self):
         """Empty secret produces 3 hashes (trimmed == original, skipped)."""
-        hashes = _venya_filter.compute_detection_hashes(b"")
+        hashes = _compute_detection_hashes(b"")
         assert len(hashes) == 3
 
     def test_binary_secret(self):
         """Binary secret (non-UTF8) works correctly."""
         secret = b"\x00\x01\x02\xff\xfe\xfd"
-        hashes = _venya_filter.compute_detection_hashes(secret)
+        hashes = _compute_detection_hashes(secret)
         assert len(hashes) == 3
         assert hashes[0] == hashlib.sha256(secret).hexdigest()
 
@@ -103,7 +91,7 @@ class TestFilterOutput:
     """Tests for filter_output with the C extension."""
 
     def _make_entries(self, secret_id: str, value: bytes) -> list[dict]:
-        hashes = _venya_filter.compute_detection_hashes(value)
+        hashes = _compute_detection_hashes(value)
         return [{"secret_id": secret_id, "hashes": hashes, "secret_value": value}]
 
     def test_exact_secret_in_output(self):
@@ -111,7 +99,7 @@ class TestFilterOutput:
         secret = b"leaked-password-ABC123"
         entries = self._make_entries("db-password", secret)
         output = b"Connecting with password: leaked-password-ABC123 done"
-        masked, masked_ids = _venya_filter.filter_output(output, entries)
+        masked, masked_ids = _filter_output(output, entries)
         assert secret not in masked
         assert b"[REDACTED:db-passw" in masked
         assert "db-passw" in masked_ids
@@ -121,7 +109,7 @@ class TestFilterOutput:
         secret = b"secret-at-start"
         entries = self._make_entries("s1", secret)
         output = b"secret-at-start is the value"
-        masked, _ = _venya_filter.filter_output(output, entries)
+        masked, _ = _filter_output(output, entries)
         assert secret not in masked
 
     def test_secret_at_end(self):
@@ -129,7 +117,7 @@ class TestFilterOutput:
         secret = b"secret-at-end"
         entries = self._make_entries("s2", secret)
         output = b"value is secret-at-end"
-        masked, _ = _venya_filter.filter_output(output, entries)
+        masked, _ = _filter_output(output, entries)
         assert secret not in masked
 
     def test_secret_in_middle(self):
@@ -137,7 +125,7 @@ class TestFilterOutput:
         secret = b"middle-secret"
         entries = self._make_entries("s3", secret)
         output = b"before middle-secret after"
-        masked, _ = _venya_filter.filter_output(output, entries)
+        masked, _ = _filter_output(output, entries)
         assert secret not in masked
 
     def test_base64_encoded_secret_detected(self):
@@ -146,7 +134,7 @@ class TestFilterOutput:
         entries = self._make_entries("b64-secret", secret)
         b64_secret = base64.b64encode(secret)
         output = f"Config: {b64_secret.decode()} end".encode()
-        masked, _ = _venya_filter.filter_output(output, entries)
+        masked, _ = _filter_output(output, entries)
         assert b64_secret not in masked
 
     def test_hex_encoded_secret_detected(self):
@@ -155,27 +143,27 @@ class TestFilterOutput:
         entries = self._make_entries("hex-secret", secret)
         hex_secret = secret.hex().encode()
         output = f"Data: {hex_secret.decode()} end".encode()
-        masked, _ = _venya_filter.filter_output(output, entries)
+        masked, _ = _filter_output(output, entries)
         assert hex_secret not in masked
 
     def test_clean_output_passes_through(self):
         """Output with no secrets is unchanged."""
         output = b"All clear, no secrets here at all"
         entries = self._make_entries("s1", b"not-in-output")
-        masked, masked_ids = _venya_filter.filter_output(output, entries)
+        masked, masked_ids = _filter_output(output, entries)
         assert masked == output
         assert masked_ids == []
 
     def test_empty_output(self):
         """Empty output returns empty."""
         entries = self._make_entries("s1", b"some-secret")
-        masked, masked_ids = _venya_filter.filter_output(b"", entries)
+        masked, masked_ids = _filter_output(b"", entries)
         assert masked == b""
         assert masked_ids == []
 
     def test_empty_entries(self):
         """No entries returns output unchanged."""
-        masked, masked_ids = _venya_filter.filter_output(b"some output", [])
+        masked, masked_ids = _filter_output(b"some output", [])
         assert masked == b"some output"
         assert masked_ids == []
 
@@ -188,7 +176,7 @@ class TestFilterOutput:
             + self._make_entries("secret-two", s2)
         )
         output = f"Value1: {s1.decode()} Value2: {s2.decode()} end".encode()
-        masked, masked_ids = _venya_filter.filter_output(output, entries)
+        masked, masked_ids = _filter_output(output, entries)
         assert s1 not in masked
         assert s2 not in masked
         assert len(masked_ids) >= 2
@@ -198,7 +186,7 @@ class TestFilterOutput:
         secret = b"repeated-secret"
         entries = self._make_entries("dup", secret)
         output = f"{secret.decode()} and {secret.decode()} again".encode()
-        masked, masked_ids = _venya_filter.filter_output(output, entries)
+        masked, masked_ids = _filter_output(output, entries)
         assert secret not in masked
         # The C extension may report the ID once or multiple times;
         # at minimum it should be present.
@@ -209,7 +197,7 @@ class TestFilterOutput:
         secret = b"padded-secret"
         entries = self._make_entries("ws", secret)
         output = f"  {secret.decode()}  done".encode()
-        masked, _ = _venya_filter.filter_output(output, entries)
+        masked, _ = _filter_output(output, entries)
         assert secret not in masked
 
     def test_secret_embedded_in_larger_string(self):
@@ -217,7 +205,7 @@ class TestFilterOutput:
         secret = b"DB_PASS"
         entries = self._make_entries("cred", secret)
         output = b"Config: DB_PASS=supersecret123 and more"
-        masked, _ = _venya_filter.filter_output(output, entries)
+        masked, _ = _filter_output(output, entries)
         assert secret not in masked
 
     def test_stderr_like_output(self):
@@ -225,7 +213,7 @@ class TestFilterOutput:
         secret = b"error-credential"
         entries = self._make_entries("err", secret)
         output = b"ERROR: failed with error-credential in config"
-        masked, _ = _venya_filter.filter_output(output, entries)
+        masked, _ = _filter_output(output, entries)
         assert secret not in masked
 
     def test_large_output_with_secret(self):
@@ -233,7 +221,7 @@ class TestFilterOutput:
         secret = b"big-secret-xyz"
         entries = self._make_entries("big", secret)
         output = b"A" * 50000 + secret + b"B" * 50000
-        masked, masked_ids = _venya_filter.filter_output(output, entries)
+        masked, masked_ids = _filter_output(output, entries)
         assert secret not in masked
         assert "big" in masked_ids
 
@@ -250,7 +238,7 @@ class TestFalsePositives:
     """
 
     def _make_entries(self, secret_id: str, value: bytes) -> list[dict]:
-        hashes = _venya_filter.compute_detection_hashes(value)
+        hashes = _compute_detection_hashes(value)
         return [{"secret_id": secret_id, "hashes": hashes, "secret_value": value}]
 
     def test_common_words_not_matched(self):
@@ -264,7 +252,7 @@ class TestFalsePositives:
         for word in common_words:
             entries = self._make_entries("x", b"not-in-output-abc123xyz")
             output = b" ".join(common_words)
-            masked, masked_ids = _venya_filter.filter_output(output, entries)
+            masked, masked_ids = _filter_output(output, entries)
             assert masked == output, f"False positive on: {word!r}"
             assert masked_ids == [], f"False positive IDs on: {word!r}"
 
@@ -276,7 +264,7 @@ class TestFalsePositives:
         entries = self._make_entries("s1", secret)
         # Generate random text that's unlikely to hash-match
         random_text = bytes(random.getrandbits(8) for _ in range(10000))
-        masked, masked_ids = _venya_filter.filter_output(random_text, entries)
+        masked, masked_ids = _filter_output(random_text, entries)
         assert masked == random_text
         assert masked_ids == []
 
@@ -292,7 +280,7 @@ class TestFalsePositives:
             b"2024-01-15 10:30:04 INFO Request processed: GET /api/v1/users\n"
             b"2024-01-15 10:30:05 DEBUG Memory usage: 128MB / 512MB\n"
         )
-        masked, masked_ids = _venya_filter.filter_output(log_lines, entries)
+        masked, masked_ids = _filter_output(log_lines, entries)
         assert masked == log_lines
         assert masked_ids == []
 
@@ -304,7 +292,7 @@ class TestFalsePositives:
             b'{"status": "ok", "code": 200, "data": {"name": "test", '
             b'"count": 42, "active": true, "items": []}}'
         )
-        masked, masked_ids = _venya_filter.filter_output(json_output, entries)
+        masked, masked_ids = _filter_output(json_output, entries)
         assert masked == json_output
         assert masked_ids == []
 
@@ -316,7 +304,7 @@ class TestFalsePositives:
         random_data = os.urandom(5000)
         b64_data = base64.b64encode(random_data)
         output = b"Data: " + b64_data + b" end"
-        masked, masked_ids = _venya_filter.filter_output(output, entries)
+        masked, masked_ids = _filter_output(output, entries)
         assert masked == output
         assert masked_ids == []
 
@@ -327,7 +315,7 @@ class TestFalsePositives:
         random_data = os.urandom(5000)
         hex_data = random_data.hex().encode()
         output = b"Hex: " + hex_data + b" end"
-        masked, masked_ids = _venya_filter.filter_output(output, entries)
+        masked, masked_ids = _filter_output(output, entries)
         assert masked == output
         assert masked_ids == []
 
@@ -351,7 +339,7 @@ class TestFalsePositives:
         ]
         for similar in similar_values:
             output = f"Using {similar.decode()} for auth".encode()
-            masked, masked_ids = _venya_filter.filter_output(output, entries)
+            masked, masked_ids = _filter_output(output, entries)
             assert similar in masked, f"False negative on similar value: {similar!r}"
             assert "pw" not in masked_ids, f"False positive on: {similar!r}"
 
@@ -362,7 +350,7 @@ class TestFalsePositives:
         # A SHA-256 hex digest appearing in output
         fake_hash = hashlib.sha256(b"something-else").hexdigest()
         output = f"Hash: {fake_hash} verified".encode()
-        masked, masked_ids = _venya_filter.filter_output(output, entries)
+        masked, masked_ids = _filter_output(output, entries)
         assert masked == output
         assert masked_ids == []
 
@@ -378,7 +366,7 @@ class TestFalsePositives:
         )
         # Only s2 appears in output
         output = b"Processing secret-beta for user"
-        masked, masked_ids = _venya_filter.filter_output(output, entries)
+        masked, masked_ids = _filter_output(output, entries)
         assert s2 not in masked  # Should be masked
         assert b"Processing " in masked  # Context preserved
         assert b" for user" in masked  # Context preserved
@@ -401,7 +389,7 @@ class TestPerformance:
     """
 
     def _make_entries(self, secret_id: str, value: bytes) -> list[dict]:
-        hashes = _venya_filter.compute_detection_hashes(value)
+        hashes = _compute_detection_hashes(value)
         return [{"secret_id": secret_id, "hashes": hashes, "secret_value": value}]
 
     def test_256kb_with_secret(self):
@@ -417,7 +405,7 @@ class TestPerformance:
         iterations = 100
         start = time.monotonic()
         for _ in range(iterations):
-            masked, _ = _venya_filter.filter_output(output, entries)
+            masked, _ = _filter_output(output, entries)
         elapsed_ms = (time.monotonic() - start) * 1000
         avg_ms = elapsed_ms / iterations
 
@@ -436,7 +424,7 @@ class TestPerformance:
         iterations = 100
         start = time.monotonic()
         for _ in range(iterations):
-            masked, _ = _venya_filter.filter_output(output, entries)
+            masked, _ = _filter_output(output, entries)
         elapsed_ms = (time.monotonic() - start) * 1000
         avg_ms = elapsed_ms / iterations
 
@@ -453,7 +441,7 @@ class TestPerformance:
         iterations = 1000
         start = time.monotonic()
         for _ in range(iterations):
-            masked, _ = _venya_filter.filter_output(output, entries)
+            masked, _ = _filter_output(output, entries)
         elapsed_ms = (time.monotonic() - start) * 1000
         avg_ms = elapsed_ms / iterations
 
@@ -477,7 +465,7 @@ class TestPerformance:
         c_iterations = 200
         start = time.monotonic()
         for _ in range(c_iterations):
-            masked_c, _ = _venya_filter.filter_output(output, entries)
+            masked_c, _ = _filter_output(output, entries)
         c_ms = (time.monotonic() - start) * 1000
 
         assert secret not in masked_c
@@ -496,7 +484,7 @@ class TestPerformance:
         iterations = 50
         start = time.monotonic()
         for _ in range(iterations):
-            masked, masked_ids = _venya_filter.filter_output(output, entries)
+            masked, masked_ids = _filter_output(output, entries)
         elapsed_ms = (time.monotonic() - start) * 1000
         avg_ms = elapsed_ms / iterations
 
