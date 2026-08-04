@@ -51,7 +51,7 @@ class RBACMiddleware(BaseHTTPMiddleware):
 
         # Admin paths require admin role
         if path.startswith("/api/v1/admin"):
-            if not self._has_admin_role(user_info):
+            if not self._has_admin_role(request, user_info):
                 return JSONResponse(
                     status_code=status.HTTP_403_FORBIDDEN,
                     content={"detail": "Admin permission required"},
@@ -62,7 +62,7 @@ class RBACMiddleware(BaseHTTPMiddleware):
             path.startswith("/api/v1/secrets")
             or path.startswith("/api/v1/roles")
         ):
-            if not self._has_write_permission(user_info):
+            if not self._has_write_permission(request, user_info):
                 return JSONResponse(
                     status_code=status.HTTP_403_FORBIDDEN,
                     content={"detail": "Write permission required"},
@@ -70,14 +70,39 @@ class RBACMiddleware(BaseHTTPMiddleware):
 
         return await call_next(request)
 
-    def _has_admin_role(self, user_info: dict) -> bool:
-        """Check if user has admin role."""
-        # TODO: Check against actual admin role in DB
-        # For now, check for "admin" in roles
-        return "admin" in user_info.get("roles", [])
+    def _has_admin_role(self, request: Request, user_info: dict) -> bool:
+        """Check if user has admin role by querying the database."""
+        backend = getattr(request.app.state, "backend", None)
+        if backend is None:
+            return False
 
-    def _has_write_permission(self, user_info: dict) -> bool:
+        db = backend.get_session()
+        try:
+            from venya.iam.role_manager import RoleManager
+
+            rm = RoleManager(db)
+            admin_role = rm.get_role_by_name("admin")
+            if admin_role is None:
+                return False
+            return rm.has_permission(user_info["user_id"], admin_role.id, "read-write")
+        finally:
+            db.close()
+
+    def _has_write_permission(self, request: Request, user_info: dict) -> bool:
         """Check if user has write permission on requested resources."""
-        # TODO: Check role permissions in DB
-        # For now, accept any authenticated user
-        return True
+        backend = getattr(request.app.state, "backend", None)
+        if backend is None:
+            return False
+
+        db = backend.get_session()
+        try:
+            from venya.iam.role_manager import RoleManager
+
+            rm = RoleManager(db)
+            user_permissions = rm.get_user_permissions(user_info["user_id"])
+            for role_id, permission in user_permissions.items():
+                if permission == "read-write":
+                    return True
+            return False
+        finally:
+            db.close()
