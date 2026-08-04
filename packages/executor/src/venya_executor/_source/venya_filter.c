@@ -348,6 +348,7 @@ static PyObject* py_filter_output(PyObject *self, PyObject *args) {
                     hx[64]='\0';
                     const char *sid=fs_get(f,hx);
                     if(sid){
+                        while(i<w){if(rl<max_output-1)res[rl++]=(uint8_t)data[i];i++;}
                         if(memcmp(last,sid,64)!=0){rl=redact(res,rl,sid,max_output);memcpy(last,sid,64);}
                         i=e+1;hit=1; goto dw;
                     }
