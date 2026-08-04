@@ -36,3 +36,4 @@ POC*/
 # Environment variables
 .env
 .env.local
+handoff.md
