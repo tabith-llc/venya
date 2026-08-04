@@ -57,6 +57,28 @@ class RoleMemberRemoveResponse(BaseModel):
     user_id: str
 
 
+# --- Helper functions ---
+
+
+def _get_db(request: Request):
+    """Get a database session from the backend on app state."""
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backend not initialized",
+        )
+    return backend.get_session()
+
+
+def _get_role_manager(request: Request):
+    """Get a RoleManager instance from the request."""
+    db = _get_db(request)
+    from venya.iam.role_manager import RoleManager
+
+    return RoleManager(db), db
+
+
 # --- Endpoints ---
 
 
@@ -73,12 +95,26 @@ async def roles_create(
 
     Requires admin permission.
     """
-    # TODO: Implement role creation via role_manager
+    role_manager, db = _get_role_manager(request)
+    try:
+        role = role_manager.create_role(
+            name=req.name,
+            permissions=req.permissions,
+            description=req.description,
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
     return RoleCreateResponse(
-        id=0,
-        name=req.name,
-        permissions=req.permissions,
-        description=req.description,
+        id=role.id,
+        name=role.name,
+        permissions=role.permissions,
+        description=role.description,
     )
 
 
@@ -90,8 +126,22 @@ async def roles_list(
     request: Request,
 ) -> RoleListResponse:
     """List all roles."""
-    # TODO: Query roles from DB
-    return RoleListResponse(roles=[])
+    role_manager, db = _get_role_manager(request)
+    try:
+        roles = role_manager.list_roles()
+        result = []
+        for role in roles:
+            members = role_manager.get_role_members(role.id)
+            result.append(RoleGetResponse(
+                id=role.id,
+                name=role.name,
+                permissions=role.permissions,
+                description=role.description,
+                member_count=len(members),
+            ))
+        return RoleListResponse(roles=result)
+    finally:
+        db.close()
 
 
 @router.get(
@@ -103,8 +153,24 @@ async def roles_get(
     request: Request,
 ) -> RoleGetResponse:
     """Get a role by ID."""
-    # TODO: Query role from DB
-    return RoleGetResponse(id=role_id, name="example", permissions="read")
+    role_manager, db = _get_role_manager(request)
+    try:
+        role = role_manager.get_role(role_id)
+        if role is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Role {role_id} not found",
+            )
+        members = role_manager.get_role_members(role_id)
+        return RoleGetResponse(
+            id=role.id,
+            name=role.name,
+            permissions=role.permissions,
+            description=role.description,
+            member_count=len(members),
+        )
+    finally:
+        db.close()
 
 
 @router.delete(
@@ -120,8 +186,26 @@ async def roles_delete(
 
     Requires admin permission.
     """
-    # TODO: Delete role via role_manager
-    return RoleDeleteResponse(deleted=True, name="example")
+    role_manager, db = _get_role_manager(request)
+    try:
+        deleted = role_manager.delete_role(role_id)
+        if not deleted:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Role {role_id} not found",
+            )
+        db.commit()
+        # Get role name before it's deleted (already deleted at this point)
+        return RoleDeleteResponse(deleted=True, name=f"role-{role_id}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
 
 @router.get(
@@ -133,8 +217,16 @@ async def role_members_list(
     request: Request,
 ) -> RoleMemberListResponse:
     """List all members of a role."""
-    # TODO: Query members from DB
-    return RoleMemberListResponse(members=[])
+    role_manager, db = _get_role_manager(request)
+    try:
+        members = role_manager.get_role_members(role_id)
+        result = [
+            {"user_id": m.user_id, "role_id": m.role_id}
+            for m in members
+        ]
+        return RoleMemberListResponse(members=result)
+    finally:
+        db.close()
 
 
 @router.post(
@@ -150,8 +242,26 @@ async def role_member_add(
 
     Requires admin permission.
     """
-    # TODO: Add member via role_manager
-    return {"user_id": req.user_id, "role_id": role_id, "added": True}
+    role_manager, db = _get_role_manager(request)
+    try:
+        membership = role_manager.add_member(
+            user_id=req.user_id,
+            role_id=role_id,
+        )
+        db.commit()
+        return {
+            "user_id": membership.user_id,
+            "role_id": membership.role_id,
+            "added": True,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
 
 @router.delete(
@@ -168,5 +278,25 @@ async def role_member_remove(
 
     Requires admin permission.
     """
-    # TODO: Remove member via role_manager
-    return RoleMemberRemoveResponse(removed=True, user_id=user_id)
+    role_manager, db = _get_role_manager(request)
+    try:
+        removed = role_manager.remove_member(
+            user_id=user_id,
+            role_id=role_id,
+        )
+        if not removed:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User '{user_id}' not found in role {role_id}",
+            )
+        db.commit()
+        return RoleMemberRemoveResponse(removed=True, user_id=user_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
