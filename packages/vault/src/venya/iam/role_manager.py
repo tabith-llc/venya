@@ -68,6 +68,62 @@ class RoleManager:
         self.db.flush()
         return role
 
+    def update_role(
+        self,
+        role_id: int,
+        *,
+        name: str | None = None,
+        permissions: str | None = None,
+        description: str | None = None,
+    ) -> Role:
+        """Update a role.
+
+        Args:
+            role_id: Role ID to update.
+            name: New role name.
+            permissions: New permission tier.
+            description: New description.
+
+        Returns:
+            The updated Role.
+
+        Raises:
+            RoleManagerError: If role not found, name already exists, or permissions invalid.
+        """
+        role = self.get_role(role_id)
+        if role is None:
+            raise RoleManagerError(f"Role {role_id} not found")
+
+        if name is not None:
+            if name == role.name:
+                name = None
+            else:
+                existing = (
+                    self.db.query(Role)
+                    .filter(func.lower(Role.name) == name.lower(), Role.id != role_id)
+                    .first()
+                )
+                if existing:
+                    raise RoleManagerError(f"Role '{name}' already exists")
+
+        if permissions is not None:
+            if permissions not in ("read", "read-write"):
+                raise RoleManagerError(
+                    f"Invalid permissions: {permissions}. Must be 'read' or 'read-write'"
+                )
+            if permissions == role.permissions:
+                permissions = None
+
+        if name is not None:
+            role.name = name
+        if permissions is not None:
+            role.permissions = permissions
+        if description is not None:
+            role.description = description
+
+        self.db.flush()
+        return role
+
     def get_role(self, role_id: int) -> Role | None:
         """Get a role by ID."""
         return self.db.query(Role).filter(Role.id == role_id).first()

@@ -53,7 +53,7 @@ Migrating Stage 1 output filter from C extension to Rust, then switching vault f
 ### Remaining Issues
 
 - Server routes: ~32 stub handlers returning mock data
-- `routes/roles.py`: 7 stubs — role management
+- `routes/roles.py`: 7 stubs → ✅ fully implemented (15 tests pass) — missing PUT update endpoint
 - `routes/admin.py`: 15 stubs — admin operations
 - `routes/enrollment.py`: 3 stubs — enrollment flow
 - `routes/auth.py`: 1 stub — WebAuthn credential persistence
@@ -103,7 +103,7 @@ VENYA_DB_URL=postgresql://venya:venya@localhost:5432/venya \
 
 1. ~~Server package TODOs~~ — RBAC middleware fixed (12 tests added); auth.py imports also fixed
 2. ~~Secrets routes~~ — ✅ fully implemented with vault integration (18 tests)
-3. Roles routes (`routes/roles.py`) — role CRUD using `RoleManager`
+3. ~~Roles routes~~ — ✅ fully implemented (15 tests pass), missing PUT update endpoint
 4. Admin routes (`routes/admin.py`) — enrollment, key rotation, user management
 5. Executor daemon integration testing
 6. CLI integration with server API
