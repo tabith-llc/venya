@@ -43,20 +43,20 @@ class VaultFactory:
 
         Args:
             config_dict: Configuration dict with keys:
-                - database_path: Path to database file
+                - database_url: PostgreSQL connection URL
                 - passphrase: Master passphrase (bytes or string)
                 - wal_mode: Enable WAL mode (default True)
 
         Returns:
             Configured VaultFactory instance.
         """
-        database_path = config_dict["database_path"]
+        database_url = config_dict["database_url"]
         passphrase = config_dict.get("passphrase")
         if isinstance(passphrase, str):
             passphrase = passphrase.encode("utf-8")
 
         config = BackendConfig(
-            database_path=database_path,
+            database_url=database_url,
             passphrase=passphrase,
             wal_mode=config_dict.get("wal_mode", True),
         )

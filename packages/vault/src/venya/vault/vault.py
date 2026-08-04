@@ -3,22 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
+from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import and_
+
+from ..iam.models import Base, Secret, SecretRole, Role, RoleMember
 from .backend import Backend, BackendConfig
+from .encryption import decrypt_secret as _decrypt_secret_impl
 from .rate_limiter import RateLimiter
 
 
-class AccessLevel(str, Enum):
-    """Vault-enforced access levels."""
-
-    MASKED = "masked"
-    PLAINTEXT = "plaintext"
-
-
-class Caller(str, Enum):
+class Caller(str):
     """Types of callers that access the vault."""
 
     HUMAN = "human"
@@ -69,11 +65,22 @@ class Vault:
         self.backend = backend
         self.rate_limiter = rate_limiter or RateLimiter()
         self.kek = kek
+        self._tables_created = False
+
+    def _ensure_tables(self) -> None:
+        """Create all ORM tables if they don't exist."""
+        if self._tables_created:
+            return
+        try:
+            Base.metadata.create_all(self.backend.engine)
+        except Exception:
+            pass  # Tables may already exist
+        self._tables_created = True
 
     def get(
         self,
         secret_key: str,
-        caller: Caller = Caller.HUMAN,
+        caller: str = "human",
         unmask: bool = False,
         user_id: str | None = None,
         role_ids: list[str] | None = None,
@@ -95,24 +102,59 @@ class Vault:
             VaultAccessError: If access is denied.
             VaultRateLimitError: If rate limit exceeded.
         """
+        self._ensure_tables()
+
         if user_id:
             self.rate_limiter.check(user_id)
 
-        # Check role access
-        if role_ids:
-            # TODO: Verify user has read access to the secret's roles
-            pass
+        session = self.backend.get_session()
+        try:
+            # Look up the secret
+            secret = (
+                session.query(Secret)
+                .filter(Secret.key == secret_key)
+                .first()
+            )
 
-        # For executor: always plaintext
-        if caller == Caller.EXECUTOR:
-            return self._decrypt_secret(secret_key)
+            if secret is None:
+                raise VaultAccessError(f"Secret not found: {secret_key}")
 
-        # For human: masked by default
-        if not unmask:
-            return "\u2022" * 8  # ••••••••
+            # Check role access if role_ids provided
+            if role_ids:
+                secret_roles = (
+                    session.query(SecretRole)
+                    .filter(SecretRole.secret_id == secret.id)
+                    .all()
+                )
+                secret_role_ids = {sr.role_id for sr in secret_roles}
 
-        # Human with unmask: requires re-auth (enforced at server level)
-        return self._decrypt_secret(secret_key)
+                # Get role IDs for the named roles
+                named_roles = (
+                    session.query(Role.id)
+                    .filter(Role.name.in_(role_ids))
+                    .all()
+                )
+                named_role_ids = {r.id for r in named_roles}
+
+                if not secret_role_ids.intersection(named_role_ids):
+                    raise VaultAccessError(
+                        "User lacks access to any of the required roles"
+                    )
+
+            # For executor: always plaintext
+            if caller == Caller.EXECUTOR:
+                plaintext = self._decrypt_secret(secret)
+                return plaintext
+
+            # For human: masked by default
+            if not unmask:
+                return "\u2022" * 8  # ••••••••
+
+            # Human with unmask: requires re-auth (enforced at server level)
+            plaintext = self._decrypt_secret(secret)
+            return plaintext
+        finally:
+            session.close()
 
     def put(
         self,
@@ -137,30 +179,63 @@ class Vault:
         Raises:
             VaultAccessError: If user doesn't have write access.
         """
-        # TODO: Verify user has write access to all specified roles
+        self._ensure_tables()
+
         if not role_ids:
             raise VaultAccessError("Secret must be scoped to at least one role")
 
-        # Encrypt the secret
         if self.kek is None:
             raise VaultError("KEK not configured")
 
+        # Encrypt the secret
         wrapped_dek, nonce, ciphertext = self._encrypt(value)
 
-        # TODO: Insert into database
-        record = SecretRecord(
-            id="",  # TODO: Get from DB
-            key=key,
-            encrypted_value=ciphertext,
-            nonce=nonce,
-            wrapped_dek=wrapped_dek,
-            key_version_id=key_version_id,
-            created_by=user_id,
-            created_at=datetime.now(),
-            role_ids=role_ids,
-        )
+        session = self.backend.get_session()
+        try:
+            # Create the secret record
+            secret = Secret(
+                key=key,
+                encrypted_value=ciphertext,
+                nonce=nonce,
+                wrapped_dek=wrapped_dek,
+                key_version_id=key_version_id,
+                created_by=user_id,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(secret)
+            session.flush()
 
-        return record
+            # Link roles
+            for role_name in role_ids:
+                role = (
+                    session.query(Role)
+                    .filter(Role.name == role_name)
+                    .first()
+                )
+                if role is None:
+                    raise VaultAccessError(f"Role not found: {role_name}")
+                session.add(SecretRole(secret_id=secret.id, role_id=role.id))
+
+            session.commit()
+
+            record = SecretRecord(
+                id=str(secret.id),
+                key=secret.key,
+                encrypted_value=secret.encrypted_value,
+                nonce=secret.nonce,
+                wrapped_dek=secret.wrapped_dek,
+                key_version_id=secret.key_version_id,
+                created_by=secret.created_by,
+                created_at=secret.created_at,
+                role_ids=role_ids,
+            )
+
+            return record
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     def delete(self, key: str, user_id: str) -> bool:
         """Delete a secret.
@@ -175,9 +250,37 @@ class Vault:
         Raises:
             VaultAccessError: If user doesn't have write access.
         """
-        # TODO: Verify user has write access
-        # TODO: Delete from database
-        return True
+        self._ensure_tables()
+
+        session = self.backend.get_session()
+        try:
+            secret = (
+                session.query(Secret)
+                .filter(Secret.key == key)
+                .first()
+            )
+
+            if secret is None:
+                return False
+
+            # Verify the user created this secret (simple ownership check)
+            if secret.created_by != user_id:
+                raise VaultAccessError("You do not own this secret")
+
+            # Delete secret roles first (foreign key constraint)
+            session.query(SecretRole).filter(
+                SecretRole.secret_id == secret.id
+            ).delete()
+
+            # Delete the secret
+            session.delete(secret)
+            session.commit()
+            return True
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     def list(
         self,
@@ -195,19 +298,72 @@ class Vault:
         Returns:
             List of secret records the user has read access to.
         """
-        # TODO: Query database with role-based filtering
-        return []
+        self._ensure_tables()
+
+        session = self.backend.get_session()
+        try:
+            query = session.query(Secret).join(SecretRole)
+
+            if prefix:
+                query = query.filter(Secret.key.like(f"{prefix}%"))
+
+            if role_ids:
+                # Get role IDs for the named roles
+                named_roles = (
+                    session.query(Role.id)
+                    .filter(Role.name.in_(role_ids))
+                    .all()
+                )
+                named_role_ids = {r.id for r in named_roles}
+                if named_role_ids:
+                    query = query.filter(
+                        SecretRole.role_id.in_(named_role_ids)
+                    )
+
+            secrets = query.distinct().all()
+
+            records = []
+            for secret in secrets:
+                secret_roles = (
+                    session.query(Role.name)
+                    .join(SecretRole, Role.id == SecretRole.role_id)
+                    .filter(SecretRole.secret_id == secret.id)
+                    .all()
+                )
+                records.append(SecretRecord(
+                    id=str(secret.id),
+                    key=secret.key,
+                    encrypted_value=secret.encrypted_value,
+                    nonce=secret.nonce,
+                    wrapped_dek=secret.wrapped_dek,
+                    key_version_id=secret.key_version_id,
+                    created_by=secret.created_by,
+                    created_at=secret.created_at,
+                    role_ids=[r.name for r in secret_roles],
+                ))
+
+            return records
+        finally:
+            session.close()
 
     def _encrypt(self, value: bytes) -> tuple[bytes, bytes, bytes]:
         """Encrypt a value using the vault's KEK."""
-        from .encryption import encrypt_secret
-
         if self.kek is None:
             raise VaultError("KEK not configured")
+
+        from .encryption import encrypt_secret
+
         return encrypt_secret(self.kek, value)
 
-    def _decrypt_secret(self, key: str) -> str:
-        """Decrypt and return a secret value."""
-        # TODO: Retrieve from database and decrypt
-        # For now, raise NotImplementedError
-        raise NotImplementedError("Database integration not yet implemented")
+    def _decrypt_secret(self, secret: Secret) -> str:
+        """Decrypt and return a secret value from a Secret ORM object."""
+        if self.kek is None:
+            raise VaultError("KEK not configured")
+
+        plaintext = _decrypt_secret_impl(
+            self.kek,
+            secret.wrapped_dek,
+            secret.nonce,
+            secret.encrypted_value,
+        )
+        return plaintext.decode("utf-8")

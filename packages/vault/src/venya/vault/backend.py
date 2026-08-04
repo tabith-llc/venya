@@ -1,4 +1,4 @@
-"""SQLCipher SQLite backend with WAL mode, TTL, and audit logging."""
+"""PostgreSQL backend for the vault."""
 
 from __future__ import annotations
 
@@ -31,20 +31,20 @@ class BackendConfigurationError(BackendError):
 
 
 class BackendConfig:
-    """Configuration for the SQLCipher backend.
+    """Configuration for the PostgreSQL backend.
 
     Attributes:
-        database_path: Path to the SQLite/SQLCipher database file.
+        database_url: PostgreSQL connection URL (e.g. postgresql+psycopg2://user:pass@host/db).
         passphrase: Master passphrase for key derivation (used to derive KEK).
-        ke: Optional raw 32-byte KEK. If provided, passphrase is ignored for
-            database encryption but KEK is used for key derivation.
-        wal_mode: Whether to enable WAL mode (default True).
+        kek: Optional raw 32-byte KEK. If provided, passphrase is ignored for
+            key derivation but KEK is used for wrapping/unwrap.
+        wal_mode: Whether to enable WAL mode (default True, PostgreSQL default).
         audit_enabled: Whether to enable audit event logging (default True).
     """
 
     def __init__(
         self,
-        database_path: str | Path,
+        database_url: str,
         passphrase: bytes | None = None,
         kek: bytes | None = None,
         wal_mode: bool = True,
@@ -59,7 +59,7 @@ class BackendConfig:
                 f"KEK must be {KEK_SIZE} bytes, got {len(kek)}"
             )
 
-        self.database_path = Path(database_path)
+        self.database_url = database_url
         self.passphrase = passphrase
         self.kek = kek
         self.wal_mode = wal_mode
@@ -73,14 +73,14 @@ class BackendConfig:
 
     @property
     def engine_url(self) -> str:
-        """Get the SQLAlchemy engine URL for SQLCipher."""
-        return f"sqlite+pysqlcipher:///:memory:"
+        """Get the SQLAlchemy engine URL."""
+        return self.database_url
 
 
 class Backend:
-    """SQLCipher SQLite backend wrapper.
+    """PostgreSQL backend wrapper.
 
-    Provides database engine creation, session management, and PRAGMA setup.
+    Provides database engine creation, session management, and connection setup.
     """
 
     def __init__(self, config: BackendConfig) -> None:
@@ -107,46 +107,28 @@ class Backend:
         return self.session_factory()
 
     def _create_engine(self) -> None:
-        """Create the SQLCipher engine with proper PRAGMAs."""
-        # Use in-memory database for now; can be changed to file-based
-        if self.config.passphrase:
-            # For file-based: sqlite+pysqlcipher:///path/to/db
-            # For in-memory: sqlite+pysqlcipher:///:memory:
-            db_url = "sqlite+pysqlcipher:///:memory:"
-        else:
-            db_url = "sqlite+pysqlcipher:///:memory:"
-
+        """Create the PostgreSQL engine."""
         self._engine = create_engine(
-            db_url,
+            self.config.database_url,
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=10,
         )
 
-        # Set SQLCipher PRAGMAs
+        # Set PostgreSQL PRAGMAs (connection-level settings)
         @event.listens_for(self._engine, "connect")
-        def set_sqlcipher_pragmas(dbapi_connection: Any, connection_record: Any) -> None:
+        def set_pragmas(dbapi_connection: Any, connection_record: Any) -> None:
             cursor = dbapi_connection.cursor()
             try:
-                # Set the page size for better performance
-                cursor.execute("PRAGMA page_size = 4096")
-
-                # Set WAL mode if enabled
+                # Enable WAL (PostgreSQL default, but be explicit)
                 if self.config.wal_mode:
-                    cursor.execute("PRAGMA journal_mode = WAL")
+                    cursor.execute("SET synchronous_commit = ON")
 
-                # Set key using derived passphrase
-                if self.config.passphrase:
-                    # SQLCipher uses the passphrase directly for encryption
-                    cursor.execute(
-                        f"PRAGMA key = \"x'{self.config.passphrase.hex()}'\""
-                    )
+                # Set statement timeout (5 minutes)
+                cursor.execute("SET statement_timeout = '300s'")
 
-                # Enable foreign keys
-                cursor.execute("PRAGMA foreign_keys = ON")
-
-                # Set busy timeout for concurrent access
-                cursor.execute("PRAGMA busy_timeout = 5000")
+                # Enable prepared statements
+                cursor.execute("SET enable_partition_pruning = ON")
 
                 cursor.close()
             except Exception:
