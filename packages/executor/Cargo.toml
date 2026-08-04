@@ -1,0 +1,22 @@
+[package]
+name = "venya-filter"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+name = "venya_filter"
+path = "src/rust/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

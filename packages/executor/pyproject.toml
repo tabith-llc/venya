@@ -16,19 +16,12 @@ dependencies = [
 venya-executor = "venya_executor.daemon:main"
 
 [build-system]
-requires = ["setuptools>=75", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[[tool.setuptools.ext-modules]]
-name = "venya_executor._venya_filter"
-sources = ["src/venya_executor/_source/venya_filter.c"]
-extra-link-args = ["-lcrypto"]
+[tool.maturin]
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]
 
 [tool.ruff]
 target-version = "py313"
