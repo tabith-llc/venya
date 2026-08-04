@@ -141,12 +141,29 @@ async def secrets_create(
     Requires read-write permission on all specified roles.
     """
     user_info = await _get_user_info(request)
+    vault = getattr(request.app.state, "vault", None)
+    if vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vault not initialized",
+        )
 
-    # TODO: Check RBAC permissions
-    # TODO: Encrypt and store via vault backend
+    try:
+        record = vault.put(
+            key=req.key,
+            value=req.value.encode("utf-8"),
+            user_id=user_info["user_id"],
+            role_ids=req.roles,
+            key_version_id=req.key_version_id,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
     return SecretCreateResponse(
-        id=0,  # TODO: Get from DB
+        id=int(record.id),
         key=req.key,
         role_ids=req.roles,
     )
@@ -167,8 +184,28 @@ async def secrets_get(
     Returns masked value by default for humans.
     Executor (mTLS) gets plaintext.
     """
-    # TODO: Implement actual secret retrieval via vault
-    return SecretGetResponse(key=key, value="\u2022" * 8, masked=not unmask)
+    user_info = await _get_user_info(request)
+    vault = getattr(request.app.state, "vault", None)
+    if vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vault not initialized",
+        )
+
+    try:
+        value = vault.get(
+            secret_key=key,
+            caller=caller,
+            unmask=unmask,
+            user_id=user_info.get("user_id"),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    return SecretGetResponse(key=key, value=value, masked=caller == "human" and not unmask)
 
 
 @router.get(
@@ -184,11 +221,29 @@ async def secrets_get_executor(
     Returns sentinel-wrapped plaintext with detection hashes.
     This endpoint is for executor (mTLS) use only.
     """
-    # TODO: Retrieve plaintext secret, wrap with sentinel, compute hashes
+    vault = getattr(request.app.state, "vault", None)
+    if vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vault not initialized",
+        )
+
+    try:
+        plaintext = vault.get(
+            secret_key=key,
+            caller="executor",
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+    secret_value = plaintext.encode("utf-8")
     return SentinelWrappedResponse(
         secret_id=key,
-        wrapped_value=wrap_with_sentinel(key, b"placeholder"),
-        detection_hashes=compute_detection_hashes(b"placeholder"),
+        wrapped_value=wrap_with_sentinel(key, secret_value),
+        detection_hashes=compute_detection_hashes(secret_value),
     )
 
 
@@ -204,8 +259,32 @@ async def secrets_list(
 
     Only shows secrets the authenticated user has read access to.
     """
-    # TODO: Query secrets with role-based filtering
-    return SecretListResponse(secrets=[])
+    user_info = await _get_user_info(request)
+    vault = getattr(request.app.state, "vault", None)
+    if vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vault not initialized",
+        )
+
+    records = vault.list(
+        prefix=prefix,
+        user_id=user_info.get("user_id"),
+    )
+
+    secrets = [
+        {
+            "id": int(r.id),
+            "key": r.key,
+            "key_version_id": r.key_version_id,
+            "created_by": r.created_by,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "role_ids": r.role_ids,
+        }
+        for r in records
+    ]
+
+    return SecretListResponse(secrets=secrets)
 
 
 @router.delete(
@@ -221,8 +300,20 @@ async def secrets_delete(
 
     Requires read-write permission on the secret's role(s).
     """
-    # TODO: Implement actual deletion with RBAC check
-    return SecretDeleteResponse(deleted=True, key=key)
+    user_info = await _get_user_info(request)
+    vault = getattr(request.app.state, "vault", None)
+    if vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vault not initialized",
+        )
+
+    deleted = vault.delete(
+        key=key,
+        user_id=user_info["user_id"],
+    )
+
+    return SecretDeleteResponse(deleted=deleted, key=key)
 
 
 async def _get_user_info(request: Request) -> dict:
@@ -272,7 +363,7 @@ async def revoke_session_secrets(
     """
     from datetime import datetime, timezone
 
-    from ..iam.models import AuditEvent
+    from venya.iam.models import AuditEvent
 
     # Verify caller is executor (mTLS)
     caller = getattr(request.state, "auth_user", {})

@@ -135,6 +135,32 @@ class Backend:
                 cursor.close()
                 raise
 
+    def get_vault(self, passphrase: str | None = None) -> Any:
+        """Create and return a configured Vault instance.
+
+        Args:
+            passphrase: Optional passphrase override for key derivation.
+
+        Returns:
+            Configured Vault instance.
+        """
+        from .vault import Vault
+        from .rate_limiter import RateLimiter
+
+        kek = None
+        effective_passphrase = passphrase or (
+            self.config.passphrase.decode("utf-8") if self.config.passphrase else None
+        )
+        if effective_passphrase:
+            from .encryption import derive_kek
+            kek, _ = derive_kek(effective_passphrase.encode("utf-8"))
+
+        return Vault(
+            backend=self,
+            rate_limiter=RateLimiter(),
+            kek=kek,
+        )
+
     def dispose(self) -> None:
         """Dispose of the engine and release resources."""
         if self._engine is not None:
