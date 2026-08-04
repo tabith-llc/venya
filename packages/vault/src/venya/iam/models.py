@@ -305,3 +305,23 @@ class ExecutorCertRevocation(Base):
         Index("ix_executor_cert_revocations_serial_number", "serial_number"),
         Index("ix_executor_cert_revocations_revoked_at", "revoked_at"),
     )
+
+
+class WebAuthnCredential(Base):
+    """WebAuthn credentials for user authentication."""
+
+    __tablename__ = "webauthn_credentials"
+
+    id = Column(Integer, primary_key=True)
+    credential_id = Column(String(128), unique=True, nullable=False, index=True)
+    user_id = Column(String(64), ForeignKey("users.user_id"), nullable=False, index=True)
+    raw_id = Column(Text, nullable=False)
+    response = Column(Text, nullable=False)
+    transports = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    user = relationship("User", backref="webauthn_credentials")
+
+    __table_args__ = (
+        Index("ix_webauthn_credentials_user_id", "user_id"),
+    )

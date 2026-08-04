@@ -119,7 +119,27 @@ async def auth_registration_complete(
             detail=str(e),
         ) from e
 
-    # TODO: Store credential in database
+    # Store credential in database
+    backend = getattr(request.app.state, "backend", None)
+    if backend is not None:
+        db = backend.get_session()
+        try:
+            from venya.iam.models import WebAuthnCredential
+            import json
+
+            credential = WebAuthnCredential(
+                credential_id=cred.credential_id,
+                user_id=cred.user_id,
+                raw_id=cred.credential_data.get("raw_id", ""),
+                response=json.dumps(cred.credential_data.get("response", {})),
+                transports=json.dumps(cred.transports),
+            )
+            db.add(credential)
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
 
     return RegistrationCompleteResponse(credential_id=cred.credential_id)
 
@@ -180,9 +200,11 @@ async def auth_login_complete(
         ) from e
 
     # Create session and issue token
-    from ..dependencies import get_backend, get_session_manager
-    from ..iam.session_manager import SessionConfig as VaultSessionConfig
     from datetime import timedelta
+
+    from venya.iam.role_manager import RoleManager
+    from venya.iam.session_manager import SessionConfig as VaultSessionConfig
+    from venya.iam.session_manager import SessionManager
 
     backend = getattr(request.app.state, "backend", None)
     if backend is None:
@@ -198,8 +220,6 @@ async def auth_login_complete(
             access_token_ttl=timedelta(minutes=5),
             max_session_duration=timedelta(hours=4),
         )
-        from ..iam.session_manager import SessionManager
-        from ..iam.role_manager import RoleManager
 
         sm = SessionManager(db, session_config)
         rm = RoleManager(db)
@@ -240,10 +260,11 @@ async def auth_refresh(
     Validates the existing session and issues a new access token.
     The session must still be active (not idle-expired, not past max duration).
     """
-    from ..dependencies import get_backend
-    from ..iam.session_manager import SessionManager, SessionConfig as VaultSessionConfig
-    from ..iam.models import Session as SessionModel
     from datetime import timedelta
+
+    from venya.iam.models import Session as SessionModel
+    from venya.iam.session_manager import SessionConfig as VaultSessionConfig
+    from venya.iam.session_manager import SessionManager
 
     backend = getattr(request.app.state, "backend", None)
     if backend is None:
