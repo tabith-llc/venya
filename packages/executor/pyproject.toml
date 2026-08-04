@@ -16,12 +16,20 @@ dependencies = [
 venya-executor = "venya_executor.daemon:main"
 
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
-build-backend = "maturin"
+requires = ["setuptools>=68.0", "setuptools-rust>=1.9"]
+build-backend = "setuptools.build_meta"
 
-[tool.maturin]
-manifest-path = "Cargo.toml"
-features = ["pyo3/extension-module"]
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools-rust]
+packages = ["venya_filter"]
+binding-rustc-flags = ["-Cstrip=debuginfo"]
+
+[[tool.setuptools-rust.rust-modules]]
+package = "venya-filter"
+source = "Cargo.toml"
+extra-rustc-args = ["-C", "lto"]
 
 [tool.ruff]
 target-version = "py313"
