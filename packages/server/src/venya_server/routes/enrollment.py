@@ -40,6 +40,20 @@ class EnrollmentTokenListResponse(BaseModel):
     tokens: list[dict]
 
 
+# --- Helper functions ---
+
+
+def _get_db(request: Request):
+    """Get a database session from the backend on app state."""
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backend not initialized",
+        )
+    return backend.get_session()
+
+
 # --- Endpoints ---
 
 
@@ -57,18 +71,29 @@ async def enrollment_create_token(
     Requires admin permission.
     The token is used in the enrollment URL for the user to complete setup.
     """
-    # TODO: Generate enrollment token, store in DB
-    import secrets
-    from datetime import datetime, timedelta, timezone
+    db = _get_db(request)
+    try:
+        from venya.iam.enrollment_manager import EnrollmentManager
 
-    token = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
-
-    return EnrollmentTokenCreateResponse(
-        token=token,
-        expires_at=expires_at.isoformat(),
-        enrollment_url=f"/api/v1/enrollment/confirm?token={token}&user_id={req.user_id}",
-    )
+        em = EnrollmentManager(db)
+        token = em.create_enrollment_token(
+            user_id=req.user_id,
+            auth_mode=req.auth_mode,
+        )
+        db.commit()
+        return EnrollmentTokenCreateResponse(
+            token=token.token,
+            expires_at=token.expires_at.isoformat(),
+            enrollment_url=f"/api/v1/enrollment/confirm?token={token.token}&user_id={req.user_id}",
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    finally:
+        db.close()
 
 
 @router.get(
@@ -82,8 +107,31 @@ async def enrollment_list_tokens(
 
     Requires admin permission.
     """
-    # TODO: Query tokens from DB
-    return EnrollmentTokenListResponse(tokens=[])
+    db = _get_db(request)
+    try:
+        from venya.iam.models import EnrollmentToken
+
+        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+        tokens = (
+            db.query(EnrollmentToken)
+            .filter(
+                EnrollmentToken.consumed == False,  # noqa: E712
+                EnrollmentToken.expires_at > now,
+            )
+            .order_by(EnrollmentToken.expires_at.desc())
+            .all()
+        )
+        result = [
+            {
+                "token": t.token,
+                "user_id": t.user_id,
+                "expires_at": t.expires_at.isoformat(),
+            }
+            for t in tokens
+        ]
+        return EnrollmentTokenListResponse(tokens=result)
+    finally:
+        db.close()
 
 
 @router.post(
@@ -99,9 +147,26 @@ async def enrollment_confirm(
 
     Called after the user has completed WebAuthn registration.
     """
-    # TODO: Validate token, create user, link WebAuthn credentials
-    return EnrollmentTokenConsumeResponse(
-        enrolled=True,
-        user_id=req.user_id,
-        auth_mode="security-key",
-    )
+    db = _get_db(request)
+    try:
+        from venya.iam.enrollment_manager import EnrollmentManager
+
+        em = EnrollmentManager(db)
+        user = em.consume_enrollment_token(
+            token_value=req.token,
+            auth_mode="security-key",
+        )
+        db.commit()
+        return EnrollmentTokenConsumeResponse(
+            enrolled=True,
+            user_id=user.user_id,
+            auth_mode=user.auth_mode,
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    finally:
+        db.close()
