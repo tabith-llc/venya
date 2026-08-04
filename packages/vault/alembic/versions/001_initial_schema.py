@@ -18,7 +18,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute("PRAGMA foreign_keys = ON")
+    # PostgreSQL enables foreign keys by default
 
     # --- Core IAM tables ---
 
@@ -194,8 +194,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("PRAGMA foreign_keys = ON")
-
     op.drop_table("executor_certs")
     op.drop_table("command_policies")
     op.drop_table("rate_limit_failures")
