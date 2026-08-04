@@ -25,16 +25,24 @@
 
 ### Vault: Switch to PostgreSQL
 
-**Why:** SQLCipher in-memory SQLite has fundamental connection-sharing issues. PostgreSQL is more appropriate for a production vault.
+**Status: Complete**
+
+Vault facade methods wired to PostgreSQL backend:
+- `get()` — retrieve secrets with RBAC, masked/plaintext based on caller
+- `put()` — store secrets with role scoping
+- `delete()` — remove secrets with ownership check
+- `list()` — query secrets with prefix/role filtering
+- 12 unit tests passing
 
 **Tasks:**
-1. Create PostgreSQL migration (replaces SQLCipher SQLite)
-2. Update `Backend` to use PostgreSQL via `psycopg2`
-3. Wire `vault.py` methods to use the new backend
-4. Update `BackendConfig` for PostgreSQL connection string
-5. Add `psycopg2-binary` to vault dependencies
-6. Write integration tests against PostgreSQL
-7. Update `build.sh` to handle PostgreSQL setup
+1. ~~Create PostgreSQL migration (replaces SQLCipher SQLite)~~
+2. ~~Update `Backend` to use PostgreSQL via `psycopg2`~~
+3. ~~Wire `vault.py` methods to use the new backend~~
+4. ~~Update `BackendConfig` for PostgreSQL connection string~~
+5. ~~Add `psycopg2-binary` to vault dependencies~~
+6. ~~Write integration tests against PostgreSQL~~
+7. ~~Update `build.sh` to handle PostgreSQL setup~~
+8. ~~Vault facade methods wired (get/put/delete/list)~~
 
 **Migration approach:**
 - Keep the same ORM models (they're DB-agnostic)
