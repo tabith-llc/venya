@@ -187,6 +187,118 @@ class TestRolesGet:
             assert "not found" in resp.json()["detail"]
 
 
+class TestRolesUpdate:
+    """Tests for role update endpoint."""
+
+    def test_update_success(self):
+        """PUT /roles/{id} should update role fields."""
+        rm = _make_mock_role_manager()
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        updated_role = SimpleNamespace(
+            id=1, name="senior-dev", permissions="read-write", description="Senior developers"
+        )
+        rm.update_role.return_value = updated_role
+        rm.get_role_members.return_value = []
+
+        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/1",
+                json={
+                    "name": "senior-dev",
+                    "permissions": "read-write",
+                    "description": "Senior developers",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["name"] == "senior-dev"
+            assert data["permissions"] == "read-write"
+            assert data["description"] == "Senior developers"
+
+    def test_update_not_found(self):
+        """PUT /roles/{id} should return 404 for missing role."""
+        rm = _make_mock_role_manager()
+        rm.update_role.side_effect = Exception("Role 999 not found")
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/999",
+                json={"name": "new-name"},
+            )
+            assert resp.status_code == 400
+            assert "not found" in resp.json()["detail"]
+
+    def test_update_duplicate_name(self):
+        """PUT /roles/{id} should return 400 if new name already exists."""
+        rm = _make_mock_role_manager()
+        rm.update_role.side_effect = Exception("Role 'dev' already exists")
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/1",
+                json={"name": "dev"},
+            )
+            assert resp.status_code == 400
+            assert "already exists" in resp.json()["detail"]
+
+    def test_update_invalid_permissions(self):
+        """PUT /roles/{id} should return 400 for invalid permissions."""
+        rm = _make_mock_role_manager()
+        rm.update_role.side_effect = Exception("Invalid permissions: admin")
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/1",
+                json={"permissions": "admin"},
+            )
+            assert resp.status_code == 400
+            assert "Invalid permissions" in resp.json()["detail"]
+
+    def test_update_partial(self):
+        """PUT /roles/{id} should allow partial updates."""
+        rm = _make_mock_role_manager()
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        updated_role = SimpleNamespace(
+            id=1, name="dev", permissions="read", description="Updated description"
+        )
+        rm.update_role.return_value = updated_role
+        rm.get_role_members.return_value = []
+
+        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/1",
+                json={"description": "Updated description"},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["description"] == "Updated description"
+
+
 class TestRolesDelete:
     """Tests for role deletion endpoint."""
 

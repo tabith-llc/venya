@@ -20,6 +20,14 @@ class RoleCreateRequest(BaseModel):
     description: str | None = Field(None, description="Optional description")
 
 
+class RoleUpdateRequest(BaseModel):
+    name: str | None = Field(None, description="New role name")
+    permissions: str | None = Field(
+        None, description='New permission tier: "read" or "read-write"'
+    )
+    description: str | None = Field(None, description="New description")
+
+
 class RoleCreateResponse(BaseModel):
     id: int
     name: str
@@ -171,6 +179,46 @@ async def roles_get(
         )
     finally:
         db.close()
+
+
+@router.put(
+    "/roles/{role_id}",
+    response_model=RoleGetResponse,
+)
+async def roles_update(
+    role_id: int,
+    req: RoleUpdateRequest,
+    request: Request,
+) -> RoleGetResponse:
+    """Update a role.
+
+    Requires admin permission.
+    """
+    role_manager, db = _get_role_manager(request)
+    try:
+        role = role_manager.update_role(
+            role_id,
+            name=req.name,
+            permissions=req.permissions,
+            description=req.description,
+        )
+        db.commit()
+        members = role_manager.get_role_members(role_id)
+        return RoleGetResponse(
+            id=role.id,
+            name=role.name,
+            permissions=role.permissions,
+            description=role.description,
+            member_count=len(members),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
 
 @router.delete(
