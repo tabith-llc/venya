@@ -90,12 +90,15 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     """Lifespan context manager for FastAPI."""
     config: ServerConfig = app.state.config  # type: ignore[attr-defined]
 
-    # Startup: initialize DB only (FIDO2 is already initialized)
+    # Startup: initialize DB and vault (FIDO2 is already initialized)
     from .dependencies import init_db
 
     backend = init_db(config.db)
     logger.info("Database initialized: %s", config.db.database_path)
     app.state.backend = backend  # type: ignore[attr-defined]
+
+    vault = backend.get_vault(config.db.passphrase)
+    app.state.vault = vault  # type: ignore[attr-defined]
 
     yield
 
