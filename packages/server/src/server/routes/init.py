@@ -47,7 +47,7 @@ async def init_vault(
     db = backend.get_session()
     try:
         # Check if already initialized (admin role exists)
-        from ..iam.models import Role
+        from vault.iam.models import Role
 
         admin_role = db.query(Role).filter(Role.name == "admin").first()
         if admin_role is not None:
@@ -76,9 +76,10 @@ async def init_vault(
             description="System administrator — full access",
         )
         db.add(admin_role)
+        db.flush()  # Get the role ID before creating membership
 
         # Enroll first admin user
-        from ..iam.models import User
+        from vault.iam.models import User
 
         admin_user = User(
             user_id=req.user_id,
@@ -87,7 +88,7 @@ async def init_vault(
         db.add(admin_user)
 
         # Assign admin role
-        from ..iam.models import RoleMember
+        from vault.iam.models import RoleMember
 
         membership = RoleMember(
             user_id=req.user_id,
