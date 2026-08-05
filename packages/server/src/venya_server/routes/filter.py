@@ -126,30 +126,66 @@ async def filter_session_output(
     Returns:
         Sanitized output with masked secrets.
     """
-    # Decode base64 input
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backend not initialized",
+        )
+
+    from venya.iam.models import Secret, Session as SessionModel
+
+    db = backend.get_session()
     try:
-        stdout = base64.b64decode(req.stdout)
-    except Exception:
-        stdout = b""
+        # Look up session to find injected secrets
+        try:
+            session_id_int = int(session_id)
+        except (ValueError, TypeError):
+            session_id_int = None
 
-    try:
-        stderr = base64.b64decode(req.stderr)
-    except Exception:
-        stderr = b""
+        session = None
+        if session_id_int is not None:
+            session = (
+                db.query(SessionModel)
+                .filter(SessionModel.id == session_id_int)
+                .first()
+            )
 
-    # Look up secrets injected in this session
-    # TODO: Get session secrets from DB or in-memory store
-    # For now, return output unmodified
-    session_secrets: dict[str, bytes] = {}
+        session_secrets: dict[str, bytes] = {}
+        if session is not None:
+            # Get secrets associated with this session's user
+            secrets = (
+                db.query(Secret)
+                .filter(Secret.created_by == session.user_id)
+                .all()
+            )
+            for secret in secrets:
+                # Use the secret key as the lookup value
+                secret_bytes = secret.key.encode() if secret.key else b""
+                hash_hex = hashlib.sha256(secret_bytes).hexdigest()
+                session_secrets[hash_hex] = secret_bytes
 
-    filtered_stdout, stdout_hashes = filter_output(stdout, session_secrets)
-    filtered_stderr, stderr_hashes = filter_output(stderr, session_secrets)
+        # Decode base64 input
+        try:
+            stdout = base64.b64decode(req.stdout)
+        except Exception:
+            stdout = b""
 
-    all_hashes = stdout_hashes + stderr_hashes
+        try:
+            stderr = base64.b64decode(req.stderr)
+        except Exception:
+            stderr = b""
 
-    return FilterResponse(
-        stdout=base64.b64encode(filtered_stdout).decode("ascii"),
-        stderr=base64.b64encode(filtered_stderr).decode("ascii"),
-        masked_count=len(all_hashes),
-        masked_hashes=all_hashes,
-    )
+        filtered_stdout, stdout_hashes = filter_output(stdout, session_secrets)
+        filtered_stderr, stderr_hashes = filter_output(stderr, session_secrets)
+
+        all_hashes = stdout_hashes + stderr_hashes
+
+        return FilterResponse(
+            stdout=base64.b64encode(filtered_stdout).decode("ascii"),
+            stderr=base64.b64encode(filtered_stderr).decode("ascii"),
+            masked_count=len(all_hashes),
+            masked_hashes=all_hashes,
+        )
+    finally:
+        db.close()
