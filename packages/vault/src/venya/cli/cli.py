@@ -242,6 +242,48 @@ def create_parser() -> argparse.ArgumentParser:
         "--confirm", action="store_true", help="Confirm recovery action"
     )
 
+    # exec
+    exec_parser = subparsers.add_parser(
+        "exec", help="Execute a command via executor ( Stage 1 + Stage 2 filtering)"
+    )
+    exec_parser.add_argument(
+        "command", help="Command to execute", nargs=argparse.REMAINDER
+    )
+    exec_parser.add_argument(
+        "--secret",
+        action="append",
+        dest="secrets",
+        help="Secret key to inject (can be specified multiple times)",
+    )
+    exec_parser.add_argument(
+        "--executor-id",
+        help="Executor ID to target (default: from config or 'default')",
+    )
+    exec_parser.add_argument(
+        "--server-url",
+        help="Server URL override (default: from config)",
+    )
+
+    # config
+    config_parser = subparsers.add_parser(
+        "config", help="Manage CLI configuration"
+    )
+    config_sub = config_parser.add_subparsers(dest="config_command")
+
+    # config show
+    config_sub.add_parser("show", help="Show current configuration")
+
+    # config set-server
+    set_server_parser = config_sub.add_parser(
+        "set-server", help="Set the server URL"
+    )
+    set_server_parser.add_argument("url", help="Server URL")
+
+    # config clear-token
+    config_sub.add_parser(
+        "clear-token", help="Clear stored access token (forces re-auth)"
+    )
+
     return parser
 
 

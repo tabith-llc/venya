@@ -17,6 +17,7 @@ import json
 import logging
 from typing import Any
 
+import httpx
 from fido2.client import WebAuthnClient
 from fido2.hid import list_devices
 from fido2.webauthn import (
@@ -74,53 +75,49 @@ class Fido2Auth:
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Simple GET request."""
-        from urllib import request as urllib_request
-        from urllib.error import HTTPError
-        from urllib.parse import urlencode
-
         url = self.server_url + path
-        if params:
-            url += "?" + urlencode(params)
-
-        req = urllib_request.Request(url, method="GET")
         try:
-            with urllib_request.urlopen(req) as resp:
-                body = resp.read()
-                if body:
-                    return json.loads(body)
-                return {}
-        except HTTPError as e:
-            body = e.read()
-            if body:
-                raise Fido2ClientError(
-                    json.loads(body).get("detail", str(e))
-                )
-            raise Fido2ClientError(str(e))
+            with httpx.Client() as client:
+                resp = client.get(url, params=params, timeout=30.0)
+                resp.raise_for_status()
+                return resp.json() if resp.content else {}
+        except httpx.HTTPStatusError as e:
+            error_msg = str(e)
+            try:
+                error_data = e.response.json()
+                error_msg = error_data.get("detail", str(e))
+            except (json.JSONDecodeError, Exception):  # noqa: F841
+                pass
+            raise Fido2ClientError(error_msg)
+        except httpx.ConnectError as e:
+            raise Fido2ClientError(f"Connection failed: {e}")
 
     def _post(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
         """Simple POST request."""
-        from urllib import request as urllib_request
-        from urllib.error import HTTPError
-
         url = self.server_url + path
-        data = json.dumps(json_data).encode("utf-8")
-        req = urllib_request.Request(url, data=data, headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }, method="POST")
         try:
-            with urllib_request.urlopen(req) as resp:
-                body = resp.read()
-                if body:
-                    return json.loads(body)
-                return {}
-        except HTTPError as e:
-            body = e.read()
-            if body:
-                raise Fido2ClientError(
-                    json.loads(body).get("detail", str(e))
+            with httpx.Client() as client:
+                resp = client.post(
+                    url,
+                    json=json_data,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    timeout=30.0,
                 )
-            raise Fido2ClientError(str(e))
+                resp.raise_for_status()
+                return resp.json() if resp.content else {}
+        except httpx.HTTPStatusError as e:
+            error_msg = str(e)
+            try:
+                error_data = e.response.json()
+                error_msg = error_data.get("detail", str(e))
+            except (json.JSONDecodeError, Exception):  # noqa: F841
+                pass
+            raise Fido2ClientError(error_msg)
+        except httpx.ConnectError as e:
+            raise Fido2ClientError(f"Connection failed: {e}")
 
     def authenticate(self, user_id: str | None = None, timeout: float = 60.0) -> dict[str, Any]:
         """Perform WebAuthn authentication.
