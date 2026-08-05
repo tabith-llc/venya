@@ -207,8 +207,6 @@ class Executor:
         env = os.environ.copy()
         if env_override:
             env.update(env_override)
-        if self._injection_result:
-            env.update(self._injection_result.env_vars)
 
         # Determine FDs to pass to child process
         pass_fds: set[int] = set()

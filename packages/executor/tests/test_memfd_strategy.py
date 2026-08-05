@@ -40,7 +40,6 @@ class TestMemfdStrategyPrepare:
         result = strategy.prepare(bundles)
 
         assert len(result.extra_fds) == 2
-        assert result.env_vars == {}
 
         # Verify data integrity
         for i, fd in enumerate(result.extra_fds):
