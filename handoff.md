@@ -2,7 +2,7 @@
 
 **Date:** 2025-08-04
 **Branch:** init
-**Last commit:** `60a963b` fix(server): wire RBAC middleware to RoleManager DB queries
+**Last commit:** `ffad439` feat(server): implement health check DB probe + filter session secrets
 
 ---
 
@@ -29,19 +29,69 @@ Migrating Stage 1 output filter from C extension to Rust, then switching vault f
 - 12 vault unit tests pass
 - PostgreSQL integration tests pass (Docker container)
 - `Backend.get_vault()` added for easy vault instantiation
+- 15 ORM models (added `WebAuthnCredential` table)
 
-#### Server Package
-- **Secrets routes fully implemented** (`routes/secrets.py`):
-  - `POST /secrets` — create with vault.put(), encryption, role scoping
-  - `GET /secrets/{key}` — retrieve with masking (human) or plaintext (executor)
-  - `GET /secrets/{key}/executor` — sentinel-wrapped plaintext + detection hashes
-  - `GET /secrets` — list with prefix filtering and role-based access
-  - `DELETE /secrets/{key}` — delete with ownership check
-  - `POST /sessions/{id}/secrets/revoke` — credential revocation with audit logging
-- Vault wired into app lifespan (`app.state.vault`)
-- Fixed `dependencies.py` init_db for PostgreSQL (reads `VENYA_DB_URL` env var)
-- Fixed import path bug in revoke endpoint (`..iam.models` → `venya.iam.models`)
-- 30/30 server tests pass (12 RBAC + 18 secrets)
+#### Server Package — All Routes Implemented (119 tests)
+
+**Secrets routes** (`routes/secrets.py`):
+- `POST /secrets` — create with vault.put(), encryption, role scoping
+- `GET /secrets/{key}` — retrieve with masking (human) or plaintext (executor)
+- `GET /secrets/{key}/executor` — sentinel-wrapped plaintext + detection hashes
+- `GET /secrets` — list with prefix filtering and role-based access
+- `DELETE /secrets/{key}` — delete with ownership check
+- `POST /sessions/{id}/secrets/revoke` — credential revocation with audit logging
+
+**Roles routes** (`routes/roles.py`):
+- `POST /roles` — create role via RoleManager
+- `GET /roles` — list roles with member counts
+- `GET /roles/{id}` — get role details
+- `PUT /roles/{id}` — update role (name, permissions, description)
+- `DELETE /roles/{id}` — delete role
+- `GET /roles/{id}/members` — list role members
+- `POST /roles/{id}/members` — add user to role
+- `DELETE /roles/{id}/members/{user_id}` — remove user from role
+
+**Admin routes** (`routes/admin.py`):
+- `POST /admin/enroll` — create enrollment token
+- `DELETE /admin/users/{user_id}` — remove user (cascades memberships/sessions)
+- `GET /admin/users` — list all users
+- `PUT /admin/users/{user_id}` — configure user settings
+- `GET /admin/key-versions` — list key versions
+- `POST /admin/key-versions/rotate` — start key rotation (creates job + per-secret tracking)
+- `POST /admin/key-versions/rollback` — rollback rotation job
+- `POST /admin/command-policy` — set executor command policy
+- `POST /admin/recovery` — break-glass recovery (create new admin)
+- `POST /admin/command-policy/allowed` — add command to allowlist
+- `POST /admin/key-versions/{id}/deactivate` — deactivate key version
+- `POST /admin/key-versions/{id}/revoke` — permanently remove key version
+- `GET /admin/key-rotation/status` — show active rotation jobs
+- `POST /admin/key-rotation/{job_id}/rollback` — rollback rotation job
+- `POST /admin/executors/{executor_id}/revoke` — revoke executor certificate
+
+**Enrollment routes** (`routes/enrollment.py`):
+- `POST /enrollment/tokens` — create enrollment token via EnrollmentManager
+- `GET /enrollment/tokens` — list active enrollment tokens
+- `POST /enrollment/confirm` — consume token and create user
+
+**Auth routes** (`routes/auth.py`):
+- `POST /auth/registration/start` — start WebAuthn registration
+- `POST /auth/registration/complete` — complete registration, store credential in DB
+- `POST /auth/login/start` — start WebAuthn authentication
+- `POST /auth/login/complete` — verify assertion, create session, issue token
+- `POST /auth/refresh` — refresh access token
+
+**Recovery routes** (`routes/recovery.py`):
+- `POST /recovery` — break-glass recovery (short CLI path)
+
+**Audit routes** (`routes/audit.py`):
+- `GET /audit` — query audit log with filters (user, date range, days, hours, pagination)
+
+**Health routes** (`routes/health.py`):
+- `GET /health` — liveness probe
+- `GET /ready` — readiness probe (checks DB connectivity)
+
+**Filter routes** (`routes/filter.py`):
+- `POST /sessions/{session_id}/filter` — filter secrets from executor output using hash matching
 
 ### Build Status
 - `./build.sh` — builds executor package (Rust + Python)
@@ -52,17 +102,7 @@ Migrating Stage 1 output filter from C extension to Rust, then switching vault f
 
 ### Remaining Issues
 
-- Server routes: ~32 stub handlers returning mock data
-- `routes/roles.py`: 7 stubs → ✅ fully implemented (20 tests pass) — PUT update added
-- `routes/admin.py`: 15 stubs → ✅ fully implemented (30 tests pass)
-- `routes/enrollment.py`: 3 stubs — enrollment flow
-- `routes/auth.py`: 1 stub — WebAuthn credential persistence
-- `routes/recovery.py`: 1 stub — admin recovery
-- `routes/audit.py`: 1 stub — audit log queries
-- `routes/health.py`: 1 stub — DB connectivity check
-- `routes/filter.py`: 1 stub — session secret filtering
-- `middleware/rbac.py`: ✅ fixed (wired to `RoleManager`; also fixed broken `from ..iam` imports in auth.py)
-- `routes/secrets.py`: ✅ fully implemented with vault integration
+All server route stubs have been implemented. No remaining stub handlers.
 
 ## Build Commands
 
@@ -109,8 +149,10 @@ VENYA_DB_URL=postgresql://venya:venya@localhost:5432/venya \
 6. ~~Auth routes~~ — ✅ fully implemented (12 tests pass) — WebAuthn credential persistence added
 7. ~~Recovery routes~~ — ✅ fully implemented (4 tests pass)
 8. ~~Audit routes~~ — ✅ fully implemented (8 tests pass)
-5. Executor daemon integration testing
-6. CLI integration with server API
+9. ~~Health routes~~ — ✅ fully implemented (4 tests pass) — DB connectivity check
+10. ~~Filter routes~~ — ✅ fully implemented (4 tests pass) — session secret filtering
+11. Executor daemon integration testing
+12. CLI integration with server API
 
 ## Key Files
 
@@ -127,15 +169,21 @@ VENYA_DB_URL=postgresql://venya:venya@localhost:5432/venya \
 - `packages/vault/src/venya/vault/vault.py` — Vault facade (get/put/delete/list)
 - `packages/vault/src/venya/vault/backend.py` — PostgreSQL backend
 - `packages/vault/src/venya/vault/encryption.py` — KEK/DEK encryption
-- `packages/vault/src/venya/iam/models.py` — ORM models (14 tables)
+- `packages/vault/src/venya/iam/models.py` — ORM models (15 tables)
+- `packages/vault/src/venya/iam/role_manager.py` — RoleManager CRUD + membership
+- `packages/vault/src/venya/iam/enrollment_manager.py` — Enrollment token management
+- `packages/vault/src/venya/iam/session_manager.py` — Session + access token management
 - `packages/vault/alembic/` — Migrations
 - `packages/vault/tests/test_vault.py` — 12 unit tests
 
 ### Server
-- `packages/server/src/venya_server/routes/` — API endpoints
+- `packages/server/src/venya_server/routes/` — All API endpoints (11 routes, 40+ endpoints)
 - `packages/server/src/venya_server/middleware/` — Auth, RBAC, rate limiting
+- `packages/server/src/venya_server/dependencies.py` — FastAPI dependency injection
 - `packages/server/src/venya_server/app.py` — FastAPI app
-- `packages/server/tests/test_rbac.py` — 12 RBAC middleware tests
+- `packages/server/src/venya_server/ca.py` — CA manager for executor certificates
+- `packages/server/src/venya_server/fido2/manager.py` — FIDO2/WebAuthn manager
+- `packages/server/tests/` — 119 tests across 7 test files
 
 ### Docs
 - `venya-docs/code/plan.md` — Project plan
