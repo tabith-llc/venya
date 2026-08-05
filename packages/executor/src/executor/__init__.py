@@ -6,9 +6,9 @@ from .strategies import InjectionResult, InjectionStrategy, MemfdStrategy, creat
 __all__ = [
     "CommandResult",
     "Executor",
-    "SecretBundle",
     "InjectionResult",
     "InjectionStrategy",
     "MemfdStrategy",
+    "SecretBundle",
     "create_strategy",
 ]
