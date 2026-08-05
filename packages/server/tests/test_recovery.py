@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from venya_server.routes import recovery as recovery_routes
+from server.routes import recovery as recovery_routes
 
 
 def _create_test_app(backend=None):

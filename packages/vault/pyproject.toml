@@ -1,5 +1,5 @@
 [project]
-name = "venya-vault"
+name = "vault"
 version = "0.1.0"
 description = "Core vault library: RBAC, encryption, IAM, CLI"
 requires-python = ">=3.13"
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-venya = "venya.cli.cli:main"
+venya = "vault.cli.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -25,7 +25,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/venya"]
+packages = ["src/vault"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

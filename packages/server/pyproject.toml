@@ -1,10 +1,10 @@
 [project]
-name = "venya-server"
+name = "server"
 version = "0.1.0"
 description = "FastAPI server: WebAuthn, REST API"
 requires-python = ">=3.13"
 dependencies = [
-    "venya-vault",
+    "vault",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "fido2>=1.1.0",
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-venya-server = "venya_server.app:main"
+venya-server = "server.app:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -26,7 +26,7 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/venya_server"]
+packages = ["src/server"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from venya_server.routes import health as health_routes
+from server.routes import health as health_routes
 
 
 def _create_test_app(backend=None):

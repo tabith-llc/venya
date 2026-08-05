@@ -11,10 +11,10 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from venya_executor.command_validator import CommandValidator
-from venya_executor.config import ExecutorConfig, MtlsConfig, CertificateRotationConfig, ReaperConfig
-from venya_executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop
-from venya_executor.executor import Executor
+from executor.command_validator import CommandValidator
+from executor.config import ExecutorConfig, MtlsConfig, CertificateRotationConfig, ReaperConfig
+from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop
+from executor.executor import Executor
 
 
 # --- Fixtures ---
@@ -433,11 +433,11 @@ class TestRunCommandStage2:
         stage1_stdout = b"hello [REDACTED:x1x1x1x1] world"
         stage2_stdout = b"hello [REDACTED:x1x1x1x1] and [REDACTED:y2y2y2y2] world"
 
-        with patch("venya_executor.executor.subprocess.Popen", return_value=mock_process):
-            with patch("venya_executor.executor.filter_and_redact", return_value=(stage1_stdout, b"", ["x1x1x1x1"], [])):
-                with patch("venya_executor.executor.scan_open_fds", return_value=[0, 1, 2, 3, 4, 5]):
-                    with patch("venya_executor.executor.set_cloexec"):
-                        with patch("venya_executor.executor.verify_fd_whitelist", return_value=[]):
+        with patch("executor.executor.subprocess.Popen", return_value=mock_process):
+            with patch("executor.executor.filter_and_redact", return_value=(stage1_stdout, b"", ["x1x1x1x1"], [])):
+                with patch("executor.executor.scan_open_fds", return_value=[0, 1, 2, 3, 4, 5]):
+                    with patch("executor.executor.set_cloexec"):
+                        with patch("executor.executor.verify_fd_whitelist", return_value=[]):
                             mock_response = MagicMock()
                             mock_response.json.return_value = {
                                 "stdout": base64.b64encode(stage2_stdout).decode(),
@@ -476,11 +476,11 @@ class TestRunCommandStage2:
         mock_process.stderr.__enter__ = MagicMock(return_value=mock_process.stderr)
         mock_process.stderr.__exit__ = MagicMock(return_value=False)
 
-        with patch("venya_executor.executor.subprocess.Popen", return_value=mock_process):
-            with patch("venya_executor.executor.filter_and_redact", return_value=(stage1_stdout, b"", ["z1z1z1z1"], [])):
-                with patch("venya_executor.executor.scan_open_fds", return_value=[0, 1, 2, 3, 4, 5]):
-                    with patch("venya_executor.executor.set_cloexec"):
-                        with patch("venya_executor.executor.verify_fd_whitelist", return_value=[]):
+        with patch("executor.executor.subprocess.Popen", return_value=mock_process):
+            with patch("executor.executor.filter_and_redact", return_value=(stage1_stdout, b"", ["z1z1z1z1"], [])):
+                with patch("executor.executor.scan_open_fds", return_value=[0, 1, 2, 3, 4, 5]):
+                    with patch("executor.executor.set_cloexec"):
+                        with patch("executor.executor.verify_fd_whitelist", return_value=[]):
                             executor.http_client = MagicMock()
                             executor.http_client.post.side_effect = httpx.RequestError(
                                 "Connection refused", request=MagicMock()
@@ -511,11 +511,11 @@ class TestRunCommandStage2:
         mock_process.stderr.__enter__ = MagicMock(return_value=mock_process.stderr)
         mock_process.stderr.__exit__ = MagicMock(return_value=False)
 
-        with patch("venya_executor.executor.subprocess.Popen", return_value=mock_process):
-            with patch("venya_executor.executor.filter_and_redact", return_value=(stage1_stdout, b"", ["a1a1a1a1"], [])):
-                with patch("venya_executor.executor.scan_open_fds", return_value=[0, 1, 2, 3, 4, 5]):
-                    with patch("venya_executor.executor.set_cloexec"):
-                        with patch("venya_executor.executor.verify_fd_whitelist", return_value=[]):
+        with patch("executor.executor.subprocess.Popen", return_value=mock_process):
+            with patch("executor.executor.filter_and_redact", return_value=(stage1_stdout, b"", ["a1a1a1a1"], [])):
+                with patch("executor.executor.scan_open_fds", return_value=[0, 1, 2, 3, 4, 5]):
+                    with patch("executor.executor.set_cloexec"):
+                        with patch("executor.executor.verify_fd_whitelist", return_value=[]):
                             executor.http_client = None
 
                             injections = [MagicMock(secret_id="s1", value=b"secret1")]

@@ -363,7 +363,7 @@ async def revoke_session_secrets(
     """
     from datetime import datetime, timezone
 
-    from venya.iam.models import AuditEvent
+    from vault.iam.models import AuditEvent
 
     # Verify caller is executor (mTLS)
     caller = getattr(request.state, "auth_user", {})

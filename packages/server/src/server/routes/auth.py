@@ -124,7 +124,7 @@ async def auth_registration_complete(
     if backend is not None:
         db = backend.get_session()
         try:
-            from venya.iam.models import WebAuthnCredential
+            from vault.iam.models import WebAuthnCredential
             import json
 
             credential = WebAuthnCredential(
@@ -202,9 +202,9 @@ async def auth_login_complete(
     # Create session and issue token
     from datetime import timedelta
 
-    from venya.iam.role_manager import RoleManager
-    from venya.iam.session_manager import SessionConfig as VaultSessionConfig
-    from venya.iam.session_manager import SessionManager
+    from vault.iam.role_manager import RoleManager
+    from vault.iam.session_manager import SessionConfig as VaultSessionConfig
+    from vault.iam.session_manager import SessionManager
 
     backend = getattr(request.app.state, "backend", None)
     if backend is None:
@@ -262,9 +262,9 @@ async def auth_refresh(
     """
     from datetime import timedelta
 
-    from venya.iam.models import Session as SessionModel
-    from venya.iam.session_manager import SessionConfig as VaultSessionConfig
-    from venya.iam.session_manager import SessionManager
+    from vault.iam.models import Session as SessionModel
+    from vault.iam.session_manager import SessionConfig as VaultSessionConfig
+    from vault.iam.session_manager import SessionManager
 
     backend = getattr(request.app.state, "backend", None)
     if backend is None:

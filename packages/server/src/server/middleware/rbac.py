@@ -78,7 +78,7 @@ class RBACMiddleware(BaseHTTPMiddleware):
 
         db = backend.get_session()
         try:
-            from venya.iam.role_manager import RoleManager
+            from vault.iam.role_manager import RoleManager
 
             rm = RoleManager(db)
             admin_role = rm.get_role_by_name("admin")
@@ -96,7 +96,7 @@ class RBACMiddleware(BaseHTTPMiddleware):
 
         db = backend.get_session()
         try:
-            from venya.iam.role_manager import RoleManager
+            from vault.iam.role_manager import RoleManager
 
             rm = RoleManager(db)
             user_permissions = rm.get_user_permissions(user_info["user_id"])

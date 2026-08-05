@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from venya_server.routes import enrollment as enrollment_routes
+from server.routes import enrollment as enrollment_routes
 
 
 def _create_test_app(backend=None, auth_user=None):
@@ -69,7 +69,7 @@ class TestEnrollmentCreateToken:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.enrollment_manager.EnrollmentManager", return_value=em):
+        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/enrollment/tokens",
@@ -94,7 +94,7 @@ class TestEnrollmentCreateToken:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.enrollment_manager.EnrollmentManager", return_value=em):
+        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/enrollment/tokens",
@@ -179,7 +179,7 @@ class TestEnrollmentConfirm:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.enrollment_manager.EnrollmentManager", return_value=em):
+        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/enrollment/confirm",
@@ -204,7 +204,7 @@ class TestEnrollmentConfirm:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.enrollment_manager.EnrollmentManager", return_value=em):
+        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/enrollment/confirm",
@@ -226,7 +226,7 @@ class TestEnrollmentConfirm:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.enrollment_manager.EnrollmentManager", return_value=em):
+        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/enrollment/confirm",

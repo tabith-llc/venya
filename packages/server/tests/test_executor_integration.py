@@ -14,7 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.testclient import TestClient
 
-from venya_server.routes import filter as filter_routes
+from server.routes import filter as filter_routes
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +596,7 @@ class TestStage2FilterIntegration:
 
     def test_stage2_filter_output_function_directly(self):
         """Test filter_output helper function directly."""
-        from venya_server.routes.filter import filter_output
+        from server.routes.filter import filter_output
 
         secret_bytes = b"direct-test-secret"
         secret_hash = hashlib.sha256(secret_bytes).hexdigest()
@@ -611,7 +611,7 @@ class TestStage2FilterIntegration:
 
     def test_stage2_filter_output_multiple_encodings(self):
         """Test filter_output detects secret in raw, base64, and hex forms."""
-        from venya_server.routes.filter import filter_output
+        from server.routes.filter import filter_output
 
         secret_bytes = b"encoding-test"
         secret_hash = hashlib.sha256(secret_bytes).hexdigest()
@@ -639,7 +639,7 @@ class TestStage2FilterIntegration:
 
     def test_stage2_detection_hashes_consistent(self):
         """compute_detection_hashes produces consistent hashes."""
-        from venya_server.routes.filter import compute_detection_hashes
+        from server.routes.filter import compute_detection_hashes
 
         value = b"consistency-check"
         hashes1 = compute_detection_hashes(value)

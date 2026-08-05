@@ -4,9 +4,9 @@ import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 from datetime import datetime, timezone
 
-from venya.vault.vault import Vault, VaultAccessError, VaultError, SecretRecord
-from venya.vault.backend import Backend
-from venya.vault.encryption import derive_kek
+from vault.vault.vault import Vault, VaultAccessError, VaultError, SecretRecord
+from vault.vault.backend import Backend
+from vault.vault.encryption import derive_kek
 
 
 class TestVaultGet:
@@ -145,7 +145,7 @@ class TestVaultPut:
         vault.backend = backend
 
         # Patch the Role query to return our mock role
-        with patch("venya.vault.vault.Role") as MockRole:
+        with patch("vault.vault.vault.Role") as MockRole:
             MockRole.name == "admin"  # This is how SQLAlchemy filters work
             MockRole.filter.return_value.first.return_value = mock_role
 

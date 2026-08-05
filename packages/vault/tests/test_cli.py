@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from venya.cli.api_client import APIClient, APIClientAuthenticationError, APIClientError, Config
+from vault.cli.api_client import APIClient, APIClientAuthenticationError, APIClientError, Config
 
 
 # ---------------------------------------------------------------------------

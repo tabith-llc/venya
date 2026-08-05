@@ -7,7 +7,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.testclient import TestClient
 
-from venya_server.routes import secrets as secrets_routes
+from server.routes import secrets as secrets_routes
 
 
 def _create_test_app(vault=None, backend=None, auth_user=None):
@@ -358,7 +358,7 @@ class TestRevokeSessionSecrets:
 
         # Mock AuditEvent import (import is local to the endpoint function)
         mock_audit_event = MagicMock()
-        with patch("venya.iam.models.AuditEvent", mock_audit_event):
+        with patch("vault.iam.models.AuditEvent", mock_audit_event):
             # Simulate executor auth via request state
             class ExecutorAuthMiddleware(BaseHTTPMiddleware):
                 async def dispatch(self, request: Request, call_next):
@@ -389,7 +389,7 @@ class TestRevokeSessionSecrets:
         app = _create_test_app(vault=vault, backend=backend, auth_user=None)
 
         mock_audit_event = MagicMock()
-        with patch("venya.iam.models.AuditEvent", mock_audit_event):
+        with patch("vault.iam.models.AuditEvent", mock_audit_event):
             client = TestClient(app, raise_server_exceptions=False)
 
             resp = client.post(

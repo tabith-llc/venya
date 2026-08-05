@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from venya.vault.secure_memory import (
+from vault.vault.secure_memory import (
     SecureBuffer,
     secure_mlock,
     secure_munlock,
@@ -135,27 +135,27 @@ class TestSecureMlock:
     """Tests for mlock functionality."""
 
     def test_mlock_not_available_on_non_linux(self):
-        with patch("venya.vault.secure_memory.platform.system", return_value="Darwin"):
+        with patch("vault.vault.secure_memory.platform.system", return_value="Darwin"):
             with pytest.raises(RuntimeError, match="only supported on Linux"):
                 secure_mlock(bytearray(16))
 
     def test_mlock_empty_raises(self):
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
             with pytest.raises(ValueError, match="empty"):
                 secure_mlock(bytearray())
 
     def test_mlock_not_found_library(self):
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
-            with patch("venya.vault.secure_memory._load_system_lib", return_value=None):
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
+            with patch("vault.vault.secure_memory._load_system_lib", return_value=None):
                 with pytest.raises(RuntimeError, match="Cannot find system C library"):
                     secure_mlock(bytearray(16))
 
     def test_mlock_no_permission(self):
         """Test that mlock failure raises OSError with correct message."""
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
-            mock_lib = patch("venya.vault.secure_memory._load_system_lib").start()
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
+            mock_lib = patch("vault.vault.secure_memory._load_system_lib").start()
             mock_lib.return_value.mlock.return_value = -1
-            with patch("venya.vault.secure_memory.ctypes.get_errno", return_value=1):
+            with patch("vault.vault.secure_memory.ctypes.get_errno", return_value=1):
                 with patch("os.strerror", return_value="Operation not permitted"):
                     with pytest.raises(OSError, match="Operation not permitted"):
                         secure_mlock(bytearray(16))
@@ -163,8 +163,8 @@ class TestSecureMlock:
 
     def test_mlock_succeeds_with_cap(self):
         """Test mlock succeeds when CAP_IPC_LOCK is available."""
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
-            mock_lib = patch("venya.vault.secure_memory._load_system_lib").start()
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
+            mock_lib = patch("vault.vault.secure_memory._load_system_lib").start()
             mock_lib.return_value.mlock.return_value = 0
             data = bytearray(32)
             secure_mlock(data)
@@ -174,8 +174,8 @@ class TestSecureMlock:
 
     def test_munlock_succeeds(self):
         """Test munlock succeeds."""
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
-            mock_lib = patch("venya.vault.secure_memory._load_system_lib").start()
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
+            mock_lib = patch("vault.vault.secure_memory._load_system_lib").start()
             mock_lib.return_value.munlock.return_value = 0
             data = bytearray(32)
             secure_munlock(data)
@@ -184,7 +184,7 @@ class TestSecureMlock:
             patch.stopall()
 
     def test_munlock_non_linux_is_noop(self):
-        with patch("venya.vault.secure_memory.platform.system", return_value="Darwin"):
+        with patch("vault.vault.secure_memory.platform.system", return_value="Darwin"):
             data = bytearray(32)
             # Should not raise
             secure_munlock(data)
@@ -195,8 +195,8 @@ class TestSecureBufferMlock:
 
     def test_buffer_with_mlock(self):
         """Test that SecureBuffer sets _locked=True when mlock succeeds."""
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
-            mock_lib = patch("venya.vault.secure_memory._load_system_lib").start()
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
+            mock_lib = patch("vault.vault.secure_memory._load_system_lib").start()
             mock_lib.return_value.mlock.return_value = 0
             buf = SecureBuffer(32, mlock=True)
             assert buf.is_locked
@@ -206,10 +206,10 @@ class TestSecureBufferMlock:
 
     def test_buffer_mlock_failure(self):
         """Test that mlock failure raises through __init__."""
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
-            mock_lib = patch("venya.vault.secure_memory._load_system_lib").start()
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
+            mock_lib = patch("vault.vault.secure_memory._load_system_lib").start()
             mock_lib.return_value.mlock.return_value = -1
-            with patch("venya.vault.secure_memory.ctypes.get_errno", return_value=1):
+            with patch("vault.vault.secure_memory.ctypes.get_errno", return_value=1):
                 with patch("os.strerror", return_value="Operation not permitted"):
                     with pytest.raises(OSError):
                         SecureBuffer(32, mlock=True)
@@ -217,8 +217,8 @@ class TestSecureBufferMlock:
 
     def test_context_manager_unlocks(self):
         """Test that context manager unlocks buffer on exit."""
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
-            mock_lib = patch("venya.vault.secure_memory._load_system_lib").start()
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
+            mock_lib = patch("vault.vault.secure_memory._load_system_lib").start()
             mock_lib.return_value.mlock.return_value = 0
             mock_lib.return_value.munlock.return_value = 0
             buf = SecureBuffer(32, mlock=True)
@@ -230,8 +230,8 @@ class TestSecureBufferMlock:
 
     def test_del_unlocks(self):
         """Test that __del__ unlocks and clears."""
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
-            mock_lib = patch("venya.vault.secure_memory._load_system_lib").start()
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
+            mock_lib = patch("vault.vault.secure_memory._load_system_lib").start()
             mock_lib.return_value.mlock.return_value = 0
             mock_lib.return_value.munlock.return_value = 0
             buf = SecureBuffer(32, mlock=True)

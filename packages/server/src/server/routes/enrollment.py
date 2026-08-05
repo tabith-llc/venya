@@ -73,7 +73,7 @@ async def enrollment_create_token(
     """
     db = _get_db(request)
     try:
-        from venya.iam.enrollment_manager import EnrollmentManager
+        from vault.iam.enrollment_manager import EnrollmentManager
 
         em = EnrollmentManager(db)
         token = em.create_enrollment_token(
@@ -109,7 +109,7 @@ async def enrollment_list_tokens(
     """
     db = _get_db(request)
     try:
-        from venya.iam.models import EnrollmentToken
+        from vault.iam.models import EnrollmentToken
 
         now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
         tokens = (
@@ -149,7 +149,7 @@ async def enrollment_confirm(
     """
     db = _get_db(request)
     try:
-        from venya.iam.enrollment_manager import EnrollmentManager
+        from vault.iam.enrollment_manager import EnrollmentManager
 
         em = EnrollmentManager(db)
         user = em.consume_enrollment_token(

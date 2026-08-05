@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from venya_server.routes import roles as roles_routes
+from server.routes import roles as roles_routes
 
 
 def _create_test_app(backend=None, auth_user=None):
@@ -80,7 +80,7 @@ class TestRolesCreate:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles",
@@ -104,7 +104,7 @@ class TestRolesCreate:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles",
@@ -121,7 +121,7 @@ class TestRolesCreate:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles",
@@ -142,7 +142,7 @@ class TestRolesList:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/roles")
             assert resp.status_code == 200
@@ -162,7 +162,7 @@ class TestRolesGet:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/roles/1")
             assert resp.status_code == 200
@@ -180,7 +180,7 @@ class TestRolesGet:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/roles/999")
             assert resp.status_code == 404
@@ -204,7 +204,7 @@ class TestRolesUpdate:
         rm.update_role.return_value = updated_role
         rm.get_role_members.return_value = []
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
                 "/api/v1/roles/1",
@@ -229,7 +229,7 @@ class TestRolesUpdate:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
                 "/api/v1/roles/999",
@@ -247,7 +247,7 @@ class TestRolesUpdate:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
                 "/api/v1/roles/1",
@@ -265,7 +265,7 @@ class TestRolesUpdate:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
                 "/api/v1/roles/1",
@@ -288,7 +288,7 @@ class TestRolesUpdate:
         rm.update_role.return_value = updated_role
         rm.get_role_members.return_value = []
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
                 "/api/v1/roles/1",
@@ -310,7 +310,7 @@ class TestRolesDelete:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.delete("/api/v1/roles/1")
             assert resp.status_code == 200
@@ -326,7 +326,7 @@ class TestRolesDelete:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.delete("/api/v1/roles/999")
             assert resp.status_code == 404
@@ -347,7 +347,7 @@ class TestRoleMembersList:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/roles/1/members")
             assert resp.status_code == 200
@@ -365,7 +365,7 @@ class TestRoleMembersList:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/roles/1/members")
             assert resp.status_code == 200
@@ -383,7 +383,7 @@ class TestRoleMemberAdd:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles/1/members",
@@ -404,7 +404,7 @@ class TestRoleMemberAdd:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles/1/members",
@@ -422,7 +422,7 @@ class TestRoleMemberAdd:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles/1/members",
@@ -443,7 +443,7 @@ class TestRoleMemberRemove:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.delete("/api/v1/roles/1/members/user1")
             assert resp.status_code == 200
@@ -460,7 +460,7 @@ class TestRoleMemberRemove:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.role_manager.RoleManager", return_value=rm):
+        with patch("vault.iam.role_manager.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.delete("/api/v1/roles/1/members/nonexistent")
             assert resp.status_code == 404

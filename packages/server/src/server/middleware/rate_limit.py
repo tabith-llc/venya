@@ -14,7 +14,7 @@ from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 
-from venya.vault.rate_limiter import RateLimiter as VaultRateLimiter, RateLimitExceededError
+from vault.vault.rate_limiter import RateLimiter as VaultRateLimiter, RateLimitExceededError
 
 logger = logging.getLogger("venya.server")
 

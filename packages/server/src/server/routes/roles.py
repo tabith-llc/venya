@@ -82,7 +82,7 @@ def _get_db(request: Request):
 def _get_role_manager(request: Request):
     """Get a RoleManager instance from the request."""
     db = _get_db(request)
-    from venya.iam.role_manager import RoleManager
+    from vault.iam.role_manager import RoleManager
 
     return RoleManager(db), db
 
