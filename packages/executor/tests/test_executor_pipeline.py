@@ -85,11 +85,8 @@ class TestExecute:
         with pytest.raises(ValueError, match="Command rejected"):
             executor.execute("sudo cat /etc/shadow", [_make_secret("s1", b"secret")])
 
-    def test_execute_cleanup_runs_even_on_error(self, executor: Executor, tmp_path: Path):
+    def test_execute_cleanup_runs_even_on_error(self, executor: Executor):
         """Cleanup runs even if command fails."""
-        executor.tmpfs_dir = str(tmp_path)
-
-        # Create a file that would be created during injection
         secrets = [_make_secret("s1", b"secret")]
 
         # This will fail validation, but cleanup should still be attempted
@@ -237,15 +234,14 @@ class TestPrepareInjections:
         assert injections[1].secret_id == "s2"
         assert injections[2].secret_id == "s3"
 
-    def test_prepare_fallback_to_tmpfs(self, executor: Executor):
-        """Falls back to tmpfs when memfd is not available."""
-        # Mock inject_via_memfd to raise NotImplementedError
-        with patch("executor.executor.inject_via_memfd", side_effect=NotImplementedError("not available")):
-            secrets = [_make_secret("s1", b"secret")]
-            injections = executor._prepare_injections(secrets)
+    def test_prepare_creates_injection_result(self, executor: Executor):
+        """Strategy is called and InjectionResult is stored on executor."""
+        secrets = [_make_secret("s1", b"secret")]
+        injections = executor._prepare_injections(secrets)
 
-            assert len(injections) == 1
-            assert "memfd:" not in injections[0].injection_path
+        assert len(injections) == 1
+        assert executor._injection_result is not None
+        assert executor._injection_result.extra_fds  # memfd strategy creates FDs
 
 
 # ---------------------------------------------------------------------------
@@ -322,136 +318,81 @@ class TestCaptureOutput:
 
 
 class TestCleanupInjections:
-    """Tests for Executor._cleanup_injections()."""
+    """Tests for Executor._cleanup_injections() with strategy-based cleanup."""
 
     def test_cleanup_closes_memfd(self, executor: Executor):
-        """Closes memfd FDs."""
-        fd, _ = os.pipe()
-        bundle = SecretBundle(
-            secret_id="s1", value=b"secret", wrapped_value=b"",
-            injection_fd=fd, injection_path="memfd:pipe",
-        )
+        """Strategy cleanup closes memfd FDs."""
+        secrets = [_make_secret("s1", b"secret")]
+        executor._prepare_injections(secrets)
 
-        executor._cleanup_injections([bundle])
+        fds_before = list(executor._injection_result.extra_fds)
+        assert len(fds_before) == 1
+        fd = fds_before[0]
 
-        # FD should be closed — fcntl should raise
+        # FD should be open before cleanup
+        fcntl.fcntl(fd, fcntl.F_GETFD)
+
+        executor._cleanup_injections()
+
+        # FD should be closed after cleanup
         with pytest.raises(OSError):
             fcntl.fcntl(fd, fcntl.F_GETFD)
 
-    def test_cleanup_deletes_tmpfs_file(self, tmp_path: Path, executor: Executor):
-        """Deletes tmpfs files."""
-        secret_file = tmp_path / "venya_test.secret"
-        secret_file.write_bytes(b"secret-data")
-
-        bundle = SecretBundle(
-            secret_id="s1", value=b"secret", wrapped_value=b"",
-            injection_path=str(secret_file),
-        )
-
-        executor._cleanup_injections([bundle])
-
-        assert not secret_file.exists()
-
-    def test_cleanup_skips_memfd_paths(self, tmp_path: Path, executor: Executor):
-        """Does not try to delete memfd paths as files."""
-        bundle = SecretBundle(
-            secret_id="s1", value=b"secret", wrapped_value=b"",
-            injection_path="memfd:3",
-        )
-
-        # Should not raise
-        executor._cleanup_injections([bundle])
+        # Injection result should be cleared
+        assert executor._injection_result is None
 
     def test_cleanup_zeros_secret_value(self, executor: Executor):
         """Zeros secret value in memory."""
         original = b"super-secret-password"
-        bundle = SecretBundle(
-            secret_id="s1", value=bytes(original), wrapped_value=b"",
-        )
+        secrets = [{"secret_id": "s1", "value": original, "wrapped_value": b""}]
+        executor._prepare_injections(secrets)
 
-        executor._cleanup_injections([bundle])
+        executor._cleanup_injections()
 
+        bundle = executor._bundles[0]
         assert bundle.value == b"\x00" * len(original)
         assert bundle.value != original
 
     def test_cleanup_clears_sentinel_registry(self, executor: Executor):
         """Clears sentinel registry after cleanup."""
-        import hashlib
-        from executor.injector import wrap_with_sentinel
-
-        # Prepare injections to populate registry
         wrapped = wrap_with_sentinel("s1", b"secret")
         secrets = [{"secret_id": "s1", "value": b"secret", "wrapped_value": wrapped}]
         executor._prepare_injections(secrets)
 
         assert len(executor.sentinel_registry.get_session_hashes()) > 0
 
-        # Cleanup should clear it
-        executor._cleanup_injections([])
+        executor._cleanup_injections()
 
         assert executor.sentinel_registry.get_session_hashes() == set()
 
-    def test_cleanup_handles_nonexistent_file(self, executor: Executor):
-        """Does not raise when file doesn't exist."""
-        bundle = SecretBundle(
-            secret_id="s1", value=b"secret", wrapped_value=b"",
-            injection_path="/tmp/nonexistent-venya-file-12345.secret",
-        )
+    def test_cleanup_resilient_to_strategy_errors(self, executor: Executor):
+        """Does not raise even if strategy cleanup functions fail."""
+        secrets = [_make_secret("s1", b"secret")]
+        executor._prepare_injections(secrets)
 
-        executor._cleanup_injections([bundle])  # Should not raise
+        # Corrupt the injection result to cause cleanup to fail
+        executor._injection_result.extra_fds = [-1]
 
-    def test_cleanup_handles_closed_fd(self, executor: Executor):
-        """Does not raise when FD is already closed."""
-        fd, other_fd = os.pipe()
-        os.close(fd)  # Close the FD first
+        # Should not raise
+        executor._cleanup_injections()
 
-        bundle = SecretBundle(
-            secret_id="s1", value=b"secret", wrapped_value=b"",
-            injection_fd=fd, injection_path="memfd:pipe",
-        )
-
-        executor._cleanup_injections([bundle])  # Should not raise
-        os.close(other_fd)
-
-    def test_cleanup_multiple_bundles(self, tmp_path: Path, executor: Executor):
-        """Cleans up multiple bundles correctly."""
-        bundles = [
-            SecretBundle(
-                secret_id="s1", value=b"secret1", wrapped_value=b"",
-                injection_path=str(tmp_path / "venya_s1.secret"),
-            ),
-            SecretBundle(
-                secret_id="s2", value=b"secret2", wrapped_value=b"",
-                injection_path=str(tmp_path / "venya_s2.secret"),
-            ),
+    def test_cleanup_multiple_secrets(self, executor: Executor):
+        """Cleans up all FDs for multiple secrets."""
+        secrets = [
+            _make_secret("s1", b"one"),
+            _make_secret("s2", b"two"),
+            _make_secret("s3", b"three"),
         ]
+        executor._prepare_injections(secrets)
 
-        # Create the files
-        for b in bundles:
-            Path(b.injection_path).write_bytes(b"value")
+        fds_before = list(executor._injection_result.extra_fds)
+        assert len(fds_before) == 3
 
-        executor._cleanup_injections(bundles)
+        executor._cleanup_injections()
 
-        assert not Path(bundles[0].injection_path).exists()
-        assert not Path(bundles[1].injection_path).exists()
-
-    def test_cleanup_preserves_non_venya_files(self, tmp_path: Path, executor: Executor):
-        """Does not delete files that are not venya secret files (though cleanup
-        deletes by path, so we test that the specific path is deleted)."""
-        secret_file = tmp_path / "venya_test.secret"
-        secret_file.write_bytes(b"secret")
-        other_file = tmp_path / "other.txt"
-        other_file.write_bytes(b"not a secret")
-
-        bundle = SecretBundle(
-            secret_id="s1", value=b"secret", wrapped_value=b"",
-            injection_path=str(secret_file),
-        )
-
-        executor._cleanup_injections([bundle])
-
-        assert not secret_file.exists()
-        assert other_file.exists()
+        for fd in fds_before:
+            with pytest.raises(OSError):
+                fcntl.fcntl(fd, fcntl.F_GETFD)
 
 
 # ---------------------------------------------------------------------------
@@ -497,20 +438,12 @@ class TestCommandResult:
 class TestSecretBundle:
     """Tests for SecretBundle dataclass."""
 
-    def test_defaults(self):
+    def test_basic_fields(self):
         bundle = SecretBundle(secret_id="s1", value=b"secret", wrapped_value=b"wrapped")
 
-        assert bundle.injection_fd is None
-        assert bundle.injection_path is None
-
-    def test_with_injection(self):
-        bundle = SecretBundle(
-            secret_id="s1", value=b"secret", wrapped_value=b"wrapped",
-            injection_fd=3, injection_path="memfd:3",
-        )
-
-        assert bundle.injection_fd == 3
-        assert bundle.injection_path == "memfd:3"
+        assert bundle.secret_id == "s1"
+        assert bundle.value == b"secret"
+        assert bundle.wrapped_value == b"wrapped"
 
 
 # ---------------------------------------------------------------------------

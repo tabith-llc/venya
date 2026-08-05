@@ -11,6 +11,7 @@ import ctypes
 import ctypes.util
 import logging
 import os
+from typing import Callable
 
 from .base import InjectionResult, InjectionStrategy
 
@@ -75,10 +76,10 @@ class MemfdStrategy(InjectionStrategy):
         )
 
 
-def _make_memfd_closer(fds: list[int]) -> collections.abc.Callable[[InjectionResult], None]:
+def _make_memfd_closer(fds: list[int]) -> Callable[[], None]:
     """Return a cleanup function that closes all given FDs."""
 
-    def closer(_result: InjectionResult) -> None:
+    def closer() -> None:
         for fd in fds:
             try:
                 os.close(fd)
