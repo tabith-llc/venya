@@ -3,29 +3,44 @@
 from __future__ import annotations
 
 import abc
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from .executor import SecretBundle
 
+logger = logging.getLogger("venya.executor.strategies")
+
 
 @dataclass
 class InjectionResult:
-    """Result returned by an injection strategy's prepare() method.
+    """Result of preparing secret injections for one command execution.
+
+    Injected at the executor level to reflect the unit-of-work lifecycle:
+    prepare all injections together, execute one command, then clean up.
 
     Attributes:
-        env_vars: Safe environment variables to merge into the child process
-            environment (e.g. paths to tmpfs files for the file strategy).
-        extra_fds: Extra file descriptors to pass to the child process
-            (e.g. memfd FDs for the memfd strategy).
-        cleanup_funcs: Functions to call after execution completes.
-            Each receives the InjectionResult as its sole argument.
+        env_vars: Environment variables to merge into the child process
+            environment (usually empty for memfd strategy).
+        extra_fds: File descriptors to pass to the subprocess via pass_fds.
+        cleanup_funcs: Functions to call on cleanup. Each takes no arguments.
+
+    NOTE: Executor processes commands sequentially. This is per-execution
+    state that assumes one active command at a time.
     """
 
     env_vars: dict[str, str] = field(default_factory=dict)
     extra_fds: list[int] = field(default_factory=list)
-    cleanup_funcs: list[Callable[[InjectionResult], None]] = field(default_factory=list)
+    cleanup_funcs: list[Callable[[], None]] = field(default_factory=list)
+
+    def cleanup(self) -> None:
+        """Run all cleanup functions, suppressing individual exceptions."""
+        for func in self.cleanup_funcs:
+            try:
+                func()
+            except Exception:
+                logger.debug("Cleanup function raised exception", exc_info=True)
 
 
 class InjectionStrategy(abc.ABC):

@@ -26,16 +26,14 @@ from typing import Any
 from .command_validator import CommandValidator
 from .filter import filter_and_redact
 from .injector import (
-    SecretInjection,
     SentinelRegistry,
-    inject_via_file,
-    inject_via_memfd,
     scan_open_fds,
     set_cloexec,
     strip_sentinel,
     verify_fd_whitelist,
-    wrap_with_sentinel,
 )
+from .strategies.base import InjectionResult, InjectionStrategy
+from .strategies.memfd_strategy import MemfdStrategy
 
 logger = logging.getLogger("venya.executor")
 
@@ -61,8 +59,6 @@ class SecretBundle:
     secret_id: str
     value: bytes
     wrapped_value: bytes  # sentinel-wrapped value
-    injection_fd: int | None = None
-    injection_path: str | None = None
 
 
 MAX_OUTPUT_BYTES = 262144  # 256 KB per stream
@@ -71,14 +67,20 @@ TRUNCATION_MARKER = "... [OUTPUT TRUNCATED: {n} bytes discarded]\n"
 
 @dataclass
 class Executor:
-    """Main executor — orchestrates command execution pipeline."""
+    """Main executor — orchestrates command execution pipeline.
+
+    NOTE: Executor processes commands sequentially. The _injection_result
+    field is per-execution state that assumes one active command at a time.
+    """
 
     command_validator: CommandValidator
     session_id: str
-    tmpfs_dir: str = "/tmp/venya-secrets"
+    injection_strategy: InjectionStrategy = field(default_factory=MemfdStrategy)
     allowed_fds: set[int] = field(default_factory=lambda: {0, 1, 2})
     _sentinel_registry: SentinelRegistry | None = None
     http_client: Any = None  # httpx.Client for server API calls
+    _injection_result: InjectionResult | None = field(init=False, default=None)
+    _bundles: list[SecretBundle] = field(init=False, default_factory=list)
 
     @property
     def sentinel_registry(self) -> SentinelRegistry:
@@ -125,11 +127,14 @@ class Executor:
         finally:
             # Step 4: Cleanup (always runs)
             secret_ids = [s.secret_id for s in injections]
-            self._cleanup_injections(injections)
+            self._cleanup_injections()
             self.revoke_tokens(secret_ids)
 
     def _prepare_injections(self, secrets: list[dict[str, Any]]) -> list[SecretBundle]:
         """Prepare secret injections for all provided secrets.
+
+        Strips sentinels, registers hashes, builds SecretBundles,
+        then delegates actual injection to the strategy.
 
         Args:
             secrets: List of secret dicts.
@@ -137,7 +142,8 @@ class Executor:
         Returns:
             List of SecretBundle objects.
         """
-        injections = []
+        self._bundles = []
+
         for secret in secrets:
             secret_id = secret["secret_id"]
             wrapped_value = secret.get("wrapped_value", b"")
@@ -158,27 +164,22 @@ class Executor:
                     sentinel_hash = match.group(1).decode()
                     self.sentinel_registry.register(secret_id, sentinel_hash)
 
-            # Inject via memfd (preferred — no disk residency)
-            fd = None
-            path = None
-            try:
-                fd, injection = inject_via_memfd(plaintext)
-                path = injection.injection_path
-            except NotImplementedError:
-                # Fallback to tmpfs file
-                injection = inject_via_file(plaintext, self.tmpfs_dir)
-                path = injection.injection_path
-
             bundle = SecretBundle(
                 secret_id=secret_id,
                 value=plaintext,
                 wrapped_value=wrapped_value,
-                injection_fd=fd,
-                injection_path=path or injection.injection_path,
             )
-            injections.append(bundle)
+            self._bundles.append(bundle)
 
-        return injections
+        # Delegate actual injection to strategy
+        self._injection_result = self.injection_strategy.prepare(self._bundles)
+        logger.info(
+            "Injected %d secrets via strategy '%s'",
+            len(self._bundles),
+            self.injection_strategy.name(),
+        )
+
+        return self._bundles
 
     def _run_command(
         self,
@@ -191,7 +192,7 @@ class Executor:
 
         Args:
             command: The command to execute.
-            injections: List of secret injections.
+            injections: List of secret bundles (used for filtering).
             env_override: Environment variable overrides.
             cwd: Working directory.
 
@@ -202,6 +203,13 @@ class Executor:
         env = os.environ.copy()
         if env_override:
             env.update(env_override)
+        if self._injection_result:
+            env.update(self._injection_result.env_vars)
+
+        # Determine FDs to pass to child process
+        pass_fds: set[int] = set()
+        if self._injection_result:
+            pass_fds.update(self._injection_result.extra_fds)
 
         # Create subprocess
         process = subprocess.Popen(
@@ -213,6 +221,7 @@ class Executor:
             env=env,
             cwd=cwd,
             start_new_session=True,
+            pass_fds=pass_fds,
         )
 
         # Set CLOEXEC on all executor FDs to prevent leakage
@@ -360,35 +369,17 @@ class Executor:
 
         return stdout, stderr
 
-    def _cleanup_injections(self, injections: list[SecretBundle]) -> None:
+    def _cleanup_injections(self) -> None:
         """Clean up all secret injections.
 
-        Closes memfds, deletes tmpfs files, clears sentinel registry.
-
-        Args:
-            injections: List of secret bundles to clean up.
+        Runs strategy cleanup functions, zeros secret values, clears registry.
         """
-        for bundle in injections:
-            # Close memfd
-            if bundle.injection_fd is not None:
-                try:
-                    os.close(bundle.injection_fd)
-                except OSError:
-                    pass
+        if self._injection_result:
+            self._injection_result.cleanup()
+            self._injection_result = None
 
-            # Delete tmpfs file
-            if bundle.injection_path and bundle.injection_path.startswith("memfd:"):
-                continue  # memfd cleaned up by closing FD
-
-            path = bundle.injection_path
-            if path and os.path.exists(path):
-                try:
-                    os.unlink(path)
-                    logger.debug("Deleted secret file: %s", path)
-                except OSError:
-                    logger.exception("Failed to delete secret file: %s", path)
-
-            # Zero secret value in memory
+        # Zero secret values in all bundles
+        for bundle in self._bundles:
             if bundle.value:
                 bundle.value = b"\x00" * len(bundle.value)
 
@@ -396,7 +387,7 @@ class Executor:
         if self._sentinel_registry:
             self._sentinel_registry.clear()
 
-        logger.info("Cleanup complete for %d injections", len(injections))
+        logger.info("Cleanup complete")
 
     def revoke_tokens(self, secret_ids: list[str]) -> None:
         """Revoke tokens for given secrets.
