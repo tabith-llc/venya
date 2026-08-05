@@ -69,6 +69,10 @@ def filter_output(
     masked_hashes: list[str] = []
 
     for hash_hex, secret_bytes in secret_hashes.items():
+        # Skip empty secret values to avoid matching every position
+        if not secret_bytes:
+            continue
+
         # Try raw bytes matching
         if secret_bytes in output:
             output = output.replace(
