@@ -254,7 +254,10 @@ async def heartbeat(
                 from datetime import datetime, timezone, timedelta
                 now = datetime.now(timezone.utc)
                 expiry_threshold = now + timedelta(days=3)
-                if current_cert.not_after < expiry_threshold:
+                not_after = current_cert.not_after
+                if not_after.tzinfo is None:
+                    not_after = not_after.replace(tzinfo=timezone.utc)
+                if not_after < expiry_threshold:
                     new_cert_required = True
 
         return HeartbeatResponse(
