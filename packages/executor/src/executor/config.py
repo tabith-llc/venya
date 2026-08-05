@@ -174,6 +174,12 @@ class ExecutorConfig(BaseSettings):
     # Reaper
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
 
+    # Secret injection
+    injection_method: str = Field(
+        default="memfd",
+        description="Secret injection strategy: memfd, fifo, env",
+    )
+
     # Logging
     log_level: str = Field(default="info", description="Logging level")
 

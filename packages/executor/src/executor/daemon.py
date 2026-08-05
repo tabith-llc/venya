@@ -30,6 +30,7 @@ from cryptography.x509.oid import NameOID
 from .config import ExecutorConfig
 from .command_validator import CommandValidator
 from .executor import Executor
+from .strategies.factory import create_strategy
 
 logger = logging.getLogger("venya.executor.daemon")
 
@@ -556,9 +557,11 @@ class ExecutorDaemon:
         Returns:
             Configured Executor instance with HTTP client for server API calls.
         """
+        strategy = create_strategy(self.config.injection_method)
         return Executor(
             command_validator=self.command_validator,
             session_id=session_id,
+            injection_strategy=strategy,
             http_client=self.client,
         )
 
