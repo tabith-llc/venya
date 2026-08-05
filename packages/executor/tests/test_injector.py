@@ -213,6 +213,261 @@ class TestParseSentinels:
         results = parse_sentinels(b"")
         assert results == []
 
+    def test_parse_sentinel_with_padding(self):
+        """Sentinel with base64 padding (=) is correctly decoded."""
+        original = b"ab"  # 2 bytes → base64 "YWI=" (with padding)
+        wrapped = wrap_with_sentinel("pad-test", original)
+        results = parse_sentinels(wrapped)
+
+        assert len(results) == 1
+        assert results[0][1] == original
+
+    def test_sentinel_with_trailing_text(self):
+        """Sentinel followed by non-sentinel text is correctly parsed."""
+        wrapped = wrap_with_sentinel("s1", b"secret")
+        data = wrapped + b" -- end of injection"
+        results = parse_sentinels(data)
+
+        assert len(results) == 1
+        assert results[0][1] == b"secret"
+
+    def test_sentinel_with_leading_text(self):
+        """Sentinel preceded by text is correctly parsed."""
+        wrapped = wrap_with_sentinel("s1", b"secret")
+        data = b"INJECT:" + wrapped
+        results = parse_sentinels(data)
+
+        assert len(results) == 1
+        assert results[0][1] == b"secret"
+
+    def test_sentinels_back_to_back_no_separator(self):
+        """Two sentinels concatenated without separator are parsed separately."""
+        w1 = wrap_with_sentinel("s1", b"alpha")
+        w2 = wrap_with_sentinel("s2", b"beta")
+        data = w1 + w2
+        results = parse_sentinels(data)
+
+        assert len(results) == 2
+        assert results[0][1] == b"alpha"
+        assert results[1][1] == b"beta"
+
+    def test_sentinel_with_special_base64_chars(self):
+        """Secrets that produce + and / in base64 are handled."""
+        # b'\xff\xfe' encodes to b"/w4=" in base64
+        original = b"\xff\xfe"
+        wrapped = wrap_with_sentinel("special-b64", original)
+        stripped = strip_sentinel(wrapped)
+
+        assert stripped == original
+
+    def test_sentinel_hash_prefix_is_consistent(self):
+        """The hash prefix is deterministic for a given secret_id."""
+        wrapped1 = wrap_with_sentinel("same-id", b"val1")
+        wrapped2 = wrap_with_sentinel("same-id", b"val2")
+
+        prefix1 = re.search(rb"\[VENYA:([a-f0-9]{8})\]", wrapped1).group(1)
+        prefix2 = re.search(rb"\[VENYA:([a-f0-9]{8})\]", wrapped2).group(1)
+
+        assert prefix1 == prefix2
+
+    def test_sentinel_different_ids_different_hashes(self):
+        """Different secret_ids produce different hash prefixes."""
+        wrapped1 = wrap_with_sentinel("id-a", b"val")
+        wrapped2 = wrap_with_sentinel("id-b", b"val")
+
+        prefix1 = re.search(rb"\[VENYA:([a-f0-9]{8})\]", wrapped1).group(1)
+        prefix2 = re.search(rb"\[VENYA:([a-f0-9]{8})\]", wrapped2).group(1)
+
+        assert prefix1 != prefix2
+
+    def test_sentinel_contains_only_valid_base64(self):
+        """The data portion between sentinels contains only valid base64 chars."""
+        import string
+
+        valid_b64_chars = set(string.ascii_letters + string.digits + "+/=")
+        wrapped = wrap_with_sentinel("charset-test", b"any content \x00\xff\xfe")
+        match = re.search(rb"\[VENYA:[a-f0-9]{8}\](.*?)\[/VENYA\]", wrapped)
+        assert match
+        data = match.group(1)
+        assert all(chr(b) in valid_b64_chars for b in data)
+
+    def test_sentinel_format_is_valid(self):
+        """Full sentinel format matches expected pattern."""
+        wrapped = wrap_with_sentinel("test-secret", b"value")
+        full_pattern = re.compile(
+            rb"\[VENYA:[a-f0-9]{8}\][A-Za-z0-9+/=]*\[/VENYA\]"
+        )
+        assert full_pattern.fullmatch(wrapped)
+
+
+class TestSentinelValidation:
+    """Tests for sentinel hash validation."""
+
+    def test_validate_known_hash(self):
+        """Known hash returns True."""
+        reg = SentinelRegistry(session_id="s1")
+        reg.register("my-secret", "a1b2c3d4")
+
+        assert reg.validate_hash("a1b2c3d4") is True
+
+    def test_validate_unknown_hash(self):
+        """Unknown hash returns False."""
+        reg = SentinelRegistry(session_id="s1")
+        reg.register("my-secret", "a1b2c3d4")
+
+        assert reg.validate_hash("deadbeef") is False
+
+    def test_validate_empty_registry(self):
+        """All hashes are unknown in empty registry."""
+        reg = SentinelRegistry(session_id="s1")
+
+        assert reg.validate_hash("anyhash") is False
+
+    def test_validate_after_clear(self):
+        """Hashes are unknown after registry is cleared."""
+        reg = SentinelRegistry(session_id="s1")
+        reg.register("my-secret", "a1b2c3d4")
+        reg.clear()
+
+        assert reg.validate_hash("a1b2c3d4") is False
+
+    def test_validate_multiple_hashes(self):
+        """Multiple registered hashes can all be validated."""
+        reg = SentinelRegistry(session_id="s1")
+        reg.register("s1", "hash1")
+        reg.register("s2", "hash2")
+        reg.register("s3", "hash3")
+
+        assert reg.validate_hash("hash1") is True
+        assert reg.validate_hash("hash2") is True
+        assert reg.validate_hash("hash3") is True
+        assert reg.validate_hash("hash4") is False
+
+
+class TestSentinelEdgeCases:
+    """Edge case tests for sentinel wrapping and stripping."""
+
+    def test_secret_containing_sentinel_like_string(self):
+        """A secret that contains '[VENYA:' before base64 encoding is safe."""
+        # The secret contains a sentinel-like string, but after base64 encoding
+        # the bracket characters are encoded and cannot match the sentinel pattern
+        original = b"prefix [VENYA:abc12345] middle [/VENYA] suffix"
+        wrapped = wrap_with_sentinel("tricky", original)
+        stripped = strip_sentinel(wrapped)
+
+        assert stripped == original
+
+    def test_secret_that_is_exact_sentinel_pattern(self):
+        """A secret that IS the sentinel pattern itself."""
+        original = b"[VENYA:abcdef01]data[/VENYA]"
+        wrapped = wrap_with_sentinel("self-ref", original)
+        stripped = strip_sentinel(wrapped)
+
+        assert stripped == original
+
+    def test_empty_hash_prefix_rejected(self):
+        """Sentinel with empty hash prefix is not matched."""
+        data = b"[VENYA:]base64data[/VENYA]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
+    def test_short_hash_prefix_rejected(self):
+        """Sentinel with hash shorter than 8 chars is not matched."""
+        data = b"[VENYA:abc1]base64data[/VENYA]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
+    def test_long_hash_prefix_rejected(self):
+        """Sentinel with hash longer than 8 chars is not matched."""
+        data = b"[VENYA:abcdef012]base64data[/VENYA]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
+    def test_uppercase_hash_prefix_rejected(self):
+        """Sentinel with uppercase hex is not matched (lowercase only)."""
+        data = b"[VENYA:ABCDEF01]base64data[/VENYA]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
+    def test_non_hex_hash_rejected(self):
+        """Sentinel with non-hex characters is not matched."""
+        data = b"[VENYA:GGGGGGGG]base64data[/VENYA]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
+    def test_missing_closing_bracket_prefix(self):
+        """Sentinel missing closing bracket of prefix is not matched."""
+        data = b"[VENYA:abcdef01base64data[/VENYA]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
+    def test_missing_opening_bracket_prefix(self):
+        """Sentinel missing opening bracket of prefix is not matched."""
+        data = b"VENYA:abcdef01]base64data[/VENYA]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
+    def test_extra_characters_before_sentinel(self):
+        """Sentinel preceded by other characters is still found by search()."""
+        import base64
+        valid_b64 = base64.b64encode(b"test").decode()
+        data = b"X[VENYA:abcdef01]" + valid_b64.encode() + b"[/VENYA]"
+        result = strip_sentinel(data)
+
+        assert result == b"test"
+
+    def test_single_sentinel_in_large_buffer(self):
+        """Single sentinel correctly extracted from large buffer."""
+        wrapped = wrap_with_sentinel("s1", b"target-secret")
+        prefix = b"X" * 10000
+        suffix = b"Y" * 10000
+        data = prefix + wrapped + suffix
+        stripped = strip_sentinel(data)
+
+        assert stripped == b"target-secret"
+
+    def test_strip_preserves_non_sentinel_data(self):
+        """Non-sentinel data is preserved when no sentinel found."""
+        data = b"some process output with [brackets] and [/tags]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
+    def test_parse_sentinels_empty_results_for_no_sentinels(self):
+        """parse_sentinels returns empty list for data without sentinels."""
+        data = b"just plain text with [VENYA: prefix but no closing"
+        results = parse_sentinels(data)
+
+        assert results == []
+
+    def test_strip_sentinel_with_only_prefix(self):
+        """Sentinel with only prefix (no data, no suffix) is not matched."""
+        data = b"[VENYA:abcdef01]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
+    def test_strip_sentinel_with_only_suffix(self):
+        """Sentinel with only suffix (no prefix, no data) is not matched."""
+        data = b"[/VENYA]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
+    def test_strip_sentinel_reverse_order(self):
+        """Closing tag before opening tag is not matched."""
+        data = b"[/VENYA]base64data[VENYA:abcdef01]"
+        result = strip_sentinel(data)
+
+        assert result == data
+
 
 # ---------------------------------------------------------------------------
 # inject_via_file
