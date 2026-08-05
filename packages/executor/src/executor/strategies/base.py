@@ -40,34 +40,27 @@ class InjectionResult:
             try:
                 func()
             except Exception:
-                logger.debug("Cleanup function raised exception", exc_info=True)
+                logger.warning("Injection cleanup error", exc_info=True)
 
 
 class InjectionStrategy(abc.ABC):
-    """Abstract base class for secret injection methods.
+    """Interface for secret injection methods.
 
     Each strategy is responsible for:
-    - Preparing the secret injection (creating FDs, files, env vars, etc.)
+    - Validating platform availability (validate)
+    - Preparing the secret injection (prepare)
     - Returning an InjectionResult with everything the executor needs
     - Registering cleanup functions to destroy injected secrets
     """
 
     @abc.abstractmethod
     def prepare(self, secrets: list[SecretBundle]) -> InjectionResult:
-        """Prepare the environment for execution.
+        """Prepare injection resources. Returns result with cleanup funcs."""
 
-        Args:
-            secrets: List of SecretBundle objects whose plaintext ``value``
-                fields contain the unwrapped secret bytes to inject.
-
-        Returns:
-            An InjectionResult containing env vars, extra FDs, and
-            cleanup functions needed to run the command.
-        """
+    @abc.abstractmethod
+    def validate(self) -> None:
+        """Check this strategy is available on current platform."""
 
     @abc.abstractmethod
     def name(self) -> str:
-        """Return the unique identifier for this strategy.
-
-        Examples: ``"memfd"``, ``"fifo"``, ``"env"``.
-        """
+        """Return the unique identifier for this strategy."""

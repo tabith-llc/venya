@@ -6,12 +6,9 @@ No disk residency. Linux-only.
 
 from __future__ import annotations
 
-import collections.abc
 import ctypes
-import ctypes.util
 import logging
 import os
-from typing import Callable
 
 from .base import InjectionResult, InjectionStrategy
 
@@ -22,68 +19,53 @@ MFD_ALLOW_SEALING = 0x0002
 
 
 class MemfdStrategy(InjectionStrategy):
-    """Inject secrets via memfd_create syscall.
+    """memfd-based injection (Linux only)."""
 
-    Secrets are written to anonymous memory-backed file descriptors.
-    They never touch disk. FDs are marked CLOEXEC so they are automatically
-    closed on exec().
-    """
+    SECRET_BASE_FD = 100
 
     def name(self) -> str:
         return "memfd"
 
+    def validate(self) -> None:
+        """Raise if memfd_create not available."""
+        try:
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            if not hasattr(libc, "memfd_create"):
+                raise RuntimeError("memfd_create unavailable - Linux kernel too old")
+        except (ImportError, FileNotFoundError) as e:
+            raise RuntimeError(f"memfd_create required but not available: {e}")
+
     def prepare(self, secrets: list) -> InjectionResult:
-        """Prepare memfd injection for the given secrets.
-
-        Args:
-            secrets: List of SecretBundle objects whose ``value`` attribute
-                contains the plaintext secret bytes.
-
-        Returns:
-            InjectionResult with extra_fds populated and a cleanup function
-            that closes all created memfd FDs.
-
-        Raises:
-            NotImplementedError: If memfd_create is unavailable on this platform.
-        """
-        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        """Create memfd for each secret value."""
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
         memfd_create = libc.memfd_create
         memfd_create.argtypes = [ctypes.c_void_p, ctypes.c_uint]
         memfd_create.restype = ctypes.c_int
 
-        fds: list[int] = []
+        extra_fds: list[int] = []
+        cleanup_funcs: list[callable] = []  # type: ignore[type-arg]
 
-        for bundle in secrets:
+        for i, bundle in enumerate(secrets):
             fd = memfd_create(b"venya_secret\x00", MFD_CLOEXEC | MFD_ALLOW_SEALING)
             if fd < 0:
                 errno = ctypes.get_errno()
-                raise OSError(errno, f"memfd_create failed: {os.strerror(errno)}")
+                raise OSError(errno, "memfd_create failed")
 
-            try:
-                os.write(fd, bundle.value)
-            except Exception:
-                os.close(fd)
-                raise
+            os.write(fd, bundle.value)
+            os.lseek(fd, 0, os.SEEK_SET)
 
-            fds.append(fd)
-            logger.debug("Injected secret %s via memfd: fd=%d", bundle.secret_id, fd)
+            logical_fd = self.SECRET_BASE_FD + i
+            extra_fds.append(fd)  # Actual OS FD for pass_fds
+            cleanup_funcs.append(lambda f=fd: os.close(f))
 
-        cleanup_funcs = [_make_memfd_closer(fds)]
+            logger.debug(
+                "Injected secret %s via memfd: logical_fd=%d os_fd=%d",
+                bundle.secret_id,
+                logical_fd,
+                fd,
+            )
 
         return InjectionResult(
-            extra_fds=fds,
+            extra_fds=extra_fds,
             cleanup_funcs=cleanup_funcs,
         )
-
-
-def _make_memfd_closer(fds: list[int]) -> Callable[[], None]:
-    """Return a cleanup function that closes all given FDs."""
-
-    def closer() -> None:
-        for fd in fds:
-            try:
-                os.close(fd)
-            except OSError:
-                logger.debug("Failed to close memfd fd=%d", fd, exc_info=True)
-
-    return closer

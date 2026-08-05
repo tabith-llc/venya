@@ -82,6 +82,10 @@ class Executor:
     _injection_result: InjectionResult | None = field(init=False, default=None)
     _bundles: list[SecretBundle] = field(init=False, default_factory=list)
 
+    def __post_init__(self) -> None:
+        """Validate the injection strategy before first use."""
+        self.injection_strategy.validate()
+
     @property
     def sentinel_registry(self) -> SentinelRegistry:
         """Lazy-init sentinel registry for this session."""
