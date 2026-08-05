@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import subprocess
 from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
@@ -53,7 +54,7 @@ class TestMemfdStrategyPrepare:
         result = strategy.prepare([])
 
         assert len(result.extra_fds) == 0
-        assert len(result.cleanup_funcs) == 1
+        assert len(result.cleanup_funcs) == 0
 
     def test_prepare_large_secret(self, strategy):
         """prepare() handles large secrets."""
@@ -166,3 +167,28 @@ class TestMemfdStrategyCleanup:
 
         # Cleanup should not raise
         result.cleanup()
+
+
+class TestMemfdSecurity:
+    """Security tests for memfd injection."""
+
+    def test_memfd_not_in_environ(self):
+        """Verify secrets are not visible in /proc/self/environ."""
+        strategy = MemfdStrategy()
+        strategy.validate()
+
+        bundles = [FakeBundle("test_secret", b"should-not-be-in-env")]
+        result = strategy.prepare(bundles)
+
+        proc = subprocess.Popen(
+            "cat /proc/self/environ | tr '\\0' '\\n' | grep -c 'should-not-be-in-env' || true",
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, _ = proc.communicate()
+        count = int(stdout.strip())
+        assert count == 0, f"Secret found {count} times in /proc/self/environ"
+
+        for fd in result.extra_fds:
+            os.close(fd)

@@ -174,10 +174,14 @@ class ExecutorConfig(BaseSettings):
     # Reaper
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
 
-    # Secret injection
+    # Secret injection (Linux-only)
     injection_method: str = Field(
         default="memfd",
-        description="Secret injection strategy: memfd, fifo, env",
+        description="Secret injection strategy (currently memfd only)",
+    )
+    secret_base_fd: int = Field(
+        default=100,
+        description="Base FD number for injected secrets",
     )
 
     # Logging
