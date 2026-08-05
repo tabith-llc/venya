@@ -1,6 +1,6 @@
 """Health check endpoints."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
 
@@ -15,10 +15,24 @@ async def health_check() -> dict:
 
 
 @router.get("/ready")
-async def readiness_check() -> dict:
+async def readiness_check(request: Request) -> dict:
     """Readiness probe — is the server ready to serve traffic?
 
     Checks database connectivity. No authentication required. Not rate-limited.
     """
-    # TODO: Add actual DB connectivity check
-    return {"status": "ok"}
+    from sqlalchemy import text
+
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        return {"status": "degraded", "checks": {"database": "not_configured"}}
+
+    db = backend.get_session()
+    try:
+        db.execute(text("SELECT 1"))
+        db.commit()
+        return {"status": "ok", "checks": {"database": "connected"}}
+    except Exception as e:
+        db.rollback()
+        return {"status": "degraded", "checks": {"database": f"error: {e}"}}
+    finally:
+        db.close()
