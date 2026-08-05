@@ -557,7 +557,7 @@ class ExecutorDaemon:
         Returns:
             Configured Executor instance with HTTP client for server API calls.
         """
-        strategy = create_strategy(self.config.injection_method)
+        strategy = create_strategy(self.config.injection_method, self.config.secret_base_fd)
         return Executor(
             command_validator=self.command_validator,
             session_id=session_id,

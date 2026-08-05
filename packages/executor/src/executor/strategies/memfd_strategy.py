@@ -21,7 +21,8 @@ MFD_ALLOW_SEALING = 0x0002
 class MemfdStrategy(InjectionStrategy):
     """memfd-based injection (Linux only)."""
 
-    SECRET_BASE_FD = 100
+    def __init__(self, secret_base_fd: int = 100) -> None:
+        self.secret_base_fd = secret_base_fd
 
     def name(self) -> str:
         return "memfd"
@@ -54,7 +55,7 @@ class MemfdStrategy(InjectionStrategy):
             os.write(fd, bundle.value)
             os.lseek(fd, 0, os.SEEK_SET)
 
-            logical_fd = self.SECRET_BASE_FD + i
+            logical_fd = self.secret_base_fd + i
             extra_fds.append(fd)  # Actual OS FD for pass_fds
             cleanup_funcs.append(lambda f=fd: os.close(f))
 

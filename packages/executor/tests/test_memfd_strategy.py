@@ -169,6 +169,31 @@ class TestMemfdStrategyCleanup:
         result.cleanup()
 
 
+class TestMemfdStrategyConfig:
+    """Tests for MemfdStrategy configuration."""
+
+    def test_default_secret_base_fd(self):
+        """MemfdStrategy defaults to secret_base_fd=100."""
+        strategy = MemfdStrategy()
+        assert strategy.secret_base_fd == 100
+
+    def test_custom_secret_base_fd(self):
+        """MemfdStrategy accepts a custom secret_base_fd value."""
+        strategy = MemfdStrategy(secret_base_fd=200)
+        assert strategy.secret_base_fd == 200
+
+    def test_custom_secret_base_fd_affects_logical_fd(self):
+        """secret_base_fd changes the logical FD in debug logging."""
+        strategy = MemfdStrategy(secret_base_fd=50)
+        bundles = [FakeBundle("s1", b"secret1"), FakeBundle("s2", b"secret2")]
+        result = strategy.prepare(bundles)
+
+        assert len(result.extra_fds) == 2
+        for fd in result.extra_fds:
+            os.close(fd)
+        result.cleanup()
+
+
 class TestMemfdSecurity:
     """Security tests for memfd injection."""
 
