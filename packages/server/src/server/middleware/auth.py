@@ -40,6 +40,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/api/v1/recovery",
         "/api/v1/executors/register",
         "/api/v1/executors/certs/revocation-list",
+        "/api/v1/heartbeat",
     })
 
     def __init__(self, app: Any = None, max_token_age: float = 300.0) -> None:

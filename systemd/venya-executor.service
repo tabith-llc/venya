@@ -1,6 +1,7 @@
 [Unit]
 Description=Venya Executor Daemon
-After=network.target
+After=network.target venya-tmpfs.mount
+Requires=venya-tmpfs.mount
 
 [Service]
 Type=simple

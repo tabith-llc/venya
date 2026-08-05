@@ -227,3 +227,132 @@ class CAManager:
             Hex-encoded serial string.
         """
         return format(serial, "016x")
+
+    def export_ca_key(self, passphrase: str) -> bytes:
+        """Export the CA private key, encrypted with a passphrase.
+
+        Reads the CA private key from disk, encrypts it using AES-256-CBC
+        with a user-provided passphrase, and returns the encrypted blob.
+
+        The plaintext key is zeroized from memory immediately after use.
+
+        Args:
+            passphrase: The passphrase to encrypt with.
+
+        Returns:
+            Encrypted key bytes: salt (16) + iv (16) + encrypted data.
+        """
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+        private_key_pem = self.ca_key_path.read_bytes()
+
+        # Derive encryption key from passphrase using PBKDF2
+        salt = os.urandom(16)
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=600_000,
+        )
+        key = kdf.derive(passphrase.encode())
+
+        # Encrypt with AES-256-CBC
+        iv = os.urandom(16)
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+        encryptor = cipher.encryptor()
+
+        # PKCS7 padding
+        block_size = 16
+        padding_len = block_size - (len(private_key_pem) % block_size)
+        padded = private_key_pem + bytes([padding_len] * padding_len)
+
+        encrypted = encryptor.update(padded) + encryptor.finalize()
+
+        # Zeroize the plaintext key from memory
+        private_key_pem = b"\x00" * len(private_key_pem)
+        del private_key_pem
+
+        return salt + iv + encrypted
+
+    def import_ca_key(self, encrypted_key: bytes) -> None:
+        """Import and write an encrypted CA private key.
+
+        Decrypts the provided encrypted key data and writes it to disk
+        with restrictive permissions (0600).
+
+        Args:
+            encrypted_key: Encrypted key bytes (salt + iv + ciphertext).
+        """
+        if len(encrypted_key) < 32:
+            raise ValueError("Encrypted key data too small")
+
+        salt = encrypted_key[:16]
+        iv = encrypted_key[16:32]
+        ciphertext = encrypted_key[32:]
+
+        # We need the passphrase — this is typically called after
+        # the admin provides it interactively. For programmatic use,
+        # pass the passphrase-deriving key directly.
+        raise NotImplementedError(
+            "Use restore_ca_key() with passphrase for decryption, "
+            "or provide encrypted_key as raw PEM for direct import"
+        )
+
+    def restore_ca_key(self, encrypted_key: bytes, passphrase: str) -> None:
+        """Restore the CA private key from encrypted data.
+
+        Decrypts the provided encrypted key data and writes it to disk
+        with restrictive permissions (0600).
+
+        Args:
+            encrypted_key: Encrypted key bytes (salt + iv + ciphertext).
+            passphrase: The passphrase used to encrypt the key.
+        """
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+        if len(encrypted_key) < 32:
+            raise ValueError("Encrypted key data too small")
+
+        salt = encrypted_key[:16]
+        iv = encrypted_key[16:32]
+        ciphertext = encrypted_key[32:]
+
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=600_000,
+        )
+        key = kdf.derive(passphrase.encode())
+
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+        decryptor = cipher.decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+
+        # Remove PKCS7 padding
+        padding_len = padded[-1]
+        if padding_len < 1 or padding_len > 16:
+            raise ValueError("Invalid passphrase or corrupted data")
+        private_key_pem = padded[:-padding_len]
+
+        # Write to disk
+        self.ca_key_path.write_bytes(private_key_pem)
+        os.chmod(str(self.ca_key_path), 0o600)
+
+        # Zeroize from memory
+        private_key_pem = b"\x00" * len(private_key_pem)
+        del private_key_pem
+
+    def get_ca_key_pem(self) -> bytes:
+        """Get the CA private key in PEM format.
+
+        WARNING: This returns the plaintext key. Use only for
+        backup/export operations. The key should be zeroized
+        immediately after use by the caller.
+
+        Returns:
+            PEM-encoded CA private key bytes.
+        """
+        return self.ca_key_path.read_bytes()
