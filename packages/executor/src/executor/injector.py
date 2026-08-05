@@ -70,8 +70,31 @@ class SentinelRegistry:
         """Clear all registered sentinels."""
         self._sentinels.clear()
 
+    def validate_hash(self, sentinel_hash: str) -> bool:
+        """Validate that a sentinel hash is registered for this session.
 
-SENTINEL_PATTERN = re.compile(rb"\[VENYA:([a-f0-9]{8})\](.*?)\[/VENYA\]")
+        Args:
+            sentinel_hash: 8-char hex hash prefix to validate.
+
+        Returns:
+            True if the hash is registered, False otherwise.
+        """
+        found = sentinel_hash in self._sentinels
+        if not found:
+            logger.warning(
+                "Unrecognized sentinel hash %s in session %s",
+                sentinel_hash,
+                self.session_id,
+            )
+        return found
+
+
+SENTINEL_PATTERN = re.compile(
+    rb"\[VENYA:([a-f0-9]{8})\]"  # [VENYA:{8-hex-char-hash}]
+    rb"([A-Za-z0-9+/]*)"          # base64 data (safe: [ cannot appear in base64)
+    rb"(=*)"                        # optional padding
+    rb"\[/VENYA\]"                  # closing tag
+)
 SENTINEL_PREFIX_PATTERN = re.compile(rb"\[VENYA:([a-f0-9]{8})\]")
 
 
@@ -99,6 +122,12 @@ def strip_sentinel(wrapped: bytes) -> bytes:
     Removes [VENYA:{hash}] prefix and [/VENYA] suffix.
     Target process sees plaintext only.
 
+    The regex uses an explicit base64 character class [A-Za-z0-9+/=]
+    for the data portion. This guarantees the sentinel delimiters
+    [VENYA: and [/VENYA] can never appear inside the encoded data,
+    making the pattern safe against greedy/non-greedy matching issues
+    even with multiple sentinels in a single buffer.
+
     Args:
         wrapped: Sentinel-wrapped bytes.
 
@@ -108,7 +137,7 @@ def strip_sentinel(wrapped: bytes) -> bytes:
     match = SENTINEL_PATTERN.search(wrapped)
     if match:
         hash_prefix = match.group(1).decode()
-        encoded_data = match.group(2)
+        encoded_data = match.group(2) + match.group(3)
         logger.debug("Stripped sentinel %s", hash_prefix)
         return base64.b64decode(encoded_data)
     return wrapped
@@ -126,7 +155,7 @@ def parse_sentinels(data: bytes) -> list[tuple[str, bytes]]:
     results = []
     for match in SENTINEL_PATTERN.finditer(data):
         hash_prefix = match.group(1).decode()
-        encoded_data = match.group(2)
+        encoded_data = match.group(2) + match.group(3)
         secret_value = base64.b64decode(encoded_data)
         results.append((hash_prefix, secret_value))
     return results
