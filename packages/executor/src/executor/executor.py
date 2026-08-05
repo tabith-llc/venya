@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .audit import AuditLogger
+from .bundles import SecretBundle
 from .command_validator import CommandValidator
 from .filter import filter_and_redact
 from .injector import (
@@ -49,15 +50,6 @@ class CommandResult:
     output_truncated: bool = False
     original_stdout_size: int = 0
     original_stderr_size: int = 0
-
-
-@dataclass
-class SecretBundle:
-    """Secrets retrieved for a command execution."""
-
-    secret_id: str
-    value: bytes
-    wrapped_value: bytes  # sentinel-wrapped value
 
 
 MAX_OUTPUT_BYTES = 262144  # 256 KB per stream
