@@ -43,6 +43,13 @@ def _run_migrations(db_path: str | None, db_key: str | None) -> None:
     os.environ["VENYA_DB_PATH"] = str(resolved_db_path)
     os.environ["VENYA_DB_KEY"] = resolved_db_key
 
+    # Construct VENYA_DB_URL from path + key for env.py
+    resolved_path = str(resolved_db_path)
+    if not resolved_path.startswith(("sqlite:///", "sqlite://")):
+        resolved_path = "file:" + resolved_path if not os.path.isabs(resolved_path) else "file:" + resolved_path
+    sqlite_url = f"sqlite:///{resolved_db_path}"
+    os.environ["VENYA_DB_URL"] = sqlite_url
+
     # Find alembic.ini relative to the vault package root
     # __file__ = .../src/venya/cli/commands.py
     # parent x4 = .../packages/vault/

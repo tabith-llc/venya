@@ -27,6 +27,11 @@ allow-direct-references = true
 [tool.hatch.build.targets.wheel]
 packages = ["src/vault"]
 
+[project.optional-dependencies]
+test = [
+    "sqlcipher3>=0.1.0",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

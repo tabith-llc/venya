@@ -59,6 +59,7 @@ EXPECTED_TABLES = [
     "secrets",
     "sessions",
     "users",
+    "webauthn_credentials",
 ]
 
 
