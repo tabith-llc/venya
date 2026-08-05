@@ -21,8 +21,6 @@ class InjectionResult:
     prepare all injections together, execute one command, then clean up.
 
     Attributes:
-        env_vars: Environment variables to merge into the child process
-            environment (usually empty for memfd strategy).
         extra_fds: File descriptors to pass to the subprocess via pass_fds.
         cleanup_funcs: Functions to call on cleanup. Each takes no arguments.
 
@@ -30,7 +28,6 @@ class InjectionResult:
     state that assumes one active command at a time.
     """
 
-    env_vars: dict[str, str] = field(default_factory=dict)
     extra_fds: list[int] = field(default_factory=list)
     cleanup_funcs: list[Callable[[], None]] = field(default_factory=list)
 
