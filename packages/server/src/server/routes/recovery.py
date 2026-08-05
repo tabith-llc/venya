@@ -48,7 +48,7 @@ async def recovery(
 
     db = backend.get_session()
     try:
-        from venya.iam.models import Role, RoleMember, User
+        from vault.iam.models import Role, RoleMember, User
 
         # Check if user already exists
         existing = (

@@ -7,7 +7,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.testclient import TestClient
 from starlette.requests import Request
 
-from venya_server.middleware.rbac import RBACMiddleware
+from server.middleware.rbac import RBACMiddleware
 
 
 class AuthUserMiddleware(BaseHTTPMiddleware):
@@ -89,7 +89,7 @@ class TestRBACMiddleware:
             return any(p == "read-write" for p in perms.values())
 
         rm_mock.has_permission.side_effect = has_permission_side_effect
-        patcher = patch("venya.iam.role_manager.RoleManager", return_value=rm_mock)
+        patcher = patch("vault.iam.role_manager.RoleManager", return_value=rm_mock)
         return patcher, rm_mock
 
     def test_write_denied_for_read_only_user(self):

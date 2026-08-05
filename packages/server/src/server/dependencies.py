@@ -8,12 +8,12 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from venya.vault.backend import Backend, BackendConfig
-from venya.vault.factory import VaultFactory
-from venya.vault.vault import Caller
-from venya.iam.models import Base
-from venya.iam.session_manager import SessionConfig as VaultSessionConfig, SessionManager
-from venya.iam.role_manager import RoleManager
+from vault.vault.backend import Backend, BackendConfig
+from vault.vault.factory import VaultFactory
+from vault.vault.vault import Caller
+from vault.iam.models import Base
+from vault.iam.session_manager import SessionConfig as VaultSessionConfig, SessionManager
+from vault.iam.role_manager import RoleManager
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 

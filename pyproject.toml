@@ -12,9 +12,9 @@ dev = ["pytest", "pytest-asyncio", "pytest-cov"]
 members = ["packages/*"]
 
 [tool.uv.sources]
-venya-vault = { workspace = true }
-venya-server = { workspace = true }
-venya-executor = { workspace = true }
+vault = { workspace = true }
+server = { workspace = true }
+executor = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["packages/vault/tests"]

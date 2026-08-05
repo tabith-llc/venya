@@ -14,7 +14,7 @@ from sqlalchemy import engine_from_config, event, pool, text
 # Add the vault source to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from venya.iam.models import Base  # noqa: E402
+from vault.iam.models import Base  # noqa: E402
 
 target_metadata = Base.metadata
 

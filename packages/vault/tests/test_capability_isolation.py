@@ -21,7 +21,7 @@ class TestCapabilityIsolation:
     @pytest.fixture(autouse=True)
     def _reset_secure_memory_state(self):
         """Reset _SYSTEM_LIB cache before each test to avoid test pollution."""
-        import venya.vault.secure_memory as sm
+        import vault.vault.secure_memory as sm
         original = sm._SYSTEM_LIB
         sm._SYSTEM_LIB = None
         yield
@@ -29,9 +29,9 @@ class TestCapabilityIsolation:
 
     def test_secure_memory_requires_linux(self):
         """mlock should fail on non-Linux platforms."""
-        from venya.vault.secure_memory import secure_mlock
+        from vault.vault.secure_memory import secure_mlock
 
-        with patch("venya.vault.secure_memory.platform.system", return_value="Darwin"):
+        with patch("vault.vault.secure_memory.platform.system", return_value="Darwin"):
             try:
                 secure_mlock(bytearray(16))
                 assert False, "Should have raised RuntimeError"
@@ -40,12 +40,12 @@ class TestCapabilityIsolation:
 
     def test_secure_memory_fails_without_cap(self):
         """mlock should fail if CAP_IPC_LOCK is not available."""
-        from venya.vault.secure_memory import secure_mlock
+        from vault.vault.secure_memory import secure_mlock
 
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
-            mock_lib = patch("venya.vault.secure_memory._load_system_lib").start()
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
+            mock_lib = patch("vault.vault.secure_memory._load_system_lib").start()
             mock_lib.return_value.mlock.return_value = -1
-            with patch("venya.vault.secure_memory.ctypes.get_errno", return_value=1):
+            with patch("vault.vault.secure_memory.ctypes.get_errno", return_value=1):
                 with patch("os.strerror", return_value="Operation not permitted"):
                     try:
                         secure_mlock(bytearray(16))
@@ -56,13 +56,13 @@ class TestCapabilityIsolation:
 
     def test_secure_buffer_auto_unlock_on_error(self):
         """SecureBuffer should handle mlock failure gracefully in context manager."""
-        from venya.vault.secure_memory import SecureBuffer
+        from vault.vault.secure_memory import SecureBuffer
 
-        with patch("venya.vault.secure_memory.platform.system", return_value="Linux"):
-            mock_lib = patch("venya.vault.secure_memory._load_system_lib").start()
+        with patch("vault.vault.secure_memory.platform.system", return_value="Linux"):
+            mock_lib = patch("vault.vault.secure_memory._load_system_lib").start()
             mock_lib.return_value.mlock.return_value = 0
             mock_lib.return_value.munlock.return_value = -1
-            with patch("venya.vault.secure_memory.ctypes.get_errno", return_value=1):
+            with patch("vault.vault.secure_memory.ctypes.get_errno", return_value=1):
                 with patch("os.strerror", return_value="Operation not permitted"):
                     buf = SecureBuffer(32, mlock=True)
                     assert buf.is_locked
@@ -75,23 +75,23 @@ class TestCapabilityIsolation:
     def test_cli_does_not_import_secure_memory(self):
         """CLI should never import secure_memory (runs on untrusted jump host)."""
         # Save modules we need to keep (secure_memory is used by other tests)
-        keep = {k: sys.modules[k] for k in sys.modules if "venya.vault.secure_memory" in k}
+        keep = {k: sys.modules[k] for k in sys.modules if "vault.vault.secure_memory" in k}
 
         # Clear cached venya imports (except secure_memory which other tests depend on)
         modules_to_remove = [
             k for k in sys.modules
-            if k.startswith("venya") and "venya.vault.secure_memory" not in k
+            if k.startswith("venya") and "vault.vault.secure_memory" not in k
         ]
         for mod in modules_to_remove:
             del sys.modules[mod]
 
         # Import CLI
-        from venya.cli import cli
+        from vault.cli import cli
 
         # Check that secure_memory is not in any imported module's namespace
         cli_module_names = [
             name for name, obj in sys.modules.items()
-            if name and name.startswith("venya.cli")
+            if name and name.startswith("vault.cli")
         ]
         for name in cli_module_names:
             mod = sys.modules[name]
@@ -117,11 +117,11 @@ class TestSecureMemoryIsolation:
         """Only secure_memory.py should define or import mlock-related symbols."""
         import importlib
         import pkgutil
-        import venya.vault
+        import vault.vault
 
         secure_memory_symbols = {"secure_mlock", "secure_munlock", "secure_zero", "SecureBuffer", "_load_system_lib"}
 
-        vault_dir = importlib.import_module("importlib.resources").files(venya.vault)
+        vault_dir = importlib.import_module("importlib.resources").files(vault.vault)
         if vault_dir and hasattr(vault_dir, "iterdir"):
             for submodule_path in vault_dir.iterdir():
                 if submodule_path.suffix == ".py" and not submodule_path.name.startswith("_"):
@@ -138,9 +138,9 @@ class TestSecureMemoryIsolation:
     def test_vault_class_does_not_use_secure_memory(self):
         """Vault facade should not import secure_memory."""
         import importlib
-        import venya.vault.vault
+        import vault.vault.vault
 
-        source = venya.vault.vault.__file__
+        source = vault.vault.vault.__file__
         with open(source) as f:
             content = f.read()
         assert "secure_memory" not in content, "Vault should not import secure_memory"
@@ -149,9 +149,9 @@ class TestSecureMemoryIsolation:
 
     def test_backend_does_not_use_secure_memory(self):
         """Backend should not import secure_memory."""
-        import venya.vault.backend
+        import vault.vault.backend
 
-        source = venya.vault.backend.__file__
+        source = vault.vault.backend.__file__
         with open(source) as f:
             content = f.read()
         assert "secure_memory" not in content, "Backend should not import secure_memory"
@@ -160,9 +160,9 @@ class TestSecureMemoryIsolation:
 
     def test_encryption_does_not_use_secure_memory(self):
         """Encryption module should not import secure_memory."""
-        import venya.vault.encryption
+        import vault.vault.encryption
 
-        source = venya.vault.encryption.__file__
+        source = vault.vault.encryption.__file__
         with open(source) as f:
             content = f.read()
         assert "secure_memory" not in content, "Encryption should not import secure_memory"
@@ -171,9 +171,9 @@ class TestSecureMemoryIsolation:
 
     def test_rate_limiter_does_not_use_secure_memory(self):
         """Rate limiter should not import secure_memory."""
-        import venya.vault.rate_limiter
+        import vault.vault.rate_limiter
 
-        source = venya.vault.rate_limiter.__file__
+        source = vault.vault.rate_limiter.__file__
         with open(source) as f:
             content = f.read()
         assert "secure_memory" not in content, "Rate limiter should not import secure_memory"
@@ -182,9 +182,9 @@ class TestSecureMemoryIsolation:
 
     def test_factory_does_not_use_secure_memory(self):
         """Factory should not import secure_memory."""
-        import venya.vault.factory
+        import vault.vault.factory
 
-        source = venya.vault.factory.__file__
+        source = vault.vault.factory.__file__
         with open(source) as f:
             content = f.read()
         assert "secure_memory" not in content, "Factory should not import secure_memory"
@@ -193,9 +193,9 @@ class TestSecureMemoryIsolation:
 
     def test_iam_models_do_not_use_secure_memory(self):
         """IAM models should not import secure_memory."""
-        import venya.iam.models
+        import vault.iam.models
 
-        source = venya.iam.models.__file__
+        source = vault.iam.models.__file__
         with open(source) as f:
             content = f.read()
         assert "secure_memory" not in content, "IAM models should not import secure_memory"
@@ -204,9 +204,9 @@ class TestSecureMemoryIsolation:
 
     def test_iam_role_manager_does_not_use_secure_memory(self):
         """IAM role manager should not import secure_memory."""
-        import venya.iam.role_manager
+        import vault.iam.role_manager
 
-        source = venya.iam.role_manager.__file__
+        source = vault.iam.role_manager.__file__
         with open(source) as f:
             content = f.read()
         assert "secure_memory" not in content, "IAM role manager should not import secure_memory"
@@ -215,9 +215,9 @@ class TestSecureMemoryIsolation:
 
     def test_iam_session_manager_does_not_use_secure_memory(self):
         """IAM session manager should not import secure_memory."""
-        import venya.iam.session_manager
+        import vault.iam.session_manager
 
-        source = venya.iam.session_manager.__file__
+        source = vault.iam.session_manager.__file__
         with open(source) as f:
             content = f.read()
         assert "secure_memory" not in content, "IAM session manager should not import secure_memory"
@@ -226,9 +226,9 @@ class TestSecureMemoryIsolation:
 
     def test_iam_enrollment_manager_does_not_use_secure_memory(self):
         """IAM enrollment manager should not import secure_memory."""
-        import venya.iam.enrollment_manager
+        import vault.iam.enrollment_manager
 
-        source = venya.iam.enrollment_manager.__file__
+        source = vault.iam.enrollment_manager.__file__
         with open(source) as f:
             content = f.read()
         assert "secure_memory" not in content, "IAM enrollment manager should not import secure_memory"
@@ -237,7 +237,7 @@ class TestSecureMemoryIsolation:
 
     def test_cli_commands_do_not_use_secure_memory(self):
         """CLI commands should not import secure_memory."""
-        from venya.cli import commands
+        from vault.cli import commands
 
         source = commands.__file__
         with open(source) as f:
@@ -248,7 +248,7 @@ class TestSecureMemoryIsolation:
 
     def test_cli_api_client_does_not_use_secure_memory(self):
         """CLI api client should not import secure_memory."""
-        from venya.cli import api_client
+        from vault.cli import api_client
 
         source = api_client.__file__
         with open(source) as f:
@@ -259,14 +259,14 @@ class TestSecureMemoryIsolation:
 
     def test_vault_factory_does_not_enable_mlock_by_default(self):
         """VaultFactory should not enable mlock by default."""
-        import venya.vault.factory
-        from venya.vault.backend import BackendConfig
+        import vault.vault.factory
+        from vault.vault.backend import BackendConfig
 
         config = BackendConfig(
             database_url="postgresql://venya:venya@localhost:5432/venya_test",
             passphrase=b"test-passphrase-for-testing",
         )
-        factory = venya.vault.factory.VaultFactory(config)
+        factory = vault.vault.factory.VaultFactory(config)
         vault = factory.build()
 
         # The vault should be built without mlock — SecureBuffer is not used
@@ -277,16 +277,16 @@ class TestSecureMemoryIsolation:
 
     def test_vault_does_not_mlock_by_default(self):
         """Vault operations should not lock memory by default."""
-        import venya.vault.factory
+        import vault.vault.factory
         from unittest.mock import MagicMock
-        from venya.vault.backend import BackendConfig
-        from venya.vault.vault import Caller
+        from vault.vault.backend import BackendConfig
+        from vault.vault.vault import Caller
 
         config = BackendConfig(
             database_url="postgresql://venya:venya@localhost:5432/venya_test",
             passphrase=b"isolation-test-passphrase",
         )
-        factory = venya.vault.factory.VaultFactory(config)
+        factory = vault.vault.factory.VaultFactory(config)
         vault = factory.build()
 
         # Mock the backend so we don't need a real DB connection
@@ -309,37 +309,37 @@ class TestSecureMemoryIsolation:
         assert record.key == "test_secret"
 
     def test_secure_memory_not_in_vault_module_exports(self):
-        """secure_memory symbols should not be re-exported from venya.vault."""
-        import venya.vault
+        """secure_memory symbols should not be re-exported from vault.vault."""
+        import vault.vault
 
         # secure_memory should not be directly accessible from the vault package
-        assert not hasattr(venya.vault, "secure_mlock"), (
-            "secure_mlock should not be re-exported from venya.vault"
+        assert not hasattr(vault.vault, "secure_mlock"), (
+            "secure_mlock should not be re-exported from vault.vault"
         )
-        assert not hasattr(venya.vault, "SecureBuffer"), (
-            "SecureBuffer should not be re-exported from venya.vault"
+        assert not hasattr(vault.vault, "SecureBuffer"), (
+            "SecureBuffer should not be re-exported from vault.vault"
         )
 
     def test_secure_memory_not_in_iam_module_exports(self):
-        """secure_memory symbols should not be accessible from venya.iam."""
-        import venya.iam
+        """secure_memory symbols should not be accessible from vault.iam."""
+        import vault.iam
 
-        assert not hasattr(venya.iam, "secure_mlock"), (
-            "secure_mlock should not be accessible from venya.iam"
+        assert not hasattr(vault.iam, "secure_mlock"), (
+            "secure_mlock should not be accessible from vault.iam"
         )
-        assert not hasattr(venya.iam, "SecureBuffer"), (
-            "SecureBuffer should not be accessible from venya.iam"
+        assert not hasattr(vault.iam, "SecureBuffer"), (
+            "SecureBuffer should not be accessible from vault.iam"
         )
 
     def test_secure_memory_not_in_cli_module_exports(self):
-        """secure_memory symbols should not be accessible from venya.cli."""
-        from venya.cli import cli
+        """secure_memory symbols should not be accessible from vault.cli."""
+        from vault.cli import cli
 
         assert not hasattr(cli, "secure_mlock"), (
-            "secure_mlock should not be accessible from venya.cli"
+            "secure_mlock should not be accessible from vault.cli"
         )
         assert not hasattr(cli, "SecureBuffer"), (
-            "SecureBuffer should not be accessible from venya.cli"
+            "SecureBuffer should not be accessible from vault.cli"
         )
 
 

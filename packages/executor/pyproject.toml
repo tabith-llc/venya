@@ -1,10 +1,10 @@
 [project]
-name = "venya-executor"
+name = "executor"
 version = "0.1.0"
 description = "Venya jump host executor daemon and credential injector"
 requires-python = ">=3.13"
 dependencies = [
-    "venya-vault",
+    "vault",
     "cryptography",
     "httpx",
     "websockets",
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-venya-executor = "venya_executor.daemon:main"
+venya-executor = "executor.daemon:main"
 
 [build-system]
 requires = ["setuptools>=68.0", "setuptools-rust>=1.9"]

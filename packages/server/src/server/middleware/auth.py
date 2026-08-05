@@ -130,9 +130,9 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         db = backend.get_session()
         try:
-            from venya.iam.session_manager import SessionManager
-            from venya.iam.session_manager import SessionConfig as VaultSessionConfig
-            from venya.iam.models import Session as SessionModel
+            from vault.iam.session_manager import SessionManager
+            from vault.iam.session_manager import SessionConfig as VaultSessionConfig
+            from vault.iam.models import Session as SessionModel
             from datetime import timedelta
 
             config = VaultSessionConfig(
@@ -165,7 +165,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             }
 
             # Get role IDs for this user
-            from venya.iam.role_manager import RoleManager
+            from vault.iam.role_manager import RoleManager
             rm = RoleManager(db)
             user_roles = rm.get_user_roles(user.user_id)
             user_info["roles"] = [str(m.role_id) for m in user_roles]

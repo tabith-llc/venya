@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from venya_server.routes import admin as admin_routes
+from server.routes import admin as admin_routes
 
 
 def _create_test_app(backend=None, auth_user=None):
@@ -61,7 +61,7 @@ class TestAdminEnroll:
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.enrollment_manager.EnrollmentManager", return_value=mock_em):
+        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=mock_em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/admin/enroll",
@@ -84,7 +84,7 @@ class TestAdminEnroll:
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.enrollment_manager.EnrollmentManager", return_value=mock_em):
+        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=mock_em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/admin/enroll",
@@ -105,7 +105,7 @@ class TestAdminRemove:
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        with patch("venya.iam.models.User", user):
+        with patch("vault.iam.models.User", user):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.delete("/api/v1/admin/users/user1")
             assert resp.status_code == 200

@@ -20,8 +20,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 
-from venya_executor.config import ExecutorConfig, MtlsConfig, CertificateRotationConfig
-from venya_executor.daemon import (
+from executor.config import ExecutorConfig, MtlsConfig, CertificateRotationConfig
+from executor.daemon import (
     CertificateManager,
     _create_csr,
     _extract_executor_id_from_cert,

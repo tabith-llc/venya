@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-logger = logging.getLogger("venya.cli.api_client")
+logger = logging.getLogger("vault.cli.api_client")
 
 # Default config file location
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "venya"

@@ -137,7 +137,7 @@ async def filter_session_output(
             detail="Backend not initialized",
         )
 
-    from venya.iam.models import Secret, Session as SessionModel
+    from vault.iam.models import Secret, Session as SessionModel
 
     db = backend.get_session()
     try:

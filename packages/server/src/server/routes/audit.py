@@ -59,7 +59,7 @@ async def audit_list(
             detail="Backend not initialized",
         )
 
-    from venya.iam.models import AuditEvent
+    from vault.iam.models import AuditEvent
 
     db = backend.get_session()
     try:

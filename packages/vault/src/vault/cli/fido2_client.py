@@ -29,7 +29,7 @@ from fido2.webauthn import (
     UserVerificationRequirement,
 )
 
-logger = logging.getLogger("venya.cli.fido2")
+logger = logging.getLogger("vault.cli.fido2")
 
 
 def _b64url_decode(data: str) -> bytes:

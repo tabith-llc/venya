@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from venya_server.routes import auth as auth_routes
+from server.routes import auth as auth_routes
 
 
 def _create_test_app(fido2_manager=None, backend=None):
@@ -194,8 +194,8 @@ class TestAuthLoginComplete:
         backend = MagicMock()
         backend.get_session.return_value = db
 
-        with patch("venya.iam.session_manager.SessionManager") as mock_sm, \
-             patch("venya.iam.role_manager.RoleManager") as mock_rm:
+        with patch("vault.iam.session_manager.SessionManager") as mock_sm, \
+             patch("vault.iam.role_manager.RoleManager") as mock_rm:
 
             mock_sm.return_value.create_session.return_value = (session_mock, access_token_mock)
             mock_rm.return_value.get_user_roles.return_value = []
@@ -247,7 +247,7 @@ class TestAuthRefresh:
         backend = MagicMock()
         backend.get_session.return_value = db
 
-        with patch("venya.iam.session_manager.SessionManager") as mock_sm:
+        with patch("vault.iam.session_manager.SessionManager") as mock_sm:
             mock_sm.return_value.check_expiry.return_value = True
             mock_sm.return_value.refresh_token.return_value = new_token_mock
 
