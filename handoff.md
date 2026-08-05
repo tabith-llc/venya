@@ -105,6 +105,9 @@ VENYA_DB_URL=postgresql://venya:venya@localhost:5432/venya \
 2. ~~Secrets routes~~ — ✅ fully implemented with vault integration (18 tests)
 3. ~~Roles routes~~ — ✅ fully implemented (20 tests pass) — PUT update added
 4. ~~Admin routes~~ — ✅ fully implemented (30 tests pass) — enrollment, key rotation, user management
+5. ~~Enrollment routes~~ — ✅ fully implemented (7 tests pass)
+6. ~~Auth routes~~ — ✅ fully implemented (12 tests pass) — WebAuthn credential persistence added
+7. ~~Recovery routes~~ — ✅ fully implemented (4 tests pass)
 5. Executor daemon integration testing
 6. CLI integration with server API
 
