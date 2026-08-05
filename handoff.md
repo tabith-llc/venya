@@ -2,7 +2,7 @@
 
 **Date:** 2025-08-04
 **Branch:** init
-**Last commit:** `ffad439` feat(server): implement health check DB probe + filter session secrets
+**Last commit:** `725f83a` test(server): add executor daemon integration tests + fix empty secret filter bug
 
 ---
 
@@ -92,6 +92,7 @@ Migrating Stage 1 output filter from C extension to Rust, then switching vault f
 
 **Filter routes** (`routes/filter.py`):
 - `POST /sessions/{session_id}/filter` — filter secrets from executor output using hash matching
+- Bug fix: empty secret values now skipped to prevent false positive masking
 
 ### Build Status
 - `./build.sh` — builds executor package (Rust + Python)
@@ -103,6 +104,8 @@ Migrating Stage 1 output filter from C extension to Rust, then switching vault f
 ### Remaining Issues
 
 All server route stubs have been implemented. No remaining stub handlers.
+
+**Bug fix (2025-08-04):** Empty secret values in `filter_output()` caused every output byte to be masked (since `b"" in output` is always `True`). Fixed by skipping empty secret values.
 
 ## Build Commands
 
@@ -151,7 +154,7 @@ VENYA_DB_URL=postgresql://venya:venya@localhost:5432/venya \
 8. ~~Audit routes~~ — ✅ fully implemented (8 tests pass)
 9. ~~Health routes~~ — ✅ fully implemented (4 tests pass) — DB connectivity check
 10. ~~Filter routes~~ — ✅ fully implemented (4 tests pass) — session secret filtering
-11. Executor daemon integration testing
+11. ~~Executor daemon integration testing~~ — ✅ fully implemented (25 integration tests pass); also fixed empty secret filter bug
 12. CLI integration with server API
 
 ## Key Files
@@ -183,7 +186,7 @@ VENYA_DB_URL=postgresql://venya:venya@localhost:5432/venya \
 - `packages/server/src/venya_server/app.py` — FastAPI app
 - `packages/server/src/venya_server/ca.py` — CA manager for executor certificates
 - `packages/server/src/venya_server/fido2/manager.py` — FIDO2/WebAuthn manager
-- `packages/server/tests/` — 119 tests across 7 test files
+- `packages/server/tests/` — 144 tests across 8 test files (including 25 executor integration tests)
 
 ### Docs
 - `venya-docs/code/plan.md` — Project plan
