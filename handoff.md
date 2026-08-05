@@ -2,7 +2,7 @@
 
 **Date:** 2025-08-04
 **Branch:** init
-**Last commit:** `7434f2b` feat(cli): modernize CLI with httpx, config file, and exec command
+**Last commit:** `450477a` fix(tests): update capability isolation tests for PostgreSQL backend
 
 ---
 
@@ -111,6 +111,8 @@ Migrating Stage 1 output filter from C extension to Rust, then switching vault f
 All server route stubs have been implemented. No remaining stub handlers.
 
 **Bug fix (2025-08-04):** Empty secret values in `filter_output()` caused every output byte to be masked (since `b"" in output` is always `True`). Fixed by skipping empty secret values.
+
+**Test fix (2025-08-04):** `test_capability_isolation.py` tests updated to use `database_url` instead of `database_path` after PostgreSQL migration.
 
 ## Build Commands
 
