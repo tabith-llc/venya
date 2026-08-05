@@ -75,11 +75,12 @@ def run_command(args: Any) -> int:
     Returns:
         Exit code (0 for success, 1 for error).
     """
-    client = APIClient()
+    server_url = getattr(args, "server_url", None)
+    client = APIClient(server_url=server_url)
 
     # Authenticate if no token is available (init and recovery are public)
     command = args.command
-    if command not in ("init", "recovery") and not client.access_token:
+    if command not in ("init", "recovery", "config") and not client.config.access_token:
         user_id = getattr(args, "user_id", None)
         try:
             print("Authenticating with security key...")
@@ -87,32 +88,41 @@ def run_command(args: Any) -> int:
             print("Authentication successful.")
         except APIClientAuthenticationError as e:
             print(f"Authentication failed: {e}", file=sys.stderr)
+            client.close()
             return 1
         except APIClientError as e:
             print(f"Authentication failed: {e}", file=sys.stderr)
+            client.close()
             return 1
 
-    if command == "init":
-        return cmd_init(client, args)
-    elif command == "store":
-        return cmd_store(client, args)
-    elif command == "get":
-        return cmd_get(client, args)
-    elif command == "list":
-        return cmd_list(client, args)
-    elif command == "delete":
-        return cmd_delete(client, args)
-    elif command == "audit":
-        return cmd_audit(client, args)
-    elif command == "admin":
-        return cmd_admin(client, args)
-    elif command == "role":
-        return cmd_role(client, args)
-    elif command == "recovery":
-        return cmd_recovery(client, args)
-    else:
-        print(f"Unknown command: {command}", file=sys.stderr)
-        return 1
+    try:
+        if command == "init":
+            return cmd_init(client, args)
+        elif command == "store":
+            return cmd_store(client, args)
+        elif command == "get":
+            return cmd_get(client, args)
+        elif command == "list":
+            return cmd_list(client, args)
+        elif command == "delete":
+            return cmd_delete(client, args)
+        elif command == "audit":
+            return cmd_audit(client, args)
+        elif command == "admin":
+            return cmd_admin(client, args)
+        elif command == "role":
+            return cmd_role(client, args)
+        elif command == "recovery":
+            return cmd_recovery(client, args)
+        elif command == "exec":
+            return cmd_exec(client, args)
+        elif command == "config":
+            return cmd_config(client, args)
+        else:
+            print(f"Unknown command: {command}", file=sys.stderr)
+            return 1
+    finally:
+        client.close()
 
 
 def cmd_init(client: APIClient, args: Any) -> int:
@@ -613,3 +623,134 @@ def cmd_recovery(client: APIClient, args: Any) -> int:
     except Exception as e:
         print(f"Recovery failed: {e}", file=sys.stderr)
         return 1
+
+
+def cmd_exec(client: APIClient, args: Any) -> int:
+    """Execute a command via the executor with secret injection and output filtering.
+
+    Flow:
+        1. Authenticate (if not already)
+        2. Resolve secrets for the command
+        3. Create executor session
+        4. Execute command via executor daemon API
+        5. Display filtered output
+    """
+    command = " ".join(args.command) if args.command else ""
+    if not command:
+        print("Error: command required", file=sys.stderr)
+        return 1
+
+    executor_id = getattr(args, "executor_id", None) or "default"
+
+    # Step 1: Get secrets for this command
+    secret_keys = getattr(args, "secrets", None)
+    secret_bundles = []
+
+    if secret_keys:
+        print(f"Fetching {len(secret_keys)} secret(s) for executor...")
+        for key in secret_keys:
+            try:
+                result = client.get(f"/api/v1/secrets/{key}/executor")
+                secret_bundles.append({
+                    "secret_id": result["secret_id"],
+                    "value": result["wrapped_value"],
+                })
+                print(f"  Secret '{key}' ready.")
+            except APIClientError as e:
+                print(f"  Warning: could not fetch secret '{key}': {e}", file=sys.stderr)
+    else:
+        print("No secrets specified. Command will run without injected credentials.")
+
+    # Step 2: Create executor session
+    try:
+        session_result = client.post(
+            "/api/v1/executors/sessions",
+            json={
+                "executor_id": executor_id,
+                "secrets": secret_bundles,
+            },
+        )
+        session_id = session_result["session_id"]
+        print(f"Session created: {session_id}")
+    except APIClientError as e:
+        print(f"Failed to create session: {e}", file=sys.stderr)
+        return 1
+
+    # Step 3: Execute command via executor
+    try:
+        print(f"Executing: {command}")
+        exec_result = client.post(
+            f"/api/v1/executors/{executor_id}/execute",
+            json={
+                "session_id": session_id,
+                "command": command,
+                "secrets": secret_bundles,
+            },
+        )
+        exit_code = exec_result.get("exit_code", 0)
+        stdout = exec_result.get("stdout", "")
+        stderr = exec_result.get("stderr", "")
+
+        # Display filtered output
+        if stdout:
+            print(stdout, end="" if stdout.endswith("\n") else "\n")
+        if stderr:
+            print(stderr, end="" if stderr.endswith("\n") else "\n", file=sys.stderr)
+
+        masked_count = exec_result.get("masked_count", 0)
+        if masked_count > 0:
+            print(f"\n({masked_count} secret(s) masked in output)", file=sys.stderr)
+
+        print(f"\nCommand exited with code: {exit_code}")
+        return exit_code
+    except APIClientError as e:
+        print(f"Execution failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_config(client: APIClient, args: Any) -> int:
+    """Manage CLI configuration."""
+    config_command = getattr(args, "config_command", None)
+    if config_command is None:
+        print("Error: config subcommand required (show, set-server, clear-token)", file=sys.stderr)
+        return 1
+
+    if config_command == "show":
+        return cmd_config_show(client)
+    elif config_command == "set-server":
+        return cmd_config_set_server(client, args)
+    elif config_command == "clear-token":
+        return cmd_config_clear_token(client)
+    else:
+        print(f"Unknown config command: {config_command}", file=sys.stderr)
+        return 1
+
+
+def cmd_config_show(client: APIClient) -> int:
+    """Show current configuration."""
+    config = client.config
+    print("Venya CLI Configuration:")
+    print(f"  Server URL: {config.server_url}")
+    if config.access_token:
+        print(f"  Access Token: [set] (expires soon — run 'venya exec' to refresh)")
+    else:
+        print("  Access Token: [not set]")
+    print(f"  Config File: {config.config_file}")
+    return 0
+
+
+def cmd_config_set_server(client: APIClient, args: Any) -> int:
+    """Set the server URL."""
+    url = args.url
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    client.config.server_url = url
+    print(f"Server URL set to: {url}")
+    return 0
+
+
+def cmd_config_clear_token(client: APIClient) -> int:
+    """Clear stored access token."""
+    client.config.access_token = None
+    print("Access token cleared. Re-authentication required.")
+    return 0
