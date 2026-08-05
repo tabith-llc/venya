@@ -2,7 +2,7 @@
 
 **Date:** 2025-08-04
 **Branch:** init
-**Last commit:** `725f83a` test(server): add executor daemon integration tests + fix empty secret filter bug
+**Last commit:** `7434f2b` feat(cli): modernize CLI with httpx, config file, and exec command
 
 ---
 
@@ -30,6 +30,11 @@ Migrating Stage 1 output filter from C extension to Rust, then switching vault f
 - PostgreSQL integration tests pass (Docker container)
 - `Backend.get_vault()` added for easy vault instantiation
 - 15 ORM models (added `WebAuthnCredential` table)
+- **CLI modernized**: `api_client.py` and `fido2_client.py` migrated from `urllib` to `httpx`
+- **CLI config**: `~/.config/venya/config.json` for server_url and access_token persistence
+- **CLI exec command**: `venya exec <cmd>` — runs commands via executor with secret injection + Stage 2 filtering
+- **CLI config command**: `venya config show|set-server|clear-token`
+- 28 CLI tests pass (Config + APIClient)
 
 #### Server Package — All Routes Implemented (119 tests)
 
@@ -155,7 +160,7 @@ VENYA_DB_URL=postgresql://venya:venya@localhost:5432/venya \
 9. ~~Health routes~~ — ✅ fully implemented (4 tests pass) — DB connectivity check
 10. ~~Filter routes~~ — ✅ fully implemented (4 tests pass) — session secret filtering
 11. ~~Executor daemon integration testing~~ — ✅ fully implemented (25 integration tests pass); also fixed empty secret filter bug
-12. CLI integration with server API
+12. ~~CLI integration with server API~~ — ✅ fully implemented (28 CLI tests pass); httpx migration, config file, `venya exec`, `venya config`
 
 ## Key Files
 
@@ -176,8 +181,13 @@ VENYA_DB_URL=postgresql://venya:venya@localhost:5432/venya \
 - `packages/vault/src/venya/iam/role_manager.py` — RoleManager CRUD + membership
 - `packages/vault/src/venya/iam/enrollment_manager.py` — Enrollment token management
 - `packages/vault/src/venya/iam/session_manager.py` — Session + access token management
+- `packages/vault/src/venya/cli/cli.py` — CLI argument parser (11 commands + exec/config)
+- `packages/vault/src/venya/cli/api_client.py` — httpx-based API client with config persistence
+- `packages/vault/src/venya/cli/fido2_client.py` — Headless WebAuthn client (httpx)
+- `packages/vault/src/venya/cli/commands.py` — CLI command implementations
 - `packages/vault/alembic/` — Migrations
 - `packages/vault/tests/test_vault.py` — 12 unit tests
+- `packages/vault/tests/test_cli.py` — 28 CLI tests
 
 ### Server
 - `packages/server/src/venya_server/routes/` — All API endpoints (11 routes, 40+ endpoints)
