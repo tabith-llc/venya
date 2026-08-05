@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
+from .audit import AuditLogger
 from .config import ExecutorConfig
 from .command_validator import CommandValidator
 from .executor import Executor
@@ -558,10 +559,12 @@ class ExecutorDaemon:
             Configured Executor instance with HTTP client for server API calls.
         """
         strategy = create_strategy(self.config.injection_method, self.config.secret_base_fd)
+        audit_logger = AuditLogger(self.config.audit, session_id)
         return Executor(
             command_validator=self.command_validator,
             session_id=session_id,
             injection_strategy=strategy,
+            audit_logger=audit_logger,
             http_client=self.client,
         )
 

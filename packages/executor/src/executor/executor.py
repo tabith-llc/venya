@@ -20,9 +20,11 @@ import select
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .audit import AuditLogger
 from .command_validator import CommandValidator
 from .filter import filter_and_redact
 from .injector import (
@@ -77,6 +79,7 @@ class Executor:
     session_id: str
     injection_strategy: InjectionStrategy = field(default_factory=MemfdStrategy)
     allowed_fds: set[int] = field(default_factory=lambda: {0, 1, 2})
+    audit_logger: AuditLogger | None = None
     _sentinel_registry: SentinelRegistry | None = None
     http_client: Any = None  # httpx.Client for server API calls
     _injection_result: InjectionResult | None = field(init=False, default=None)
@@ -114,17 +117,40 @@ class Executor:
         # Step 1: Validate command
         is_valid, reason = self.command_validator.validate(command)
         if not is_valid:
+            if self.audit_logger:
+                self.audit_logger.emit("command_rejected", command=command, reason=reason)
             raise ValueError(f"Command rejected: {reason}")
 
         logger.info("Executing command: %s", command)
+        start_time = time.time()
 
         # Step 2: Prepare secret injections
         injections: list[SecretBundle] = []
         try:
             injections = self._prepare_injections(secrets)
 
+            # Audit: credential_injected
+            if self.audit_logger:
+                self.audit_logger.emit(
+                    "credential_injected",
+                    command=command,
+                    strategy=self.injection_strategy.name(),
+                    fd_count=len(injections),
+                    secret_ids=[s.secret_id for s in injections],
+                )
+
             # Step 3: Execute with injected secrets
             result = self._run_command(command, injections, env_override, cwd)
+
+            # Audit: command_executed
+            if self.audit_logger:
+                duration_ms = (time.time() - start_time) * 1000
+                self.audit_logger.emit(
+                    "command_executed",
+                    command=command,
+                    exit_code=result.exit_code,
+                    duration_ms=round(duration_ms, 2),
+                )
 
             return result
 
