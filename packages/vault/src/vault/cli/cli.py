@@ -189,6 +189,82 @@ def create_parser() -> argparse.ArgumentParser:
     )
     revoke_parser.add_argument("executor_id", help="Executor ID to revoke")
 
+    # admin export-ca-cert
+    export_cert_parser = admin_sub.add_parser(
+        "export-ca-cert", help="Export the CA certificate (for distribution to executors)"
+    )
+    export_cert_parser.add_argument(
+        "--output", "-o",
+        help="Output file path (default: stdout)",
+    )
+    export_cert_parser.add_argument(
+        "--ca-dir",
+        help="CA directory path (default: /etc/venya/ca)",
+    )
+
+    # admin export-ca-key
+    export_key_parser = admin_sub.add_parser(
+        "export-ca-key", help="Export the CA private key (encrypted with passphrase)"
+    )
+    export_key_parser.add_argument(
+        "--output", "-o",
+        required=True,
+        help="Output file path for encrypted key",
+    )
+    export_key_parser.add_argument(
+        "--ca-dir",
+        help="CA directory path (default: /etc/venya/ca)",
+    )
+
+    # admin split-ca-key
+    split_key_parser = admin_sub.add_parser(
+        "split-ca-key", help="Split CA key using Shamir's Secret Sharing"
+    )
+    split_key_parser.add_argument(
+        "--threshold", "-t",
+        type=int,
+        required=True,
+        help="Minimum shares needed to reconstruct (K)",
+    )
+    split_key_parser.add_argument(
+        "--shares", "-s",
+        type=int,
+        required=True,
+        help="Total number of shares to create (N)",
+    )
+    split_key_parser.add_argument(
+        "--output-dir", "-d",
+        required=True,
+        help="Directory to write share files",
+    )
+    split_key_parser.add_argument(
+        "--ca-dir",
+        help="CA directory path (default: /etc/venya/ca)",
+    )
+
+    # admin restore-ca-key
+    restore_key_parser = admin_sub.add_parser(
+        "restore-ca-key", help="Restore CA key from shares or encrypted backup"
+    )
+    restore_key_parser.add_argument(
+        "--mode",
+        choices=["shares", "backup"],
+        required=True,
+        help="Restore mode: from shares (SSS) or from encrypted backup file",
+    )
+    restore_key_parser.add_argument(
+        "--shares", nargs="+",
+        help="Share files for SSS restore (e.g., share-1 share-2 share-3)",
+    )
+    restore_key_parser.add_argument(
+        "--backup-file",
+        help="Encrypted backup file for backup restore mode",
+    )
+    restore_key_parser.add_argument(
+        "--ca-dir",
+        help="CA directory path (default: /etc/venya/ca)",
+    )
+
     # role
     role_parser = subparsers.add_parser("role", help="Role management")
     role_sub = role_parser.add_subparsers(dest="role_command")

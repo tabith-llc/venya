@@ -48,6 +48,13 @@ class RevocationListResponse(BaseModel):
     revoked_serials: list[str] = Field(default_factory=list, description="List of revoked certificate serial numbers")
 
 
+class HeartbeatResponse(BaseModel):
+    """Response for heartbeat ping."""
+
+    revoked: bool = Field(default=False, description="Whether this executor has been revoked")
+    new_cert_required: bool = Field(default=False, description="Whether a certificate rotation is needed")
+
+
 # --- Helpers ---
 
 
@@ -93,8 +100,6 @@ async def register_executor(
 
     Also creates a corresponding user account for the executor.
     """
-    from ..iam.models import User, ExecutorCert
-
     db = _get_db(request)
     ca_manager = _get_ca_manager(request)
 
@@ -109,6 +114,8 @@ async def register_executor(
             )
 
         # Create executor user account if it doesn't exist
+        from vault.iam.models import User, ExecutorCert
+
         existing_user = db.query(User).filter(User.user_id == req.executor_id).first()
         if existing_user is None:
             # Auto-create executor user account
@@ -189,12 +196,70 @@ async def get_revocation_list(
     Executors poll this endpoint periodically (every 60s) to check
     if their certificate has been revoked.
     """
-    from ..iam.models import ExecutorCertRevocation
+    from vault.iam.models import ExecutorCertRevocation
 
     db = _get_db(request)
     try:
         revocations = db.query(ExecutorCertRevocation).all()
         serials = [r.serial_number for r in revocations]
         return RevocationListResponse(revoked_serials=serials)
+    finally:
+        db.close()
+
+
+@router.post(
+    "/heartbeat",
+    response_model=HeartbeatResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def heartbeat(
+    request: Request,
+) -> HeartbeatResponse:
+    """Receive heartbeat from executor.
+
+    Executors POST to this endpoint every 30s to signal liveness.
+    The server responds with revocation status and cert rotation hint.
+
+    This is a public endpoint — no authentication required.
+    """
+    from vault.iam.models import ExecutorCert, ExecutorCertRevocation
+
+    db = _get_db(request)
+    try:
+        body = await request.json()
+        executor_id = body.get("executor_id", "")
+        cert_fingerprint = body.get("cert_fingerprint", "")
+
+        revoked = False
+        new_cert_required = False
+
+        if executor_id:
+            # Check if executor's current cert is revoked
+            current_cert = (
+                db.query(ExecutorCert)
+                .filter(ExecutorCert.executor_id == executor_id)
+                .first()
+            )
+
+            if current_cert:
+                # Check revocation list
+                revoked = (
+                    db.query(ExecutorCertRevocation)
+                    .filter(ExecutorCertRevocation.serial_number == current_cert.serial_number)
+                    .first()
+                    is not None
+                )
+
+                # Check if cert needs rotation (within 3 days of expiry)
+                from datetime import datetime, timezone, timedelta
+                now = datetime.now(timezone.utc)
+                expiry_threshold = now + timedelta(days=3)
+                if current_cert.not_after < expiry_threshold:
+                    new_cert_required = True
+
+        return HeartbeatResponse(
+            revoked=revoked,
+            new_cert_required=new_cert_required,
+        )
     finally:
         db.close()

@@ -301,6 +301,14 @@ def cmd_admin(client: APIClient, args: Any) -> int:
         return cmd_admin_rotate_key(client, args)
     elif admin_command == "revoke-executor":
         return cmd_admin_revoke_executor(client, args)
+    elif admin_command == "export-ca-cert":
+        return cmd_admin_export_ca_cert(args)
+    elif admin_command == "export-ca-key":
+        return cmd_admin_export_ca_key(args)
+    elif admin_command == "split-ca-key":
+        return cmd_admin_split_ca_key(args)
+    elif admin_command == "restore-ca-key":
+        return cmd_admin_restore_ca_key(args)
     else:
         print(f"Unknown admin command: {admin_command}", file=sys.stderr)
         return 1
@@ -760,4 +768,278 @@ def cmd_config_clear_token(client: APIClient) -> int:
     """Clear stored access token."""
     client.config.access_token = None
     print("Access token cleared. Re-authentication required.")
+    return 0
+
+
+# --- CA Key Management Commands (local, run on server) ---
+
+
+def _resolve_ca_dir(args: Any) -> str:
+    """Resolve the CA directory path."""
+    return getattr(args, "ca_dir", None) or "/etc/venya/ca"
+
+
+def cmd_admin_export_ca_cert(args: Any) -> int:
+    """Export the CA certificate to a file or stdout.
+
+    This command reads the CA certificate from the server's CA directory
+    and writes it to the specified output file or stdout. The certificate
+    is then distributed out-of-band to executor machines.
+    """
+    import sys
+    from pathlib import Path
+
+    ca_dir = _resolve_ca_dir(args)
+    ca_cert_path = Path(ca_dir) / "ca.crt"
+
+    if not ca_cert_path.exists():
+        print(f"Error: CA certificate not found at {ca_cert_path}", file=sys.stderr)
+        print("Run 'venya init' on the server to generate the CA.", file=sys.stderr)
+        return 1
+
+    cert_data = ca_cert_path.read_bytes()
+
+    output = getattr(args, "output", None)
+    if output:
+        Path(output).write_bytes(cert_data)
+        print(f"CA certificate exported to {output}")
+    else:
+        sys.stdout.buffer.write(cert_data)
+        sys.stdout.buffer.write(b"\n")
+        print("(CA certificate written to stdout — transfer securely)", file=sys.stderr)
+
+    return 0
+
+
+def cmd_admin_export_ca_key(args: Any) -> int:
+    """Export the CA private key, encrypted with a passphrase.
+
+    Reads the CA private key from disk, encrypts it using AES-256-CBC
+    with a user-provided passphrase, and writes the encrypted blob to
+    the specified output file.
+
+    The plaintext key is never written to disk or stdout.
+    """
+    from pathlib import Path
+
+    import cryptography.hazmat.primitives.ciphers as ciphers
+    import cryptography.hazmat.primitives.hashes as hashes
+    from cryptography.hazmat.primitives.ciphers import algorithms, modes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    ca_dir = _resolve_ca_dir(args)
+    ca_key_path = Path(ca_dir) / "ca.key"
+    output_path = Path(args.output)
+
+    if not ca_key_path.exists():
+        print(f"Error: CA key not found at {ca_dir}", file=sys.stderr)
+        print("Run 'venya init' on the server to generate the CA.", file=sys.stderr)
+        return 1
+
+    # Read the plaintext key
+    plaintext_key = ca_key_path.read_bytes()
+
+    # Prompt for passphrase (twice for confirmation)
+    passphrase1 = None
+    while passphrase1 is None:
+        passphrase1 = input("Enter passphrase for encrypted key: ")
+        passphrase2 = input("Confirm passphrase: ")
+        if passphrase1 != passphrase2:
+            print("Passphrases do not match. Try again.")
+            passphrase1 = None
+
+    if not passphrase1:
+        print("Error: passphrase cannot be empty", file=sys.stderr)
+        return 1
+
+    # Derive encryption key from passphrase using PBKDF2
+    salt = os.urandom(16)
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=600_000,
+    )
+    key = kdf.derive(passphrase1.encode())
+
+    # Encrypt with AES-256-CBC
+    iv = os.urandom(16)
+    cipher = ciphers.Cipher(
+        algorithms.AES(key),
+        modes.CBC(iv),
+    )
+    encryptor = cipher.encryptor()
+
+    # PKCS7 padding
+    block_size = 16
+    padding_len = block_size - (len(plaintext_key) % block_size)
+    padded = plaintext_key + bytes([padding_len] * padding_len)
+
+    encrypted = encryptor.update(padded) + encryptor.finalize()
+
+    # Write: salt (16) + iv (16) + encrypted data
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(salt + iv + encrypted)
+    output_path.chmod(0o600)
+
+    print(f"CA key encrypted and exported to {output_path}")
+    print("Store this file securely. It requires the passphrase to decrypt.")
+    return 0
+
+
+def cmd_admin_split_ca_key(args: Any) -> int:
+    """Split the CA private key using Shamir's Secret Sharing.
+
+    Creates N shares of the CA key where any K shares can reconstruct
+    the key. Shares are written as individual files in the output directory.
+
+    This is the recommended backup method for the CA key.
+    """
+    from pathlib import Path
+
+    from vault.shamir import combine, split
+
+    ca_dir = _resolve_ca_dir(args)
+    ca_key_path = Path(ca_dir) / "ca.key"
+    output_dir = Path(args.output_dir)
+
+    if not ca_key_path.exists():
+        print(f"Error: CA key not found at {ca_dir}", file=sys.stderr)
+        print("Run 'venya init' on the server to generate the CA.", file=sys.stderr)
+        return 1
+
+    plaintext_key = ca_key_path.read_bytes()
+    threshold = args.threshold
+    num_shares = args.shares
+
+    if threshold > num_shares:
+        print("Error: threshold cannot exceed number of shares", file=sys.stderr)
+        return 1
+
+    shares = split(plaintext_key, threshold=threshold, shares=num_shares)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, share in enumerate(shares):
+        share_id = share[0]
+        share_file = output_dir / f"share-{share_id:02d}"
+        share_file.write_bytes(share[1:])  # Store data only (ID is embedded)
+        share_file.chmod(0o600)
+        print(f"  Share {share_id}/{num_shares} written to {share_file}")
+
+    print(f"\n{num_shares} shares created. Any {threshold} are needed to reconstruct.")
+    print("Distribute shares to different locations/administrators.")
+    print("Keep this directory secure and delete after distribution.")
+    return 0
+
+
+def cmd_admin_restore_ca_key(args: Any) -> int:
+    """Restore the CA private key from shares or an encrypted backup.
+
+    Two modes:
+    - shares: Reconstruct using Shamir's Secret Sharing from N share files
+    - backup: Decrypt from a passphrase-encrypted backup file
+    """
+    from pathlib import Path
+
+    from vault.shamir import combine
+
+    ca_dir = _resolve_ca_dir(args)
+    ca_key_path = Path(ca_dir) / "ca.key"
+    mode = args.mode
+
+    if mode == "shares":
+        share_files = getattr(args, "shares", None)
+        if not share_files or len(share_files) < 2:
+            print("Error: at least 2 share files required for SSS restore", file=sys.stderr)
+            return 1
+
+        # Read shares (prepend ID byte back)
+        shares = []
+        for share_path_str in share_files:
+            share_path = Path(share_path_str)
+            if not share_path.exists():
+                print(f"Error: share file not found: {share_path}", file=sys.stderr)
+                return 1
+            data = share_path.read_bytes()
+            # We don't know the ID from the file, so we need to embed it
+            # The share file is just the data bytes; ID must be provided
+            # For simplicity, we expect the filename to encode the ID
+            # e.g., share-01, share-02, etc.
+            try:
+                share_id = int(share_path.stem.split("-")[-1])
+            except (ValueError, IndexError):
+                print(
+                    f"Error: cannot determine share ID from filename '{share_path.stem}'. "
+                    f"Use filenames like 'share-01', 'share-02', etc.",
+                    file=sys.stderr,
+                )
+                return 1
+            shares.append(bytes([share_id]) + data)
+
+        try:
+            reconstructed = combine(shares)
+        except ValueError as e:
+            print(f"Error reconstructing shares: {e}", file=sys.stderr)
+            return 1
+
+    elif mode == "backup":
+        backup_file = getattr(args, "backup_file", None)
+        if not backup_file:
+            print("Error: --backup-file required for backup restore mode", file=sys.stderr)
+            return 1
+
+        backup_path = Path(backup_file)
+        if not backup_path.exists():
+            print(f"Error: backup file not found: {backup_path}", file=sys.stderr)
+            return 1
+
+        import cryptography.hazmat.primitives.ciphers as ciphers
+        import cryptography.hazmat.primitives.hashes as hashes
+        from cryptography.hazmat.primitives.ciphers import algorithms, modes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+        encrypted_data = backup_path.read_bytes()
+        if len(encrypted_data) < 32:
+            print("Error: backup file too small", file=sys.stderr)
+            return 1
+
+        salt = encrypted_data[:16]
+        iv = encrypted_data[16:32]
+        ciphertext = encrypted_data[32:]
+
+        passphrase = input("Enter passphrase to decrypt backup: ")
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=600_000,
+        )
+        key = kdf.derive(passphrase.encode())
+
+        cipher = ciphers.Cipher(
+            ciphers.algorithms.AES(key),
+            ciphers.modes.CBC(iv),
+        )
+        decryptor = cipher.decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+
+        # Remove PKCS7 padding
+        padding_len = padded[-1]
+        if padding_len < 1 or padding_len > 16:
+            print("Error: invalid passphrase or corrupted backup", file=sys.stderr)
+            return 1
+        reconstructed = padded[:-padding_len]
+
+    else:
+        print(f"Unknown restore mode: {mode}", file=sys.stderr)
+        return 1
+
+    # Write the restored key
+    ca_key_path.parent.mkdir(parents=True, exist_ok=True)
+    ca_key_path.write_bytes(reconstructed)
+    ca_key_path.chmod(0o600)
+
+    print(f"CA key restored to {ca_key_path}")
+    print("WARNING: All existing executor certificates signed by this CA are now valid again.")
+    print("Consider rotating executor certificates after restore.")
     return 0

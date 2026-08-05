@@ -1,0 +1,12 @@
+[Unit]
+Description=Venya Executor tmpfs (secret storage)
+Before=venya-executor.service
+
+[Mount]
+What=tmpfs
+Where=/tmp/venya-secrets
+Type=tmpfs
+Options=mode=0700,noexec,nosuid,nodev,size=100M
+
+[Install]
+WantedBy=multi-user.target
