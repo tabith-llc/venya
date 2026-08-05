@@ -53,6 +53,9 @@ class InjectionStrategy(abc.ABC):
     - Registering cleanup functions to destroy injected secrets
     """
 
+    def __init__(self, secret_base_fd: int = 100) -> None:
+        self.secret_base_fd = secret_base_fd
+
     @abc.abstractmethod
     def prepare(self, secrets: list[SecretBundle]) -> InjectionResult:
         """Prepare injection resources. Returns result with cleanup funcs."""
