@@ -222,9 +222,11 @@ class ExecutorConfig(BaseSettings):
             path: Path to write config file.
         """
         try:
-            import tomli_w as tomli_w  # type: ignore[import-not-found]
-        except ImportError:
             import tomli_w  # type: ignore[import-not-found]
+        except ImportError:
+            raise ImportError(
+                "tomli_w is required for config save. Install with: pip install tomli-w"
+            )
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

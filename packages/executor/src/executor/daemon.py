@@ -17,7 +17,7 @@ import os
 import signal
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +28,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from .audit import AuditLogger
-from .config import ExecutorConfig
 from .command_validator import CommandValidator
+from .config import ExecutorConfig
 from .executor import Executor
 from .strategies.factory import create_strategy
 
@@ -110,7 +110,7 @@ class CertificateManager:
         cert_pem = data["cert_pem"].encode()
         ca_cert_pem = data["ca_cert_pem"].encode()
         self.serial = data["serial_number"]
-        self._not_after = datetime.fromisoformat(data["not_after"]).replace(tzinfo=timezone.utc)
+        self._not_after = datetime.fromisoformat(data["not_after"]).replace(tzinfo=UTC)
 
         # Validate CA signature before saving
         _validate_ca_signature(cert_pem, ca_cert_pem)
@@ -151,7 +151,7 @@ class CertificateManager:
             return True
 
         cert = x509.load_pem_x509_certificate(Path(self.cert_path).read_bytes())
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expiry = cert.not_valid_after_utc
         threshold = timedelta(days=self.config.cert_rotation.rotate_before_days)
 
@@ -197,7 +197,7 @@ class CertificateManager:
         cert_pem = data["cert_pem"].encode()
         ca_cert_pem = data["ca_cert_pem"].encode()
         self.serial = data["serial_number"]
-        self._not_after = datetime.fromisoformat(data["not_after"]).replace(tzinfo=timezone.utc)
+        self._not_after = datetime.fromisoformat(data["not_after"]).replace(tzinfo=UTC)
 
         # Validate CA signature
         _validate_ca_signature(cert_pem, ca_cert_pem)
@@ -280,7 +280,7 @@ class CertificateManager:
             cert = x509.load_pem_x509_certificate(Path(self.cert_path).read_bytes())
             self._not_after = cert.not_valid_after_utc
             self.serial = format(cert.serial_number, "016x")
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Corrupted or invalid cert — metadata unavailable but cert
             # still exists, so registration is still skipped.
             logger.warning("Could not parse existing certificate for metadata")
@@ -308,7 +308,6 @@ def _create_csr(private_key: ec.EllipticCurvePrivateKey, executor_id: str) -> by
     Returns:
         PEM-encoded CSR bytes.
     """
-    now = datetime.now(timezone.utc)
     subject = x509.Name([
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
         x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
@@ -341,14 +340,14 @@ def _validate_ca_signature(cert_pem: bytes, ca_cert_pem: bytes) -> None:
         from cryptography.hazmat.primitives.asymmetric.ec import ECDSA, EllipticCurvePublicKey
 
         if not isinstance(ca_public_key, EllipticCurvePublicKey):
-            raise RuntimeError(
+            raise TypeError(
                 f"CA public key is {type(ca_public_key).__name__}, expected ECDSA"
             )
         hash_algo = cert.signature_hash_algorithm
         if hash_algo is None:
             raise RuntimeError("Certificate has no signature hash algorithm")
         ca_public_key.verify(cert.signature, cert.tbs_certificate_bytes, ECDSA(hash_algo))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"Certificate CA validation failed: {e}")
 
 
@@ -371,7 +370,7 @@ def _extract_executor_id_from_cert(cert_path: str) -> str:
             raise ValueError("Certificate has no CN (Common Name)")
         value = cn_attributes[0].value
         return value.decode() if isinstance(value, bytes) else value
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise ValueError(f"Failed to extract executor ID from certificate: {e}")
 
 

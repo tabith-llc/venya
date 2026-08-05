@@ -6,8 +6,6 @@ Policy is configurable at initialization and changeable by an admin.
 
 from __future__ import annotations
 
-import fnmatch
-import re
 from dataclasses import dataclass, field
 
 
@@ -135,8 +133,7 @@ class CommandValidator:
         # Strip leading sudo/su if present
         cmd = command.strip()
         for prefix in ("sudo ", "su "):
-            if cmd.startswith(prefix):
-                cmd = cmd[len(prefix):]
+            cmd = cmd.removeprefix(prefix)
 
         # Get the first word (command)
         first_word = cmd.split()[0] if cmd.split() else cmd

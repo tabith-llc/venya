@@ -22,10 +22,10 @@ logger = logging.getLogger("venya.executor.filter")
 # Hard-fail: executor must have the Rust filter module available
 
 __all__ = [
-    "compute_detection_hashes",
     "build_filter_entries",
-    "filter_output",
+    "compute_detection_hashes",
     "filter_and_redact",
+    "filter_output",
 ]
 
 

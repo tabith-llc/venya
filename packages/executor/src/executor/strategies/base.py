@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import abc
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .executor import SecretBundle

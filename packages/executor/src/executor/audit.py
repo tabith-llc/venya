@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import time
 import threading
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from .config import AuditForwarderConfig
@@ -28,7 +27,7 @@ class AuditEvent:
 
     event_type: str
     session_id: str
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -145,7 +144,7 @@ class AuditLogger:
                         )
             except httpx.ConnectError as e:
                 logger.warning("Audit forward connection error: %s", e)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.error("Audit forward error: %s", e)
 
             time.sleep(delay)
