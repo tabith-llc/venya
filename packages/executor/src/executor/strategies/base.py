@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .executor import SecretBundle
+    from ..bundles import SecretBundle
 
 logger = logging.getLogger("venya.executor.strategies")
 

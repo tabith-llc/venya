@@ -1,6 +1,7 @@
 """Venya executor — command execution and secret injection."""
 
-from .executor import CommandResult, Executor, SecretBundle
+from .bundles import SecretBundle
+from .executor import CommandResult, Executor
 from .strategies import InjectionResult, InjectionStrategy, MemfdStrategy, create_strategy
 
 __all__ = [
