@@ -21,9 +21,9 @@ logger = logging.getLogger("venya.server")
 class SessionMiddleware(BaseHTTPMiddleware):
     """Validates session tokens and manages token rotation.
 
-    Extracts the Bearer token from the Authorization header,
-    looks up the session, validates it's not expired, and attaches
-    user info to request.state.auth_user.
+    Accepts authentication via HttpOnly cookie (browser) or Bearer token
+    (CLI). Extracts the token, looks up the session, validates it's not
+    expired, and attaches user info to request.state.auth_user.
     """
 
     # Paths that don't require authentication
@@ -41,7 +41,15 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/api/v1/executors/register",
         "/api/v1/executors/certs/revocation-list",
         "/api/v1/heartbeat",
+        "/api/v1/auth/login/browser/challenge",
+        "/api/v1/auth/login/browser/assert",
+        "/api/v1/auth/refresh/browser",
+        "/api/v1/auth/logout/browser",
+        "/api/v1/enroll/browser",
+        "/api/v1/enroll/browser/complete",
     })
+
+    ACCESS_TOKEN_COOKIE = "venya_access_token"
 
     def __init__(self, app: Any = None, max_token_age: float = 300.0) -> None:
         """
@@ -70,15 +78,18 @@ class SessionMiddleware(BaseHTTPMiddleware):
             request.state.auth_user = {"caller": "executor"}  # type: ignore[attr-defined]
             return await call_next(request)
 
-        # Extract bearer token
-        auth_header = request.headers.get("authorization", "")
-        if not auth_header.startswith("Bearer "):
+        # Extract token: cookie (browser) takes priority, then bearer header (CLI)
+        token = request.cookies.get(self.ACCESS_TOKEN_COOKIE)
+        if not token:
+            auth_header = request.headers.get("authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+
+        if not token:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": "Missing authentication token"},
             )
-
-        token = auth_header[7:]
 
         # Validate token via backend
         user_info = await self._validate_token(request, token)
