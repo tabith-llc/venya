@@ -37,3 +37,6 @@ POC*/
 .env
 .env.local
 handoff.md
+
+# Dev docs only (not tracked)
+docs/
