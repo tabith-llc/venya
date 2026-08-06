@@ -103,6 +103,7 @@ class Fido2Manager:
             serialized to a dict for the client.
         """
         challenge_id = secrets.token_urlsafe(16)
+        raw_challenge = secrets.token_bytes(32)
 
         # Store challenge metadata
         self.store.store_challenge(
@@ -112,14 +113,13 @@ class Fido2Manager:
                 "username": username,
                 "user_id": user_id,
                 "existing_credential_ids": existing_credential_ids or [],
+                "raw_challenge": raw_challenge,
             },
         )
 
-        # Generate challenge options (will be populated with real FIDO2 data)
+        # Generate challenge options
         options = {
-            "challenge": base64.b64encode(
-                self.store._challenges[challenge_id].data.get("raw_challenge", b"")
-            ).decode("ascii"),
+            "challenge": base64.b64encode(raw_challenge).decode("ascii"),
             "rp": {"id": self.rp_id, "name": self.rp_name},
             "user": {
                 "id": base64.b64encode(user_id.encode()).decode("ascii"),

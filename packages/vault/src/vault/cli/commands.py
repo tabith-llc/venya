@@ -133,7 +133,23 @@ def run_command(args: Any) -> int:
 
 
 def cmd_init(client: APIClient, args: Any) -> int:
-    """Bootstrap the vault."""
+    """Bootstrap the vault with mandatory FIDO2 enrollment.
+
+    Two-step flow:
+    1. Run migrations
+    2. Call POST /api/v1/init → get FIDO2 challenge
+    3. Perform WebAuthn registration with security key
+    4. Call POST /api/v1/init/complete → get recovery code
+    5. Print recovery code
+    """
+    from .fido2_client import (
+        Fido2Auth,
+        Fido2ClientError,
+        Fido2NotFoundError,
+        Fido2TimeoutError,
+        Fido2UserInteractionRequiredError,
+    )
+
     # Run migrations unless skipped
     if not getattr(args, "skip_migrations", False):
         try:
@@ -146,18 +162,37 @@ def cmd_init(client: APIClient, args: Any) -> int:
             return 1
 
     try:
-        result = client.post("/api/v1/init", json={"user_id": args.user_id})
+        fido2 = Fido2Auth(client.config.server_url)
+
+        print(f"Starting vault initialization for user '{args.user_id}'...")
+        print("Please insert your security key when prompted.\n")
+
+        result = fido2.register(user_id=args.user_id, timeout=60.0)
+
         print(f"Initialization complete. User '{args.user_id}' enrolled as admin.")
 
         # Print recovery code (printed once, never stored)
-        if "recovery_code" in result:
+        recovery_code = result.get("recovery_code")
+        if recovery_code:
             print("\n" + "=" * 50)
             print("RECOVERY CODE — Print and store securely!")
             print("This code is printed only once and never stored.")
             print("=" * 50)
-            print(f"  {result['recovery_code']}")
+            print(f"  {recovery_code}")
             print("=" * 50)
         return 0
+    except Fido2NotFoundError as e:
+        print(f"FIDO2 registration failed: {e}", file=sys.stderr)
+        return 1
+    except Fido2TimeoutError as e:
+        print(f"FIDO2 registration timed out: {e}", file=sys.stderr)
+        return 1
+    except Fido2UserInteractionRequiredError as e:
+        print(f"FIDO2 registration failed: {e}", file=sys.stderr)
+        return 1
+    except Fido2ClientError as e:
+        print(f"FIDO2 registration failed: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Initialization failed: {e}", file=sys.stderr)
         return 1
