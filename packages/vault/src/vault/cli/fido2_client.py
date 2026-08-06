@@ -24,6 +24,7 @@ from fido2.webauthn import (
     AuthenticatorData,
     CollectedClientData,
     CredentialRequestOptions,
+    CredentialCreationOptions,
     PublicKeyCredentialDescriptor,
     PublicKeyCredentialRequestOptions,
     UserVerificationRequirement,
@@ -179,6 +180,174 @@ class Fido2Auth:
             "user_id": result["user_id"],
             "session_token": result["session_token"],
             "credential_id": result["credential_id"],
+        }
+
+    def register(self, user_id: str, timeout: float = 60.0) -> dict[str, Any]:
+        """Perform WebAuthn registration (enrollment).
+
+        Used during vault init to enroll the first admin's security key.
+
+        Args:
+            user_id: User ID to register.
+            timeout: Maximum seconds to wait for user interaction.
+
+        Returns:
+            Dict with the server-expected attestation response format.
+
+        Raises:
+            Fido2ClientError: On registration failure.
+            Fido2NotFoundError: If no FIDO2 device is found.
+            Fido2TimeoutError: If user doesn't touch key in time.
+        """
+        # Step 1: Get challenge from server
+        logger.info("Requesting registration challenge from server for user %s", user_id)
+        start_result = self._post("/api/v1/init", {
+            "user_id": user_id,
+        })
+        challenge_id = start_result["challenge_id"]
+        options = start_result["options"]
+
+        # Step 2: Convert server options to fido2 types
+        request_options = self._build_registration_options(options)
+
+        # Step 3: Perform WebAuthn creation
+        logger.info("Waiting for security key touch to register...")
+        try:
+            credential = self._get_credential(request_options, timeout=timeout)
+        except OSError as e:
+            err_str = str(e).lower()
+            if "fido" in err_str or "device" in err_str or "usb" in err_str or "no such" in err_str:
+                raise Fido2NotFoundError(f"No FIDO2 device found: {e}") from e
+            if "time" in err_str or "timeout" in err_str:
+                raise Fido2TimeoutError(f"Registration timed out: {e}") from e
+            raise Fido2ClientError(f"FIDO2 error: {e}") from e
+        except ValueError as e:
+            err_msg = str(e).lower()
+            if "user" in err_msg or "presence" in err_msg or "touch" in err_msg:
+                raise Fido2UserInteractionRequiredError(
+                    "Please touch your security key"
+                ) from e
+            raise Fido2ClientError(f"FIDO2 error: {e}") from e
+
+        # Step 4: Convert credential to server format and complete
+        logger.info("Sending attestation to server")
+        response = self._format_credential_response(credential)
+        result = self._post("/api/v1/init/complete", {
+            "user_id": user_id,
+            "challenge_id": challenge_id,
+            "response": response,
+        })
+
+        return result
+
+    def _build_registration_options(
+        self, options: dict[str, Any]
+    ) -> CredentialCreationOptions:
+        """Convert server challenge options to fido2 CredentialCreationOptions.
+
+        Args:
+            options: WebAuthn registration options from server.
+
+        Returns:
+            CredentialCreationOptions for python-fido2.
+        """
+        challenge = _b64url_decode(options["challenge"])
+
+        pub_key_cred_params = []
+        for param in options.get("pubKeyCredParams", []):
+            pub_key_cred_params.append({
+                "type": param.get("type", "public-key"),
+                "alg": param.get("alg"),
+            })
+
+        exclude_credentials = []
+        for cred in options.get("excludeCredentials", []):
+            if "id" in cred:
+                cred_id = _b64url_decode(cred["id"])
+                exclude_credentials.append(PublicKeyCredentialDescriptor(
+                    type=cred.get("type", "public-key"),
+                    id=cred_id,
+                    transports=cred.get("transports"),
+                ))
+
+        user_id = _b64url_decode(options["user"]["id"])
+
+        public_key = {
+            "rp": options.get("rp", {}),
+            "user": {
+                "id": user_id,
+                "name": options["user"].get("name", ""),
+                "display_name": options["user"].get("displayName", ""),
+            },
+            "challenge": challenge,
+            "pubKeyCredParams": pub_key_cred_params,
+            "timeout": options.get("timeout", 60000),
+            "excludeCredentials": exclude_credentials or None,
+            "attestation": options.get("attestation", "none"),
+        }
+
+        return CredentialCreationOptions(public_key=public_key)
+
+    def _get_credential(
+        self,
+        request_options: CredentialCreationOptions,
+        timeout: float = 60.0,
+    ) -> Any:
+        """Perform WebAuthn credential creation using python-fido2.
+
+        Args:
+            request_options: Credential creation options.
+            timeout: Timeout in seconds.
+
+        Returns:
+            Credential selection from python-fido2.
+        """
+        devices = list_devices()
+        if not devices:
+            raise Fido2NotFoundError("No FIDO2 devices found")
+
+        client = WebAuthnClient()
+        return client.make_credential(request_options.public_key)
+
+    def _format_credential_response(
+        self,
+        credential: Any,
+    ) -> dict[str, Any]:
+        """Convert python-fido2 credential to server-expected format.
+
+        Args:
+            credential: CredentialSelection from python-fido2.
+
+        Returns:
+            Dict in the format the server expects for init/complete.
+        """
+        auth_response = credential.auth_response
+
+        # credential ID
+        cred_id = auth_response.credential_id
+
+        # authenticator data (raw bytes)
+        auth_data = auth_response.auth_data
+
+        # client data
+        client_data = auth_response.client_data
+
+        # attestation object (raw bytes)
+        attestation_object = auth_response.attestation_object
+
+        return {
+            "id": _b64url_encode(cred_id),
+            "rawId": _b64url_encode(cred_id),
+            "response": {
+                "clientDataJSON": _b64url_encode(
+                    _serialize_client_data(client_data)
+                ),
+                "authenticatorData": _b64url_encode(_serialize_auth_data(auth_data)),
+                "attestationObject": _b64url_encode(attestation_object),
+                "transports": auth_response.transports or [],
+            },
+            "type": "public-key",
+            "clientExtensionResults": {},
         }
 
     def _build_request_options(

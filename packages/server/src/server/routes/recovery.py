@@ -1,5 +1,6 @@
 """Break-glass recovery endpoint (alias for /admin/recovery)."""
 
+import hashlib
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -50,6 +51,30 @@ async def recovery(
     try:
         from vault.iam.models import Role, RoleMember, User
 
+        # Validate recovery code against stored hash
+        pepper = getattr(
+            getattr(request.app.state, "config", None),
+            "recovery_code_pepper",
+            "",
+        )
+        submitted_hash = hashlib.sha256((pepper + req.code).encode()).hexdigest()
+
+        # Find admin user with matching recovery code hash
+        admin_user = (
+            db.query(User)
+            .join(RoleMember)
+            .join(Role)
+            .filter(Role.name == "admin")
+            .filter(User.recovery_code_hash == submitted_hash)
+            .first()
+        )
+
+        if admin_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid recovery code",
+            )
+
         # Check if user already exists
         existing = (
             db.query(User).filter(User.user_id == req.new_user_id).first()
@@ -82,7 +107,7 @@ async def recovery(
 
         db.commit()
 
-        logger.info("Recovery: created new admin user %s", req.new_user_id)
+        logger.info("Recovery: created new admin user %s (validated by code from %s)", req.new_user_id, admin_user.user_id)
         return RecoveryResponse(
             success=True,
             action="new_admin",

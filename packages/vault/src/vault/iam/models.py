@@ -37,8 +37,9 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(String(64), unique=True, nullable=False, index=True)
     auth_mode = Column(String(32), nullable=False, default="security-key")
-    enrolled_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    enrolled_at = Column(DateTime, nullable=True)
     session_timeout = Column(Integer, default=900)  # 15 minutes in seconds
+    recovery_code_hash = Column(String(64), nullable=True)
 
     # Relationships
     roles = relationship("RoleMember", back_populates="user")

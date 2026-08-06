@@ -119,6 +119,12 @@ class ServerConfig(BaseSettings):
     audit_remote_url: str | None = Field(default=None, description="Remote syslog URL (tls://host:port)")
     audit_local_retention_days: int = Field(default=90, description="Local audit log retention days")
 
+    # Recovery code pepper (server-side secret for hashing break-glass recovery codes)
+    recovery_code_pepper: str = Field(
+        default="",
+        description="Secret pepper for hashing recovery codes. Must be set in production.",
+    )
+
     @classmethod
     def from_file(cls, path: str | Path) -> ServerConfig:
         """Load configuration from a TOML file.
