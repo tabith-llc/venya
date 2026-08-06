@@ -176,8 +176,12 @@ class EnrollmentToken(Base):
     id = Column(Integer, primary_key=True)
     token = Column(String(128), unique=True, nullable=False, index=True)
     user_id = Column(String(64), nullable=False)
+    created_at = Column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False,
+    )
     expires_at = Column(DateTime, nullable=False)
     consumed = Column(Boolean, default=False, nullable=False)
+    failed_attempts = Column(Integer, default=0, nullable=False)
 
     __table_args__ = (
         Index("ix_enrollment_tokens_token", "token"),

@@ -35,11 +35,12 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.config = config  # type: ignore[attr-defined]
 
     # Register routes at creation time (needed for OpenAPI docs)
-    from .routes import admin, audit, auth, auth_browser, enrollment, executors, filter as filter_routes, health, init as init_route, recovery, roles, secrets
+    from .routes import admin, audit, auth, auth_browser, enroll, enrollment, executors, filter as filter_routes, health, init as init_route, recovery, roles, secrets
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(auth_browser.router, prefix="/api/v1")
+    app.include_router(enroll.router, prefix="/api/v1")
     app.include_router(init_route.router, prefix="/api/v1")
     app.include_router(executors.router, prefix="/api/v1")
     app.include_router(audit.router, prefix="/api/v1")

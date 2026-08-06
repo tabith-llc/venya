@@ -66,6 +66,14 @@ class Fido2Config(BaseModel):
         default_factory=lambda: ["https://localhost"],
         description="Allowed_origins for WebAuthn",
     )
+    enrollment_token_ttl: int = Field(
+        default=15,
+        description="Enrollment token lifetime in minutes",
+    )
+    unmask_auto_hide_timeout: int = Field(
+        default=30,
+        description="Seconds before unmasked secret auto-masks",
+    )
 
 
 class ServerConfig(BaseSettings):
