@@ -56,7 +56,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     from .middleware import auth as auth_middleware
     from .middleware import rbac
     from .middleware import rate_limit
+    from .middleware import security_headers
 
+    app.add_middleware(security_headers.SecurityHeadersMiddleware)
     app.add_middleware(rate_limit.RateLimitMiddleware, config=config.rate_limit)
     app.add_middleware(auth_middleware.SessionMiddleware)
     app.add_middleware(rbac.RBACMiddleware)
