@@ -33,6 +33,9 @@ class SecretCreateResponse(BaseModel):
 class SecretGetRequest(BaseModel):
     unmask: bool = Field(False, description="Return plaintext instead of masked")
     caller: str = Field("human", description="Caller type: human or executor")
+    elevation_token: str | None = Field(
+        None, description="Elevation token for unmasking via browser",
+    )
 
 
 class SecretGetResponse(BaseModel):
@@ -178,11 +181,13 @@ async def secrets_get(
     request: Request,
     unmask: bool = False,
     caller: str = "human",
+    elevation_token: str | None = None,
 ) -> SecretGetResponse:
     """Retrieve a secret value.
 
     Returns masked value by default for humans.
     Executor (mTLS) gets plaintext.
+    Browser users need a valid elevation token to unmask.
     """
     user_info = await _get_user_info(request)
     vault = getattr(request.app.state, "vault", None)
@@ -191,6 +196,85 @@ async def secrets_get(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Vault not initialized",
         )
+
+    # For browser users requesting unmask, validate elevation token
+    if caller == "human" and unmask and elevation_token:
+        backend = getattr(request.app.state, "backend", None)
+        if backend is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Backend not initialized",
+            )
+
+        db = backend.get_session()
+        try:
+            import hashlib
+            from datetime import datetime, timezone
+            from vault.iam.models import ElevationToken
+
+            token_hash = hashlib.sha256(elevation_token.encode()).hexdigest()
+            elevation = (
+                db.query(ElevationToken)
+                .filter(
+                    ElevationToken.token_hash == token_hash,
+                    ElevationToken.user_id == user_info["user_id"],
+                    ElevationToken.used == False,
+                )
+                .first()
+            )
+
+            if elevation is None:
+                # No valid elevation token - return masked
+                value = vault.get(
+                    secret_key=key,
+                    caller=caller,
+                    unmask=False,
+                    user_id=user_info.get("user_id"),
+                )
+                return SecretGetResponse(key=key, value=value, masked=True)
+
+            if elevation.expires_at < datetime.now(timezone.utc):
+                # Expired token - return masked
+                value = vault.get(
+                    secret_key=key,
+                    caller=caller,
+                    unmask=False,
+                    user_id=user_info.get("user_id"),
+                )
+                return SecretGetResponse(key=key, value=value, masked=True)
+
+            # Mark token as used
+            elevation.used = True
+            db.commit()
+
+            # Elevation valid - return plaintext
+            try:
+                value = vault.get(
+                    secret_key=key,
+                    caller=caller,
+                    unmask=True,
+                    user_id=user_info.get("user_id"),
+                )
+                return SecretGetResponse(key=key, value=value, masked=False)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=str(e),
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Elevation token validation failed",
+            )
+        finally:
+            db.close()
 
     try:
         value = vault.get(
