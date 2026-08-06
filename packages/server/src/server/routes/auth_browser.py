@@ -53,6 +53,20 @@ class BrowserLogoutRequest(BaseModel):
     pass
 
 
+class BrowserElevateRequest(BaseModel):
+    pass
+
+
+class BrowserElevateResponse(BaseModel):
+    challenge_id: str
+    options: dict[str, Any]
+
+
+class BrowserElevateCompleteRequest(BaseModel):
+    challenge_id: str
+    response: dict[str, Any]
+
+
 # --- Helpers ---
 
 
@@ -348,3 +362,218 @@ async def browser_logout(
     )
     response.delete_cookie(key=COOKIE_NAME, path="/")
     return response
+
+
+# --- Elevation endpoints ---
+
+ELEVATION_TOKEN_TTL_SECONDS = 60
+
+
+def _hash_elevation_token(token: str) -> str:
+    """SHA-256 hash an elevation token for secure storage."""
+    import hashlib
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _create_elevation_challenge(db, session, fido2_manager, request):
+    """Create a WebAuthn elevation challenge tied to the current session.
+
+    Args:
+        db: Database session.
+        session: The current Session model.
+        fido2_manager: The Fido2Manager instance.
+
+    Returns:
+        Tuple of (challenge_id, browser_options).
+    """
+    from vault.iam.models import WebAuthnCredential
+
+    # Get user's credentials for the allow list
+    credentials = (
+        db.query(WebAuthnCredential)
+        .filter(WebAuthnCredential.user_id == session.user_id)
+        .all()
+    )
+
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No WebAuthn credentials found for this user",
+        )
+
+    challenge_id, options = fido2_manager.start_authentication(
+        user_id=session.user_id,
+    )
+
+    browser_options = challenge_to_browser_options(challenge_id, options)
+
+    # Store the session ID with the challenge so we can verify it matches
+    # The fido2 manager already stores challenge_id -> options mapping
+    # We attach session_id via app state temporarily
+    if not hasattr(request.app.state, "_elevation_challenges"):
+        request.app.state._elevation_challenges = {}
+    request.app.state._elevation_challenges[challenge_id] = {
+        "session_id": session.id,
+        "user_id": session.user_id,
+    }
+
+    return challenge_id, browser_options
+
+
+@router.post(
+    "/auth/elevate/browser/challenge",
+    response_model=BrowserElevateResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def browser_elevate_challenge(
+    request: Request,
+) -> BrowserElevateResponse:
+    """Issue a WebAuthn challenge for elevation (sensitive operations).
+
+    Requires an active session cookie. The user must re-authenticate
+    with their security key to perform sensitive operations like
+    unmasking secret values.
+    """
+    result = _get_session_from_cookie(request)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session",
+        )
+
+    db, session, user_info = result
+    try:
+        fido2_manager = getattr(request.app.state, "fido2_manager", None)
+        if fido2_manager is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="FIDO2 manager not initialized",
+            )
+
+        challenge_id, browser_options = _create_elevation_challenge(
+            db, session, fido2_manager, request
+        )
+
+        return BrowserElevateResponse(
+            challenge_id=challenge_id,
+            options=browser_options,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error("Elevation challenge failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Elevation challenge failed",
+        )
+    finally:
+        db.close()
+
+
+@router.post(
+    "/auth/elevate/browser/assert",
+    status_code=status.HTTP_200_OK,
+)
+async def browser_elevate_assert(
+    req: BrowserElevateCompleteRequest,
+    request: Request,
+) -> dict[str, str]:
+    """Verify WebAuthn elevation assertion and return elevation token.
+
+    Verifies the assertion via Fido2Manager, confirms the challenge
+    was issued for the current session, and returns a short-lived
+    elevation token (60 seconds) for use in sensitive operations.
+    """
+    result = _get_session_from_cookie(request)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session",
+        )
+
+    db, session, user_info = result
+    try:
+        fido2_manager = getattr(request.app.state, "fido2_manager", None)
+        if fido2_manager is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="FIDO2 manager not initialized",
+            )
+
+        # Verify the challenge was issued for this session
+        elevation_challenges = getattr(
+            request.app.state, "_elevation_challenges", {}
+        )
+        challenge_info = elevation_challenges.get(req.challenge_id)
+
+        if challenge_info is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Elevation challenge not found or expired",
+            )
+
+        if challenge_info["session_id"] != session.id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Elevation challenge session mismatch",
+            )
+
+        # Verify the assertion
+        fido2_response = browser_assertion_to_fido2(req.response)
+
+        try:
+            fido2_manager.finish_authentication(
+                req.challenge_id, fido2_response,
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=str(e),
+            ) from e
+
+        # Clean up the challenge
+        del elevation_challenges[req.challenge_id]
+
+        # Create elevation token
+        import secrets as secrets_module
+
+        elevation_token = secrets_module.token_urlsafe(32)
+        token_hash = _hash_elevation_token(elevation_token)
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=ELEVATION_TOKEN_TTL_SECONDS
+        )
+
+        from vault.iam.models import ElevationToken
+
+        elevation_record = ElevationToken(
+            token_hash=token_hash,
+            user_id=session.user_id,
+            expires_at=expires_at,
+        )
+        db.add(elevation_record)
+        db.commit()
+
+        logger.info(
+            "Elevation token created for user %s",
+            session.user_id,
+        )
+
+        return {
+            "status": "ok",
+            "elevation_token": elevation_token,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.error("Elevation assertion failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Elevation assertion failed",
+        ) from e
+    finally:
+        db.close()

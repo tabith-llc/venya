@@ -312,6 +312,22 @@ class ExecutorCertRevocation(Base):
     )
 
 
+class ElevationToken(Base):
+    """Elevation tokens for sensitive operations (secret unmasking)."""
+
+    __tablename__ = "elevation_tokens"
+
+    id = Column(Integer, primary_key=True)
+    token_hash = Column(String(64), unique=True, nullable=False, index=True)
+    user_id = Column(String(64), ForeignKey("users.user_id"), nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    used = Column(Boolean, default=False, nullable=False)
+
+    __table_args__ = (
+        Index("ix_elevation_tokens_expires_at", "expires_at"),
+    )
+
+
 class WebAuthnCredential(Base):
     """WebAuthn credentials for user authentication."""
 

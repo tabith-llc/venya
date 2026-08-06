@@ -290,6 +290,31 @@ class TestPublicPaths:
         )
         assert resp.status_code == 503  # Backend not initialized, not 401
 
+    def test_elevate_challenge_public(self):
+        """Browser elevate challenge should be public."""
+        from server.routes import auth_browser
+
+        app = _create_test_app()
+        app.include_router(auth_browser.router, prefix="/api/v1")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/auth/elevate/browser/challenge")
+        assert resp.status_code == 503  # Backend not initialized, not 401
+
+    def test_elevate_assert_public(self):
+        """Browser elevate assert should be public."""
+        from server.routes import auth_browser
+
+        app = _create_test_app()
+        app.include_router(auth_browser.router, prefix="/api/v1")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/auth/elevate/browser/assert",
+            json={"challenge_id": "x", "response": {}},
+        )
+        assert resp.status_code == 503  # Backend not initialized, not 401
+
 
 class TestMtlsBypass:
     """Tests for mTLS request bypass."""

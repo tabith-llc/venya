@@ -284,3 +284,196 @@ class TestBrowserLogout:
         assert resp.status_code == 200
         set_cookie = resp.headers.get("set-cookie", "")
         assert "venya_access_token=" in set_cookie
+
+
+class TestBrowserElevateChallenge:
+    """Tests for browser elevate challenge endpoint."""
+
+    def test_elevate_challenge_success(self):
+        """POST /auth/elevate/browser/challenge should return browser-formatted options."""
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+
+        user_mock = SimpleNamespace(user_id="user1")
+        now = datetime.now(timezone.utc)
+        session_mock = SimpleNamespace(
+            id=1, user_id="user1", created_at=now,
+            expires_at=now + timedelta(minutes=10), user=user_mock,
+        )
+
+        db = MagicMock()
+        # Mock the chain: query(WebAuthnCredential).filter().all()
+        # Return at least one credential so the challenge can be created
+        mock_cred = MagicMock()
+        mock_cred.credential_id = "cred-1"
+        db.query.return_value.filter.return_value.all.return_value = [mock_cred]
+        # For _get_session_from_cookie: query(Session).filter().first()
+        db.query.return_value.filter.return_value.first.return_value = session_mock
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        fido2 = MagicMock()
+        fido2.start_authentication.return_value = (
+            "elev-challenge-123",
+            {
+                "challenge": "dGVzdA==",
+                "rpId": "localhost",
+                "timeout": 60000,
+                "userVerification": "discouraged",
+            },
+        )
+
+        app = _create_test_app(fido2_manager=fido2, backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False, cookies={"venya_access_token": "valid-token"})
+        resp = client.post("/api/v1/auth/elevate/browser/challenge")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["challenge_id"] == "elev-challenge-123"
+        assert "options" in data
+
+    def test_elevate_challenge_no_cookie(self):
+        """Should return 401 if no session cookie."""
+        backend = MagicMock()
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/auth/elevate/browser/challenge")
+        assert resp.status_code == 401
+
+    def test_elevate_challenge_invalid_session(self):
+        """Should return 401 for invalid session cookie."""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False, cookies={"venya_access_token": "invalid"})
+        resp = client.post("/api/v1/auth/elevate/browser/challenge")
+        assert resp.status_code == 401
+
+
+class TestBrowserElevateAssert:
+    """Tests for browser elevate assert endpoint."""
+
+    def test_elevate_assert_success(self):
+        """POST /auth/elevate/browser/assert should return elevation token."""
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+
+        user_mock = SimpleNamespace(user_id="user1")
+        now = datetime.now(timezone.utc)
+        session_mock = SimpleNamespace(
+            id=1, user_id="user1", created_at=now,
+            expires_at=now + timedelta(minutes=10), user=user_mock,
+        )
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = session_mock
+        db.add = MagicMock()
+        db.commit = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        fido2 = MagicMock()
+        fido2.finish_authentication.return_value = {"user_id": "user1", "credential_id": "cred-1"}
+
+        app = _create_test_app(fido2_manager=fido2, backend=backend)
+
+        # Simulate a prior challenge being stored
+        app.state._elevation_challenges = {
+            "elev-challenge-123": {"session_id": 1, "user_id": "user1"}
+        }
+
+        client = TestClient(app, raise_server_exceptions=False, cookies={"venya_access_token": "valid-token"})
+        resp = client.post(
+            "/api/v1/auth/elevate/browser/assert",
+            json={
+                "challenge_id": "elev-challenge-123",
+                "response": {"id": "dGVzdA=="},
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "elevation_token" in data
+        assert len(data["elevation_token"]) > 0
+
+    def test_elevate_assert_no_cookie(self):
+        """Should return 401 if no session cookie."""
+        # Need a backend so get_backend() doesn't return 503
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/auth/elevate/browser/assert",
+            json={"challenge_id": "chal-1", "response": {"id": "dGVzdA=="}},
+        )
+        assert resp.status_code == 401
+
+    def test_elevate_assert_invalid_challenge(self):
+        """Should return 401 if challenge not found."""
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+
+        user_mock = SimpleNamespace(user_id="user1")
+        now = datetime.now(timezone.utc)
+        session_mock = SimpleNamespace(
+            id=1, user_id="user1", created_at=now,
+            expires_at=now + timedelta(minutes=10), user=user_mock,
+        )
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = session_mock
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        fido2 = MagicMock()
+        app = _create_test_app(fido2_manager=fido2, backend=backend)
+        # No challenges stored
+
+        client = TestClient(app, raise_server_exceptions=False, cookies={"venya_access_token": "valid-token"})
+        resp = client.post(
+            "/api/v1/auth/elevate/browser/assert",
+            json={"challenge_id": "nonexistent", "response": {"id": "dGVzdA=="}},
+        )
+        assert resp.status_code == 401
+
+    def test_elevate_assert_session_mismatch(self):
+        """Should return 401 if challenge session doesn't match."""
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+
+        user_mock = SimpleNamespace(user_id="user1")
+        now = datetime.now(timezone.utc)
+        session_mock = SimpleNamespace(
+            id=99, user_id="user1", created_at=now,
+            expires_at=now + timedelta(minutes=10), user=user_mock,
+        )
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = session_mock
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        fido2 = MagicMock()
+        app = _create_test_app(fido2_manager=fido2, backend=backend)
+
+        # Challenge is for session 1, but cookie is for session 99
+        app.state._elevation_challenges = {
+            "chal-1": {"session_id": 1, "user_id": "user1"}
+        }
+
+        client = TestClient(app, raise_server_exceptions=False, cookies={"venya_access_token": "valid-token"})
+        resp = client.post(
+            "/api/v1/auth/elevate/browser/assert",
+            json={"challenge_id": "chal-1", "response": {"id": "dGVzdA=="}},
+        )
+        assert resp.status_code == 401

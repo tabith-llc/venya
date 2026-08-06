@@ -47,6 +47,8 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/api/v1/auth/logout/browser",
         "/api/v1/enroll/browser",
         "/api/v1/enroll/browser/complete",
+        "/api/v1/auth/elevate/browser/challenge",
+        "/api/v1/auth/elevate/browser/assert",
     })
 
     ACCESS_TOKEN_COOKIE = "venya_access_token"
