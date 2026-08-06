@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class DatabaseConfig(BaseModel):
     """Database configuration."""
 
+    database_url: str | None = Field(default=None, description="PostgreSQL database URL")
     database_path: str = Field(default="venya.db", description="Path to SQLCipher database")
     passphrase: str | None = Field(default=None, description="Master passphrase for key derivation")
     wal_mode: bool = Field(default=True, description="Enable WAL mode")
@@ -77,7 +78,7 @@ class ServerConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="VENYA_",
         env_nested_delimiter="__",
-        env_file=".env",
+        env_file="/opt/venya/.env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -88,6 +89,7 @@ class ServerConfig(BaseSettings):
     debug: bool = Field(default=False, description="Enable debug mode")
 
     # Database
+    db_url: str | None = Field(default=None, description="PostgreSQL database URL (overrides db.database_path)")
     db: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
     # Sessions

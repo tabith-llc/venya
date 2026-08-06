@@ -18,38 +18,28 @@ from vault.iam.role_manager import RoleManager
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def init_db(db_config: BackendConfig) -> Backend:
+def init_db(db_config: BackendConfig, db_url: str | None = None) -> Backend:
     """Initialize the database backend.
 
-    Uses VENYA_DB_URL env var for PostgreSQL, falling back to
-    the passed db_config for local SQLite development.
+    Uses database_url for PostgreSQL connection.
 
     Args:
-        db_config: Database configuration.
+        db_config: Database configuration (passphrase only).
+        db_url: PostgreSQL database URL.
 
     Returns:
         Configured Backend instance.
     """
     import os
 
-    database_url = os.environ.get("VENYA_DB_URL")
-    if database_url:
-        config = BackendConfig(
-            database_url=database_url,
-            passphrase=db_config.passphrase.encode("utf-8") if db_config.passphrase else None,
-        )
-    else:
-        from pathlib import Path
+    database_url = db_url or os.environ.get("VENYA_DB_URL")
+    if not database_url:
+        raise RuntimeError("No database URL configured. Set VENYA_DB_URL or config.db_url")
 
-        path = Path(db_config.database_path)
-        if not path.parent.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-
-        config = BackendConfig(
-            database_path=path,
-            passphrase=db_config.passphrase.encode("utf-8") if db_config.passphrase else None,
-            wal_mode=db_config.wal_mode,
-        )
+    config = BackendConfig(
+        database_url=database_url,
+        passphrase=db_config.passphrase.encode("utf-8") if db_config.passphrase else None,
+    )
     return Backend(config)
 
 
