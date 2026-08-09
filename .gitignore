@@ -40,3 +40,12 @@ handoff.md
 
 # Dev docs only (not tracked)
 docs/
+
+# Generated project overviews
+project_overview_*.md
+
+# Developer notes
+DEVELOPER_NOTE.md
+
+# Qdrant local state
+.qdrant
