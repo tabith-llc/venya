@@ -1,5 +1,6 @@
 """Tests for GvisorStrategy."""
 
+import subprocess
 from executor.strategies.gvisor_strategy import GvisorStrategy, CONTAINER_SECRET_DIR
 from executor.strategies.base import SecretMount
 from unittest.mock import patch, MagicMock
@@ -425,6 +426,267 @@ class TestCaptureContainerOutput:
 
         assert stdout == b""
         assert stderr == b""
+
+
+class TestApplyEgressRules:
+    """Tests for Executor._apply_egress_rules()."""
+
+    def _make_executor(self):
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        return Executor(
+            command_validator=validator,
+            session_id="test-session",
+        )
+
+    def test_apply_egress_rules_creates_chain(self, monkeypatch):
+        """_apply_egress_rules creates an iptables chain for the session."""
+        executor = self._make_executor()
+        allowed_hosts = [{"host": "10.10.10.50", "port": 22}]
+        network_name = "venya-net-abc123"
+        session_uuid = "test-uuid-1"
+
+        called_commands = []
+
+        def mock_run(cmd, **kwargs):
+            called_commands.append(cmd)
+            mock_result = MagicMock()
+            mock_result.stdout = b""
+            mock_result.stderr = b""
+            mock_result.returncode = 0
+            return mock_result
+
+        monkeypatch.setattr("executor.executor.subprocess.run", mock_run)
+
+        executor._apply_egress_rules(allowed_hosts, network_name, session_uuid)
+
+        chain_name = f"VENYA_EGRESS_{session_uuid}"
+        assert any(chain_name in cmd for cmd in called_commands)
+
+    def test_apply_egress_rules_adds_dns_rules(self, monkeypatch):
+        """_apply_egress_rules adds UDP and TCP port 53 DNS rules."""
+        executor = self._make_executor()
+        allowed_hosts = []
+        network_name = "venya-net-abc123"
+        session_uuid = "test-uuid-1"
+
+        called_commands = []
+
+        def mock_run(cmd, **kwargs):
+            called_commands.append(cmd)
+            mock_result = MagicMock()
+            mock_result.stdout = b""
+            mock_result.stderr = b""
+            mock_result.returncode = 0
+            return mock_result
+
+        monkeypatch.setattr("executor.executor.subprocess.run", mock_run)
+
+        executor._apply_egress_rules(allowed_hosts, network_name, session_uuid)
+
+        dns_udp_cmds = [cmd for cmd in called_commands if "udp" in cmd]
+        dns_tcp_cmds = [cmd for cmd in called_commands if "tcp" in cmd and "--dport" in cmd and "53" in cmd]
+        assert any(any("dport" in item for item in cmd) and any("53" in item for item in cmd) for cmd in dns_udp_cmds)
+        assert any(any("dport" in item for item in cmd) and any("53" in item for item in cmd) for cmd in dns_tcp_cmds)
+
+    def test_apply_egress_rules_adds_host_rules(self, monkeypatch):
+        """_apply_egress_rules adds ACCEPT rules for each allowed host:port."""
+        executor = self._make_executor()
+        allowed_hosts = [
+            {"host": "10.10.10.50", "port": 22},
+            {"host": "10.10.10.60", "port": 443},
+        ]
+        network_name = "venya-net-abc123"
+        session_uuid = "test-uuid-1"
+
+        called_commands = []
+
+        def mock_run(cmd, **kwargs):
+            called_commands.append(cmd)
+            mock_result = MagicMock()
+            mock_result.stdout = b""
+            mock_result.stderr = b""
+            mock_result.returncode = 0
+            return mock_result
+
+        monkeypatch.setattr("executor.executor.subprocess.run", mock_run)
+
+        executor._apply_egress_rules(allowed_hosts, network_name, session_uuid)
+
+        host22_cmds = [cmd for cmd in called_commands if "10.10.10.50" in cmd]
+        host443_cmds = [cmd for cmd in called_commands if "10.10.10.60" in cmd]
+        assert any(any("22" in item for item in cmd) for cmd in host22_cmds)
+        assert any(any("443" in item for item in cmd) for cmd in host443_cmds)
+
+    def test_apply_egress_rules_adds_drop_rule(self, monkeypatch):
+        """_apply_egress_rules adds a final DROP ALL rule."""
+        executor = self._make_executor()
+        allowed_hosts = [{"host": "10.10.10.50", "port": 22}]
+        network_name = "venya-net-abc123"
+        session_uuid = "test-uuid-1"
+
+        called_commands = []
+
+        def mock_run(cmd, **kwargs):
+            called_commands.append(cmd)
+            mock_result = MagicMock()
+            mock_result.stdout = b""
+            mock_result.stderr = b""
+            mock_result.returncode = 0
+            return mock_result
+
+        monkeypatch.setattr("executor.executor.subprocess.run", mock_run)
+
+        executor._apply_egress_rules(allowed_hosts, network_name, session_uuid)
+
+        assert any("DROP" in item for cmd in called_commands for item in cmd)
+
+    def test_apply_egress_rules_attaches_to_forward_chain(self, monkeypatch):
+        """_apply_egress_rules attaches the chain to the FORWARD chain."""
+        executor = self._make_executor()
+        allowed_hosts = []
+        network_name = "venya-net-abc123"
+        session_uuid = "test-uuid-1"
+
+        called_commands = []
+
+        def mock_run(cmd, **kwargs):
+            called_commands.append(cmd)
+            mock_result = MagicMock()
+            mock_result.stdout = b""
+            mock_result.stderr = b""
+            mock_result.returncode = 0
+            return mock_result
+
+        monkeypatch.setattr("executor.executor.subprocess.run", mock_run)
+
+        executor._apply_egress_rules(allowed_hosts, network_name, session_uuid)
+
+        chain_short = network_name[:12]
+        chain_name = f"VENYA_EGRESS_{session_uuid}"
+        assert any(f"br-{chain_short}" in cmd and chain_name in cmd for cmd in called_commands)
+
+    def test_apply_egress_rules_stores_chain_name(self, monkeypatch):
+        """_apply_egress_rules stores the chain name for cleanup."""
+        executor = self._make_executor()
+        allowed_hosts = []
+        network_name = "venya-net-abc123"
+        session_uuid = "test-uuid-1"
+
+        called_commands = []
+
+        def mock_run(cmd, **kwargs):
+            called_commands.append(cmd)
+            mock_result = MagicMock()
+            mock_result.stdout = b""
+            mock_result.stderr = b""
+            mock_result.returncode = 0
+            return mock_result
+
+        monkeypatch.setattr("executor.executor.subprocess.run", mock_run)
+
+        executor._apply_egress_rules(allowed_hosts, network_name, session_uuid)
+
+        assert executor._egress_chain_name == f"VENYA_EGRESS_{session_uuid}"
+
+    def test_apply_egress_rules_fails_on_iptables_error(self, monkeypatch):
+        """_apply_egress_rules raises RuntimeError when iptables fails."""
+        executor = self._make_executor()
+        allowed_hosts = []
+        network_name = "venya-net-abc123"
+        session_uuid = "test-uuid-1"
+
+        def mock_run(cmd, **kwargs):
+            error = subprocess.CalledProcessError(1, cmd)
+            error.stderr = b"iptables error"
+            raise error
+
+        monkeypatch.setattr("executor.executor.subprocess.run", mock_run)
+
+        try:
+            executor._apply_egress_rules(allowed_hosts, network_name, session_uuid)
+            assert False, "Expected RuntimeError"
+        except RuntimeError as e:
+            assert "iptables" in str(e).lower() or "egress" in str(e).lower()
+
+
+class TestCleanupEgressRules:
+    """Tests for Executor._cleanup_egress_rules()."""
+
+    def _make_executor(self):
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        return Executor(
+            command_validator=validator,
+            session_id="test-session",
+        )
+
+    def test_cleanup_flushes_chain(self, monkeypatch):
+        """_cleanup_egress_rules flushes the iptables chain."""
+        executor = self._make_executor()
+        executor._egress_chain_name = "VENYA_EGRESS_test-uuid"
+
+        called_commands = []
+
+        def mock_run(cmd, **kwargs):
+            called_commands.append(cmd)
+            mock_result = MagicMock()
+            mock_result.stdout = b""
+            mock_result.stderr = b""
+            mock_result.returncode = 0
+            return mock_result
+
+        monkeypatch.setattr("executor.executor.subprocess.run", mock_run)
+
+        executor._cleanup_egress_rules()
+
+        assert any("VENYA_EGRESS_test-uuid" in cmd and ("-F" in cmd or "--flush" in cmd) for cmd in called_commands)
+
+    def test_cleanup_deletes_chain(self, monkeypatch):
+        """_cleanup_egress_rules deletes the iptables chain."""
+        executor = self._make_executor()
+        executor._egress_chain_name = "VENYA_EGRESS_test-uuid"
+
+        called_commands = []
+
+        def mock_run(cmd, **kwargs):
+            called_commands.append(cmd)
+            mock_result = MagicMock()
+            mock_result.stdout = b""
+            mock_result.stderr = b""
+            mock_result.returncode = 0
+            return mock_result
+
+        monkeypatch.setattr("executor.executor.subprocess.run", mock_run)
+
+        executor._cleanup_egress_rules()
+
+        assert any("VENYA_EGRESS_test-uuid" in cmd and "-X" in cmd for cmd in called_commands)
+
+    def test_cleanup_is_noop_when_no_chain(self, monkeypatch):
+        """_cleanup_egress_rules is a no-op when no chain was set."""
+        executor = self._make_executor()
+        executor._egress_chain_name = None
+
+        called_commands = []
+
+        def mock_run(cmd, **kwargs):
+            called_commands.append(cmd)
+            mock_result = MagicMock()
+            mock_result.stdout = b""
+            mock_result.stderr = b""
+            mock_result.returncode = 0
+            return mock_result
+
+        monkeypatch.setattr("executor.executor.subprocess.run", mock_run)
+
+        executor._cleanup_egress_rules()
+
+        assert called_commands == []
 
 
 class TestFilterAndBuildResult:

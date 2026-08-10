@@ -3,8 +3,8 @@
 Orchestrates the full execution pipeline:
   1. Validate command against policy
   2. Retrieve secrets from server
-  3. Inject credentials via FDs
-  4. Execute command
+  3. Inject credentials (memfd FDs or tmpfs mounts for gVisor)
+  4. Execute command (direct subprocess OR gVisor sandbox)
   5. Capture and filter output (Stage 1 + Stage 2)
   6. Clean up (delete secrets, revoke tokens)
 """
@@ -18,6 +18,7 @@ import re
 import select
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -32,7 +33,8 @@ from .injector import (
     strip_sentinel,
     verify_fd_whitelist,
 )
-from .strategies.base import InjectionResult, InjectionStrategy
+from .strategies.base import InjectionResult, InjectionStrategy, SecretMount
+from .strategies.gvisor_strategy import GvisorStrategy
 from .strategies.memfd_strategy import MemfdStrategy
 
 logger = logging.getLogger("venya.executor")
@@ -55,10 +57,23 @@ class CommandResult:
 MAX_OUTPUT_BYTES = 262144  # 256 KB per stream
 TRUNCATION_MARKER = "... [OUTPUT TRUNCATED: {n} bytes discarded]\n"
 
+# gVisor container image — minimal, no network tools
+GVISOR_IMAGE = "venya-executor:minimal"
+
+# How long to wait for a container to finish
+CONTAINER_TIMEOUT = 3600  # 1 hour max
+
 
 @dataclass
 class Executor:
     """Main executor — orchestrates command execution pipeline.
+
+    Supports two execution modes:
+    - memfd: Direct subprocess with FD-passed secrets (existing behavior)
+    - gvisor: gVisor-sandboxed Docker container with tmpfs-mounted secrets
+              and no network access
+
+    The mode is determined by the injection strategy's name().
 
     NOTE: Executor processes commands sequentially. The _injection_result
     field is per-execution state that assumes one active command at a time.
@@ -73,6 +88,7 @@ class Executor:
     http_client: Any = None  # httpx.Client for server API calls
     _injection_result: InjectionResult | None = field(init=False, default=None)
     _bundles: list[SecretBundle] = field(init=False, default_factory=list)
+    _egress_chain_name: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         """Validate the injection strategy before first use."""
@@ -129,7 +145,15 @@ class Executor:
                 )
 
             # Step 3: Execute with injected secrets
-            result = self._run_command(command, injections, env_override, cwd)
+            # Branch based on strategy type
+            if self.injection_strategy.name() == "gvisor":
+                result = self._run_command_gvisor(
+                    command, injections, env_override, cwd
+                )
+            else:
+                result = self._run_command_direct(
+                    command, injections, env_override, cwd
+                )
 
             # Audit: command_executed
             if self.audit_logger:
@@ -200,23 +224,20 @@ class Executor:
 
         return self._bundles
 
-    def _run_command(
+    # ================================================================
+    # DIRECT EXECUTION (existing memfd path — unchanged)
+    # ================================================================
+
+    def _run_command_direct(
         self,
         command: str,
         injections: list[SecretBundle],
         env_override: dict[str, str] | None,
         cwd: str | None,
     ) -> CommandResult:
-        """Run the command with injected secrets.
+        """Run command directly via subprocess.Popen (memfd strategy).
 
-        Args:
-            command: The command to execute.
-            injections: List of secret bundles (used for filtering).
-            env_override: Environment variable overrides.
-            cwd: Working directory.
-
-        Returns:
-            CommandResult.
+        This is the existing execution path. Kept for backwards compat.
         """
         # Build process environment
         env = os.environ.copy()
@@ -385,6 +406,355 @@ class Executor:
             stderr = stderr[:MAX_OUTPUT_BYTES] + marker
 
         return stdout, stderr
+
+    # ================================================================
+    # gVisor SANDBOX EXECUTION (new path)
+    # ================================================================
+
+    def _run_command_gvisor(
+        self,
+        command: str,
+        injections: list[SecretBundle],
+        env_override: dict[str, str] | None,
+        cwd: str | None,
+    ) -> CommandResult:
+        """Run command inside a gVisor-sandboxed Docker container.
+
+        Key security properties:
+        - Network access is DISABLED (--network=none)
+        - Secrets are mounted as read-only tmpfs files
+        - gVisor's Sentry intercepts syscalls (no direct host kernel access)
+        - stdout/stderr are captured from container logs
+
+        Args:
+            command: The command to execute inside the container.
+            injections: Secret bundles (for filtering reference).
+            env_override: Environment variables to set.
+            cwd: Working directory (mapped into container).
+
+        Returns:
+            CommandResult with filtered output.
+        """
+        import docker  # type: ignore[import-not-found]
+
+        # Build volume mounts for secrets
+        secret_mounts: list[SecretMount] = []
+        if self._injection_result:
+            secret_mounts = self._injection_result.secret_mounts
+
+        volumes: dict[str, dict[str, str]] = {}
+        for mount in secret_mounts:
+            volumes[mount.path] = {
+                "bind": mount.container_path,
+                "mode": "ro",
+            }
+
+        # Build environment (excluding secrets — they come from files)
+        container_env: list[str] = []
+        if env_override:
+            for k, v in env_override.items():
+                container_env.append(f"{k}={v}")
+
+        # Unique container name for this session
+        container_name = f"venya-{self.session_id}-{uuid.uuid4().hex[:8]}"
+
+        logger.info(
+            "Launching gVisor container: name=%s, mounts=%d, network=none",
+            container_name,
+            len(secret_mounts),
+        )
+
+        # Connect to Docker daemon
+        client = docker.from_env()
+
+        # Track the container so cleanup can remove it
+        container = None
+
+        try:
+            # Launch container with gVisor runtime
+            container = client.containers.run(
+                image=GVISOR_IMAGE,
+                runtime="runsc",          # gVisor sandbox
+                command=["sh", "-c", command],
+                name=container_name,
+                detach=True,
+                stdin_open=False,
+                tty=False,
+                network_mode="none",      # NO NETWORK ACCESS
+                volumes=volumes,
+                environment=container_env,
+                working_dir=cwd or "/work",
+                auto_remove=False,        # We'll remove manually after capturing logs
+                mem_limit="512m",         # Prevent resource exhaustion
+                cpu_quota=100000,         # 1 CPU max
+                pids_limit=100,           # Prevent fork bombs
+                read_only=False,          # Need writable /tmp inside container
+                tmpfs={"/tmp": "size=64m,mode=1777"},  # Writable tmpfs inside container
+            )
+
+            # Wait for container to finish
+            result = container.wait(timeout=CONTAINER_TIMEOUT)
+            exit_code = result.get("StatusCode", -1)
+
+            # Capture stdout/stderr from container logs
+            stdout, stderr = self._capture_container_output(container)
+
+            logger.info(
+                "gVisor container exited: code=%d, stdout=%d bytes, stderr=%d bytes",
+                exit_code,
+                len(stdout),
+                len(stderr),
+            )
+
+            # Stage 1 + Stage 2 filtering (same as direct path)
+            return self._filter_and_build_result(
+                command, exit_code, stdout, stderr, injections
+            )
+
+        except docker.errors.ContainerError as e:
+            logger.error("gVisor container error: %s", e)
+            return CommandResult(
+                command=command,
+                exit_code=-1,
+                stdout=b"",
+                stderr=str(e).encode(),
+            )
+        except docker.errors.ImageNotFound:
+            logger.error("Container image not found: %s", GVISOR_IMAGE)
+            raise RuntimeError(
+                f"Container image {GVISOR_IMAGE} not found. "
+                f"Build it with: docker build -t {GVISOR_IMAGE} ."
+            )
+        except Exception as e:
+            logger.exception("gVisor execution failed")
+            raise
+        finally:
+            # Always remove the container
+            if container is not None:
+                try:
+                    container.remove(force=True)
+                except Exception:
+                    logger.warning("Failed to remove container %s", container_name)
+
+    def _apply_egress_rules(
+        self,
+        allowed_hosts: list[dict[str, Any]],
+        network_name: str,
+        session_uuid: str,
+    ) -> None:
+        """Apply iptables egress rules for gVisor container network.
+
+        Creates a unique iptables chain with:
+        1. ACCEPT rules for DNS (UDP/TCP port 53)
+        2. ACCEPT rules for each allowed host:port
+        3. DROP ALL as default policy
+
+        The chain is attached to the Docker bridge's FORWARD chain.
+
+        Args:
+            allowed_hosts: List of {host, port} dicts for allowed destinations.
+            network_name: Docker network name (used to derive bridge interface).
+            session_uuid: UUID for unique chain naming.
+
+        Raises:
+            RuntimeError: If iptables commands fail.
+        """
+        chain_name = f"VENYA_EGRESS_{session_uuid}"
+        bridge_name = f"br-{network_name[:12]}"
+
+        commands = [
+            # Create chain
+            ["iptables", "-N", chain_name],
+            # DNS rules (UDP + TCP port 53)
+            ["iptables", "-A", chain_name, "-p", "udp", "--dport", "53", "-j", "ACCEPT"],
+            ["iptables", "-A", chain_name, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"],
+        ]
+
+        # Add rules for each allowed host
+        for host in allowed_hosts:
+            host_ip = host["host"]
+            host_port = host["port"]
+            commands.append([
+                "iptables", "-A", chain_name,
+                "-d", host_ip,
+                "-p", "tcp",
+                "--dport", str(host_port),
+                "-j", "ACCEPT",
+            ])
+
+        # Default DROP all
+        commands.append(["iptables", "-A", chain_name, "-j", "DROP"])
+
+        # Attach chain to FORWARD
+        commands.append([
+            "iptables", "-I", "FORWARD",
+            "-o", bridge_name,
+            "-j", chain_name,
+        ])
+
+        # Execute all commands
+        for cmd in commands:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=10,
+                )
+                if result.returncode != 0:
+                    self._egress_chain_name = None
+                    raise RuntimeError(
+                        f"iptables failed: {' '.join(cmd)}: {result.stderr.decode()}"
+                    )
+            except subprocess.CalledProcessError as e:
+                self._egress_chain_name = None
+                raise RuntimeError(
+                    f"iptables egress rule failed: {' '.join(e.cmd)}: {e.stderr.decode()}"
+                ) from e
+            except subprocess.TimeoutExpired:
+                self._egress_chain_name = None
+                raise RuntimeError(
+                    f"iptables timed out: {' '.join(cmd)}"
+                )
+
+        self._egress_chain_name = chain_name
+        logger.info("Applied egress rules: chain=%s, hosts=%d", chain_name, len(allowed_hosts))
+
+    def _cleanup_egress_rules(self) -> None:
+        """Clean up iptables egress rules.
+
+        Flushes the chain and removes it. No-op if no chain was created.
+        """
+        if not self._egress_chain_name:
+            return
+
+        try:
+            subprocess.run(
+                ["iptables", "-F", self._egress_chain_name],
+                capture_output=True,
+                timeout=10,
+            )
+            subprocess.run(
+                ["iptables", "-X", self._egress_chain_name],
+                capture_output=True,
+                timeout=10,
+            )
+            logger.info("Cleaned up egress rules: chain=%s", self._egress_chain_name)
+        except subprocess.SubprocessError:
+            logger.warning("Failed to clean up egress rules: chain=%s", self._egress_chain_name)
+        finally:
+            self._egress_chain_name = None
+
+    def _capture_container_output(self, container: Any) -> tuple[bytes, bytes]:
+        """Capture stdout and stderr from a Docker container.
+
+        Docker combines stdout/stderr in logs when tty=False.
+        We separate them using the stream attribute.
+
+        Args:
+            container: Docker container object.
+
+        Returns:
+            Tuple of (stdout_bytes, stderr_bytes).
+        """
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+
+        try:
+            logs = container.logs(stream=True, follow=False)
+            for chunk in logs:
+                # Docker log entries have an 8-byte header when stream=True
+                # First byte indicates stream: 1=stdout, 2=stderr
+                if len(chunk) > 8 and chunk[0:1] in (b"\x01", b"\x02"):
+                    payload = chunk[8:]
+                    if chunk[0:1] == b"\x01":
+                        stdout_chunks.append(payload)
+                    else:
+                        stderr_chunks.append(payload)
+                else:
+                    # No header — treat as stdout
+                    stdout_chunks.append(chunk)
+        except Exception:
+            logger.warning("Failed to capture container logs", exc_info=True)
+
+        stdout = b"".join(stdout_chunks)[:MAX_OUTPUT_BYTES]
+        stderr = b"".join(stderr_chunks)[:MAX_OUTPUT_BYTES]
+
+        return stdout, stderr
+
+    # ================================================================
+    # SHARED FILTERING (used by both execution paths)
+    # ================================================================
+
+    def _filter_and_build_result(
+        self,
+        command: str,
+        exit_code: int,
+        stdout: bytes,
+        stderr: bytes,
+        injections: list[SecretBundle],
+    ) -> CommandResult:
+        """Run Stage 1 + Stage 2 filtering and build CommandResult.
+
+        This is the shared post-processing path for both direct subprocess
+        and gVisor container execution. The filtering logic is identical
+        regardless of how the process was launched.
+
+        Args:
+            command: Original command string.
+            exit_code: Process exit code.
+            stdout: Raw stdout bytes.
+            stderr: Raw stderr bytes.
+            injections: Secret bundles for filtering reference.
+
+        Returns:
+            CommandResult with filtered output.
+        """
+        # Stage 1: Local filtering (Rust extension)
+        masked_stdout, masked_stderr, stdout_ids, stderr_ids = filter_and_redact(
+            stdout,
+            stderr,
+            [{"secret_id": s.secret_id, "value": s.value} for s in injections],
+        )
+
+        all_masked_ids = sorted(set(stdout_ids + stderr_ids))
+
+        # Stage 2: Server-side definitive filtering
+        stage2_stdout = masked_stdout
+        stage2_stderr = masked_stderr
+        stage2_masked_ids = all_masked_ids
+
+        if self.http_client is not None:
+            try:
+                stage2_stdout, stage2_stderr, stage2_masked_ids = self._send_to_stage2(
+                    stdout,
+                    stderr,
+                    [{"secret_id": s.secret_id, "value": s.value} for s in injections],
+                )
+            except Exception:
+                logger.exception("Stage 2 filter failed — using Stage 1 results")
+
+        logger.info(
+            "Command exited with code %d, %d secrets masked",
+            exit_code,
+            len(stage2_masked_ids),
+        )
+
+        return CommandResult(
+            command=command,
+            exit_code=exit_code,
+            stdout=stage2_stdout,
+            stderr=stage2_stderr,
+            masked_secret_ids=stage2_masked_ids,
+            output_truncated=(
+                len(stdout) > MAX_OUTPUT_BYTES or len(stderr) > MAX_OUTPUT_BYTES
+            ),
+            original_stdout_size=len(stdout),
+            original_stderr_size=len(stderr),
+        )
+
+    # ================================================================
+    # CLEANUP (unchanged)
+    # ================================================================
 
     def _cleanup_injections(self) -> None:
         """Clean up all secret injections.
