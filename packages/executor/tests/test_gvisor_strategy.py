@@ -788,6 +788,145 @@ class TestCaptureContainerOutput:
         assert stderr == b""
 
 
+class TestExecuteWithAllowedHosts:
+    """Tests for Executor.execute() with allowed_hosts parameter."""
+
+    def _make_mock_docker(self):
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = [b"\x01hello world"]
+        mock_network = MagicMock()
+        mock_network.name = "venya-net-test123"
+        mock_network.id = "net-abc123"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.networks.create.return_value = mock_network
+        mock_docker = MagicMock()
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors.ContainerError = Exception
+        mock_docker.errors.ImageNotFound = Exception
+        return mock_docker, mock_client, mock_container
+
+    def test_execute_with_allowed_hosts_passes_to_gvisor(self, monkeypatch):
+        """execute() passes allowed_hosts to _run_command_gvisor."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_docker, mock_client, mock_container = self._make_mock_docker()
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+
+            # Mock strategy prepare to avoid /dev/shm dependency
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            # Mock _prepare_injections to return empty list
+            monkeypatch.setattr(executor, "_prepare_injections", lambda secrets: [])
+
+            gvisor_called_with = []
+
+            original_gvisor = executor._run_command_gvisor
+
+            def mock_gvisor(command, injections, env_override, cwd, allowed_hosts=None):
+                gvisor_called_with.append(allowed_hosts)
+                return original_gvisor(command, injections, env_override, cwd, allowed_hosts)
+
+            monkeypatch.setattr(executor, "_run_command_gvisor", mock_gvisor)
+
+            def mock_subprocess_run(cmd, **kwargs):
+                mock_result = MagicMock()
+                mock_result.stdout = b""
+                mock_result.stderr = b""
+                mock_result.returncode = 0
+                return mock_result
+
+            monkeypatch.setattr("executor.executor.subprocess.run", mock_subprocess_run)
+
+            allowed_hosts = [{"host": "10.10.10.50", "port": 22}]
+            executor.execute("/bin/echo hello", [], allowed_hosts=allowed_hosts)
+
+            assert len(gvisor_called_with) == 1
+            assert gvisor_called_with[0] == allowed_hosts
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
+
+    def test_execute_without_allowed_hosts_passes_none(self, monkeypatch):
+        """execute() passes None to _run_command_gvisor when no allowed_hosts."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_docker, mock_client, mock_container = self._make_mock_docker()
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+
+            # Mock strategy prepare to avoid /dev/shm dependency
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            # Mock _prepare_injections to return empty list
+            monkeypatch.setattr(executor, "_prepare_injections", lambda secrets: [])
+
+            gvisor_called_with = []
+
+            original_gvisor = executor._run_command_gvisor
+
+            def mock_gvisor(command, injections, env_override, cwd, allowed_hosts=None):
+                gvisor_called_with.append(allowed_hosts)
+                return original_gvisor(command, injections, env_override, cwd, allowed_hosts)
+
+            monkeypatch.setattr(executor, "_run_command_gvisor", mock_gvisor)
+
+            def mock_subprocess_run(cmd, **kwargs):
+                mock_result = MagicMock()
+                mock_result.stdout = b""
+                mock_result.stderr = b""
+                mock_result.returncode = 0
+                return mock_result
+
+            monkeypatch.setattr("executor.executor.subprocess.run", mock_subprocess_run)
+
+            executor.execute("/bin/echo hello", [])
+
+            assert len(gvisor_called_with) == 1
+            assert gvisor_called_with[0] is None
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
+
+
 class TestApplyEgressRules:
     """Tests for Executor._apply_egress_rules()."""
 

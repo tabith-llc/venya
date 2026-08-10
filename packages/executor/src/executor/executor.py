@@ -107,6 +107,7 @@ class Executor:
         secrets: list[dict[str, Any]],
         env_override: dict[str, str] | None = None,
         cwd: str | None = None,
+        allowed_hosts: list[dict[str, Any]] | None = None,
     ) -> CommandResult:
         """Execute a command with secret injection and output filtering.
 
@@ -115,6 +116,7 @@ class Executor:
             secrets: List of secret dicts with 'secret_id', 'value', 'wrapped_value'.
             env_override: Environment variables to set (not for secrets).
             cwd: Working directory for the command.
+            allowed_hosts: List of {host, port} dicts for egress whitelist (gvisor only).
 
         Returns:
             CommandResult with exit code, filtered output, and audit data.
@@ -136,19 +138,21 @@ class Executor:
 
             # Audit: credential_injected
             if self.audit_logger:
-                self.audit_logger.emit(
-                    "credential_injected",
-                    command=command,
-                    strategy=self.injection_strategy.name(),
-                    fd_count=len(injections),
-                    secret_ids=[s.secret_id for s in injections],
-                )
+                audit_data = {
+                    "command": command,
+                    "strategy": self.injection_strategy.name(),
+                    "fd_count": len(injections),
+                    "secret_ids": [s.secret_id for s in injections],
+                }
+                if allowed_hosts:
+                    audit_data["allowed_hosts"] = allowed_hosts
+                self.audit_logger.emit("credential_injected", **audit_data)
 
             # Step 3: Execute with injected secrets
             # Branch based on strategy type
             if self.injection_strategy.name() == "gvisor":
                 result = self._run_command_gvisor(
-                    command, injections, env_override, cwd
+                    command, injections, env_override, cwd, allowed_hosts
                 )
             else:
                 result = self._run_command_direct(
