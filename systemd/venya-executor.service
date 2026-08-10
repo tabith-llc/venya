@@ -5,9 +5,9 @@ Requires=venya-tmpfs.mount
 
 [Service]
 Type=simple
-User=venya-executor
-Group=venya-executor
-ExecStart=/usr/bin/venya-executor --config /etc/venya/executor.toml
+User=venya
+Group=venya
+ExecStart=/opt/venya/.venv/bin/venya-executor --config /etc/venya/executor.toml
 Restart=always
 
 # Executor must NOT have CAP_IPC_LOCK — jump host is untrusted
@@ -17,8 +17,8 @@ Restart=always
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/venya/executor
+ProtectHome=read-only
+ReadWritePaths=/var/lib/venya/executor /var/log/venya /home/venya
 ReadOnlyPaths=/etc/venya
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
