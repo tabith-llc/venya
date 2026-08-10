@@ -10,7 +10,6 @@ dependencies = [
     "websockets",
     "pydantic",
     "pydantic-settings",
-    "docker>=7.0.0",
 ]
 
 [project.scripts]
