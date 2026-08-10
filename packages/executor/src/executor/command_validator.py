@@ -18,7 +18,7 @@ class CommandPolicy:
     allowed_commands: frozenset[str]  # explicit allowlist (strict mode)
     trusted_paths: frozenset[str]  # trusted directories (balanced mode)
     dangerous_patterns: frozenset[str]  # blocked patterns (all modes)
-    allowed_hosts: list[dict[str, Any]] = field(default_factory=list)  # egress whitelist (gvisor)
+    allowed_hosts: list[dict[str, Any]] = field(default_factory=list)  # network allow rules (sbx)
 
 
 # Default dangerous patterns (all presets block these)
