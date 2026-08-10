@@ -71,6 +71,12 @@ async def serve_enroll() -> FileResponse:
     return FileResponse(STATIC_DIR / "enroll.html")
 
 
+@router.get("/enroll-admin")
+async def serve_enroll_admin() -> FileResponse:
+    """Serve the admin enrollment page."""
+    return FileResponse(STATIC_DIR / "enroll-admin.html")
+
+
 @router.get("/dashboard")
 async def serve_dashboard() -> FileResponse:
     """Serve the dashboard page."""
