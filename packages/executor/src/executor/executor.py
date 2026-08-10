@@ -3,8 +3,8 @@
 Orchestrates the full execution pipeline:
   1. Validate command against policy
   2. Retrieve secrets from server
-  3. Inject credentials (memfd FDs or tmpfs mounts for gVisor)
-  4. Execute command (direct subprocess OR gVisor sandbox)
+  3. Inject credentials (memfd FDs or tmpfs mounts for sandbox)
+  4. Execute command (direct subprocess OR sandbox)
   5. Capture and filter output (Stage 1 + Stage 2)
   6. Clean up (delete secrets, revoke tokens)
 """
@@ -34,7 +34,6 @@ from .injector import (
     verify_fd_whitelist,
 )
 from .strategies.base import InjectionResult, InjectionStrategy, SecretMount
-from .strategies.gvisor_strategy import GvisorStrategy
 from .strategies.memfd_strategy import MemfdStrategy
 
 logger = logging.getLogger("venya.executor")

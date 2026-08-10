@@ -6,12 +6,12 @@ Registry-based strategy selection driven by configuration.
 from __future__ import annotations
 
 from .base import InjectionStrategy
-from .gvisor_strategy import GvisorStrategy
 from .memfd_strategy import MemfdStrategy
+from .sbx_strategy import SbxStrategy
 
 STRATEGY_REGISTRY: dict[str, type[InjectionStrategy]] = {
     "memfd": MemfdStrategy,
-    "gvisor": GvisorStrategy,
+    "sbx": SbxStrategy,
 }
 
 
@@ -19,7 +19,7 @@ def create_strategy(method: str, secret_base_fd: int = 100) -> InjectionStrategy
     """Create an injection strategy by name.
 
     Args:
-        method: Strategy name ("memfd" or "gvisor").
+        method: Strategy name ("memfd" or "sbx").
         secret_base_fd: Base FD number for injected secrets (memfd only).
 
     Returns:
