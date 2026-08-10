@@ -3,10 +3,17 @@ name = "venya"
 version = "0.1.0"
 description = "A secrets broker system for LLMs"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "vault",
+    "server",
+    "executor",
+]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "pytest-cov"]
+
+[tool.uv]
+default-groups = ["dev"]
 
 [tool.uv.workspace]
 members = ["packages/*"]
