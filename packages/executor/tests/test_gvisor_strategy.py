@@ -382,6 +382,21 @@ class TestDaemonCLIArguments:
         assert args.allow_host == ['10.0.0.1:22', '10.0.0.2:443']
 
 
+class TestInstallScriptIptables:
+    """Tests for install.sh ensuring iptables is available."""
+
+    def test_install_sh_includes_iptables(self):
+        """install.sh installs iptables package."""
+        import os
+
+        install_sh = os.path.join(os.path.dirname(__file__), "../../../install.sh")
+        install_sh = os.path.abspath(install_sh)
+
+        if os.path.exists(install_sh):
+            content = open(install_sh).read()
+            assert "iptables" in content
+
+
 class TestRunCommandGvisor:
     """Tests for Executor._run_command_gvisor()."""
 
