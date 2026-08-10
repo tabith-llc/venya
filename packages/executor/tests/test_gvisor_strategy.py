@@ -176,3 +176,34 @@ class TestGvisorStrategyPrepare:
 
         result.cleanup()
         result.cleanup()  # Should not raise
+
+
+class TestFactoryCreateGvisor:
+    """Tests for factory.create_strategy with 'gvisor'."""
+
+    def test_create_strategy_returns_gvisor(self):
+        """create_strategy('gvisor') returns a GvisorStrategy instance."""
+        from executor.strategies.factory import create_strategy
+
+        strategy = create_strategy("gvisor")
+        assert isinstance(strategy, GvisorStrategy)
+
+    def test_create_strategy_gvisor_has_correct_name(self):
+        """create_strategy('gvisor') returns strategy with name 'gvisor'."""
+        from executor.strategies.factory import create_strategy
+
+        strategy = create_strategy("gvisor")
+        assert strategy.name() == "gvisor"
+
+    def test_create_strategy_unknown_raises(self):
+        """create_strategy('unknown') raises ValueError."""
+        from executor.strategies.factory import create_strategy
+
+        try:
+            create_strategy("unknown")
+        except ValueError as e:
+            assert "Unknown injection strategy" in str(e)
+            assert "gvisor" in str(e)
+            assert "memfd" in str(e)
+        else:
+            assert False, "Expected ValueError"
