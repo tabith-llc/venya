@@ -321,6 +321,11 @@ VENYA_CORS_ORIGINS=["https://vault"]
 EOF
 
     info ".env written to $INSTALL_DIR/.env"
+
+    # --- Run database migrations ---
+    info "Running database migrations..."
+    sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR && VENYA_DB_URL='postgresql://venya:venya_dev_password@localhost/venya' /home/venya/.local/bin/uv run alembic -c packages/vault/alembic.ini upgrade head"
+    info "Database migrations complete"
 fi
 
 # --- Executor configuration (if MODE=executor or both) ---
