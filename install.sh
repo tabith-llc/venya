@@ -123,6 +123,13 @@ else
     info "Rust already installed: $(rustc --version)"
 fi
 
+# --- Install Rust for venya user ---
+SU_CARGO="/home/venya/.cargo/bin/cargo"
+if [ ! -f "$SU_CARGO" ]; then
+    info "Installing Rust for venya user..."
+    sudo -u venya bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y" > /dev/null 2>&1
+fi
+
 # --- Install uv (for both root and venya user) ---
 if ! command -v uv &>/dev/null; then
     info "Installing uv..."
@@ -268,11 +275,63 @@ if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
     sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/dev/null | grep -q 1 || \
         sudo -u postgres psql -c "CREATE DATABASE venya OWNER venya;" > /dev/null 2>&1
 
+    # --- Select bind address ---
+    info "Scanning network interfaces..."
+    BIND_ADDRESS="0.0.0.0"
+    OPTIONS=()
+    
+    # Add localhost
+    OPTIONS+=("127.0.0.1")
+    
+    # Add all interfaces
+    OPTIONS+=("0.0.0.0")
+    
+    # Add discovered IPs (exclude loopback)
+    while IFS= read -r ip; do
+        # Skip loopback and already-added
+        if [[ "$ip" != "127.0.0.1" ]] && [[ "$ip" != "0.0.0.0" ]] && [[ ! " ${OPTIONS[*]} " =~ " $ip " ]]; then
+            OPTIONS+=("$ip")
+        fi
+    done < <(ip -4 addr show 2>/dev/null | grep -oP 'inet \K[\d.]+' | sort -u)
+    
+    # Add IPv6 addresses
+    while IFS= read -r ip; do
+        if [[ -n "$ip" ]] && [[ ! " ${OPTIONS[*]} " =~ " $ip " ]]; then
+            OPTIONS+=("$ip")
+        fi
+    done < <(ip -6 addr show 2>/dev/null | grep -oP 'inet6 \K[0-9a-f:]+' | grep -v "^fe80:" | grep -v "^::1" | sort -u)
+    
+    # Deduplicate
+    readarray -t OPTIONS < <(printf '%s\n' "${OPTIONS[@]}" | sort -u)
+    
+    if [ "$SKIP_PROMPT" = "yes" ]; then
+        BIND_ADDRESS="0.0.0.0"
+    else
+        echo ""
+        echo "Select bind address for the server:"
+        for i in "${!OPTIONS[@]}"; do
+            marker=""
+            if [ "${OPTIONS[$i]}" = "0.0.0.0" ]; then
+                marker=" (default - listen on all interfaces)"
+            fi
+            echo "  $((i+1)). ${OPTIONS[$i]}$marker"
+        done
+        echo ""
+        echo -n "Enter option number (default: 2 for 0.0.0.0): "
+        read -r choice
+        if [ -z "$choice" ] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#OPTIONS[@]}" ]; then
+            BIND_ADDRESS="0.0.0.0"
+        else
+            BIND_ADDRESS="${OPTIONS[$((choice-1))]}"
+        fi
+    fi
+    info "Server will bind to: $BIND_ADDRESS"
+
     # --- Write server.toml ---
     mkdir -p /etc/venya
 
     cat > /etc/venya/server.toml << EOF
-host = "0.0.0.0"
+host = "$BIND_ADDRESS"
 port = 8080
 
 [db]
@@ -324,7 +383,7 @@ EOF
 
     # --- Run database migrations ---
     info "Running database migrations..."
-    sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR && VENYA_DB_URL='postgresql://venya:venya_dev_password@localhost/venya' /home/venya/.local/bin/uv run alembic -c packages/vault/alembic.ini upgrade head"
+    sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR/packages/vault && VENYA_DB_URL='postgresql://venya:venya_dev_password@localhost/venya' /home/venya/.local/bin/uv run alembic -c alembic.ini upgrade head"
     info "Database migrations complete"
 fi
 
