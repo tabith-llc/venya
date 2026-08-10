@@ -452,7 +452,7 @@ class TestRunCommandStage2:
                                 MagicMock(secret_id="s1", value=b"secret1"),
                                 MagicMock(secret_id="s2", value=b"secret2"),
                             ]
-                            result = executor._run_command("echo test", injections, None, None)
+                            result = executor._run_command_direct("echo test", injections, None, None)
 
         # Stage 2 output should be used
         assert result.stdout == stage2_stdout
@@ -487,7 +487,7 @@ class TestRunCommandStage2:
                             )
 
                             injections = [MagicMock(secret_id="s1", value=b"secret1")]
-                            result = executor._run_command("echo test", injections, None, None)
+                            result = executor._run_command_direct("echo test", injections, None, None)
 
         # Should fall back to Stage 1
         assert result.stdout == stage1_stdout
@@ -519,7 +519,7 @@ class TestRunCommandStage2:
                             executor.http_client = None
 
                             injections = [MagicMock(secret_id="s1", value=b"secret1")]
-                            result = executor._run_command("echo test", injections, None, None)
+                            result = executor._run_command_direct("echo test", injections, None, None)
 
         # Should use Stage 1 results directly
         assert result.stdout == stage1_stdout

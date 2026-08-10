@@ -46,6 +46,7 @@ def _get_tables(db_path: str, db_key: str) -> list[str]:
 EXPECTED_TABLES = [
     "audit_events",
     "command_policies",
+    "elevation_tokens",
     "enrollment_tokens",
     "executor_cert_revocations",
     "executor_certs",
