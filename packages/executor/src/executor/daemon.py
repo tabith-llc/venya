@@ -717,6 +717,17 @@ def main() -> None:
         default="info",
         help="Logging level",
     )
+    parser.add_argument(
+        "--allow-host",
+        action="append",
+        metavar="HOST:PORT",
+        help="Allow egress to HOST:PORT (can be specified multiple times)",
+    )
+    parser.add_argument(
+        "--no-network",
+        action="store_true",
+        help="Disable all network access (overrides --allow-host)",
+    )
 
     args = parser.parse_args()
 

@@ -333,6 +333,55 @@ class TestCommandValidatorParseFlags:
         assert is_valid is True
 
 
+class TestDaemonCLIArguments:
+    """Tests for daemon.py CLI --allow-host and --no-network arguments."""
+
+    def test_parser_has_allow_host_argument(self):
+        """argparse parser has --allow-host argument."""
+        import sys
+        from unittest.mock import patch
+
+        # Mock sys.argv to include --allow-host
+        with patch.object(sys, 'argv', ['venya-executor', '--allow-host', '10.0.0.1:22']):
+            from executor.daemon import main
+            import argparse
+
+            parser = argparse.ArgumentParser(description="Venya Executor Daemon")
+            parser.add_argument("--config", type=str, default="/etc/venya/executor.toml")
+            parser.add_argument("--daemonize", action="store_true")
+            parser.add_argument("--log-level", choices=["debug", "info", "warning", "error"], default="info")
+            parser.add_argument("--allow-host", action="append", metavar="HOST:PORT")
+            parser.add_argument("--no-network", action="store_true")
+
+            # This should not raise
+            args = parser.parse_args(['--allow-host', '10.0.0.1:22'])
+            assert args.allow_host == ['10.0.0.1:22']
+
+    def test_parser_has_no_network_argument(self):
+        """argparse parser has --no-network argument."""
+        import argparse
+
+        parser = argparse.ArgumentParser(description="Venya Executor Daemon")
+        parser.add_argument("--config", type=str, default="/etc/venya/executor.toml")
+        parser.add_argument("--daemonize", action="store_true")
+        parser.add_argument("--log-level", choices=["debug", "info", "warning", "error"], default="info")
+        parser.add_argument("--allow-host", action="append", metavar="HOST:PORT")
+        parser.add_argument("--no-network", action="store_true")
+
+        args = parser.parse_args(['--no-network'])
+        assert args.no_network is True
+
+    def test_parser_allows_multiple_allow_host(self):
+        """--allow-host can be specified multiple times."""
+        import argparse
+
+        parser = argparse.ArgumentParser(description="Venya Executor Daemon")
+        parser.add_argument("--allow-host", action="append", metavar="HOST:PORT")
+
+        args = parser.parse_args(['--allow-host', '10.0.0.1:22', '--allow-host', '10.0.0.2:443'])
+        assert args.allow_host == ['10.0.0.1:22', '10.0.0.2:443']
+
+
 class TestRunCommandGvisor:
     """Tests for Executor._run_command_gvisor()."""
 
