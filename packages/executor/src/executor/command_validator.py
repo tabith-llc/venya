@@ -91,6 +91,12 @@ class CommandValidator:
         if not command or not command.strip():
             return False, "Empty command"
 
+        # Strip --no-network flag from command for validation
+        command = self._strip_flag(command, "--no-network")
+
+        # Extract and validate --allow-host flags
+        allowed_hosts = self._parse_allow_hosts(command)
+
         # Check dangerous patterns first (applies to all presets)
         for pattern in self.policy.dangerous_patterns:
             if pattern in command:
@@ -110,6 +116,51 @@ class CommandValidator:
             return True, ""
         else:
             return False, f"Unknown preset: {self.policy.preset!r}"
+
+    def _strip_flag(self, command: str, flag: str) -> str:
+        """Remove a flag from the command string.
+
+        Args:
+            command: The full command string.
+            flag: The flag to remove (e.g., '--no-network').
+
+        Returns:
+            Command string with the flag removed.
+        """
+        import re
+
+        # Remove the flag and any trailing whitespace
+        pattern = rf'\s*{re.escape(flag)}\s*'
+        return re.sub(pattern, ' ', command).strip()
+
+    def _parse_allow_hosts(self, command: str) -> list[dict[str, Any]]:
+        """Parse --allow-host flags from the command string.
+
+        Args:
+            command: The command string (may contain --allow-host flags).
+
+        Returns:
+            List of {host, port} dicts parsed from --allow-host flags.
+        """
+        import re
+
+        allowed_hosts: list[dict[str, Any]] = []
+        pattern = r'--allow-host\s+(\S+)'
+
+        for match in re.finditer(pattern, command):
+            host_port = match.group(1)
+            if ':' in host_port:
+                host, port_str = host_port.rsplit(':', 1)
+                try:
+                    port = int(port_str)
+                    allowed_hosts.append({"host": host, "port": port})
+                except ValueError:
+                    pass  # Invalid port, skip
+            else:
+                # No port specified, default to all ports
+                allowed_hosts.append({"host": host_port, "port": 0})
+
+        return allowed_hosts
 
     def _validate_strict(self, command: str) -> tuple[bool, str]:
         """Strict mode: only explicitly allowed commands."""
