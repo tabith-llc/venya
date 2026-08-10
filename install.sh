@@ -88,7 +88,7 @@ info "Installing Venya to $INSTALL_DIR"
 info "Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq curl wget strace ltrace gdb tcpdump net-tools iproute2 \
-                    build-essential rsync sudo postgresql > /dev/null 2>&1
+                    build-essential rsync sudo postgresql iptables > /dev/null 2>&1
 
 # --- Install Rust ---
 if ! command -v rustc &>/dev/null; then
