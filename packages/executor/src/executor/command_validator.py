@@ -7,6 +7,7 @@ Policy is configurable at initialization and changeable by an admin.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class CommandPolicy:
     allowed_commands: frozenset[str]  # explicit allowlist (strict mode)
     trusted_paths: frozenset[str]  # trusted directories (balanced mode)
     dangerous_patterns: frozenset[str]  # blocked patterns (all modes)
+    allowed_hosts: list[dict[str, Any]] = field(default_factory=list)  # egress whitelist (gvisor)
 
 
 # Default dangerous patterns (all presets block these)
