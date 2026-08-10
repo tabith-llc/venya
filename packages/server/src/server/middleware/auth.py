@@ -71,8 +71,11 @@ class SessionMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
+        # Normalize path: strip trailing slash except for root "/"
+        path = request.url.path.rstrip("/") if request.url.path != "/" else request.url.path
+
         # Skip auth for public paths
-        if request.url.path in self.PUBLIC_PATHS:
+        if path in self.PUBLIC_PATHS:
             return await call_next(request)
 
         # Skip mTLS paths (executor)
