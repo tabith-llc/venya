@@ -372,6 +372,7 @@ EOF
 
     # --- Write .env ---
     cat > "$INSTALL_DIR/.env" << EOF
+VENYA_HOST=$BIND_ADDRESS
 VENYA_DB__DATABASE_URL=postgresql://venya:venya_dev_password@localhost/venya
 VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
 VENYA_FIDO2__RP_ID=vault
