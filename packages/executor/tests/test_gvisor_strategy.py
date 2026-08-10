@@ -210,6 +210,50 @@ class TestFactoryCreateGvisor:
             assert False, "Expected ValueError"
 
 
+class TestCommandPolicyAllowedHosts:
+    """Tests for CommandPolicy with allowed_hosts field."""
+
+    def test_policy_has_allowed_hosts_field(self):
+        """CommandPolicy has allowed_hosts field."""
+        from executor.command_validator import CommandPolicy
+
+        policy = CommandPolicy(
+            preset="balanced",
+            allowed_commands=frozenset(),
+            trusted_paths=frozenset(),
+            dangerous_patterns=frozenset(),
+            allowed_hosts=[{"host": "10.0.0.1", "port": 22}],
+        )
+        assert hasattr(policy, "allowed_hosts")
+        assert policy.allowed_hosts == [{"host": "10.0.0.1", "port": 22}]
+
+    def test_policy_allowed_hosts_defaults_to_empty_list(self):
+        """CommandPolicy allowed_hosts defaults to empty list."""
+        from executor.command_validator import CommandPolicy
+
+        policy = CommandPolicy(
+            preset="balanced",
+            allowed_commands=frozenset(),
+            trusted_paths=frozenset(),
+            dangerous_patterns=frozenset(),
+        )
+        assert policy.allowed_hosts == []
+
+    def test_make_balanced_policy_has_empty_allowed_hosts(self):
+        """make_balanced_policy() returns policy with empty allowed_hosts."""
+        from executor.command_validator import make_balanced_policy
+
+        policy = make_balanced_policy()
+        assert policy.allowed_hosts == []
+
+    def test_make_strict_policy_has_empty_allowed_hosts(self):
+        """make_strict_policy() returns policy with empty allowed_hosts."""
+        from executor.command_validator import make_strict_policy
+
+        policy = make_strict_policy()
+        assert policy.allowed_hosts == []
+
+
 class TestRunCommandGvisor:
     """Tests for Executor._run_command_gvisor()."""
 
