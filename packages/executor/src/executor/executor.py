@@ -511,7 +511,7 @@ class Executor:
         """Run Stage 1 + Stage 2 filtering and build CommandResult.
 
         This is the shared post-processing path for both direct subprocess
-        and gVisor container execution. The filtering logic is identical
+        and sandbox execution. The filtering logic is identical
         regardless of how the process was launched.
 
         Args:
