@@ -56,11 +56,8 @@ class CommandResult:
 MAX_OUTPUT_BYTES = 262144  # 256 KB per stream
 TRUNCATION_MARKER = "... [OUTPUT TRUNCATED: {n} bytes discarded]\n"
 
-# gVisor container image — minimal, no network tools
-GVISOR_IMAGE = "venya-executor:minimal"
-
-# How long to wait for a container to finish
-CONTAINER_TIMEOUT = 3600  # 1 hour max
+# How long to wait for sandbox commands
+SBX_TIMEOUT = 3600  # 1 hour max
 
 
 @dataclass
@@ -69,8 +66,8 @@ class Executor:
 
     Supports two execution modes:
     - memfd: Direct subprocess with FD-passed secrets (existing behavior)
-    - gvisor: gVisor-sandboxed Docker container with tmpfs-mounted secrets
-              and no network access
+    - sbx: Docker Sandboxes microVM with tmpfs-mounted secrets
+           and policy-based network access
 
     The mode is determined by the injection strategy's name().
 
@@ -87,7 +84,6 @@ class Executor:
     http_client: Any = None  # httpx.Client for server API calls
     _injection_result: InjectionResult | None = field(init=False, default=None)
     _bundles: list[SecretBundle] = field(init=False, default_factory=list)
-    _egress_chain_name: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         """Validate the injection strategy before first use."""
@@ -115,7 +111,7 @@ class Executor:
             secrets: List of secret dicts with 'secret_id', 'value', 'wrapped_value'.
             env_override: Environment variables to set (not for secrets).
             cwd: Working directory for the command.
-            allowed_hosts: List of {host, port} dicts for egress whitelist (gvisor only).
+            allowed_hosts: List of {host, port} dicts for network allow rules.
 
         Returns:
             CommandResult with exit code, filtered output, and audit data.
@@ -149,8 +145,8 @@ class Executor:
 
             # Step 3: Execute with injected secrets
             # Branch based on strategy type
-            if self.injection_strategy.name() == "gvisor":
-                result = self._run_command_gvisor(
+            if self.injection_strategy.name() == "sbx":
+                result = self._run_command_sbx(
                     command, injections, env_override, cwd, allowed_hosts
                 )
             else:
@@ -411,10 +407,10 @@ class Executor:
         return stdout, stderr
 
     # ================================================================
-    # gVisor SANDBOX EXECUTION (new path)
+    # SBX SANDBOX EXECUTION
     # ================================================================
 
-    def _run_command_gvisor(
+    def _run_command_sbx(
         self,
         command: str,
         injections: list[SecretBundle],
@@ -422,307 +418,83 @@ class Executor:
         cwd: str | None,
         allowed_hosts: list[dict[str, Any]] | None = None,
     ) -> CommandResult:
-        """Run command inside a gVisor-sandboxed Docker container.
+        """Run command inside a Docker Sandbox (microVM).
 
         Key security properties:
-        - When allowed_hosts is None/empty: network_mode="none" (no network)
-        - When allowed_hosts is provided: bridge network + iptables egress whitelist
-        - Secrets are mounted as read-only tmpfs files
-        - gVisor's Sentry intercepts syscalls (no direct host kernel access)
-        - stdout/stderr are captured from container logs
+        - When allowed_hosts is None/empty: deny-by-default network policy
+        - When allowed_hosts is provided: sbx policy allow rules
+        - Secrets are copied into sandbox via sbx cp (tmpfs-backed)
+        - Sandbox provides hypervisor isolation (separate kernel)
+        - stdout/stderr captured from sbx exec output
 
         Args:
-            command: The command to execute inside the container.
+            command: The command to execute inside the sandbox.
             injections: Secret bundles (for filtering reference).
             env_override: Environment variables to set.
-            cwd: Working directory (mapped into container).
-            allowed_hosts: List of {host, port} dicts for egress whitelist.
+            cwd: Working directory (sandbox uses its workspace).
+            allowed_hosts: List of {host, port} dicts for network allow rules.
 
         Returns:
             CommandResult with filtered output.
         """
-        import docker  # type: ignore[import-not-found]
+        from .strategies.sbx_strategy import SbxStrategy
 
-        # Build volume mounts for secrets
-        secret_mounts: list[SecretMount] = []
+        if not isinstance(self.injection_strategy, SbxStrategy):
+            raise RuntimeError("SBX strategy required but got: %s" % type(self.injection_strategy).__name__)
+
+        strategy = self.injection_strategy
+        session_uuid = uuid.uuid4().hex[:12]
+        sandbox_name = f"venya-{self.session_id}-{session_uuid}"
+
+        # Create the sandbox
+        workspace = cwd or "/workspace"
+        logger.info("Creating Docker Sandbox: %s", sandbox_name)
+        strategy.create_sandbox(sandbox_name, workspace)
+
+        # Copy secrets into sandbox
         if self._injection_result:
-            secret_mounts = self._injection_result.secret_mounts
+            strategy.copy_secrets_into_sandbox(self._injection_result.secret_mounts)
 
-        volumes: dict[str, dict[str, str]] = {}
-        for mount in secret_mounts:
-            volumes[mount.path] = {
-                "bind": mount.container_path,
-                "mode": "ro",
-            }
-
-        # Build environment (excluding secrets — they come from files)
-        container_env: list[str] = []
-        if env_override:
-            for k, v in env_override.items():
-                container_env.append(f"{k}={v}")
-
-        # Connect to Docker daemon (needed for network creation)
-        client = docker.from_env()
-
-        # Determine network mode
-        network_mode: str | Any = "none"
-        docker_network = None
-        session_uuid = uuid.uuid4().hex
-
+        # Apply network policy if allowed_hosts provided
         if allowed_hosts:
-            network_name = f"venya-net-{session_uuid}"
-            logger.info("Creating Docker network: %s", network_name)
-            docker_network = client.networks.create(network_name, driver="bridge")
-            network_mode = docker_network.name  # SDK expects string
+            strategy.apply_network_policy(allowed_hosts)
         else:
-            logger.info("No allowed_hosts — using network_mode=none")
-
-        # Unique container name for this session
-        container_name = f"venya-{self.session_id}-{session_uuid}"
-
-        if allowed_hosts:
-            logger.info(
-                "Launching gVisor container: name=%s, mounts=%d, network=%s, allowed_hosts=%d",
-                container_name,
-                len(secret_mounts),
-                network_mode,
-                len(allowed_hosts),
-            )
-        else:
-            logger.info(
-                "Launching gVisor container: name=%s, mounts=%d, network=none",
-                container_name,
-                len(secret_mounts),
-            )
-
-        # Track resources so cleanup can remove them
-        container = None
+            logger.info("No allowed_hosts — deny-by-default network policy")
 
         try:
-            # Launch container with gVisor runtime
-            container = client.containers.run(
-                image=GVISOR_IMAGE,
-                runtime="runsc",          # gVisor sandbox
-                command=["sh", "-c", command],
-                name=container_name,
-                detach=True,
-                stdin_open=False,
-                tty=False,
-                network_mode=network_mode,
-                volumes=volumes,
-                environment=container_env,
-                working_dir=cwd or "/work",
-                auto_remove=False,        # We'll remove manually after capturing logs
-                mem_limit="512m",         # Prevent resource exhaustion
-                cpu_quota=100000,         # 1 CPU max
-                pids_limit=100,           # Prevent fork bombs
-                read_only=False,          # Need writable /tmp inside container
-                tmpfs={"/tmp": "size=64m,mode=1777"},  # Writable tmpfs inside container
-            )
+            # Execute command inside sandbox
+            logger.info("Executing in sandbox: %s", command)
+            result = strategy.execute_command(command)
 
-            # Apply egress rules if allowed_hosts was provided
-            if allowed_hosts and docker_network:
-                self._apply_egress_rules(allowed_hosts, docker_network.name, session_uuid)
-
-            # Wait for container to finish
-            result = container.wait(timeout=CONTAINER_TIMEOUT)
-            exit_code = result.get("StatusCode", -1)
-
-            # Capture stdout/stderr from container logs
-            stdout, stderr = self._capture_container_output(container)
+            stdout = result.stdout[:MAX_OUTPUT_BYTES]
+            stderr = result.stderr[:MAX_OUTPUT_BYTES]
 
             logger.info(
-                "gVisor container exited: code=%d, stdout=%d bytes, stderr=%d bytes",
-                exit_code,
+                "Sandbox command exited: code=%d, stdout=%d bytes, stderr=%d bytes",
+                result.returncode,
                 len(stdout),
                 len(stderr),
             )
 
             # Stage 1 + Stage 2 filtering (same as direct path)
             return self._filter_and_build_result(
-                command, exit_code, stdout, stderr, injections
+                command, result.returncode, stdout, stderr, injections
             )
 
-        except docker.errors.ContainerError as e:
-            logger.error("gVisor container error: %s", e)
+        except subprocess.TimeoutExpired:
+            logger.error("Sandbox command timed out after %d seconds", SBX_TIMEOUT)
             return CommandResult(
                 command=command,
                 exit_code=-1,
                 stdout=b"",
-                stderr=str(e).encode(),
+                stderr=f"Command timed out after {SBX_TIMEOUT} seconds".encode(),
             )
-        except docker.errors.ImageNotFound:
-            logger.error("Container image not found: %s", GVISOR_IMAGE)
-            raise RuntimeError(
-                f"Container image {GVISOR_IMAGE} not found. "
-                f"Build it with: docker build -t {GVISOR_IMAGE} ."
-            )
-        except Exception as e:
-            logger.exception("gVisor execution failed")
+        except Exception:
+            logger.exception("Sandbox execution failed")
             raise
         finally:
-            # Always remove the container
-            if container is not None:
-                try:
-                    container.remove(force=True)
-                except Exception:
-                    logger.warning("Failed to remove container %s", container_name)
-
-            # Clean up Docker network if created
-            if docker_network is not None:
-                try:
-                    docker_network.remove()
-                    logger.info("Removed Docker network: %s", docker_network.name)
-                except Exception:
-                    logger.warning("Failed to remove network %s", docker_network.name)
-
-            # Clean up iptables egress rules
-            self._cleanup_egress_rules()
-
-    def _apply_egress_rules(
-        self,
-        allowed_hosts: list[dict[str, Any]],
-        network_name: str,
-        session_uuid: str,
-    ) -> None:
-        """Apply iptables egress rules for gVisor container network.
-
-        Creates a unique iptables chain with:
-        1. ACCEPT rules for DNS (UDP/TCP port 53)
-        2. ACCEPT rules for each allowed host:port
-        3. DROP ALL as default policy
-
-        The chain is attached to the Docker bridge's FORWARD chain.
-
-        Args:
-            allowed_hosts: List of {host, port} dicts for allowed destinations.
-            network_name: Docker network name (used to derive bridge interface).
-            session_uuid: UUID for unique chain naming.
-
-        Raises:
-            RuntimeError: If iptables commands fail.
-        """
-        chain_name = f"VENYA_EGRESS_{session_uuid}"
-        bridge_name = f"br-{network_name[:12]}"
-
-        commands = [
-            # Create chain
-            ["iptables", "-N", chain_name],
-            # DNS rules (UDP + TCP port 53)
-            ["iptables", "-A", chain_name, "-p", "udp", "--dport", "53", "-j", "ACCEPT"],
-            ["iptables", "-A", chain_name, "-p", "tcp", "--dport", "53", "-j", "ACCEPT"],
-        ]
-
-        # Add rules for each allowed host
-        for host in allowed_hosts:
-            host_ip = host["host"]
-            host_port = host["port"]
-            commands.append([
-                "iptables", "-A", chain_name,
-                "-d", host_ip,
-                "-p", "tcp",
-                "--dport", str(host_port),
-                "-j", "ACCEPT",
-            ])
-
-        # Default DROP all
-        commands.append(["iptables", "-A", chain_name, "-j", "DROP"])
-
-        # Attach chain to FORWARD
-        commands.append([
-            "iptables", "-I", "FORWARD",
-            "-o", bridge_name,
-            "-j", chain_name,
-        ])
-
-        # Execute all commands
-        for cmd in commands:
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    timeout=10,
-                )
-                if result.returncode != 0:
-                    self._egress_chain_name = None
-                    raise RuntimeError(
-                        f"iptables failed: {' '.join(cmd)}: {result.stderr.decode()}"
-                    )
-            except subprocess.CalledProcessError as e:
-                self._egress_chain_name = None
-                raise RuntimeError(
-                    f"iptables egress rule failed: {' '.join(e.cmd)}: {e.stderr.decode()}"
-                ) from e
-            except subprocess.TimeoutExpired:
-                self._egress_chain_name = None
-                raise RuntimeError(
-                    f"iptables timed out: {' '.join(cmd)}"
-                )
-
-        self._egress_chain_name = chain_name
-        logger.info("Applied egress rules: chain=%s, hosts=%d", chain_name, len(allowed_hosts))
-
-    def _cleanup_egress_rules(self) -> None:
-        """Clean up iptables egress rules.
-
-        Flushes the chain and removes it. No-op if no chain was created.
-        """
-        if not self._egress_chain_name:
-            return
-
-        try:
-            subprocess.run(
-                ["iptables", "-F", self._egress_chain_name],
-                capture_output=True,
-                timeout=10,
-            )
-            subprocess.run(
-                ["iptables", "-X", self._egress_chain_name],
-                capture_output=True,
-                timeout=10,
-            )
-            logger.info("Cleaned up egress rules: chain=%s", self._egress_chain_name)
-        except subprocess.SubprocessError:
-            logger.warning("Failed to clean up egress rules: chain=%s", self._egress_chain_name)
-        finally:
-            self._egress_chain_name = None
-
-    def _capture_container_output(self, container: Any) -> tuple[bytes, bytes]:
-        """Capture stdout and stderr from a Docker container.
-
-        Docker combines stdout/stderr in logs when tty=False.
-        We separate them using the stream attribute.
-
-        Args:
-            container: Docker container object.
-
-        Returns:
-            Tuple of (stdout_bytes, stderr_bytes).
-        """
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-
-        try:
-            logs = container.logs(stream=True, follow=False)
-            for chunk in logs:
-                # Docker log entries have an 8-byte header when stream=True
-                # First byte indicates stream: 1=stdout, 2=stderr
-                if len(chunk) > 8 and chunk[0:1] in (b"\x01", b"\x02"):
-                    payload = chunk[8:]
-                    if chunk[0:1] == b"\x01":
-                        stdout_chunks.append(payload)
-                    else:
-                        stderr_chunks.append(payload)
-                else:
-                    # No header — treat as stdout
-                    stdout_chunks.append(chunk)
-        except Exception:
-            logger.warning("Failed to capture container logs", exc_info=True)
-
-        stdout = b"".join(stdout_chunks)[:MAX_OUTPUT_BYTES]
-        stderr = b"".join(stderr_chunks)[:MAX_OUTPUT_BYTES]
-
-        return stdout, stderr
+            # Always remove the sandbox
+            strategy.remove_sandbox()
 
     # ================================================================
     # SHARED FILTERING (used by both execution paths)
