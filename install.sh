@@ -22,7 +22,7 @@ INSTALL_DIR="${VENYA_INSTALL_DIR:-}"
 DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-venya_test_passphrase_2024}"
 SKIP_PROMPT="${VENYA_SKIP_PROMPT:-}"
 TARBALL_URL="${VENYA_TARBALL:-}"
-HOST_TYPE="${VENYA_HOST_TYPE:-server}"  # "server" (venya-vault) or "executor" (venya-executor)
+MODE="${VENYA_MODE:-}"  # REQUIRED: "vault", "executor", or "both"
 EXECUTOR_ID="${VENYA_EXECUTOR_ID:-jump-1}"
 SERVER_URL="${VENYA_SERVER_URL:-http://localhost:8080}"
 
@@ -84,11 +84,36 @@ fi
 
 info "Installing Venya to $INSTALL_DIR"
 
+# --- Validate MODE ---
+if [ -z "$MODE" ]; then
+    error "MODE is required. Set VENYA_MODE=vault, VENYA_MODE=executor, or VENYA_MODE=both"
+    exit 1
+fi
+
+if [ "$MODE" != "vault" ] && [ "$MODE" != "executor" ] && [ "$MODE" != "both" ]; then
+    error "Invalid MODE '$MODE'. Must be 'vault', 'executor', or 'both'"
+    exit 1
+fi
+
+# --- Create venya user ---
+if ! id venya &>/dev/null; then
+    if [ "$SKIP_PROMPT" = "yes" ]; then
+        VENYA_PASSWORD="${VENYA_PASSWORD:-venya12}"
+    else
+        echo -n "Enter password for venya user: "
+        read -rs VENYA_PASSWORD
+        echo ""
+    fi
+    useradd -m -s /bin/bash venya
+    echo "venya:$VENYA_PASSWORD" | chpasswd
+    info "Created venya user"
+fi
+
 # --- Install system packages ---
 info "Installing system packages..."
 apt-get update -qq
 apt-get install -y -qq curl wget strace ltrace gdb tcpdump net-tools iproute2 \
-                    build-essential rsync sudo postgresql iptables > /dev/null 2>&1
+                    build-essential rsync sudo iptables > /dev/null 2>&1
 
 # --- Install Rust ---
 if ! command -v rustc &>/dev/null; then
@@ -98,7 +123,7 @@ else
     info "Rust already installed: $(rustc --version)"
 fi
 
-# --- Install uv ---
+# --- Install uv (for both root and venya user) ---
 if ! command -v uv &>/dev/null; then
     info "Installing uv..."
     curl -LsSf https://astral.sh/uv/install.sh | sh > /dev/null 2>&1
@@ -106,9 +131,16 @@ else
     info "uv already installed: $(uv --version)"
 fi
 
-# Source paths
+# Source paths for root
 source "$HOME/.cargo/env" 2>/dev/null || true
 source "$HOME/.local/bin/env" 2>/dev/null || true
+
+# --- Install uv for venya user ---
+SU_UV_BIN="/home/venya/.local/bin/uv"
+if [ ! -f "$SU_UV_BIN" ]; then
+    info "Installing uv for venya user..."
+    sudo -u venya bash -c "curl -LsSf https://astral.sh/uv/install.sh | sh" > /dev/null 2>&1
+fi
 
 # --- Get tarball ---
 if [ -z "$TARBALL_URL" ]; then
@@ -136,33 +168,29 @@ fi
 mkdir -p "$INSTALL_DIR"
 tar xzf "$TARBALL_FILE" -C "$INSTALL_DIR" --strip-components=1
 rm -f "$TARBALL_FILE"
+chown venya:venya "$INSTALL_DIR"
 
-# --- Build Python environment ---
+# --- Build Python environment (as venya user) ---
 info "Creating Python virtual environment..."
-cd "$INSTALL_DIR"
-UV_VENV_CLEAR=1 uv venv .venv
+VENYA_UV="/home/venya/.local/bin/uv"
+sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR && UV_VENV_CLEAR=1 $VENYA_UV venv .venv"
 
 info "Installing Python packages..."
-uv sync
+if [ "$MODE" = "executor" ] || [ "$MODE" = "both" ]; then
+    sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR && $VENYA_UV pip install -r $INSTALL_DIR/venya-executor-requirements.txt"
+fi
+if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
+    sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR && $VENYA_UV pip install -r $INSTALL_DIR/venya-vault-requirements.txt"
+fi
 
-# --- Build Rust extension ---
+# --- Build Rust extension (as venya user) ---
 info "Building Rust filter extension..."
-cd packages/executor
-cargo build --release > /dev/null 2>&1
+VENYA_CARGO="/home/venya/.cargo/bin/cargo"
+sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR/packages/executor && $VENYA_CARGO build --release" > /dev/null 2>&1
 PYTHON_PATH=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
-cp target/release/libvenya_filter.so "$PYTHON_PATH/venya_filter.so"
+cp "$INSTALL_DIR/packages/executor/target/release/libvenya_filter.so" "$PYTHON_PATH/venya_filter.so"
+chown venya:venya "$PYTHON_PATH/venya_filter.so"
 cd ../..
-
-# --- Setup PostgreSQL ---
-info "Setting up PostgreSQL..."
-systemctl start postgresql
-systemctl enable postgresql
-
-sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya'" 2>/dev/null | grep -q 1 || \
-    sudo -u postgres psql -c "CREATE USER venya WITH PASSWORD 'venya_dev_password';" > /dev/null 2>&1
-
-sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/dev/null | grep -q 1 || \
-    sudo -u postgres psql -c "CREATE DATABASE venya OWNER venya;" > /dev/null 2>&1
 
 # --- Apply code fixes ---
 info "Applying code fixes..."
@@ -214,9 +242,77 @@ for f in "$INSTALL_DIR/packages/server/src/server/routes/executors.py"; do
     fi
 done
 
-# --- Write .env ---
-info "Writing configuration..."
-cat > "$INSTALL_DIR/.env" << EOF
+# --- Create directories and set ownership ---
+mkdir -p /var/lib/venya/ca
+mkdir -p /var/log/venya
+chown -R venya:venya /var/lib/venya
+chown -R venya:venya /var/log/venya
+chown -R venya:venya "$INSTALL_DIR"
+chmod 700 /var/lib/venya/ca
+
+# --- Server configuration (if MODE=vault or both) ---
+if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
+    info "Configuring server..."
+
+    # --- Install and setup PostgreSQL ---
+    info "Installing PostgreSQL..."
+    apt-get install -y -qq postgresql > /dev/null 2>&1
+
+    info "Setting up PostgreSQL..."
+    systemctl start postgresql
+    systemctl enable postgresql
+
+    sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya'" 2>/dev/null | grep -q 1 || \
+        sudo -u postgres psql -c "CREATE USER venya WITH PASSWORD 'venya_dev_password';" > /dev/null 2>&1
+
+    sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/dev/null | grep -q 1 || \
+        sudo -u postgres psql -c "CREATE DATABASE venya OWNER venya;" > /dev/null 2>&1
+
+    # --- Write server.toml ---
+    mkdir -p /etc/venya
+
+    cat > /etc/venya/server.toml << EOF
+host = "0.0.0.0"
+port = 8080
+
+[db]
+database_url = "postgresql://venya:venya_dev_password@localhost/venya"
+database_path = "venya.db"
+passphrase = "$DB_PASSPHRASE"
+wal_mode = true
+
+[fido2]
+rp_id = "vault"
+rp_name = "Venya Vault"
+origins = ["https://vault"]
+enrollment_token_ttl = 15
+unmask_auto_hide_timeout = 30
+
+[session]
+session_timeout = 900
+access_token_ttl = 300
+max_session_duration = 14400
+
+[rate_limit]
+max_attempts = 5
+window_seconds = 300.0
+ip_rate_limit = 100
+
+[ca_dir]
+ca_dir = "/var/lib/venya/ca"
+
+[cors_origins]
+cors_origins = ["https://vault"]
+
+[audit]
+audit_remote_url = null
+audit_local_retention_days = 90
+EOF
+
+    info "Server config written to /etc/venya/server.toml"
+
+    # --- Write .env ---
+    cat > "$INSTALL_DIR/.env" << EOF
 VENYA_DB__DATABASE_URL=postgresql://venya:venya_dev_password@localhost/venya
 VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
 VENYA_FIDO2__RP_ID=vault
@@ -224,17 +320,11 @@ VENYA_FIDO2__RP_NAME=Venya Vault
 VENYA_CORS_ORIGINS=["https://vault"]
 EOF
 
-# --- Create directories ---
-mkdir -p /var/lib/venya/ca
-CURRENT_USER="$(whoami)"
-if [ "$CURRENT_USER" = "root" ]; then
-    CURRENT_USER="${SUDO_USER:-dust}"
+    info ".env written to $INSTALL_DIR/.env"
 fi
-chown -R "$CURRENT_USER" /var/lib/venya
-chmod 700 /var/lib/venya/ca
 
-# --- Executor configuration (if HOST_TYPE=executor) ---
-if [ "$HOST_TYPE" = "executor" ]; then
+# --- Executor configuration (if MODE=executor or both) ---
+if [ "$MODE" = "executor" ] || [ "$MODE" = "both" ]; then
     info "Configuring executor..."
 
     # --- Install Docker Sandboxes (sbx) CLI ---
@@ -242,9 +332,9 @@ if [ "$HOST_TYPE" = "executor" ]; then
     if ! command -v sbx &>/dev/null; then
         curl -fsSL https://get.docker.com | REPO_ONLY=1 sh > /dev/null 2>&1
         apt-get install -y -qq docker-sbx > /dev/null 2>&1
-        # Add current user to kvm group for libvirt access
-        usermod -aG kvm "$CURRENT_USER" 2>/dev/null || true
-        info "sbx CLI installed. Run 'newgrp kvm' or re-login to activate."
+        # Add venya user to kvm group for libvirt access
+        usermod -aG kvm venya 2>/dev/null || true
+        info "sbx CLI installed. venya user added to kvm group."
     else
         info "sbx CLI already installed: $(sbx --version 2>/dev/null || echo 'unknown')"
     fi
@@ -270,6 +360,23 @@ EOF
     info "Note: mTLS certs must be generated on the vault server and copied here."
 fi
 
+# --- Install systemd services ---
+info "Installing systemd services..."
+
+SYSTEMD_DIR="/etc/systemd/system"
+cp "$INSTALL_DIR/systemd/venya-vault.service" "$SYSTEMD_DIR/"
+cp "$INSTALL_DIR/systemd/venya-executor.service" "$SYSTEMD_DIR/"
+systemctl daemon-reload
+
+if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
+    systemctl enable venya-vault.service
+    info "Enabled venya-vault.service"
+fi
+if [ "$MODE" = "executor" ] || [ "$MODE" = "both" ]; then
+    systemctl enable venya-executor.service
+    info "Enabled venya-executor.service"
+fi
+
 # --- Summary ---
 echo ""
 echo "============================================"
@@ -281,20 +388,25 @@ echo "  cd $INSTALL_DIR"
 echo "  source .venv/bin/activate"
 echo ""
 
-if [ "$HOST_TYPE" = "executor" ]; then
+if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
+    echo "To start the vault server:"
+    echo "  systemctl start venya-vault"
+    echo "  # or manually: $INSTALL_DIR/.venv/bin/venya-server --config /etc/venya/server.toml"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Verify health: curl http://localhost:8080/api/v1/health"
+    echo "  2. Initialize vault: POST /api/v1/init"
+fi
+
+if [ "$MODE" = "executor" ] || [ "$MODE" = "both" ]; then
     echo "To start the executor:"
-    echo "  $INSTALL_DIR/.venv/bin/venya-executor --config /etc/venya/executor.toml"
+    echo "  systemctl start venya-executor"
+    echo "  # or manually: $INSTALL_DIR/.venv/bin/venya-executor --config /etc/venya/executor.toml"
     echo ""
     echo "Next steps:"
     echo "  1. Generate mTLS certs on vault server"
     echo "  2. Copy ca.crt, executor.crt, executor.key to /etc/venya/executor/"
-    echo "  3. Start executor"
-else
-    echo "To start the server:"
-    echo "  nohup $INSTALL_DIR/.venv/bin/uvicorn server.app:create_app --factory --host 0.0.0.0 --port 8080 &"
-    echo ""
-    echo "Next steps:"
-    echo "  1. Verify health: curl http://localhost:8080/api/v1/health"
-    echo "  2. Initialize vault: venya init admin-1"
+    echo "  3. systemctl start venya-executor"
+    echo "  4. Run 'newgrp kvm' or re-login to activate KVM group"
 fi
 echo ""
