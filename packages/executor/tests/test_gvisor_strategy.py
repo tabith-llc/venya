@@ -254,6 +254,85 @@ class TestCommandPolicyAllowedHosts:
         assert policy.allowed_hosts == []
 
 
+class TestCommandValidatorParseFlags:
+    """Tests for --allow-host and --no-network flag parsing."""
+
+    def _make_validator(self):
+        from executor.command_validator import CommandValidator
+        return CommandValidator()
+
+    def test_strip_no_network_flag(self):
+        """_strip_flag removes --no-network from command."""
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        result = validator._strip_flag("/bin/echo hello --no-network", "--no-network")
+        assert result == "/bin/echo hello"
+
+    def test_strip_no_network_flag_with_spaces(self):
+        """_strip_flag handles --no-network with surrounding spaces."""
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        result = validator._strip_flag("/bin/echo hello  --no-network  ", "--no-network")
+        assert result == "/bin/echo hello"
+
+    def test_parse_allow_host_single(self):
+        """_parse_allow_hosts parses single --allow-host flag."""
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        result = validator._parse_allow_hosts("/bin/ssh --allow-host 10.0.0.1:22")
+        assert result == [{"host": "10.0.0.1", "port": 22}]
+
+    def test_parse_allow_host_multiple(self):
+        """_parse_allow_hosts parses multiple --allow-host flags."""
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        result = validator._parse_allow_hosts(
+            "/bin/sh --allow-host 10.0.0.1:22 --allow-host 10.0.0.2:443"
+        )
+        assert len(result) == 2
+        assert result[0] == {"host": "10.0.0.1", "port": 22}
+        assert result[1] == {"host": "10.0.0.2", "port": 443}
+
+    def test_parse_allow_host_no_port(self):
+        """_parse_allow_hosts handles --allow-host without port (defaults to 0)."""
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        result = validator._parse_allow_hosts("/bin/sh --allow-host 10.0.0.1")
+        assert result == [{"host": "10.0.0.1", "port": 0}]
+
+    def test_parse_allow_host_none(self):
+        """_parse_allow_hosts returns empty list when no flags present."""
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        result = validator._parse_allow_hosts("/bin/echo hello")
+        assert result == []
+
+    def test_validate_strips_no_network(self):
+        """validate() strips --no-network before checking dangerous patterns."""
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        # --no-network contains "no" which shouldn't match any dangerous pattern
+        is_valid, reason = validator.validate("/bin/echo hello --no-network")
+        assert is_valid is True
+
+    def test_validate_allows_allow_host_in_strict(self):
+        """validate() strips --allow-host before strict mode check."""
+        from executor.command_validator import CommandValidator, make_strict_policy
+
+        policy = make_strict_policy(allowed_commands=["/bin/ssh"])
+        validator = CommandValidator(policy=policy)
+
+        is_valid, reason = validator.validate("/bin/ssh --allow-host 10.0.0.1:22")
+        assert is_valid is True
+
+
 class TestRunCommandGvisor:
     """Tests for Executor._run_command_gvisor()."""
 
