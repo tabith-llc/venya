@@ -78,6 +78,10 @@ class SessionMiddleware(BaseHTTPMiddleware):
         if path in self.PUBLIC_PATHS:
             return await call_next(request)
 
+        # Skip auth for static assets (any path starting with /static/)
+        if path.startswith("/static/"):
+            return await call_next(request)
+
         # Skip mTLS paths (executor)
         if self._is_mtls_request(request):
             request.state.auth_user = {"caller": "executor"}  # type: ignore[attr-defined]
