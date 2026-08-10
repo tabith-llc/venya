@@ -22,7 +22,7 @@ INSTALL_DIR="${VENYA_INSTALL_DIR:-}"
 DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-venya_test_passphrase_2024}"
 SKIP_PROMPT="${VENYA_SKIP_PROMPT:-}"
 TARBALL_URL="${VENYA_TARBALL:-}"
-HOST_TYPE="${VENYA_HOST_TYPE:-server}"  # "server" or "executor"
+HOST_TYPE="${VENYA_HOST_TYPE:-server}"  # "server" (venya-vault) or "executor" (venya-executor)
 EXECUTOR_ID="${VENYA_EXECUTOR_ID:-jump-1}"
 SERVER_URL="${VENYA_SERVER_URL:-http://localhost:8080}"
 
@@ -236,6 +236,19 @@ chmod 700 /var/lib/venya/ca
 # --- Executor configuration (if HOST_TYPE=executor) ---
 if [ "$HOST_TYPE" = "executor" ]; then
     info "Configuring executor..."
+
+    # --- Install Docker Sandboxes (sbx) CLI ---
+    info "Installing Docker Sandboxes (sbx) CLI..."
+    if ! command -v sbx &>/dev/null; then
+        curl -fsSL https://get.docker.com | REPO_ONLY=1 sh > /dev/null 2>&1
+        apt-get install -y -qq docker-sbx > /dev/null 2>&1
+        # Add current user to kvm group for libvirt access
+        usermod -aG kvm "$CURRENT_USER" 2>/dev/null || true
+        info "sbx CLI installed. Run 'newgrp kvm' or re-login to activate."
+    else
+        info "sbx CLI already installed: $(sbx --version 2>/dev/null || echo 'unknown')"
+    fi
+
     mkdir -p /etc/venya/executor
     mkdir -p /var/log/venya
 
@@ -244,7 +257,7 @@ server_url = "$SERVER_URL"
 executor_id = "$EXECUTOR_ID"
 log_level = "info"
 daemonize = false
-injection_method = "memfd"
+injection_method = "sbx"
 secret_base_fd = 100
 
 [mtls]
