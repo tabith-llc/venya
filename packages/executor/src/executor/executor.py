@@ -417,11 +417,13 @@ class Executor:
         injections: list[SecretBundle],
         env_override: dict[str, str] | None,
         cwd: str | None,
+        allowed_hosts: list[dict[str, Any]] | None = None,
     ) -> CommandResult:
         """Run command inside a gVisor-sandboxed Docker container.
 
         Key security properties:
-        - Network access is DISABLED (--network=none)
+        - When allowed_hosts is None/empty: network_mode="none" (no network)
+        - When allowed_hosts is provided: bridge network + iptables egress whitelist
         - Secrets are mounted as read-only tmpfs files
         - gVisor's Sentry intercepts syscalls (no direct host kernel access)
         - stdout/stderr are captured from container logs
@@ -431,6 +433,7 @@ class Executor:
             injections: Secret bundles (for filtering reference).
             env_override: Environment variables to set.
             cwd: Working directory (mapped into container).
+            allowed_hosts: List of {host, port} dicts for egress whitelist.
 
         Returns:
             CommandResult with filtered output.
@@ -455,19 +458,41 @@ class Executor:
             for k, v in env_override.items():
                 container_env.append(f"{k}={v}")
 
-        # Unique container name for this session
-        container_name = f"venya-{self.session_id}-{uuid.uuid4().hex[:8]}"
-
-        logger.info(
-            "Launching gVisor container: name=%s, mounts=%d, network=none",
-            container_name,
-            len(secret_mounts),
-        )
-
-        # Connect to Docker daemon
+        # Connect to Docker daemon (needed for network creation)
         client = docker.from_env()
 
-        # Track the container so cleanup can remove it
+        # Determine network mode
+        network_mode: str | Any = "none"
+        docker_network = None
+        session_uuid = uuid.uuid4().hex
+
+        if allowed_hosts:
+            network_name = f"venya-net-{session_uuid}"
+            logger.info("Creating Docker network: %s", network_name)
+            docker_network = client.networks.create(network_name, driver="bridge")
+            network_mode = docker_network.name  # SDK expects string
+        else:
+            logger.info("No allowed_hosts — using network_mode=none")
+
+        # Unique container name for this session
+        container_name = f"venya-{self.session_id}-{session_uuid}"
+
+        if allowed_hosts:
+            logger.info(
+                "Launching gVisor container: name=%s, mounts=%d, network=%s, allowed_hosts=%d",
+                container_name,
+                len(secret_mounts),
+                network_mode,
+                len(allowed_hosts),
+            )
+        else:
+            logger.info(
+                "Launching gVisor container: name=%s, mounts=%d, network=none",
+                container_name,
+                len(secret_mounts),
+            )
+
+        # Track resources so cleanup can remove them
         container = None
 
         try:
@@ -480,7 +505,7 @@ class Executor:
                 detach=True,
                 stdin_open=False,
                 tty=False,
-                network_mode="none",      # NO NETWORK ACCESS
+                network_mode=network_mode,
                 volumes=volumes,
                 environment=container_env,
                 working_dir=cwd or "/work",
@@ -491,6 +516,10 @@ class Executor:
                 read_only=False,          # Need writable /tmp inside container
                 tmpfs={"/tmp": "size=64m,mode=1777"},  # Writable tmpfs inside container
             )
+
+            # Apply egress rules if allowed_hosts was provided
+            if allowed_hosts and docker_network:
+                self._apply_egress_rules(allowed_hosts, docker_network.name, session_uuid)
 
             # Wait for container to finish
             result = container.wait(timeout=CONTAINER_TIMEOUT)
@@ -535,6 +564,17 @@ class Executor:
                     container.remove(force=True)
                 except Exception:
                     logger.warning("Failed to remove container %s", container_name)
+
+            # Clean up Docker network if created
+            if docker_network is not None:
+                try:
+                    docker_network.remove()
+                    logger.info("Removed Docker network: %s", docker_network.name)
+                except Exception:
+                    logger.warning("Failed to remove network %s", docker_network.name)
+
+            # Clean up iptables egress rules
+            self._cleanup_egress_rules()
 
     def _apply_egress_rules(
         self,

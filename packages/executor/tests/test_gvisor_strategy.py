@@ -343,6 +343,366 @@ class TestRunCommandGvisor:
             else:
                 sys.modules["docker"] = original
 
+    def test_gvisor_with_allowed_hosts_creates_network(self, monkeypatch):
+        """_run_command_gvisor creates a Docker network when allowed_hosts is provided."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = [b"\x01hello"]
+        mock_network = MagicMock()
+        mock_network.name = "venya-net-test123"
+        mock_network.id = "net-abc123"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.networks.create.return_value = mock_network
+        mock_docker = MagicMock()
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors.ContainerError = Exception
+        mock_docker.errors.ImageNotFound = Exception
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            allowed_hosts = [{"host": "10.10.10.50", "port": 22}]
+
+            def mock_apply_egress(*args, **kwargs):
+                executor._egress_chain_name = "VENYA_EGRESS_test"
+
+            monkeypatch.setattr(executor, "_apply_egress_rules", mock_apply_egress)
+
+            def mock_subprocess_run(cmd, **kwargs):
+                mock_result = MagicMock()
+                mock_result.stdout = b""
+                mock_result.stderr = b""
+                mock_result.returncode = 0
+                return mock_result
+
+            monkeypatch.setattr("executor.executor.subprocess.run", mock_subprocess_run)
+
+            result = executor._run_command_gvisor("echo hello", [], None, None, allowed_hosts=allowed_hosts)
+
+            # Verify network was created
+            call_args = mock_client.networks.create.call_args
+            assert call_args is not None
+            assert "venya-net" in call_args[0][0]
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
+
+    def test_gvisor_with_allowed_hosts_uses_network_mode(self, monkeypatch):
+        """_run_command_gvisor uses network=network_name when allowed_hosts is provided."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = [b"\x01hello"]
+        mock_network = MagicMock()
+        mock_network.name = "venya-net-test456"
+        mock_network.id = "net-abc123"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.networks.create.return_value = mock_network
+        mock_docker = MagicMock()
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors.ContainerError = Exception
+        mock_docker.errors.ImageNotFound = Exception
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            allowed_hosts = [{"host": "10.10.10.50", "port": 22}]
+
+            def mock_apply_egress(*args, **kwargs):
+                executor._egress_chain_name = "VENYA_EGRESS_test"
+
+            monkeypatch.setattr(executor, "_apply_egress_rules", mock_apply_egress)
+
+            def mock_subprocess_run(cmd, **kwargs):
+                mock_result = MagicMock()
+                mock_result.stdout = b""
+                mock_result.stderr = b""
+                mock_result.returncode = 0
+                return mock_result
+
+            monkeypatch.setattr("executor.executor.subprocess.run", mock_subprocess_run)
+
+            executor._run_command_gvisor("echo hello", [], None, None, allowed_hosts=allowed_hosts)
+
+            # Verify container was launched with network name string, not "none"
+            call_kwargs = mock_client.containers.run.call_args[1]
+            assert isinstance(call_kwargs["network_mode"], str)
+            assert call_kwargs["network_mode"] != "none"
+            assert "venya-net" in call_kwargs["network_mode"]
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
+
+    def test_gvisor_without_allowed_hosts_uses_network_none(self):
+        """_run_command_gvisor uses network_mode='none' when allowed_hosts is empty."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_docker, mock_client, mock_container = self._make_mock_docker()
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            result = executor._run_command_gvisor("echo hello", [], None, None, allowed_hosts=[])
+
+            call_kwargs = mock_client.containers.run.call_args[1]
+            assert call_kwargs["network_mode"] == "none"
+            # No network should be created
+            mock_client.networks.create.assert_not_called()
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
+
+    def test_gvisor_with_allowed_hosts_calls_egress_rules(self, monkeypatch):
+        """_run_command_gvisor calls _apply_egress_rules when allowed_hosts is provided."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = [b"\x01hello"]
+        mock_network = MagicMock()
+        mock_network.name = "venya-net-test789"
+        mock_network.id = "net-abc123"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.networks.create.return_value = mock_network
+        mock_docker = MagicMock()
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors.ContainerError = Exception
+        mock_docker.errors.ImageNotFound = Exception
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            egress_called = []
+
+            def mock_apply_egress(allowed_hosts, network_name, session_uuid):
+                egress_called.append((allowed_hosts, network_name, session_uuid))
+                executor._egress_chain_name = f"VENYA_EGRESS_{session_uuid}"
+
+            monkeypatch.setattr(executor, "_apply_egress_rules", mock_apply_egress)
+
+            def mock_subprocess_run(cmd, **kwargs):
+                mock_result = MagicMock()
+                mock_result.stdout = b""
+                mock_result.stderr = b""
+                mock_result.returncode = 0
+                return mock_result
+
+            monkeypatch.setattr("executor.executor.subprocess.run", mock_subprocess_run)
+
+            allowed_hosts = [{"host": "10.10.10.50", "port": 22}]
+            executor._run_command_gvisor("echo hello", [], None, None, allowed_hosts=allowed_hosts)
+
+            assert len(egress_called) == 1
+            assert egress_called[0][0] == allowed_hosts
+            assert "venya-net" in egress_called[0][1]
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
+
+    def test_gvisor_with_allowed_hosts_cleans_up_network(self, monkeypatch):
+        """_run_command_gvisor removes the Docker network in finally block."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = [b"\x01hello"]
+        mock_network = MagicMock()
+        mock_network.name = "venya-net-cleanup"
+        mock_network.id = "net-abc123"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.networks.create.return_value = mock_network
+        mock_docker = MagicMock()
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors.ContainerError = Exception
+        mock_docker.errors.ImageNotFound = Exception
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            def mock_apply_egress(*args, **kwargs):
+                executor._egress_chain_name = "VENYA_EGRESS_test"
+
+            monkeypatch.setattr(executor, "_apply_egress_rules", mock_apply_egress)
+
+            def mock_subprocess_run(cmd, **kwargs):
+                mock_result = MagicMock()
+                mock_result.stdout = b""
+                mock_result.stderr = b""
+                mock_result.returncode = 0
+                return mock_result
+
+            monkeypatch.setattr("executor.executor.subprocess.run", mock_subprocess_run)
+
+            executor._run_command_gvisor("echo hello", [], None, None, allowed_hosts=[{"host": "10.10.10.50", "port": 22}])
+
+            # Network should be removed in finally
+            assert mock_network.remove.called
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
+
+    def test_gvisor_with_allowed_hosts_cleans_up_egress_rules(self, monkeypatch):
+        """_run_command_gvisor calls _cleanup_egress_rules in finally block."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = [b"\x01hello"]
+        mock_network = MagicMock()
+        mock_network.name = "venya-net-egress"
+        mock_network.id = "net-abc123"
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_client.networks.create.return_value = mock_network
+        mock_docker = MagicMock()
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors.ContainerError = Exception
+        mock_docker.errors.ImageNotFound = Exception
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            cleanup_called = []
+
+            original_cleanup = executor._cleanup_egress_rules
+
+            def mock_cleanup():
+                cleanup_called.append(True)
+                return original_cleanup()
+
+            monkeypatch.setattr(executor, "_cleanup_egress_rules", mock_cleanup)
+
+            def mock_apply_egress(*args, **kwargs):
+                executor._egress_chain_name = "VENYA_EGRESS_test"
+
+            monkeypatch.setattr(executor, "_apply_egress_rules", mock_apply_egress)
+
+            def mock_subprocess_run(cmd, **kwargs):
+                mock_result = MagicMock()
+                mock_result.stdout = b""
+                mock_result.stderr = b""
+                mock_result.returncode = 0
+                return mock_result
+
+            monkeypatch.setattr("executor.executor.subprocess.run", mock_subprocess_run)
+
+            executor._run_command_gvisor("echo hello", [], None, None, allowed_hosts=[{"host": "10.10.10.50", "port": 22}])
+
+            assert len(cleanup_called) == 1
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
+
 
 class TestCaptureContainerOutput:
     """Tests for Executor._capture_container_output()."""
