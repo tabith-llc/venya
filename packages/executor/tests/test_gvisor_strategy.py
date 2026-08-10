@@ -341,3 +341,87 @@ class TestRunCommandGvisor:
                 sys.modules.pop("docker", None)
             else:
                 sys.modules["docker"] = original
+
+
+class TestCaptureContainerOutput:
+    """Tests for Executor._capture_container_output()."""
+
+    def _make_executor(self):
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        return Executor(
+            command_validator=validator,
+            session_id="test-session",
+        )
+
+    def test_separates_stdout_and_stderr(self):
+        """_capture_container_output separates stdout and stderr by stream byte."""
+        executor = self._make_executor()
+
+        mock_container = MagicMock()
+        # 8-byte Docker headers: \x01=stdout, \x02=stderr
+        mock_container.logs.return_value = [
+            b"\x01" + b"\x00" * 7 + b"hello",
+            b"\x02" + b"\x00" * 7 + b"world",
+            b"\x01" + b"\x00" * 7 + b" foo",
+        ]
+
+        stdout, stderr = executor._capture_container_output(mock_container)
+
+        assert stdout == b"hello foo"
+        assert stderr == b"world"
+
+    def test_no_header_treated_as_stdout(self):
+        """_capture_container_output treats chunks without headers as stdout."""
+        executor = self._make_executor()
+
+        mock_container = MagicMock()
+        mock_container.logs.return_value = [
+            b"no header line",
+            b"\x02" + b"\x00" * 7 + b"stderr only",
+        ]
+
+        stdout, stderr = executor._capture_container_output(mock_container)
+
+        assert stdout == b"no header line"
+        assert stderr == b"stderr only"
+
+    def test_short_chunk_without_header(self):
+        """_capture_container_output handles short chunks (< 9 bytes) as stdout."""
+        executor = self._make_executor()
+
+        mock_container = MagicMock()
+        mock_container.logs.return_value = [
+            b"short",  # less than 9 bytes, no header
+        ]
+
+        stdout, stderr = executor._capture_container_output(mock_container)
+
+        assert stdout == b"short"
+        assert stderr == b""
+
+    def test_empty_logs(self):
+        """_capture_container_output handles empty logs."""
+        executor = self._make_executor()
+
+        mock_container = MagicMock()
+        mock_container.logs.return_value = []
+
+        stdout, stderr = executor._capture_container_output(mock_container)
+
+        assert stdout == b""
+        assert stderr == b""
+
+    def test_logs_exception_returns_empty(self):
+        """_capture_container_output returns empty on logs exception."""
+        executor = self._make_executor()
+
+        mock_container = MagicMock()
+        mock_container.logs.side_effect = RuntimeError("connection lost")
+
+        stdout, stderr = executor._capture_container_output(mock_container)
+
+        assert stdout == b""
+        assert stderr == b""
