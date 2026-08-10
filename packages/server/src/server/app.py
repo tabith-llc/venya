@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     # Startup: initialize DB, vault, and CA (FIDO2 is already initialized)
     from .dependencies import init_db
 
-    backend = init_db(config.db, db_url=config.db_url)
+    backend = init_db(config.db, db_url=config.db.database_url)
     logger.info("Database initialized: %s", config.db.database_path)
     app.state.backend = backend  # type: ignore[attr-defined]
 
@@ -124,12 +124,14 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 
 def main() -> None:
     """Run the server."""
+    import logging
+
     import uvicorn
 
     config = ServerConfig()
 
     logging.basicConfig(
-        level="debug" if config.debug else "info",
+        level=logging.DEBUG if config.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
