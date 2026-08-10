@@ -207,3 +207,137 @@ class TestFactoryCreateGvisor:
             assert "memfd" in str(e)
         else:
             assert False, "Expected ValueError"
+
+
+class TestRunCommandGvisor:
+    """Tests for Executor._run_command_gvisor()."""
+
+    def _make_mock_docker(self):
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 0}
+        mock_container.logs.return_value = [b"\x01hello world"]
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker = MagicMock()
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors.ContainerError = Exception
+        mock_docker.errors.ImageNotFound = Exception
+        return mock_docker, mock_client, mock_container
+
+    def test_gvisor_launches_container_with_network_none(self):
+        """_run_command_gvisor launches container with network_mode='none'."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_docker, mock_client, mock_container = self._make_mock_docker()
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            result = executor._run_command_gvisor("echo hello", [], None, None)
+
+            # Verify container was launched with correct params
+            call_kwargs = mock_client.containers.run.call_args[1]
+            assert call_kwargs["network_mode"] == "none"
+            assert call_kwargs["runtime"] == "runsc"
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
+
+    def test_gvisor_container_removed_after_execution(self):
+        """_run_command_gvisor always removes the container after execution."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_docker, mock_client, mock_container = self._make_mock_docker()
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            executor._run_command_gvisor("echo test", [], None, None)
+
+            assert mock_container.remove.called
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
+
+    def test_gvisor_returns_command_result(self):
+        """_run_command_gvisor returns a CommandResult with exit code and output."""
+        import sys
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+        from executor.strategies.gvisor_strategy import GvisorStrategy
+        from executor.strategies.base import InjectionResult
+
+        mock_container = MagicMock()
+        mock_container.wait.return_value = {"StatusCode": 42}
+        # Docker log format: 1-byte stream indicator + 7 padding bytes + payload
+        stdout_chunk = b"\x01" + b"\x00" * 7 + b"stdout data"
+        stderr_chunk = b"\x02" + b"\x00" * 7 + b"stderr data"
+        mock_container.logs.return_value = [stdout_chunk, stderr_chunk]
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = mock_container
+        mock_docker = MagicMock()
+        mock_docker.from_env.return_value = mock_client
+        mock_docker.errors.ContainerError = Exception
+        mock_docker.errors.ImageNotFound = Exception
+
+        original = sys.modules.get("docker")
+        sys.modules["docker"] = mock_docker
+
+        try:
+            validator = CommandValidator()
+            strategy = GvisorStrategy()
+
+            executor = Executor(
+                command_validator=validator,
+                session_id="test-session",
+                injection_strategy=strategy,
+            )
+            executor._injection_result = InjectionResult()
+            executor._bundles = []
+
+            result = executor._run_command_gvisor("exit 42", [], None, None)
+
+            assert result.exit_code == 42
+            assert b"stdout data" in result.stdout
+            assert b"stderr data" in result.stderr
+        finally:
+            if original is None:
+                sys.modules.pop("docker", None)
+            else:
+                sys.modules["docker"] = original
