@@ -425,3 +425,114 @@ class TestCaptureContainerOutput:
 
         assert stdout == b""
         assert stderr == b""
+
+
+class TestFilterAndBuildResult:
+    """Tests for Executor._filter_and_build_result()."""
+
+    def _make_executor(self):
+        from executor.executor import Executor
+        from executor.command_validator import CommandValidator
+
+        validator = CommandValidator()
+        return Executor(
+            command_validator=validator,
+            session_id="test-session",
+        )
+
+    def test_uses_stage1_results_without_http_client(self):
+        """_filter_and_build_result uses Stage 1 results when no HTTP client."""
+        from unittest.mock import patch
+
+        executor = self._make_executor()
+        executor.http_client = None
+
+        stage1_stdout = b"hello [REDACTED:z1z1z1z1] world"
+
+        with patch("executor.executor.filter_and_redact", return_value=(stage1_stdout, b"", ["z1z1z1z1"], [])):
+            result = executor._filter_and_build_result(
+                "echo test", 0, b"hello secret world", b"", []
+            )
+
+        assert result.stdout == stage1_stdout
+        assert result.masked_secret_ids == ["z1z1z1z1"]
+
+    def test_uses_stage2_results_when_http_client_available(self):
+        """_filter_and_build_result uses Stage 2 results when HTTP client is available."""
+        from unittest.mock import patch
+        import base64
+
+        executor = self._make_executor()
+
+        stage2_stdout = b"server filtered [REDACTED:y2y2y2y2]"
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "stdout": base64.b64encode(stage2_stdout).decode(),
+            "stderr": base64.b64encode(b"").decode(),
+            "masked_hashes": ["y2y2y2y2"],
+        }
+        executor.http_client = MagicMock()
+        executor.http_client.post.return_value = mock_response
+
+        with patch("executor.executor.filter_and_redact", return_value=(b"local", b"", ["x1x1x1x1"], [])):
+            result = executor._filter_and_build_result(
+                "echo test", 0, b"raw output", b"", []
+            )
+
+        assert result.stdout == stage2_stdout
+        assert result.masked_secret_ids == ["y2y2y2y2"]
+
+    def test_falls_back_to_stage1_on_stage2_failure(self):
+        """_filter_and_build_result falls back to Stage 1 when Stage 2 fails."""
+        from unittest.mock import patch
+        import httpx
+
+        executor = self._make_executor()
+        stage1_stdout = b"local [REDACTED:z1z1z1z1]"
+
+        executor.http_client = MagicMock()
+        executor.http_client.post.side_effect = httpx.RequestError(
+            "Connection refused", request=MagicMock()
+        )
+
+        with patch("executor.executor.filter_and_redact", return_value=(stage1_stdout, b"", ["z1z1z1z1"], [])):
+            result = executor._filter_and_build_result(
+                "echo test", 0, b"raw", b"", []
+            )
+
+        assert result.stdout == stage1_stdout
+        assert result.masked_secret_ids == ["z1z1z1z1"]
+
+    def test_truncation_flag_set_on_large_output(self):
+        """_filter_and_build_result sets output_truncated when output exceeds limit."""
+        from unittest.mock import patch
+
+        executor = self._make_executor()
+        executor.http_client = None
+
+        large_output = b"x" * 300000  # exceeds MAX_OUTPUT_BYTES (262144)
+
+        with patch("executor.executor.filter_and_redact", return_value=(large_output, b"", [], [])):
+            result = executor._filter_and_build_result(
+                "echo test", 0, large_output, b"", []
+            )
+
+        assert result.output_truncated is True
+        assert result.original_stdout_size == 300000
+
+    def test_truncation_flag_not_set_on_small_output(self):
+        """_filter_and_build_result does not set output_truncated for small output."""
+        from unittest.mock import patch
+
+        executor = self._make_executor()
+        executor.http_client = None
+
+        small_output = b"small"
+
+        with patch("executor.executor.filter_and_redact", return_value=(small_output, b"", [], [])):
+            result = executor._filter_and_build_result(
+                "echo test", 0, small_output, b"", []
+            )
+
+        assert result.output_truncated is False
+        assert result.original_stdout_size == 5
