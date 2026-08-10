@@ -16,15 +16,15 @@ logger = logging.getLogger("venya.executor.strategies")
 
 @dataclass
 class SecretMount:
-    """A secret made available at a filesystem path (for container mounts).
+    """A secret made available at a filesystem path (for sandbox mounts).
 
-    Used by GvisorStrategy to expose secrets as read-only files
-    inside a gVisor sandbox container.
+    Used by SbxStrategy to expose secrets as read-only files
+    inside a Docker Sandbox microVM.
     """
 
     secret_id: str
     path: str  # Host-side path (on tmpfs) to mount into container
-    container_path: str  # Path inside the container where the secret appears
+    container_path: str  # Path inside the sandbox where the secret appears
 
 
 @dataclass
@@ -36,8 +36,8 @@ class InjectionResult:
 
     Attributes:
         extra_fds: File descriptors to pass to the subprocess via pass_fds.
-        secret_mounts: Filesystem mounts for container-based execution
-                       (used by GvisorStrategy, ignored by MemfdStrategy).
+        secret_mounts: Filesystem mounts for sandbox-based execution
+                       (used by SbxStrategy, ignored by MemfdStrategy).
         cleanup_funcs: Functions to call on cleanup. Each takes no arguments.
 
     NOTE: Executor processes commands sequentially. This is per-execution
