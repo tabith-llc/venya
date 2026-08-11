@@ -28,9 +28,7 @@ allow-direct-references = true
 packages = ["src/vault"]
 
 [project.optional-dependencies]
-test = [
-    "sqlcipher3>=0.1.0",
-]
+test = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
