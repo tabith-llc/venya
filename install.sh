@@ -21,10 +21,12 @@ set -euo pipefail
 INSTALL_DIR="${VENYA_INSTALL_DIR:-}"
 DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-venya_test_passphrase_2024}"
 SKIP_PROMPT="${VENYA_SKIP_PROMPT:-}"
-TARBALL_URL="${VENYA_TARBALL:-}"
+TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-install.tar.gz}"
 MODE="${VENYA_MODE:-}"  # REQUIRED: "vault", "executor", or "both"
 EXECUTOR_ID="${VENYA_EXECUTOR_ID:-jump-1}"
 SERVER_URL="${VENYA_SERVER_URL:-http://localhost:8080}"
+VAULT_HOSTNAME="${VAULT_HOSTNAME:-localhost}"
+TLS_MODE="${TLS_MODE:-internal}"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -97,15 +99,7 @@ fi
 
 # --- Create venya user ---
 if ! id venya &>/dev/null; then
-    if [ "$SKIP_PROMPT" = "yes" ]; then
-        VENYA_PASSWORD="${VENYA_PASSWORD:-venya12}"
-    else
-        echo -n "Enter password for venya user: "
-        read -rs VENYA_PASSWORD
-        echo ""
-    fi
     useradd -m -s /bin/bash venya
-    echo "venya:$VENYA_PASSWORD" | chpasswd
     info "Created venya user"
 fi
 
@@ -175,7 +169,7 @@ fi
 mkdir -p "$INSTALL_DIR"
 tar xzf "$TARBALL_FILE" -C "$INSTALL_DIR" --strip-components=1
 rm -f "$TARBALL_FILE"
-chown venya:venya "$INSTALL_DIR"
+chown -R venya:venya "$INSTALL_DIR"
 
 # --- Build Python environment (as venya user) ---
 info "Creating Python virtual environment..."
@@ -193,7 +187,19 @@ fi
 # --- Build Rust extension (as venya user) ---
 info "Building Rust filter extension..."
 VENYA_CARGO="/home/venya/.cargo/bin/cargo"
-sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR/packages/executor && $VENYA_CARGO build --release" > /dev/null 2>&1
+RUST_LOG="/var/log/venya/rust-build.log"
+mkdir -p "$(dirname "$RUST_LOG")"
+sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR/packages/executor && $VENYA_CARGO build --release" > "$RUST_LOG" 2>&1
+if [ $? -ne 0 ]; then
+    error "Rust build failed. See $RUST_LOG"
+    cat "$RUST_LOG"
+    exit 1
+fi
+if [ ! -f "$INSTALL_DIR/packages/executor/target/release/libvenya_filter.so" ]; then
+    error "Rust build completed but libvenya_filter.so not found"
+    exit 1
+fi
+info "Rust build complete"
 PYTHON_PATH=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
 cp "$INSTALL_DIR/packages/executor/target/release/libvenya_filter.so" "$PYTHON_PATH/venya_filter.so"
 chown venya:venya "$PYTHON_PATH/venya_filter.so"
@@ -270,7 +276,7 @@ if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
     systemctl enable postgresql
 
     sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya'" 2>/dev/null | grep -q 1 || \
-        sudo -u postgres psql -c "CREATE USER venya WITH PASSWORD 'venya_dev_password';" > /dev/null 2>&1
+        sudo -u postgres psql -c "CREATE USER venya;" > /dev/null 2>&1
 
     sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/dev/null | grep -q 1 || \
         sudo -u postgres psql -c "CREATE DATABASE venya OWNER venya;" > /dev/null 2>&1
@@ -341,7 +347,7 @@ ssl_cert = "$SSL_DIR/server.crt"
 ssl_key = "$SSL_DIR/server.key"
 
 [db]
-database_url = "postgresql://venya:venya_dev_password@localhost/venya"
+database_url = "postgresql://venya@localhost/venya"
 database_path = "venya.db"
 passphrase = "$DB_PASSPHRASE"
 wal_mode = true
@@ -398,7 +404,7 @@ EOF
     # --- Write .env ---
     cat > "$INSTALL_DIR/.env" << EOF
 VENYA_HOST=$BIND_ADDRESS
-VENYA_DB__DATABASE_URL=postgresql://venya:venya_dev_password@localhost/venya
+VENYA_DB__DATABASE_URL=postgresql://venya@localhost/venya
 VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
 VENYA_FIDO2__RP_ID=$HOSTNAME
 VENYA_FIDO2__RP_NAME=Venya Vault
@@ -411,7 +417,7 @@ EOF
 
     # --- Run database migrations ---
     info "Running database migrations..."
-    sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR/packages/vault && VENYA_DB_URL='postgresql://venya:venya_dev_password@localhost/venya' /home/venya/.local/bin/uv run alembic -c alembic.ini upgrade head"
+    sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR/packages/vault && VENYA_DB_URL='postgresql://venya@localhost/venya' /home/venya/.local/bin/uv run alembic -c alembic.ini upgrade head"
     info "Database migrations complete"
 fi
 
@@ -468,6 +474,45 @@ if [ "$MODE" = "executor" ] || [ "$MODE" = "both" ]; then
     systemctl enable venya-executor.service
     info "Enabled venya-executor.service"
 fi
+
+# --- Verification ---
+info "Verifying installation..."
+ERRORS=0
+if [ ! -f "$INSTALL_DIR/.venv/bin/venya" ]; then
+    error "venya binary not found at $INSTALL_DIR/.venv/bin/venya"
+    ERRORS=$((ERRORS + 1))
+fi
+if [ ! -f "$INSTALL_DIR/.venv/lib/python*/site-packages/venya_filter.so" ] && [ ! -f "$INSTALL_DIR/.venv/lib/python*/site-packages/venya_filter.cpython-*.so" ]; then
+    # Check for the .so file with any python version prefix
+    if [ ! -f "$INSTALL_DIR/.venv/lib/python*/site-packages/venya_filter"* ]; then
+        warn "venya_filter.so not found in site-packages"
+    fi
+fi
+if [ ! -f /etc/venya/server.toml ]; then
+    error "server.toml not found at /etc/venya/server.toml"
+    ERRORS=$((ERRORS + 1))
+fi
+if [ ! -f /etc/venya/ssl/server.crt ] || [ ! -f /etc/venya/ssl/server.key ]; then
+    error "SSL certificate not found at /etc/venya/ssl/"
+    ERRORS=$((ERRORS + 1))
+fi
+if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
+    if [ ! -f /etc/systemd/system/venya-vault.service ]; then
+        error "venya-vault.service not found at /etc/systemd/system/venya-vault.service"
+        ERRORS=$((ERRORS + 1))
+    fi
+fi
+if [ "$MODE" = "executor" ] || [ "$MODE" = "both" ]; then
+    if [ ! -f /etc/systemd/system/venya-executor.service ]; then
+        error "venya-executor.service not found at /etc/systemd/system/venya-executor.service"
+        ERRORS=$((ERRORS + 1))
+    fi
+fi
+if [ "$ERRORS" -gt 0 ]; then
+    error "Installation completed with $ERRORS error(s). Check output above."
+    exit 1
+fi
+info "Installation verified successfully"
 
 # --- Summary ---
 echo ""
