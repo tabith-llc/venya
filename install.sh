@@ -275,6 +275,11 @@ if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
     systemctl start postgresql
     systemctl enable postgresql
 
+    # Configure trust authentication for local host connections (safe: localhost only)
+    sudo sed -i 's/host    all             all             127.0.0.1\/32            scram-sha-256/host    all             all             127.0.0.1\/32            trust/' /etc/postgresql/16/main/pg_hba.conf
+    sudo sed -i 's/host    all             all             ::1\/128                 scram-sha-256/host    all             all             ::1\/128                 trust/' /etc/postgresql/16/main/pg_hba.conf
+    systemctl restart postgresql
+
     sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya'" 2>/dev/null | grep -q 1 || \
         sudo -u postgres psql -c "CREATE USER venya;" > /dev/null 2>&1
 
