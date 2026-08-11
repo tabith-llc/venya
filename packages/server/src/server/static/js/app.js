@@ -94,6 +94,7 @@
                 challenge_id: challengeId,
                 response: response,
             }),
+            credentials: "include",
         });
 
         if (!resp.ok) {

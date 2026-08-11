@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..fido2.browser_adapter import (
@@ -81,9 +82,10 @@ def _set_session_cookie(response: Response, access_token: str) -> None:
         key=COOKIE_NAME,
         value=access_token,
         httponly=True,
-        secure=True,
-        samesite="strict",
+        secure=False,
+        samesite="lax",
         max_age=COOKIE_MAX_AGE,
+        path="/",
     )
 
 
@@ -246,10 +248,7 @@ async def browser_login_assert(
         )
         db.commit()
 
-        response = Response(
-            content='{"status": "ok"}',
-            media_type="application/json",
-        )
+        response = JSONResponse(content={"status": "ok"})
         _set_session_cookie(response, access_token.token)
         return response
     except Exception:
@@ -577,3 +576,10 @@ async def browser_elevate_assert(
         ) from e
     finally:
         db.close()
+
+
+@router.get("/auth/debug/cookie")
+async def debug_cookie(request: Request) -> dict:
+    """Debug endpoint to check current cookie state."""
+    cookie = request.cookies.get(COOKIE_NAME, "NONE")
+    return {"cookie": cookie[:30] + "..." if len(cookie) > 30 else cookie}

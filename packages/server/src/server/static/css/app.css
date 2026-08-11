@@ -371,6 +371,10 @@ table tbody tr:hover {
     z-index: 1000;
 }
 
+.modal-overlay[hidden] {
+    display: none !important;
+}
+
 .modal {
     background: #fff;
     border-radius: 6px;
@@ -416,6 +420,49 @@ table tbody tr:hover {
     gap: 10px;
     justify-content: flex-end;
     margin-top: 8px;
+}
+
+.modal-buttons-center {
+    justify-content: center;
+}
+
+.modal-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    text-align: center;
+}
+
+.success-user {
+    margin-bottom: 12px;
+    text-align: center;
+}
+
+.success-label {
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: #555;
+}
+
+.recovery-code-box {
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 12px;
+    text-align: center;
+    font-family: monospace;
+    font-size: 16px;
+    letter-spacing: 0.05em;
+    margin-bottom: 16px;
+    word-break: break-all;
+}
+
+.success-warning {
+    font-size: 13px;
+    color: #cc3333;
+    margin-bottom: 20px;
+    text-align: center;
+    font-weight: 500;
 }
 
 /* --- Pagination --- */

@@ -87,15 +87,7 @@ class SessionManager:
         now = datetime.now(timezone.utc)
         expires_at = now + self.config.session_timeout
 
-        session = SessionModel(
-            user_id=user_id,
-            expires_at=expires_at,
-            access_token_jti=None,  # Will be set after token creation
-        )
-        self.db.add(session)
-        self.db.flush()
-
-        # Create access token
+        # Create access token first
         access_token = AccessToken(
             token=secrets.token_urlsafe(32),
             user_id=user_id,
@@ -103,8 +95,13 @@ class SessionManager:
             expires_at=now + self.config.access_token_ttl,
         )
 
-        # Update session with access token JTI
-        session.access_token_jti = access_token.jti
+        session = SessionModel(
+            user_id=user_id,
+            expires_at=expires_at,
+            access_token=access_token.token,
+            access_token_jti=access_token.jti,
+        )
+        self.db.add(session)
         self.db.flush()
 
         return session, access_token
