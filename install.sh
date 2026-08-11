@@ -351,7 +351,7 @@ EOF
 {$VAULT_HOSTNAME} {
     reverse_proxy 127.0.0.1:8080
 
-    tls {$TLS_MODE}
+    tls $TLS_MODE
 
     # Pass real client IP for audit logging
     header_up X-Real-IP {remote_host}
