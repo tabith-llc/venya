@@ -73,21 +73,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             allow_headers=["*"],
         )
 
-    # Initialize FIDO2 manager at creation time (not deferred to lifespan)
-    from .fido2.manager import Fido2Manager
-
-    app.state.fido2_manager = Fido2Manager(  # type: ignore[attr-defined]
-        rp_id=config.fido2.rp_id,
-        rp_name=config.fido2.rp_name,
-        origins=config.fido2.origins,
-    )
-
-    # Initialize CA manager
-    from .ca import CAManager
-
-    ca_manager = CAManager(config.ca_dir)
-    app.state.ca_manager = ca_manager  # type: ignore[attr-defined]
-
+    # FIDO2 manager initialized in lifespan after DB is ready
     return app
 
 
@@ -104,6 +90,16 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 
     vault = backend.get_vault(config.db.passphrase)
     app.state.vault = vault  # type: ignore[attr-defined]
+
+    # Initialize FIDO2 manager after DB is ready
+    from .fido2.manager import Fido2Manager
+
+    app.state.fido2_manager = Fido2Manager(  # type: ignore[attr-defined]
+        rp_id=config.fido2.rp_id,
+        rp_name=config.fido2.rp_name,
+        origins=config.fido2.origins,
+        backend=backend,
+    )
 
     # Initialize CA if not already done
     from .ca import CAManager

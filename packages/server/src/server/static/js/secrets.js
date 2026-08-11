@@ -97,7 +97,7 @@
             }
         }
 
-        window.location.href = "/?expired=1";
+        window.location.href = "/";
     }
 
     function restoreFormState() {

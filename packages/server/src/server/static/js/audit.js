@@ -56,7 +56,7 @@
         var resp = await fetch(url, options);
 
         if (resp.status === 401) {
-            window.location.href = "/?expired=1";
+            window.location.href = "/";
             return null;
         }
 

@@ -78,11 +78,40 @@ class Fido2Manager:
         rp_id: str = "localhost",
         rp_name: str = "Venya",
         origins: list[str] | None = None,
+        backend: Any = None,
     ) -> None:
         self.rp_id = rp_id
         self.rp_name = rp_name
         self.origins = origins or ["https://localhost"]
         self.store = Fido2Store()
+        self.backend = backend
+        if backend is not None:
+            self._load_credentials_from_db()
+
+    def _load_credentials_from_db(self) -> None:
+        """Load WebAuthn credentials from the database into the in-memory store."""
+        from vault.iam.models import WebAuthnCredential
+
+        try:
+            db = self.backend.get_session()
+            try:
+                creds = db.query(WebAuthnCredential).all()
+                for db_cred in creds:
+                    stored = StoredCredential(
+                        user_id=db_cred.user_id,
+                        credential_id=db_cred.credential_id,
+                        credential_data={
+                            "raw_id": db_cred.raw_id,
+                            "response": db_cred.response,
+                            "transports": db_cred.transports,
+                        },
+                        transports=db_cred.transports or [],
+                    )
+                    self.store.store_credential(stored)
+            finally:
+                db.close()
+        except Exception:
+            pass
 
     def start_registration(
         self,
@@ -289,6 +318,7 @@ class Fido2Manager:
             {
                 "credential_id": c.credential_id,
                 "transports": c.transports,
+                "raw_id": c.credential_data["raw_id"],
             }
             for c in self.store.get_user_credentials(user_id)
         ]

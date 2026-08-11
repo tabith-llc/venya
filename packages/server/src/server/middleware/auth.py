@@ -101,6 +101,8 @@ class SessionMiddleware(BaseHTTPMiddleware):
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]
 
+        logger.info("AUTH DEBUG: cookies=%s, ACCESS_TOKEN_COOKIE=%s, token=%s", dict(request.cookies), self.ACCESS_TOKEN_COOKIE, token[:20] if token else "None")
+
         if not token:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -170,10 +172,10 @@ class SessionMiddleware(BaseHTTPMiddleware):
             )
             manager = SessionManager(db, config)
 
-            # Find session by access token JTI
+            # Find session by access token
             session = (
                 db.query(SessionModel)
-                .filter(SessionModel.access_token_jti == token)
+                .filter(SessionModel.access_token == token)
                 .first()
             )
 
