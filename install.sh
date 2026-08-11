@@ -368,6 +368,11 @@ EOF
 
     info "Caddyfile written to /etc/venya/Caddyfile (TLS mode: $TLS_MODE)"
 
+    # Copy Caddyfile to Caddy's default location
+    sudo cp /etc/venya/Caddyfile /etc/caddy/Caddyfile
+    sudo systemctl restart caddy
+    sleep 2
+
     # --- Install Caddy internal CA into system trust store ---
     info "Installing Caddy internal CA..."
     systemctl enable --now caddy > /dev/null 2>&1
