@@ -348,10 +348,9 @@ EOF
     mkdir -p /etc/venya
 
     cat > /etc/venya/Caddyfile << EOF
-{$VAULT_HOSTNAME} {
+$VAULT_HOSTNAME {
     reverse_proxy 127.0.0.1:8080 {
         header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
     }
 
     tls $TLS_MODE
