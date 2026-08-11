@@ -50,14 +50,9 @@ def create_parser() -> argparse.ArgumentParser:
         help="Skip running database migrations",
     )
     init_parser.add_argument(
-        "--force",
+        "--installation-reset",
         action="store_true",
-        help="Force re-initialization",
-    )
-    init_parser.add_argument(
-        "--confirm-reset",
-        action="store_true",
-        help="Confirm data wipe during reset",
+        help="Reset vault to pre-initialization state before starting (only allowed when no users are enrolled)",
     )
 
     # store

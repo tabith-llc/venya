@@ -36,7 +36,74 @@ class InitCompleteResponse(BaseModel):
     user_id: str
 
 
+# --- Request/Response models ---
+
+
+class ResetResponse(BaseModel):
+    success: bool
+    message: str
+
+
 # --- Endpoints ---
+
+
+@router.post(
+    "/init/reset",
+    response_model=ResetResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def init_reset(
+    request: Request,
+) -> ResetResponse:
+    """Reset the vault to pre-initialization state.
+
+    Only permitted when no users are enrolled (enrolled_at IS NULL for all users).
+    Deletes admin role, all users, all role members, and enrollment tokens.
+
+    This is a safety net for failed first-time enrollment attempts.
+    """
+    from ..dependencies import get_backend
+    from vault.iam.models import Role, RoleMember, User, EnrollmentToken
+
+    backend = get_backend(request)
+    db = backend.get_session()
+    try:
+        # Check if any user is enrolled
+        enrolled_count = (
+            db.query(User)
+            .filter(User.enrolled_at.isnot(None))
+            .count()
+        )
+
+        if enrolled_count > 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Vault already initialized. Cannot reset.",
+            )
+
+        # Delete in order to respect foreign key constraints
+        db.query(EnrollmentToken).delete()
+        db.query(RoleMember).delete()
+        db.query(User).filter(User.user_id != "system").delete()
+        db.query(Role).filter(Role.name == "admin").delete()
+        db.commit()
+
+        logger.info("Vault reset to pre-initialization state")
+
+        return ResetResponse(
+            success=True,
+            message="Vault reset to pre-initialization state.",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+    finally:
+        db.close()
 
 
 @router.post(
@@ -87,11 +154,12 @@ async def init_vault(
                     .filter(RoleMember.role_id == admin_role.id)
                     .first()
                 )
+                user_id_str = pending_user.user_id if pending_user else "unknown"
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
-                        f"Vault already initialized with admin '{pending_user.user_id}'. "
-                        "Re-initialization requires --force --confirm-reset."
+                        f"Vault already initialized with admin '{user_id_str}'. "
+                        "Use --installation-reset to start over."
                     ),
                 )
 
@@ -103,6 +171,14 @@ async def init_vault(
                 .filter(RoleMember.role_id == admin_role.id)
                 .first()
             )
+
+            if pending_user is None:
+                # Admin role exists but no role members — stale state from failed init
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Admin role exists but no pending enrollment found. Use --installation-reset to start over.",
+                )
 
             fido2_manager = getattr(request.app.state, "fido2_manager", None)
             if fido2_manager is None:

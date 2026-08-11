@@ -126,6 +126,8 @@ def cmd_init(client: APIClient, args: Any) -> int:
     3. Perform WebAuthn registration with security key
     4. Call POST /api/v1/init/complete → get recovery code
     5. Print recovery code
+
+    If --installation-reset is set, resets vault to pre-initialization state first.
     """
     from .fido2_client import (
         Fido2Auth,
@@ -134,6 +136,19 @@ def cmd_init(client: APIClient, args: Any) -> int:
         Fido2TimeoutError,
         Fido2UserInteractionRequiredError,
     )
+
+    # Run installation reset if requested
+    if getattr(args, "installation_reset", False):
+        try:
+            print("Resetting vault to pre-initialization state...")
+            reset_result = client.post("/api/v1/init/reset")
+            print(f"Reset complete: {reset_result.get('message', 'ok')}")
+        except APIClientError as e:
+            print(f"Reset failed: {e}", file=sys.stderr)
+            return 1
+        except Exception as e:
+            print(f"Reset failed: {e}", file=sys.stderr)
+            return 1
 
     # Run migrations unless skipped
     if not getattr(args, "skip_migrations", False):
