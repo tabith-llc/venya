@@ -210,6 +210,7 @@ async def init_complete(
     from fastapi import HTTPException
 
     from ..dependencies import get_backend
+    from ..fido2.browser_adapter import browser_registration_to_fido2
     from vault.iam.models import User, WebAuthnCredential
     import json
 
@@ -223,15 +224,36 @@ async def init_complete(
                 detail="FIDO2 manager not initialized",
             )
 
+        # Convert browser response to fido2 format
+        logger.info("init_complete received: user_id=%s, challenge_id=%s", req.user_id, req.challenge_id)
+        logger.info("response keys: %s", list(req.response.keys()))
+        logger.info("response.response: %s", req.response.get("response"))
+        try:
+            fido2_response = browser_registration_to_fido2(req.response)
+            logger.info("fido2_response: %s", fido2_response)
+        except Exception as e:
+            logger.error("browser_registration_to_fido2 failed: %s: %s", type(e).__name__, e)
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
+
         # Verify FIDO2 attestation
         try:
             cred = fido2_manager.finish_registration(
-                req.challenge_id, req.response
+                req.challenge_id, fido2_response
             )
         except ValueError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
+            ) from e
+        except Exception as e:
+            logger.error("finish_registration failed: %s: %s", type(e).__name__, e)
+            import traceback
+            logger.error(traceback.format_exc())
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Registration failed: {str(e)}",
             ) from e
 
         # Find the pending user

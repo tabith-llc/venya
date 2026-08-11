@@ -330,9 +330,15 @@ if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
     # --- Write server.toml ---
     mkdir -p /etc/venya
 
+    # Define variables needed by server.toml
+    SSL_DIR="/etc/venya/ssl"
+    HOSTNAME=$(hostname -f 2>/dev/null || hostname)
+
     cat > /etc/venya/server.toml << EOF
 host = "$BIND_ADDRESS"
 port = 8080
+ssl_cert = "$SSL_DIR/server.crt"
+ssl_key = "$SSL_DIR/server.key"
 
 [db]
 database_url = "postgresql://venya:venya_dev_password@localhost/venya"
@@ -341,9 +347,9 @@ passphrase = "$DB_PASSPHRASE"
 wal_mode = true
 
 [fido2]
-rp_id = "vault"
+rp_id = "$HOSTNAME"
 rp_name = "Venya Vault"
-origins = ["https://vault"]
+origins = ["https://$HOSTNAME"]
 enrollment_token_ttl = 15
 unmask_auto_hide_timeout = 30
 
@@ -361,7 +367,7 @@ ip_rate_limit = 100
 ca_dir = "/var/lib/venya/ca"
 
 [cors_origins]
-cors_origins = ["https://vault"]
+cors_origins = ["https://$HOSTNAME"]
 
 [audit]
 audit_remote_url = null
@@ -370,14 +376,35 @@ EOF
 
     info "Server config written to /etc/venya/server.toml"
 
+    # --- Generate self-signed SSL certificate ---
+    info "Generating self-signed SSL certificate..."
+    mkdir -p "$SSL_DIR"
+    chown -R venya:venya "$SSL_DIR"
+    chmod 700 "$SSL_DIR"
+
+    # Generate self-signed cert (valid for 365 days)
+    openssl ecparam -name prime256v1 -genkey -noout -out "$SSL_DIR/server.key" 2>/dev/null
+    openssl req -new -x509 -key "$SSL_DIR/server.key" -out "$SSL_DIR/server.crt" \
+        -days 365 \
+        -subj "/C=US/ST=State/L=City/O=Venya/OU=Dev/CN=$HOSTNAME" \
+        -addext "subjectAltName=DNS:$HOSTNAME,DNS:localhost,IP:127.0.0.1" \
+        2>/dev/null
+
+    chown venya:venya "$SSL_DIR/server.crt" "$SSL_DIR/server.key"
+    chmod 644 "$SSL_DIR/server.crt"
+    chmod 600 "$SSL_DIR/server.key"
+    info "SSL certificate generated: $SSL_DIR/server.crt"
+
     # --- Write .env ---
     cat > "$INSTALL_DIR/.env" << EOF
 VENYA_HOST=$BIND_ADDRESS
 VENYA_DB__DATABASE_URL=postgresql://venya:venya_dev_password@localhost/venya
 VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
-VENYA_FIDO2__RP_ID=vault
+VENYA_FIDO2__RP_ID=$HOSTNAME
 VENYA_FIDO2__RP_NAME=Venya Vault
-VENYA_CORS_ORIGINS=["https://vault"]
+VENYA_SSL_CERT=$SSL_DIR/server.crt
+VENYA_SSL_KEY=$SSL_DIR/server.key
+VENYA_CORS_ORIGINS=["https://$HOSTNAME:8080"]
 EOF
 
     info ".env written to $INSTALL_DIR/.env"
@@ -459,8 +486,9 @@ if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
     echo "  # or manually: $INSTALL_DIR/.venv/bin/venya-server --config /etc/venya/server.toml"
     echo ""
     echo "Next steps:"
-    echo "  1. Verify health: curl http://localhost:8080/api/v1/health"
-    echo "  2. Initialize vault: POST /api/v1/init"
+    echo "  1. Verify health: curl https://localhost:8080/api/v1/health (use -k for self-signed cert)"
+    echo "  2. Initialize vault: POST https://$HOSTNAME:8080/api/v1/init"
+    echo "  3. Enroll admin: open https://$HOSTNAME:8080/enroll-admin in browser"
 fi
 
 if [ "$MODE" = "executor" ] || [ "$MODE" = "both" ]; then
