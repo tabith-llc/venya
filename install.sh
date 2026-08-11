@@ -281,70 +281,27 @@ if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
     sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/dev/null | grep -q 1 || \
         sudo -u postgres psql -c "CREATE DATABASE venya OWNER venya;" > /dev/null 2>&1
 
-    # --- Select bind address ---
-    info "Scanning network interfaces..."
-    BIND_ADDRESS="0.0.0.0"
-    OPTIONS=()
-    
-    # Add localhost
-    OPTIONS+=("127.0.0.1")
-    
-    # Add all interfaces
-    OPTIONS+=("0.0.0.0")
-    
-    # Add discovered IPs (exclude loopback)
-    while IFS= read -r ip; do
-        # Skip loopback and already-added
-        if [[ "$ip" != "127.0.0.1" ]] && [[ "$ip" != "0.0.0.0" ]] && [[ ! " ${OPTIONS[*]} " =~ " $ip " ]]; then
-            OPTIONS+=("$ip")
-        fi
-    done < <(ip -4 addr show 2>/dev/null | grep -oP 'inet \K[\d.]+' | sort -u)
-    
-    # Add IPv6 addresses
-    while IFS= read -r ip; do
-        if [[ -n "$ip" ]] && [[ ! " ${OPTIONS[*]} " =~ " $ip " ]]; then
-            OPTIONS+=("$ip")
-        fi
-    done < <(ip -6 addr show 2>/dev/null | grep -oP 'inet6 \K[0-9a-f:]+' | grep -v "^fe80:" | grep -v "^::1" | sort -u)
-    
-    # Deduplicate
-    readarray -t OPTIONS < <(printf '%s\n' "${OPTIONS[@]}" | sort -u)
-    
-    if [ "$SKIP_PROMPT" = "yes" ]; then
-        BIND_ADDRESS="0.0.0.0"
-    else
-        echo ""
-        echo "Select bind address for the server:"
-        for i in "${!OPTIONS[@]}"; do
-            marker=""
-            if [ "${OPTIONS[$i]}" = "0.0.0.0" ]; then
-                marker=" (default - listen on all interfaces)"
-            fi
-            echo "  $((i+1)). ${OPTIONS[$i]}$marker"
-        done
-        echo ""
-        echo -n "Enter option number (default: 2 for 0.0.0.0): "
-        read -r choice
-        if [ -z "$choice" ] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#OPTIONS[@]}" ]; then
-            BIND_ADDRESS="0.0.0.0"
-        else
-            BIND_ADDRESS="${OPTIONS[$((choice-1))]}"
-        fi
-    fi
-    info "Server will bind to: $BIND_ADDRESS"
+    # --- Server binds to localhost only — Caddy terminates TLS ---
+    BIND_ADDRESS="127.0.0.1"
+    info "Server will bind to: $BIND_ADDRESS (Caddy handles TLS)"
+
+    # --- Install Caddy reverse proxy ---
+    info "Installing Caddy reverse proxy..."
+    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl > /dev/null 2>&1
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+    apt-get update > /dev/null 2>&1
+    apt-get install -y -qq caddy > /dev/null 2>&1
+    info "Caddy installed: $(caddy version)"
 
     # --- Write server.toml ---
     mkdir -p /etc/venya
 
-    # Define variables needed by server.toml
-    SSL_DIR="/etc/venya/ssl"
     HOSTNAME=$(hostname -f 2>/dev/null || hostname)
 
     cat > /etc/venya/server.toml << EOF
 host = "$BIND_ADDRESS"
 port = 8080
-ssl_cert = "$SSL_DIR/server.crt"
-ssl_key = "$SSL_DIR/server.key"
 
 [db]
 database_url = "postgresql://venya@localhost/venya"
@@ -353,9 +310,9 @@ passphrase = "$DB_PASSPHRASE"
 wal_mode = true
 
 [fido2]
-rp_id = "$HOSTNAME"
+rp_id = "$VAULT_HOSTNAME"
 rp_name = "Venya Vault"
-origins = ["https://$HOSTNAME"]
+origins = ["https://$VAULT_HOSTNAME"]
 enrollment_token_ttl = 15
 unmask_auto_hide_timeout = 30
 
@@ -373,7 +330,7 @@ ip_rate_limit = 100
 ca_dir = "/var/lib/venya/ca"
 
 [cors_origins]
-cors_origins = ["https://$HOSTNAME"]
+cors_origins = ["https://$VAULT_HOSTNAME"]
 
 [audit]
 audit_remote_url = null
@@ -382,35 +339,54 @@ EOF
 
     info "Server config written to /etc/venya/server.toml"
 
-    # --- Generate self-signed SSL certificate ---
-    info "Generating self-signed SSL certificate..."
-    mkdir -p "$SSL_DIR"
-    chown -R venya:venya "$SSL_DIR"
-    chmod 700 "$SSL_DIR"
+    # --- Create Caddyfile ---
+    mkdir -p /etc/venya
 
-    # Generate self-signed cert (valid for 365 days)
-    openssl ecparam -name prime256v1 -genkey -noout -out "$SSL_DIR/server.key" 2>/dev/null
-    openssl req -new -x509 -key "$SSL_DIR/server.key" -out "$SSL_DIR/server.crt" \
-        -days 365 \
-        -subj "/C=US/ST=State/L=City/O=Venya/OU=Dev/CN=$HOSTNAME" \
-        -addext "subjectAltName=DNS:$HOSTNAME,DNS:localhost,IP:127.0.0.1" \
-        2>/dev/null
+    cat > /etc/venya/Caddyfile << EOF
+{$VAULT_HOSTNAME} {
+    reverse_proxy 127.0.0.1:8080
 
-    chown venya:venya "$SSL_DIR/server.crt" "$SSL_DIR/server.key"
-    chmod 644 "$SSL_DIR/server.crt"
-    chmod 600 "$SSL_DIR/server.key"
-    info "SSL certificate generated: $SSL_DIR/server.crt"
+    tls {$TLS_MODE}
+
+    # Pass real client IP for audit logging
+    header_up X-Real-IP {remote_host}
+    header_up X-Forwarded-For {remote_host}
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+    }
+}
+EOF
+
+    info "Caddyfile written to /etc/venya/Caddyfile (TLS mode: $TLS_MODE)"
+
+    # --- Install Caddy internal CA into system trust store ---
+    info "Installing Caddy internal CA..."
+    systemctl enable --now caddy > /dev/null 2>&1
+    sleep 2
+    CADDY_ROOT_CA="/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt"
+    if [ -f "$CADDY_ROOT_CA" ]; then
+        cp "$CADDY_ROOT_CA" /usr/local/share/ca-certificates/caddy-local-ca.crt
+        chmod 644 /usr/local/share/ca-certificates/caddy-local-ca.crt
+        update-ca-certificates > /dev/null 2>&1
+        info "Caddy root CA installed to system trust store"
+    else
+        warn "Caddy CA not found — TLS may not be trusted"
+    fi
+    systemctl restart caddy > /dev/null 2>&1
+    info "Caddy enabled and started"
 
     # --- Write .env ---
     cat > "$INSTALL_DIR/.env" << EOF
 VENYA_HOST=$BIND_ADDRESS
 VENYA_DB__DATABASE_URL=postgresql://venya@localhost/venya
 VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
-VENYA_FIDO2__RP_ID=$HOSTNAME
+VENYA_FIDO2__RP_ID=$VAULT_HOSTNAME
 VENYA_FIDO2__RP_NAME=Venya Vault
-VENYA_SSL_CERT=$SSL_DIR/server.crt
-VENYA_SSL_KEY=$SSL_DIR/server.key
-VENYA_CORS_ORIGINS=["https://$HOSTNAME:8080"]
+VENYA_CORS_ORIGINS=["https://$VAULT_HOSTNAME"]
 EOF
 
     info ".env written to $INSTALL_DIR/.env"
@@ -492,8 +468,8 @@ if [ ! -f /etc/venya/server.toml ]; then
     error "server.toml not found at /etc/venya/server.toml"
     ERRORS=$((ERRORS + 1))
 fi
-if [ ! -f /etc/venya/ssl/server.crt ] || [ ! -f /etc/venya/ssl/server.key ]; then
-    error "SSL certificate not found at /etc/venya/ssl/"
+if [ ! -f /etc/venya/Caddyfile ]; then
+    error "Caddyfile not found at /etc/venya/Caddyfile"
     ERRORS=$((ERRORS + 1))
 fi
 if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
@@ -528,12 +504,16 @@ echo ""
 if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
     echo "To start the vault server:"
     echo "  systemctl start venya-vault"
-    echo "  # or manually: $INSTALL_DIR/.venv/bin/venya-server --config /etc/venya/server.toml"
+    echo ""
+    echo "Caddy reverse proxy:"
+    echo "  Config: /etc/venya/Caddyfile"
+    echo "  TLS mode: $TLS_MODE"
+    echo "  Access: https://$VAULT_HOSTNAME"
     echo ""
     echo "Next steps:"
-    echo "  1. Verify health: curl https://localhost:8080/api/v1/health (use -k for self-signed cert)"
-    echo "  2. Initialize vault: POST https://$HOSTNAME:8080/api/v1/init"
-    echo "  3. Enroll admin: open https://$HOSTNAME:8080/enroll-admin in browser"
+    echo "  1. Verify health: curl https://$VAULT_HOSTNAME/api/v1/health"
+    echo "  2. Initialize vault: POST https://$VAULT_HOSTNAME/api/v1/init"
+    echo "  3. Enroll admin: open https://$VAULT_HOSTNAME/enroll-admin in browser"
 fi
 
 if [ "$MODE" = "executor" ] || [ "$MODE" = "both" ]; then
