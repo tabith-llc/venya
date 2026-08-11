@@ -109,8 +109,7 @@
     function webauthnSupported() {
         return (
             typeof window !== "undefined" &&
-            typeof window.PublicKeyCredential === "function" &&
-            typeof window.PublicKeyCredential.isSupported === "function"
+            typeof window.PublicKeyCredential === "function"
         );
     }
 
