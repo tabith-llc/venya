@@ -38,11 +38,11 @@ def create_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("user_id", help="User ID for first admin")
     init_parser.add_argument(
         "--db-path",
-        help="Path to the vault database (default: $VENYA_DB_PATH or ./venya.db)",
+        help="[deprecated] PostgreSQL is used exclusively. Set VENYA_DB_URL instead.",
     )
     init_parser.add_argument(
         "--db-key",
-        help="Database encryption key (default: $VENYA_DB_KEY)",
+        help="[deprecated] PostgreSQL is used exclusively. Set VENYA_DB_URL instead.",
     )
     init_parser.add_argument(
         "--skip-migrations",
