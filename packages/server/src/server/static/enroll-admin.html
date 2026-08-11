@@ -9,88 +9,11 @@
 <body>
     <div id="app">
         <h1>Enroll Admin User</h1>
-        <p>Touch your FIDO2 security key when prompted.</p>
-        <button id="enroll-btn">Enroll Security Key</button>
+        <p>Insert FIDO2 security key, and click the Enroll Security Key button.</p>
+        <button id="enroll-btn" class="btn-primary">Enroll Security Key</button>
         <div id="message" class="message" hidden></div>
     </div>
     <script src="/static/js/webauthn.min.js"></script>
-    <script>
-        (function () {
-            "use strict";
-
-            var enrollBtn = document.getElementById("enroll-btn");
-            var messageDiv = document.getElementById("message");
-
-            function showMessage(text, type) {
-                messageDiv.textContent = text;
-                messageDiv.className = "message message-" + type;
-                messageDiv.hidden = false;
-            }
-
-            function clearMessage() {
-                messageDiv.textContent = "";
-                messageDiv.className = "message";
-                messageDiv.hidden = true;
-            }
-
-            function setLoading(loading) {
-                enrollBtn.disabled = loading;
-                enrollBtn.textContent = loading ? "Enrolling..." : "Enroll Security Key";
-            }
-
-            async function startEnrollment() {
-                clearMessage();
-                setLoading(true);
-
-                try {
-                    // Step 1: Get challenge from /api/v1/init
-                    var initResp = await fetch("/api/v1/init", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ user_id: "admin-1" }),
-                    });
-
-                    if (!initResp.ok) {
-                        var data = await initResp.json().catch(function () { return {}; });
-                        throw new Error(data.detail || "Failed to get enrollment challenge");
-                    }
-
-                    var init_data = await initResp.json();
-                    var options = init_data.options;
-
-                    // Step 2: WebAuthn registration
-                    var registrationResponse = await VenyaWebAuthn.startRegistration(options);
-
-                    // Step 3: Complete enrollment via /api/v1/init/complete
-                    var completeResp = await fetch("/api/v1/init/complete", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            user_id: "admin-1",
-                            challenge_id: init_data.challenge_id,
-                            response: registrationResponse,
-                        }),
-                    });
-
-                    if (!completeResp.ok) {
-                        var data = await completeResp.json().catch(function () { return {}; });
-                        throw new Error(data.detail || "Enrollment failed");
-                    }
-
-                    var result = await completeResp.json();
-                    showMessage("Enrollment successful! Recovery code: " + result.recovery_code + ". Redirecting to login...", "success");
-                    setTimeout(function () {
-                        window.location.href = "/";
-                    }, 3000);
-                } catch (err) {
-                    showMessage(err.message || "Enrollment failed. Please try again.", "error");
-                } finally {
-                    setLoading(false);
-                }
-            }
-
-            enrollBtn.addEventListener("click", startEnrollment);
-        })();
-    </script>
+    <script src="/static/js/enroll-admin.js"></script>
 </body>
 </html>

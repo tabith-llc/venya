@@ -37,6 +37,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/api/v1/auth/refresh",
         "/api/v1/enrollment/confirm",
         "/api/v1/init",
+        "/api/v1/init/complete",
         "/api/v1/recovery",
         "/api/v1/executors/register",
         "/api/v1/executors/certs/revocation-list",

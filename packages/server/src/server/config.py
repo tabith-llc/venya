@@ -94,6 +94,8 @@ class ServerConfig(BaseSettings):
     # Server
     host: str = Field(default="127.0.0.1", description="Bind address")
     port: int = Field(default=8080, description="Bind port")
+    ssl_cert: str | None = Field(default=None, description="Path to SSL certificate file")
+    ssl_key: str | None = Field(default=None, description="Path to SSL private key file")
     debug: bool = Field(default=False, description="Enable debug mode")
 
     # Database

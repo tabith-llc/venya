@@ -137,9 +137,18 @@ def main() -> None:
 
     app = create_app(config)
 
-    uvicorn.run(
-        app,
-        host=config.host,
-        port=config.port,
-        log_level="debug" if config.debug else "info",
-    )
+    uvicorn_kwargs = {
+        "app": app,
+        "host": config.host,
+        "port": config.port,
+        "log_level": "debug" if config.debug else "info",
+    }
+
+    if config.ssl_cert and config.ssl_key:
+        uvicorn_kwargs["ssl_certfile"] = config.ssl_cert
+        uvicorn_kwargs["ssl_keyfile"] = config.ssl_key
+        logger.info("Starting server with HTTPS (SSL cert: %s)", config.ssl_cert)
+    else:
+        logger.info("Starting server with HTTP (no SSL configured)")
+
+    uvicorn.run(**uvicorn_kwargs)
