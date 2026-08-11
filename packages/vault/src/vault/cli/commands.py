@@ -11,44 +11,29 @@ from typing import Any
 from .api_client import APIClient, APIClientAuthenticationError, APIClientError
 
 
-def _run_migrations(db_path: str | None, db_key: str | None) -> None:
+def _run_migrations(_db_path: str | None = None, _db_key: str | None = None) -> None:
     """Run Alembic migrations programmatically.
 
     This is called by `venya init` to ensure the database schema is up to date
     before bootstrapping. Users never need to run `alembic` directly.
 
     Args:
-        db_path: Path to the database file. Falls back to VENYA_DB_PATH env var
-                 or ./venya.db.
-        db_key: Database encryption key. Falls back to VENYA_DB_KEY env var.
+        _db_path: [deprecated] Path to the database file. PostgreSQL is used exclusively.
+        _db_key: [deprecated] Database encryption key. PostgreSQL is used exclusively.
 
     Raises:
-        RuntimeError: If VENYA_DB_KEY is not set or migrations fail.
+        RuntimeError: If VENYA_DB_URL is not set or migrations fail.
     """
     from alembic.config import Config
     from alembic import command
 
-    resolved_db_path = db_path or os.environ.get("VENYA_DB_PATH", "./venya.db")
-    resolved_db_key = db_key or os.environ.get("VENYA_DB_KEY", "")
-
-    if not resolved_db_key:
+    venya_db_url = os.environ.get("VENYA_DB_URL", "")
+    if not venya_db_url:
         raise RuntimeError(
-            "Database key not found. Set --db-key or VENYA_DB_KEY environment "
-            "variable. Example:\n"
-            "  venya init admin --db-key mysecret\n"
-            "  VENYA_DB_KEY=mysecret venya init admin"
+            "VENYA_DB_URL not set. Set it before running 'venya init'.\n"
+            "Example:\n"
+            "  VENYA_DB_URL=postgresql://user:pass@host/db venya init"
         )
-
-    # Set env vars that alembic env.py reads
-    os.environ["VENYA_DB_PATH"] = str(resolved_db_path)
-    os.environ["VENYA_DB_KEY"] = resolved_db_key
-
-    # Construct VENYA_DB_URL from path + key for env.py
-    resolved_path = str(resolved_db_path)
-    if not resolved_path.startswith(("sqlite:///", "sqlite://")):
-        resolved_path = "file:" + resolved_path if not os.path.isabs(resolved_path) else "file:" + resolved_path
-    sqlite_url = f"sqlite:///{resolved_db_path}"
-    os.environ["VENYA_DB_URL"] = sqlite_url
 
     # Find alembic.ini relative to the vault package root
     # __file__ = .../src/venya/cli/commands.py
