@@ -520,7 +520,6 @@ if [ "$MODE" = "vault" ] || [ "$MODE" = "both" ]; then
     echo ""
     echo "Next steps:"
     echo "  1. Verify health: curl https://$VAULT_HOSTNAME/api/v1/health"
-    echo "  2. Initialize vault: POST https://$VAULT_HOSTNAME/api/v1/init"
     echo "  3. Enroll admin: open https://$VAULT_HOSTNAME/enroll-admin in browser"
 fi
 
