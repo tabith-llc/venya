@@ -93,6 +93,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("user_id", sa.String(64), nullable=False),
         sa.Column("expires_at", sa.DateTime(), nullable=False),
+        sa.Column("access_token", sa.String(128), nullable=True),
         sa.Column("access_token_jti", sa.String(64), nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.user_id"]),
     )

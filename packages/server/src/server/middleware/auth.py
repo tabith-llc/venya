@@ -201,7 +201,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             user_info["roles"] = [str(m.role_id) for m in user_roles]
 
             # Auto-refresh: if token is near expiry, create new token
-            now = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             if session.expires_at < now + timedelta(seconds=60):
                 new_token = manager.refresh_token(token)
                 if new_token:

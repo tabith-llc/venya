@@ -34,7 +34,7 @@ curl -fsSL http://10.27.27.35:8080/install-venya-vault.sh | sudo bash
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL venya user password |
 | `VENYA_DB_PASSPHRASE` | `venya_test_passphrase_2024` | Server encryption passphrase |
 | `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-vault-install.tar.gz` | Tarball URL |
-| `VAULT_HOSTNAME` | `localhost` | Hostname for TLS/Caddy |
+| `VAULT_HOSTNAME` | `$(hostname)` | Hostname for TLS/Caddy (auto-detected by default) |
 | `TLS_MODE` | `internal` | Caddy TLS mode (`internal`, `manual`, `email`) |
 
 ### `install-venya-executor.sh`

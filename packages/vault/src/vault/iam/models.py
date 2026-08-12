@@ -138,7 +138,6 @@ class Session(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(String(64), ForeignKey("users.user_id"), nullable=False)
     expires_at = Column(DateTime, nullable=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.now(timezone.utc))
     access_token = Column(String(128), nullable=True)
     access_token_jti = Column(String(64), nullable=True)
 

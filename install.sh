@@ -25,7 +25,7 @@ TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-install.tar.gz}"
 MODE="${VENYA_MODE:-}"  # REQUIRED: "vault", "executor", or "both"
 EXECUTOR_ID="${VENYA_EXECUTOR_ID:-jump-1}"
 SERVER_URL="${VENYA_SERVER_URL:-http://localhost:8080}"
-VAULT_HOSTNAME="${VAULT_HOSTNAME:-localhost}"
+VAULT_HOSTNAME="${VAULT_HOSTNAME:-$(hostname)}"
 TLS_MODE="${TLS_MODE:-internal}"
 
 # --- Colors ---

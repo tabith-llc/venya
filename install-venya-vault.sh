@@ -26,7 +26,7 @@ INSTALL_DIR="${VENYA_INSTALL_DIR:-}"
 DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-venya_test_passphrase_2024}"
 SKIP_PROMPT="${VENYA_SKIP_PROMPT:-}"
 TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-vault-install.tar.gz}"
-VAULT_HOSTNAME="${VAULT_HOSTNAME:-localhost}"
+VAULT_HOSTNAME="${VAULT_HOSTNAME:-$(hostname)}"
 TLS_MODE="${TLS_MODE:-internal}"
 
 # --- Colors ---
