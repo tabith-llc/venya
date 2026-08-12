@@ -16,12 +16,16 @@
     var API_BASE = "/api/v1";
     var AUTO_HIDE_TIMEOUT = 30000; // 30 seconds
     var STORE_FORM_STATE_KEY = "venya_store_form_state";
+    var REFRESH_INTERVAL = 240000; // 4 minutes (token lives 5 min)
 
     // In-memory form state for session recovery
     var pendingFormState = null;
 
     // Track active auto-hide timers: { secretKey: timeoutId }
     var autoHideTimers = {};
+
+    // Session refresh timer
+    var refreshTimerId = null;
 
     // --- DOM elements ---
 
@@ -71,6 +75,29 @@
             return resp.json();
         }
         return null;
+    }
+
+    // --- Session refresh ---
+
+    function refreshSession() {
+        fetch(API_BASE + "/auth/refresh", {
+            method: "POST",
+            credentials: "include",
+        }).catch(function () {
+            // Refresh failed — session expired, will be caught on next API call
+        });
+    }
+
+    function startSessionRefresh() {
+        if (refreshTimerId !== null) return; // Already running
+        refreshSession(); // Refresh immediately
+        refreshTimerId = setInterval(refreshSession, REFRESH_INTERVAL);
+    }
+
+    function stopSessionRefresh() {
+        if (refreshTimerId === null) return;
+        clearInterval(refreshTimerId);
+        refreshTimerId = null;
     }
 
     // --- Session timeout handling ---
@@ -140,12 +167,14 @@
         window.location.hash = "dashboard";
         if (dashboardSection) dashboardSection.hidden = false;
         if (auditSection) auditSection.hidden = true;
+        startSessionRefresh();
     }
 
     function showAudit() {
         window.location.hash = "audit";
         if (auditSection) auditSection.hidden = false;
         if (dashboardSection) dashboardSection.hidden = true;
+        stopSessionRefresh();
     }
 
     // --- Secrets table rendering ---
@@ -600,6 +629,20 @@
         navAudit.addEventListener("click", function (e) {
             e.preventDefault();
             showAudit();
+        });
+    }
+
+    // Logout button
+    var logoutBtn = document.getElementById("logout-btn");
+    if (logoutBtn) {
+        logoutBtn.addEventListener("click", function () {
+            stopSessionRefresh();
+            fetch(API_BASE + "/auth/logout/browser", {
+                method: "POST",
+                credentials: "include",
+            }).finally(function () {
+                window.location.href = "/";
+            });
         });
     }
 
