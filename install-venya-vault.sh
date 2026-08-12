@@ -360,7 +360,27 @@ cp "$INSTALL_DIR/systemd/venya-vault.service" "$SYSTEMD_DIR/"
 systemctl daemon-reload
 systemctl enable venya-vault.service
 systemctl start venya-vault.service
-info "Enabled and started venya-vault.service"
+
+# Wait for service to be running (retry up to 5 times)
+RETRY=0
+MAX_RETRY=5
+while [ $RETRY -lt $MAX_RETRY ]; do
+    if systemctl is-active --quiet venya-vault.service 2>/dev/null; then
+        break
+    fi
+    RETRY=$((RETRY + 1))
+    info "Service not ready, retrying ($RETRY/$MAX_RETRY)..."
+    sleep 2
+    systemctl restart venya-vault.service
+done
+
+if [ $RETRY -eq $MAX_RETRY ]; then
+    error "venya-vault.service failed to start after $MAX_RETRY attempts"
+    systemctl status venya-vault.service --no-pager
+    exit 1
+fi
+
+info "venya-vault.service is running"
 
 # --- Verification ---
 info "Verifying installation..."
