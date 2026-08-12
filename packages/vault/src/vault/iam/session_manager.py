@@ -164,10 +164,10 @@ class SessionManager:
         Returns:
             New AccessToken if successful, None if session expired or max cap reached.
         """
-        # Find session by access token JTI
+        # Find session by access token
         session = (
             self.db.query(SessionModel)
-            .filter(SessionModel.access_token_jti == access_token)
+            .filter(SessionModel.access_token == access_token)
             .first()
         )
         if session is None:
@@ -186,6 +186,7 @@ class SessionManager:
             expires_at=datetime.now(timezone.utc) + self.config.access_token_ttl,
         )
 
+        session.access_token = new_token.token
         session.access_token_jti = new_token.jti
         self.db.flush()
 

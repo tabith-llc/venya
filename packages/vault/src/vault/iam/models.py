@@ -147,6 +147,7 @@ class Session(Base):
     __table_args__ = (
         Index("ix_sessions_user_id", "user_id"),
         Index("ix_sessions_expires_at", "expires_at"),
+        UniqueConstraint("access_token", name="uq_sessions_access_token"),
     )
 
 

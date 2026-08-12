@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from datetime import datetime, timezone
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 from vault.vault.backend import Backend, BackendConfig
 from vault.vault.factory import VaultFactory
 from vault.vault.vault import Caller
-from vault.iam.models import Base
+from vault.iam.models import Base, Session as SessionModel
 from vault.iam.session_manager import SessionConfig as VaultSessionConfig, SessionManager
 from vault.iam.role_manager import RoleManager
 
@@ -43,15 +44,6 @@ def init_db(db_config: BackendConfig, db_url: str | None = None) -> Backend:
     return Backend(config)
 
 
-def get_db(backend: Backend) -> Generator[Session, None, None]:
-    """FastAPI dependency that yields a DB session."""
-    session = backend.get_session()
-    try:
-        yield session
-    finally:
-        session.close()
-
-
 def get_backend(request: Request) -> Backend:
     """FastAPI dependency that yields the backend from app state."""
     backend = getattr(request.app.state, "backend", None)
@@ -61,6 +53,58 @@ def get_backend(request: Request) -> Backend:
             detail="Backend not initialized",
         )
     return backend
+
+
+def get_db(backend: Backend = Depends(get_backend)) -> Generator[Session, None, None]:
+    """FastAPI dependency that yields a DB session."""
+    session = backend.get_session()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def get_current_session(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> tuple[Session, SessionModel] | None:
+    """FastAPI dependency that returns (db, session) from cookie.
+
+    DB session remains open until request completes.
+
+    Args:
+        request: The FastAPI request (for cookie access).
+        db: DB session from get_db dependency.
+
+    Returns:
+        Tuple of (db, SessionModel) if valid, None otherwise.
+    """
+    token = request.cookies.get("venya_access_token")
+    if not token:
+        return None
+
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.access_token == token)
+        .first()
+    )
+    if session is None:
+        return None
+
+    # Check expiry
+    from vault.iam.session_manager import SessionConfig
+
+    config = SessionConfig()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    # Ensure expires_at is offset-naive for comparison
+    expires_at = session.expires_at.replace(tzinfo=None) if session.expires_at.tzinfo else session.expires_at
+    session_created_at = expires_at - config.session_timeout
+    if session_created_at + config.max_session_duration < now:
+        return None
+    if expires_at < now:
+        return None
+
+    return (db, session)
 
 
 def get_session_manager(backend: Backend = Depends(get_backend)) -> SessionManager:

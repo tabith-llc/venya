@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import FastAPI
@@ -29,6 +30,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         description="A secrets broker system for LLMs",
         version="0.1.0",
         lifespan=lifespan,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )
 
     # Store config on app state
@@ -109,9 +112,49 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         ca_manager.initialize()
     app.state.ca_manager = ca_manager  # type: ignore[attr-defined]
 
+    # Periodic session cleanup
+    from datetime import datetime, timezone
+
+    from sqlalchemy import text
+
+    cleanup_task = None
+
+    async def session_cleanup_loop():
+        """Run session cleanup every 5 minutes."""
+        while True:
+            await asyncio.sleep(300)  # 5 minutes
+            try:
+                db = backend.get_session()
+                try:
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
+                    from vault.iam.session_manager import SessionConfig
+                    config = SessionConfig()
+                    hard_cap_threshold = now - (config.max_session_duration - config.session_timeout)
+                    deleted = db.execute(
+                        text("DELETE FROM sessions WHERE expires_at < :threshold"),
+                        {"threshold": hard_cap_threshold},
+                    )
+                    db.commit()
+                    logger.info("Session cleanup: deleted %d expired sessions", deleted.rowcount)
+                except Exception:
+                    db.rollback()
+                    logger.exception("Session cleanup failed")
+                finally:
+                    db.close()
+            except Exception:
+                logger.exception("Session cleanup loop error")
+
+    cleanup_task = asyncio.create_task(session_cleanup_loop())
+
     yield
 
     # Shutdown
+    if cleanup_task is not None:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
     backend = getattr(app.state, "backend", None)
     if backend is not None:
         backend.dispose()
