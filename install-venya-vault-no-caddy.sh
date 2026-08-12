@@ -359,7 +359,8 @@ SYSTEMD_DIR="/etc/systemd/system"
 cp "$INSTALL_DIR/systemd/venya-vault.service" "$SYSTEMD_DIR/"
 systemctl daemon-reload
 systemctl enable venya-vault.service
-info "Enabled venya-vault.service"
+systemctl start venya-vault.service
+info "Enabled and started venya-vault.service"
 
 # --- Verification ---
 info "Verifying installation..."
@@ -392,8 +393,8 @@ echo "============================================"
 echo "  Venya Vault installed to $INSTALL_DIR"
 echo "============================================"
 echo ""
-echo "To start the vault server:"
-echo "  systemctl start venya-vault"
+echo "Manage the vault server:"
+echo "  systemctl start|stop|restart|status venya-vault"
 echo ""
 echo "Caddy reverse proxy:"
 echo "  Config: /etc/venya/Caddyfile"
