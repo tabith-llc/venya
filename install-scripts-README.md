@@ -33,7 +33,7 @@ curl -fsSL http://10.27.27.35:8080/install-venya-vault.sh | sudo bash
 | `VENYA_PASSWORD` | (prompt) | OS venya user password |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL venya user password |
 | `VENYA_DB_PASSPHRASE` | `venya_test_passphrase_2024` | Server encryption passphrase |
-| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-install.tar.gz` | Tarball URL |
+| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-vault-install.tar.gz` | Tarball URL |
 | `VAULT_HOSTNAME` | `localhost` | Hostname for TLS/Caddy |
 | `TLS_MODE` | `internal` | Caddy TLS mode (`internal`, `manual`, `email`) |
 
@@ -63,7 +63,7 @@ curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
 | `VENYA_INSTALL_DIR` | `/opt/venya` | Install location |
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompts |
 | `VENYA_PASSWORD` | (prompt) | OS venya user password |
-| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-install.tar.gz` | Tarball URL |
+| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-executor-install.tar.gz` | Tarball URL |
 | `VENYA_EXECUTOR_ID` | `jump-1` | Executor identifier |
 | `VENYA_SERVER_URL` | `http://localhost:8080` | Vault server URL |
 
@@ -96,7 +96,7 @@ cd /media/dust/dust-ext1/projects/venya-installer
 ./create-tarball-and-serve.sh
 ```
 
-This creates the tarball, copies `install.sh` to the serving directory, and starts an HTTP server on port 8080.
+This creates two tarballs (`venya-vault-install.tar.gz` and `venya-executor-install.tar.gz`), copies all install scripts to the serving directory, and starts an HTTP server on port 8080.
 
 ### Install on VMs
 
