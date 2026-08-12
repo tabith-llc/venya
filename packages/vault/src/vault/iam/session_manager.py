@@ -118,11 +118,11 @@ class SessionManager:
         if session is None:
             return False
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         # Check hard cap
-        created_at = session.created_at or session.created_at
-        if created_at + self.config.max_session_duration < now:
+        session_created_at = session.expires_at - self.config.session_timeout
+        if session_created_at + self.config.max_session_duration < now:
             return False
 
         # Check idle timeout
@@ -143,10 +143,11 @@ class SessionManager:
         if session is None:
             return False
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         # Check hard cap
-        if session.created_at + self.config.max_session_duration < now:
+        session_created_at = session.expires_at - self.config.session_timeout
+        if session_created_at + self.config.max_session_duration < now:
             return False
 
         # Extend idle timeout
@@ -212,14 +213,12 @@ class SessionManager:
         Returns:
             Number of sessions removed.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        hard_cap_threshold = now - (self.config.max_session_duration - self.config.session_timeout)
         expired = (
             self.db.query(SessionModel)
             .filter(
-                SessionModel.expires_at < now,
-                SessionModel.created_at
-                + self.config.max_session_duration
-                < now,  # Only remove if both idle and max cap expired
+                SessionModel.expires_at < hard_cap_threshold,
             )
             .delete()
         )
@@ -232,10 +231,11 @@ class SessionManager:
         Returns:
             False if session has expired (requires re-auth), True if still active.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         # Hard cap check
-        if session.created_at + self.config.max_session_duration < now:
+        session_created_at = session.expires_at - self.config.session_timeout
+        if session_created_at + self.config.max_session_duration < now:
             return False
 
         # Idle timeout check

@@ -252,6 +252,8 @@ async def browser_login_assert(
         _set_session_cookie(response, access_token.token)
         return response
     except Exception:
+        import traceback
+        logger.error("Login failed:\n%s", traceback.format_exc())
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
