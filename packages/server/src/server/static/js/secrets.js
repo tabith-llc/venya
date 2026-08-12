@@ -80,7 +80,7 @@
     // --- Session refresh ---
 
     function refreshSession() {
-        fetch(API_BASE + "/auth/refresh", {
+        fetch(API_BASE + "/auth/refresh/browser", {
             method: "POST",
             credentials: "include",
         }).catch(function () {
@@ -658,6 +658,9 @@
 
         // Check for restored form state from session recovery
         restoreFormState();
+
+        // Start session refresh timer
+        startSessionRefresh();
     }
 
     // Expose for external use (e.g., audit.js)

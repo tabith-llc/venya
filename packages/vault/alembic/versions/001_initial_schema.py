@@ -96,6 +96,7 @@ def upgrade() -> None:
         sa.Column("access_token", sa.String(128), nullable=True),
         sa.Column("access_token_jti", sa.String(64), nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.user_id"]),
+        sa.UniqueConstraint("access_token", name="uq_sessions_access_token"),
     )
     op.create_index("ix_sessions_user_id", "sessions", ["user_id"])
     op.create_index("ix_sessions_expires_at", "sessions", ["expires_at"])

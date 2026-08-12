@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,7 @@ from ..fido2.browser_adapter import (
     challenge_to_browser_options,
     browser_assertion_to_fido2,
 )
+from ..dependencies import get_current_session, get_db
 
 logger = logging.getLogger("venya.server")
 
@@ -82,7 +83,7 @@ def _set_session_cookie(response: Response, access_token: str) -> None:
         key=COOKIE_NAME,
         value=access_token,
         httponly=True,
-        secure=False,
+        secure=True,
         samesite="lax",
         max_age=COOKIE_MAX_AGE,
         path="/",
@@ -105,6 +106,7 @@ def _get_session_from_cookie(
     backend = get_backend(request)
     token = request.cookies.get(COOKIE_NAME)
     if not token:
+        logger.info("GET_SESSION DEBUG: no token in cookie")
         return None
 
     db = backend.get_session()
@@ -122,14 +124,17 @@ def _get_session_from_cookie(
 
         session = (
             db.query(SessionModel)
-            .filter(SessionModel.access_token_jti == token)
+            .filter(SessionModel.access_token == token)
             .first()
         )
+        logger.info("GET_SESSION DEBUG: token=%s, session=%s", token[:20] if token else "None", session.id if session else "None")
 
         if session is None:
+            logger.info("GET_SESSION DEBUG: session not found in DB")
             return None
 
         if not manager.check_expiry(session):
+            logger.info("GET_SESSION DEBUG: session expired, expires_at=%s", session.expires_at)
             return None
 
         user = session.user
@@ -269,54 +274,48 @@ async def browser_login_assert(
 )
 async def browser_refresh(
     request: Request,
+    session=Depends(get_current_session),
 ) -> Response:
     """Refresh an expiring session cookie.
 
     Validates the existing session cookie and issues a new
     access token cookie with a fresh expiry.
     """
-    result = _get_session_from_cookie(request)
-    if result is None:
+    logger.info("REFRESH DEBUG: cookies=%s", dict(request.cookies))
+    if session is None:
+        logger.info("REFRESH DEBUG: session not found")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
         )
 
-    db, session, user_info = result
-    try:
-        from vault.iam.session_manager import SessionConfig, SessionManager
+    db, session_model = session
 
-        session_config = SessionConfig(
-            session_timeout=timedelta(minutes=15),
-            access_token_ttl=timedelta(minutes=5),
-            max_session_duration=timedelta(hours=4),
-        )
-        manager = SessionManager(db, session_config)
+    from vault.iam.session_manager import SessionConfig, SessionManager
 
-        # Get current token from cookie
-        current_token = request.cookies.get(COOKIE_NAME, "")
+    session_config = SessionConfig(
+        session_timeout=timedelta(minutes=15),
+        access_token_ttl=timedelta(minutes=5),
+        max_session_duration=timedelta(hours=4),
+    )
+    manager = SessionManager(db, session_config)
 
-        new_token = manager.refresh_token(current_token)
-        if new_token is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token refresh failed",
-            )
-
-        response = Response(
-            content='{"status": "ok"}',
-            media_type="application/json",
-        )
-        _set_session_cookie(response, new_token.token)
-        return response
-    except HTTPException:
-        raise
-    except Exception:
+    current_token = request.cookies.get(COOKIE_NAME, "")
+    new_token = manager.refresh_token(current_token)
+    if new_token is None:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Session refresh failed",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token refresh failed",
         )
 
+    db.commit()
+
+    response = Response(
+        content='{"status": "ok"}',
+        media_type="application/json",
+    )
+    _set_session_cookie(response, new_token.token)
+    return response
 
 @router.post(
     "/auth/logout/browser",
