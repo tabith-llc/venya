@@ -619,9 +619,6 @@
 
     // Check if we're on the dashboard page
     if (secretsTbody || dashboardSection) {
-        // Initialize theme toggle
-        initThemeToggle();
-
         // Load user info for welcome bar
         initWelcomeBar();
 
