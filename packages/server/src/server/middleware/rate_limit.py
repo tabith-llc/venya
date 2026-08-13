@@ -45,7 +45,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if config is not None:
             self.requests_per_minute = config.ip_rate_limit
             self.auth_requests_per_minute = min(
-                config.ip_rate_limit // 5,  # 20% of general limit for auth
+                config.ip_rate_limit,  # Same as general limit for auth endpoints
                 20,
             )
         else:
