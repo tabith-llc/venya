@@ -93,13 +93,14 @@
     async function checkAuth() {
         try {
             var me = await apiFetch(API_BASE + "/auth/me");
-            if (!me.roles || me.roles.indexOf("admin") === -1) {
+            if (!me || !me.roles || me.roles.indexOf("admin") === -1) {
                 window.location.href = "/dashboard";
                 return false;
             }
             return true;
         } catch (err) {
-            window.location.href = "/";
+            // Transient auth error — don't hard-redirect, let the page try to load
+            // If not authenticated, API calls will fail and show errors
             return false;
         }
     }
@@ -120,10 +121,11 @@
         showLoading();
         try {
             var data = await apiFetch(API_BASE + "/roles");
+            console.log("Roles loaded:", data);
             renderRoles(data.roles);
         } catch (err) {
             console.error("Failed to load roles:", err);
-            showToast("Failed to load roles.", "error");
+            showToast("Failed to load roles: " + err.message, "error");
         } finally {
             hideLoading();
         }
