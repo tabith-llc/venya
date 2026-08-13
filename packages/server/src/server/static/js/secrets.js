@@ -377,6 +377,21 @@
         defaultOption.value = "";
         defaultOption.textContent = "Select a role";
         roleSelect.appendChild(defaultOption);
+
+        // Load roles from API
+        apiFetch(API_BASE + "/roles").then(function(data) {
+            if (data && data.roles) {
+                for (var i = 0; i < data.roles.length; i++) {
+                    var opt = document.createElement("option");
+                    opt.value = data.roles[i].name;
+                    opt.textContent = data.roles[i].name;
+                    roleSelect.appendChild(opt);
+                }
+            }
+        }).catch(function(err) {
+            console.error("Failed to load roles:", err);
+        });
+
         roleLabel.appendChild(roleSelect);
         form.appendChild(roleLabel);
 
