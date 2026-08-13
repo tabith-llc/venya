@@ -77,6 +77,8 @@ class AdminUserListResponse(BaseModel):
 
 
 class AdminConfigureUserRequest(BaseModel):
+    display_name: str | None = None
+    status: str | None = None
     auth_mode: str | None = None
     session_timeout: int | None = None
 
@@ -436,6 +438,10 @@ async def admin_configure_user(
                 detail=f"User not found: {user_id}",
             )
 
+        if req.display_name is not None:
+            user.display_name = req.display_name
+        if req.status is not None:
+            user.status = req.status
         if req.auth_mode is not None:
             user.auth_mode = req.auth_mode
         if req.session_timeout is not None:
