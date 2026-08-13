@@ -115,6 +115,7 @@
 
     function hideLoading() {
         loadingState.hidden = true;
+        rolesTable.hidden = false;
     }
 
     async function loadRoles() {
@@ -132,13 +133,18 @@
     }
 
     function renderRoles(roles) {
+        console.log("renderRoles called with:", roles);
+        console.log("rolesTbody exists:", !!rolesTbody);
+        console.log("emptyState exists:", !!emptyState);
         rolesTbody.innerHTML = "";
 
         if (!roles || roles.length === 0) {
+            console.log("No roles to display, showing empty state");
             emptyState.hidden = false;
             return;
         }
 
+        console.log("Rendering", roles.length, "roles");
         emptyState.hidden = true;
 
         for (var i = 0; i < roles.length; i++) {
