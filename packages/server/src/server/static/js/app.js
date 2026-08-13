@@ -148,6 +148,8 @@
         } catch (err) {
             if (err.message && err.message.indexOf("not found") !== -1) {
                 showMessage("No credentials found for this user ID.", "error");
+            } else if (err.message && (err.message.indexOf("not allowed") !== -1 || err.message.indexOf("denied") !== -1 || err.message.indexOf("permission") !== -1)) {
+                showMessage("This security key is not associated with this account. Please use the correct key.", "error");
             } else if (err.message && err.message.indexOf("Invalid") !== -1) {
                 showMessage("Authentication failed. Please try again with your security key.", "error");
             } else if (err.message && err.message.indexOf("Challenge") !== -1) {
