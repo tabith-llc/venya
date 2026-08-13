@@ -75,13 +75,15 @@ def _get_db(request: Request):
 
 def _get_current_user_id(request: Request) -> str:
     """Extract the current user ID from the request."""
-    user_id = getattr(request.state, "auth_user", None)
-    if user_id is None:
+    user_info = getattr(request.state, "auth_user", None)
+    if user_info is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
-    return user_id
+    if isinstance(user_info, dict):
+        return user_info["user_id"]
+    return user_info
 
 
 def _get_elevation_token(request: Request) -> str | None:

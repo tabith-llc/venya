@@ -197,23 +197,25 @@ class Fido2Manager:
         else:
             credential_id = raw_id_b64
 
-        # Extract public key from response
-        public_key_b64 = response.get("response", {}).get("attestationObject", {})
-        if isinstance(public_key_b64, str):
-            public_key = base64.b64decode(public_key_b64)
-        elif isinstance(public_key_b64, bytes):
-            public_key = public_key_b64
-        else:
-            public_key = b""
-
-        # Extract sign count from response
-        auth_data = response.get("response", {}).get("attestationObject", {})
-        if isinstance(auth_data, str):
-            auth_data_bytes = base64.b64decode(auth_data)
-        elif isinstance(auth_data, bytes):
-            auth_data_bytes = auth_data
-        else:
+        # Extract attestationObject from nested browser response structure
+        attestation_object = None
+        resp = response.get("response", {})
+        if isinstance(resp, dict):
+            attestation_object = resp.get("authenticatorAttestationResponse", {}).get(
+                "attestationObject"
+            )
+        if attestation_object is None:
             auth_data_bytes = b""
+        elif isinstance(attestation_object, str):
+            # Could be base64 or base64url — try standard base64 first, then base64url
+            try:
+                auth_data_bytes = base64.b64decode(attestation_object)
+            except Exception:
+                auth_data_bytes = base64.urlsafe_b64decode(attestation_object + "=" * (4 - len(attestation_object) % 4))
+        else:
+            auth_data_bytes = attestation_object
+
+        public_key = auth_data_bytes
         # Sign count is bytes 30-33 of authenticator data (right-aligned 32-bit)
         sign_count = 0
         if len(auth_data_bytes) >= 37:

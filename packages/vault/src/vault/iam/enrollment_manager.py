@@ -119,7 +119,7 @@ class EnrollmentManager:
         if token is None:
             raise EnrollmentError("Invalid enrollment token")
 
-        if token.state != "created":
+        if token.state not in ("created", "in_progress"):
             raise EnrollmentError(
                 f"Enrollment token is not in 'created' state (current: {token.state})"
             )
@@ -146,7 +146,11 @@ class EnrollmentManager:
             EnrollmentError: If token is invalid or not in 'created' state.
         """
         token = self.get_token_by_plaintext(token_value)
-        if token is None or token.state != "created":
+        if token is None:
+            raise EnrollmentError("Invalid enrollment token")
+        if token.state == "in_progress":
+            return token
+        if token.state != "created":
             raise EnrollmentError("Invalid enrollment token or not in 'created' state")
 
         token.state = "in_progress"

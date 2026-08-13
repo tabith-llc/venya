@@ -94,6 +94,7 @@
             } catch (e) {
                 data = {};
             }
+            console.error("API error:", url, resp.status, data);
             throw new Error(data.detail || "Request failed");
         }
 
@@ -448,7 +449,7 @@
             if (createError) createError.hidden = true;
 
             var payload = {
-                user_id: username,
+                username: username,
             };
             if (displayName) {
                 payload.display_name = displayName;
@@ -467,8 +468,8 @@
                 showToast("User created successfully.", "success");
                 loadUsers();
 
-                if (data.token) {
-                    openTokenModal(username, data.token, data.expires_at);
+                if (data.enrollment_token) {
+                    openTokenModal(username, data.enrollment_token, null);
                 }
             }).catch(function (err) {
                 if (createError) {
@@ -558,7 +559,11 @@
             }).then(function (data) {
                 if (!data) return;
                 closeReenrollModal();
-                showToast("User re-enrollment initiated.", "success");
+                if (data.enrollment_token) {
+                    openTokenModal(currentReenrollUser, data.enrollment_token, null);
+                } else {
+                    showToast("User re-enrollment initiated.", "success");
+                }
                 loadUsers();
             }).catch(function (err) {
                 if (reenrollError) {

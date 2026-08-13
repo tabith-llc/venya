@@ -163,7 +163,7 @@ async def browser_enroll_complete(
         # Validate token is in in_progress state
         try:
             token = em.get_token_by_plaintext(req.enrollment_token)
-            if token is None or token.state != "in_progress":
+            if token is None or token.state not in ("in_progress", "created"):
                 raise EnrollmentError("Invalid enrollment token or not in progress")
             if token.expires_at <= datetime.now(timezone.utc):
                 raise EnrollmentError("Enrollment token has expired")
@@ -194,8 +194,15 @@ async def browser_enroll_complete(
             ) from e
 
         # Store WebAuthn credential
+        user = db.query(User).filter(User.id == token.user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User not found",
+            )
+
         webauthn_cred = WebAuthnCredential(
-            user_id=int(cred.user_id),  # type: ignore[arg-type]
+            user_id=user.user_id,
             credential_id=cred.credential_id,
             public_key=cred.public_key,
             sign_count=cred.sign_count,
@@ -208,11 +215,9 @@ async def browser_enroll_complete(
         em.complete_enrollment(req.enrollment_token)
 
         # Activate user
-        user = db.query(User).filter(User.id == token.user_id).first()
-        if user:
-            user.status = "active"
-            user.enrolled_at = datetime.now(timezone.utc)
-            user.auth_mode = "webauthn"
+        user.status = "active"
+        user.enrolled_at = datetime.now(timezone.utc)
+        user.auth_mode = "webauthn"
 
         # Create session
         from vault.iam.session_manager import SessionManager
