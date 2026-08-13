@@ -650,4 +650,9 @@
             });
         }
     }
+
+    // --- Initialize ---
+
+    window.startSessionRefresh();
+    checkAdmin();
 })();
