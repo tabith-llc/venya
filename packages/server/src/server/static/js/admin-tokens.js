@@ -105,7 +105,7 @@
         sessionRefreshTimerId = setInterval(refreshSession, REFRESH_INTERVAL);
     }
 
-    function stopSessionRefresh() {
+    function window.stopSessionRefresh() {
         if (sessionRefreshTimerId === null) return;
         clearInterval(sessionRefreshTimerId);
         sessionRefreshTimerId = null;
@@ -161,6 +161,7 @@
             }
 
             loadUsersForFilter();
+            window.startSessionRefresh();
         } catch (err) {
             window.location.href = "/";
         }
@@ -497,7 +498,7 @@
     var logoutBtn = document.getElementById("logout-btn");
     if (logoutBtn) {
         logoutBtn.addEventListener("click", function () {
-            stopSessionRefresh();
+            window.stopSessionRefresh();
             fetch(API_BASE + "/auth/logout/browser", {
                 method: "POST",
                 credentials: "include",
@@ -509,7 +510,7 @@
 
     // --- Initialize ---
 
-    stopSessionRefresh();
+    window.stopSessionRefresh();
     initThemeToggle();
     checkAdmin();
 

@@ -557,7 +557,7 @@
     checkAuth().then(function (authenticated) {
         if (authenticated) {
             loadRoles();
-            refreshTimerId = setInterval(loadRoles, REFRESH_INTERVAL);
+            window.startSessionRefresh();
         }
     });
 })();
