@@ -54,11 +54,6 @@
 
         var resp = await fetch(url, options);
 
-        if (resp.status === 401) {
-            handleSessionExpired();
-            return null;
-        }
-
         if (!resp.ok) {
             var data;
             try {
