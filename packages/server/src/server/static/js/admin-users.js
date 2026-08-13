@@ -307,7 +307,7 @@
         } catch (err) {
             if (loadingState) {
                 loadingState.hidden = true;
-                loadingState.innerHTML = "<p style='color:#cc3333'>Failed to load users: " + escapeHtml(err.message) + "</p>";
+                loadingState.innerHTML = "<p class=\"message-error\">Failed to load users: " + escapeHtml(err.message) + "</p>";
                 loadingState.hidden = false;
             }
         }
