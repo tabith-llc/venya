@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -77,9 +77,11 @@ def _sign_executor_cert(
     ca_cert: x509.Certificate,
     executor_id: str,
     validity_days: int = 30,
+    executor_key: ec.EllipticCurvePrivateKey | None = None,
 ) -> x509.Certificate:
     """Sign an executor certificate with the given CA keypair."""
-    executor_key = ec.generate_private_key(ec.SECP256R1())
+    if executor_key is None:
+        executor_key = ec.generate_private_key(ec.SECP256R1())
     now = datetime.now(timezone.utc)
     subject = x509.Name([
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
@@ -237,21 +239,35 @@ def cert_files(tmp_path: Path, executor_key: ec.EllipticCurvePrivateKey, executo
 
 
 @pytest.fixture()
-def tls_client(tmp_ca_dir: Path, executor_key: ec.EllipticCurvePrivateKey, executor_cert: x509.Certificate):
-    """Create an httpx.Client with real mTLS (cert + key + CA verification).
+def tls_client(tmp_ca_dir: Path, tmp_path: Path, ca_key: ec.EllipticCurvePrivateKey, ca_cert: x509.Certificate):
+    """Create an httpx2.Client with real mTLS (cert + key + CA verification).
 
     This validates the full TLS certificate chain between executor and server.
+    Generates a matching keypair and CA-signed cert for this fixture.
     """
-    cert_pem = executor_cert.public_bytes(serialization.Encoding.PEM).decode()
-    key_pem = executor_key.private_bytes(
+    import ssl
+    # Generate a matching keypair for this test
+    test_key = ec.generate_private_key(ec.SECP256R1())
+    test_cert = _sign_executor_cert(ca_key, ca_cert, "tls-test-executor", validity_days=30, executor_key=test_key)
+    
+    cert_pem = test_cert.public_bytes(serialization.Encoding.PEM).decode()
+    key_pem = test_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     ).decode()
-    return httpx.Client(
+    # Write cert and key to temp files
+    cert_file = tmp_path / "tls_executor.crt"
+    key_file = tmp_path / "tls_executor.key"
+    cert_file.write_text(cert_pem)
+    key_file.write_text(key_pem)
+    # Build SSL context with CA verification + client cert
+    ssl_ctx = ssl.create_default_context(cafile=str(tmp_ca_dir / "ca.crt"))
+    ssl_ctx.check_hostname = False
+    ssl_ctx.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+    return httpx2.Client(
         base_url="https://test-server.local",
-        cert=(cert_pem, key_pem),
-        verify=str(tmp_ca_dir / "ca.crt"),
+        verify=ssl_ctx,
         timeout=30.0,
     )
 
@@ -275,7 +291,7 @@ def executor_config(tmp_path: Path, tmp_ca_dir: Path) -> ExecutorConfig:
 
 
 @pytest.fixture()
-def cert_manager(executor_config: ExecutorConfig, tls_client: httpx.Client) -> CertificateManager:
+def cert_manager(executor_config: ExecutorConfig, tls_client: httpx2.Client) -> CertificateManager:
     """Create a CertificateManager with real mTLS client."""
     return CertificateManager(executor_config, tls_client)
 

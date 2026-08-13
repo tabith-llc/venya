@@ -7,7 +7,7 @@ set -euo pipefail
 # Installs Venya Vault on a fresh VM:
 #   - venya user, system packages, Caddy, PostgreSQL
 #   - Python venv, server + vault packages
-#   - server.toml, .env, Caddyfile, DB migrations
+#   - server.toml, .env, Caddyfile
 #   - venya-vault.service
 #
 # Environment variables:
@@ -281,10 +281,7 @@ max_attempts = 5
 window_seconds = 300.0
 ip_rate_limit = 100
 
-[ca_dir]
 ca_dir = "/var/lib/venya/ca"
-
-[cors_origins]
 cors_origins = ["https://$VAULT_HOSTNAME"]
 
 [audit]
@@ -297,6 +294,7 @@ info "Server config written to /etc/venya/server.toml"
 # --- Write .env ---
 cat > "$INSTALL_DIR/.env" << EOF
 VENYA_HOST=127.0.0.1
+VENYA_DB_URL=postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya
 VENYA_DB__DATABASE_URL=postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya
 VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
 VENYA_FIDO2__RP_ID=$VAULT_HOSTNAME
@@ -346,11 +344,11 @@ else
     warn "Caddy CA not found — TLS may not be trusted"
 fi
 systemctl restart caddy > /dev/null 2>&1
-info "Caddy enabled and started"
+ info "Caddy enabled and started"
 
 # --- Run database migrations ---
 info "Running database migrations..."
-sudo -u venya env PATH="/home/venya/.local/bin:$PATH" bash -c "cd $INSTALL_DIR/packages/vault && VENYA_DB_URL='postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya' /home/venya/.local/bin/uv run alembic -c alembic.ini upgrade head"
+sudo -u venya PATH="/opt/venya/.venv/bin:$PATH" VENYA_DB_URL="postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya" bash -c "cd $INSTALL_DIR && python -c \"from vault.cli.commands import _run_migrations; _run_migrations()\""
 info "Database migrations complete"
 
 # --- Install systemd service ---

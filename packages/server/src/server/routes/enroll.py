@@ -1,19 +1,18 @@
-"""Browser WebAuthn enrollment endpoints.
+"""Browser WebAuthn enrollment endpoints (Phase 2).
 
-One-time browser enrollment using a token issued by `venya init --no-enroll`.
-Tokens are bound to a user_id, have a 15-minute TTL, and are invalidated
-after 3 failed attempts.
+Two-step enrollment flow:
+1. POST /enroll/browser/start — validate token, issue WebAuthn challenge
+2. POST /enroll/browser/complete — verify WebAuthn, store credential, create session
 """
 
 from __future__ import annotations
 
 import logging
-import secrets
-import string
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..fido2.browser_adapter import (
@@ -22,43 +21,26 @@ from ..fido2.browser_adapter import (
 )
 
 logger = logging.getLogger("venya.server")
-
 router = APIRouter()
-
-ALPHABET = string.ascii_letters + string.digits  # base62
-
-
-def _generate_enrollment_token() -> str:
-    """Generate an enrollment token with enrl_ prefix and 128-bit entropy.
-
-    Returns:
-        Token string like "enrl_abc123XYZ..."
-    """
-    raw = secrets.token_bytes(128 // 8)
-    number = int.from_bytes(raw, byteorder="big")
-    base62 = ""
-    while number > 0:
-        number, remainder = divmod(number, len(ALPHABET))
-        base62 = ALPHABET[remainder] + base62
-    return "enrl_" + base62.zfill(26)
 
 
 # --- Request/Response models ---
 
 
-class BrowserEnrollRequest(BaseModel):
-    token: str = Field(..., description="Enrollment token from venya init")
+class BrowserEnrollStartRequest(BaseModel):
+    enrollment_token: str = Field(..., description="Plaintext enrollment token")
 
 
-class BrowserEnrollResponse(BaseModel):
+class BrowserEnrollStartResponse(BaseModel):
     challenge_id: str
     options: dict[str, Any]
 
 
 class BrowserEnrollCompleteRequest(BaseModel):
-    token: str = Field(..., description="Enrollment token")
-    challenge_id: str = Field(..., description="Challenge ID from enroll/browser response")
+    enrollment_token: str = Field(..., description="Plaintext enrollment token")
+    challenge_id: str = Field(..., description="Challenge ID from start response")
     response: dict[str, Any] = Field(..., description="WebAuthn attestation response")
+    label: str = Field(..., description="Credential label (e.g. 'Primary key')")
 
 
 # --- Helpers ---
@@ -75,94 +57,47 @@ def _get_db(request: Request):
     return backend.get_session()
 
 
-def _validate_enrollment_token(db, token_value: str, ttl_minutes: int) -> Any:
-    """Validate an enrollment token and return it.
-
-    Args:
-        db: Database session.
-        token_value: The token string to validate.
-        ttl_minutes: Token TTL in minutes.
-
-    Returns:
-        The EnrollmentToken if valid.
-
-    Raises:
-        HTTPException: If token is invalid, expired, consumed, or rate-limited.
-    """
-    from vault.iam.models import EnrollmentToken
-
-    now = datetime.now(timezone.utc)
-    token = (
-        db.query(EnrollmentToken)
-        .filter(EnrollmentToken.token == token_value)
-        .first()
+def _set_session_cookie(response: JSONResponse, token: str) -> None:
+    """Set the venya_access_token cookie."""
+    response.set_cookie(
+        key="venya_access_token",
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=900,  # 15 minutes
     )
-
-    if token is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid enrollment token",
-        )
-
-    if token.consumed:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Enrollment token has already been used",
-        )
-
-    if token.expires_at < now:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Enrollment token has expired",
-        )
-
-    if token.failed_attempts >= 3:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Enrollment token has been invalidated due to too many failed attempts",
-        )
-
-    return token
-
-
-def _increment_failed_attempts(db, token):
-    """Increment the failed attempts counter on a token.
-
-    Args:
-        db: Database session.
-        token: The EnrollmentToken to update.
-    """
-    token.failed_attempts += 1
-    db.flush()
 
 
 # --- Endpoints ---
 
 
 @router.post(
-    "/enroll/browser",
-    response_model=BrowserEnrollResponse,
+    "/enroll/browser/start",
+    response_model=BrowserEnrollStartResponse,
     status_code=status.HTTP_200_OK,
 )
 async def browser_enroll_start(
-    req: BrowserEnrollRequest,
+    req: BrowserEnrollStartRequest,
     request: Request,
-) -> BrowserEnrollResponse:
+) -> BrowserEnrollStartResponse:
     """Validate enrollment token and issue WebAuthn registration challenge.
 
-    Returns a browser-formatted WebAuthn registration challenge for
-    the client to present to the authenticator.
+    Transitions token state from 'created' to 'in_progress'.
     """
     db = _get_db(request)
     try:
-        config = getattr(request.app.state, "config", None)
-        ttl_minutes = (
-            config.fido2.enrollment_token_ttl
-            if config
-            else 15
-        )
+        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from vault.iam.models import User
 
-        token = _validate_enrollment_token(db, req.token, ttl_minutes)
+        em = EnrollmentManager(db)
+
+        # Validate token and check user status
+        token = em.validate_token_for_start(req.enrollment_token)
+
+        # Transition state to in_progress
+        em.mark_token_in_progress(req.enrollment_token)
+        db.commit()
 
         fido2_manager = getattr(request.app.state, "fido2_manager", None)
         if fido2_manager is None:
@@ -171,24 +106,31 @@ async def browser_enroll_start(
                 detail="FIDO2 manager not initialized",
             )
 
+        # Get user for display name
+        user = db.query(User).filter(User.id == token.user_id).first()
+        username = user.display_name or user.user_id if user else token.user_id
+
         challenge_id, options = fido2_manager.start_registration(
-            user_id=token.user_id,
-            username=token.user_id,
+            user_id=str(token.user_id),
+            username=username,
         )
 
         browser_options = challenge_to_browser_registration_options(
             challenge_id, options
         )
 
-        return BrowserEnrollResponse(
+        return BrowserEnrollStartResponse(
             challenge_id=challenge_id,
             options=browser_options,
         )
     except HTTPException:
-        db.rollback()
         raise
+    except EnrollmentError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
     except Exception as e:
-        db.rollback()
         logger.error("Enrollment start failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -206,22 +148,30 @@ async def browser_enroll_complete(
     req: BrowserEnrollCompleteRequest,
     request: Request,
 ) -> dict[str, str]:
-    """Complete browser enrollment: store credential and consume token.
+    """Complete browser enrollment: store credential, activate user, create session.
 
-    Verifies the WebAuthn attestation, stores the credential via
-    Fido2Manager, and marks the enrollment token as consumed.
+    Transitions token state from 'in_progress' to 'completed' and
+    user status from 'pending_enrollment' to 'active'.
     """
     db = _get_db(request)
     try:
-        config = getattr(request.app.state, "config", None)
-        ttl_minutes = (
-            config.fido2.enrollment_token_ttl
-            if config
-            else 15
-        )
+        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from vault.iam.models import User, WebAuthnCredential
 
-        # Validate token
-        token = _validate_enrollment_token(db, req.token, ttl_minutes)
+        em = EnrollmentManager(db)
+
+        # Validate token is in in_progress state
+        try:
+            token = em.get_token_by_plaintext(req.enrollment_token)
+            if token is None or token.state != "in_progress":
+                raise EnrollmentError("Invalid enrollment token or not in progress")
+            if token.expires_at <= datetime.now(timezone.utc):
+                raise EnrollmentError("Enrollment token has expired")
+        except EnrollmentError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
 
         fido2_manager = getattr(request.app.state, "fido2_manager", None)
         if fido2_manager is None:
@@ -230,51 +180,67 @@ async def browser_enroll_complete(
                 detail="FIDO2 manager not initialized",
             )
 
-        # Convert and verify registration
-        fido2_response = browser_registration_to_fido2(req.response)
-
+        # Complete WebAuthn registration
         try:
+            fido2_response = browser_registration_to_fido2(req.response)
             cred = fido2_manager.finish_registration(
                 req.challenge_id,
                 fido2_response,
             )
         except ValueError as e:
-            _increment_failed_attempts(db, token)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
             ) from e
 
-        # Store credential
-        from vault.iam.models import WebAuthnCredential
-        import json
-
+        # Store WebAuthn credential
         webauthn_cred = WebAuthnCredential(
+            user_id=int(cred.user_id),  # type: ignore[arg-type]
             credential_id=cred.credential_id,
-            user_id=cred.user_id,
-            raw_id=cred.credential_data.get("raw_id", ""),
-            response=json.dumps(cred.credential_data.get("response", {})),
-            transports=json.dumps(cred.transports),
+            public_key=cred.public_key,
+            sign_count=cred.sign_count,
+            label=req.label,
+            is_active=True,
         )
         db.add(webauthn_cred)
 
-        token.consumed = True
+        # Update token state and user status
+        em.complete_enrollment(req.enrollment_token)
 
-        from vault.iam.models import User
-        user = db.query(User).filter(User.user_id == token.user_id).first()
+        # Activate user
+        user = db.query(User).filter(User.id == token.user_id).first()
         if user:
-            user.auth_mode = "webauthn"
+            user.status = "active"
             user.enrolled_at = datetime.now(timezone.utc)
+            user.auth_mode = "webauthn"
 
+        # Create session
+        from vault.iam.session_manager import SessionManager
+
+        sm = SessionManager(db)
+        roles = [rm.role_id for rm in user.roles] if user and user.roles else []
+        session, access_token = sm.create_session(
+            user_id=user.user_id,
+            roles=[str(r) for r in roles],
+        )
         db.commit()
 
+        # Set session cookie
+        response = JSONResponse(content={"status": "ok"})
+        _set_session_cookie(response, access_token.token)
+
         logger.info(
-            "Browser enrollment complete for user %s",
+            "Browser enrollment complete for user %s (ID: %s)",
+            user.user_id if user else "unknown",
             token.user_id,
         )
 
-        return {"status": "ok", "user_id": token.user_id}
+        return response
     except HTTPException:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         raise
     except Exception as e:
         try:
@@ -287,7 +253,4 @@ async def browser_enroll_complete(
             detail="Enrollment failed",
         ) from e
     finally:
-        try:
-            db.close()
-        except Exception:
-            pass
+        db.close()

@@ -653,6 +653,15 @@
 
     // Check if we're on the dashboard page
     if (secretsTbody || dashboardSection) {
+        // Initialize theme toggle
+        initThemeToggle();
+
+        // Load user info for welcome bar
+        initWelcomeBar();
+
+        // Show/hide admin nav links
+        initNavVisibility();
+
         // Load roles for the role selector
         loadSecrets();
 
@@ -668,4 +677,82 @@
         load: loadSecrets,
         showDashboard: showDashboard,
     };
+
+    // --- Welcome bar ---
+
+    async function initWelcomeBar() {
+        var welcomeBar = document.getElementById("welcome-bar");
+        var welcomeText = document.getElementById("welcome-text");
+        if (!welcomeBar || !welcomeText) return;
+
+        try {
+            var me = await apiFetch(API_BASE + "/auth/me");
+            if (me && me.display_name) {
+                welcomeText.textContent = "Welcome, " + me.display_name + "!";
+                welcomeBar.hidden = false;
+            } else if (me && me.user_id) {
+                welcomeText.textContent = "Welcome, " + me.user_id + "!";
+                welcomeBar.hidden = false;
+            }
+        } catch (err) {
+            // Silently fail — welcome bar stays hidden
+        }
+    }
+
+    // --- Nav visibility ---
+
+    async function initNavVisibility() {
+        try {
+            var me = await apiFetch(API_BASE + "/auth/me");
+            if (!me || !me.roles) return;
+
+            var isAdmin = false;
+            for (var i = 0; i < me.roles.length; i++) {
+                if (me.roles[i] === "admin") {
+                    isAdmin = true;
+                    break;
+                }
+            }
+
+            var navUsers = document.getElementById("nav-users");
+            var navTokens = document.getElementById("nav-tokens");
+
+            if (!isAdmin) {
+                if (navUsers) navUsers.style.display = "none";
+                if (navTokens) navTokens.style.display = "none";
+            }
+        } catch (err) {
+            // Silently fail
+        }
+    }
+
+    // --- Dark mode toggle ---
+
+    function initThemeToggle() {
+        var toggle = document.getElementById("theme-toggle");
+        if (!toggle) return;
+
+        // Apply saved theme or system preference
+        var saved = localStorage.getItem("venya-theme");
+        if (saved) {
+            document.documentElement.setAttribute("data-theme", saved);
+        } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            document.documentElement.setAttribute("data-theme", "dark");
+        }
+
+        // Toggle button click
+        toggle.addEventListener("click", function () {
+            var current = document.documentElement.getAttribute("data-theme");
+            var next = current === "dark" ? "light" : "dark";
+            document.documentElement.setAttribute("data-theme", next);
+            localStorage.setItem("venya-theme", next);
+
+            // Update button icon
+            toggle.textContent = next === "dark" ? "\u2600" : "\u263E";
+        });
+
+        // Set initial icon
+        var theme = document.documentElement.getAttribute("data-theme");
+        toggle.textContent = theme === "dark" ? "\u2600" : "\u263E";
+    }
 })();

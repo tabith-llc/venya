@@ -6,7 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "vault",
     "cryptography",
-    "httpx",
+    "httpx2>=0.27.0",
     "websockets",
     "pydantic",
     "pydantic-settings",

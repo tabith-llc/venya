@@ -27,9 +27,10 @@ class StoredCredential:
     """A stored WebAuthn credential."""
 
     user_id: str
-    credential_id: str
-    credential_data: dict[str, Any]
-    transports: list[str] = field(default_factory=list)
+    credential_id: bytes
+    public_key: bytes
+    sign_count: int = 0
+    label: str | None = None
 
 
 class Fido2Store:
@@ -40,7 +41,7 @@ class Fido2Store:
 
     def __init__(self) -> None:
         self._challenges: dict[str, StoredChallenge] = {}
-        self._credentials: dict[str, StoredCredential] = {}
+        self._credentials: dict[bytes, StoredCredential] = {}
 
     def store_challenge(self, challenge_id: str, user_id: str, data: dict) -> None:
         self._challenges[challenge_id] = StoredChallenge(
@@ -53,13 +54,13 @@ class Fido2Store:
     def store_credential(self, cred: StoredCredential) -> None:
         self._credentials[cred.credential_id] = cred
 
-    def get_credential(self, credential_id: str) -> StoredCredential | None:
+    def get_credential(self, credential_id: bytes) -> StoredCredential | None:
         return self._credentials.get(credential_id)
 
     def get_user_credentials(self, user_id: str) -> list[StoredCredential]:
         return [c for c in self._credentials.values() if c.user_id == user_id]
 
-    def remove_credential(self, credential_id: str) -> bool:
+    def remove_credential(self, credential_id: bytes) -> bool:
         if credential_id in self._credentials:
             del self._credentials[credential_id]
             return True
@@ -95,17 +96,16 @@ class Fido2Manager:
         try:
             db = self.backend.get_session()
             try:
-                creds = db.query(WebAuthnCredential).all()
+                creds = db.query(WebAuthnCredential).filter(
+                    WebAuthnCredential.is_active == True  # noqa: E712
+                ).all()
                 for db_cred in creds:
                     stored = StoredCredential(
                         user_id=db_cred.user_id,
                         credential_id=db_cred.credential_id,
-                        credential_data={
-                            "raw_id": db_cred.raw_id,
-                            "response": db_cred.response,
-                            "transports": db_cred.transports,
-                        },
-                        transports=db_cred.transports or [],
+                        public_key=db_cred.public_key,
+                        sign_count=db_cred.sign_count,
+                        label=db_cred.label,
                     )
                     self.store.store_credential(stored)
             finally:
@@ -117,7 +117,7 @@ class Fido2Manager:
         self,
         user_id: str,
         username: str,
-        existing_credential_ids: list[str] | None = None,
+        existing_credential_ids: list[bytes] | None = None,
     ) -> tuple[str, dict]:
         """Start a WebAuthn registration challenge.
 
@@ -161,9 +161,7 @@ class Fido2Manager:
             ],
             "timeout": 60000,
             "excludeCredentials": [
-                {"type": "public-key", "id": base64.b64encode(
-                    base64.b64decode(cid)
-                ).decode("ascii")}
+                {"type": "public-key", "id": base64.b64encode(cid).decode("ascii")}
                 for cid in (existing_credential_ids or [])
             ],
             "attestation": "none",
@@ -192,24 +190,40 @@ class Fido2Manager:
         if stored is None:
             raise ValueError("Challenge not found or expired")
 
-        credential_id = secrets.token_urlsafe(32)
-
-        # Extract credential data from response
-        raw_id = response.get("id", "")
-        if isinstance(raw_id, str):
-            raw_id_bytes = base64.b64decode(raw_id)
+        # Extract credential_id from response (base64url-encoded in browser)
+        raw_id_b64 = response.get("id", "")
+        if isinstance(raw_id_b64, str):
+            credential_id = base64.b64decode(raw_id_b64)
         else:
-            raw_id_bytes = raw_id
+            credential_id = raw_id_b64
+
+        # Extract public key from response
+        public_key_b64 = response.get("response", {}).get("attestationObject", {})
+        if isinstance(public_key_b64, str):
+            public_key = base64.b64decode(public_key_b64)
+        elif isinstance(public_key_b64, bytes):
+            public_key = public_key_b64
+        else:
+            public_key = b""
+
+        # Extract sign count from response
+        auth_data = response.get("response", {}).get("attestationObject", {})
+        if isinstance(auth_data, str):
+            auth_data_bytes = base64.b64decode(auth_data)
+        elif isinstance(auth_data, bytes):
+            auth_data_bytes = auth_data
+        else:
+            auth_data_bytes = b""
+        # Sign count is bytes 30-33 of authenticator data (right-aligned 32-bit)
+        sign_count = 0
+        if len(auth_data_bytes) >= 37:
+            sign_count = int.from_bytes(auth_data_bytes[30:34], "big")
 
         cred = StoredCredential(
             user_id=stored.data["user_id"],
             credential_id=credential_id,
-            credential_data={
-                "raw_id": base64.b64encode(raw_id_bytes).decode("ascii"),
-                "response": response.get("response", {}),
-                "transports": response.get("transports", []),
-            },
-            transports=response.get("transports", []),
+            public_key=public_key,
+            sign_count=sign_count,
         )
 
         self.store.store_credential(cred)
@@ -236,7 +250,7 @@ class Fido2Manager:
                 allow_credentials = [
                     {
                         "type": "public-key",
-                        "id": c.credential_data["raw_id"],
+                        "id": base64.b64encode(c.credential_id).decode("ascii"),
                     }
                     for c in credentials
                 ]
@@ -284,23 +298,23 @@ class Fido2Manager:
         if stored is None:
             raise ValueError("Challenge not found or expired")
 
-        raw_id = response.get("id", "")
-        if isinstance(raw_id, str):
-            raw_id_b64 = raw_id
+        raw_id_b64 = response.get("id", "")
+        if isinstance(raw_id_b64, str):
+            raw_id = base64.b64decode(raw_id_b64)
         else:
-            raw_id_b64 = base64.b64encode(raw_id).decode("ascii")
+            raw_id = raw_id_b64
 
         # Find matching credential
         credential = None
         target_user_id = stored.data.get("target_user_id")
         if target_user_id:
             for c in self.store.get_user_credentials(target_user_id):
-                if c.credential_data.get("raw_id") == raw_id_b64:
+                if c.credential_id == raw_id:
                     credential = c
                     break
         else:
             for c in self.store._credentials.values():
-                if c.credential_data.get("raw_id") == raw_id_b64:
+                if c.credential_id == raw_id:
                     credential = c
                     break
 
@@ -309,20 +323,20 @@ class Fido2Manager:
 
         return {
             "user_id": credential.user_id,
-            "credential_id": credential.credential_id,
+            "credential_id": base64.b64encode(credential.credential_id).decode("ascii"),
         }
 
     def get_user_credentials(self, user_id: str) -> list[dict]:
         """Get all registered credentials for a user."""
         return [
             {
-                "credential_id": c.credential_id,
-                "transports": c.transports,
-                "raw_id": c.credential_data["raw_id"],
+                "credential_id": base64.b64encode(c.credential_id).decode("ascii"),
+                "label": c.label,
+                "sign_count": c.sign_count,
             }
             for c in self.store.get_user_credentials(user_id)
         ]
 
-    def remove_credential(self, credential_id: str) -> bool:
+    def remove_credential(self, credential_id: bytes) -> bool:
         """Remove a registered credential."""
         return self.store.remove_credential(credential_id)

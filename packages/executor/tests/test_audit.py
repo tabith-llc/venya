@@ -30,7 +30,7 @@ def logger(audit_config: AuditForwarderConfig) -> AuditLogger:
 
 @pytest.fixture()
 def success_mock() -> MagicMock:
-    """Create a properly configured httpx.Client mock that returns 200."""
+    """Create a properly configured httpx2.Client mock that returns 200."""
     mock_client = MagicMock()
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -111,7 +111,7 @@ class TestAuditLoggerFlush:
         log = AuditLogger(audit_config, session_id="s1")
         log.emit("credential_injected", strategy="memfd", fd_count=1)
 
-        with patch("httpx.Client", return_value=success_mock) as mock_client_cls:
+        with patch("httpx2.Client", return_value=success_mock) as mock_client_cls:
             log.flush()
 
         mock_client_cls.return_value.__enter__.return_value.post.assert_called_once()
@@ -123,7 +123,7 @@ class TestAuditLoggerFlush:
         log = AuditLogger(audit_config, session_id="s1")
         log.emit("credential_injected", strategy="memfd")
 
-        with patch("httpx.Client", return_value=success_mock):
+        with patch("httpx2.Client", return_value=success_mock):
             log.flush()
 
         assert len(log._buffer) == 0
@@ -146,7 +146,7 @@ class TestAuditLoggerFlush:
         audit_config.max_buffer_size = 5
         log = AuditLogger(audit_config, session_id="s1")
 
-        with patch("httpx.Client", return_value=success_mock):
+        with patch("httpx2.Client", return_value=success_mock):
             for i in range(5):
                 log.emit("credential_injected", strategy="memfd", fd_count=i + 1)
 
@@ -174,7 +174,7 @@ class TestAuditLoggerShutdown:
         log = AuditLogger(audit_config, session_id="s1")
         log.emit("credential_injected", strategy="memfd")
 
-        with patch("httpx.Client", return_value=success_mock):
+        with patch("httpx2.Client", return_value=success_mock):
             log.shutdown()
 
         assert len(log._buffer) == 0

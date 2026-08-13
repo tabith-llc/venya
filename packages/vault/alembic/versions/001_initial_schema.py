@@ -18,16 +18,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # PostgreSQL enables foreign keys by default
-
     # --- Core IAM tables ---
 
     op.create_table(
         "users",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("user_id", sa.String(64), nullable=False),
+        sa.Column("display_name", sa.String(128), nullable=True),
+        sa.Column("status", sa.String(32), nullable=False, server_default="pending_enrollment"),
         sa.Column("auth_mode", sa.String(32), nullable=False, server_default="security-key"),
-        sa.Column("enrolled_at", sa.DateTime(), nullable=True),
+        sa.Column("enrolled_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("session_timeout", sa.Integer(), nullable=False, server_default="900"),
         sa.UniqueConstraint("user_id", name="uq_users_user_id"),
     )
@@ -58,7 +58,7 @@ def upgrade() -> None:
         "key_versions",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("version_label", sa.String(64), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("active", sa.Boolean(), nullable=False, server_default="0"),
         sa.Column("rotation_pending", sa.Boolean(), nullable=False, server_default="0"),
         sa.Column("encrypted_kek_hash", sa.String(64), nullable=True),
@@ -74,7 +74,7 @@ def upgrade() -> None:
         sa.Column("wrapped_dek", sa.LargeBinary(), nullable=False),
         sa.Column("key_version_id", sa.String(64), nullable=False),
         sa.Column("created_by", sa.String(64), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["created_by"], ["users.user_id"]),
     )
     op.create_index("ix_secrets_key", "secrets", ["key"])
@@ -92,7 +92,7 @@ def upgrade() -> None:
         "sessions",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("user_id", sa.String(64), nullable=False),
-        sa.Column("expires_at", sa.DateTime(), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("access_token", sa.String(128), nullable=True),
         sa.Column("access_token_jti", sa.String(64), nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.user_id"]),
@@ -107,7 +107,7 @@ def upgrade() -> None:
         sa.Column("event_type", sa.String(64), nullable=False),
         sa.Column("user_id", sa.String(64), nullable=True),
         sa.Column("fields", sa.Text(), nullable=True),
-        sa.Column("timestamp", sa.DateTime(), nullable=False),
+        sa.Column("timestamp", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["user_id"], ["users.user_id"]),
     )
     op.create_index("ix_audit_events_event_type", "audit_events", ["event_type"])
@@ -116,14 +116,17 @@ def upgrade() -> None:
     op.create_table(
         "enrollment_tokens",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("token", sa.String(128), nullable=False),
-        sa.Column("user_id", sa.String(64), nullable=False),
-        sa.Column("expires_at", sa.DateTime(), nullable=False),
-        sa.Column("consumed", sa.Boolean(), nullable=False, server_default="0"),
-        sa.UniqueConstraint("token", name="uq_enrollment_tokens_token"),
+        sa.Column("user_id", sa.Integer(), sa.ForeignKey("users.id"), nullable=False),
+        sa.Column("token_hash", sa.String(64), nullable=False),
+        sa.Column("state", sa.String(16), nullable=False, server_default="created"),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("used_at", sa.DateTime(timezone=True), nullable=True),
+        sa.UniqueConstraint("token_hash", name="uq_enrollment_tokens_token_hash"),
     )
-    op.create_index("ix_enrollment_tokens_token", "enrollment_tokens", ["token"])
+    op.create_index("ix_enrollment_tokens_token_hash", "enrollment_tokens", ["token_hash"])
     op.create_index("ix_enrollment_tokens_expires_at", "enrollment_tokens", ["expires_at"])
+    op.create_index("ix_enrollment_tokens_user_id", "enrollment_tokens", ["user_id"])
 
     # --- Key rotation tables ---
 
@@ -137,9 +140,9 @@ def upgrade() -> None:
         sa.Column("total_secrets", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("completed_secrets", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("failed_count", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("started_at", sa.DateTime(), nullable=True),
-        sa.Column("completed_at", sa.DateTime(), nullable=True),
-        sa.Column("rolled_back_at", sa.DateTime(), nullable=True),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("rolled_back_at", sa.DateTime(timezone=True), nullable=True),
     )
 
     op.create_table(
@@ -158,7 +161,7 @@ def upgrade() -> None:
         "rate_limit_failures",
         sa.Column("user_id", sa.String(64), primary_key=True),
         sa.Column("failed_attempts", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("window_start", sa.DateTime(), nullable=False),
+        sa.Column("window_start", sa.DateTime(timezone=True), nullable=False),
     )
 
     # --- Command policies ---
@@ -170,8 +173,8 @@ def upgrade() -> None:
         sa.Column("preset", sa.String(32), nullable=False),
         sa.Column("allowed_commands", sa.Text(), nullable=True),
         sa.Column("dangerous_patterns", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("policy_name", name="uq_command_policies_policy_name"),
     )
     op.create_index("ix_command_policies_policy_name", "command_policies", ["policy_name"])
@@ -183,10 +186,10 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("executor_id", sa.String(64), nullable=False),
         sa.Column("serial_number", sa.String(64), nullable=False),
-        sa.Column("not_before", sa.DateTime(), nullable=False),
-        sa.Column("not_after", sa.DateTime(), nullable=False),
+        sa.Column("not_before", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("not_after", sa.DateTime(timezone=True), nullable=False),
         sa.Column("fingerprint", sa.String(64), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["executor_id"], ["users.user_id"]),
         sa.UniqueConstraint("serial_number", name="uq_executor_certs_serial_number"),
     )

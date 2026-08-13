@@ -83,6 +83,24 @@ async def serve_dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "dashboard.html")
 
 
+@router.get("/admin/users")
+async def serve_admin_users() -> FileResponse:
+    """Serve the admin users page."""
+    return FileResponse(STATIC_DIR / "admin-users.html")
+
+
+@router.get("/admin/tokens")
+async def serve_admin_tokens() -> FileResponse:
+    """Serve the admin tokens page."""
+    return FileResponse(STATIC_DIR / "admin-tokens.html")
+
+
+@router.get("/credentials")
+async def serve_credentials() -> FileResponse:
+    """Serve the credentials page."""
+    return FileResponse(STATIC_DIR / "credentials.html")
+
+
 @router.get("/static/{file_path:path}")
 async def serve_static(file_path: str) -> FileResponse:
     """Serve static assets (CSS, JS, images, etc.).

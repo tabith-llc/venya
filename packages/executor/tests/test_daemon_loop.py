@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from cryptography.hazmat.primitives import hashes
 
@@ -202,7 +202,7 @@ class TestSendHeartbeat:
         config.mtls.ca_cert = ca_path
 
         daemon = ExecutorDaemon(config)
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
 
         daemon._send_heartbeat()
 
@@ -216,8 +216,8 @@ class TestSendHeartbeat:
     def test_heartbeat_handles_connection_error(self, config: ExecutorConfig):
         """_send_heartbeat logs debug on connection error, does not raise."""
         daemon = ExecutorDaemon(config)
-        daemon.client = MagicMock(spec=httpx.Client)
-        daemon.client.post.side_effect = httpx.RequestError(
+        daemon.client = MagicMock(spec=httpx2.Client)
+        daemon.client.post.side_effect = httpx2.RequestError(
             "Connection refused", request=MagicMock()
         )
 
@@ -227,7 +227,7 @@ class TestSendHeartbeat:
     def test_heartbeat_with_no_cert(self, config: ExecutorConfig):
         """_send_heartbeat sends empty fingerprint when no cert exists."""
         daemon = ExecutorDaemon(config)
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
 
         daemon._send_heartbeat()
 
@@ -352,7 +352,7 @@ class TestDaemonStop:
         """stop() stops the reaper loop."""
         daemon = ExecutorDaemon(config)
         daemon.reaper.tmpfs_dir = str(tmpfs_dir)
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
         daemon.reaper.start()
         time.sleep(0.2)
         assert daemon.reaper._thread.is_alive()
@@ -364,7 +364,7 @@ class TestDaemonStop:
     def test_stop_closes_client(self, config: ExecutorConfig):
         """stop() closes the HTTP client."""
         daemon = ExecutorDaemon(config)
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
 
         daemon.stop()
 
@@ -374,7 +374,7 @@ class TestDaemonStop:
         """stop() removes the PID file."""
         daemon = ExecutorDaemon(config)
         daemon.config.pid_file = str(tmp_path / "executor.pid")
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
 
         daemon._write_pidfile()
         daemon.stop()
@@ -386,7 +386,7 @@ class TestDaemonStop:
         caplog.set_level("INFO", logger="venya.executor.daemon")
 
         daemon = ExecutorDaemon(config)
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
 
         daemon.stop()
 
@@ -405,7 +405,7 @@ class TestMainLoop:
     def test_main_loop_exits_when_revoked(self, config: ExecutorConfig):
         """_main_loop() exits when check_revocation returns True."""
         daemon = ExecutorDaemon(config)
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
         daemon.state.running = True
 
         with patch.object(daemon.cert_manager, "needs_rotation", return_value=False):
@@ -419,7 +419,7 @@ class TestMainLoop:
     def test_main_loop_exits_when_stopped(self, config: ExecutorConfig):
         """_main_loop() exits when state.running is False."""
         daemon = ExecutorDaemon(config)
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
 
         # Set running to False immediately — loop should not enter
         with patch.object(daemon.cert_manager, "needs_rotation", return_value=False):
@@ -436,7 +436,7 @@ class TestMainLoop:
     def test_main_loop_sends_heartbeat(self, config: ExecutorConfig):
         """_main_loop() calls _send_heartbeat each iteration."""
         daemon = ExecutorDaemon(config)
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
         daemon.state.running = True
 
         call_count = [0]
@@ -457,7 +457,7 @@ class TestMainLoop:
     def test_main_loop_rotates_cert_when_needed(self, config: ExecutorConfig):
         """_main_loop() rotates certificate when needs_rotation returns True."""
         daemon = ExecutorDaemon(config)
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
         daemon.state.running = True
 
         rotate_called = [False]
