@@ -369,6 +369,10 @@ async def admin_remove(
         db.query(RoleMember).filter(RoleMember.user_id == user_id).delete()
         # Remove sessions
         db.query(Session).filter(Session.user_id == user_id).delete()
+        # Remove enrollment tokens (user_id is integer FK)
+        from vault.iam.models import EnrollmentToken
+
+        db.query(EnrollmentToken).filter(EnrollmentToken.user_id == user.id).delete()
         # Remove the user
         db.delete(user)
         db.commit()
