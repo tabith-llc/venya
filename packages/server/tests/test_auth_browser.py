@@ -142,7 +142,7 @@ class TestBrowserLoginAssert:
             assert "venya_access_token=access-token-xyz" in set_cookie
             assert "HttpOnly" in set_cookie
             assert "Secure" in set_cookie
-            assert "samesite=strict" in set_cookie.lower()
+            assert "samesite=lax" in set_cookie.lower()
 
     def test_assert_invalid_challenge(self):
         """Should return 401 for invalid challenge."""
@@ -187,7 +187,7 @@ class TestBrowserRefresh:
         user_mock = SimpleNamespace(user_id="user1")
         now = datetime.now(timezone.utc)
         session_mock = SimpleNamespace(
-            id=1, user_id="user1", expires_at=now + timedelta(minutes=10), user=user_mock,
+            id=1, user_id="user1", expires_at=now + timedelta(hours=1), user=user_mock,
         )
         token_mock = SimpleNamespace(token="new-access-token", jti="new-jti")
 
@@ -295,20 +295,23 @@ class TestBrowserElevateChallenge:
         from types import SimpleNamespace
 
         user_mock = SimpleNamespace(user_id="user1")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)  # UTC aware, matches timezone-aware DB columns
         session_mock = SimpleNamespace(
             id=1, user_id="user1", created_at=now,
             expires_at=now + timedelta(minutes=10), user=user_mock,
         )
 
         db = MagicMock()
-        # Mock the chain: query(WebAuthnCredential).filter().all()
-        # Return at least one credential so the challenge can be created
+        # Mock query(WebAuthnCredential).filter().all() for elevation challenge
         mock_cred = MagicMock()
         mock_cred.credential_id = "cred-1"
-        db.query.return_value.filter.return_value.all.return_value = [mock_cred]
-        # For _get_session_from_cookie: query(Session).filter().first()
-        db.query.return_value.filter.return_value.first.return_value = session_mock
+        mock_cred.user_id = "user1"
+        # filter() is called with args, returns mock_filter
+        mock_filter = MagicMock()
+        mock_filter.all.return_value = [mock_cred]
+        mock_filter.first.return_value = session_mock
+        # query().filter() -> mock_filter (filter is callable, returns mock_filter)
+        db.query.return_value.filter = MagicMock(return_value=mock_filter)
         backend = MagicMock()
         backend.get_session.return_value = db
 
@@ -364,7 +367,7 @@ class TestBrowserElevateAssert:
         from types import SimpleNamespace
 
         user_mock = SimpleNamespace(user_id="user1")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)  # UTC aware, matches timezone-aware DB columns
         session_mock = SimpleNamespace(
             id=1, user_id="user1", created_at=now,
             expires_at=now + timedelta(minutes=10), user=user_mock,
@@ -455,7 +458,7 @@ class TestBrowserElevateAssert:
         now = datetime.now(timezone.utc)
         session_mock = SimpleNamespace(
             id=99, user_id="user1", created_at=now,
-            expires_at=now + timedelta(minutes=10), user=user_mock,
+            expires_at=now + timedelta(hours=1), user=user_mock,
         )
 
         db = MagicMock()

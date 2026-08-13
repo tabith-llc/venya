@@ -64,6 +64,13 @@ class BrowserElevateResponse(BaseModel):
     options: dict[str, Any]
 
 
+class AuthMeResponse(BaseModel):
+    user_id: str
+    display_name: str | None
+    status: str
+    roles: list[str]
+
+
 class BrowserElevateCompleteRequest(BaseModel):
     challenge_id: str
     response: dict[str, Any]
@@ -584,3 +591,57 @@ async def debug_cookie(request: Request) -> dict:
     """Debug endpoint to check current cookie state."""
     cookie = request.cookies.get(COOKIE_NAME, "NONE")
     return {"cookie": cookie[:30] + "..." if len(cookie) > 30 else cookie}
+
+
+@router.get(
+    "/auth/me",
+    response_model=AuthMeResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def auth_me(request: Request) -> AuthMeResponse:
+    """Return current authenticated user info.
+
+    Reads the session cookie and returns the current user's
+    identity, status, and roles. Used by the dashboard to
+    gate admin-only navigation links.
+    """
+    result = _get_session_from_cookie(request)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session",
+        )
+
+    db, session, user_info = result
+    try:
+        from vault.iam.models import User
+
+        user = db.query(User).filter(User.user_id == session.user_id).first()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
+
+        from vault.iam.role_manager import RoleManager
+
+        role_manager = RoleManager(db)
+        role_members = role_manager.get_user_roles(session.user_id)
+        role_names = [member.role.name for member in role_members]
+
+        return AuthMeResponse(
+            user_id=session.user_id,
+            display_name=user.display_name,
+            status=user.status,
+            roles=role_names,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Auth me failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve user info",
+        )
+    finally:
+        db.close()

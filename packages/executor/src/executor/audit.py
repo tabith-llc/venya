@@ -114,14 +114,14 @@ class AuditLogger:
 
     def _post_with_retry(self, payload: str, remote_url: str) -> None:
         """POST payload to remote_url with exponential backoff."""
-        import httpx
+        import httpx2
 
         delay = self._config.retry_base_delay
         max_delay = self._config.retry_max_delay
 
         while not self._shutdown:
             try:
-                with httpx.Client(verify=False, timeout=10.0) as client:
+                with httpx2.Client(verify=False, timeout=10.0) as client:
                     response = client.post(
                         remote_url,
                         content=payload,
@@ -142,7 +142,7 @@ class AuditLogger:
                             response.status_code,
                             response.text[:200],
                         )
-            except httpx.ConnectError as e:
+            except httpx2.ConnectError as e:
                 logger.warning("Audit forward connection error: %s", e)
             except Exception as e:  # noqa: BLE001
                 logger.error("Audit forward error: %s", e)

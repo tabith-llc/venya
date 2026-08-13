@@ -76,13 +76,9 @@ class MockFido2Manager:
 
         return StoredCredential(
             user_id=stored["user_id"],
-            credential_id="test-cred-id",
-            credential_data={
-                "raw_id": "dGVzdC1jcmVk",
-                "response": {},
-                "transports": [],
-            },
-            transports=[],
+            credential_id=b"test-cred-id",
+            public_key=b"test-public-key",
+            sign_count=0,
         )
 
 

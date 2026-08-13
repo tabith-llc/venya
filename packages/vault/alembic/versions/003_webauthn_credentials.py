@@ -21,19 +21,16 @@ def upgrade() -> None:
     op.create_table(
         "webauthn_credentials",
         sa.Column("id", sa.Integer(), primary_key=True),
-        sa.Column("credential_id", sa.String(128), nullable=False),
         sa.Column("user_id", sa.String(64), nullable=False),
-        sa.Column("raw_id", sa.Text(), nullable=False),
-        sa.Column("response", sa.Text(), nullable=False),
-        sa.Column("transports", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("credential_id", sa.LargeBinary(), nullable=False),
+        sa.Column("public_key", sa.LargeBinary(), nullable=False),
+        sa.Column("sign_count", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("label", sa.String(64), nullable=True),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default="1"),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.user_id"]),
         sa.UniqueConstraint("credential_id", name="uq_webauthn_credentials_credential_id"),
-    )
-    op.create_index(
-        "ix_webauthn_credentials_credential_id",
-        "webauthn_credentials",
-        ["credential_id"],
     )
     op.create_index(
         "ix_webauthn_credentials_user_id",

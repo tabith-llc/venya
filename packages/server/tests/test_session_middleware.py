@@ -263,7 +263,7 @@ class TestPublicPaths:
         assert resp.status_code == 503  # FIDO2 not initialized, not 401
 
     def test_enroll_browser_public(self):
-        """Browser enrollment should be public."""
+        """Browser enrollment start should be public."""
         from server.routes import enroll
 
         app = _create_test_app()
@@ -271,8 +271,8 @@ class TestPublicPaths:
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
-            "/api/v1/enroll/browser",
-            json={"token": "enrl_test"},
+            "/api/v1/enroll/browser/start",
+            json={"enrollment_token": "test-token"},
         )
         assert resp.status_code == 503  # Backend not initialized, not 401
 
@@ -286,7 +286,7 @@ class TestPublicPaths:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/enroll/browser/complete",
-            json={"token": "enrl_test", "challenge_id": "x", "response": {}},
+            json={"enrollment_token": "test-token", "challenge_id": "x", "response": {}, "label": "key"},
         )
         assert resp.status_code == 503  # Backend not initialized, not 401
 

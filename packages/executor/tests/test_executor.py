@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 
 from executor.command_validator import CommandValidator
@@ -36,10 +36,10 @@ def executor(validator: CommandValidator) -> Executor:
 
 
 @pytest.fixture()
-def mock_http_client() -> httpx.Client:
+def mock_http_client() -> httpx2.Client:
     """Create a mock httpx client."""
-    client = MagicMock(spec=httpx.Client)
-    response = MagicMock(spec=httpx.Response)
+    client = MagicMock(spec=httpx2.Client)
+    response = MagicMock(spec=httpx2.Response)
     response.status_code = 200
     response.json.return_value = {"revoked": True, "count": 2, "session_id": "test-session-123"}
     response.raise_for_status.return_value = None
@@ -53,7 +53,7 @@ def mock_http_client() -> httpx.Client:
 class TestRevokeTokens:
     """Tests for Executor.revoke_tokens()."""
 
-    def test_revoke_tokens_calls_server_api(self, executor: Executor, mock_http_client: httpx.Client):
+    def test_revoke_tokens_calls_server_api(self, executor: Executor, mock_http_client: httpx2.Client):
         """revoke_tokens calls POST /sessions/{session_id}/secrets/revoke."""
         executor.http_client = mock_http_client
         secret_ids = ["secret-1", "secret-2"]
@@ -66,7 +66,7 @@ class TestRevokeTokens:
             timeout=10.0,
         )
 
-    def test_revoke_tokens_logs_success(self, executor: Executor, mock_http_client: httpx.Client, caplog):
+    def test_revoke_tokens_logs_success(self, executor: Executor, mock_http_client: httpx2.Client, caplog):
         """revoke_tokens logs success on successful API call."""
         executor.http_client = mock_http_client
         caplog.set_level("INFO", logger="venya.executor")
@@ -76,7 +76,7 @@ class TestRevokeTokens:
         assert "Revoked tokens for 1 secrets" in caplog.text
         assert "test-session-123" in caplog.text
 
-    def test_revoke_tokens_empty_list(self, executor: Executor, mock_http_client: httpx.Client):
+    def test_revoke_tokens_empty_list(self, executor: Executor, mock_http_client: httpx2.Client):
         """revoke_tokens does nothing with empty list."""
         executor.http_client = mock_http_client
 
@@ -94,9 +94,9 @@ class TestRevokeTokens:
         assert "No HTTP client available" in caplog.text
         assert "skipping server token revocation" in caplog.text
 
-    def test_revoke_tokens_server_error(self, executor: Executor, mock_http_client: httpx.Client, caplog):
+    def test_revoke_tokens_server_error(self, executor: Executor, mock_http_client: httpx2.Client, caplog):
         """revoke_tokens logs error but doesn't raise on server failure."""
-        mock_http_client.post.side_effect = httpx.RequestError(
+        mock_http_client.post.side_effect = httpx2.RequestError(
             "Connection refused", request=MagicMock()
         )
         executor.http_client = mock_http_client
@@ -129,7 +129,7 @@ class TestCreateExecutor:
         daemon = ExecutorDaemon(config)
 
         # Manually set a mock client (simulating what start() does)
-        daemon.client = MagicMock(spec=httpx.Client)
+        daemon.client = MagicMock(spec=httpx2.Client)
 
         exec_instance = daemon.create_executor("session-abc")
 
@@ -217,8 +217,8 @@ class TestReaperLoop:
 
     def test_check_orphaned_revokes_tokens(self, tmp_path: Path):
         """Revokes tokens for orphaned secrets via server API."""
-        mock_client = MagicMock(spec=httpx.Client)
-        response = MagicMock(spec=httpx.Response)
+        mock_client = MagicMock(spec=httpx2.Client)
+        response = MagicMock(spec=httpx2.Response)
         response.status_code = 200
         mock_client.post.return_value = response
 
@@ -268,8 +268,8 @@ class TestReaperLoop:
 
     def test_check_orphaned_multiple_orphaned_files(self, tmp_path: Path):
         """Handles multiple orphaned files correctly."""
-        mock_client = MagicMock(spec=httpx.Client)
-        response = MagicMock(spec=httpx.Response)
+        mock_client = MagicMock(spec=httpx2.Client)
+        response = MagicMock(spec=httpx2.Response)
         response.status_code = 200
         mock_client.post.return_value = response
 
@@ -323,7 +323,7 @@ class TestSendToStage2:
         response.raise_for_status.return_value = None
         return response
 
-    def test_send_to_stage2_success(self, executor: Executor, mock_http_client: httpx.Client):
+    def test_send_to_stage2_success(self, executor: Executor, mock_http_client: httpx2.Client):
         """_send_to_stage2 sends base64-encoded output and returns filtered result."""
         import base64
         executor.http_client = mock_http_client
@@ -357,7 +357,7 @@ class TestSendToStage2:
         assert result_stderr == b""
         assert masked_ids == ["a1b2c3d4"]
 
-    def test_send_to_stage2_parses_masked_hashes(self, executor: Executor, mock_http_client: httpx.Client):
+    def test_send_to_stage2_parses_masked_hashes(self, executor: Executor, mock_http_client: httpx2.Client):
         """_send_to_stage2 deduplicates and sorts masked hashes."""
         executor.http_client = mock_http_client
 
@@ -375,7 +375,7 @@ class TestSendToStage2:
 
         assert masked_ids == ["a1b2c3d4", "c3d4e5f6"]
 
-    def test_send_to_stage2_empty_masked_hashes(self, executor: Executor, mock_http_client: httpx.Client):
+    def test_send_to_stage2_empty_masked_hashes(self, executor: Executor, mock_http_client: httpx2.Client):
         """_send_to_stage2 handles missing masked_hashes gracefully."""
         executor.http_client = mock_http_client
 
@@ -393,14 +393,14 @@ class TestSendToStage2:
 
         assert masked_ids == []
 
-    def test_send_to_stage2_server_error_raises(self, executor: Executor, mock_http_client: httpx.Client):
+    def test_send_to_stage2_server_error_raises(self, executor: Executor, mock_http_client: httpx2.Client):
         """_send_to_stage2 raises on server connection failure."""
         executor.http_client = mock_http_client
-        mock_http_client.post.side_effect = httpx.RequestError(
+        mock_http_client.post.side_effect = httpx2.RequestError(
             "Connection refused", request=MagicMock()
         )
 
-        with pytest.raises(httpx.RequestError):
+        with pytest.raises(httpx2.RequestError):
             executor._send_to_stage2(b"out", b"err", [])
 
 
@@ -482,7 +482,7 @@ class TestRunCommandStage2:
                     with patch("executor.executor.set_cloexec"):
                         with patch("executor.executor.verify_fd_whitelist", return_value=[]):
                             executor.http_client = MagicMock()
-                            executor.http_client.post.side_effect = httpx.RequestError(
+                            executor.http_client.post.side_effect = httpx2.RequestError(
                                 "Connection refused", request=MagicMock()
                             )
 

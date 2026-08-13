@@ -347,11 +347,11 @@ async def init_complete(
 
         # Store WebAuthn credential in database
         webauthn_cred = WebAuthnCredential(
-            credential_id=cred.credential_id,
             user_id=cred.user_id,
-            raw_id=cred.credential_data.get("raw_id", ""),
-            response=json.dumps(cred.credential_data.get("response", {})),
-            transports=json.dumps(cred.transports),
+            credential_id=cred.credential_id,
+            public_key=cred.public_key,
+            sign_count=cred.sign_count,
+            is_active=True,
         )
         db.add(webauthn_cred)
 

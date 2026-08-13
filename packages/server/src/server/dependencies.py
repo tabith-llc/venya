@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from vault.vault.backend import Backend, BackendConfig
 from vault.vault.factory import VaultFactory
 from vault.vault.vault import Caller
-from vault.iam.models import Base, Session as SessionModel
+from vault.iam.models import Session as SessionModel
 from vault.iam.session_manager import SessionConfig as VaultSessionConfig, SessionManager
 from vault.iam.role_manager import RoleManager
 
@@ -95,13 +95,11 @@ def get_current_session(
     from vault.iam.session_manager import SessionConfig
 
     config = SessionConfig()
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    # Ensure expires_at is offset-naive for comparison
-    expires_at = session.expires_at.replace(tzinfo=None) if session.expires_at.tzinfo else session.expires_at
-    session_created_at = expires_at - config.session_timeout
+    now = datetime.now(timezone.utc)
+    session_created_at = session.expires_at - config.session_timeout
     if session_created_at + config.max_session_duration < now:
         return None
-    if expires_at < now:
+    if session.expires_at < now:
         return None
 
     return (db, session)

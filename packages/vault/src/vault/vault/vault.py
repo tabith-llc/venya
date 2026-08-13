@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import and_
 
-from ..iam.models import Base, Secret, SecretRole, Role, RoleMember
+from ..iam.models import Secret, SecretRole, Role, RoleMember
 from .backend import Backend, BackendConfig
 from .encryption import decrypt_secret as _decrypt_secret_impl
 from .rate_limiter import RateLimiter
@@ -65,17 +65,6 @@ class Vault:
         self.backend = backend
         self.rate_limiter = rate_limiter or RateLimiter()
         self.kek = kek
-        self._tables_created = False
-
-    def _ensure_tables(self) -> None:
-        """Create all ORM tables if they don't exist."""
-        if self._tables_created:
-            return
-        try:
-            Base.metadata.create_all(self.backend.engine)
-        except Exception:
-            pass  # Tables may already exist
-        self._tables_created = True
 
     def get(
         self,
@@ -102,7 +91,6 @@ class Vault:
             VaultAccessError: If access is denied.
             VaultRateLimitError: If rate limit exceeded.
         """
-        self._ensure_tables()
 
         if user_id:
             self.rate_limiter.check(user_id)
@@ -179,7 +167,6 @@ class Vault:
         Raises:
             VaultAccessError: If user doesn't have write access.
         """
-        self._ensure_tables()
 
         if not role_ids:
             raise VaultAccessError("Secret must be scoped to at least one role")
@@ -250,7 +237,6 @@ class Vault:
         Raises:
             VaultAccessError: If user doesn't have write access.
         """
-        self._ensure_tables()
 
         session = self.backend.get_session()
         try:
@@ -298,7 +284,6 @@ class Vault:
         Returns:
             List of secret records the user has read access to.
         """
-        self._ensure_tables()
 
         session = self.backend.get_session()
         try:
