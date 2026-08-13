@@ -367,6 +367,7 @@ async def init_complete(
         recovery_code_hash = _hash_recovery_code(recovery_code, pepper)
 
         user.auth_mode = "webauthn"
+        user.status = "active"
         user.enrolled_at = datetime.now(timezone.utc)
         user.recovery_code_hash = recovery_code_hash
 
