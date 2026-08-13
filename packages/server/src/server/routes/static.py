@@ -107,6 +107,12 @@ async def serve_credentials() -> FileResponse:
     return FileResponse(STATIC_DIR / "credentials.html")
 
 
+@router.get("/admin/roles")
+async def serve_admin_roles() -> FileResponse:
+    """Serve the admin roles page."""
+    return FileResponse(STATIC_DIR / "admin-roles.html")
+
+
 @router.get("/static/{file_path:path}")
 async def serve_static(file_path: str) -> FileResponse:
     """Serve static assets (CSS, JS, images, etc.).
