@@ -1,10 +1,20 @@
 /**
  * Shared navigation bar.
  * Injected into all pages via <div id="nav-container"></div>.
+ * Not shown on public pages (login, enroll).
  */
 
 (function () {
     "use strict";
+
+    // Don't show nav on public pages
+    var publicPaths = ["/", "/enroll", "/enroll-admin"];
+    var path = window.location.pathname;
+    for (var i = 0; i < publicPaths.length; i++) {
+        if (path === publicPaths[i] || path.indexOf(publicPaths[i] + "?") === 0) {
+            return; // Skip nav injection
+        }
+    }
 
     var NAV_HTML = [
         '<nav id="nav">',
