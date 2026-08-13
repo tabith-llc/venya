@@ -453,33 +453,9 @@
         }
     }
 
-    // Nav links
-    var navLinks = document.querySelectorAll("#nav a");
-    for (var n = 0; n < navLinks.length; n++) {
-        navLinks[n].addEventListener("click", function (e) {
-            e.preventDefault();
-            window.location.href = this.href;
-        });
-    }
-
-    // Logout button
-    var logoutBtn = document.getElementById("logout-btn");
-    if (logoutBtn) {
-        logoutBtn.addEventListener("click", function () {
-            window.stopSessionRefresh();
-            fetch(API_BASE + "/auth/logout/browser", {
-                method: "POST",
-                credentials: "include",
-            }).finally(function () {
-                window.location.href = "/";
-            });
-        });
-    }
-
     // --- Initialize ---
 
     window.startSessionRefresh();
-    initThemeToggle();
     initNavVisibility();
     loadCredentials();
 
@@ -508,30 +484,5 @@
         } catch (err) {
             // Silently fail
         }
-    }
-
-    // --- Dark mode toggle ---
-
-    function initThemeToggle() {
-        var toggle = document.getElementById("theme-toggle");
-        if (!toggle) return;
-
-        var saved = localStorage.getItem("venya-theme");
-        if (saved) {
-            document.documentElement.setAttribute("data-theme", saved);
-        } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
-            document.documentElement.setAttribute("data-theme", "dark");
-        }
-
-        toggle.addEventListener("click", function () {
-            var current = document.documentElement.getAttribute("data-theme");
-            var next = current === "dark" ? "light" : "dark";
-            document.documentElement.setAttribute("data-theme", next);
-            localStorage.setItem("venya-theme", next);
-            toggle.textContent = next === "dark" ? "\u2600" : "\u263E";
-        });
-
-        var theme = document.documentElement.getAttribute("data-theme");
-        toggle.textContent = theme === "dark" ? "\u2600" : "\u263E";
     }
 })();

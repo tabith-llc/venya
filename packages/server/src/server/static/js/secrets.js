@@ -77,28 +77,8 @@
         return null;
     }
 
-    // --- Session refresh ---
+    // --- Session refresh (shared via session-refresh.js) ---
 
-    function refreshSession() {
-        fetch(API_BASE + "/auth/refresh/browser", {
-            method: "POST",
-            credentials: "include",
-        }).catch(function () {
-            // Refresh failed — session expired, will be caught on next API call
-        });
-    }
-
-    function startSessionRefresh() {
-        if (refreshTimerId !== null) return; // Already running
-        refreshSession(); // Refresh immediately
-        refreshTimerId = setInterval(refreshSession, REFRESH_INTERVAL);
-    }
-
-    function stopSessionRefresh() {
-        if (refreshTimerId === null) return;
-        clearInterval(refreshTimerId);
-        refreshTimerId = null;
-    }
 
     // --- Session timeout handling ---
 
@@ -632,20 +612,6 @@
         });
     }
 
-    // Logout button
-    var logoutBtn = document.getElementById("logout-btn");
-    if (logoutBtn) {
-        logoutBtn.addEventListener("click", function () {
-            stopSessionRefresh();
-            fetch(API_BASE + "/auth/logout/browser", {
-                method: "POST",
-                credentials: "include",
-            }).finally(function () {
-                window.location.href = "/";
-            });
-        });
-    }
-
     // Hash change navigation
     window.addEventListener("hashchange", handleHashChange);
 
@@ -724,35 +690,5 @@
         } catch (err) {
             // Silently fail
         }
-    }
-
-    // --- Dark mode toggle ---
-
-    function initThemeToggle() {
-        var toggle = document.getElementById("theme-toggle");
-        if (!toggle) return;
-
-        // Apply saved theme or system preference
-        var saved = localStorage.getItem("venya-theme");
-        if (saved) {
-            document.documentElement.setAttribute("data-theme", saved);
-        } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
-            document.documentElement.setAttribute("data-theme", "dark");
-        }
-
-        // Toggle button click
-        toggle.addEventListener("click", function () {
-            var current = document.documentElement.getAttribute("data-theme");
-            var next = current === "dark" ? "light" : "dark";
-            document.documentElement.setAttribute("data-theme", next);
-            localStorage.setItem("venya-theme", next);
-
-            // Update button icon
-            toggle.textContent = next === "dark" ? "\u2600" : "\u263E";
-        });
-
-        // Set initial icon
-        var theme = document.documentElement.getAttribute("data-theme");
-        toggle.textContent = theme === "dark" ? "\u2600" : "\u263E";
     }
 })();
