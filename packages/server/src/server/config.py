@@ -46,7 +46,7 @@ class RateLimitConfig(BaseModel):
         description="Time window in seconds for counting failures",
     )
     ip_rate_limit: int = Field(
-        default=100,
+        default=1000,
         description="Maximum requests per IP per minute",
     )
 
