@@ -65,6 +65,12 @@ async def serve_index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@router.get("/favicon.ico")
+async def serve_favicon() -> FileResponse:
+    """Serve the favicon."""
+    return FileResponse(STATIC_DIR / "favicon.ico")
+
+
 @router.get("/enroll")
 async def serve_enroll() -> FileResponse:
     """Serve the enrollment page."""
