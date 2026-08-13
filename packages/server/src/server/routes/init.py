@@ -216,6 +216,13 @@ async def init_vault(
             description="System administrator — full access",
         )
         db.add(admin_role)
+
+        user_role = Role(
+            name="user",
+            permissions="read",
+            description="Regular user — read-only access",
+        )
+        db.add(user_role)
         db.flush()
 
         admin_user = User(
