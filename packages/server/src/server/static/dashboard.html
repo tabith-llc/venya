@@ -7,16 +7,8 @@
     <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
-    <nav id="nav">
-        <a href="#dashboard" id="nav-secrets">Secrets</a>
-        <a href="#audit" id="nav-audit">Audit Log</a>
-        <a href="/admin/users" id="nav-users">Users</a>
-        <a href="/admin/tokens" id="nav-tokens">Tokens</a>
-        <a href="/admin/roles" id="nav-roles">Roles</a>
-        <a href="/credentials" id="nav-credentials">Credentials</a>
-        <button id="theme-toggle" class="nav-theme-toggle" title="Toggle dark mode">&#9683;</button>
-        <button id="logout-btn" class="nav-logout">Logout</button>
-    </nav>
+    <div id="nav-container"></div>
+    <script src="/static/js/nav.js?v=1"></script>
     <div id="app">
         <div id="welcome-bar" hidden>
             <span id="welcome-text"></span>
