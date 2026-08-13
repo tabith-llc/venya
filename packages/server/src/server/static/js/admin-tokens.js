@@ -105,7 +105,7 @@
         sessionRefreshTimerId = setInterval(refreshSession, REFRESH_INTERVAL);
     }
 
-    function window.stopSessionRefresh() {
+    function stopSessionRefresh() {
         if (sessionRefreshTimerId === null) return;
         clearInterval(sessionRefreshTimerId);
         sessionRefreshTimerId = null;
