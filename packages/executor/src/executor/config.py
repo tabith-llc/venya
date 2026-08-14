@@ -126,6 +126,18 @@ class ReaperConfig(BaseModel):
     )
 
 
+class BootstrapConfig(BaseModel):
+    """Bootstrap configuration for initial executor registration.
+
+    These settings are used only during the one-time registration
+    with the vault server. After registration, the enrollment token
+    is cleared from the config.
+    """
+
+    enrollment_token: str | None = None
+    tls_verify: bool = True
+
+
 class ExecutorConfig(BaseSettings):
     """Executor configuration.
 
@@ -146,6 +158,12 @@ class ExecutorConfig(BaseSettings):
         default="https://localhost:8080",
         description="Vault server URL",
     )
+
+    # Bootstrap (registration-only)
+    bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
+
+    # Path to this config file (for _clear_enrollment_token)
+    config_path: Path | None = None
 
     # Executor identity
     executor_id: str = Field(
