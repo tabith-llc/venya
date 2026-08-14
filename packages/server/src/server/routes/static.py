@@ -65,6 +65,12 @@ async def serve_index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@router.get("/favicon.ico")
+async def serve_favicon() -> FileResponse:
+    """Serve the favicon."""
+    return FileResponse(STATIC_DIR / "favicon.ico")
+
+
 @router.get("/enroll")
 async def serve_enroll() -> FileResponse:
     """Serve the enrollment page."""
@@ -81,6 +87,30 @@ async def serve_enroll_admin() -> FileResponse:
 async def serve_dashboard() -> FileResponse:
     """Serve the dashboard page."""
     return FileResponse(STATIC_DIR / "dashboard.html")
+
+
+@router.get("/admin/users")
+async def serve_admin_users() -> FileResponse:
+    """Serve the admin users page."""
+    return FileResponse(STATIC_DIR / "admin-users.html")
+
+
+@router.get("/admin/tokens")
+async def serve_admin_tokens() -> FileResponse:
+    """Serve the admin tokens page."""
+    return FileResponse(STATIC_DIR / "admin-tokens.html")
+
+
+@router.get("/credentials")
+async def serve_credentials() -> FileResponse:
+    """Serve the credentials page."""
+    return FileResponse(STATIC_DIR / "credentials.html")
+
+
+@router.get("/admin/roles")
+async def serve_admin_roles() -> FileResponse:
+    """Serve the admin roles page."""
+    return FileResponse(STATIC_DIR / "admin-roles.html")
 
 
 @router.get("/static/{file_path:path}")

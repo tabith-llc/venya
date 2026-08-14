@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -161,13 +161,13 @@ def config(tmp_path: Path, tmp_ca_dir: Path) -> ExecutorConfig:
 
 
 @pytest.fixture()
-def client() -> httpx.Client:
+def client() -> httpx2.Client:
     """Create a temporary httpx client."""
-    return httpx.Client(base_url="https://example.com", verify=False)
+    return httpx2.Client(base_url="https://example.com", verify=False)
 
 
 @pytest.fixture()
-def cert_manager(config: ExecutorConfig, client: httpx.Client) -> CertificateManager:
+def cert_manager(config: ExecutorConfig, client: httpx2.Client) -> CertificateManager:
     """Create a CertificateManager instance."""
     return CertificateManager(config, client)
 
@@ -175,8 +175,8 @@ def cert_manager(config: ExecutorConfig, client: httpx.Client) -> CertificateMan
 # --- Helper: create mock server response ---
 
 
-def _make_mock_response(cert: x509.Certificate, ca_cert: x509.Certificate, serial: int) -> httpx.Response:
-    """Create a mocked httpx.Response for a successful registration."""
+def _make_mock_response(cert: x509.Certificate, ca_cert: x509.Certificate, serial: int) -> httpx2.Response:
+    """Create a mocked httpx2.Response for a successful registration."""
     cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
     ca_cert_pem = ca_cert.public_bytes(serialization.Encoding.PEM).decode()
     serial_hex = format(serial, "016x")
@@ -190,7 +190,7 @@ def _make_mock_response(cert: x509.Certificate, ca_cert: x509.Certificate, seria
         "not_after": not_after,
     }
 
-    mock_response = MagicMock(spec=httpx.Response)
+    mock_response = MagicMock(spec=httpx2.Response)
     mock_response.status_code = 201
     mock_response.json.return_value = json_data
     mock_response.raise_for_status.return_value = None
@@ -264,18 +264,18 @@ class TestRegisterErrors:
 
     def test_register_server_error(self, cert_manager: CertificateManager):
         """Registration raises HTTPError when server returns error."""
-        mock_response = MagicMock(spec=httpx.Response)
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
             "400 Bad Request",
             request=MagicMock(),
             response=MagicMock(),
         )
 
         with patch.object(cert_manager.client, "post", return_value=mock_response):
-            with pytest.raises(httpx.HTTPStatusError):
+            with pytest.raises(httpx2.HTTPStatusError):
                 cert_manager.register("test-executor")
 
-    def test_register_invalid_ca_signature(self, config: ExecutorConfig, client: httpx.Client):
+    def test_register_invalid_ca_signature(self, config: ExecutorConfig, client: httpx2.Client):
         """Registration raises RuntimeError when cert is not signed by CA."""
         # Create a cert signed by a DIFFERENT CA
         ca_key1, ca_cert1 = _make_ca_pair()
@@ -433,7 +433,7 @@ class TestCheckRevocation:
         """Returns True when serial is in the revocation list."""
         cert_manager.serial = "0000000000000001"
 
-        mock_response = MagicMock(spec=httpx.Response)
+        mock_response = MagicMock(spec=httpx2.Response)
         mock_response.json.return_value = {
             "revoked_serials": ["0000000000000001", "0000000000000002"]
         }
@@ -446,7 +446,7 @@ class TestCheckRevocation:
         """Returns False when serial is not in the revocation list."""
         cert_manager.serial = "0000000000000001"
 
-        mock_response = MagicMock(spec=httpx.Response)
+        mock_response = MagicMock(spec=httpx2.Response)
         mock_response.json.return_value = {"revoked_serials": ["0000000000000002"]}
         mock_response.raise_for_status.return_value = None
 
@@ -457,7 +457,7 @@ class TestCheckRevocation:
         """Returns False when revocation list is empty."""
         cert_manager.serial = "0000000000000001"
 
-        mock_response = MagicMock(spec=httpx.Response)
+        mock_response = MagicMock(spec=httpx2.Response)
         mock_response.json.return_value = {"revoked_serials": []}
         mock_response.raise_for_status.return_value = None
 
@@ -476,7 +476,7 @@ class TestCheckRevocation:
         """Returns False (graceful degradation) when server is unreachable."""
         cert_manager.serial = "0000000000000001"
 
-        with patch.object(cert_manager.client, "get", side_effect=httpx.RequestError("Connection refused", request=MagicMock())):
+        with patch.object(cert_manager.client, "get", side_effect=httpx2.RequestError("Connection refused", request=MagicMock())):
             assert cert_manager.check_revocation() is False
 
 

@@ -118,7 +118,7 @@ class SessionManager:
         if session is None:
             return False
 
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(timezone.utc)
 
         # Check hard cap
         session_created_at = session.expires_at - self.config.session_timeout
@@ -143,7 +143,7 @@ class SessionManager:
         if session is None:
             return False
 
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(timezone.utc)
 
         # Check hard cap
         session_created_at = session.expires_at - self.config.session_timeout
@@ -214,7 +214,7 @@ class SessionManager:
         Returns:
             Number of sessions removed.
         """
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(timezone.utc)
         hard_cap_threshold = now - (self.config.max_session_duration - self.config.session_timeout)
         expired = (
             self.db.query(SessionModel)
@@ -232,7 +232,7 @@ class SessionManager:
         Returns:
             False if session has expired (requires re-auth), True if still active.
         """
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(timezone.utc)
 
         # Hard cap check
         session_created_at = session.expires_at - self.config.session_timeout

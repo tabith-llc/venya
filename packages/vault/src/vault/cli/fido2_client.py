@@ -17,7 +17,7 @@ import json
 import logging
 from typing import Any
 
-import httpx
+import httpx2
 from fido2.client import WebAuthnClient
 from fido2.hid import list_devices
 from fido2.webauthn import (
@@ -78,11 +78,11 @@ class Fido2Auth:
         """Simple GET request."""
         url = self.server_url + path
         try:
-            with httpx.Client() as client:
+            with httpx2.Client() as client:
                 resp = client.get(url, params=params, timeout=30.0)
                 resp.raise_for_status()
                 return resp.json() if resp.content else {}
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             error_msg = str(e)
             try:
                 error_data = e.response.json()
@@ -90,14 +90,14 @@ class Fido2Auth:
             except (json.JSONDecodeError, Exception):  # noqa: F841
                 pass
             raise Fido2ClientError(error_msg)
-        except httpx.ConnectError as e:
+        except httpx2.ConnectError as e:
             raise Fido2ClientError(f"Connection failed: {e}")
 
     def _post(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
         """Simple POST request."""
         url = self.server_url + path
         try:
-            with httpx.Client() as client:
+            with httpx2.Client() as client:
                 resp = client.post(
                     url,
                     json=json_data,
@@ -109,7 +109,7 @@ class Fido2Auth:
                 )
                 resp.raise_for_status()
                 return resp.json() if resp.content else {}
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             error_msg = str(e)
             try:
                 error_data = e.response.json()
@@ -117,7 +117,7 @@ class Fido2Auth:
             except (json.JSONDecodeError, Exception):  # noqa: F841
                 pass
             raise Fido2ClientError(error_msg)
-        except httpx.ConnectError as e:
+        except httpx2.ConnectError as e:
             raise Fido2ClientError(f"Connection failed: {e}")
 
     def authenticate(self, user_id: str | None = None, timeout: float = 60.0) -> dict[str, Any]:

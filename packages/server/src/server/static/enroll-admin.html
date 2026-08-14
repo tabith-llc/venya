@@ -7,12 +7,14 @@
     <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
+    <div id="nav-container"></div>
+    <script src="/static/js/nav.js?v=1"></script>
     <div id="app">
         <h1>Enroll Admin User</h1>
         <form id="enroll-form">
             <label>
                 Admin username
-                <input type="text" id="username-input" value="admin-1" placeholder="admin-1" autocomplete="off" spellcheck="false">
+                <input type="text" id="username-input" autocomplete="off" spellcheck="false">
             </label>
             <p>Insert FIDO2 security key, and click the Enroll Security Key button.</p>
             <button type="submit" id="enroll-btn" class="btn-primary">Enroll Security Key</button>

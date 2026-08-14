@@ -1,7 +1,9 @@
 """SQLAlchemy ORM models for the vault database.
 
-14 tables covering IAM, secrets, sessions, key rotation, rate limiting,
-command policies, and audit logging.
+17 tables covering IAM, secrets, sessions, key rotation, rate limiting,
+command policies, executor certificates, elevation tokens, and WebAuthn credentials.
+
+Schema is created via Alembic migrations on install. Models are the ORM interface.
 """
 
 from __future__ import annotations
@@ -13,12 +15,10 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
-    Index,
     Integer,
     LargeBinary,
     String,
     Text,
-    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -35,20 +35,18 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(String(64), unique=True, nullable=False, index=True)
+    user_id = Column(String(64), unique=True, nullable=False)
+    display_name = Column(String(128), nullable=True)
+    status = Column(String(32), nullable=False, default="pending_enrollment")
     auth_mode = Column(String(32), nullable=False, default="security-key")
-    enrolled_at = Column(DateTime, nullable=True)
-    session_timeout = Column(Integer, default=900)  # 15 minutes in seconds
+    enrolled_at = Column(DateTime(timezone=True), nullable=True)
+    session_timeout = Column(Integer, default=900)
     recovery_code_hash = Column(String(64), nullable=True)
 
     # Relationships
     roles = relationship("RoleMember", back_populates="user")
     created_secrets = relationship("Secret", back_populates="creator")
     sessions = relationship("Session", back_populates="user")
-
-    __table_args__ = (
-        Index("ix_users_user_id", "user_id"),
-    )
 
 
 class Role(Base):
@@ -58,16 +56,12 @@ class Role(Base):
 
     id = Column(Integer, primary_key=True)
     name = Column(String(64), unique=True, nullable=False)
-    permissions = Column(String(16), nullable=False, default="read")  # read | read-write
+    permissions = Column(String(16), nullable=False, default="read")
     description = Column(Text, nullable=True)
 
     # Relationships
     members = relationship("RoleMember", back_populates="role")
     scoped_secrets = relationship("SecretRole", back_populates="role")
-
-    __table_args__ = (
-        Index("ix_roles_name", "name"),
-    )
 
 
 class RoleMember(Base):
@@ -82,11 +76,6 @@ class RoleMember(Base):
     user = relationship("User", back_populates="roles")
     role = relationship("Role", back_populates="members")
 
-    __table_args__ = (
-        Index("ix_role_members_user_id", "user_id"),
-        Index("ix_role_members_role_id", "role_id"),
-    )
-
 
 class Secret(Base):
     """Encrypted secrets."""
@@ -94,23 +83,19 @@ class Secret(Base):
     __tablename__ = "secrets"
 
     id = Column(Integer, primary_key=True)
-    key = Column(String(512), nullable=False, index=True)
+    key = Column(String(512), nullable=False)
     encrypted_value = Column(LargeBinary, nullable=False)
-    nonce = Column(LargeBinary, nullable=False)  # 12-byte ChaCha20 nonce
-    wrapped_dek = Column(LargeBinary, nullable=False)  # 40-byte AES-256-KW wrapped DEK
+    nonce = Column(LargeBinary, nullable=False)
+    wrapped_dek = Column(LargeBinary, nullable=False)
     key_version_id = Column(String(64), nullable=False)
     created_by = Column(String(64), ForeignKey("users.user_id"), nullable=False)
     created_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
     # Relationships
     creator = relationship("User", back_populates="created_secrets")
     roles = relationship("SecretRole", back_populates="secret")
-
-    __table_args__ = (
-        Index("ix_secrets_key", "key"),
-    )
 
 
 class SecretRole(Base):
@@ -137,18 +122,12 @@ class Session(Base):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(String(64), ForeignKey("users.user_id"), nullable=False)
-    expires_at = Column(DateTime, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
     access_token = Column(String(128), nullable=True)
     access_token_jti = Column(String(64), nullable=True)
 
     # Relationships
     user = relationship("User", back_populates="sessions")
-
-    __table_args__ = (
-        Index("ix_sessions_user_id", "user_id"),
-        Index("ix_sessions_expires_at", "expires_at"),
-        UniqueConstraint("access_token", name="uq_sessions_access_token"),
-    )
 
 
 class AuditEvent(Base):
@@ -157,16 +136,11 @@ class AuditEvent(Base):
     __tablename__ = "audit_events"
 
     id = Column(Integer, primary_key=True)
-    event_type = Column(String(64), nullable=False, index=True)
+    event_type = Column(String(64), nullable=False)
     user_id = Column(String(64), ForeignKey("users.user_id"), nullable=True)
-    fields = Column(Text, nullable=True)  # JSON fields
+    fields = Column(Text, nullable=True)
     timestamp = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
-    )
-
-    __table_args__ = (
-        Index("ix_audit_events_event_type", "event_type"),
-        Index("ix_audit_events_timestamp", "timestamp"),
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
 
@@ -176,19 +150,14 @@ class EnrollmentToken(Base):
     __tablename__ = "enrollment_tokens"
 
     id = Column(Integer, primary_key=True)
-    token = Column(String(128), unique=True, nullable=False, index=True)
-    user_id = Column(String(64), nullable=False)
+    user_id = Column(ForeignKey("users.id"), nullable=False)
+    token_hash = Column(String(64), unique=True, nullable=False)
+    state = Column(String(16), nullable=False, default="created")
     created_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False,
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False,
     )
-    expires_at = Column(DateTime, nullable=False)
-    consumed = Column(Boolean, default=False, nullable=False)
-    failed_attempts = Column(Integer, default=0, nullable=False)
-
-    __table_args__ = (
-        Index("ix_enrollment_tokens_token", "token"),
-        Index("ix_enrollment_tokens_expires_at", "expires_at"),
-    )
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class KeyVersion(Base):
@@ -199,11 +168,11 @@ class KeyVersion(Base):
     id = Column(Integer, primary_key=True)
     version_label = Column(String(64), unique=True, nullable=False)
     created_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
     active = Column(Boolean, default=False, nullable=False)
     rotation_pending = Column(Boolean, default=False, nullable=False)
-    encrypted_kek_hash = Column(String(64), nullable=True)  # SHA-256 fingerprint
+    encrypted_kek_hash = Column(String(64), nullable=True)
 
 
 class KeyRotationJob(Base):
@@ -215,13 +184,13 @@ class KeyRotationJob(Base):
     created_by_user_id = Column(String(64), nullable=True)
     old_key_version_id = Column(Integer, nullable=True)
     new_key_version_id = Column(Integer, nullable=True)
-    status = Column(String(16), nullable=False, default="pending")  # pending/running/completed/failed/rolled_back
+    status = Column(String(16), nullable=False, default="pending")
     total_secrets = Column(Integer, default=0)
     completed_secrets = Column(Integer, default=0)
     failed_count = Column(Integer, default=0)
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
-    rolled_back_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    rolled_back_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class KeyRotationSecret(Base):
@@ -234,7 +203,7 @@ class KeyRotationSecret(Base):
         Integer, ForeignKey("key_rotation_jobs.id"), nullable=False
     )
     secret_id = Column(Integer, nullable=False)
-    status = Column(String(16), nullable=False, default="pending")  # pending/rotated/failed
+    status = Column(String(16), nullable=False, default="pending")
     error_message = Column(Text, nullable=True)
 
 
@@ -245,7 +214,7 @@ class RateLimitFailure(Base):
 
     user_id = Column(String(64), primary_key=True)
     failed_attempts = Column(Integer, default=0, nullable=False)
-    window_start = Column(DateTime, nullable=False)
+    window_start = Column(DateTime(timezone=True), nullable=False)
 
 
 class CommandPolicy(Base):
@@ -255,21 +224,16 @@ class CommandPolicy(Base):
 
     id = Column(Integer, primary_key=True)
     policy_name = Column(String(64), unique=True, nullable=False)
-    preset = Column(String(32), nullable=False)  # strict/balanced/permissive
-    allowed_commands = Column(Text, nullable=True)  # JSON array
-    dangerous_patterns = Column(Text, nullable=True)  # JSON array
+    preset = Column(String(32), nullable=False)
+    allowed_commands = Column(Text, nullable=True)
+    dangerous_patterns = Column(Text, nullable=True)
     created_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
     updated_at = Column(
-        DateTime,
+        DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
         nullable=False,
-    )
-
-    __table_args__ = (
-        Index("ix_command_policies_policy_name", "policy_name"),
     )
 
 
@@ -281,17 +245,11 @@ class ExecutorCert(Base):
     id = Column(Integer, primary_key=True)
     executor_id = Column(String(64), ForeignKey("users.user_id"), nullable=False)
     serial_number = Column(String(64), unique=True, nullable=False)
-    not_before = Column(DateTime, nullable=False)
-    not_after = Column(DateTime, nullable=False)
-    fingerprint = Column(String(64), nullable=False)  # SHA-256 fingerprint
+    not_before = Column(DateTime(timezone=True), nullable=False)
+    not_after = Column(DateTime(timezone=True), nullable=False)
+    fingerprint = Column(String(64), nullable=False)
     created_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
-    )
-
-    __table_args__ = (
-        Index("ix_executor_certs_executor_id", "executor_id"),
-        Index("ix_executor_certs_serial_number", "serial_number"),
-        Index("ix_executor_certs_not_after", "not_after"),
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
 
 
@@ -302,16 +260,11 @@ class ExecutorCertRevocation(Base):
 
     id = Column(Integer, primary_key=True)
     serial_number = Column(String(64), unique=True, nullable=False)
-    executor_id = Column(String(64), nullable=True)  # Which executor this cert belonged to
+    executor_id = Column(String(64), nullable=True)
     revoked_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
-    reason = Column(Text, nullable=True)  # Why it was revoked
-
-    __table_args__ = (
-        Index("ix_executor_cert_revocations_serial_number", "serial_number"),
-        Index("ix_executor_cert_revocations_revoked_at", "revoked_at"),
-    )
+    reason = Column(Text, nullable=True)
 
 
 class ElevationToken(Base):
@@ -320,14 +273,10 @@ class ElevationToken(Base):
     __tablename__ = "elevation_tokens"
 
     id = Column(Integer, primary_key=True)
-    token_hash = Column(String(64), unique=True, nullable=False, index=True)
-    user_id = Column(String(64), ForeignKey("users.user_id"), nullable=False, index=True)
-    expires_at = Column(DateTime, nullable=False)
+    token_hash = Column(String(64), unique=True, nullable=False)
+    user_id = Column(String(64), ForeignKey("users.user_id"), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
     used = Column(Boolean, default=False, nullable=False)
-
-    __table_args__ = (
-        Index("ix_elevation_tokens_expires_at", "expires_at"),
-    )
 
 
 class WebAuthnCredential(Base):
@@ -336,15 +285,13 @@ class WebAuthnCredential(Base):
     __tablename__ = "webauthn_credentials"
 
     id = Column(Integer, primary_key=True)
-    credential_id = Column(String(128), unique=True, nullable=False, index=True)
-    user_id = Column(String(64), ForeignKey("users.user_id"), nullable=False, index=True)
-    raw_id = Column(Text, nullable=False)
-    response = Column(Text, nullable=False)
-    transports = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    user_id = Column(ForeignKey("users.user_id"), nullable=False)
+    credential_id = Column(LargeBinary, unique=True, nullable=False)
+    public_key = Column(LargeBinary, nullable=False)
+    sign_count = Column(Integer, default=0)
+    label = Column(String(64), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
 
     user = relationship("User", backref="webauthn_credentials")
-
-    __table_args__ = (
-        Index("ix_webauthn_credentials_user_id", "user_id"),
-    )

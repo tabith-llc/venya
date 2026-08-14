@@ -31,13 +31,15 @@ class RateLimiter:
     Attributes:
         max_attempts: Maximum failed attempts before lockout.
         window_seconds: Time window in seconds for counting failures.
+        lockout_reinstate_minutes: Minutes before a locked-out user can try again.
         _failures: In-memory dict of user_id -> FailureRecord.
     """
 
     def __init__(
         self,
         max_attempts: int = 5,
-        window_seconds: float = 300.0,
+        window_seconds: int = 300,
+        lockout_reinstate_minutes: int = 15,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
@@ -46,6 +48,7 @@ class RateLimiter:
 
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
+        self.lockout_reinstate_minutes = lockout_reinstate_minutes
         self._failures: dict[str, FailureRecord] = {}
 
     def record_failure(self, user_id: str) -> None:
@@ -74,7 +77,7 @@ class RateLimiter:
         if record.failed_attempts >= self.max_attempts:
             raise RateLimitExceededError(
                 f"User {user_id} has exceeded {self.max_attempts} failed attempts "
-                f"within {self.window_seconds:.0f} seconds"
+                f"within {self.window_seconds} seconds. Locked out for {self.lockout_reinstate_minutes} minutes."
             )
 
     def check(self, user_id: str) -> None:
@@ -99,7 +102,7 @@ class RateLimiter:
         if record.failed_attempts >= self.max_attempts:
             raise RateLimitExceededError(
                 f"User {user_id} is locked out: {record.failed_attempts} failed attempts "
-                f"within {self.window_seconds:.0f} seconds"
+                f"within {self.window_seconds} seconds. Unlocks in {self.lockout_reinstate_minutes} minutes."
             )
 
     def record_success(self, user_id: str) -> None:

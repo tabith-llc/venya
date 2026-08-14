@@ -54,11 +54,6 @@
 
         var resp = await fetch(url, options);
 
-        if (resp.status === 401) {
-            handleSessionExpired();
-            return null;
-        }
-
         if (!resp.ok) {
             var data;
             try {
@@ -77,28 +72,8 @@
         return null;
     }
 
-    // --- Session refresh ---
+    // --- Session refresh (shared via session-refresh.js) ---
 
-    function refreshSession() {
-        fetch(API_BASE + "/auth/refresh/browser", {
-            method: "POST",
-            credentials: "include",
-        }).catch(function () {
-            // Refresh failed — session expired, will be caught on next API call
-        });
-    }
-
-    function startSessionRefresh() {
-        if (refreshTimerId !== null) return; // Already running
-        refreshSession(); // Refresh immediately
-        refreshTimerId = setInterval(refreshSession, REFRESH_INTERVAL);
-    }
-
-    function stopSessionRefresh() {
-        if (refreshTimerId === null) return;
-        clearInterval(refreshTimerId);
-        refreshTimerId = null;
-    }
 
     // --- Session timeout handling ---
 
@@ -402,6 +377,21 @@
         defaultOption.value = "";
         defaultOption.textContent = "Select a role";
         roleSelect.appendChild(defaultOption);
+
+        // Load roles from API
+        apiFetch(API_BASE + "/roles").then(function(data) {
+            if (data && data.roles) {
+                for (var i = 0; i < data.roles.length; i++) {
+                    var opt = document.createElement("option");
+                    opt.value = data.roles[i].name;
+                    opt.textContent = data.roles[i].name;
+                    roleSelect.appendChild(opt);
+                }
+            }
+        }).catch(function(err) {
+            console.error("Failed to load roles:", err);
+        });
+
         roleLabel.appendChild(roleSelect);
         form.appendChild(roleLabel);
 
@@ -632,20 +622,6 @@
         });
     }
 
-    // Logout button
-    var logoutBtn = document.getElementById("logout-btn");
-    if (logoutBtn) {
-        logoutBtn.addEventListener("click", function () {
-            stopSessionRefresh();
-            fetch(API_BASE + "/auth/logout/browser", {
-                method: "POST",
-                credentials: "include",
-            }).finally(function () {
-                window.location.href = "/";
-            });
-        });
-    }
-
     // Hash change navigation
     window.addEventListener("hashchange", handleHashChange);
 
@@ -653,6 +629,12 @@
 
     // Check if we're on the dashboard page
     if (secretsTbody || dashboardSection) {
+        // Load user info for welcome bar
+        initWelcomeBar();
+
+        // Show/hide admin nav links
+        initNavVisibility();
+
         // Load roles for the role selector
         loadSecrets();
 
@@ -668,4 +650,52 @@
         load: loadSecrets,
         showDashboard: showDashboard,
     };
+
+    // --- Welcome bar ---
+
+    async function initWelcomeBar() {
+        var welcomeBar = document.getElementById("welcome-bar");
+        var welcomeText = document.getElementById("welcome-text");
+        if (!welcomeBar || !welcomeText) return;
+
+        try {
+            var me = await apiFetch(API_BASE + "/auth/me");
+            if (me && me.display_name) {
+                welcomeText.textContent = "Welcome, " + me.display_name + "!";
+                welcomeBar.hidden = false;
+            } else if (me && me.user_id) {
+                welcomeText.textContent = "Welcome, " + me.user_id + "!";
+                welcomeBar.hidden = false;
+            }
+        } catch (err) {
+            // Silently fail — welcome bar stays hidden
+        }
+    }
+
+    // --- Nav visibility ---
+
+    async function initNavVisibility() {
+        try {
+            var me = await apiFetch(API_BASE + "/auth/me");
+            if (!me || !me.roles) return;
+
+            var isAdmin = false;
+            for (var i = 0; i < me.roles.length; i++) {
+                if (me.roles[i] === "admin") {
+                    isAdmin = true;
+                    break;
+                }
+            }
+
+            var navUsers = document.getElementById("nav-users");
+            var navTokens = document.getElementById("nav-tokens");
+
+            if (!isAdmin) {
+                if (navUsers) navUsers.style.display = "none";
+                if (navTokens) navTokens.style.display = "none";
+            }
+        } catch (err) {
+            // Silently fail
+        }
+    }
 })();

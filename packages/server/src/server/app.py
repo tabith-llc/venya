@@ -38,7 +38,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.config = config  # type: ignore[attr-defined]
 
     # Register routes at creation time (needed for OpenAPI docs)
-    from .routes import admin, audit, auth, auth_browser, enroll, enrollment, executors, filter as filter_routes, health, init as init_route, recovery, roles, secrets, static as static_routes
+    from .routes import admin, audit, auth, auth_browser, credentials, enroll, enrollment, executors, filter as filter_routes, health, init as init_route, recovery, roles, secrets, static as static_routes
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")
@@ -52,6 +52,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(roles.router, prefix="/api/v1")
     app.include_router(enrollment.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
+    app.include_router(credentials.router, prefix="/api/v1")
     app.include_router(filter_routes.router, prefix="/api/v1")
     app.include_router(static_routes.router)
 
@@ -126,7 +127,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             try:
                 db = backend.get_session()
                 try:
-                    now = datetime.now(timezone.utc).replace(tzinfo=None)
+                    now = datetime.now(timezone.utc)
                     from vault.iam.session_manager import SessionConfig
                     config = SessionConfig()
                     hard_cap_threshold = now - (config.max_session_duration - config.session_timeout)

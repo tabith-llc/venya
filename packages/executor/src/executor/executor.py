@@ -81,7 +81,7 @@ class Executor:
     allowed_fds: set[int] = field(default_factory=lambda: {0, 1, 2})
     audit_logger: AuditLogger | None = None
     _sentinel_registry: SentinelRegistry | None = None
-    http_client: Any = None  # httpx.Client for server API calls
+    http_client: Any = None  # httpx2.Client for server API calls
     _injection_result: InjectionResult | None = field(init=False, default=None)
     _bundles: list[SecretBundle] = field(init=False, default_factory=list)
 

@@ -72,14 +72,10 @@ class TestAuthRegistrationComplete:
     def test_complete_success(self):
         """POST /auth/registration/complete should store credential in DB."""
         cred = SimpleNamespace(
-            credential_id="cred-123",
+            credential_id=b"cred-123",
             user_id="user1",
-            credential_data={
-                "raw_id": "dGVzdA==",
-                "response": {"clientDataJSON": "abc"},
-                "transports": ["internal"],
-            },
-            transports=["internal"],
+            public_key=b"public-key-data",
+            sign_count=0,
         )
         fido2 = MagicMock()
         fido2.finish_registration.return_value = cred

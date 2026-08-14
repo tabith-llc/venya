@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -56,7 +56,7 @@ class CertificateManager:
     computation. Uses ECDSA P-256 for all keypairs and certificates.
     """
 
-    def __init__(self, config: ExecutorConfig, client: httpx.Client) -> None:
+    def __init__(self, config: ExecutorConfig, client: httpx2.Client) -> None:
         self.config = config
         self.client = client
         self.cert_path = config.mtls.cert
@@ -80,7 +80,7 @@ class CertificateManager:
         Raises:
             RuntimeError: If the server returns an error or the certificate
                 fails CA validation.
-            httpx.HTTPError: If the network request fails.
+            httpx2.HTTPError: If the network request fails.
         """
         if os.path.exists(self.cert_path) and os.path.exists(self.key_path):
             logger.info("Certificate already exists — skipping registration for: %s", executor_id)
@@ -170,7 +170,7 @@ class CertificateManager:
         Raises:
             RuntimeError: If no certificate exists, CA validation fails, or
                 the server returns an error.
-            httpx.HTTPError: If the network request fails.
+            httpx2.HTTPError: If the network request fails.
         """
         logger.info("Rotating executor certificate")
 
@@ -267,7 +267,7 @@ class CertificateManager:
                 logger.debug("Certificate not revoked (serial=%s)", self.serial)
 
             return is_revoked
-        except httpx.RequestError:
+        except httpx2.RequestError:
             logger.debug("Failed to check revocation status (will retry)")
             return False
 
@@ -527,21 +527,21 @@ class ExecutorDaemon:
         # Signal handling
         self._shutdown_event = threading.Event()
 
-    def _create_initial_client(self) -> httpx.Client:
+    def _create_initial_client(self) -> httpx2.Client:
         """Create HTTP client for initial registration.
 
         Used before certificate registration when we don't yet have the
         CA cert. After registration, the client is recreated with mTLS.
         """
-        return httpx.Client(
+        return httpx2.Client(
             base_url=self.config.server_url,
             verify=False,  # No CA cert yet — registration only
             timeout=30.0,
         )
 
-    def _create_mtls_client(self) -> httpx.Client:
+    def _create_mtls_client(self) -> httpx2.Client:
         """Create HTTP client with mTLS after certificate registration."""
-        return httpx.Client(
+        return httpx2.Client(
             base_url=self.config.server_url,
             cert=(self.config.mtls.cert, self.config.mtls.key),
             verify=self.config.mtls.ca_cert,
@@ -654,7 +654,7 @@ class ExecutorDaemon:
                 },
                 timeout=10.0,
             )
-        except httpx.RequestError:
+        except httpx2.RequestError:
             logger.debug("Heartbeat failed (server unreachable)")
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
