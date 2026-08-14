@@ -36,6 +36,31 @@ from .strategies.factory import create_strategy
 logger = logging.getLogger("venya.executor.daemon")
 
 
+def _is_tls_error(exc: Exception) -> bool:
+    """Check if an exception is caused by a TLS/SSL verification failure.
+
+    Walks the exception cause chain to find an SSL error underneath.
+    httpx2 raises ConnectError for both TLS failures and network errors —
+    this function distinguishes them.
+
+    Args:
+        exc: The exception to inspect.
+
+    Returns:
+        True if an SSL/TLS error was found in the cause chain.
+    """
+    import ssl
+
+    current = exc
+    visited = set()
+    while current and id(current) not in visited:
+        if isinstance(current, (ssl.SSLCertVerificationError, ssl.SSLError, ssl.SSLEOFError)):
+            return True
+        visited.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class DaemonState:
     """Tracks daemon runtime state."""
 
@@ -56,26 +81,25 @@ class CertificateManager:
     computation. Uses ECDSA P-256 for all keypairs and certificates.
     """
 
-    def __init__(self, config: ExecutorConfig, client: httpx2.Client) -> None:
+    def __init__(self, config: ExecutorConfig) -> None:
         self.config = config
-        self.client = client
+        self.client: httpx2.Client | None = None
         self.cert_path = config.mtls.cert
         self.key_path = config.mtls.key
         self.ca_cert_path = config.mtls.ca_cert
         self.serial: str | None = None
         self._not_after: datetime | None = None
 
-    def register(self, executor_id: str) -> None:
+    def register(self, executor_id: str, enrollment_token: str | None = None) -> None:
         """Register executor with server, obtain signed certificate.
 
-        Generates an ECDSA P-256 keypair, creates a CSR, submits it to the
-        server's ``/executors/register`` endpoint, validates the returned
-        certificate against the CA, and persists both cert and key to disk.
-
-        If a certificate already exists on disk, registration is skipped.
+        Uses throwaway httpx2.Client instances for both the primary attempt
+        (verify=True) and fallback (verify=False). Never uses self.client —
+        prevents silent TLS bypass from a pre-existing verify=False client.
 
         Args:
             executor_id: Unique executor identifier.
+            enrollment_token: Optional enrollment token for bootstrap auth.
 
         Raises:
             RuntimeError: If the server returns an error or the certificate
@@ -95,16 +119,35 @@ class CertificateManager:
         # Create CSR with executor_id as CN
         csr_pem = _create_csr(private_key, executor_id)
 
-        # Register with server
-        response = self.client.post(
-            "/api/v1/executors/register",
-            json={
-                "executor_id": executor_id,
-                "csr_pem": csr_pem.decode(),
-            },
-            timeout=30.0,
-        )
-        response.raise_for_status()
+        # Build payload
+        payload = {
+            "csr_pem": csr_pem.decode(),
+            "executor_id": executor_id,
+        }
+        if enrollment_token:
+            payload["enrollment_token"] = enrollment_token
+
+        url = f"{self.config.server_url}/api/v1/executors/register"
+
+        # Attempt 1: Full TLS verification (enterprise — corporate CA in trust store)
+        try:
+            with httpx2.Client(verify=True, timeout=30.0) as client:
+                response = client.post(url, json=payload)
+            response.raise_for_status()
+        except httpx2.ConnectError as e:
+            if not _is_tls_error(e):
+                raise
+            # Attempt 2: Fallback (dev — Caddy CA not in trust store)
+            logger.warning(
+                "TLS verification failed for registration (%s). "
+                "Falling back to insecure mode for this one-time call. "
+                "All subsequent communication will use mTLS.",
+                e,
+            )
+            with httpx2.Client(verify=False, timeout=30.0) as client:
+                response = client.post(url, json=payload)
+                response.raise_for_status()
+
         data = response.json()
 
         cert_pem = data["cert_pem"].encode()
@@ -508,14 +551,15 @@ class ExecutorDaemon:
             config = ExecutorConfig()
 
         self.config = config
+        self._config_path = self.config.config_path or Path("/etc/venya/executor.toml")
         self.state = DaemonState()
         self.state.executor_id = config.executor_id
 
         # Command validator
         self.command_validator = CommandValidator()
 
-        # Certificate manager (client created after registration)
-        self.cert_manager = CertificateManager(config, self._create_initial_client())
+        # Certificate manager — client created after registration
+        self.cert_manager = CertificateManager(config)
 
         # Reaper loop
         self.reaper = ReaperLoop(
@@ -527,18 +571,6 @@ class ExecutorDaemon:
         # Signal handling
         self._shutdown_event = threading.Event()
 
-    def _create_initial_client(self) -> httpx2.Client:
-        """Create HTTP client for initial registration.
-
-        Used before certificate registration when we don't yet have the
-        CA cert. After registration, the client is recreated with mTLS.
-        """
-        return httpx2.Client(
-            base_url=self.config.server_url,
-            verify=False,  # No CA cert yet — registration only
-            timeout=30.0,
-        )
-
     def _create_mtls_client(self) -> httpx2.Client:
         """Create HTTP client with mTLS after certificate registration."""
         return httpx2.Client(
@@ -547,6 +579,44 @@ class ExecutorDaemon:
             verify=self.config.mtls.ca_cert,
             timeout=30.0,
         )
+
+    def _clear_enrollment_token(self) -> None:
+        """Remove the consumed enrollment token from the config file.
+
+        The token should only be on disk for the one-time registration.
+        After registration, it's cleared to prevent exposure.
+        """
+        import tomllib
+
+        config_path = self._config_path
+        if not config_path.exists():
+            return
+
+        try:
+            with open(config_path, "rb") as f:
+                data = tomllib.load(f)
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not read config file to clear enrollment token")
+            return
+
+        # Remove bootstrap section if it exists and contains enrollment_token
+        if "bootstrap" in data and "enrollment_token" in data["bootstrap"]:
+            del data["bootstrap"]["enrollment_token"]
+            # Remove entire bootstrap section if it's now empty
+            if not data["bootstrap"]:
+                del data["bootstrap"]
+
+            try:
+                import tomli_w
+            except ImportError:
+                logger.warning("tomli_w not installed — could not save config")
+                return
+
+            path = Path(config_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(config_path, "w") as f:
+                tomli_w.dump(data, f)
+            logger.info("Cleared enrollment token from config")
 
     def create_executor(self, session_id: str) -> Executor:
         """Create an Executor instance with mTLS client.
@@ -572,9 +642,16 @@ class ExecutorDaemon:
         logger.info("Starting executor daemon: %s", self.config.executor_id)
 
         # Register with server (creates cert/key if not present)
-        self.cert_manager.register(self.state.executor_id)
+        # register() uses throwaway httpx2.Client instances internally —
+        # never self.client. After registration, certs are on disk.
+        enrollment_token = self.config.bootstrap.enrollment_token
+        self.cert_manager.register(self.state.executor_id, enrollment_token=enrollment_token)
 
-        # Recreate HTTP client with mTLS now that we have a certificate
+        # Clear enrollment token from config after successful registration
+        if enrollment_token:
+            self._clear_enrollment_token()
+
+        # Create mTLS client — takes over for all subsequent communication
         self.client = self._create_mtls_client()
         self.cert_manager.client = self.client
 
