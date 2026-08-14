@@ -13,6 +13,7 @@ Token model (per plan section 5.1):
 from __future__ import annotations
 
 import logging
+import ssl
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,29 @@ class Config:
 
 # Lazy import json at module level when needed
 import json  # noqa: E402
+
+
+def _is_tls_error(exc: Exception) -> bool:
+    """Check if an exception is caused by a TLS/SSL verification failure.
+
+    Walks the exception cause chain to find an SSL error underneath.
+    httpx2 raises ConnectError for both TLS failures and network errors —
+    this function distinguishes them.
+
+    Args:
+        exc: The exception to inspect.
+
+    Returns:
+        True if an SSL/TLS error was found in the cause chain.
+    """
+    current = exc
+    visited = set()
+    while current and id(current) not in visited:
+        if isinstance(current, (ssl.SSLCertVerificationError, ssl.SSLError, ssl.SSLEOFError)):
+            return True
+        visited.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class APIClient:
@@ -341,6 +365,72 @@ class APIClient:
     ) -> dict[str, Any]:
         """Send a DELETE request."""
         return self._request("DELETE", path, params=params, extra_headers=extra_headers)
+
+    def register_executor(
+        self,
+        executor_id: str,
+        csr_pem: str,
+        enrollment_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Register an executor with the vault server.
+
+        Uses throwaway httpx2.Client instances for both the primary attempt
+        (verify=True) and fallback (verify=False). Never uses self._http —
+        prevents silent TLS bypass from a pre-existing verify=False client.
+
+        This method is scoped to registration only. _request() and _post_raw()
+        never fall back — prevents silent TLS bypass on authenticated calls.
+
+        Args:
+            executor_id: Executor identifier.
+            csr_pem: PEM-encoded Certificate Signing Request.
+            enrollment_token: Optional enrollment token for bootstrap auth.
+
+        Returns:
+            Dict with cert_pem, ca_cert_pem, serial_number, not_after.
+
+        Raises:
+            APIClientError: On network failure or registration error.
+        """
+        payload: dict[str, Any] = {
+            "executor_id": executor_id,
+            "csr_pem": csr_pem,
+        }
+        if enrollment_token:
+            payload["enrollment_token"] = enrollment_token
+
+        url = f"{self.config.server_url}/api/v1/executors/register"
+
+        # Attempt 1: Full TLS verification (enterprise — corporate CA in trust store)
+        try:
+            with httpx2.Client(verify=True, timeout=30.0) as client:
+                response = client.post(url, json=payload)
+            response.raise_for_status()
+            return response.json() if response.content else {}
+        except httpx2.ConnectError as e:
+            if not _is_tls_error(e):
+                raise APIClientError(f"Connection failed: {e}")
+            logger.warning(
+                "TLS verification failed for registration (%s). "
+                "Falling back to insecure mode for this one-time call. "
+                "All subsequent communication will use mTLS.",
+                e,
+            )
+            # Attempt 2: Fallback (dev — Caddy CA not in trust store)
+            with httpx2.Client(verify=False, timeout=30.0) as client:
+                response = client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json() if response.content else {}
+        except httpx2.HTTPStatusError as e:
+            error_msg = "Unknown error"
+            try:
+                error_data = e.response.json()
+                error_msg = error_data.get("detail", str(e))
+            except Exception:  # noqa: BLE001
+                error_msg = str(e)
+            raise APIClientError(error_msg)
+        except httpx2.RequestError as e:
+            raise APIClientError(f"Request failed: {e}")
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
