@@ -1530,7 +1530,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     Flow:
         1. Generate RSA 2048-bit keypair locally
         2. Create CSR with CN=executor_id
-        3. Submit CSR to POST /api/v1/executors/register
+        3. Submit CSR via client.register_executor() (with TLS fallback)
         4. Save signed cert + key to output-dir
         5. Verify auth with GET /api/v1/executors/certs/revocation-list
         6. Print success/failure
@@ -1545,6 +1545,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     executor_id = getattr(args, "executor_id", "venya-exec")
     output_dir = getattr(args, "output_dir", "/etc/venya")
     vault_url = getattr(args, "vault_url", None)
+    enrollment_token = getattr(args, "enrollment_token", None)
 
     # Determine server URL
     if vault_url:
@@ -1557,7 +1558,7 @@ def executor_register(client: APIClient, args: Any) -> int:
 
     # Step 1: Generate RSA keypair
     try:
-        print(f"Generating RSA 2048-bit keypair...")
+        print("Generating RSA 2048-bit keypair...")
         private_key = rsa.generate_private_key(
             public_exponent=65537,
             key_size=2048,
@@ -1583,12 +1584,13 @@ def executor_register(client: APIClient, args: Any) -> int:
         print(f"CSR creation failed: {e}", file=sys.stderr)
         return 1
 
-    # Step 3: Submit CSR to vault
+    # Step 3: Submit CSR via register_executor() with TLS fallback
     try:
         print(f"Submitting CSR to {server_url}/api/v1/executors/register...")
-        result = client._post_raw(
-            "/api/v1/executors/register",
-            {"executor_id": executor_id, "csr_pem": csr_pem},
+        result = client.register_executor(
+            executor_id=executor_id,
+            csr_pem=csr_pem,
+            enrollment_token=enrollment_token,
         )
         cert_pem = result.get("cert_pem", "")
         ca_cert_pem = result.get("ca_cert_pem", "")
@@ -1596,7 +1598,7 @@ def executor_register(client: APIClient, args: Any) -> int:
         not_after = result.get("not_after", "")
 
         if not cert_pem:
-            print(f"Registration failed: no certificate returned", file=sys.stderr)
+            print("Registration failed: no certificate returned", file=sys.stderr)
             return 1
     except APIClientError as e:
         print(f"Registration failed: {e}", file=sys.stderr)

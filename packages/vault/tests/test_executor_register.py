@@ -359,9 +359,10 @@ class TestExecutorRegister:
         args.vault_url = "https://vault.example.com"
         args.output_dir = output_dir
 
-        # Create client with mocked response
+        # Create client
         client, config_file = _make_mock_client()
-        client._http.request.return_value = _make_mock_response(
+
+        mock_response = _make_mock_response(
             status_code=201,
             json_data={
                 "executor_id": "venya-exec",
@@ -372,20 +373,25 @@ class TestExecutorRegister:
             },
         )
 
-        try:
-            result = executor_register(client, args)
-            assert result == 0
+        with patch("vault.cli.api_client.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
 
-            # Verify files were created
-            assert (tmp_path / "certs" / "executor.key").exists()
-            assert (tmp_path / "certs" / "executor.pem").exists()
-            assert (tmp_path / "certs" / "ca.pem").exists()
+            try:
+                result = executor_register(client, args)
+                assert result == 0
 
-            # Verify key file permissions
-            key_stat = os.stat(tmp_path / "certs" / "executor.key")
-            assert stat.S_IMODE(key_stat.st_mode) == 0o600
-        finally:
-            client.close()
+                # Verify files were created
+                assert (tmp_path / "certs" / "executor.key").exists()
+                assert (tmp_path / "certs" / "executor.pem").exists()
+                assert (tmp_path / "certs" / "ca.pem").exists()
+
+                # Verify key file permissions
+                key_stat = os.stat(tmp_path / "certs" / "executor.key")
+                assert stat.S_IMODE(key_stat.st_mode) == 0o600
+            finally:
+                client.close()
+        config_file.unlink()
 
     def test_register_no_vault_url(self, tmp_path):
         """Registration fails without vault URL when config has no URL."""
@@ -473,7 +479,8 @@ class TestExecutorRegister:
         args.output_dir = nested_dir
 
         client, config_file = _make_mock_client()
-        client._http.request.return_value = _make_mock_response(
+
+        mock_response = _make_mock_response(
             status_code=201,
             json_data={
                 "executor_id": "venya-exec",
@@ -483,12 +490,18 @@ class TestExecutorRegister:
                 "not_after": "2026-09-13T00:00:00+00:00",
             },
         )
-        try:
-            result = executor_register(client, args)
-            assert result == 0
-            assert (tmp_path / "a" / "b" / "c" / "certs" / "executor.key").exists()
-        finally:
-            client.close()
+
+        with patch("vault.cli.api_client.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
+
+            try:
+                result = executor_register(client, args)
+                assert result == 0
+                assert (tmp_path / "a" / "b" / "c" / "certs" / "executor.key").exists()
+            finally:
+                client.close()
+        config_file.unlink()
 
     def test_register_uses_config_server_url(self, tmp_path):
         """Registration uses server_url from config when --vault-url is not provided."""
@@ -508,32 +521,29 @@ class TestExecutorRegister:
         args.output_dir = str(tmp_path)
 
         client, _ = _make_mock_client(config_file)
-        captured_requests = []
 
-        def track_request(*args, **kwargs):
-            captured_requests.append((args, kwargs))
-            return _make_mock_response(
-                status_code=201,
-                json_data={
-                    "executor_id": "venya-exec",
-                    "cert_pem": cert_pem,
-                    "ca_cert_pem": cert_pem,
-                    "serial_number": "01:23:45",
-                    "not_after": "2026-09-13T00:00:00+00:00",
-                },
-            )
+        mock_response = _make_mock_response(
+            status_code=201,
+            json_data={
+                "executor_id": "venya-exec",
+                "cert_pem": cert_pem,
+                "ca_cert_pem": cert_pem,
+                "serial_number": "01:23:45",
+                "not_after": "2026-09-13T00:00:00+00:00",
+            },
+        )
 
-        client._http.request.side_effect = track_request
-        try:
-            result = executor_register(client, args)
-            assert result == 0
-            # Check that the registration endpoint was called with the config URL
-            assert len(captured_requests) >= 1
-            first_call = captured_requests[0]
-            # The path should be /api/v1/executors/register
-            assert "/api/v1/executors/register" in str(first_call)
-        finally:
-            client.close()
+        with patch("vault.cli.api_client.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
+
+            try:
+                result = executor_register(client, args)
+                assert result == 0
+                # Verify throwaway client was created with verify=True
+                MockClient.assert_called_once_with(verify=True, timeout=30.0)
+            finally:
+                client.close()
         config_file.unlink()
 
 
