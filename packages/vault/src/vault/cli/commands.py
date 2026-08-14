@@ -363,6 +363,8 @@ def cmd_admin(client: APIClient, args: Any) -> int:
         return cmd_admin_rotate_key(client, args)
     elif admin_command == "revoke-executor":
         return cmd_admin_revoke_executor(client, args)
+    elif admin_command == "executor-enroll":
+        return cmd_admin_executor_enroll(client, args)
     elif admin_command == "list-tokens":
         return cmd_admin_list_tokens(client, args)
     elif admin_command == "issue-token":
@@ -637,6 +639,25 @@ def cmd_admin_revoke_executor(client: APIClient, args: Any) -> int:
         return 1
     except Exception as e:
         print(f"Revoke failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
+    """Generate an enrollment token for executor bootstrap registration."""
+    try:
+        result = client.post(f"/api/v1/admin/executors/{args.executor_id}/enroll")
+        token = result.get("enrollment_token", "")
+        expires_in = result.get("expires_in_seconds", 900)
+        print(f"Enrollment token for executor '{args.executor_id}':")
+        print(f"  Token: {token}")
+        print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
+        print("Deliver this token to the executor operator out-of-band.")
+        return 0
+    except APIClientError as e:
+        print(f"Enrollment failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Enrollment failed: {e}", file=sys.stderr)
         return 1
 
 

@@ -228,6 +228,13 @@ def create_parser() -> argparse.ArgumentParser:
     )
     revoke_executor_parser.add_argument("executor_id", help="Executor ID to revoke")
 
+    # admin executor-enroll
+    enroll_executor_parser = admin_sub.add_parser(
+        "executor-enroll", help="Generate an enrollment token for an executor"
+    )
+    enroll_executor_parser.add_argument("executor_id", metavar="EXECUTOR_ID",
+                                       help="Executor ID to enroll")
+
     # admin list-tokens
     list_tokens_parser = admin_sub.add_parser(
         "list-tokens", help="List all enrollment tokens for a user"
@@ -456,6 +463,12 @@ def create_parser() -> argparse.ArgumentParser:
         "--output-dir",
         default="/etc/venya",
         help="Directory to save cert and key (default: /etc/venya)",
+    )
+    register_parser.add_argument(
+        "--enrollment-token",
+        dest="enrollment_token",
+        default=None,
+        help="Enrollment token for bootstrap registration (from admin executor-enroll)",
     )
 
     # exec cert — certificate management
