@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
 from datetime import datetime, timezone
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger("venya.server")
 
 from vault.vault.backend import Backend, BackendConfig
 from vault.vault.factory import VaultFactory
@@ -81,6 +84,7 @@ def get_current_session(
     """
     token = request.cookies.get("venya_access_token")
     if not token:
+        logger.info("GET_SESSION DEBUG: no token in cookie")
         return None
 
     session = (
@@ -89,6 +93,7 @@ def get_current_session(
         .first()
     )
     if session is None:
+        logger.info("GET_SESSION DEBUG: token %s not found in DB", token[:20] if token else "None")
         return None
 
     # Check expiry
@@ -98,10 +103,13 @@ def get_current_session(
     now = datetime.now(timezone.utc)
     session_created_at = session.expires_at - config.session_timeout
     if session_created_at + config.max_session_duration < now:
+        logger.info("GET_SESSION DEBUG: session %s over max cap, created_at=%s, now=%s", session.id, session_created_at, now)
         return None
     if session.expires_at < now:
+        logger.info("GET_SESSION DEBUG: session %s expired, expires_at=%s, now=%s", session.id, session.expires_at, now)
         return None
 
+    logger.info("GET_SESSION DEBUG: token=%s, session=%s", token[:20] if token else "None", session.id)
     return (db, session)
 
 

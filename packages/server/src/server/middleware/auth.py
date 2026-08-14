@@ -58,6 +58,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/admin/users",
         "/admin/tokens",
         "/credentials",
+        "/favicon.ico",
         "/static",
     })
 

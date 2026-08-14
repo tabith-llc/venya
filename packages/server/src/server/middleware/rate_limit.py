@@ -43,9 +43,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
         if config is not None:
+            self.enforce = config.enforce
             self.requests_per_minute = config.ip_rate_limit
             self.auth_requests_per_minute = config.ip_rate_limit
         else:
+            self.enforce = True
             self.requests_per_minute = requests_per_minute
             self.auth_requests_per_minute = auth_requests_per_minute
 
@@ -57,6 +59,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         ip = self._get_client_ip(request)
+
+        # Skip rate limiting if not enforced
+        if not self.enforce:
+            return await call_next(request)
 
         # Check auth rate limit for auth endpoints
         if self._is_auth_endpoint(request.url.path):
