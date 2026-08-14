@@ -10,6 +10,7 @@ dependencies = [
     "websockets",
     "pydantic",
     "pydantic-settings",
+    "tomli-w",
 ]
 
 [project.scripts]
