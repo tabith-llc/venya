@@ -252,5 +252,14 @@ class ExecutorConfig(BaseSettings):
         import json
 
         data = json.loads(self.model_dump_json())
-        with open(path, "w") as f:
+
+        def filter_none(obj):
+            if isinstance(obj, dict):
+                return {k: filter_none(v) for k, v in obj.items() if v is not None}
+            if isinstance(obj, list):
+                return [filter_none(item) for item in obj if item is not None]
+            return obj
+
+        data = filter_none(data)
+        with open(path, "wb") as f:
             tomli_w.dump(data, f)
