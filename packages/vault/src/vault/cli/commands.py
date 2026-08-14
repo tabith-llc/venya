@@ -70,9 +70,9 @@ def run_command(args: Any) -> int:
     server_url = getattr(args, "server_url", None)
     client = APIClient(server_url=server_url)
 
-    # Authenticate if no token is available (init and recovery are public)
+    # Authenticate if no token is available (init, recovery, config, and exec are public)
     command = args.command
-    if command not in ("init", "recovery", "config") and not client.config.access_token:
+    if command not in ("init", "recovery", "config", "exec") and not client.config.access_token:
         user_id = getattr(args, "user_id", None)
         try:
             print("Authenticating with security key...")
@@ -110,8 +110,10 @@ def run_command(args: Any) -> int:
             return cmd_enroll(client, args)
         elif command == "recovery":
             return cmd_recovery(client, args)
+        elif command == "run":
+            return cmd_run(client, args)
         elif command == "exec":
-            return cmd_exec(client, args)
+            return cmd_exec_group(client, args)
         elif command == "config":
             return cmd_config(client, args)
         else:
@@ -932,7 +934,7 @@ def cmd_recovery(client: APIClient, args: Any) -> int:
         return 1
 
 
-def cmd_exec(client: APIClient, args: Any) -> int:
+def cmd_run(client: APIClient, args: Any) -> int:
     """Execute a command via the executor with secret injection and output filtering.
 
     Flow:
@@ -942,7 +944,8 @@ def cmd_exec(client: APIClient, args: Any) -> int:
         4. Execute command via executor daemon API
         5. Display filtered output
     """
-    command = " ".join(args.command) if args.command else ""
+    command_args = getattr(args, "command_args", None)
+    command = " ".join(command_args) if command_args else ""
     if not command:
         print("Error: command required", file=sys.stderr)
         return 1
@@ -1042,7 +1045,7 @@ def cmd_config_show(client: APIClient) -> int:
     print("Venya CLI Configuration:")
     print(f"  Server URL: {config.server_url}")
     if config.access_token:
-        print(f"  Access Token: [set] (expires soon — run 'venya exec' to refresh)")
+        print(f"  Access Token: [set] (expires soon — run 'venya run' to refresh)")
     else:
         print("  Access Token: [not set]")
     print(f"  Config File: {config.config_file}")
@@ -1483,7 +1486,7 @@ def cmd_enroll_complete(client: APIClient, args: Any) -> int:
         print(f"  Status: ok")
         print(f"  User ID: {result.get('user_id', '')}")
         print(f"  Credential ID: {result.get('credential_id', '')}")
-        print(f"  Next step: Run 'venya exec' to authenticate with your new key.")
+        print(f"  Next step: Run 'venya run' to authenticate with your new key.")
         return 0
     except APIClientError as e:
         print(f"Enrollment complete failed: {e}", file=sys.stderr)
@@ -1494,6 +1497,254 @@ def cmd_enroll_complete(client: APIClient, args: Any) -> int:
     except Exception as e:
         print(f"Enrollment complete failed: {e}", file=sys.stderr)
         return 1
+
+
+# --- Executor Lifecycle Commands ---
+
+
+def cmd_exec_group(client: APIClient, args: Any) -> int:
+    """Dispatch executor lifecycle subcommands."""
+    exec_command = getattr(args, "exec_command", None)
+    if exec_command is None:
+        print("Error: exec subcommand required (register, cert, heartbeat, audit, status)", file=sys.stderr)
+        return 1
+
+    if exec_command == "register":
+        return executor_register(client, args)
+    elif exec_command == "cert":
+        return executor_cert(client, args)
+    elif exec_command == "heartbeat":
+        return executor_heartbeat(args)
+    elif exec_command == "audit":
+        return executor_audit(client, args)
+    elif exec_command == "status":
+        return executor_status(args)
+    else:
+        print(f"Unknown exec command: {exec_command}", file=sys.stderr)
+        return 1
+
+
+def executor_register(client: APIClient, args: Any) -> int:
+    """Register this machine as an executor with the vault.
+
+    Flow:
+        1. Generate RSA 2048-bit keypair locally
+        2. Create CSR with CN=executor_id
+        3. Submit CSR to POST /api/v1/executors/register
+        4. Save signed cert + key to output-dir
+        5. Verify auth with GET /api/v1/executors/certs/revocation-list
+        6. Print success/failure
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    from pathlib import Path
+    import os
+
+    executor_id = getattr(args, "executor_id", "venya-exec")
+    output_dir = getattr(args, "output_dir", "/etc/venya")
+    vault_url = getattr(args, "vault_url", None)
+
+    # Determine server URL
+    if vault_url:
+        server_url = vault_url.rstrip("/")
+    elif client.config.server_url and client.config.server_url != "http://localhost:8000":
+        server_url = client.config.server_url.rstrip("/")
+    else:
+        print("Error: vault URL required. Set it in config (~/.config/venya/config.json) or pass --vault-url", file=sys.stderr)
+        return 1
+
+    # Step 1: Generate RSA keypair
+    try:
+        print(f"Generating RSA 2048-bit keypair...")
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+        )
+    except Exception as e:
+        print(f"Key generation failed: {e}", file=sys.stderr)
+        return 1
+
+    # Step 2: Create CSR
+    try:
+        print(f"Creating CSR with CN={executor_id}...")
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ])
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(subject)
+            .sign(private_key, hashes.SHA256())
+        )
+        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
+    except Exception as e:
+        print(f"CSR creation failed: {e}", file=sys.stderr)
+        return 1
+
+    # Step 3: Submit CSR to vault
+    try:
+        print(f"Submitting CSR to {server_url}/api/v1/executors/register...")
+        result = client._post_raw(
+            "/api/v1/executors/register",
+            {"executor_id": executor_id, "csr_pem": csr_pem},
+        )
+        cert_pem = result.get("cert_pem", "")
+        ca_cert_pem = result.get("ca_cert_pem", "")
+        serial_number = result.get("serial_number", "")
+        not_after = result.get("not_after", "")
+
+        if not cert_pem:
+            print(f"Registration failed: no certificate returned", file=sys.stderr)
+            return 1
+    except APIClientError as e:
+        print(f"Registration failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Registration failed: {e}", file=sys.stderr)
+        return 1
+
+    # Step 4: Save cert + key to output-dir
+    try:
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Save private key
+        key_path = output_path / "executor.key"
+        key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        key_path.write_bytes(key_pem)
+        os.chmod(str(key_path), 0o600)
+
+        # Save signed certificate
+        cert_path = output_path / "executor.pem"
+        cert_path.write_bytes(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
+
+        # Save CA certificate
+        ca_cert_path = output_path / "ca.pem"
+        if ca_cert_pem:
+            ca_cert_path.write_bytes(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
+
+        print(f"Certificate saved to {cert_path}")
+        print(f"Private key saved to {key_path} (permissions: 600)")
+        if ca_cert_pem:
+            print(f"CA certificate saved to {ca_cert_path}")
+    except OSError as e:
+        print(f"Failed to save certificate: {e}", file=sys.stderr)
+        return 1
+
+    # Step 5: Verify auth with revocation list
+    try:
+        print("Verifying authentication...")
+        client.get("/api/v1/executors/certs/revocation-list")
+        print("Authentication verified.")
+    except APIClientError as e:
+        print(f"Warning: authentication verification failed: {e}", file=sys.stderr)
+        print("Certificate was saved, but auth verification failed.", file=sys.stderr)
+
+    # Step 6: Print success
+    print(f"\nExecutor '{executor_id}' registered successfully.")
+    print(f"  Serial: {serial_number}")
+    print(f"  Expires: {not_after}")
+    print(f"  Cert: {cert_path}")
+    print(f"\nTo use mTLS authentication, set VENYA_MTLS_CERT and VENYA_MTLS_KEY:")
+    print(f"  export VENYA_MTLS_CERT={cert_path}")
+    print(f"  export VENYA_MTLS_KEY={key_path}")
+    return 0
+
+
+def executor_cert(client: APIClient, args: Any) -> int:
+    """Certificate management subcommands."""
+    cert_command = getattr(args, "cert_command", None)
+    if cert_command is None:
+        print("Error: cert subcommand required (status, renew, revoke)", file=sys.stderr)
+        return 1
+
+    if cert_command == "status":
+        return executor_cert_status(args)
+    elif cert_command == "renew":
+        print("Not yet implemented.")
+        return 0
+    elif cert_command == "revoke":
+        print("Not yet implemented.")
+        return 0
+    else:
+        print(f"Unknown cert command: {cert_command}", file=sys.stderr)
+        return 1
+
+
+def executor_cert_status(args: Any) -> int:
+    """Show certificate expiry status.
+
+    Reads the certificate file and prints days until expiry.
+    """
+    from cryptography import x509
+    from cryptography.x509 import load_pem_x509_certificate
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+
+    path = Path(cert_path)
+    if not path.exists():
+        print(f"Error: certificate not found at {cert_path}", file=sys.stderr)
+        print("Run 'venya exec register' to create a certificate.", file=sys.stderr)
+        return 1
+
+    try:
+        cert_data = path.read_bytes()
+        cert = load_pem_x509_certificate(cert_data)
+        not_after = cert.not_valid_after_utc
+        now = datetime.now(timezone.utc)
+        delta = not_after - now
+        days_remaining = delta.days
+
+        subject = cert.subject
+        cn = "unknown"
+        for attr in subject:
+            if attr.oid == x509.oid.NameOID.COMMON_NAME:
+                cn = attr.value
+                break
+
+        print(f"Certificate: {cert_path}")
+        print(f"  Subject: {cn}")
+        print(f"  Expires: {not_after.isoformat()}")
+        print(f"  Days remaining: {days_remaining}")
+
+        if days_remaining < 0:
+            print("  STATUS: EXPIRED", file=sys.stderr)
+            return 1
+        elif days_remaining < 7:
+            print("  WARNING: Certificate expires in less than 7 days!", file=sys.stderr)
+            return 1
+        else:
+            print("  STATUS: OK")
+            return 0
+    except Exception as e:
+        print(f"Failed to read certificate: {e}", file=sys.stderr)
+        return 1
+
+
+def executor_heartbeat(args: Any) -> int:
+    """Send heartbeat to vault."""
+    print("Not yet implemented.")
+    return 0
+
+
+def executor_audit(client: APIClient, args: Any) -> int:
+    """View executor audit log."""
+    print("Not yet implemented.")
+    return 0
+
+
+def executor_status(args: Any) -> int:
+    """Show executor registration status."""
+    print("Not yet implemented.")
+    return 0
 
 
 # --- CA Key Management Commands (local, run on server) ---

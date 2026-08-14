@@ -19,6 +19,11 @@ def create_parser() -> argparse.ArgumentParser:
         venya audit [filters]                   # Query audit log
         venya admin <subcommand>                # Admin operations
         venya role <subcommand>                 # Role management
+        venya run <command>                     # Execute a command via executor
+        venya exec <subcommand>                 # Executor lifecycle operations
+        venya config <subcommand>               # Manage CLI configuration
+        venya credential <subcommand>           # Manage credentials
+        venya enroll <subcommand>               # Headless enrollment
     """
     parser = argparse.ArgumentParser(
         prog="venya",
@@ -196,8 +201,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     kv_sub = kv_parser.add_subparsers(dest="kv_command")
 
-    kv_sub.add_parser("list", help="List all key versions")
-    kv_sub.add_parser("list").add_argument(
+    list_parser = kv_sub.add_parser("list", help="List all key versions")
+    list_parser.add_argument(
         "--json",
         action="store_true",
         help="Output in JSON format",
@@ -406,26 +411,96 @@ def create_parser() -> argparse.ArgumentParser:
         "--confirm", action="store_true", help="Confirm recovery action"
     )
 
-    # exec
-    exec_parser = subparsers.add_parser(
-        "exec", help="Execute a command via executor ( Stage 1 + Stage 2 filtering)"
+    # run (formerly exec)
+    run_parser = subparsers.add_parser(
+        "run", help="Execute a command via executor (Stage 1 + Stage 2 filtering)"
     )
-    exec_parser.add_argument(
-        "command", help="Command to execute", nargs=argparse.REMAINDER
+    run_parser.add_argument(
+        "command_args", help="Command to execute", nargs=argparse.REMAINDER
     )
-    exec_parser.add_argument(
+    run_parser.add_argument(
         "--secret",
         action="append",
         dest="secrets",
         help="Secret key to inject (can be specified multiple times)",
     )
-    exec_parser.add_argument(
+    run_parser.add_argument(
         "--executor-id",
         help="Executor ID to target (default: from config or 'default')",
     )
-    exec_parser.add_argument(
+    run_parser.add_argument(
         "--server-url",
         help="Server URL override (default: from config)",
+    )
+
+    # exec — executor lifecycle management
+    exec_parser = subparsers.add_parser(
+        "exec", help="Executor lifecycle operations"
+    )
+    exec_subparsers = exec_parser.add_subparsers(dest="exec_command")
+
+    # exec register
+    register_parser = exec_subparsers.add_parser(
+        "register", help="Register this machine as an executor with the vault"
+    )
+    register_parser.add_argument(
+        "--executor-id",
+        default="venya-exec",
+        help="Executor ID (default: venya-exec)",
+    )
+    register_parser.add_argument(
+        "--vault-url",
+        help="Vault server URL (default: from config)",
+    )
+    register_parser.add_argument(
+        "--output-dir",
+        default="/etc/venya",
+        help="Directory to save cert and key (default: /etc/venya)",
+    )
+
+    # exec cert — certificate management
+    cert_parser = exec_subparsers.add_parser(
+        "cert", help="Certificate management"
+    )
+    cert_subparsers = cert_parser.add_subparsers(dest="cert_command")
+
+    # exec cert status
+    cert_status_parser = cert_subparsers.add_parser(
+        "status", help="Show certificate expiry status"
+    )
+    cert_status_parser.add_argument(
+        "--cert-path",
+        default="/etc/venya/executor.pem",
+        help="Path to executor certificate (default: /etc/venya/executor.pem)",
+    )
+
+    # exec cert renew
+    cert_subparsers.add_parser(
+        "renew", help="Renew executor certificate (not yet implemented)"
+    )
+
+    # exec cert revoke
+    cert_subparsers.add_parser(
+        "revoke", help="Revoke executor certificate (not yet implemented)"
+    )
+
+    # exec heartbeat
+    heartbeat_parser = exec_subparsers.add_parser(
+        "heartbeat", help="Send heartbeat to vault (not yet implemented)"
+    )
+    heartbeat_parser.add_argument(
+        "--vault-url",
+        help="Vault server URL (default: from config)",
+    )
+
+    # exec audit
+    exec_subparsers.add_parser(
+        "audit", help="View executor audit log (not yet implemented)"
+    )
+
+    # exec status
+    exec_subparsers.add_parser(
+        "status", help="Show executor registration status (not yet implemented)"
     )
 
     # config
