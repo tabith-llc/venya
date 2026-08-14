@@ -1,8 +1,10 @@
 """Admin operation endpoints."""
 
+import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -181,6 +183,12 @@ class AdminKeyRotationJobRollbackResponse(BaseModel):
 class AdminRevokeExecutorResponse(BaseModel):
     revoked: bool
     executor_id: str
+
+
+class AdminEnrollExecutorResponse(BaseModel):
+    executor_id: str
+    enrollment_token: str
+    expires_in_seconds: int = 900
 
 
 # --- Helper functions ---
@@ -1079,6 +1087,84 @@ async def admin_revoke_executor(
             cert.serial_number,
         )
         return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id)
+    finally:
+        db.close()
+
+
+@router.post(
+    "/admin/executors/{executor_id}/enroll",
+    response_model=AdminEnrollExecutorResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_enroll_executor(
+    executor_id: str,
+    request: Request,
+) -> AdminEnrollExecutorResponse:
+    """Generate an enrollment token for executor bootstrap registration (admin only).
+
+    Creates a token in the format `enrl_exec_{base64url}` with 15-minute expiry.
+    The token is hashed and stored in the database. The plaintext token is
+    returned only once.
+
+    The admin delivers the token to the executor operator out-of-band.
+    The executor includes it in the registration request.
+    """
+    from vault.iam.models import AuditEvent, ExecutorEnrollmentToken
+
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backend not initialized",
+        )
+    db = backend.get_session()
+    try:
+        caller = getattr(request.state, "auth_user", {})
+        admin_user_id = caller.get("user_id", "unknown")
+
+        plaintext = "enrl_exec_" + secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+        token = ExecutorEnrollmentToken(
+            executor_id=executor_id,
+            token_hash=token_hash,
+            state="created",
+            created_by=admin_user_id,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        )
+        db.add(token)
+        db.commit()
+
+        audit_event = AuditEvent(
+            event_type="executor_enrollment_token_created",
+            user_id=admin_user_id,
+            fields={
+                "executor_id": executor_id,
+                "expires_in_seconds": 900,
+            },
+            timestamp=datetime.now(timezone.utc),
+        )
+        db.add(audit_event)
+        db.commit()
+
+        logger.info(
+            "Admin created executor enrollment token for %s (by %s)",
+            executor_id, admin_user_id,
+        )
+
+        return AdminEnrollExecutorResponse(
+            executor_id=executor_id,
+            enrollment_token=plaintext,
+            expires_in_seconds=900,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
     finally:
         db.close()
 
