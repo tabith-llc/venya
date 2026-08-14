@@ -6,16 +6,18 @@ list polling for mTLS-based executor authentication.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..ca import CAManager
+from vault.iam.models import AuditEvent, ExecutorEnrollmentToken, User, ExecutorCert
 
 logger = logging.getLogger("venya.server")
 
@@ -30,6 +32,7 @@ class ExecutorRegisterRequest(BaseModel):
 
     executor_id: str = Field(..., description="Unique executor identifier", min_length=1, max_length=64)
     csr_pem: str = Field(..., description="PEM-encoded Certificate Signing Request")
+    enrollment_token: str | None = None
 
 
 class ExecutorRegisterResponse(BaseModel):
@@ -113,19 +116,59 @@ async def register_executor(
                 detail=f"Invalid CSR: {e}",
             )
 
-        # Create executor user account if it doesn't exist
-        from vault.iam.models import User, ExecutorCert
+        # --- Token validation (optional bootstrap auth) ---
+        resolved_executor_id = req.executor_id
+        token_audit_fields = {}
 
-        existing_user = db.query(User).filter(User.user_id == req.executor_id).first()
+        if req.enrollment_token:
+            token_hash = hashlib.sha256(req.enrollment_token.encode("utf-8")).hexdigest()
+            token = (
+                db.query(ExecutorEnrollmentToken)
+                .filter(ExecutorEnrollmentToken.token_hash == token_hash)
+                .first()
+            )
+
+            if token is None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid enrollment token",
+                )
+            if token.state != "created":
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Enrollment token is not in 'created' state",
+                )
+            if token.expires_at <= datetime.now(timezone.utc):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Enrollment token has expired",
+                )
+
+            resolved_executor_id = token.executor_id
+            token.state = "consumed"
+            token.used_at = datetime.now(timezone.utc)
+            token_audit_fields = {"with_token": True, "token_verified": True}
+            logger.info("Enrollment token verified for executor: %s", resolved_executor_id)
+        else:
+            server_config = getattr(request.app.state, "server_config", None)
+            if server_config and server_config.executor_registration_require_token:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Enrollment token required. Contact your administrator.",
+                )
+            token_audit_fields = {"with_token": False}
+
+        # Create executor user account if it doesn't exist
+        existing_user = db.query(User).filter(User.user_id == resolved_executor_id).first()
         if existing_user is None:
             # Auto-create executor user account
             new_user = User(
-                user_id=req.executor_id,
+                user_id=resolved_executor_id,
                 auth_mode="mtls",
             )
             db.add(new_user)
             db.flush()
-            logger.info("Auto-created executor user: %s", req.executor_id)
+            logger.info("Auto-created executor user: %s", resolved_executor_id)
         else:
             # Update auth mode if it was something else
             if existing_user.auth_mode != "mtls":
@@ -133,7 +176,7 @@ async def register_executor(
 
         # Sign the CSR
         try:
-            cert = ca_manager.sign_csr(csr, req.executor_id)
+            cert = ca_manager.sign_csr(csr, resolved_executor_id)
         except RuntimeError as e:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -146,12 +189,12 @@ async def register_executor(
 
         existing_cert = (
             db.query(ExecutorCert)
-            .filter(ExecutorCert.executor_id == req.executor_id)
+            .filter(ExecutorCert.executor_id == resolved_executor_id)
             .first()
         )
 
         cert_record = ExecutorCert(
-            executor_id=req.executor_id,
+            executor_id=resolved_executor_id,
             serial_number=serial_hex,
             not_before=cert.not_valid_before_utc,
             not_after=cert.not_valid_after_utc,
@@ -167,6 +210,19 @@ async def register_executor(
         else:
             db.add(cert_record)
 
+        # Audit event for registration
+        audit_event = AuditEvent(
+            event_type="executor_registered",
+            user_id=None,
+            fields={
+                "executor_id": resolved_executor_id,
+                "serial_number": serial_hex,
+                **token_audit_fields,
+            },
+            timestamp=datetime.now(timezone.utc),
+        )
+        db.add(audit_event)
+
         db.commit()
 
         # Return signed certificate + CA chain
@@ -174,7 +230,7 @@ async def register_executor(
         ca_cert_pem = ca_manager.get_ca_cert_pem().decode()
 
         return ExecutorRegisterResponse(
-            executor_id=req.executor_id,
+            executor_id=resolved_executor_id,
             cert_pem=cert_pem,
             ca_cert_pem=ca_cert_pem,
             serial_number=serial_hex,
