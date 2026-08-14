@@ -98,6 +98,11 @@ def create_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument("--hours", type=int, help="Query last N hours")
     audit_parser.add_argument("--limit", type=int, default=100, help="Max results (default 100)")
     audit_parser.add_argument("--offset", type=int, default=0, help="Result offset")
+    audit_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
 
     # admin
     admin_parser = subparsers.add_parser("admin", help="Admin operations")
@@ -130,7 +135,31 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin list
-    admin_sub.add_parser("list", help="List all registered users")
+    admin_list_parser = admin_sub.add_parser("list", help="List all registered users")
+    admin_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
+
+    # admin create-user
+    create_user_parser = admin_sub.add_parser(
+        "create-user", help="Create a new user and issue an enrollment token"
+    )
+    create_user_parser.add_argument("username", help="User ID (e.g. 'jsmith')")
+    create_user_parser.add_argument(
+        "--display-name",
+        help="Human-readable display name",
+    )
+    create_user_parser.add_argument(
+        "--roles",
+        help="Comma-separated list of role names to assign",
+    )
+    create_user_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
 
     # admin set-command-policy
     set_policy_parser = admin_sub.add_parser(
@@ -146,8 +175,13 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin get-command-policy
-    admin_sub.add_parser(
+    get_policy_parser = admin_sub.add_parser(
         "get-command-policy", help="Get current executor command policy"
+    )
+    get_policy_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
     )
 
     # admin add-allowed-command
@@ -163,6 +197,11 @@ def create_parser() -> argparse.ArgumentParser:
     kv_sub = kv_parser.add_subparsers(dest="kv_command")
 
     kv_sub.add_parser("list", help="List all key versions")
+    kv_sub.add_parser("list").add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
     deactivate_parser = kv_sub.add_parser("deactivate", help="Deactivate a key version")
     deactivate_parser.add_argument("version_id", help="Version ID")
     kv_sub.add_parser("revoke", help="Revoke a key version")
@@ -179,10 +218,49 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin revoke-executor
-    revoke_parser = admin_sub.add_parser(
+    revoke_executor_parser = admin_sub.add_parser(
         "revoke-executor", help="Revoke an executor certificate"
     )
-    revoke_parser.add_argument("executor_id", help="Executor ID to revoke")
+    revoke_executor_parser.add_argument("executor_id", help="Executor ID to revoke")
+
+    # admin list-tokens
+    list_tokens_parser = admin_sub.add_parser(
+        "list-tokens", help="List all enrollment tokens for a user"
+    )
+    list_tokens_parser.add_argument("user_id", help="User ID")
+    list_tokens_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
+
+    # admin issue-token
+    issue_token_parser = admin_sub.add_parser(
+        "issue-token", help="Revoke old tokens and issue a new enrollment token"
+    )
+    issue_token_parser.add_argument("user_id", help="User ID")
+    issue_token_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
+
+    # admin revoke-token
+    revoke_token_parser = admin_sub.add_parser(
+        "revoke-token", help="Revoke a single enrollment token"
+    )
+    revoke_token_parser.add_argument("token_id", help="Token ID to revoke")
+
+    # admin re-enroll
+    re_enroll_parser = admin_sub.add_parser(
+        "re-enroll", help="Deactivate credentials and issue a new enrollment token"
+    )
+    re_enroll_parser.add_argument("user_id", help="User ID to re-enroll")
+    re_enroll_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
 
     # admin export-ca-cert
     export_cert_parser = admin_sub.add_parser(
@@ -276,11 +354,21 @@ def create_parser() -> argparse.ArgumentParser:
     role_create.add_argument("--description", help="Role description")
 
     # role list
-    role_sub.add_parser("list", help="List all roles")
+    role_list_parser = role_sub.add_parser("list", help="List all roles")
+    role_list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
 
     # role get
     role_get = role_sub.add_parser("get", help="Get role details")
     role_get.add_argument("role_id", help="Role ID or name")
+    role_get.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
 
     # role delete
     role_delete = role_sub.add_parser("delete", help="Delete a role")
@@ -289,6 +377,11 @@ def create_parser() -> argparse.ArgumentParser:
     # role members
     role_members = role_sub.add_parser("members", help="List role members")
     role_members.add_argument("role_id", help="Role ID or name")
+    role_members.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
 
     # role add-member
     role_add = role_sub.add_parser("add-member", help="Add user to role")
@@ -353,6 +446,67 @@ def create_parser() -> argparse.ArgumentParser:
     # config clear-token
     config_sub.add_parser(
         "clear-token", help="Clear stored access token (forces re-auth)"
+    )
+
+    # credential
+    credential_parser = subparsers.add_parser(
+        "credential", help="Manage credentials (security keys)"
+    )
+    credential_sub = credential_parser.add_subparsers(dest="credential_command")
+
+    # credential list
+    cred_list = credential_sub.add_parser("list", help="List own credentials")
+    cred_list.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
+
+    # credential add
+    cred_add = credential_sub.add_parser("add", help="Add a new credential (requires security key)")
+    cred_add.add_argument("label", help="Label for the new credential")
+    cred_add.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
+
+    # credential remove
+    cred_remove = credential_sub.add_parser("remove", help="Remove a credential (requires security key)")
+    cred_remove.add_argument("credential_id", help="Credential ID to remove")
+
+    # enroll
+    enroll_parser = subparsers.add_parser(
+        "enroll", help="Headless enrollment using an enrollment token"
+    )
+    enroll_sub = enroll_parser.add_subparsers(dest="enroll_command")
+
+    # enroll start
+    enroll_start = enroll_sub.add_parser(
+        "start", help="Start enrollment: get WebAuthn challenge from token"
+    )
+    enroll_start.add_argument("token", help="Enrollment token")
+    enroll_start.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
+
+    # enroll complete
+    enroll_complete = enroll_sub.add_parser(
+        "complete", help="Complete enrollment: submit WebAuthn attestation"
+    )
+    enroll_complete.add_argument("token", help="Enrollment token")
+    enroll_complete.add_argument("challenge_id", help="Challenge ID from enroll start")
+    enroll_complete.add_argument("response", help="WebAuthn attestation response (JSON)")
+    enroll_complete.add_argument(
+        "--label",
+        help="Label for the new credential",
+    )
+    enroll_complete.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
     )
 
     return parser

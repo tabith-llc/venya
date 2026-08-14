@@ -1,4 +1,4 @@
-"""Tests for enrollment flow endpoints."""
+"""Tests for enrollment flow endpoints (legacy)."""
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -31,108 +31,79 @@ def _create_test_app(backend=None, auth_user=None):
     return app
 
 
-def _make_mock_enrollment_manager(token=None, user=None, error=None):
-    """Create a mock EnrollmentManager."""
-    from datetime import datetime, timezone, timedelta
-
-    em = MagicMock()
-    if error:
-        em.create_enrollment_token.side_effect = error
-        em.consume_enrollment_token.side_effect = error
-    else:
-        if token:
-            em.create_enrollment_token.return_value = token
-        else:
-            em.create_enrollment_token.return_value = SimpleNamespace(
-                token="enc-token-123",
-                user_id="newuser",
-                expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
-            )
-        if user:
-            em.consume_enrollment_token.return_value = user
-        else:
-            em.consume_enrollment_token.return_value = SimpleNamespace(
-                user_id="newuser",
-                auth_mode="security-key",
-            )
-    return em
+def _make_mock_db_with_user(user_id_str="newuser", user_int_id=1):
+    """Create a mock DB that returns a user for query lookups."""
+    user_mock = SimpleNamespace(id=user_int_id, user_id=user_id_str)
+    mock_query = MagicMock()
+    mock_query.filter.return_value.first.return_value = user_mock
+    db = MagicMock()
+    db.query.return_value = mock_query
+    return db
 
 
 class TestEnrollmentCreateToken:
-    """Tests for enrollment token creation endpoint."""
+    """Tests for enrollment token creation endpoint (legacy)."""
 
     def test_create_token_success(self):
-        """POST /enrollment/tokens should create token via EnrollmentManager."""
-        em = _make_mock_enrollment_manager()
+        """POST /enrollment/tokens should create token for existing user."""
+        mock_token = SimpleNamespace(id=1)
+        em = MagicMock()
+        em.create_enrollment_token.return_value = (mock_token, "enc-token-123")
+
+        db = _make_mock_db_with_user()
         backend = MagicMock()
-        session = MagicMock()
-        backend.get_session.return_value = session
+        backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
         with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/enrollment/tokens",
-                json={
-                    "user_id": "newuser",
-                    "auth_mode": "platform",
-                },
+                json={"user_id": "newuser"},
             )
             assert resp.status_code == 201
             data = resp.json()
             assert data["token"] == "enc-token-123"
-            assert "enrollment_url" in data
-            assert "newuser" in data["enrollment_url"]
+            assert data["expires_in_seconds"] == 900
 
-    def test_create_token_max_tokens(self):
-        """POST /enrollment/tokens should return 400 if too many tokens."""
-        em = _make_mock_enrollment_manager(
-            error=Exception("User 'user1' already has 3 active enrollment tokens")
-        )
+    def test_create_token_user_not_found(self):
+        """POST /enrollment/tokens should return 404 if user not found."""
+        em = MagicMock()
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
         backend = MagicMock()
-        session = MagicMock()
-        backend.get_session.return_value = session
+        backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
         with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/enrollment/tokens",
-                json={"user_id": "user1"},
+                json={"user_id": "nonexistent"},
             )
-            assert resp.status_code == 400
-            assert "already has 3 active" in resp.json()["detail"]
+            assert resp.status_code == 404
 
 
 class TestEnrollmentListTokens:
     """Tests for enrollment token listing endpoint."""
 
     def test_list_tokens_success(self):
-        """GET /enrollment/tokens should return active tokens."""
+        """GET /enrollment/tokens should list active tokens."""
         from datetime import datetime, timezone, timedelta
 
-        now = datetime.now(timezone.utc)
         token1 = SimpleNamespace(
-            token="token-1",
-            user_id="user1",
-            expires_at=now + timedelta(hours=12),
+            id=1, user_id=1, state="created",
+            created_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
         )
         token2 = SimpleNamespace(
-            token="token-2",
-            user_id="user2",
-            expires_at=now + timedelta(hours=6),
+            id=2, user_id=1, state="in_progress",
+            created_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         )
+
         db = MagicMock()
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-            def order_by(self, *args, **kwargs):
-                return self
-            def all(self):
-                return [token1, token2]
-
-        db.query.return_value = MockQuery()
+        db.query.return_value.filter.return_value.order_by.return_value.all.return_value = [token1, token2]
         backend = MagicMock()
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
@@ -142,98 +113,43 @@ class TestEnrollmentListTokens:
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["tokens"]) == 2
-        assert data["tokens"][0]["user_id"] == "user1"
-        assert data["tokens"][1]["user_id"] == "user2"
+        assert data["tokens"][0]["state"] == "created"
+        assert data["tokens"][1]["state"] == "in_progress"
 
-    def test_list_tokens_empty(self):
-        """GET /enrollment/tokens should return empty list when no active tokens."""
+
+class TestEnrollmentRevokeToken:
+    """Tests for enrollment token revocation endpoint."""
+
+    def test_revoke_success(self):
+        """POST /enrollment/tokens/{id}/revoke should revoke token."""
+        em = MagicMock()
+        em.revoke_token.return_value = True
+
         db = MagicMock()
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-            def order_by(self, *args, **kwargs):
-                return self
-            def all(self):
-                return []
-
-        db.query.return_value = MockQuery()
         backend = MagicMock()
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get("/api/v1/enrollment/tokens")
-        assert resp.status_code == 200
-        assert resp.json()["tokens"] == []
-
-
-class TestEnrollmentConfirm:
-    """Tests for enrollment confirmation endpoint."""
-
-    def test_confirm_success(self):
-        """POST /enrollment/confirm should consume token and create user."""
-        em = _make_mock_enrollment_manager()
-        backend = MagicMock()
-        session = MagicMock()
-        backend.get_session.return_value = session
-        app = _create_test_app(backend=backend)
-
         with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
-            resp = client.post(
-                "/api/v1/enrollment/confirm",
-                json={
-                    "token": "enc-token-123",
-                    "user_id": "newuser",
-                },
-            )
+            resp = client.post("/api/v1/enrollment/tokens/1/revoke")
             assert resp.status_code == 200
             data = resp.json()
-            assert data["enrolled"] is True
-            assert data["user_id"] == "newuser"
-            assert data["auth_mode"] == "security-key"
+            assert data["revoked"] is True
 
-    def test_confirm_invalid_token(self):
-        """POST /enrollment/confirm should return 400 for invalid token."""
-        em = _make_mock_enrollment_manager(
-            error=Exception("Invalid or expired enrollment token")
-        )
+    def test_revoke_not_found(self):
+        """POST /enrollment/tokens/{id}/revoke returns 400 if token not found."""
+        em = MagicMock()
+        em.revoke_token.return_value = False
+
+        db = MagicMock()
         backend = MagicMock()
-        session = MagicMock()
-        backend.get_session.return_value = session
+        backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
         with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
-            resp = client.post(
-                "/api/v1/enrollment/confirm",
-                json={
-                    "token": "invalid-token",
-                    "user_id": "newuser",
-                },
-            )
-            assert resp.status_code == 400
-            assert "Invalid or expired" in resp.json()["detail"]
-
-    def test_confirm_user_exists(self):
-        """POST /enrollment/confirm should return 400 if user already exists."""
-        em = _make_mock_enrollment_manager(
-            error=Exception("User 'existing' already exists")
-        )
-        backend = MagicMock()
-        session = MagicMock()
-        backend.get_session.return_value = session
-        app = _create_test_app(backend=backend)
-
-        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
-            client = TestClient(app, raise_server_exceptions=False)
-            resp = client.post(
-                "/api/v1/enrollment/confirm",
-                json={
-                    "token": "enc-token-123",
-                    "user_id": "existing",
-                },
-            )
-            assert resp.status_code == 400
-            assert "already exists" in resp.json()["detail"]
+            resp = client.post("/api/v1/enrollment/tokens/999/revoke")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["revoked"] is False

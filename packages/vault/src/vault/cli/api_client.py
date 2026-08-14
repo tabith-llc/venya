@@ -16,7 +16,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 
 logger = logging.getLogger("vault.cli.api_client")
 
@@ -122,9 +122,9 @@ class APIClient:
             self.config.server_url = server_url
         if access_token:
             self.config.access_token = access_token
-        self._http = httpx.Client(
+        self._http = httpx2.Client(
             base_url=self.config.server_url,
-            timeout=httpx.Timeout(30.0),
+            timeout=httpx2.Timeout(30.0),
             follow_redirects=True,
         )
 
@@ -147,6 +147,7 @@ class APIClient:
         path: str,
         json_data: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Make an HTTP request to the server.
 
@@ -166,7 +167,7 @@ class APIClient:
             APIClientError: On request failure.
             APIClientAuthenticationError: On auth failure.
         """
-        headers = self._get_headers()
+        headers = self._get_headers(extra_headers)
 
         try:
             response = self._http.request(
@@ -177,7 +178,7 @@ class APIClient:
                 headers=headers,
             )
             response.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             error_msg = "Unknown error"
             try:
                 error_data = e.response.json()
@@ -190,7 +191,7 @@ class APIClient:
                     try:
                         self.refresh_token()
                         # Retry the original request with new token
-                        headers = self._get_headers()
+                        headers = self._get_headers(extra_headers)
                         response = self._http.request(
                             method,
                             path,
@@ -204,9 +205,9 @@ class APIClient:
                         pass
                 raise APIClientAuthenticationError(error_msg)
             raise APIClientError(error_msg)
-        except httpx.ConnectError as e:
+        except httpx2.ConnectError as e:
             raise APIClientError(f"Connection failed: {e}")
-        except httpx.TimeoutException as e:
+        except httpx2.TimeoutException as e:
             raise APIClientError(f"Request timed out: {e}")
 
         if response.content:
@@ -291,7 +292,7 @@ class APIClient:
                 headers=headers,
             )
             response.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             error_msg = "Unknown error"
             try:
                 error_data = e.response.json()
@@ -301,7 +302,7 @@ class APIClient:
             if e.response.status_code == 401:
                 raise APIClientAuthenticationError(error_msg)
             raise APIClientError(error_msg)
-        except httpx.ConnectError as e:
+        except httpx2.ConnectError as e:
             raise APIClientError(f"Connection failed: {e}")
 
         if response.content:
@@ -317,26 +318,29 @@ class APIClient:
         path: str,
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Send a POST request."""
-        return self._request("POST", path, json_data=json, params=params)
+        return self._request("POST", path, json_data=json, params=params, extra_headers=extra_headers)
 
     def put(
         self,
         path: str,
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Send a PUT request."""
-        return self._request("PUT", path, json_data=json, params=params)
+        return self._request("PUT", path, json_data=json, params=params, extra_headers=extra_headers)
 
     def delete(
         self,
         path: str,
         params: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Send a DELETE request."""
-        return self._request("DELETE", path, params=params)
+        return self._request("DELETE", path, params=params, extra_headers=extra_headers)
 
     def close(self) -> None:
         """Close the underlying HTTP client."""

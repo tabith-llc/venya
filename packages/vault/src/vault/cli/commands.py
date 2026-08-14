@@ -104,6 +104,10 @@ def run_command(args: Any) -> int:
             return cmd_admin(client, args)
         elif command == "role":
             return cmd_role(client, args)
+        elif command == "credential":
+            return cmd_credential(client, args)
+        elif command == "enroll":
+            return cmd_enroll(client, args)
         elif command == "recovery":
             return cmd_recovery(client, args)
         elif command == "exec":
@@ -217,6 +221,9 @@ def cmd_store(client: APIClient, args: Any) -> int:
         )
         print(f"Secret '{args.key}' stored successfully.")
         return 0
+    except APIClientError as e:
+        print(f"Failed to store secret: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to store secret: {e}", file=sys.stderr)
         return 1
@@ -234,6 +241,9 @@ def cmd_get(client: APIClient, args: Any) -> int:
         else:
             print("\u2022" * 8)  # ••••••••
         return 0
+    except APIClientError as e:
+        print(f"Failed to retrieve secret: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to retrieve secret: {e}", file=sys.stderr)
         return 1
@@ -256,6 +266,9 @@ def cmd_list(client: APIClient, args: Any) -> int:
         for secret in secrets:
             print(f"  {secret['key']}")
         return 0
+    except APIClientError as e:
+        print(f"Failed to list secrets: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to list secrets: {e}", file=sys.stderr)
         return 1
@@ -267,6 +280,9 @@ def cmd_delete(client: APIClient, args: Any) -> int:
         client.delete(f"/api/v1/secrets/{args.key}")
         print(f"Secret '{args.key}' deleted.")
         return 0
+    except APIClientError as e:
+        print(f"Failed to delete secret: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to delete secret: {e}", file=sys.stderr)
         return 1
@@ -298,12 +314,19 @@ def cmd_audit(client: APIClient, args: Any) -> int:
             print("No audit events found.")
             return 0
 
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
         for event in events:
             print(
                 f"  [{event['timestamp']}] {event['event_type']} "
                 f"(user: {event.get('user_id', 'N/A')})"
             )
         return 0
+    except APIClientError as e:
+        print(f"Failed to query audit log: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to query audit log: {e}", file=sys.stderr)
         return 1
@@ -324,6 +347,8 @@ def cmd_admin(client: APIClient, args: Any) -> int:
         return cmd_admin_configure(client, args)
     elif admin_command == "list":
         return cmd_admin_list(client, args)
+    elif admin_command == "create-user":
+        return cmd_admin_create_user(client, args)
     elif admin_command == "set-command-policy":
         return cmd_admin_set_policy(client, args)
     elif admin_command == "get-command-policy":
@@ -336,6 +361,14 @@ def cmd_admin(client: APIClient, args: Any) -> int:
         return cmd_admin_rotate_key(client, args)
     elif admin_command == "revoke-executor":
         return cmd_admin_revoke_executor(client, args)
+    elif admin_command == "list-tokens":
+        return cmd_admin_list_tokens(client, args)
+    elif admin_command == "issue-token":
+        return cmd_admin_issue_token(client, args)
+    elif admin_command == "revoke-token":
+        return cmd_admin_revoke_token(client, args)
+    elif admin_command == "re-enroll":
+        return cmd_admin_re_enroll(client, args)
     elif admin_command == "export-ca-cert":
         return cmd_admin_export_ca_cert(args)
     elif admin_command == "export-ca-key":
@@ -360,6 +393,9 @@ def cmd_admin_enroll(client: APIClient, args: Any) -> int:
         if "enrollment_token" in result:
             print(f"Enrollment token: {result['enrollment_token']}")
         return 0
+    except APIClientError as e:
+        print(f"Enrollment failed: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Enrollment failed: {e}", file=sys.stderr)
         return 1
@@ -371,6 +407,9 @@ def cmd_admin_remove(client: APIClient, args: Any) -> int:
         client.delete(f"/api/v1/admin/users/{args.user_id}")
         print(f"User '{args.user_id}' removed.")
         return 0
+    except APIClientError as e:
+        print(f"Remove failed: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Remove failed: {e}", file=sys.stderr)
         return 1
@@ -391,6 +430,9 @@ def cmd_admin_configure(client: APIClient, args: Any) -> int:
         )
         print(f"User '{args.user_id}' configured.")
         return 0
+    except APIClientError as e:
+        print(f"Configure failed: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Configure failed: {e}", file=sys.stderr)
         return 1
@@ -406,14 +448,68 @@ def cmd_admin_list(client: APIClient, args: Any) -> int:
             print("No users found.")
             return 0
 
-        for user in users:
-            print(
-                f"  {user['user_id']} (mode: {user['auth_mode']}, "
-                f"enrolled: {user.get('enrolled_at', 'N/A')})"
-            )
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        # Calculate column widths
+        headers = ["USER_ID", "DISPLAY_NAME", "STATUS", "AUTH_MODE", "ENROLLED_AT", "SESSION_TIMEOUT"]
+        rows = []
+        for u in users:
+            rows.append([
+                u.get("user_id", ""),
+                u.get("display_name") or "-",
+                u.get("status", ""),
+                u.get("auth_mode", ""),
+                u.get("enrolled_at") or "-",
+                str(u.get("session_timeout", "")),
+            ])
+
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(cell))
+
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        print(fmt.format(*headers))
+        print(fmt.format(*["-" * w for w in widths]))
+        for row in rows:
+            print(fmt.format(*row))
         return 0
     except Exception as e:
         print(f"List failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_admin_create_user(client: APIClient, args: Any) -> int:
+    """Create a new user and issue an enrollment token."""
+    try:
+        payload = {"username": args.username}
+        if getattr(args, "display_name", None):
+            payload["display_name"] = args.display_name
+        if getattr(args, "roles", None):
+            payload["roles"] = [r.strip() for r in args.roles.split(",")]
+
+        result = client.post("/api/v1/admin/users", json=payload)
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        print(f"User created successfully.")
+        print(f"  User ID:       {result.get('user_id', '')}")
+        print(f"  Status:        {result.get('status', '')}")
+        token = result.get("enrollment_token", "")
+        expires = result.get("expires_in_seconds", 900)
+        print(f"  Enrollment Token: {token}")
+        print(f"    WARNING: Token is printed once and never stored.")
+        print(f"    Expires in: {expires} seconds")
+        return 0
+    except APIClientError as e:
+        print(f"Create user failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Create user failed: {e}", file=sys.stderr)
         return 1
 
 
@@ -427,6 +523,9 @@ def cmd_admin_set_policy(client: APIClient, args: Any) -> int:
         client.post("/api/v1/admin/command-policy", json=policy)
         print(f"Command policy set to '{args.preset}'.")
         return 0
+    except APIClientError as e:
+        print(f"Set policy failed: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Set policy failed: {e}", file=sys.stderr)
         return 1
@@ -438,6 +537,9 @@ def cmd_admin_get_policy(client: APIClient, args: Any) -> int:
         result = client.get("/api/v1/admin/command-policy")
         print(json.dumps(result, indent=2))
         return 0
+    except APIClientError as e:
+        print(f"Get policy failed: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Get policy failed: {e}", file=sys.stderr)
         return 1
@@ -452,6 +554,9 @@ def cmd_admin_add_command(client: APIClient, args: Any) -> int:
         )
         print(f"Command '{args.command_path}' added to allowlist.")
         return 0
+    except APIClientError as e:
+        print(f"Add command failed: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Add command failed: {e}", file=sys.stderr)
         return 1
@@ -466,7 +571,10 @@ def cmd_admin_key_version(client: APIClient, args: Any) -> int:
 
     if kv_command == "list":
         result = client.get("/api/v1/admin/key-versions")
-        print(json.dumps(result, indent=2))
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+        else:
+            print(json.dumps(result, indent=2))
     elif kv_command == "deactivate":
         version_id = getattr(args, "version_id", None)
         if not version_id:
@@ -508,6 +616,9 @@ def cmd_admin_rotate_key(client: APIClient, args: Any) -> int:
         result = client.post("/api/v1/admin/key-rotation", json=payload)
         print(f"Key rotation started: {result.get('job_id', 'N/A')}")
         return 0
+    except APIClientError as e:
+        print(f"Key rotation failed: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Key rotation failed: {e}", file=sys.stderr)
         return 1
@@ -519,8 +630,122 @@ def cmd_admin_revoke_executor(client: APIClient, args: Any) -> int:
         client.post(f"/api/v1/admin/executors/{args.executor_id}/revoke")
         print(f"Executor '{args.executor_id}' certificate revoked.")
         return 0
+    except APIClientError as e:
+        print(f"Revoke failed: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Revoke failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_admin_list_tokens(client: APIClient, args: Any) -> int:
+    """List all enrollment tokens for a user."""
+    try:
+        result = client.get(f"/api/v1/admin/users/{args.user_id}/enrollment-tokens")
+        tokens = result.get("tokens", [])
+
+        if not tokens:
+            print("No tokens found.")
+            return 0
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        headers = ["ID", "STATE", "CREATED_AT", "EXPIRES_AT", "USED_AT"]
+        rows = []
+        for t in tokens:
+            rows.append([
+                t.get("id", ""),
+                t.get("state", ""),
+                t.get("created_at") or "-",
+                t.get("expires_at") or "-",
+                t.get("used_at") or "-",
+            ])
+
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(cell))
+
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        print(fmt.format(*headers))
+        print(fmt.format(*["-" * w for w in widths]))
+        for row in rows:
+            print(fmt.format(*row))
+        return 0
+    except APIClientError as e:
+        print(f"List tokens failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"List tokens failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_admin_issue_token(client: APIClient, args: Any) -> int:
+    """Revoke old tokens and issue a new enrollment token for a user."""
+    try:
+        result = client.post(f"/api/v1/admin/users/{args.user_id}/enrollment-tokens")
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        print(f"Token issued successfully for user '{args.user_id}'.")
+        token = result.get("enrollment_token", "")
+        if token:
+            print(f"  Enrollment Token: {token}")
+            print(f"    WARNING: Token is printed once and never stored.")
+        print(f"  Previous tokens revoked: {result.get('previous_tokens_revoked', 0)}")
+        print(f"  Expires in: {result.get('expires_in_seconds', 900)} seconds")
+        return 0
+    except APIClientError as e:
+        print(f"Issue token failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Issue token failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_admin_revoke_token(client: APIClient, args: Any) -> int:
+    """Revoke a single enrollment token."""
+    try:
+        client.delete(f"/api/v1/admin/enrollment-tokens/{args.token_id}")
+        print(f"Token '{args.token_id}' revoked.")
+        return 0
+    except APIClientError as e:
+        print(f"Revoke token failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Revoke token failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_admin_re_enroll(client: APIClient, args: Any) -> int:
+    """Deactivate credentials, revoke tokens, and issue a new enrollment token."""
+    try:
+        result = client.post(f"/api/v1/admin/users/{args.user_id}/re-enroll")
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        print(f"Re-enrollment initiated for user '{args.user_id}'.")
+        print(f"  User ID:       {result.get('user_id', '')}")
+        print(f"  Status:        {result.get('status', '')}")
+        token = result.get("enrollment_token", "")
+        if token:
+            print(f"  Enrollment Token: {token}")
+            print(f"    WARNING: Token is printed once and never stored.")
+        print(f"  Credentials deactivated: {result.get('credentials_deactivated', False)}")
+        print(f"  Tokens revoked: {result.get('tokens_revoked', 0)}")
+        print(f"  Expires in: {result.get('expires_in_seconds', 900)} seconds")
+        return 0
+    except APIClientError as e:
+        print(f"Re-enroll failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Re-enroll failed: {e}", file=sys.stderr)
         return 1
 
 
@@ -563,6 +788,9 @@ def cmd_role_create(client: APIClient, args: Any) -> int:
         )
         print(f"Role '{args.name}' created.")
         return 0
+    except APIClientError as e:
+        print(f"Failed to create role: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to create role: {e}", file=sys.stderr)
         return 1
@@ -578,12 +806,19 @@ def cmd_role_list(client: APIClient, args: Any) -> int:
             print("No roles found.")
             return 0
 
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
         for role in roles:
             print(
                 f"  {role['id']}: {role['name']} "
                 f"({role['permissions']})"
             )
         return 0
+    except APIClientError as e:
+        print(f"Failed to list roles: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to list roles: {e}", file=sys.stderr)
         return 1
@@ -595,6 +830,9 @@ def cmd_role_get(client: APIClient, args: Any) -> int:
         result = client.get(f"/api/v1/roles/{args.role_id}")
         print(json.dumps(result, indent=2))
         return 0
+    except APIClientError as e:
+        print(f"Failed to get role: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to get role: {e}", file=sys.stderr)
         return 1
@@ -606,6 +844,9 @@ def cmd_role_delete(client: APIClient, args: Any) -> int:
         client.delete(f"/api/v1/roles/{args.role_id}")
         print(f"Role '{args.role_id}' deleted.")
         return 0
+    except APIClientError as e:
+        print(f"Failed to delete role: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to delete role: {e}", file=sys.stderr)
         return 1
@@ -621,9 +862,16 @@ def cmd_role_members(client: APIClient, args: Any) -> int:
             print("No members found.")
             return 0
 
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
         for member in members:
             print(f"  {member['user_id']}")
         return 0
+    except APIClientError as e:
+        print(f"Failed to list members: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to list members: {e}", file=sys.stderr)
         return 1
@@ -638,6 +886,9 @@ def cmd_role_add_member(client: APIClient, args: Any) -> int:
         )
         print(f"User '{args.user_id}' added to role '{args.role_id}'.")
         return 0
+    except APIClientError as e:
+        print(f"Failed to add member: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to add member: {e}", file=sys.stderr)
         return 1
@@ -651,6 +902,9 @@ def cmd_role_remove_member(client: APIClient, args: Any) -> int:
         )
         print(f"User '{args.user_id}' removed from role '{args.role_id}'.")
         return 0
+    except APIClientError as e:
+        print(f"Failed to remove member: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Failed to remove member: {e}", file=sys.stderr)
         return 1
@@ -670,6 +924,9 @@ def cmd_recovery(client: APIClient, args: Any) -> int:
         )
         print("Recovery completed successfully.")
         return 0
+    except APIClientError as e:
+        print(f"Recovery failed: {e}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(f"Recovery failed: {e}", file=sys.stderr)
         return 1
@@ -756,6 +1013,9 @@ def cmd_exec(client: APIClient, args: Any) -> int:
     except APIClientError as e:
         print(f"Execution failed: {e}", file=sys.stderr)
         return 1
+    except Exception as e:
+        print(f"Execution failed: {e}", file=sys.stderr)
+        return 1
 
 
 def cmd_config(client: APIClient, args: Any) -> int:
@@ -804,6 +1064,436 @@ def cmd_config_clear_token(client: APIClient) -> int:
     client.config.access_token = None
     print("Access token cleared. Re-authentication required.")
     return 0
+
+
+def cmd_credential(client: APIClient, args: Any) -> int:
+    """Credential management operations."""
+    cred_command = getattr(args, "credential_command", None)
+    if cred_command is None:
+        print("Error: credential subcommand required (list, add, remove)", file=sys.stderr)
+        return 1
+
+    if cred_command == "list":
+        return cmd_credential_list(client, args)
+    elif cred_command == "add":
+        return cmd_credential_add(client, args)
+    elif cred_command == "remove":
+        return cmd_credential_remove(client, args)
+    else:
+        print(f"Unknown credential command: {cred_command}", file=sys.stderr)
+        return 1
+
+
+def cmd_credential_list(client: APIClient, args: Any) -> int:
+    """List own credentials."""
+    try:
+        result = client.get("/api/v1/credentials")
+        credentials = result.get("credentials", [])
+
+        if not credentials:
+            print("No credentials found.")
+            return 0
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        headers = ["ID", "LABEL", "CREATED_AT", "LAST_USED_AT"]
+        rows = []
+        for c in credentials:
+            rows.append([
+                c.get("id", ""),
+                c.get("label") or "-",
+                c.get("created_at") or "-",
+                c.get("last_used_at") or "-",
+            ])
+
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(cell))
+
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        print(fmt.format(*headers))
+        print(fmt.format(*["-" * w for w in widths]))
+        for row in rows:
+            print(fmt.format(*row))
+        return 0
+    except APIClientError as e:
+        print(f"Failed to list credentials: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Failed to list credentials: {e}", file=sys.stderr)
+        return 1
+
+
+def _elevate(client: APIClient) -> str:
+    """Perform elevation via WebAuthn re-authentication.
+
+    Returns:
+        Elevation token string.
+
+    Raises:
+        APIClientError: If elevation fails.
+    """
+    from .fido2_client import (
+        Fido2Auth,
+        Fido2ClientError,
+        Fido2NotFoundError,
+        Fido2TimeoutError,
+        Fido2UserInteractionRequiredError,
+    )
+
+    fido2 = Fido2Auth(client.config.server_url)
+
+    try:
+        # Step 1: Get elevation challenge
+        challenge_result = fido2._post("/api/v1/auth/elevate/browser/challenge", {})
+        challenge_id = challenge_result["challenge_id"]
+        options = challenge_result["options"]
+    except Fido2ClientError as e:
+        raise APIClientError(f"Elevation challenge failed: {e}") from e
+
+    # Step 2: Build request options
+    from .fido2_client import _b64url_decode
+    from fido2.webauthn import (
+        CredentialRequestOptions,
+        PublicKeyCredentialDescriptor,
+        UserVerificationRequirement,
+    )
+
+    challenge = _b64url_decode(options["challenge"])
+    allow_credentials = []
+    for cred in options.get("allow_credentials", []):
+        cred_id = _b64url_decode(cred["id"])
+        allow_credentials.append(PublicKeyCredentialDescriptor(
+            type=cred.get("type", "public-key"),
+            id=cred_id,
+            transports=cred.get("transports"),
+        ))
+
+    uv_map = {
+        "discouraged": UserVerificationRequirement.DISCOURAGED,
+        "preferred": UserVerificationRequirement.PREFERRED,
+        "required": UserVerificationRequirement.REQUIRED,
+    }
+    user_verification = uv_map.get(
+        options.get("user_verification", "preferred"),
+        UserVerificationRequirement.PREFERRED,
+    )
+
+    public_key = PublicKeyCredentialRequestOptions(
+        challenge=challenge,
+        timeout=options.get("timeout"),
+        rp_id=options.get("rp_id"),
+        allow_credentials=allow_credentials or None,
+        user_verification=user_verification,
+    )
+
+    request_options = CredentialRequestOptions(public_key=public_key)
+
+    # Step 3: Perform WebAuthn assertion
+    from fido2.client import WebAuthnClient
+    from fido2.hid import list_devices
+
+    try:
+        devices = list_devices()
+        if not devices:
+            raise Fido2NotFoundError("No FIDO2 device found")
+        rp_id = public_key.rp_id or "localhost"
+        webauthn_client = WebAuthnClient(rp_id)
+        assertion = webauthn_client.get_assertion(request_options.public_key)
+    except OSError as e:
+        err_str = str(e).lower()
+        if "fido" in err_str or "device" in err_str or "usb" in err_str or "no such" in err_str:
+            raise APIClientError(f"No FIDO2 device found: {e}") from e
+        if "time" in err_str or "timeout" in err_str:
+            raise APIClientError(f"Elevation timed out: {e}") from e
+        raise APIClientError(f"FIDO2 error: {e}") from e
+    except ValueError as e:
+        err_msg = str(e).lower()
+        if "user" in err_msg or "presence" in err_msg or "touch" in err_msg:
+            raise APIClientError("Please touch your security key") from e
+        raise APIClientError(f"FIDO2 error: {e}") from e
+
+    # Step 4: Format assertion
+    from .fido2_client import _b64url_encode, _serialize_auth_data, _serialize_client_data
+    auth_response = assertion.assertions[0]
+    cred_id = auth_response.credential["id"]
+    auth_data = auth_response.auth_data
+    signature = auth_response.signature
+    client_data = assertion.client_data
+
+    response = {
+        "id": _b64url_encode(cred_id),
+        "rawId": _b64url_encode(cred_id),
+        "response": {
+            "clientDataJSON": _b64url_encode(_serialize_client_data(client_data)),
+            "authenticatorData": _b64url_encode(_serialize_auth_data(auth_data)),
+            "signature": _b64url_encode(signature),
+            "userHandle": None,
+        },
+        "type": "public-key",
+        "clientExtensionResults": {},
+    }
+
+    # Step 5: Submit assertion to get elevation token
+    try:
+        assert_result = fido2._post("/api/v1/auth/elevate/browser/assert", {
+            "challenge_id": challenge_id,
+            "response": response,
+        })
+    except Fido2ClientError as e:
+        raise APIClientError(f"Elevation assertion failed: {e}") from e
+
+    return assert_result["elevation_token"]
+
+
+def cmd_credential_add(client: APIClient, args: Any) -> int:
+    """Add a new credential (requires elevation via WebAuthn re-auth)."""
+    try:
+        label = args.label
+
+        # Step 1: Elevate
+        print("Re-authenticating with security key for elevation...")
+        elevation_token = _elevate(client)
+        print("Elevation successful.")
+
+        # Step 2: Start credential registration
+        start_result = client.post(
+            "/api/v1/credentials/add/browser/start",
+            json={"label": label},
+            extra_headers={"X-Elevation-Token": elevation_token},
+        )
+        challenge_id = start_result["challenge_id"]
+        options = start_result["options"]
+
+        print("Please touch your security key to register the credential...")
+
+        # Step 3: Perform WebAuthn registration
+        from .fido2_client import (
+            Fido2NotFoundError,
+            Fido2TimeoutError,
+            Fido2UserInteractionRequiredError,
+            _b64url_decode,
+            _b64url_encode,
+            _serialize_auth_data,
+            _serialize_client_data,
+        )
+        from fido2.client import WebAuthnClient
+        from fido2.hid import list_devices
+        from fido2.webauthn import (
+            CredentialCreationOptions,
+            PublicKeyCredentialDescriptor,
+        )
+
+        challenge = _b64url_decode(options["challenge"])
+        user_id = _b64url_decode(options["user"]["id"])
+
+        pub_key_cred_params = []
+        for param in options.get("pubKeyCredParams", []):
+            pub_key_cred_params.append({
+                "type": param.get("type", "public-key"),
+                "alg": param.get("alg"),
+            })
+
+        exclude_credentials = []
+        for cred in options.get("excludeCredentials", []):
+            if "id" in cred:
+                cred_id = _b64url_decode(cred["id"])
+                exclude_credentials.append(PublicKeyCredentialDescriptor(
+                    type=cred.get("type", "public-key"),
+                    id=cred_id,
+                    transports=cred.get("transports"),
+                ))
+
+        public_key = {
+            "rp": options.get("rp", {}),
+            "user": {
+                "id": user_id,
+                "name": options["user"].get("name", ""),
+                "display_name": options["user"].get("displayName", ""),
+            },
+            "challenge": challenge,
+            "pubKeyCredParams": pub_key_cred_params,
+            "timeout": options.get("timeout", 60000),
+            "excludeCredentials": exclude_credentials or None,
+            "attestation": options.get("attestation", "none"),
+        }
+
+        try:
+            devices = list_devices()
+            if not devices:
+                raise Fido2NotFoundError("No FIDO2 device found")
+            webauthn_client = WebAuthnClient()
+            credential = webauthn_client.make_credential(public_key)
+        except OSError as e:
+            err_str = str(e).lower()
+            if "fido" in err_str or "device" in err_str or "usb" in err_str or "no such" in err_str:
+                raise APIClientError(f"No FIDO2 device found: {e}") from e
+            if "time" in err_str or "timeout" in err_str:
+                raise APIClientError(f"Registration timed out: {e}") from e
+            raise APIClientError(f"FIDO2 error: {e}") from e
+        except ValueError as e:
+            err_msg = str(e).lower()
+            if "user" in err_msg or "presence" in err_msg or "touch" in err_msg:
+                raise APIClientError("Please touch your security key") from e
+            raise APIClientError(f"FIDO2 error: {e}") from e
+
+        # Step 4: Format credential response
+        auth_response = credential.auth_response
+        cred_id = auth_response.credential_id
+        auth_data_bytes = auth_response.auth_data
+        attestation_object = auth_response.attestation_object
+
+        cred_response = {
+            "id": _b64url_encode(cred_id),
+            "rawId": _b64url_encode(cred_id),
+            "response": {
+                "clientDataJSON": _b64url_encode(_serialize_client_data(auth_response.client_data)),
+                "authenticatorData": _b64url_encode(_serialize_auth_data(auth_data_bytes)),
+                "attestationObject": _b64url_encode(attestation_object),
+                "transports": auth_response.transports or [],
+            },
+            "type": "public-key",
+            "clientExtensionResults": {},
+        }
+
+        # Step 5: Complete registration
+        result = client.post(
+            "/api/v1/credentials/add/browser/complete",
+            json={
+                "challenge_id": challenge_id,
+                "response": cred_response,
+                "label": label,
+            },
+            extra_headers={"X-Elevation-Token": elevation_token},
+        )
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        print(f"Credential added successfully.")
+        print(f"  Credential ID: {result.get('id', '')}")
+        print(f"  Label: {result.get('label', label)}")
+        print(f"  Status: ok")
+        return 0
+    except APIClientError as e:
+        print(f"Failed to add credential: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Failed to add credential: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_credential_remove(client: APIClient, args: Any) -> int:
+    """Remove a credential (requires elevation via WebAuthn re-auth)."""
+    try:
+        credential_id = args.credential_id
+
+        # Step 1: Elevate
+        print("Re-authenticating with security key for elevation...")
+        elevation_token = _elevate(client)
+        print("Elevation successful.")
+
+        # Step 2: Remove credential
+        client.delete(
+            f"/api/v1/credentials/{credential_id}",
+            extra_headers={"X-Elevation-Token": elevation_token},
+        )
+        print(f"Credential '{credential_id}' removed.")
+        return 0
+    except APIClientError as e:
+        print(f"Failed to remove credential: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Failed to remove credential: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_enroll(client: APIClient, args: Any) -> int:
+    """Enrollment operations (headless, uses enrollment token)."""
+    enroll_command = getattr(args, "enroll_command", None)
+    if enroll_command is None:
+        print("Error: enroll subcommand required (start, complete)", file=sys.stderr)
+        return 1
+
+    if enroll_command == "start":
+        return cmd_enroll_start(client, args)
+    elif enroll_command == "complete":
+        return cmd_enroll_complete(client, args)
+    else:
+        print(f"Unknown enroll command: {enroll_command}", file=sys.stderr)
+        return 1
+
+
+def cmd_enroll_start(client: APIClient, args: Any) -> int:
+    """Start enrollment: validate token, get WebAuthn challenge."""
+    try:
+        token = args.token
+
+        result = client.post(
+            "/api/v1/enroll/browser/start",
+            json={"enrollment_token": token},
+        )
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        print(f"Enrollment challenge ready.")
+        print(f"  Challenge ID: {result.get('challenge_id', '')}")
+        print(f"  Next step: Run 'venya enroll complete' with the WebAuthn attestation response.")
+        return 0
+    except APIClientError as e:
+        print(f"Enrollment start failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Enrollment start failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_enroll_complete(client: APIClient, args: Any) -> int:
+    """Complete enrollment: submit WebAuthn attestation."""
+    try:
+        token = args.token
+        challenge_id = args.challenge_id
+        response = json.loads(args.response)
+        label = getattr(args, "label", None)
+
+        payload = {
+            "enrollment_token": token,
+            "challenge_id": challenge_id,
+            "response": response,
+        }
+        if label:
+            payload["label"] = label
+
+        result = client.post(
+            "/api/v1/enroll/browser/complete",
+            json=payload,
+        )
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        print(f"Enrollment completed successfully.")
+        print(f"  Status: ok")
+        print(f"  User ID: {result.get('user_id', '')}")
+        print(f"  Credential ID: {result.get('credential_id', '')}")
+        print(f"  Next step: Run 'venya exec' to authenticate with your new key.")
+        return 0
+    except APIClientError as e:
+        print(f"Enrollment complete failed: {e}", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as e:
+        print(f"Invalid response JSON: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Enrollment complete failed: {e}", file=sys.stderr)
+        return 1
 
 
 # --- CA Key Management Commands (local, run on server) ---

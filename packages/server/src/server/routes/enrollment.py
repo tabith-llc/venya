@@ -1,4 +1,8 @@
-"""Enrollment flow endpoints."""
+"""Enrollment flow endpoints.
+
+Admin endpoints for managing enrollment tokens (old flow, superseded by
+Phase 1 admin users endpoint).
+"""
 
 import logging
 
@@ -13,31 +17,24 @@ logger = logging.getLogger("venya.server")
 
 
 class EnrollmentTokenCreateRequest(BaseModel):
-    user_id: str = Field(..., description="User ID to enroll")
-    auth_mode: str = Field(
-        "security-key", description="Auth mode: security-key or platform"
-    )
+    user_id: str = Field(..., description="User ID that already exists")
 
 
 class EnrollmentTokenCreateResponse(BaseModel):
     token: str
-    expires_at: str
-    enrollment_url: str
-
-
-class EnrollmentTokenConsumeRequest(BaseModel):
-    token: str = Field(..., description="Enrollment token")
-    user_id: str = Field(..., description="User ID being enrolled")
-
-
-class EnrollmentTokenConsumeResponse(BaseModel):
-    enrolled: bool
-    user_id: str
-    auth_mode: str
+    expires_in_seconds: int = 900
 
 
 class EnrollmentTokenListResponse(BaseModel):
     tokens: list[dict]
+
+
+class EnrollmentTokenRevokeRequest(BaseModel):
+    token_id: int
+
+
+class EnrollmentTokenRevokeResponse(BaseModel):
+    revoked: bool
 
 
 # --- Helper functions ---
@@ -66,25 +63,40 @@ async def enrollment_create_token(
     req: EnrollmentTokenCreateRequest,
     request: Request,
 ) -> EnrollmentTokenCreateResponse:
-    """Create an enrollment token for a new user.
+    """Create an enrollment token for an existing user.
 
     Requires admin permission.
-    The token is used in the enrollment URL for the user to complete setup.
     """
     db = _get_db(request)
     try:
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from datetime import timezone as tz
+
+        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from vault.iam.models import User
 
         em = EnrollmentManager(db)
-        token = em.create_enrollment_token(
-            user_id=req.user_id,
-            auth_mode=req.auth_mode,
-        )
+
+        # Find user by user_id string
+        user = db.query(User).filter(User.user_id == req.user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User '{req.user_id}' not found",
+            )
+
+        token, plaintext = em.create_enrollment_token(user.id)
         db.commit()
         return EnrollmentTokenCreateResponse(
-            token=token.token,
-            expires_at=token.expires_at.isoformat(),
-            enrollment_url=f"/api/v1/enrollment/confirm?token={token.token}&user_id={req.user_id}",
+            token=plaintext,
+            expires_in_seconds=900,
+        )
+    except HTTPException:
+        raise
+    except EnrollmentError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
         )
     except Exception as e:
         db.rollback()
@@ -109,22 +121,25 @@ async def enrollment_list_tokens(
     """
     db = _get_db(request)
     try:
+        from datetime import timezone as tz
+
         from vault.iam.models import EnrollmentToken
 
-        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
         tokens = (
             db.query(EnrollmentToken)
             .filter(
-                EnrollmentToken.consumed == False,  # noqa: E712
-                EnrollmentToken.expires_at > now,
+                EnrollmentToken.state.in_(["created", "in_progress"]),
+                EnrollmentToken.expires_at > __import__("datetime").datetime.now(tz.utc),
             )
-            .order_by(EnrollmentToken.expires_at.desc())
+            .order_by(EnrollmentToken.created_at.desc())
             .all()
         )
         result = [
             {
-                "token": t.token,
+                "id": t.id,
                 "user_id": t.user_id,
+                "state": t.state,
+                "created_at": t.created_at.isoformat(),
                 "expires_at": t.expires_at.isoformat(),
             }
             for t in tokens
@@ -135,33 +150,26 @@ async def enrollment_list_tokens(
 
 
 @router.post(
-    "/enrollment/confirm",
-    response_model=EnrollmentTokenConsumeResponse,
+    "/enrollment/tokens/{token_id}/revoke",
+    response_model=EnrollmentTokenRevokeResponse,
     status_code=status.HTTP_200_OK,
 )
-async def enrollment_confirm(
-    req: EnrollmentTokenConsumeRequest,
+async def enrollment_revoke_token(
+    token_id: int,
     request: Request,
-) -> EnrollmentTokenConsumeResponse:
-    """Complete enrollment using a token.
+) -> EnrollmentTokenRevokeResponse:
+    """Revoke an enrollment token.
 
-    Called after the user has completed WebAuthn registration.
+    Requires admin permission.
     """
     db = _get_db(request)
     try:
         from vault.iam.enrollment_manager import EnrollmentManager
 
         em = EnrollmentManager(db)
-        user = em.consume_enrollment_token(
-            token_value=req.token,
-            auth_mode="security-key",
-        )
+        revoked = em.revoke_token(token_id)
         db.commit()
-        return EnrollmentTokenConsumeResponse(
-            enrolled=True,
-            user_id=user.user_id,
-            auth_mode=user.auth_mode,
-        )
+        return EnrollmentTokenRevokeResponse(revoked=revoked)
     except Exception as e:
         db.rollback()
         raise HTTPException(

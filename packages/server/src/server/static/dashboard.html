@@ -7,12 +7,12 @@
     <link rel="stylesheet" href="/static/css/app.css">
 </head>
 <body>
-    <nav id="nav">
-        <a href="#dashboard" id="nav-secrets">Secrets</a>
-        <a href="#audit" id="nav-audit">Audit Log</a>
-        <button id="logout-btn" class="nav-logout">Logout</button>
-    </nav>
+    <div id="nav-container"></div>
+    <script src="/static/js/nav.js?v=1"></script>
     <div id="app">
+        <div id="welcome-bar" hidden>
+            <span id="welcome-text"></span>
+        </div>
         <section id="dashboard-section">
             <h1>Secrets</h1>
             <button id="store-secret-btn">Store Secret</button>
@@ -59,6 +59,7 @@
         </div>
     </div>
     <script src="/static/js/webauthn.min.js?v=2"></script>
+    <script src="/static/js/session-refresh.js?v=1"></script>
     <script src="/static/js/secrets.js?v=2"></script>
     <script src="/static/js/audit.js?v=2"></script>
 </body>

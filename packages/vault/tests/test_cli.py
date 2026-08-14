@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 
 from vault.cli.api_client import APIClient, APIClientAuthenticationError, APIClientError, Config
@@ -143,7 +143,7 @@ class TestConfig:
 
 def _make_mock_response(status_code=200, json_data=None, content=None):
     """Create a mock httpx.Response."""
-    mock = MagicMock(spec=httpx.Response)
+    mock = MagicMock(spec=httpx2.Response)
     mock.status_code = status_code
     if json_data is not None:
         mock.json.return_value = json_data
@@ -239,7 +239,7 @@ class TestAPIClient:
 
             mock_http = MagicMock()
             mock_401_response = _make_mock_response(status_code=401, json_data={"detail": "Unauthorized"})
-            mock_401_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            mock_401_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
                 "unauthorized", request=MagicMock(), response=mock_401_response
             )
 
@@ -273,7 +273,7 @@ class TestAPIClient:
             mock_http = MagicMock()
 
             mock_response = _make_mock_response(status_code=401, json_data={"detail": "Unauthorized"})
-            mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
                 "unauthorized", request=MagicMock(), response=mock_response
             )
             mock_http.request.return_value = mock_response
@@ -294,7 +294,7 @@ class TestAPIClient:
         try:
             client = APIClient(config_file=config_file)
             mock_http = MagicMock()
-            mock_http.request.side_effect = httpx.ConnectError("Connection refused")
+            mock_http.request.side_effect = httpx2.ConnectError("Connection refused")
             client._http = mock_http
 
             with pytest.raises(APIClientError, match="Connection failed"):
@@ -312,7 +312,7 @@ class TestAPIClient:
         try:
             client = APIClient(config_file=config_file)
             mock_http = MagicMock()
-            mock_http.request.side_effect = httpx.TimeoutException("Timeout")
+            mock_http.request.side_effect = httpx2.TimeoutException("Timeout")
             client._http = mock_http
 
             with pytest.raises(APIClientError, match="timed out"):
@@ -332,7 +332,7 @@ class TestAPIClient:
             mock_http = MagicMock()
 
             mock_response = _make_mock_response(status_code=500, json_data={"detail": "Internal server error"})
-            mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
                 "server error", request=MagicMock(), response=mock_response
             )
             mock_http.request.return_value = mock_response

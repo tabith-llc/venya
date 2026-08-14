@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Venya - Admin Tokens</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+    <div id="nav-container"></div>
+    <script src="/static/js/nav.js?v=1"></script>
+    <div id="app">
+        <h1>Enrollment Tokens</h1>
+        <button id="issue-token-btn" class="btn-primary">Issue New Token</button>
+        <div id="token-filters">
+            <label for="filter-user">Filter by User
+                <select id="filter-user">
+                    <option value="">All Users</option>
+                </select>
+            </label>
+        </div>
+        <table id="tokens-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>User</th>
+                    <th>State</th>
+                    <th>Created</th>
+                    <th>Expires</th>
+                    <th>Used</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="tokens-tbody"></tbody>
+        </table>
+        <div id="empty-state" class="empty-state" hidden>
+            <p>No tokens found.</p>
+        </div>
+        <div id="loading-state" class="loading-state" hidden>
+            <p>Loading tokens...</p>
+        </div>
+    </div>
+
+    <!-- Issue Token Modal -->
+    <div id="issue-modal" class="modal-overlay" hidden>
+        <div class="modal">
+            <h2 class="modal-title">Issue New Token</h2>
+            <form id="issue-token-form">
+                <label>
+                    User
+                    <select id="issue-user" required>
+                        <option value="">Select a user...</option>
+                    </select>
+                </label>
+                <div id="issue-error" class="message-error" hidden></div>
+                <div class="modal-buttons">
+                    <button type="button" id="issue-cancel-btn" class="btn-secondary">Cancel</button>
+                    <button type="submit" id="issue-submit-btn" class="btn-primary">Issue</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Token Display Modal -->
+    <div id="token-modal" class="modal-overlay" hidden>
+        <div class="modal">
+            <h2 class="modal-title">Token Issued</h2>
+            <div id="token-content">
+                <p class="success-user">Token issued for <strong id="token-username"></strong>.</p>
+                <p class="success-label">Enrollment token (display once):</p>
+                <div class="token-display-box">
+                    <input type="text" id="token-display" readonly>
+                    <button type="button" id="copy-token-btn" class="btn-secondary">Copy</button>
+                </div>
+                <p class="success-warning" id="token-expiry">This token expires in 15 minutes. Display only once.</p>
+            </div>
+            <div class="modal-buttons modal-buttons-center">
+                <button type="button" id="token-close-btn" class="btn-primary">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Revoke Confirmation Modal -->
+    <div id="revoke-modal" class="modal-overlay" hidden>
+        <div class="modal">
+            <h2 class="modal-title">Revoke Token</h2>
+            <div id="revoke-content">
+                <p>Revoke token <strong id="revoke-token-id"></strong> for user <strong id="revoke-username"></strong>?</p>
+                <div id="revoke-error" class="message-error" hidden></div>
+            </div>
+            <div class="modal-buttons">
+                <button type="button" id="revoke-cancel-btn" class="btn-secondary">Cancel</button>
+                <button type="button" id="revoke-confirm-btn" class="btn-delete">Revoke</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/webauthn.min.js?v=2"></script>
+    <script src="/static/js/session-refresh.js?v=1"></script>
+    <script src="/static/js/admin-tokens.js?v=1"></script>
+</body>
+</html>

@@ -23,7 +23,7 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("serial_number", sa.String(64), nullable=False),
         sa.Column("executor_id", sa.String(64), nullable=True),
-        sa.Column("revoked_at", sa.DateTime(), nullable=False),
+        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("reason", sa.Text(), nullable=True),
         sa.UniqueConstraint("serial_number", name="uq_executor_cert_revocations_serial_number"),
     )

@@ -216,6 +216,13 @@ async def init_vault(
             description="System administrator — full access",
         )
         db.add(admin_role)
+
+        user_role = Role(
+            name="user",
+            permissions="read",
+            description="Regular user — read-only access",
+        )
+        db.add(user_role)
         db.flush()
 
         admin_user = User(
@@ -347,11 +354,11 @@ async def init_complete(
 
         # Store WebAuthn credential in database
         webauthn_cred = WebAuthnCredential(
-            credential_id=cred.credential_id,
             user_id=cred.user_id,
-            raw_id=cred.credential_data.get("raw_id", ""),
-            response=json.dumps(cred.credential_data.get("response", {})),
-            transports=json.dumps(cred.transports),
+            credential_id=cred.credential_id,
+            public_key=cred.public_key,
+            sign_count=cred.sign_count,
+            is_active=True,
         )
         db.add(webauthn_cred)
 
@@ -367,6 +374,7 @@ async def init_complete(
         recovery_code_hash = _hash_recovery_code(recovery_code, pepper)
 
         user.auth_mode = "webauthn"
+        user.status = "active"
         user.enrolled_at = datetime.now(timezone.utc)
         user.recovery_code_hash = recovery_code_hash
 

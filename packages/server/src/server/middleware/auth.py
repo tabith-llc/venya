@@ -47,7 +47,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/api/v1/auth/login/browser/assert",
         "/api/v1/auth/refresh/browser",
         "/api/v1/auth/logout/browser",
-        "/api/v1/enroll/browser",
+        "/api/v1/enroll/browser/start",
         "/api/v1/enroll/browser/complete",
         "/api/v1/auth/elevate/browser/challenge",
         "/api/v1/auth/elevate/browser/assert",
@@ -55,6 +55,10 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/enroll",
         "/enroll-admin",
         "/dashboard",
+        "/admin/users",
+        "/admin/tokens",
+        "/credentials",
+        "/favicon.ico",
         "/static",
     })
 
@@ -201,7 +205,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             user_info["roles"] = [str(m.role_id) for m in user_roles]
 
             # Auto-refresh: if token is near expiry, create new token
-            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            now = datetime.now(timezone.utc)
             if session.expires_at < now + timedelta(seconds=60):
                 new_token = manager.refresh_token(token)
                 if new_token:

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Venya - Admin Roles</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+    <div id="nav-container"></div>
+    <script src="/static/js/nav.js?v=1"></script>
+    <div id="app">
+        <h1>Roles</h1>
+        <button id="create-role-btn" class="btn-primary">Create Role</button>
+        <table id="roles-table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Permissions</th>
+                    <th>Description</th>
+                    <th>Members</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="roles-tbody"></tbody>
+        </table>
+        <div id="empty-state" class="empty-state" hidden>
+            <p>No roles found.</p>
+        </div>
+        <div id="loading-state" class="loading-state" hidden>
+            <p>Loading roles...</p>
+        </div>
+    </div>
+
+    <!-- Create Role Modal -->
+    <div id="create-role-modal" class="modal-overlay" hidden>
+        <div class="modal">
+            <h2 class="modal-title">Create Role</h2>
+            <form id="create-role-form">
+                <label>
+                    Name
+                    <input type="text" id="create-role-name" required placeholder="e.g. analyst" autocomplete="off" spellcheck="false">
+                </label>
+                <label>
+                    Permissions
+                    <select id="create-role-permissions">
+                        <option value="read">Read</option>
+                        <option value="read-write" selected>Read-Write</option>
+                    </select>
+                </label>
+                <label>
+                    Description
+                    <input type="text" id="create-role-description" placeholder="Optional description">
+                </label>
+                <div id="create-role-error" class="message-error" hidden></div>
+                <div class="modal-buttons">
+                    <button type="button" id="create-role-cancel-btn" class="btn-secondary">Cancel</button>
+                    <button type="submit" id="create-role-submit-btn" class="btn-primary">Create</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Edit Role Modal -->
+    <div id="edit-role-modal" class="modal-overlay" hidden>
+        <div class="modal">
+            <h2 class="modal-title">Edit Role</h2>
+            <form id="edit-role-form">
+                <label>
+                    Name
+                    <input type="text" id="edit-role-name" required autocomplete="off" spellcheck="false">
+                </label>
+                <label>
+                    Permissions
+                    <select id="edit-role-permissions">
+                        <option value="read">Read</option>
+                        <option value="read-write">Read-Write</option>
+                    </select>
+                </label>
+                <label>
+                    Description
+                    <input type="text" id="edit-role-description">
+                </label>
+                <div id="edit-role-error" class="message-error" hidden></div>
+                <div class="modal-buttons">
+                    <button type="button" id="edit-role-cancel-btn" class="btn-secondary">Cancel</button>
+                    <button type="submit" id="edit-role-submit-btn" class="btn-primary">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Delete Role Modal -->
+    <div id="delete-role-modal" class="modal-overlay" hidden>
+        <div class="modal">
+            <h2 class="modal-title">Delete Role</h2>
+            <div id="delete-role-content">
+                <p>Delete <strong id="delete-role-name"></strong>? This action cannot be undone.</p>
+                <div id="delete-role-error" class="message-error" hidden></div>
+            </div>
+            <div class="modal-buttons">
+                <button type="button" id="delete-role-cancel-btn" class="btn-secondary">Cancel</button>
+                <button type="button" id="delete-role-confirm-btn" class="btn-delete">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Manage Members Modal -->
+    <div id="manage-members-modal" class="modal-overlay" hidden>
+        <div class="modal modal-large">
+            <h2 class="modal-title" id="manage-members-title">Manage Members</h2>
+            <div id="manage-members-content">
+                <div id="members-list"></div>
+                <form id="add-member-form">
+                    <label>
+                        Add User
+                        <select id="add-member-user">
+                            <option value="">Select a user...</option>
+                        </select>
+                    </label>
+                    <div id="add-member-error" class="message-error" hidden></div>
+                    <div class="modal-buttons">
+                        <button type="submit" id="add-member-btn" class="btn-primary">Add</button>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-buttons modal-buttons-center">
+                <button type="button" id="manage-members-close-btn" class="btn-primary">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/webauthn.min.js?v=2"></script>
+    <script src="/static/js/session-refresh.js?v=1"></script>
+    <script src="/static/js/admin-roles.js?v=1"></script>
+</body>
+</html>

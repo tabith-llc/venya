@@ -25,7 +25,7 @@ INSTALL_DIR="${VENYA_INSTALL_DIR:-}"
 SKIP_PROMPT="${VENYA_SKIP_PROMPT:-}"
 TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-executor-install.tar.gz}"
 EXECUTOR_ID="${VENYA_EXECUTOR_ID:-jump-1}"
-SERVER_URL="${VENYA_SERVER_URL:-http://localhost:8080}"
+SERVER_URL="${VENYA_SERVER_URL:-https://venya-vault}"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -281,12 +281,13 @@ EOF
 info "Executor config written to /etc/venya/executor.toml"
 info "Note: mTLS certs must be generated on the vault server and copied here."
 
-# --- Install systemd service ---
+# --- Install systemd service and mount unit ---
 info "Installing systemd service..."
 SYSTEMD_DIR="/etc/systemd/system"
 cp "$INSTALL_DIR/systemd/venya-executor.service" "$SYSTEMD_DIR/"
+cp "$INSTALL_DIR/systemd/tmp-venya_secrets.mount" "$SYSTEMD_DIR/"
 systemctl daemon-reload
-systemctl enable venya-executor.service
+systemctl enable venya-executor.service tmp-venya_secrets.mount
 info "Enabled venya-executor.service"
 
 # --- Verification ---
@@ -306,6 +307,10 @@ if [ ! -f /etc/venya/executor.toml ]; then
 fi
 if [ ! -f /etc/systemd/system/venya-executor.service ]; then
     error "venya-executor.service not found"
+    ERRORS=$((ERRORS + 1))
+fi
+if [ ! -f /etc/systemd/system/tmp-venya_secrets.mount ]; then
+    error "tmp-venya_secrets.mount not found"
     ERRORS=$((ERRORS + 1))
 fi
 if [ "$ERRORS" -gt 0 ]; then

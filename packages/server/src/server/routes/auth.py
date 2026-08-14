@@ -125,14 +125,13 @@ async def auth_registration_complete(
         db = backend.get_session()
         try:
             from vault.iam.models import WebAuthnCredential
-            import json
 
             credential = WebAuthnCredential(
-                credential_id=cred.credential_id,
                 user_id=cred.user_id,
-                raw_id=cred.credential_data.get("raw_id", ""),
-                response=json.dumps(cred.credential_data.get("response", {})),
-                transports=json.dumps(cred.transports),
+                credential_id=cred.credential_id,
+                public_key=cred.public_key,
+                sign_count=cred.sign_count,
+                is_active=True,
             )
             db.add(credential)
             db.commit()

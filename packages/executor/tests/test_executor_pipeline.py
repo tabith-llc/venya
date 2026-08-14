@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 
 from executor.command_validator import CommandValidator
@@ -37,9 +37,9 @@ def executor(validator: CommandValidator) -> Executor:
 
 
 @pytest.fixture()
-def mock_http_client() -> httpx.Client:
-    client = MagicMock(spec=httpx.Client)
-    response = MagicMock(spec=httpx.Response)
+def mock_http_client() -> httpx2.Client:
+    client = MagicMock(spec=httpx2.Client)
+    response = MagicMock(spec=httpx2.Response)
     response.status_code = 200
     response.json.return_value = {"revoked": True, "count": 0}
     response.raise_for_status.return_value = None
@@ -93,7 +93,7 @@ class TestExecute:
         with pytest.raises(ValueError):
             executor.execute("invalid-command", secrets)
 
-    def test_execute_revoke_tokens_called(self, executor: Executor, mock_http_client: httpx.Client):
+    def test_execute_revoke_tokens_called(self, executor: Executor, mock_http_client: httpx2.Client):
         """revoke_tokens is called after execution."""
         executor.http_client = mock_http_client
 

@@ -37,17 +37,25 @@ class SessionConfig(BaseModel):
 class RateLimitConfig(BaseModel):
     """Rate limiting configuration."""
 
+    enforce: bool = Field(
+        default=True,
+        description="Whether to enforce rate limiting",
+    )
     max_attempts: int = Field(
         default=5,
         description="Maximum failed attempts before lockout",
     )
-    window_seconds: float = Field(
-        default=300.0,
+    window_seconds: int = Field(
+        default=300,
         description="Time window in seconds for counting failures",
     )
     ip_rate_limit: int = Field(
-        default=100,
+        default=1000,
         description="Maximum requests per IP per minute",
+    )
+    lockout_reinstate_minutes: int = Field(
+        default=15,
+        description="Minutes before a locked-out user can try again",
     )
 
 

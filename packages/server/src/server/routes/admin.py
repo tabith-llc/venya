@@ -26,6 +26,43 @@ class AdminEnrollResponse(BaseModel):
     enrollment_token: str | None = None
 
 
+class AdminCreateUserRequest(BaseModel):
+    username: str = Field(..., description="User ID (e.g. 'jsmith')")
+    display_name: str | None = Field(None, description="Human-readable name")
+    roles: list[str] = Field(default_factory=list, description="Role names to assign")
+
+
+class AdminCreateUserResponse(BaseModel):
+    user_id: str
+    status: str
+    enrollment_token: str
+    expires_in_seconds: int = 900
+
+
+class AdminReEnrollResponse(BaseModel):
+    user_id: str
+    enrollment_token: str
+    expires_in_seconds: int = 900
+    credentials_deactivated: int = 0
+    tokens_revoked: int = 0
+
+
+class AdminUserTokenListResponse(BaseModel):
+    tokens: list[dict]
+
+
+class AdminUserTokenCreateResponse(BaseModel):
+    user_id: str
+    enrollment_token: str
+    expires_in_seconds: int = 900
+    previous_tokens_revoked: int = 0
+
+
+class AdminTokenRevokeResponse(BaseModel):
+    revoked: bool
+    token_id: int
+
+
 class AdminRemoveRequest(BaseModel):
     user_id: str = Field(..., description="User ID to remove")
 
@@ -40,6 +77,8 @@ class AdminUserListResponse(BaseModel):
 
 
 class AdminConfigureUserRequest(BaseModel):
+    display_name: str | None = None
+    status: str | None = None
     auth_mode: str | None = None
     session_timeout: int | None = None
 
@@ -173,22 +212,126 @@ async def admin_enroll(
     """Enroll a new user (admin only).
 
     Creates an enrollment token that the user can use to complete onboarding.
+    DEPRECATED: Use POST /admin/users instead.
     """
     db = _get_db(request)
     try:
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from datetime import timezone as tz
+
+        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from vault.iam.models import User
 
         em = EnrollmentManager(db)
-        token = em.create_enrollment_token(
+
+        # Check if user already exists
+        existing = db.query(User).filter(User.user_id == req.user_id).first()
+        if existing:
+            raise EnrollmentError(f"User '{req.user_id}' already exists")
+
+        # Create user
+        user = User(
             user_id=req.user_id,
+            status="pending_enrollment",
             auth_mode=req.auth_mode,
         )
+        db.add(user)
+        db.flush()
+
+        # Create enrollment token
+        token, plaintext = em.create_enrollment_token(user.id)
         db.commit()
+
         return AdminEnrollResponse(
             enrolled=True,
             user_id=req.user_id,
             auth_mode=req.auth_mode,
-            enrollment_token=token.token,
+            enrollment_token=plaintext,
+        )
+    except HTTPException:
+        raise
+    except EnrollmentError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    finally:
+        db.close()
+
+
+@router.post(
+    "/admin/users",
+    response_model=AdminCreateUserResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_user(
+    req: AdminCreateUserRequest,
+    request: Request,
+) -> AdminCreateUserResponse:
+    """Create a new user and enrollment token (admin only).
+
+    Phase 1: Admin creates user + enrollment token in one call.
+    The admin delivers the token to the user out-of-band.
+    """
+    db = _get_db(request)
+    try:
+        from datetime import timezone as tz
+
+        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from vault.iam.models import Role, RoleMember, User
+
+        em = EnrollmentManager(db)
+
+        # Check if user already exists
+        existing = db.query(User).filter(User.user_id == req.username).first()
+        if existing:
+            raise EnrollmentError(f"User '{req.username}' already exists")
+
+        # Create user
+        user = User(
+            user_id=req.username,
+            display_name=req.display_name,
+            status="pending_enrollment",
+        )
+        db.add(user)
+        db.flush()
+
+        # Assign roles
+        for role_name in req.roles:
+            role = db.query(Role).filter(Role.name == role_name).first()
+            if role is None:
+                raise EnrollmentError(f"Role '{role_name}' not found")
+            membership = RoleMember(user_id=user.user_id, role_id=role.id)
+            db.add(membership)
+
+        # Create enrollment token
+        token, plaintext = em.create_enrollment_token(user.id)
+        db.commit()
+
+        logger.info(
+            "Admin created user '%s' (ID: %d) with roles: %s",
+            req.username, user.id, req.roles,
+        )
+
+        return AdminCreateUserResponse(
+            user_id=req.username,
+            status="pending_enrollment",
+            enrollment_token=plaintext,
+            expires_in_seconds=900,
+        )
+    except HTTPException:
+        raise
+    except EnrollmentError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
         )
     except Exception as e:
         db.rollback()
@@ -226,6 +369,10 @@ async def admin_remove(
         db.query(RoleMember).filter(RoleMember.user_id == user_id).delete()
         # Remove sessions
         db.query(Session).filter(Session.user_id == user_id).delete()
+        # Remove enrollment tokens (user_id is integer FK)
+        from vault.iam.models import EnrollmentToken
+
+        db.query(EnrollmentToken).filter(EnrollmentToken.user_id == user.id).delete()
         # Remove the user
         db.delete(user)
         db.commit()
@@ -260,6 +407,8 @@ async def admin_list_users(
         result = [
             {
                 "user_id": u.user_id,
+                "display_name": u.display_name,
+                "status": u.status,
                 "auth_mode": u.auth_mode,
                 "enrolled_at": u.enrolled_at.isoformat() if u.enrolled_at else None,
                 "session_timeout": u.session_timeout,
@@ -293,6 +442,10 @@ async def admin_configure_user(
                 detail=f"User not found: {user_id}",
             )
 
+        if req.display_name is not None:
+            user.display_name = req.display_name
+        if req.status is not None:
+            user.status = req.status
         if req.auth_mode is not None:
             user.auth_mode = req.auth_mode
         if req.session_timeout is not None:
@@ -926,6 +1079,227 @@ async def admin_revoke_executor(
             cert.serial_number,
         )
         return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id)
+    finally:
+        db.close()
+
+
+# --- Phase 6: Re-enrollment ---
+
+
+@router.post(
+    "/admin/users/{user_id}/re-enroll",
+    response_model=AdminReEnrollResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_re_enroll(
+    user_id: str,
+    request: Request,
+) -> AdminReEnrollResponse:
+    """Re-enroll a user who has lost all credentials (admin only).
+
+    Phase 6: Resets user for fresh enrollment.
+    - Sets user status to pending_enrollment
+    - Revokes all active enrollment tokens
+    - Deactivates all WebAuthn credentials
+    - Generates new enrollment token
+    """
+    db = _get_db(request)
+    try:
+        from datetime import timezone as tz
+
+        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from vault.iam.models import User, WebAuthnCredential
+
+        em = EnrollmentManager(db)
+
+        # Find user
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not found: {user_id}",
+            )
+
+        # Deactivate all active credentials
+        deactivated = (
+            db.query(WebAuthnCredential)
+            .filter(
+                WebAuthnCredential.user_id == user.user_id,
+                WebAuthnCredential.is_active == True,  # noqa: E712
+            )
+            .update({"is_active": False}, synchronize_session="fetch")
+        )
+
+        # Revoke all active enrollment tokens
+        tokens_revoked = em.revoke_all_active_tokens(user.id)
+
+        # Set user status to pending_enrollment
+        user.status = "pending_enrollment"
+
+        # Generate new enrollment token
+        token, plaintext = em.create_enrollment_token(user.id)
+        db.commit()
+
+        logger.info(
+            "Re-enrolled user '%s' (ID: %d), deactivated %d credentials, revoked %d tokens",
+            user_id, user.id, deactivated, tokens_revoked,
+        )
+
+        return AdminReEnrollResponse(
+            user_id=user_id,
+            enrollment_token=plaintext,
+            expires_in_seconds=900,
+            credentials_deactivated=deactivated,
+            tokens_revoked=tokens_revoked,
+        )
+    except HTTPException:
+        raise
+    except EnrollmentError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    finally:
+        db.close()
+
+
+# --- Phase 7: Admin Token Management ---
+
+
+@router.get(
+    "/admin/users/{user_id}/enrollment-tokens",
+    response_model=AdminUserTokenListResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_list_user_tokens(
+    user_id: str,
+    request: Request,
+) -> AdminUserTokenListResponse:
+    """List all enrollment tokens for a user (admin only).
+
+    Phase 7: Shows token states for audit/management.
+    """
+    db = _get_db(request)
+    try:
+        from vault.iam.models import EnrollmentToken, User
+
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not found: {user_id}",
+            )
+
+        tokens = (
+            db.query(EnrollmentToken)
+            .filter(EnrollmentToken.user_id == user.id)
+            .order_by(EnrollmentToken.created_at.desc())
+            .all()
+        )
+
+        result = [
+            {
+                "id": t.id,
+                "state": t.state,
+                "created_at": t.created_at.isoformat(),
+                "expires_at": t.expires_at.isoformat(),
+                "used_at": t.used_at.isoformat() if t.used_at else None,
+            }
+            for t in tokens
+        ]
+
+        return AdminUserTokenListResponse(tokens=result)
+    finally:
+        db.close()
+
+
+@router.post(
+    "/admin/users/{user_id}/enrollment-tokens",
+    response_model=AdminUserTokenCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_user_token(
+    user_id: str,
+    request: Request,
+) -> AdminUserTokenCreateResponse:
+    """Issue a new enrollment token for a user (admin only).
+
+    Phase 7: Revokes existing tokens and issues a new one.
+    """
+    db = _get_db(request)
+    try:
+        from vault.iam.enrollment_manager import EnrollmentManager
+        from vault.iam.models import User
+
+        em = EnrollmentManager(db)
+
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User not found: {user_id}",
+            )
+
+        # Revoke existing active tokens
+        tokens_revoked = em.revoke_all_active_tokens(user.id)
+
+        # Create new token
+        token, plaintext = em.create_enrollment_token(user.id)
+        db.commit()
+
+        return AdminUserTokenCreateResponse(
+            user_id=user_id,
+            enrollment_token=plaintext,
+            expires_in_seconds=900,
+            previous_tokens_revoked=tokens_revoked,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    finally:
+        db.close()
+
+
+@router.delete(
+    "/admin/enrollment-tokens/{token_id}",
+    response_model=AdminTokenRevokeResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_revoke_token(
+    token_id: int,
+    request: Request,
+) -> AdminTokenRevokeResponse:
+    """Revoke a specific enrollment token (admin only).
+
+    Phase 7: Revokes a single token by ID.
+    """
+    db = _get_db(request)
+    try:
+        from vault.iam.enrollment_manager import EnrollmentManager
+
+        em = EnrollmentManager(db)
+        revoked = em.revoke_token(token_id)
+        db.commit()
+
+        return AdminTokenRevokeResponse(revoked=revoked, token_id=token_id)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
     finally:
         db.close()
 

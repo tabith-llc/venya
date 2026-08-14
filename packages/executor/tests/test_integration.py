@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import httpx
+import httpx2
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -131,7 +131,7 @@ class TestMTLSHandshake:
         # Create a fresh httpx test client pointing at our test server
         # (tls_client has mTLS cert but the TestClient doesn't do real TLS,
         #  so we use it just for HTTP; the real TLS validation happens via
-        #  the httpx.Client cert= parameter proving the cert/key are valid)
+        #  the httpx2.Client cert= parameter proving the cert/key are valid)
         db = _make_mock_db()
         app = _create_test_app(ca_manager, db)
         test_client = TestClient(app)
@@ -185,7 +185,7 @@ class TestMTLSHandshake:
         ca_key, ca_cert = _make_ca_pair()
         new_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
 
-        mock_response = MagicMock(spec=httpx.Response)
+        mock_response = MagicMock(spec=httpx2.Response)
         mock_response.status_code = 201
         mock_response.json.return_value = {
             "executor_id": "test-executor",
@@ -223,7 +223,7 @@ class TestMTLSHandshake:
         # Sign executor cert with CA2 (wrong CA)
         other_cert = _sign_executor_cert(ca_key2, ca_cert2, "test-executor")
 
-        mock_response = MagicMock(spec=httpx.Response)
+        mock_response = MagicMock(spec=httpx2.Response)
         mock_response.status_code = 201
         mock_response.json.return_value = {
             "executor_id": "test-executor",
@@ -251,7 +251,7 @@ class TestMTLSHandshake:
             ),
             cert_rotation=CertificateRotationConfig(rotation_days=30, rotate_before_days=3),
         )
-        client = httpx.Client(base_url="https://test-server.local", verify=False)
+        client = httpx2.Client(base_url="https://test-server.local", verify=False)
         mgr = CertificateManager(config, client)
 
         client.post = MagicMock(return_value=mock_response)
@@ -324,7 +324,7 @@ class TestCertificateRotation:
         new_key = ec.generate_private_key(ec.SECP256R1())
         new_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
 
-        mock_response = MagicMock(spec=httpx.Response)
+        mock_response = MagicMock(spec=httpx2.Response)
         mock_response.status_code = 201
         mock_response.json.return_value = {
             "executor_id": "test-executor",
@@ -394,7 +394,7 @@ class TestCertificateRotation:
         # Generate new cert for rotation response
         new_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
 
-        mock_response = MagicMock(spec=httpx.Response)
+        mock_response = MagicMock(spec=httpx2.Response)
         mock_response.status_code = 201
         mock_response.json.return_value = {
             "executor_id": "test-executor",
@@ -452,7 +452,7 @@ class TestRevocation:
         cert_manager.serial = format(initial_cert.serial_number, "016x")
 
         # Mock server response with the serial in the revocation list
-        mock_response = MagicMock(spec=httpx.Response)
+        mock_response = MagicMock(spec=httpx2.Response)
         mock_response.json.return_value = {
             "revoked_serials": [cert_manager.serial, "0000000000000002"]
         }
@@ -475,7 +475,7 @@ class TestRevocation:
         )
         cert_manager.serial = format(initial_cert.serial_number, "016x")
 
-        mock_response = MagicMock(spec=httpx.Response)
+        mock_response = MagicMock(spec=httpx2.Response)
         mock_response.json.return_value = {
             "revoked_serials": ["0000000000000001", "0000000000000002"]
         }
@@ -500,7 +500,7 @@ class TestRevocation:
 
         # Simulate server unreachable
         with MagicMock() as mock_get:
-            mock_get.side_effect = httpx.RequestError(
+            mock_get.side_effect = httpx2.RequestError(
                 "Connection refused", request=MagicMock()
             )
             cert_manager.client.get = mock_get
