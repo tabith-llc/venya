@@ -91,7 +91,7 @@ def _set_session_cookie(response: Response, access_token: str) -> None:
         value=access_token,
         httponly=True,
         secure=True,
-        samesite="strict",
+        samesite="lax",
         max_age=COOKIE_MAX_AGE,
         path="/",
     )
@@ -607,11 +607,13 @@ async def auth_me(request: Request) -> AuthMeResponse:
     """
     result = _get_session_from_cookie(request)
     if result is None:
+        logger.info("AUTH_ME DEBUG: _get_session_from_cookie returned None")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
         )
 
+    logger.info("AUTH_ME DEBUG: got session, user_id=%s", result[1].user_id if result and len(result) > 1 else "unknown")
     db, session, user_info = result
     try:
         from vault.iam.models import User
