@@ -293,7 +293,9 @@ def executor_config(tmp_path: Path, tmp_ca_dir: Path) -> ExecutorConfig:
 @pytest.fixture()
 def cert_manager(executor_config: ExecutorConfig, tls_client: httpx2.Client) -> CertificateManager:
     """Create a CertificateManager with real mTLS client."""
-    return CertificateManager(executor_config, tls_client)
+    cm = CertificateManager(executor_config)
+    cm.client = tls_client
+    return cm
 
 
 # ---------------------------------------------------------------------------

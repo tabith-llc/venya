@@ -168,8 +168,10 @@ def client() -> httpx2.Client:
 
 @pytest.fixture()
 def cert_manager(config: ExecutorConfig, client: httpx2.Client) -> CertificateManager:
-    """Create a CertificateManager instance."""
-    return CertificateManager(config, client)
+    """Create a CertificateManager instance with mTLS client for rotate/check_revocation."""
+    cm = CertificateManager(config)
+    cm.client = client
+    return cm
 
 
 # --- Helper: create mock server response ---
@@ -210,8 +212,14 @@ class TestRegister:
 
         mock_response = _make_mock_response(executor_cert, ca_cert, executor_cert.serial_number)
 
-        with patch.object(cert_manager.client, "post", return_value=mock_response):
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
+
             cert_manager.register("test-executor")
+
+        # Verify throwaway client was created with verify=True
+        MockClient.assert_called_once_with(verify=True, timeout=30.0)
 
         # Verify files were created
         assert os.path.exists(cert_manager.cert_path)
@@ -235,7 +243,10 @@ class TestRegister:
 
         mock_response = _make_mock_response(executor_cert, ca_cert, executor_cert.serial_number)
 
-        with patch.object(cert_manager.client, "post", return_value=mock_response):
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
+
             cert_manager.register("test-executor")
 
         # CA cert should be saved
@@ -249,14 +260,13 @@ class TestRegister:
         Path(cert_manager.cert_path).write_bytes(b"-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----")
         Path(cert_manager.key_path).write_bytes(b"-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----")
 
-        with patch.object(cert_manager.client, "post") as mock_post:
+        with patch("executor.daemon.httpx2.Client") as MockClient:
             cert_manager.register("test-executor")
-            mock_post.assert_not_called()
+            MockClient.assert_not_called()
 
         # Serial should be loaded from existing cert (even if fake, no error)
         # With a fake cert, _load_metadata will fail, but register should
         # still skip the server call
-        assert not mock_post.called
 
 
 class TestRegisterErrors:
@@ -271,11 +281,14 @@ class TestRegisterErrors:
             response=MagicMock(),
         )
 
-        with patch.object(cert_manager.client, "post", return_value=mock_response):
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
+
             with pytest.raises(httpx2.HTTPStatusError):
                 cert_manager.register("test-executor")
 
-    def test_register_invalid_ca_signature(self, config: ExecutorConfig, client: httpx2.Client):
+    def test_register_invalid_ca_signature(self, config: ExecutorConfig):
         """Registration raises RuntimeError when cert is not signed by CA."""
         # Create a cert signed by a DIFFERENT CA
         ca_key1, ca_cert1 = _make_ca_pair()
@@ -284,8 +297,11 @@ class TestRegisterErrors:
 
         mock_response = _make_mock_response(executor_cert, ca_cert1, executor_cert.serial_number)
 
-        mgr = CertificateManager(config, client)
-        with patch.object(mgr.client, "post", return_value=mock_response):
+        mgr = CertificateManager(config)
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
+
             with pytest.raises(RuntimeError, match="CA validation failed"):
                 mgr.register("test-executor")
 

@@ -15,7 +15,7 @@ import os
 import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
@@ -196,9 +196,9 @@ class TestMTLSHandshake:
         }
         mock_response.raise_for_status.return_value = None
 
-        with MagicMock() as mock_post:
-            mock_post.return_value = mock_response
-            cert_manager.client.post = mock_post
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
             cert_manager.register("test-executor")
 
         # Verify cert file
@@ -251,13 +251,14 @@ class TestMTLSHandshake:
             ),
             cert_rotation=CertificateRotationConfig(rotation_days=30, rotate_before_days=3),
         )
-        client = httpx2.Client(base_url="https://test-server.local", verify=False)
-        mgr = CertificateManager(config, client)
+        mgr = CertificateManager(config)
 
-        client.post = MagicMock(return_value=mock_response)
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
 
-        with pytest.raises(RuntimeError, match="CA validation failed"):
-            mgr.register("test-executor")
+            with pytest.raises(RuntimeError, match="CA validation failed"):
+                mgr.register("test-executor")
 
 
 # ---------------------------------------------------------------------------
