@@ -145,6 +145,12 @@ class ServerConfig(BaseSettings):
         description="Secret pepper for hashing recovery codes. Must be set in production.",
     )
 
+    # Executor registration hardening
+    executor_registration_require_token: bool = Field(
+        default=False,
+        description="Reject executor registrations without a valid enrollment token (enterprise hardening)",
+    )
+
     @classmethod
     def from_file(cls, path: str | Path) -> ServerConfig:
         """Load configuration from a TOML file.
