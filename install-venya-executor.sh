@@ -281,6 +281,17 @@ EOF
 info "Executor config written to /etc/venya/executor.toml"
 info "Note: mTLS certs must be generated on the vault server and copied here."
 
+# --- Write bootstrap config (enrollment token) ---
+if [ -n "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" ]; then
+    cat >> /etc/venya/executor.toml << EOF
+
+[bootstrap]
+enrollment_token = "$VENYA_EXECUTOR_ENROLLMENT_TOKEN"
+tls_verify = true
+EOF
+    info "Bootstrap enrollment token configured"
+fi
+
 # --- Install systemd service and mount unit ---
 info "Installing systemd service..."
 SYSTEMD_DIR="/etc/systemd/system"
