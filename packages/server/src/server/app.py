@@ -63,21 +63,22 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     from .middleware import security_headers
     from .middleware import rate_limit_headers
 
-    app.add_middleware(security_headers.SecurityHeadersMiddleware)
+    app.add_middleware(security_headers.SecurityHeadersMiddleware, cors_origins=config.cors.origins)
     app.add_middleware(rate_limit_headers.RateLimitHeaderMiddleware)
     app.add_middleware(rate_limit.RateLimitMiddleware, config=config.rate_limit)
     app.add_middleware(auth_middleware.SessionMiddleware)
     app.add_middleware(rbac.RBACMiddleware)
 
-    # CORS
-    if config.cors_origins:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=config.cors_origins,
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+    # CORS — always register; empty origins = deny all (Starlette behavior)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.cors.origins,
+        allow_credentials=config.cors.allow_credentials,
+        allow_methods=config.cors.allow_methods,
+        allow_headers=config.cors.allow_headers,
+        expose_headers=config.cors.expose_headers,
+        max_age=config.cors.max_age,
+    )
 
     # FIDO2 manager initialized in lifespan after DB is ready
     return app
@@ -86,6 +87,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     """Lifespan context manager for FastAPI."""
     config: ServerConfig = app.state.config  # type: ignore[attr-defined]
+
+    # Warn if CORS origins are still default in non-debug environment
+    if not config.debug and config.cors.origins == ["http://localhost"]:
+        logger.warning(
+            "CORS origins are still default (['http://localhost']) in non-debug mode. "
+            "Update VENYA__CORS__ORIGINS to allow browser clients."
+        )
 
     # Startup: initialize DB, vault, and CA (FIDO2 is already initialized)
     from .dependencies import init_db
