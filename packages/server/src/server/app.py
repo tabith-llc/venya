@@ -123,6 +123,20 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         ca_manager.initialize()
     app.state.ca_manager = ca_manager  # type: ignore[attr-defined]
 
+    # Initialize admin CA (required if admin_mtls is enabled)
+    from pathlib import Path
+
+    from .ca import AdminCAManager
+
+    admin_ca_dir = Path(config.ca_dir) / "admin-ca"
+    admin_ca_manager = AdminCAManager(admin_ca_dir, config.ca_security)
+    if config.admin_mtls.enabled and not admin_ca_manager.has_ca:
+        raise RuntimeError(
+            "admin_mtls.enabled but admin CA not found at admin-ca/. "
+            "Run: venya admin init-admin-ca"
+        )
+    app.state.admin_ca_manager = admin_ca_manager  # type: ignore[attr-defined]
+
     # Periodic session cleanup
     from datetime import datetime, timezone
 
@@ -175,10 +189,24 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 def main() -> None:
     """Run the server."""
     import logging
+    import os
 
     import uvicorn
 
     config = ServerConfig()
+
+    # Admin mTLS startup enforcement
+    if config.admin_mtls.enabled and config.host not in ("127.0.0.1", "::1", "localhost"):
+        raise RuntimeError(
+            "admin_mtls.enabled requires loopback bind address (127.0.0.1 or ::1). "
+            "Set VENYA_HOST=127.0.0.1 or disable admin_mtls."
+        )
+
+    passphrase_env = config.admin_mtls.ca_key_passphrase_env
+    if config.admin_mtls.enabled and not os.environ.get(passphrase_env):
+        raise RuntimeError(
+            f"admin_mtls.enabled requires {passphrase_env} environment variable to be set."
+        )
 
     from server.utils.sensitive_log_filter import SensitiveFieldFilter
 
