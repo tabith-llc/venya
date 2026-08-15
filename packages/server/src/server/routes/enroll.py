@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from ..utils.token_binding import verify_binding_hash
+from ..utils.time import is_expired
 from pydantic import BaseModel, Field
 
 from ..fido2.browser_adapter import (
@@ -179,7 +180,13 @@ async def browser_enroll_complete(
             token = em.get_token_by_plaintext(req.enrollment_token)
             if token is None or token.state not in ("in_progress", "created"):
                 raise EnrollmentError("Invalid enrollment token or not in progress")
-            if token.expires_at <= datetime.now(timezone.utc):
+            server_config = getattr(request.app.state, "config", None)
+            tolerance = (
+                server_config.clock_skew.token_tolerance_seconds
+                if server_config and hasattr(server_config, "clock_skew")
+                else 60
+            )
+            if is_expired(token.expires_at, tolerance):
                 raise EnrollmentError("Enrollment token has expired")
         except EnrollmentError as e:
             raise HTTPException(

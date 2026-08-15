@@ -184,6 +184,29 @@ class CORSConfig(BaseModel):
     max_age: int = Field(default=3600, ge=0, description="Preflight cache in seconds")
 
 
+class ClockSkewConfig(BaseModel):
+    """Clock skew tolerance configuration.
+
+    Different environments have different clock sync realities:
+    - Cloud/Kubernetes: NTP reliable, 60s is fine.
+    - On-prem/edge: Physical hardware, may need 120s.
+    - High-security: May tighten to 15-30s.
+    """
+
+    token_tolerance_seconds: int = Field(
+        default=60,
+        ge=0,
+        le=300,
+        description="Clock skew tolerance for token/session expiration checks (0-300s)",
+    )
+    cert_tolerance_seconds: int = Field(
+        default=300,
+        ge=0,
+        le=600,
+        description="Clock skew tolerance for certificate validity checks (0-600s)",
+    )
+
+
 class AdminMTLSConfig(BaseModel):
     """Configuration for admin mTLS authentication."""
 
@@ -266,6 +289,9 @@ class ServerConfig(BaseSettings):
 
     # Admin mTLS
     admin_mtls: AdminMTLSConfig = Field(default_factory=AdminMTLSConfig)
+
+    # Clock skew tolerance
+    clock_skew: ClockSkewConfig = Field(default_factory=ClockSkewConfig)
 
     # Audit forwarding
     audit_remote_url: str | None = Field(default=None, description="Remote syslog URL (tls://host:port)")
