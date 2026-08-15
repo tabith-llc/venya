@@ -190,7 +190,7 @@ class TestAdminSignCert:
         assert cn_attrs[0].value == "admin@venya.internal"
 
     def test_admin_cert_has_correct_san(self, admin_ca_dir, admin_ca_security):
-        """Signed admin cert should have SAN DNS = admin_identity."""
+        """Signed admin cert should have RFC822Name SAN for email-style identity."""
         os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
@@ -198,8 +198,36 @@ class TestAdminSignCert:
         cert, _, _ = manager.sign_admin_cert("operator@venya.internal")
 
         san_ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        emails = san_ext.value.get_values_for_type(x509.RFC822Name)
+        assert "operator@venya.internal" in emails
+
+    def test_admin_cert_email_identity_uses_rfc822_san(self, admin_ca_dir, admin_ca_security):
+        """Email-style identity (with @) should use RFC822Name SAN."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        cert, _, _ = manager.sign_admin_cert("admin@workstation.local")
+
+        san_ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        emails = san_ext.value.get_values_for_type(x509.RFC822Name)
         dns_names = san_ext.value.get_values_for_type(x509.DNSName)
-        assert "operator@venya.internal" in dns_names
+        assert "admin@workstation.local" in emails
+        assert len(dns_names) == 0
+
+    def test_admin_cert_hostname_identity_uses_dns_san(self, admin_ca_dir, admin_ca_security):
+        """Hostname-style identity (no @) should use DNSName SAN."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        cert, _, _ = manager.sign_admin_cert("admin-cli.workstation")
+
+        san_ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        emails = san_ext.value.get_values_for_type(x509.RFC822Name)
+        dns_names = san_ext.value.get_values_for_type(x509.DNSName)
+        assert len(emails) == 0
+        assert "admin-cli.workstation" in dns_names
 
     def test_admin_cert_has_client_auth_eku(self, admin_ca_dir, admin_ca_security):
         """Signed admin cert should have ExtendedKeyUsage = clientAuth."""
@@ -296,6 +324,96 @@ class TestAdminSignCert:
         cn = ca_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
         assert len(cn) == 1
         assert cn[0].value == "Venya Admin CA"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Identity Extraction (SAN type fix)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractIdentity:
+    """Tests for _extract_identity_from_cert with RFC822Name support."""
+
+    def test_extract_identity_prefers_rfc822_over_dns(self, admin_ca_dir, admin_ca_security):
+        """RFC822Name SAN should take precedence over DNSName SAN."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        ca_cert, ca_key = manager._load_ca_cert_and_key()
+
+        from cryptography.hazmat.primitives.asymmetric import ec as ec_mod
+
+        test_key = ec_mod.generate_private_key(ec_mod.SECP256R1())
+
+        cert_with_both_sans = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "cn-identity"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(test_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=90))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([
+                    x509.RFC822Name("email@preferred.local"),
+                    x509.DNSName("dns-not-preferred.local"),
+                ]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        from server.middleware.auth import _extract_identity_from_cert
+
+        identity = _extract_identity_from_cert(cert_with_both_sans)
+        assert identity == "email@preferred.local"
+
+    def test_extract_identity_falls_back_to_cn(self, admin_ca_dir, admin_ca_security):
+        """Should fall back to CN when no SAN present."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        ca_cert, ca_key = manager._load_ca_cert_and_key()
+
+        from cryptography.hazmat.primitives.asymmetric import ec as ec_mod
+
+        test_key = ec_mod.generate_private_key(ec_mod.SECP256R1())
+
+        cert_no_san = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "cn-only-identity"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(test_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=90))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        from server.middleware.auth import _extract_identity_from_cert
+
+        identity = _extract_identity_from_cert(cert_no_san)
+        assert identity == "cn-only-identity"
 
 
 # ---------------------------------------------------------------------------

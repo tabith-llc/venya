@@ -541,6 +541,24 @@ ADMIN_CA_VALIDITY_DAYS = 3650  # 10 years
 ADMIN_CERT_VALIDITY_DAYS = 90  # 90 days
 
 
+def _build_san_for_identity(identity: str) -> x509.SubjectAlternativeName:
+    """Build a SubjectAlternativeName extension for the given identity.
+
+    Uses RFC822Name (email SAN) for email-style identities containing '@',
+    and DNSName for hostname-style identities.
+
+    Args:
+        identity: The admin identity string.
+
+    Returns:
+        A SubjectAlternativeName extension value.
+    """
+    if "@" in identity:
+        return x509.SubjectAlternativeName([x509.RFC822Name(identity)])
+    else:
+        return x509.SubjectAlternativeName([x509.DNSName(identity)])
+
+
 class AdminCAManager:
     """Manages the admin CA keypair, certificates, and signing operations.
 
@@ -723,7 +741,7 @@ class AdminCAManager:
                 critical=False,
             )
             .add_extension(
-                x509.SubjectAlternativeName([x509.DNSName(admin_identity)]),
+                _build_san_for_identity(admin_identity),
                 critical=False,
             )
         )
