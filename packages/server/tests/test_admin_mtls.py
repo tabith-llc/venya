@@ -794,3 +794,160 @@ class TestStartupEnforcement:
         # Should not raise — CA exists
         if config.admin_mtls.enabled and not admin_ca_manager.has_ca:
             pytest.fail("Should not raise when admin CA exists")
+
+
+# ---------------------------------------------------------------------------
+# Tests: Phase 5 — Admin Cert Revocation Endpoint
+# ---------------------------------------------------------------------------
+
+
+def _create_revoke_test_app():
+    """Create a minimal test app for revocation endpoint tests."""
+    from fastapi import FastAPI
+    from unittest.mock import MagicMock
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+
+    from server.config import ServerConfig
+    from server.routes import admin as admin_routes
+    from vault.iam.models import AdminCertRevocation
+
+    app = FastAPI()
+    app.state.config = ServerConfig()
+
+    # Track revocations
+    revocations = []
+
+    backend = MagicMock()
+
+    def get_session():
+        mock_db = MagicMock()
+
+        def query_side_effect(model):
+            if model is AdminCertRevocation:
+                mock_q = MagicMock()
+
+                def filter_side_effect(*args):
+                    mock_f = MagicMock()
+
+                    def first_side_effect():
+                        # Extract serial from the filter — it's a ColumnElement comparison
+                        # The serial_number column value is stored in revocations
+                        for rev in revocations:
+                            mock_f.serial = rev.serial_number
+                            if mock_f.serial:
+                                return rev
+                        return None
+
+                    mock_f.first = first_side_effect
+                    return mock_f
+
+                mock_q.filter = filter_side_effect
+                return mock_q
+            mock_q = MagicMock()
+            mock_q.filter.return_value.first.return_value = None
+            return mock_q
+
+        mock_db.query.side_effect = query_side_effect
+
+        def add_side_effect(obj):
+            revocations.append(obj)
+
+        def commit_side_effect():
+            pass
+
+        def rollback_side_effect():
+            pass
+
+        mock_db.add = add_side_effect
+        mock_db.commit = commit_side_effect
+        mock_db.rollback = rollback_side_effect
+        return mock_db
+
+    backend.get_session = get_session
+    app.state.backend = backend
+
+    # Add auth middleware with admin user (bypasses SessionMiddleware)
+    mock_user = MagicMock()
+    mock_user.user_id = "admin"
+    mock_user.roles = ["admin"]
+    mock_user.permissions = "read-write"
+
+    class AuthMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            request.state.auth_user = mock_user
+            return await call_next(request)
+
+    app.add_middleware(AuthMiddleware)
+    app.include_router(admin_routes.router, prefix="/api/v1")
+
+    return app, backend, revocations
+
+
+class TestRevokeAdminCertEndpoint:
+    """Tests for POST /api/v1/admin/certs/revoke."""
+
+    def test_revoke_admin_cert_endpoint(self):
+        """Valid revocation request should return 200."""
+        serial_hex = "01ab2c3d4e5f6789"
+
+        app, backend, revocations = _create_revoke_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/admin/certs/revoke",
+            json={"serial": serial_hex, "reason": "test revocation"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["serial"] == serial_hex
+        assert data["revoked"] is True
+        assert data["reason"] == "test revocation"
+        assert len(revocations) == 1
+
+    def test_revoke_admin_cert_already_revoked(self):
+        """Revoking the same serial twice should return 200 (idempotent)."""
+        serial_hex = "02abcd1234567890"
+
+        app, backend, revocations = _create_revoke_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        # First revocation
+        resp1 = client.post(
+            "/api/v1/admin/certs/revoke",
+            json={"serial": serial_hex, "reason": "first"},
+        )
+        assert resp1.status_code == 200
+
+        # Second revocation (idempotent)
+        resp2 = client.post(
+            "/api/v1/admin/certs/revoke",
+            json={"serial": serial_hex, "reason": "second"},
+        )
+        assert resp2.status_code == 200
+        assert resp2.json()["already_revoked"] is True
+        # Should only have 1 revocation record (idempotent)
+        assert len(revocations) == 1
+
+    def test_revoke_admin_cert_invalid_serial(self):
+        """Invalid serial format should return 400."""
+        app, backend, revocations = _create_revoke_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/admin/certs/revoke",
+            json={"serial": "not-hex!", "reason": "test"},
+        )
+        assert resp.status_code == 400
+
+    def test_revoke_admin_cert_long_serial(self):
+        """Serial too long should return 400."""
+        app, backend, revocations = _create_revoke_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/admin/certs/revoke",
+            json={"serial": "a" * 20, "reason": "test"},
+        )
+        assert resp.status_code == 400

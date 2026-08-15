@@ -1448,3 +1448,69 @@ async def admin_key_rotation(
     Admin only. Creates a new key version and begins re-wrapping all secrets.
     """
     return await admin_key_version_rotate(req, request)
+
+
+# --- Admin mTLS Certificate Revocation ---
+
+
+class AdminRevokeCertRequest(BaseModel):
+    serial: str = Field(..., description="Hex serial number of certificate to revoke")
+    reason: str = Field(default="unspecified", description="Revocation reason")
+
+
+@router.post("/admin/certs/revoke")
+async def admin_revoke_admin_cert(
+    req: AdminRevokeCertRequest,
+    request: Request,
+) -> dict:
+    """Revoke an admin certificate by serial number.
+
+    Admin only. Idempotent — revoking the same serial twice returns success.
+    """
+    # Validate serial format
+    serial = req.serial.strip()
+    try:
+        int(serial, 16)
+        if len(serial) > 16:
+            raise ValueError("too long")
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid serial format — must be hex string (up to 16 chars)",
+        )
+
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server not initialized",
+        )
+
+    # Check if already revoked (idempotent)
+    db = backend.get_session()
+    try:
+        from vault.iam.models import AdminCertRevocation
+
+        existing = (
+            db.query(AdminCertRevocation)
+            .filter(AdminCertRevocation.serial_number == serial)
+            .first()
+        )
+
+        if existing:
+            logger.info("Admin cert %s already revoked (reason: %s)", serial, existing.reason)
+            return {"serial": serial, "revoked": True, "reason": existing.reason, "already_revoked": True}
+
+        # Insert new revocation
+        now = datetime.now(timezone.utc)
+        revocation = AdminCertRevocation(serial_number=serial, reason=req.reason, revoked_at=now)
+        db.add(revocation)
+        db.commit()
+
+        logger.info("Admin cert %s revoked (reason: %s)", serial, req.reason)
+        return {"serial": serial, "revoked": True, "reason": req.reason}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
