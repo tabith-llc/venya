@@ -87,6 +87,21 @@ class Fido2Config(BaseModel):
     )
 
 
+class CRLConfig(BaseModel):
+    """Configuration for Certificate Revocation List management."""
+
+    crl_retention_days: int = Field(
+        default=90,
+        ge=1,
+        le=365,
+        description="Days to keep revocation records before purge",
+    )
+    crl_url: str | None = Field(
+        default=None,
+        description="CRL Distribution Point URL for CDP extension (e.g., https://crl.venya.internal/api/v1/executors/certs/crl)",
+    )
+
+
 class CASecurityConfig(BaseModel):
     """CA key security configuration."""
 
@@ -195,6 +210,9 @@ class ServerConfig(BaseSettings):
 
     # CA security
     ca_security: CASecurityConfig = Field(default_factory=CASecurityConfig)
+
+    # CRL (Certificate Revocation List)
+    crl: CRLConfig = Field(default_factory=CRLConfig)
 
     # Executor enrollment (token TTL, auth, rate limiting)
     executor_enrollment: ExecutorEnrollmentConfig = Field(

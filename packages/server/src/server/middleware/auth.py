@@ -42,6 +42,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/api/v1/recovery",
         "/api/v1/executors/register",
         "/api/v1/executors/certs/revocation-list",
+        "/api/v1/executors/certs/crl",
         "/api/v1/heartbeat",
         "/api/v1/auth/login/browser/challenge",
         "/api/v1/auth/login/browser/assert",

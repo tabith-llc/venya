@@ -230,12 +230,14 @@ class CAManager:
         self,
         csr: x509.CertificateSigningRequest,
         executor_id: str,
+        crl_url: str | None = None,
     ) -> x509.Certificate:
         """Sign a CSR with the CA, producing an executor certificate.
 
         Args:
             csr: The certificate signing request to sign.
             executor_id: Unique executor identifier (used as CN).
+            crl_url: Optional CRL Distribution Point URL for CDP extension.
 
         Returns:
             Signed X.509 certificate.
@@ -289,6 +291,20 @@ class CAManager:
                 critical=False,
             )
         )
+
+        # Add CRL Distribution Point if URL is provided
+        if crl_url:
+            builder = builder.add_extension(
+                x509.CRLDistributionPoints([
+                    x509.DistributionPoint(
+                        full_name=[x509.UniformResourceIdentifier(crl_url)],
+                        relative_name=None,
+                        reasons=None,
+                        crl_issuer=None,
+                    )
+                ]),
+                critical=False,
+            )
 
         cert = builder.sign(ca_key, hashes.SHA256())
         return cert
@@ -454,3 +470,66 @@ class CAManager:
             PEM-encoded CA private key bytes.
         """
         return self.ca_key_path.read_bytes()
+
+    def generate_crl(self, db_session, max_entries: int = 1000) -> bytes:
+        """Generate a DER-encoded Certificate Revocation List.
+
+        Queries the database for revoked certificate serial numbers,
+        builds a CRL signed by the CA, and returns it in DER format.
+
+        Args:
+            db_session: SQLAlchemy session for querying revocations.
+            max_entries: Maximum number of revocations to include.
+
+        Returns:
+            DER-encoded CRL bytes.
+        """
+        from sqlalchemy import desc
+
+        from vault.iam.models import ExecutorCertRevocation
+
+        ca_cert, ca_key = self.load_ca()
+        now = datetime.now(timezone.utc)
+
+        revocations = (
+            db_session.query(ExecutorCertRevocation)
+            .order_by(desc(ExecutorCertRevocation.revoked_at))
+            .limit(max_entries)
+            .all()
+        )
+
+        builder = x509.CertificateRevocationListBuilder()
+        builder = builder.issuer_name(ca_cert.subject)
+        builder = builder.last_update(now)
+        builder = builder.next_update(now + timedelta(hours=1))
+
+        for rev in revocations:
+            revoked_cert = (
+                x509.RevokedCertificateBuilder()
+                .serial_number(int(rev.serial_number, 16))
+                .revocation_date(rev.revoked_at)
+                .build(hashes.SHA256())
+            )
+            builder = builder.add_revoked_certificate(revoked_cert)
+
+        crl = builder.sign(ca_key, hashes.SHA256())
+        return crl.public_bytes(serialization.Encoding.DER)
+
+    def purge_expired_revocations(self, db_session, retention_days: int) -> int:
+        """Delete revocation records older than retention_days.
+
+        Args:
+            db_session: SQLAlchemy session.
+            retention_days: Keep records for this many days.
+
+        Returns:
+            Number of deleted records.
+        """
+        from vault.iam.models import ExecutorCertRevocation
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        deleted_count = db_session.query(ExecutorCertRevocation).filter(
+            ExecutorCertRevocation.revoked_at < cutoff
+        ).delete(synchronize_session=False)
+        db_session.commit()
+        return deleted_count
