@@ -3,22 +3,21 @@
 Tests cover:
 - BootstrapConfig loading from TOML
 - _clear_enrollment_token() removes token from config
-- TLS fallback in CertificateManager.register()
-- Network error re-raise in CertificateManager.register()
+- TLS verification behavior in CertificateManager.register()
+- VENYA_TLS_VERIFY environment variable handling
+- Network error handling in CertificateManager.register()
 """
 
 from __future__ import annotations
 
-import ssl
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
 
 from executor.config import BootstrapConfig, ExecutorConfig
-from executor.daemon import _is_tls_error
 
 
 class TestBootstrapConfig:
@@ -46,19 +45,6 @@ class TestBootstrapConfig:
 
         config = BootstrapConfig.model_validate({"tls_verify": "0"})
         assert config.tls_verify is False
-
-
-class TestIsTLSError:
-    """Tests for _is_tls_error() in executor daemon."""
-
-    def test_ssl_cert_verification_error(self):
-        exc = httpx2.ConnectError("SSL: CERTIFICATE_VERIFY_FAILED")
-        exc.__cause__ = ssl.SSLCertVerificationError("cert failed")
-        assert _is_tls_error(exc) is True
-
-    def test_connection_refused(self):
-        exc = httpx2.ConnectError("Connection refused")
-        assert _is_tls_error(exc) is False
 
 
 class TestClearEnrollmentToken:
@@ -155,27 +141,19 @@ tls_verify = false
         assert data["bootstrap"]["tls_verify"] is False
 
 
-class TestDaemonRegistrationTLSFallback:
-    """Tests for TLS fallback in CertificateManager.register() with throwaway clients."""
+class TestDaemonRegistrationTLSVerification:
+    """Tests for TLS verification in CertificateManager.register() with throwaway clients."""
 
-    def test_fallback_on_tls_error(self):
-        """Daemon creates throwaway client with verify=True first, falls back to verify=False on TLS error."""
-        tls_error = httpx2.ConnectError("SSL: CERTIFICATE_VERIFY_FAILED")
-        tls_error.__cause__ = ssl.SSLCertVerificationError("cert failed")
-        fallback_response = MagicMock()
-        fallback_response.json.return_value = {
+    def test_default_is_verify_true(self, monkeypatch):
+        """When VENYA_TLS_VERIFY is not set, verification is enabled."""
+        monkeypatch.delenv("VENYA_TLS_VERIFY", raising=False)
+
+        success_response = MagicMock()
+        success_response.json.return_value = {
             "cert_pem": "CERT", "ca_cert_pem": "CA",
             "serial_number": "01", "not_after": "2026-09-01",
         }
-        fallback_response.raise_for_status.return_value = None
-
-        call_count = [0]
-
-        def post_side_effect(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise tls_error
-            return fallback_response
+        success_response.raise_for_status.return_value = None
 
         with patch("executor.daemon.httpx2.Client") as MockClient, \
              patch("executor.daemon._generate_ecdsa_p256_keypair"), \
@@ -190,23 +168,140 @@ class TestDaemonRegistrationTLSFallback:
             MockPath.return_value.mkdir = MagicMock()
 
             MockClient.return_value.__enter__.return_value = MockClient.return_value
-            MockClient.return_value.post.side_effect = post_side_effect
+            MockClient.return_value.post.return_value = success_response
 
-            from executor.config import ExecutorConfig
             from executor.daemon import CertificateManager
 
             config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
             cm = CertificateManager(config)
             cm.register("test-1")
 
-            assert MockClient.call_count == 2
-            MockClient.assert_has_calls([
-                call(verify=True, timeout=30.0),
-                call(verify=False, timeout=30.0),
-            ], any_order=True)
+            MockClient.assert_called_once()
+            assert MockClient.call_args[1]["verify"] is True
 
-    def test_network_error_re_raises(self):
-        """Daemon re-raises ConnectError when not TLS-related (e.g., connection refused)."""
+    def test_explicit_true_is_verify_true(self, monkeypatch):
+        """VENYA_TLS_VERIFY=true enables verification."""
+        monkeypatch.setenv("VENYA_TLS_VERIFY", "true")
+
+        success_response = MagicMock()
+        success_response.json.return_value = {
+            "cert_pem": "CERT", "ca_cert_pem": "CA",
+            "serial_number": "01", "not_after": "2026-09-01",
+        }
+        success_response.raise_for_status.return_value = None
+
+        with patch("executor.daemon.httpx2.Client") as MockClient, \
+             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
+             patch("executor.daemon._create_csr", return_value=b"CSR"), \
+             patch("executor.daemon._validate_ca_signature"), \
+             patch("executor.daemon.Path") as MockPath, \
+             patch("executor.daemon.os.chmod"):
+            MockPath.return_value.write_bytes = MagicMock()
+            MockPath.return_value.exists.return_value = False
+            MockPath.return_value.chmod = MagicMock()
+            MockPath.return_value.parent = MagicMock()
+            MockPath.return_value.mkdir = MagicMock()
+
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = success_response
+
+            from executor.daemon import CertificateManager
+
+            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            cm = CertificateManager(config)
+            cm.register("test-1")
+
+            assert MockClient.call_args[1]["verify"] is True
+
+    def test_false_disables_verification_with_warning(self, monkeypatch, caplog):
+        """VENYA_TLS_VERIFY=false disables verification and logs a warning."""
+        monkeypatch.setenv("VENYA_TLS_VERIFY", "false")
+
+        success_response = MagicMock()
+        success_response.json.return_value = {
+            "cert_pem": "CERT", "ca_cert_pem": "CA",
+            "serial_number": "01", "not_after": "2026-09-01",
+        }
+        success_response.raise_for_status.return_value = None
+
+        with patch("executor.daemon.httpx2.Client") as MockClient, \
+             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
+             patch("executor.daemon._create_csr", return_value=b"CSR"), \
+             patch("executor.daemon._validate_ca_signature"), \
+             patch("executor.daemon.Path") as MockPath, \
+             patch("executor.daemon.os.chmod"), \
+             caplog.at_level("WARNING"):
+            MockPath.return_value.write_bytes = MagicMock()
+            MockPath.return_value.exists.return_value = False
+            MockPath.return_value.chmod = MagicMock()
+            MockPath.return_value.parent = MagicMock()
+            MockPath.return_value.mkdir = MagicMock()
+
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = success_response
+
+            from executor.daemon import CertificateManager
+
+            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            cm = CertificateManager(config)
+            cm.register("test-1")
+
+            assert MockClient.call_args[1]["verify"] is False
+            assert "TLS verification disabled" in caplog.text
+
+    def test_invalid_value_raises_error(self, monkeypatch):
+        """VENYA_TLS_VERIFY with invalid value raises RuntimeError."""
+        monkeypatch.setenv("VENYA_TLS_VERIFY", "maybe")
+
+        with patch("executor.daemon.httpx2.Client") as MockClient, \
+             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
+             patch("executor.daemon._create_csr", return_value=b"CSR"):
+            from executor.daemon import CertificateManager
+
+            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            cm = CertificateManager(config)
+
+            with pytest.raises(RuntimeError, match="Invalid VENYA_TLS_VERIFY"):
+                cm.register("test-1")
+
+            MockClient.assert_not_called()
+
+    def test_no_fallback_on_tls_error_with_verification(self, monkeypatch):
+        """Daemon fails securely on TLS error when VENYA_TLS_VERIFY=true."""
+        monkeypatch.setenv("VENYA_TLS_VERIFY", "true")
+
+        tls_error = httpx2.ConnectError("SSL: CERTIFICATE_VERIFY_FAILED")
+
+        with patch("executor.daemon.httpx2.Client") as MockClient, \
+             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
+             patch("executor.daemon._create_csr", return_value=b"CSR"), \
+             patch("executor.daemon._validate_ca_signature"), \
+             patch("executor.daemon.Path") as MockPath, \
+             patch("executor.daemon.os.chmod"):
+            MockPath.return_value.write_bytes = MagicMock()
+            MockPath.return_value.exists.return_value = False
+            MockPath.return_value.chmod = MagicMock()
+            MockPath.return_value.parent = MagicMock()
+            MockPath.return_value.mkdir = MagicMock()
+
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.side_effect = tls_error
+
+            from executor.daemon import CertificateManager
+
+            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            cm = CertificateManager(config)
+
+            with pytest.raises(RuntimeError, match="Registration failed. Verify server CA is trusted"):
+                cm.register("test-1")
+
+            assert MockClient.call_count == 1
+            MockClient.assert_called_once_with(verify=True, timeout=30.0)
+
+    def test_network_error_re_raises_when_verification_disabled(self, monkeypatch):
+        """Daemon re-raises ConnectError when VENYA_TLS_VERIFY=false and connection fails."""
+        monkeypatch.setenv("VENYA_TLS_VERIFY", "false")
+
         network_error = httpx2.ConnectError("Connection refused")
 
         with patch("executor.daemon.httpx2.Client") as MockClient, \
@@ -218,7 +313,6 @@ class TestDaemonRegistrationTLSFallback:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.side_effect = network_error
 
-            from executor.config import ExecutorConfig
             from executor.daemon import CertificateManager
 
             config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
@@ -227,8 +321,7 @@ class TestDaemonRegistrationTLSFallback:
             with pytest.raises(httpx2.ConnectError):
                 cm.register("test-1")
 
-            # Verify only one client created (no fallback for non-TLS errors)
-            MockClient.assert_called_once_with(verify=True, timeout=30.0)
+            MockClient.assert_called_once_with(verify=False, timeout=30.0)
 
     def test_uses_throwaway_not_self_client(self):
         """register() never uses self.client — always creates new httpx2.Client instances."""
@@ -254,7 +347,6 @@ class TestDaemonRegistrationTLSFallback:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = success_response
 
-            from executor.config import ExecutorConfig
             from executor.daemon import CertificateManager
 
             config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
@@ -263,4 +355,5 @@ class TestDaemonRegistrationTLSFallback:
 
             # Verify httpx2.Client was called (throwaway client created)
             MockClient.assert_called_once()
-            assert MockClient.call_args == call(verify=True, timeout=30.0)
+            assert MockClient.call_args[1]["verify"] is True
+            assert MockClient.call_args[1]["timeout"] == 30.0

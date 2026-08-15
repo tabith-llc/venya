@@ -1,7 +1,8 @@
 """CA (Certificate Authority) management for executor mTLS.
 
 Generates CA key/cert during initialization and signs executor CSRs.
-Uses ECDSA P-256 for all certificates.
+Uses ECDSA P-256 for all certificates. Supports passphrase-based
+encryption for CA private key storage.
 """
 
 from __future__ import annotations
@@ -17,6 +18,11 @@ from typing import Any
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import (
+    BestAvailableEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
 from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 
 logger = logging.getLogger("venya.ca")
@@ -26,17 +32,91 @@ CA_VALIDITY_DAYS = 3650  # 10 years
 EXECUTOR_VALIDITY_DAYS = 30  # 30 days
 
 
+def _load_passphrase(env_var: str) -> bytes | None:
+    """Load passphrase from environment variable.
+
+    Returns:
+        Passphrase as bytes, or None if not set.
+    """
+    passphrase = os.environ.get(env_var)
+    if passphrase:
+        return passphrase.encode("utf-8")
+    return None
+
+
+def _serialize_key_encrypted(key: ec.EllipticCurvePrivateKey, passphrase: bytes | None) -> bytes:
+    """Serialize a private key, optionally encrypting with a passphrase.
+
+    Args:
+        key: The private key to serialize.
+        passphrase: Optional passphrase for encryption.
+
+    Returns:
+        PEM-encoded key bytes (encrypted if passphrase provided).
+    """
+    if passphrase:
+        return key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=PrivateFormat.PKCS8,
+            encryption_algorithm=BestAvailableEncryption(passphrase),
+        )
+    else:
+        logger.warning(
+            "CA key will be stored UNENCRYPTED — set %s in production",
+            os.environ.get("CA_SECURITY__KEY_PASSPHRASE_ENV", "VENYA_CA_KEY_PASSPHRASE"),
+        )
+        return key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+
+
+def _deserialize_key(data: bytes, passphrase: bytes | None) -> ec.EllipticCurvePrivateKey:
+    """Deserialize a private key from PEM, optionally decrypting.
+
+    Args:
+        data: PEM-encoded key data.
+        passphrase: Optional passphrase for decryption.
+
+    Returns:
+        ECDSA private key instance.
+
+    Raises:
+        RuntimeError: If decryption fails or key cannot be loaded.
+    """
+    try:
+        return serialization.load_pem_private_key(data, password=passphrase)
+    except ValueError as e:
+        if passphrase:
+            raise RuntimeError(f"Failed to decrypt CA key with provided passphrase: {e}") from e
+        else:
+            raise RuntimeError(
+                "Failed to load CA key (may be encrypted but no passphrase provided). "
+                "Set the passphrase environment variable."
+            ) from e
+
+
 class CAManager:
     """Manages the CA keypair, certificates, and signing operations.
 
     The CA is generated once during initialization and stored on disk.
     All executor certificates are signed by this CA.
+
+    Supports passphrase-based encryption for the CA private key via
+    the VENYA_CA_KEY_PASSPHRASE environment variable.
     """
 
-    def __init__(self, ca_dir: str) -> None:
+    def __init__(self, ca_dir: str, ca_security: CASecurityConfig | None = None) -> None:
         self.ca_dir = Path(ca_dir)
         self.ca_key_path = self.ca_dir / "ca.key"
         self.ca_cert_path = self.ca_dir / "ca.crt"
+
+        # CA security config
+        if ca_security is not None:
+            self._key_passphrase_env = ca_security.key_passphrase_env
+        else:
+            self._key_passphrase_env = "VENYA_CA_KEY_PASSPHRASE"
 
     @property
     def has_ca(self) -> bool:
@@ -47,7 +127,8 @@ class CAManager:
         """Generate a new CA keypair and self-signed certificate.
 
         Creates the CA directory (if needed), generates an ECDSA P-256
-        keypair, and creates a self-signed CA certificate.
+        keypair, and creates a self-signed CA certificate. If a passphrase
+        is set via VENYA_CA_KEY_PASSPHRASE, the key will be encrypted on disk.
 
         Raises:
             RuntimeError: If CA already exists.
@@ -61,12 +142,11 @@ class CAManager:
         # Generate ECDSA P-256 keypair
         private_key = ec.generate_private_key(ec.SECP256R1())
 
-        # Store private key
-        key_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
+        # Load passphrase for encryption
+        passphrase = _load_passphrase(self._key_passphrase_env)
+
+        # Store private key (encrypted if passphrase provided)
+        key_pem = _serialize_key_encrypted(private_key, passphrase)
         self.ca_key_path.write_bytes(key_pem)
         os.chmod(str(self.ca_key_path), 0o600)
 
@@ -113,19 +193,37 @@ class CAManager:
         self.ca_cert_path.write_bytes(cert_pem)
         os.chmod(str(self.ca_cert_path), 0o644)
 
-        logger.info("CA initialized at %s", self.ca_dir)
+        logger.info("CA initialized at %s (encrypted=%s)", self.ca_dir, passphrase is not None)
 
     def load_ca(self) -> tuple[x509.Certificate, Any]:
         """Load the CA certificate and private key from disk.
 
+        If the key is encrypted, attempts to decrypt using the passphrase
+        from VENYA_CA_KEY_PASSPHRASE.
+
         Returns:
             Tuple of (certificate, private_key).
+
+        Raises:
+            RuntimeError: If the key cannot be decrypted.
         """
+        passphrase = _load_passphrase(self._key_passphrase_env)
+        key_data = self.ca_key_path.read_bytes()
+
+        # Check if key appears encrypted
+        is_encrypted = b"ENCRYPTED" in key_data
+
+        if is_encrypted and not passphrase:
+            raise RuntimeError(
+                f"CA key is encrypted but {self._key_passphrase_env} is not set. "
+                "Set the environment variable before starting the server."
+            )
+
+        if not is_encrypted and passphrase:
+            logger.warning("CA key is unencrypted but passphrase is set — ignoring passphrase")
+
+        private_key = _deserialize_key(key_data, passphrase)
         cert = x509.load_pem_x509_certificate(self.ca_cert_path.read_bytes())
-        private_key = serialization.load_pem_private_key(
-            self.ca_key_path.read_bytes(),
-            password=None,
-        )
         return cert, private_key
 
     def sign_csr(

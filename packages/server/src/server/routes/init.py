@@ -202,7 +202,8 @@ async def init_vault(
         config = getattr(request.app.state, "config", None)
         if config is not None:
             ca_dir = getattr(config, "ca_dir", "/var/lib/venya/ca")
-            ca_manager = CAManager(ca_dir)
+            ca_security = getattr(config, "ca_security", None)
+            ca_manager = CAManager(ca_dir, ca_security)
             if not ca_manager.has_ca:
                 try:
                     ca_manager.initialize()

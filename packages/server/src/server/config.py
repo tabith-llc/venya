@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger("venya.server")
 
 
 class DatabaseConfig(BaseModel):
@@ -84,6 +87,67 @@ class Fido2Config(BaseModel):
     )
 
 
+class CASecurityConfig(BaseModel):
+    """CA key security configuration."""
+
+    key_passphrase_env: str = Field(
+        default="VENYA_CA_KEY_PASSPHRASE",
+        description="Environment variable containing the CA key passphrase.",
+    )
+    require_in_production: bool = Field(
+        default=True,
+        description="Require passphrase in production (warn if unset).",
+    )
+
+
+class ExecutorEnrollmentConfig(BaseModel):
+    """Configuration for executor enrollment and registration."""
+
+    # Token lifecycle
+    token_ttl_seconds: int = Field(
+        default=1800,
+        ge=120,
+        le=86400,
+        description="Enrollment token lifetime in seconds (120–86400)",
+    )
+
+    # Authorization
+    require_token: bool = Field(
+        default=False,
+        description="Reject executor registrations without a valid enrollment token",
+    )
+
+    # Rate limiting
+    token_generation_per_minute: int = Field(
+        default=10,
+        description="Max enrollment tokens generated per admin per minute",
+    )
+    registration_attempts_per_minute: int = Field(
+        default=5,
+        description="Max registration attempts per IP/executor per minute",
+    )
+    registration_ip_per_minute: int = Field(
+        default=20,
+        description="Max registration attempts per source IP per minute (batch enrollment)",
+    )
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether to enforce executor enrollment rate limiting",
+    )
+
+    @field_validator("token_ttl_seconds")
+    @classmethod
+    def warn_extended_ttl(cls, v: int) -> int:
+        if v > 14400:
+            logger.warning(
+                "Executor enrollment token TTL is %d seconds (>4h). "
+                "Consider using shorter-lived tokens for production deployments.",
+                v,
+            )
+        return v
+
+
 class ServerConfig(BaseSettings):
     """Server configuration.
 
@@ -129,6 +193,14 @@ class ServerConfig(BaseSettings):
         description="Directory for CA key/cert storage",
     )
 
+    # CA security
+    ca_security: CASecurityConfig = Field(default_factory=CASecurityConfig)
+
+    # Executor enrollment (token TTL, auth, rate limiting)
+    executor_enrollment: ExecutorEnrollmentConfig = Field(
+        default_factory=ExecutorEnrollmentConfig,
+    )
+
     # CORS
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost"],
@@ -143,12 +215,6 @@ class ServerConfig(BaseSettings):
     recovery_code_pepper: str = Field(
         default="",
         description="Secret pepper for hashing recovery codes. Must be set in production.",
-    )
-
-    # Executor registration hardening
-    executor_registration_require_token: bool = Field(
-        default=False,
-        description="Reject executor registrations without a valid enrollment token (enterprise hardening)",
     )
 
     @classmethod

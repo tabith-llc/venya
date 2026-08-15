@@ -36,31 +36,6 @@ from .strategies.factory import create_strategy
 logger = logging.getLogger("venya.executor.daemon")
 
 
-def _is_tls_error(exc: Exception) -> bool:
-    """Check if an exception is caused by a TLS/SSL verification failure.
-
-    Walks the exception cause chain to find an SSL error underneath.
-    httpx2 raises ConnectError for both TLS failures and network errors —
-    this function distinguishes them.
-
-    Args:
-        exc: The exception to inspect.
-
-    Returns:
-        True if an SSL/TLS error was found in the cause chain.
-    """
-    import ssl
-
-    current = exc
-    visited = set()
-    while current and id(current) not in visited:
-        if isinstance(current, (ssl.SSLCertVerificationError, ssl.SSLError, ssl.SSLEOFError)):
-            return True
-        visited.add(id(current))
-        current = current.__cause__ or current.__context__
-    return False
-
-
 class DaemonState:
     """Tracks daemon runtime state."""
 
@@ -93,9 +68,8 @@ class CertificateManager:
     def register(self, executor_id: str, enrollment_token: str | None = None) -> None:
         """Register executor with server, obtain signed certificate.
 
-        Uses throwaway httpx2.Client instances for both the primary attempt
-        (verify=True) and fallback (verify=False). Never uses self.client —
-        prevents silent TLS bypass from a pre-existing verify=False client.
+        Always uses full TLS verification. To disable verification in
+        development, set VENYA_TLS_VERIFY=false before running.
 
         Args:
             executor_id: Unique executor identifier.
@@ -129,24 +103,31 @@ class CertificateManager:
 
         url = f"{self.config.server_url}/api/v1/executors/register"
 
-        # Attempt 1: Full TLS verification (enterprise — corporate CA in trust store)
+        tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
+        if tls_verify_env == "":
+            tls_verify = True
+        elif tls_verify_env.lower() == "true":
+            tls_verify = True
+        elif tls_verify_env.lower() == "false":
+            tls_verify = False
+            logger.warning("VENYA_TLS_VERIFY=false — TLS verification disabled (dev only)")
+        else:
+            raise RuntimeError(
+                f"Invalid VENYA_TLS_VERIFY value: '{tls_verify_env}'. "
+                "Must be 'true' or 'false'."
+            )
+
         try:
-            with httpx2.Client(verify=True, timeout=30.0) as client:
+            with httpx2.Client(verify=tls_verify, timeout=30.0) as client:
                 response = client.post(url, json=payload)
             response.raise_for_status()
         except httpx2.ConnectError as e:
-            if not _is_tls_error(e):
-                raise
-            # Attempt 2: Fallback (dev — Caddy CA not in trust store)
-            logger.warning(
-                "TLS verification failed for registration (%s). "
-                "Falling back to insecure mode for this one-time call. "
-                "All subsequent communication will use mTLS.",
-                e,
-            )
-            with httpx2.Client(verify=False, timeout=30.0) as client:
-                response = client.post(url, json=payload)
-                response.raise_for_status()
+            if tls_verify:
+                raise RuntimeError(
+                    "Registration failed. Verify server CA is trusted. "
+                    "In development, export VENYA_TLS_VERIFY=false"
+                ) from e
+            raise
 
         data = response.json()
 

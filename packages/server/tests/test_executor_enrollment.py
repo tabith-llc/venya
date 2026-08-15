@@ -8,9 +8,12 @@ Tests cover:
 """
 
 import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -34,7 +37,8 @@ def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manag
 
     if require_token:
         from server.config import ServerConfig
-        app.state.server_config = ServerConfig(executor_registration_require_token=True)
+        from server.config import ExecutorEnrollmentConfig
+        app.state.config = ServerConfig(executor_enrollment=ExecutorEnrollmentConfig(require_token=True))
 
     if ca_manager is not None:
         app.state.ca_manager = ca_manager
@@ -98,7 +102,7 @@ class TestAdminEnrollExecutor:
         data = response.json()
         assert data["enrollment_token"].startswith("enrl_exec_")
         assert data["executor_id"] == "jump-1"
-        assert data["expires_in_seconds"] == 900
+        assert data["expires_in_seconds"] == 1800
 
     def test_enroll_returns_503_when_no_backend(self):
         """Returns 503 when backend is not initialized."""
@@ -174,7 +178,7 @@ class TestRegisterEndpointWithToken:
     """Tests for executor registration with enrollment token."""
 
     def test_token_valid_resolves_executor_id(self):
-        """Valid token overrides executor_id from request body."""
+        """Valid token resolves executor_id from token."""
         mock_db = MagicMock()
         backend = MagicMock()
         backend.get_session.return_value = mock_db
@@ -205,7 +209,7 @@ class TestRegisterEndpointWithToken:
         response = client.post(
             "/api/v1/executors/register",
             json={
-                "executor_id": "different-id",
+                "executor_id": "token-exec-1",
                 "csr_pem": _generate_test_csr(),
                 "enrollment_token": "enrl_exec_testtoken",
             },
@@ -213,6 +217,38 @@ class TestRegisterEndpointWithToken:
         assert response.status_code == 201
         data = response.json()
         assert data["executor_id"] == "token-exec-1"
+
+    def test_token_mismatched_executor_id_returns_401(self):
+        """Token executor_id must match request executor_id."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(
+            backend=backend, auth_user={"user_id": "admin"},
+            ca_manager=_make_mock_ca(),
+        )
+
+        mock_token = MagicMock()
+        mock_token.executor_id = "token-exec-1"
+        mock_token.state = "created"
+        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+
+        mock_db.query.side_effect = lambda model: token_query
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "different-id",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_testtoken",
+            },
+        )
+        assert response.status_code == 401
+        assert "bound to different executor_id" in response.json()["detail"]
 
     def test_token_invalid_returns_401(self):
         """Invalid token returns 401 Unauthorized."""
@@ -368,7 +404,7 @@ class TestRegisterEndpointWithToken:
         response = client.post(
             "/api/v1/executors/register",
             json={
-                "executor_id": "any-id",
+                "executor_id": "consumed-exec",
                 "csr_pem": _generate_test_csr(),
                 "enrollment_token": "enrl_exec_valid",
             },
@@ -412,3 +448,79 @@ class TestRegisterEndpointWithToken:
         )
         assert response.status_code == 503
         assert "CA not initialized" in response.json()["detail"]
+
+
+class TestTokenTTL:
+    """Tests for configurable token TTL (Issue #5)."""
+
+    def test_default_ttl_is_1800(self):
+        """Default TTL should be 1800 seconds (30 minutes)."""
+        from server.config import ServerConfig, ExecutorEnrollmentConfig
+
+        config = ServerConfig()
+        assert config.executor_enrollment.token_ttl_seconds == 1800
+
+    def test_token_ttl_uses_configured_value(self):
+        """Token should use configured TTL, not hardcoded value."""
+        from server.config import ServerConfig, ExecutorEnrollmentConfig
+
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+
+        custom_ttl = 600  # 10 minutes
+        app = _create_test_app(
+            backend=backend,
+            auth_user={"user_id": "test-admin"},
+        )
+        app.state.config = ServerConfig(
+            executor_enrollment=ExecutorEnrollmentConfig(token_ttl_seconds=custom_ttl)
+        )
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post("/api/v1/admin/executors/jump-1/enroll")
+        assert response.status_code == 201
+        data = response.json()
+        assert data["expires_in_seconds"] == custom_ttl
+
+    def test_token_ttl_minimum_enforced(self):
+        """TTL below minimum (120s) should raise validation error."""
+        from server.config import ExecutorEnrollmentConfig
+
+        with pytest.raises(Exception):  # Pydantic ValidationError
+            ExecutorEnrollmentConfig(token_ttl_seconds=60)
+
+    def test_token_ttl_maximum_enforced(self):
+        """TTL above maximum (86400s) should raise validation error."""
+        from server.config import ExecutorEnrollmentConfig
+
+        with pytest.raises(Exception):  # Pydantic ValidationError
+            ExecutorEnrollmentConfig(token_ttl_seconds=90000)
+
+    def test_response_includes_expires_at(self):
+        """Response should include expires_at ISO 8601 timestamp."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(backend=backend, auth_user={"user_id": "test-admin"})
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post("/api/v1/admin/executors/jump-1/enroll")
+        assert response.status_code == 201
+        data = response.json()
+        assert "expires_at" in data
+        # Should be valid ISO 8601
+        from datetime import datetime
+        expires_at = datetime.fromisoformat(data["expires_at"])
+        assert expires_at.tzinfo is not None
+
+    def test_token_ttl_warns_on_extended(self):
+        """TTL above 4h should produce a warning log."""
+        from server.config import ExecutorEnrollmentConfig
+
+        with patch("server.config.logger") as mock_logger:
+            config = ExecutorEnrollmentConfig(token_ttl_seconds=14401)
+            # Trigger the validator
+            config.model_validate(config.model_dump())
+
+        assert any("TTL" in str(call) and ">4h" in str(call) for call in mock_logger.warning.call_args_list)
