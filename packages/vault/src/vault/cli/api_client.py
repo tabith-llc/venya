@@ -368,6 +368,13 @@ class APIClient:
         Raises:
             APIClientError: On network failure or registration error.
         """
+        # Validate executor_id format before sending to server
+        from vault.utils.executor_id import validate_executor_id
+        try:
+            executor_id = validate_executor_id(executor_id)
+        except ValueError as e:
+            raise APIClientError(str(e))
+
         payload: dict[str, Any] = {
             "executor_id": executor_id,
             "csr_pem": csr_pem,

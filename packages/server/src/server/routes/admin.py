@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from ..rate_limit import rate_limit_admin_token_gen
+from ..utils.executor_id import validate_executor_id
 from ..utils.token_binding import compute_binding_hash
 
 router = APIRouter()
@@ -1120,6 +1121,15 @@ async def admin_enroll_executor(
     The admin delivers the token to the executor operator out-of-band.
     The executor includes it in the registration request.
     """
+    # Validate executor_id format before any DB or CA operations
+    try:
+        executor_id = validate_executor_id(executor_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
     from vault.iam.models import AuditEvent, ExecutorEnrollmentToken
 
     backend = getattr(request.app.state, "backend", None)

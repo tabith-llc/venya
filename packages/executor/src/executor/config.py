@@ -168,7 +168,7 @@ class ExecutorConfig(BaseSettings):
     # Executor identity
     executor_id: str = Field(
         default="default",
-        description="Unique executor identifier",
+        description="Unique executor identifier (lowercase alphanumeric + hyphens)",
     )
 
     # mTLS
@@ -263,3 +263,17 @@ class ExecutorConfig(BaseSettings):
         data = filter_none(data)
         with open(path, "wb") as f:
             tomli_w.dump(data, f)
+
+    def model_post_init(self, __context):
+        """Validate executor_id on initialization."""
+        import re
+        pattern = r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"
+        if len(self.executor_id) < 2 or len(self.executor_id) > 64:
+            raise ValueError(
+                f"executor_id must be 2-64 characters, got {len(self.executor_id)}"
+            )
+        if not re.match(pattern, self.executor_id):
+            raise ValueError(
+                "executor_id must be lowercase alphanumeric with "
+                "optional hyphens, starting and ending with alphanumeric"
+            )

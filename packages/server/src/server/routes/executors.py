@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from ..ca import CAManager
 from ..rate_limit import rate_limit_registration
+from ..utils.executor_id import EXECUTOR_ID_PATTERN, validate_executor_id
 from ..utils.token_binding import verify_binding_hash
 from vault.iam.models import AuditEvent, ExecutorEnrollmentToken, User, ExecutorCert
 
@@ -33,7 +34,13 @@ router = APIRouter()
 class ExecutorRegisterRequest(BaseModel):
     """Request body for executor registration."""
 
-    executor_id: str = Field(..., description="Unique executor identifier", min_length=1, max_length=64)
+    executor_id: str = Field(
+        ...,
+        description="Unique executor identifier (lowercase alphanumeric + hyphens)",
+        pattern=EXECUTOR_ID_PATTERN,
+        min_length=2,
+        max_length=64,
+    )
     csr_pem: str = Field(..., description="PEM-encoded Certificate Signing Request")
     enrollment_token: str | None = None
 
@@ -52,6 +59,19 @@ class RevocationListResponse(BaseModel):
     """Response for revocation list polling."""
 
     revoked_serials: list[str] = Field(default_factory=list, description="List of revoked certificate serial numbers")
+
+
+class HeartbeatRequest(BaseModel):
+    """Request body for heartbeat ping."""
+
+    executor_id: str = Field(
+        ...,
+        description="Executor identifier",
+        pattern=EXECUTOR_ID_PATTERN,
+        min_length=2,
+        max_length=64,
+    )
+    cert_fingerprint: str = Field(default="", description="Certificate fingerprint")
 
 
 class HeartbeatResponse(BaseModel):
@@ -317,6 +337,7 @@ async def get_revocation_list(
     status_code=status.HTTP_200_OK,
 )
 async def heartbeat(
+    req: HeartbeatRequest,
     request: Request,
 ) -> HeartbeatResponse:
     """Receive heartbeat from executor.
@@ -330,10 +351,7 @@ async def heartbeat(
 
     db = _get_db(request)
     try:
-        body = await request.json()
-        executor_id = body.get("executor_id", "")
-        cert_fingerprint = body.get("cert_fingerprint", "")
-
+        executor_id = req.executor_id
         revoked = False
         new_cert_required = False
 

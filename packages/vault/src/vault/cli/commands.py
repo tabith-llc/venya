@@ -1568,6 +1568,14 @@ def executor_register(client: APIClient, args: Any) -> int:
     vault_url = getattr(args, "vault_url", None)
     enrollment_token = getattr(args, "enrollment_token", None)
 
+    # Validate executor_id format before any operations
+    try:
+        from vault.utils.executor_id import validate_executor_id
+        executor_id = validate_executor_id(executor_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
     # Determine server URL
     if vault_url:
         server_url = vault_url.rstrip("/")
