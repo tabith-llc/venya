@@ -317,3 +317,14 @@ class WebAuthnCredential(Base):
     last_used_at = Column(DateTime(timezone=True), nullable=True)
 
     user = relationship("User", backref="webauthn_credentials")
+
+
+class AdminCertRevocation(Base):
+    """Revoked admin certificate serial numbers."""
+
+    __tablename__ = "admin_cert_revocations"
+
+    id = Column(Integer, primary_key=True)
+    serial_number = Column(String(64), nullable=False, index=True)
+    revoked_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    reason = Column(String(64))
