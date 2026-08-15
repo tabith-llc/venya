@@ -1,21 +1,76 @@
 """Session validation middleware.
 
 Validates bearer tokens against active sessions and attaches
-user info to request state.
+user info to request state. Supports mTLS-based admin endpoint
+authentication via Caddy-layer client certificate verification.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtensionOID, NameOID
 from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 
 logger = logging.getLogger("venya.server")
+
+# Clock skew tolerance for certificate validity checks
+_CERT_CLOCK_SKEW = timedelta(minutes=5)
+
+
+def _extract_identity_from_cert(cert: x509.Certificate) -> str:
+    """Extract admin identity from a client certificate.
+
+    Prefers SAN DNS names, falls back to CN.
+
+    Args:
+        cert: The X.509 certificate to extract identity from.
+
+    Returns:
+        The identity string (SAN DNS or CN value).
+
+    Raises:
+        ValueError: If certificate has neither SAN nor CN.
+    """
+    try:
+        san_ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        dns_names = san_ext.value.get_values_for_type(x509.DNSName)
+        if dns_names:
+            return dns_names[0]
+    except x509.ExtensionNotFound:
+        pass
+    cn_attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    if cn_attrs:
+        return cn_attrs[0].value
+    raise ValueError("Certificate has neither SAN nor CN")
+
+
+def _verify_cert_against_ca(cert: x509.Certificate, ca_cert: x509.Certificate) -> bool:
+    """Verify a certificate was signed by the admin CA.
+
+    Args:
+        cert: The certificate to verify.
+        ca_cert: The admin CA certificate.
+
+    Returns:
+        True if the signature is valid.
+    """
+    ca_public_key = ca_cert.public_key()
+    ca_public_key.verify(
+        cert.signature,
+        cert.tbs_certificate_bytes,
+        ec.ECDSA(cert.signature_hash_algorithm),
+    )
+    return True
 
 
 class SessionMiddleware(BaseHTTPMiddleware):
@@ -75,6 +130,175 @@ class SessionMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.max_token_age = max_token_age
 
+    def _is_admin_route(self, path: str) -> bool:
+        """Check if path is an admin endpoint.
+
+        Args:
+            path: The request URL path.
+
+        Returns:
+            True if this is an admin route.
+        """
+        return path.startswith("/api/v1/admin/")
+
+    async def _validate_admin_mtls(self, request: Request) -> JSONResponse | None:
+        """Validate mTLS client certificate for admin routes.
+
+        When admin_mtls is enabled and the path is an admin route, this
+        performs a 7-step validation chain:
+        1. Check X-Client-Verified sentinel header
+        2. Parse X-Client-Cert PEM header
+        3. Verify cert signature against admin CA
+        4. Verify cert not expired (±5min clock skew)
+        5. Extract identity (SAN DNS or CN)
+        6. Check identity against known_admin_ids
+        7. Check revocation in AdminCertRevocation table
+
+        Args:
+            request: The FastAPI request.
+
+        Returns:
+            JSONResponse with 403 if validation fails, None if all checks pass.
+        """
+        config = getattr(request.app.state, "config", None)
+        if not config or not config.admin_mtls.enabled:
+            return None
+
+        path = request.url.path.rstrip("/") if request.url.path != "/" else request.url.path
+        if not self._is_admin_route(path):
+            return None
+
+        # Step 1: Check X-Client-Verified sentinel header
+        verified = request.headers.get("x-client-verified")
+        if verified != "true":
+            logger.warning("Admin route %s: missing or invalid X-Client-Verified header", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        # Step 2: Parse X-Client-Cert PEM header
+        cert_pem_header = request.headers.get("x-client-cert")
+        if not cert_pem_header:
+            logger.warning("Admin route %s: missing X-Client-Cert header", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        # Decode PEM header (may have spaces/newlines removed by HTTP layer)
+        cert_pem_data = cert_pem_header.encode("utf-8")
+        # Reconstruct PEM format if needed
+        if b"-----BEGIN CERTIFICATE-----" not in cert_pem_data:
+            # Try adding PEM headers
+            try:
+                # The header might be base64-encoded DER or raw PEM without headers
+                # Try to decode as base64 first
+                import base64
+                der_bytes = base64.b64decode(cert_pem_data)
+                cert = x509.load_der_x509_certificate(der_bytes)
+            except Exception:
+                logger.warning("Admin route %s: failed to parse X-Client-Cert header", path)
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "Admin access requires valid client certificate"},
+                )
+        else:
+            try:
+                cert = x509.load_pem_x509_certificate(cert_pem_data)
+            except Exception:
+                logger.warning("Admin route %s: failed to parse X-Client-Cert PEM", path)
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "Admin access requires valid client certificate"},
+                )
+
+        # Step 3: Verify cert signature against admin CA
+        admin_ca_cert_path = config.admin_mtls.ca_cert
+        if not admin_ca_cert_path:
+            logger.warning("Admin route %s: admin CA cert path not configured", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        try:
+            admin_ca_cert = x509.load_pem_x509_certificate(Path(admin_ca_cert_path).read_bytes())
+        except Exception:
+            logger.exception("Admin route %s: failed to load admin CA cert", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        try:
+            _verify_cert_against_ca(cert, admin_ca_cert)
+        except Exception:
+            logger.warning("Admin route %s: cert signature verification failed", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        # Step 4: Verify cert not expired (±5min clock skew tolerance)
+        now = datetime.now(timezone.utc)
+        if cert.not_valid_before_utc > now + _CERT_CLOCK_SKEW:
+            logger.warning("Admin route %s: cert not yet valid", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Client certificate is not yet valid"},
+            )
+        if cert.not_valid_after_utc < now - _CERT_CLOCK_SKEW:
+            logger.warning("Admin route %s: cert expired", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Client certificate has expired"},
+            )
+
+        # Step 5: Extract identity (SAN DNS preferred, CN fallback)
+        try:
+            identity = _extract_identity_from_cert(cert)
+        except ValueError:
+            logger.warning("Admin route %s: cert has no SAN or CN", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        # Step 6: Check identity against known_admin_ids
+        known_ids = config.admin_mtls.known_admin_ids
+        if known_ids and identity not in known_ids:
+            logger.warning("Admin route %s: identity '%s' not in known_admin_ids", path, identity)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        # Step 7: Check revocation in AdminCertRevocation table
+        backend = getattr(request.app.state, "backend", None)
+        if backend is not None:
+            db = backend.get_session()
+            try:
+                from vault.iam.models import AdminCertRevocation
+                serial_hex = hex(cert.serial_number)[2:]  # Remove '0x' prefix
+                # Pad to even length for consistent hex representation
+                if len(serial_hex) % 2:
+                    serial_hex = "0" + serial_hex
+                serial_hex = serial_hex.lower()
+                revoked = db.query(AdminCertRevocation).filter(
+                    AdminCertRevocation.serial_number == serial_hex
+                ).first()
+                if revoked:
+                    logger.warning("Admin route %s: cert serial %s is revoked", path, serial_hex)
+                    return JSONResponse(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        content={"detail": "Client certificate has been revoked"},
+                    )
+            finally:
+                db.close()
+
+        return None  # All checks passed, continue to bearer token auth
+
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
@@ -98,6 +322,14 @@ class SessionMiddleware(BaseHTTPMiddleware):
         if self._is_executor_session_path(request.url.path):
             request.state.auth_user = {"caller": "executor"}  # type: ignore[attr-defined]
             return await call_next(request)
+
+        # Admin mTLS validation (before bearer token auth)
+        if getattr(request.app.state, "config", None) and \
+           request.app.state.config.admin_mtls.enabled and \
+           self._is_admin_route(path):
+            mtls_result = await self._validate_admin_mtls(request)
+            if mtls_result is not None:
+                return mtls_result
 
         # Extract token: cookie (browser) takes priority, then bearer header (CLI)
         token = request.cookies.get(self.ACCESS_TOKEN_COOKIE)

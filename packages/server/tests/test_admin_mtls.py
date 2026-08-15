@@ -5,17 +5,20 @@ Tests cover:
 - Admin CA key encryption with passphrase
 - Admin certificate signing (CN, SAN, EKU, validity)
 - Admin CA key loading with/without passphrase
+- Middleware mTLS validation chain (Phase 2)
 """
 
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from cryptography import x509
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID, NameOID, ExtendedKeyUsageOID
+from starlette.testclient import TestClient
 
 from server.ca import AdminCAManager
 from server.config import CASecurityConfig
@@ -293,3 +296,345 @@ class TestAdminSignCert:
         cn = ca_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
         assert len(cn) == 1
         assert cn[0].value == "Venya Admin CA"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Middleware mTLS Validation (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def _create_admin_mtls_app(
+    admin_ca_dir: str,
+    admin_identity: str = "dust@montana",
+    known_admin_ids: list[str] | None = None,
+    admin_mtls_enabled: bool = True,
+):
+    """Create a test app with admin mTLS middleware configured."""
+    from fastapi import FastAPI, Request
+    from starlette.requests import Request as StarletteRequest
+
+    from server.config import AdminMTLSConfig, ServerConfig
+    from server.middleware.auth import SessionMiddleware
+
+    if known_admin_ids is None:
+        known_admin_ids = [admin_identity]
+
+    config = ServerConfig(
+        admin_mtls=AdminMTLSConfig(
+            enabled=admin_mtls_enabled,
+            ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
+            known_admin_ids=known_admin_ids,
+        ),
+    )
+
+    app = FastAPI()
+    app.add_middleware(SessionMiddleware)
+    app.state.config = config
+
+    @app.get("/api/v1/admin/test")
+    def admin_test(request: Request):
+        user = getattr(request.state, "auth_user", None)
+        return {"user": user, "path": "/api/v1/admin/test"}
+
+    @app.get("/api/v1/admin/executors/list")
+    def admin_executors_list(request: Request):
+        return {"executors": []}
+
+    @app.get("/api/v1/health")
+    def health():
+        return {"status": "ok"}
+
+    return app
+
+
+def _sign_admin_cert_and_pem(
+    admin_ca_dir: str,
+    admin_identity: str,
+    passphrase: str = "test_passphrase",
+) -> tuple[str, str]:
+    """Sign an admin cert and return PEM-encoded cert string and key PEM."""
+    os.environ[passphrase] = passphrase
+    from server.ca import AdminCAManager
+    from server.config import CASecurityConfig
+
+    ca_security = CASecurityConfig(key_passphrase_env=passphrase)
+    manager = AdminCAManager(Path(admin_ca_dir), ca_security)
+    manager.initialize()
+
+    cert, key_pem, cert_pem = manager.sign_admin_cert(admin_identity)
+    return cert_pem.decode("utf-8"), key_pem.decode("utf-8")
+
+
+class TestAdminMTLSMiddleware:
+    """Tests for admin mTLS middleware validation chain."""
+
+    def test_header_injection_rejected(self, admin_ca_dir, admin_ca_security):
+        """Forged X-Client-Cert without Caddy verification should be rejected."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        cert_pem_str = cert_pem.decode("utf-8")
+
+        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        # Send X-Client-Cert but NOT X-Client-Verified
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={"X-Client-Cert": cert_pem_str},
+        )
+        assert resp.status_code == 403
+        assert "client certificate" in resp.json()["detail"].lower()
+
+    def test_missing_cert_on_admin_route(self, admin_ca_dir, admin_ca_security):
+        """No client cert on admin route should return 403."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test")
+        assert resp.status_code == 403
+        assert "client certificate" in resp.json()["detail"].lower()
+
+    def test_valid_cert_passes(self, admin_ca_dir, admin_ca_security):
+        """Valid cert + known identity should pass mTLS and continue to bearer auth."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        cert_pem_str = cert_pem.decode("utf-8")
+
+        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": cert_pem_str,
+                "X-Client-Verified": "true",
+            },
+        )
+        # mTLS passes → continues to bearer token auth → 401 (no token)
+        assert resp.status_code == 401
+        assert "Missing authentication token" in resp.json()["detail"]
+
+    def test_expired_cert_rejected(self, admin_ca_dir, admin_ca_security):
+        """Expired admin cert should be rejected."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        # Create an expired cert manually
+        from cryptography.hazmat.primitives.asymmetric import ec as ec_mod
+
+        ca_cert, ca_key = manager._load_ca_cert_and_key()
+        now = datetime.now(timezone.utc)
+        expired_key = ec_mod.generate_private_key(ec_mod.SECP256R1())
+
+        expired_cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "dust@montana"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(expired_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=200))
+            .not_valid_after(now - timedelta(days=10))  # Expired 10 days ago
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("dust@montana")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        expired_pem = expired_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+
+        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": expired_pem,
+                "X-Client-Verified": "true",
+            },
+        )
+        assert resp.status_code == 403
+        assert "expired" in resp.json()["detail"].lower()
+
+    def test_unknown_identity_rejected(self, admin_ca_dir, admin_ca_security):
+        """Valid cert but unknown identity should be rejected."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        cert, _, cert_pem = manager.sign_admin_cert("rogue@attacker.internal")
+        cert_pem_str = cert_pem.decode("utf-8")
+
+        # Only dust@montana is known
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            "dust@montana",
+            known_admin_ids=["dust@montana"],
+        )
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": cert_pem_str,
+                "X-Client-Verified": "true",
+            },
+        )
+        assert resp.status_code == 403
+        assert "client certificate" in resp.json()["detail"].lower()
+
+    def test_san_preferred_over_cn(self, admin_ca_dir, admin_ca_security):
+        """SAN DNS should take precedence over CN for identity."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        # Create a cert with SAN DNS = "dust@montana" but CN = "different"
+        ca_cert, ca_key = manager._load_ca_cert_and_key()
+        from cryptography.hazmat.primitives.asymmetric import ec as ec_mod
+
+        test_key = ec_mod.generate_private_key(ec_mod.SECP256R1())
+
+        cert_with_san = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "different@identity.internal"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(test_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=90))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("dust@montana")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        cert_pem_str = cert_with_san.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+
+        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": cert_pem_str,
+                "X-Client-Verified": "true",
+            },
+        )
+        # Should pass because SAN DNS = "dust@montana" matches known_admin_ids
+        assert resp.status_code == 401  # mTLS passes → no bearer token
+
+    def test_revoked_cert_rejected(self, admin_ca_dir, admin_ca_security):
+        """Cert serial in AdminCertRevocation should be rejected."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        cert_pem_str = cert_pem.decode("utf-8")
+
+        # We need a backend with a DB session for the revocation check.
+        # Since we can't easily set up a full backend in this test,
+        # we'll test with admin_mtls disabled for the backend path,
+        # or mock the backend.
+        from unittest.mock import MagicMock, patch
+
+        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+
+        # Create mock backend with revoked cert
+        db = MagicMock()
+        from vault.iam.models import AdminCertRevocation
+        revoked_entry = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = revoked_entry
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        app.state.backend = backend
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": cert_pem_str,
+                "X-Client-Verified": "true",
+            },
+        )
+        assert resp.status_code == 403
+        assert "revoked" in resp.json()["detail"].lower()
+
+    def test_non_admin_route_unaffected(self, admin_ca_dir, admin_ca_security):
+        """Non-admin routes should not require mTLS even when enabled."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/health")
+        assert resp.status_code == 200
+
+    def test_admin_mtls_disabled_allows_admin_routes(self, admin_ca_dir, admin_ca_security):
+        """When admin_mtls is disabled, admin routes should work with bearer token only."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana", admin_mtls_enabled=False)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test")
+        # Without mTLS, should get 401 (no bearer token), not 403
+        assert resp.status_code == 401
+        assert "Missing authentication token" in resp.json()["detail"]
+
+    def test_wrong_verified_value_rejected(self, admin_ca_dir, admin_ca_security):
+        """X-Client-Verified with wrong value should be rejected."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        cert_pem_str = cert_pem.decode("utf-8")
+
+        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": cert_pem_str,
+                "X-Client-Verified": "false",  # Wrong value
+            },
+        )
+        assert resp.status_code == 403
