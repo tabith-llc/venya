@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
-from .utils.token_binding import verify_binding_hash
+from ..utils.token_binding import verify_binding_hash
 from pydantic import BaseModel, Field
 
 from ..fido2.browser_adapter import (
