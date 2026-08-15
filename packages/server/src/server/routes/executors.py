@@ -14,10 +14,12 @@ from cryptography.hazmat.primitives import serialization
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..ca import CAManager
 from ..rate_limit import rate_limit_registration
+from ..utils.token_binding import verify_binding_hash
 from vault.iam.models import AuditEvent, ExecutorEnrollmentToken, User, ExecutorCert
 
 logger = logging.getLogger("venya.server")
@@ -124,6 +126,8 @@ async def register_executor(
 
         if req.enrollment_token:
             token_hash = hashlib.sha256(req.enrollment_token.encode("utf-8")).hexdigest()
+
+            # Pre-check for diagnostic specificity (non-authoritative)
             token = (
                 db.query(ExecutorEnrollmentToken)
                 .filter(ExecutorEnrollmentToken.token_hash == token_hash)
@@ -135,10 +139,15 @@ async def register_executor(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid enrollment token",
                 )
-            if token.state != "created":
+            if token.state == "revoked":
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Enrollment token is not in 'created' state",
+                    detail="Enrollment token has been revoked",
+                )
+            if token.state == "consumed":
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Enrollment token already consumed",
                 )
             if token.expires_at <= datetime.now(timezone.utc):
                 raise HTTPException(
@@ -152,9 +161,40 @@ async def register_executor(
                     detail="Enrollment token bound to different executor_id",
                 )
 
+            # Verify cryptographic binding to executor_id
+            server_config = getattr(request.app.state, "config", None)
+            pepper = getattr(server_config, "recovery_code_pepper", "") if server_config else ""
+            if not verify_binding_hash(
+                entity_id=token.executor_id,
+                plaintext_token=req.enrollment_token,
+                server_secret=pepper,
+                stored_binding_hash=token.binding_hash,
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Enrollment token binding mismatch — token has been invalidated",
+                )
+
+            # Authoritative atomic consumption — closes race window
+            now = datetime.now(timezone.utc)
+            result = db.execute(
+                text("""
+                    UPDATE executor_enrollment_tokens
+                    SET state = 'consumed', used_at = :now
+                    WHERE token_hash = :hash AND state = 'created' AND expires_at > :now
+                """),
+                {"hash": token_hash, "now": now},
+            )
+
+            if result.rowcount != 1:
+                # Lost the race — token was consumed between pre-check and UPDATE
+                db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Enrollment token was consumed concurrently",
+                )
+
             resolved_executor_id = token.executor_id
-            token.state = "consumed"
-            token.used_at = datetime.now(timezone.utc)
             token_audit_fields = {"with_token": True, "token_verified": True}
             logger.info("Enrollment token verified for executor: %s", resolved_executor_id)
         else:

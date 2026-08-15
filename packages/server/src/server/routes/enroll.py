@@ -13,6 +13,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+
+from .utils.token_binding import verify_binding_hash
 from pydantic import BaseModel, Field
 
 from ..fido2.browser_adapter import (
@@ -95,6 +97,22 @@ async def browser_enroll_start(
         # Validate token and check user status
         token = em.validate_token_for_start(req.enrollment_token)
 
+        # Verify cryptographic binding to user's string ID
+        user = db.query(User).filter(User.id == token.user_id).first()
+        username = user.display_name or user.user_id if user else str(token.user_id)
+        server_config = getattr(request.app.state, "config", None)
+        pepper = getattr(server_config, "recovery_code_pepper", "") if server_config else ""
+        if not verify_binding_hash(
+            entity_id=username,
+            plaintext_token=req.enrollment_token,
+            server_secret=pepper,
+            stored_binding_hash=token.binding_hash,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Enrollment token binding mismatch — token has been invalidated",
+            )
+
         # Transition state to in_progress
         em.mark_token_in_progress(req.enrollment_token)
         db.commit()
@@ -105,10 +123,6 @@ async def browser_enroll_start(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="FIDO2 manager not initialized",
             )
-
-        # Get user for display name
-        user = db.query(User).filter(User.id == token.user_id).first()
-        username = user.display_name or user.user_id if user else token.user_id
 
         challenge_id, options = fido2_manager.start_registration(
             user_id=str(token.user_id),
@@ -171,6 +185,22 @@ async def browser_enroll_complete(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
+            )
+
+        # Verify cryptographic binding to user's string ID
+        user = db.query(User).filter(User.id == token.user_id).first()
+        username = user.display_name or user.user_id if user else str(token.user_id)
+        server_config = getattr(request.app.state, "config", None)
+        pepper = getattr(server_config, "recovery_code_pepper", "") if server_config else ""
+        if not verify_binding_hash(
+            entity_id=username,
+            plaintext_token=req.enrollment_token,
+            server_secret=pepper,
+            stored_binding_hash=token.binding_hash,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Enrollment token binding mismatch — token has been invalidated",
             )
 
         fido2_manager = getattr(request.app.state, "fido2_manager", None)

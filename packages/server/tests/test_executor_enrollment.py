@@ -25,9 +25,23 @@ from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from server.routes import admin as admin_routes, executors as executors_routes
+from server.utils.token_binding import compute_binding_hash
+
+_TEST_PEPPER = "test-pepper-12345"
 
 
-def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manager=None):
+def _make_mock_token(executor_id, plaintext_token, state="created"):
+    """Create a mock enrollment token with valid binding hash."""
+    mock_token = MagicMock()
+    mock_token.executor_id = executor_id
+    mock_token.state = state
+    mock_token.token_hash = hashlib.sha256(plaintext_token.encode("utf-8")).hexdigest()
+    mock_token.binding_hash = compute_binding_hash(executor_id, plaintext_token, _TEST_PEPPER)
+    mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    return mock_token
+
+
+def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manager=None, pepper="test-pepper-12345"):
     """Create a minimal test app with admin and executor routes."""
     app = FastAPI()
     if backend is None:
@@ -35,10 +49,12 @@ def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manag
         backend.get_session.return_value = MagicMock()
     app.state.backend = backend
 
+    from server.config import ServerConfig
+    from server.config import ExecutorEnrollmentConfig
     if require_token:
-        from server.config import ServerConfig
-        from server.config import ExecutorEnrollmentConfig
-        app.state.config = ServerConfig(executor_enrollment=ExecutorEnrollmentConfig(require_token=True))
+        app.state.config = ServerConfig(executor_enrollment=ExecutorEnrollmentConfig(require_token=True), recovery_code_pepper=pepper)
+    else:
+        app.state.config = ServerConfig(recovery_code_pepper=pepper)
 
     if ca_manager is not None:
         app.state.ca_manager = ca_manager
@@ -187,10 +203,7 @@ class TestRegisterEndpointWithToken:
             ca_manager=_make_mock_ca(),
         )
 
-        mock_token = MagicMock()
-        mock_token.executor_id = "token-exec-1"
-        mock_token.state = "created"
-        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        mock_token = _make_mock_token("token-exec-1", "enrl_exec_testtoken", "created")
 
         # Setup query mock: token lookup returns mock_token, user lookup returns None
         token_query = MagicMock()
@@ -204,6 +217,11 @@ class TestRegisterEndpointWithToken:
             return user_query
 
         mock_db.query.side_effect = query_side_effect
+
+        # Mock atomic UPDATE result
+        mock_result = MagicMock()
+        mock_result.rowcount = 1
+        mock_db.execute.return_value = mock_result
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post(
@@ -328,7 +346,7 @@ class TestRegisterEndpointWithToken:
             },
         )
         assert response.status_code == 401
-        assert "not in 'created' state" in response.json()["detail"]
+        assert "already consumed" in response.json()["detail"]
 
     def test_no_token_backward_compatible(self):
         """Without token, uses executor_id from request body."""
@@ -377,16 +395,13 @@ class TestRegisterEndpointWithToken:
         assert "Enrollment token required" in response.json()["detail"]
 
     def test_token_state_marked_consumed(self):
-        """Valid token state is updated to 'consumed'."""
+        """Valid token state is updated to 'consumed' via atomic UPDATE."""
         mock_db = MagicMock()
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
 
-        mock_token = MagicMock()
-        mock_token.executor_id = "consumed-exec"
-        mock_token.state = "created"
-        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        mock_token = _make_mock_token("consumed-exec", "enrl_exec_valid", "created")
 
         token_query = MagicMock()
         token_query.filter.return_value.first.return_value = mock_token
@@ -400,6 +415,11 @@ class TestRegisterEndpointWithToken:
 
         mock_db.query.side_effect = query_side_effect
 
+        # Mock atomic UPDATE result
+        mock_result = MagicMock()
+        mock_result.rowcount = 1
+        mock_db.execute.return_value = mock_result
+
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post(
             "/api/v1/executors/register",
@@ -410,8 +430,8 @@ class TestRegisterEndpointWithToken:
             },
         )
         assert response.status_code == 201
-        assert mock_token.state == "consumed"
-        assert mock_token.used_at is not None
+        # Verify atomic UPDATE was called
+        assert mock_db.execute.called
 
     def test_invalid_csr_returns_400(self):
         """Invalid CSR format returns 400 Bad Request."""
@@ -524,3 +544,279 @@ class TestTokenTTL:
             config.model_validate(config.model_dump())
 
         assert any("TTL" in str(call) and ">4h" in str(call) for call in mock_logger.warning.call_args_list)
+
+
+class TestTokenAtomicConsumption:
+    """Tests for atomic token consumption (Issue #6)."""
+
+    def test_atomic_update_succeeds(self):
+        """Atomic UPDATE returns rowcount=1 on valid token."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+
+        mock_token = _make_mock_token("atomic-exec-1", "enrl_exec_atomic", "created")
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+        user_query = MagicMock()
+        user_query.filter.return_value.first.return_value = None
+
+        def query_side_effect(model):
+            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+                return token_query
+            return user_query
+
+        mock_db.query.side_effect = query_side_effect
+
+        mock_result = MagicMock()
+        mock_result.rowcount = 1
+        mock_db.execute.return_value = mock_result
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "atomic-exec-1",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_atomic",
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["executor_id"] == "atomic-exec-1"
+        # Verify atomic UPDATE was called
+        assert mock_db.execute.called
+        call_args = mock_db.execute.call_args
+        assert "UPDATE executor_enrollment_tokens" in str(call_args[0][0])
+
+    def test_atomic_update_race_condition_returns_401(self):
+        """Atomic UPDATE returns rowcount=0 when token consumed concurrently."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+
+        mock_token = _make_mock_token("race-exec-1", "enrl_exec_race", "created")
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+
+        mock_db.query.side_effect = lambda model: token_query
+
+        # Simulate race: pre-check passed but atomic UPDATE found nothing
+        mock_result = MagicMock()
+        mock_result.rowcount = 0
+        mock_db.execute.return_value = mock_result
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "race-exec-1",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_race",
+            },
+        )
+        assert response.status_code == 401
+        assert "consumed concurrently" in response.json()["detail"]
+        # Verify rollback was called
+        assert mock_db.rollback.called
+
+    def test_token_revoked_returns_specific_error(self):
+        """Revoked token returns specific error message."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+
+        mock_token = MagicMock()
+        mock_token.state = "revoked"
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+
+        mock_db.query.side_effect = lambda model: token_query
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "test-1",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_revoked",
+            },
+        )
+        assert response.status_code == 401
+        assert "revoked" in response.json()["detail"]
+        # Atomic UPDATE should NOT be called for revoked tokens
+        assert not mock_db.execute.called
+
+    def test_token_already_consumed_returns_specific_error(self):
+        """Already consumed token returns specific error message."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+
+        mock_token = MagicMock()
+        mock_token.state = "consumed"
+        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+
+        mock_db.query.side_effect = lambda model: token_query
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "test-1",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_consumed",
+            },
+        )
+        assert response.status_code == 401
+        assert "already consumed" in response.json()["detail"]
+        # Atomic UPDATE should NOT be called for already consumed tokens
+        assert not mock_db.execute.called
+
+
+class TestTokenBinding:
+    """Tests for enrollment token binding hash (Issue #7)."""
+
+    def test_binding_valid_succeeds(self):
+        """Valid binding hash allows registration."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+
+        mock_token = _make_mock_token("binding-exec", "enrl_exec_binding", "created")
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+        user_query = MagicMock()
+        user_query.filter.return_value.first.return_value = None
+
+        def query_side_effect(model):
+            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+                return token_query
+            return user_query
+
+        mock_db.query.side_effect = query_side_effect
+
+        mock_result = MagicMock()
+        mock_result.rowcount = 1
+        mock_db.execute.return_value = mock_result
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "binding-exec",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_binding",
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["executor_id"] == "binding-exec"
+
+    def test_binding_mismatch_returns_401(self):
+        """Wrong binding hash causes 401 (executor_id must match to reach binding check)."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+
+        # Token bound to "binding-exec" but with WRONG binding hash
+        mock_token = MagicMock()
+        mock_token.executor_id = "binding-exec"
+        mock_token.state = "created"
+        mock_token.binding_hash = "wrong-binding-hash-0000000000000000000000000000000000000000000000000000000000000000"
+        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+        user_query = MagicMock()
+        user_query.filter.return_value.first.return_value = None
+
+        def query_side_effect(model):
+            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+                return token_query
+            return user_query
+
+        mock_db.query.side_effect = query_side_effect
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "binding-exec",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_binding",
+            },
+        )
+        assert response.status_code == 401
+        assert "binding mismatch" in response.json()["detail"]
+
+    def test_legacy_token_empty_binding_rejected(self):
+        """Empty binding_hash (legacy token) is rejected."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+
+        mock_token = MagicMock()
+        mock_token.executor_id = "legacy-exec"
+        mock_token.state = "created"
+        mock_token.binding_hash = ""
+        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+
+        mock_db.query.side_effect = lambda model: token_query
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "legacy-exec",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_legacy",
+            },
+        )
+        assert response.status_code == 401
+        assert "invalidated" in response.json()["detail"]
+
+    def test_legacy_token_none_binding_rejected(self):
+        """None binding_hash (legacy token) is rejected."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+
+        mock_token = MagicMock()
+        mock_token.executor_id = "legacy-exec-2"
+        mock_token.state = "created"
+        mock_token.binding_hash = None
+        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+
+        mock_db.query.side_effect = lambda model: token_query
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "legacy-exec-2",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_legacy2",
+            },
+        )
+        assert response.status_code == 401
+        assert "invalidated" in response.json()["detail"]
