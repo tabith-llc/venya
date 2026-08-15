@@ -212,6 +212,8 @@ async def secrets_get(
             from datetime import datetime, timezone
             from vault.iam.models import ElevationToken
 
+            from ..utils.time import is_expired
+
             token_hash = hashlib.sha256(elevation_token.encode()).hexdigest()
             elevation = (
                 db.query(ElevationToken)
@@ -233,7 +235,13 @@ async def secrets_get(
                 )
                 return SecretGetResponse(key=key, value=value, masked=True)
 
-            if elevation.expires_at < datetime.now(timezone.utc):
+            server_config = getattr(request.app.state, "config", None)
+            tolerance = (
+                server_config.clock_skew.token_tolerance_seconds
+                if server_config and hasattr(server_config, "clock_skew")
+                else 60
+            )
+            if is_expired(elevation.expires_at, tolerance):
                 # Expired token - return masked
                 value = vault.get(
                     secret_key=key,

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from ..ca import CAManager
 from ..rate_limit import rate_limit_registration
 from ..utils.executor_id import EXECUTOR_ID_PATTERN, validate_executor_id
+from ..utils.time import effective_expiry_check_time, is_expired
 from vault.iam.models import AuditEvent, ExecutorEnrollmentToken, User, ExecutorCert
 
 logger = logging.getLogger("venya.server")
@@ -222,7 +223,13 @@ async def register_executor(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Enrollment token has already been consumed by a different executor",
                 )
-            if token.expires_at <= datetime.now(timezone.utc):
+            server_config = getattr(request.app.state, "config", None)
+            tolerance = (
+                server_config.clock_skew.token_tolerance_seconds
+                if server_config and hasattr(server_config, "clock_skew")
+                else 60
+            )
+            if is_expired(token.expires_at, tolerance):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Enrollment token has expired",
@@ -235,14 +242,14 @@ async def register_executor(
                 )
 
             # Authoritative atomic consumption — closes race window
-            now = datetime.now(timezone.utc)
+            now_minus_tolerance = effective_expiry_check_time(tolerance)
             result = db.execute(
                 text("""
                     UPDATE executor_enrollment_tokens
                     SET state = 'consumed', used_at = :now
                     WHERE token_hash = :hash AND state = 'created' AND expires_at > :now
                 """),
-                {"hash": token_hash, "now": now},
+                {"hash": token_hash, "now": now_minus_tolerance},
             )
 
             if result.rowcount != 1:

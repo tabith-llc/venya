@@ -23,6 +23,10 @@ class SessionError(Exception):
     """Session error."""
 
 
+# Default clock skew tolerance for vault-side checks
+_DEFAULT_CLOCK_SKEW_SECONDS = 60
+
+
 @dataclass
 class SessionConfig:
     """Session configuration.
@@ -31,6 +35,7 @@ class SessionConfig:
         session_timeout: Idle timeout before session expires (default 15 min).
         access_token_ttl: Per-token lifetime (default 5 min).
         max_session_duration: Hard cap on any single session (default 4 hours).
+        clock_skew_tolerance_seconds: Clock skew tolerance for expiration checks.
     """
 
     session_timeout: timedelta = field(default_factory=lambda: timedelta(minutes=15))
@@ -38,6 +43,7 @@ class SessionConfig:
     max_session_duration: timedelta = field(
         default_factory=lambda: timedelta(hours=4)
     )
+    clock_skew_tolerance_seconds: int = field(default=_DEFAULT_CLOCK_SKEW_SECONDS)
 
 
 @dataclass
@@ -119,6 +125,9 @@ class SessionManager:
             return False
 
         now = datetime.now(timezone.utc)
+        now_minus_tolerance = now - timedelta(
+            seconds=self.config.clock_skew_tolerance_seconds
+        )
 
         # Check hard cap
         session_created_at = session.expires_at - self.config.session_timeout
@@ -126,7 +135,7 @@ class SessionManager:
             return False
 
         # Check idle timeout
-        if session.expires_at < now:
+        if session.expires_at < now_minus_tolerance:
             return False
 
         return True
@@ -216,10 +225,14 @@ class SessionManager:
         """
         now = datetime.now(timezone.utc)
         hard_cap_threshold = now - (self.config.max_session_duration - self.config.session_timeout)
+        # Apply clock skew tolerance to cleanup threshold
+        cleanup_threshold = hard_cap_threshold - timedelta(
+            seconds=self.config.clock_skew_tolerance_seconds
+        )
         expired = (
             self.db.query(SessionModel)
             .filter(
-                SessionModel.expires_at < hard_cap_threshold,
+                SessionModel.expires_at < cleanup_threshold,
             )
             .delete()
         )
@@ -233,6 +246,9 @@ class SessionManager:
             False if session has expired (requires re-auth), True if still active.
         """
         now = datetime.now(timezone.utc)
+        now_minus_tolerance = now - timedelta(
+            seconds=self.config.clock_skew_tolerance_seconds
+        )
 
         # Hard cap check
         session_created_at = session.expires_at - self.config.session_timeout
@@ -240,7 +256,7 @@ class SessionManager:
             return False
 
         # Idle timeout check
-        if session.expires_at < now:
+        if session.expires_at < now_minus_tolerance:
             return False
 
         return True

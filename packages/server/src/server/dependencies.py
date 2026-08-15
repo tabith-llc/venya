@@ -18,6 +18,7 @@ from vault.vault.vault import Caller
 from vault.iam.models import Session as SessionModel
 from vault.iam.session_manager import SessionConfig as VaultSessionConfig, SessionManager
 from vault.iam.role_manager import RoleManager
+from .utils.time import is_expired
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -100,12 +101,18 @@ def get_current_session(
     from vault.iam.session_manager import SessionConfig
 
     config = SessionConfig()
+    server_config = getattr(request.app.state, "config", None)
+    tolerance = (
+        server_config.clock_skew.token_tolerance_seconds
+        if server_config and hasattr(server_config, "clock_skew")
+        else 60
+    )
     now = datetime.now(timezone.utc)
     session_created_at = session.expires_at - config.session_timeout
     if session_created_at + config.max_session_duration < now:
         logger.info("GET_SESSION DEBUG: session %s over max cap, created_at=%s, now=%s", session.id, session_created_at, now)
         return None
-    if session.expires_at < now:
+    if is_expired(session.expires_at, tolerance):
         logger.info("GET_SESSION DEBUG: session %s expired, expires_at=%s, now=%s", session.id, session.expires_at, now)
         return None
 

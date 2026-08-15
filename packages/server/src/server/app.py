@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import ServerConfig
+from .utils.time import effective_expiry_check_time
 
 logger = logging.getLogger("venya.server")
 
@@ -155,9 +156,17 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
                     from vault.iam.session_manager import SessionConfig
                     config = SessionConfig()
                     hard_cap_threshold = now - (config.max_session_duration - config.session_timeout)
+                    # Apply clock skew tolerance to cleanup threshold
+                    server_config = getattr(app.state, "config", None)
+                    tolerance = (
+                        server_config.clock_skew.token_tolerance_seconds
+                        if server_config and hasattr(server_config, "clock_skew")
+                        else 60
+                    )
+                    cleanup_threshold = hard_cap_threshold - __import__("datetime").timedelta(seconds=tolerance)
                     deleted = db.execute(
                         text("DELETE FROM sessions WHERE expires_at < :threshold"),
-                        {"threshold": hard_cap_threshold},
+                        {"threshold": cleanup_threshold},
                     )
                     db.commit()
                     logger.info("Session cleanup: deleted %d expired sessions", deleted.rowcount)

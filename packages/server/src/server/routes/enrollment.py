@@ -9,6 +9,8 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from ..utils.time import effective_expiry_check_time
+
 router = APIRouter()
 logger = logging.getLogger("venya.server")
 
@@ -125,11 +127,18 @@ async def enrollment_list_tokens(
 
         from vault.iam.models import EnrollmentToken
 
+        server_config = getattr(request.app.state, "config", None)
+        tolerance = (
+            server_config.clock_skew.token_tolerance_seconds
+            if server_config and hasattr(server_config, "clock_skew")
+            else 60
+        )
+        now_minus_tolerance = effective_expiry_check_time(tolerance)
         tokens = (
             db.query(EnrollmentToken)
             .filter(
                 EnrollmentToken.state.in_(["created", "in_progress"]),
-                EnrollmentToken.expires_at > __import__("datetime").datetime.now(tz.utc),
+                EnrollmentToken.expires_at > now_minus_tolerance,
             )
             .order_by(EnrollmentToken.created_at.desc())
             .all()

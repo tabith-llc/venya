@@ -20,6 +20,7 @@ from ..fido2.browser_adapter import (
     challenge_to_browser_registration_options,
     browser_registration_to_fido2,
 )
+from ..utils.time import effective_expiry_check_time
 
 logger = logging.getLogger("venya.server")
 router = APIRouter()
@@ -106,12 +107,19 @@ def _verify_elevation(request: Request, db) -> bool:
     from vault.iam.models import ElevationToken
 
     token_hash = __import__("hashlib").sha256(token.encode()).hexdigest()
+    server_config = getattr(request.app.state, "config", None)
+    tolerance = (
+        server_config.clock_skew.token_tolerance_seconds
+        if server_config and hasattr(server_config, "clock_skew")
+        else 60
+    )
+    now_minus_tolerance = effective_expiry_check_time(tolerance)
     elevation = (
         db.query(ElevationToken)
         .filter(
             ElevationToken.token_hash == token_hash,
             ElevationToken.used == False,  # noqa: E712
-            ElevationToken.expires_at > datetime.now(timezone.utc),
+            ElevationToken.expires_at > now_minus_tolerance,
         )
         .first()
     )

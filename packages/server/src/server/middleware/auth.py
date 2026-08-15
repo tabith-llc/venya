@@ -21,10 +21,9 @@ from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 
-logger = logging.getLogger("venya.server")
+from ..utils.time import has_not_yet_started, is_expired
 
-# Clock skew tolerance for certificate validity checks
-_CERT_CLOCK_SKEW = timedelta(minutes=5)
+logger = logging.getLogger("venya.server")
 
 
 def _extract_identity_from_cert(cert: x509.Certificate) -> str:
@@ -240,15 +239,21 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Admin access requires valid client certificate"},
             )
 
-        # Step 4: Verify cert not expired (±5min clock skew tolerance)
+        # Step 4: Verify cert not expired (config-driven clock skew tolerance)
+        config = getattr(request.app.state, "config", None)
+        cert_tolerance = (
+            config.clock_skew.cert_tolerance_seconds
+            if config and hasattr(config, "clock_skew")
+            else 300
+        )
         now = datetime.now(timezone.utc)
-        if cert.not_valid_before_utc > now + _CERT_CLOCK_SKEW:
+        if has_not_yet_started(cert.not_valid_before_utc, cert_tolerance):
             logger.warning("Admin route %s: cert not yet valid", path)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": "Client certificate is not yet valid"},
             )
-        if cert.not_valid_after_utc < now - _CERT_CLOCK_SKEW:
+        if is_expired(cert.not_valid_after_utc, cert_tolerance):
             logger.warning("Admin route %s: cert expired", path)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,

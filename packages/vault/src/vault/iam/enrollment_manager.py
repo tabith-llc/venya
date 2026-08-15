@@ -21,6 +21,10 @@ from sqlalchemy.orm import Session
 from .models import EnrollmentToken, User
 
 
+# Default clock skew tolerance for vault-side checks
+_DEFAULT_CLOCK_SKEW_SECONDS = 60
+
+
 class EnrollmentError(Exception):
     """Enrollment error."""
 
@@ -31,9 +35,11 @@ class EnrollmentConfig:
 
     Attributes:
         token_expiry: How long enrollment tokens are valid (default 15 minutes).
+        clock_skew_tolerance_seconds: Clock skew tolerance for expiration checks.
     """
 
     token_expiry: timedelta = field(default_factory=lambda: timedelta(minutes=15))
+    clock_skew_tolerance_seconds: int = field(default=_DEFAULT_CLOCK_SKEW_SECONDS)
 
 
 class EnrollmentManager:
@@ -58,12 +64,15 @@ class EnrollmentManager:
             The plaintext token is returned only once and never stored.
         """
         # Check for active (non-expired, non-completed, non-revoked) tokens
+        now_minus_tolerance = datetime.now(timezone.utc) - timedelta(
+            seconds=self.config.clock_skew_tolerance_seconds
+        )
         active_count = (
             self.db.query(EnrollmentToken)
             .filter(
                 EnrollmentToken.user_id == user_id,
                 EnrollmentToken.state.in_(["created", "in_progress"]),
-                EnrollmentToken.expires_at > datetime.now(timezone.utc),
+                EnrollmentToken.expires_at > now_minus_tolerance,
             )
             .count()
         )
@@ -124,7 +133,9 @@ class EnrollmentManager:
                 f"Enrollment token is not in 'created' state (current: {token.state})"
             )
 
-        if token.expires_at <= datetime.now(timezone.utc):
+        if token.expires_at <= datetime.now(timezone.utc) - timedelta(
+            seconds=self.config.clock_skew_tolerance_seconds
+        ):
             raise EnrollmentError("Enrollment token has expired")
 
         user = self.db.query(User).filter(User.id == token.user_id).first()
@@ -243,10 +254,13 @@ class EnrollmentManager:
             Number of tokens removed.
         """
         now = datetime.now(timezone.utc)
+        now_minus_tolerance = now - timedelta(
+            seconds=self.config.clock_skew_tolerance_seconds
+        )
         count = (
             self.db.query(EnrollmentToken)
             .filter(
-                (EnrollmentToken.expires_at < now)
+                (EnrollmentToken.expires_at < now_minus_tolerance)
                 | (EnrollmentToken.state == "revoked"),
             )
             .delete(synchronize_session="fetch")
