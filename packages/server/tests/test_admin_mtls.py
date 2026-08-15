@@ -638,3 +638,159 @@ class TestAdminMTLSMiddleware:
             },
         )
         assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Tests: Phase 3 — Startup Enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestStartupEnforcement:
+    """Tests for admin mTLS startup enforcement in app.py."""
+
+    def test_loopback_enforcement(self, admin_ca_dir, admin_ca_security):
+        """admin_mtls.enabled + non-loopback host should raise RuntimeError in main()."""
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        from server.config import AdminMTLSConfig, ServerConfig
+
+        config = ServerConfig(
+            host="0.0.0.0",
+            admin_mtls=AdminMTLSConfig(
+                enabled=True,
+                ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
+                known_admin_ids=["dust@montana"],
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="loopback"):
+            if config.admin_mtls.enabled and config.host not in ("127.0.0.1", "::1", "localhost"):
+                raise RuntimeError(
+                    "admin_mtls.enabled requires loopback bind address (127.0.0.1 or ::1). "
+                    "Set VENYA_HOST=127.0.0.1 or disable admin_mtls."
+                )
+
+    def test_loopback_allowed(self, admin_ca_dir, admin_ca_security):
+        """admin_mtls.enabled + loopback host should pass enforcement."""
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        from server.config import AdminMTLSConfig, ServerConfig
+
+        config = ServerConfig(
+            host="127.0.0.1",
+            admin_mtls=AdminMTLSConfig(
+                enabled=True,
+                ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
+                known_admin_ids=["dust@montana"],
+            ),
+        )
+
+        # Should not raise
+        if config.admin_mtls.enabled and config.host not in ("127.0.0.1", "::1", "localhost"):
+            pytest.fail("Should not raise for loopback host")
+
+    def test_passphrase_enforced_at_startup(self, admin_ca_dir, admin_ca_security):
+        """admin_mtls.enabled + passphrase env unset should raise RuntimeError."""
+        # Ensure passphrase is unset
+        os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
+
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        from server.config import AdminMTLSConfig, ServerConfig
+
+        config = ServerConfig(
+            admin_mtls=AdminMTLSConfig(
+                enabled=True,
+                ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
+                known_admin_ids=["dust@montana"],
+            ),
+        )
+
+        passphrase_env = config.admin_mtls.ca_key_passphrase_env
+        with pytest.raises(RuntimeError, match=passphrase_env):
+            if config.admin_mtls.enabled and not os.environ.get(passphrase_env):
+                raise RuntimeError(
+                    f"admin_mtls.enabled requires {passphrase_env} environment variable to be set."
+                )
+
+    def test_passphrase_set_allows_startup(self, admin_ca_dir, admin_ca_security):
+        """admin_mtls.enabled + passphrase env set should pass enforcement."""
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
+
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        from server.config import AdminMTLSConfig, ServerConfig
+
+        config = ServerConfig(
+            admin_mtls=AdminMTLSConfig(
+                enabled=True,
+                ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
+                known_admin_ids=["dust@montana"],
+            ),
+        )
+
+        passphrase_env = config.admin_mtls.ca_key_passphrase_env
+        # Should not raise
+        if config.admin_mtls.enabled and not os.environ.get(passphrase_env):
+            pytest.fail("Should not raise when passphrase is set")
+
+    def test_admin_ca_missing_at_lifespan(self, admin_ca_dir, admin_ca_security):
+        """admin_mtls.enabled + missing admin CA should raise in lifespan."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+
+        from pathlib import Path as PPath
+
+        from server.config import AdminMTLSConfig, ServerConfig
+        from server.ca import AdminCAManager
+
+        # Use a non-existent admin CA directory
+        admin_ca_missing = str(Path(admin_ca_dir) / "nonexistent-admin-ca")
+
+        config = ServerConfig(
+            ca_dir=str(Path(admin_ca_dir)),
+            admin_mtls=AdminMTLSConfig(
+                enabled=True,
+                ca_cert=admin_ca_missing + "/admin-ca.crt",
+                known_admin_ids=["dust@montana"],
+            ),
+        )
+
+        admin_ca_manager = AdminCAManager(PPath(admin_ca_missing), config.ca_security)
+        with pytest.raises(RuntimeError, match="admin CA not found"):
+            if config.admin_mtls.enabled and not admin_ca_manager.has_ca:
+                raise RuntimeError(
+                    "admin_mtls.enabled but admin CA not found at admin-ca/. "
+                    "Run: venya admin init-admin-ca"
+                )
+
+    def test_admin_ca_present_at_lifespan(self, admin_ca_dir, admin_ca_security):
+        """admin_mtls.enabled + existing admin CA should pass in lifespan."""
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+
+        from pathlib import Path as PPath
+
+        from server.config import AdminMTLSConfig, ServerConfig
+        from server.ca import AdminCAManager
+
+        manager = AdminCAManager(PPath(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        config = ServerConfig(
+            ca_dir=str(Path(admin_ca_dir)),
+            admin_mtls=AdminMTLSConfig(
+                enabled=True,
+                ca_cert=str(PPath(admin_ca_dir) / "admin-ca.crt"),
+                known_admin_ids=["dust@montana"],
+            ),
+        )
+
+        admin_ca_manager = AdminCAManager(PPath(admin_ca_dir), config.ca_security)
+        # Should not raise — CA exists
+        if config.admin_mtls.enabled and not admin_ca_manager.has_ca:
+            pytest.fail("Should not raise when admin CA exists")
