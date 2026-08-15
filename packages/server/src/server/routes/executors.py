@@ -75,7 +75,7 @@ class ExecutorRegisterRequest(BaseModel):
         min_length=2,
         max_length=64,
     )
-    csr_pem: str = Field(..., description="PEM-encoded Certificate Signing Request")
+    csr_pem: str = Field(..., description="PEM-encoded Certificate Signing Request", max_length=2048)
     enrollment_token: str | None = None
 
 

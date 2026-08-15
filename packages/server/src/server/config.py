@@ -293,6 +293,14 @@ class ServerConfig(BaseSettings):
     # Clock skew tolerance
     clock_skew: ClockSkewConfig = Field(default_factory=ClockSkewConfig)
 
+    # Request size limits
+    max_request_body_bytes: int = Field(
+        default=1_048_576,
+        ge=1024,
+        le=104_857_600,
+        description="Maximum request body size in bytes (1024–104857600, default 1MB)",
+    )
+
     # Audit forwarding
     audit_remote_url: str | None = Field(default=None, description="Remote syslog URL (tls://host:port)")
     audit_local_retention_days: int = Field(default=90, description="Local audit log retention days")
