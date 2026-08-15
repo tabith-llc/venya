@@ -175,6 +175,12 @@ class ExecutorEnrollmentToken(Base):
     token_hash = Column(String(64), unique=True, nullable=False)
     state = Column(String(16), nullable=False, default="created")
     created_by = Column(String(64), ForeignKey("users.user_id"), nullable=False)
+    created_by_session_id = Column(String(64), nullable=True,
+        comment="Forensic trace — nullify after 90 days per retention policy")
+    created_from_ip = Column(String(45), nullable=True,
+        comment="Forensic trace — nullify after 90 days per retention policy")
+    created_from_user_agent = Column(String(256), nullable=True,
+        comment="Forensic trace — nullify after 90 days per retention policy")
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False,

@@ -1150,6 +1150,9 @@ async def admin_enroll_executor(
 
         caller = getattr(request.state, "auth_user", {})
         admin_user_id = caller.get("user_id", "unknown")
+        session_id = caller.get("session_id")
+        client_ip = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent")
 
         plaintext = "enrl_exec_" + secrets.token_urlsafe(32)
         pepper = config.recovery_code_pepper if config else ""
@@ -1166,6 +1169,9 @@ async def admin_enroll_executor(
             token_hash=token_hash,
             state="created",
             created_by=admin_user_id,
+            created_by_session_id=str(session_id) if session_id else None,
+            created_from_ip=client_ip,
+            created_from_user_agent=user_agent,
             expires_at=expires_at,
         )
         db.add(token)
@@ -1177,7 +1183,12 @@ async def admin_enroll_executor(
             fields={
                 "executor_id": executor_id,
                 "token_id": token.id,
-                "expires_in_seconds": ttl_seconds,
+                "token_hash_preview": token_hash[:8],
+                "expires_at": expires_at.isoformat(),
+                "created_by_session_id": str(session_id) if session_id else None,
+                "created_from_ip": client_ip,
+                "created_from_user_agent": user_agent,
+                "token_created_at": now.isoformat(),
             },
             timestamp=now,
         )

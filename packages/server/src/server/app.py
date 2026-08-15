@@ -161,6 +161,26 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
                     )
                     db.commit()
                     logger.info("Session cleanup: deleted %d expired sessions", deleted.rowcount)
+                    # Purge expired admin identity metadata (90-day retention)
+                    try:
+                        cutoff = now - __import__("datetime").timedelta(days=90)
+                        result = db.execute(
+                            text("""UPDATE executor_enrollment_tokens
+                                    SET created_by_session_id = NULL,
+                                        created_from_ip = NULL,
+                                        created_from_user_agent = NULL
+                                    WHERE created_at < :cutoff
+                                      AND (created_by_session_id IS NOT NULL
+                                           OR created_from_ip IS NOT NULL
+                                           OR created_from_user_agent IS NOT NULL)"""),
+                            {"cutoff": cutoff},
+                        )
+                        db.commit()
+                        if result.rowcount:
+                            logger.info("Purged admin identity metadata for %d expired tokens", result.rowcount)
+                    except Exception:
+                        db.rollback()
+                        logger.exception("Admin identity metadata purge failed")
                 except Exception:
                     db.rollback()
                     logger.exception("Session cleanup failed")
