@@ -29,6 +29,11 @@ TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-vault-install.tar.gz
 VAULT_HOSTNAME="${VAULT_HOSTNAME:-$(hostname)}"
 TLS_MODE="${TLS_MODE:-internal}"
 
+# Admin mTLS
+ADMIN_MTLS_ENABLED="${VENYA_ADMIN_MTLS_ENABLED:-true}"
+ADMIN_IDENTITY="${VENYA_ADMIN_IDENTITY:-}"
+ADMIN_CA_PASSPHRASE="${VENYA_ADMIN_CA_PASSPHRASE:-}"
+
 # --- Colors ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -227,6 +232,63 @@ chown -R venya:venya /var/log/venya
 chown -R venya:venya "$INSTALL_DIR"
 chmod 700 /var/lib/venya/ca
 
+# --- Admin mTLS bootstrap ---
+ADMIN_CA_DIR="/var/lib/venya/ca/admin-ca"
+ADMIN_CERT_DIR="/etc/venya/admin"
+
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    info "Configuring admin mTLS..."
+
+    # Generate passphrase if not provided
+    if [ -z "$ADMIN_CA_PASSPHRASE" ]; then
+        ADMIN_CA_PASSPHRASE=$(openssl rand -base64 32)
+    fi
+
+    # Derive default identity
+    if [ -z "$ADMIN_IDENTITY" ]; then
+        ADMIN_IDENTITY="admin@${VAULT_HOSTNAME}"
+    fi
+
+    # Create directories
+    mkdir -p "$ADMIN_CA_DIR"
+    chmod 700 "$ADMIN_CA_DIR"
+    mkdir -p "$ADMIN_CERT_DIR"
+    chmod 700 "$ADMIN_CERT_DIR"
+
+    # Generate admin CA
+    export VENYA_ADMIN_CA_KEY_PASSPHRASE="$ADMIN_CA_PASSPHRASE"
+    sudo -u venya PATH="/opt/venya/.venv/bin:$PATH" \
+        python -c "
+from pathlib import Path
+from server.ca import AdminCAManager
+from server.config import CASecurityConfig
+cm = AdminCAManager(Path('$ADMIN_CA_DIR'), CASecurityConfig())
+if not cm.has_ca:
+    cm.initialize()
+print('Admin CA initialized')
+"
+
+    # Generate first admin cert
+    sudo -u venya PATH="/opt/venya/.venv/bin:$PATH" \
+        python -c "
+from pathlib import Path
+from server.ca import AdminCAManager
+from server.config import CASecurityConfig
+cm = AdminCAManager(Path('$ADMIN_CA_DIR'), CASecurityConfig())
+cert, key_pem, cert_pem = cm.sign_admin_cert('$ADMIN_IDENTITY')
+Path('$ADMIN_CERT_DIR/admin.crt').write_bytes(cert_pem)
+Path('$ADMIN_CERT_DIR/admin.key').write_bytes(key_pem)
+Path('$ADMIN_CERT_DIR/admin.crt').chmod(0o644)
+Path('$ADMIN_CERT_DIR/admin.key').chmod(0o600)
+print('Admin cert generated for $ADMIN_IDENTITY')
+"
+
+    # Write passphrase to .env (added below, but set env var here for Python calls)
+    # The actual .env append happens after .env file is created
+
+    info "Admin CA and first admin cert generated for $ADMIN_IDENTITY"
+fi
+
 # --- Install and setup PostgreSQL ---
 info "Installing PostgreSQL..."
 apt-get install -y -qq postgresql > /dev/null 2>&1
@@ -289,6 +351,17 @@ audit_remote_url = null
 audit_local_retention_days = 90
 EOF
 
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    cat >> /etc/venya/server.toml << EOF
+
+[admin_mtls]
+enabled = true
+ca_cert = "$ADMIN_CA_DIR/admin-ca.crt"
+known_admin_ids = ["$ADMIN_IDENTITY"]
+EOF
+    info "Admin mTLS section appended to server.toml"
+fi
+
 info "Server config written to /etc/venya/server.toml"
 
 # --- Write .env ---
@@ -302,10 +375,60 @@ VENYA_FIDO2__RP_NAME=Venya Vault
 VENYA_CORS_ORIGINS=["https://$VAULT_HOSTNAME"]
 EOF
 
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    cat >> "$INSTALL_DIR/.env" << EOF
+VENYA_ADMIN_CA_KEY_PASSPHRASE="$ADMIN_CA_PASSPHRASE"
+EOF
+    chmod 600 "$INSTALL_DIR/.env"
+fi
+
 info ".env written to $INSTALL_DIR/.env"
 
 # --- Write Caddyfile ---
-cat > /etc/venya/Caddyfile << EOF
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    cat > /etc/venya/Caddyfile << EOF
+$VAULT_HOSTNAME {
+    tls $TLS_MODE {
+        client_auth {
+            mode verify_if_given
+            trusted_ca_cert_file /var/lib/venya/ca/admin-ca/admin-ca.crt
+        }
+    }
+
+    # Admin routes — require verified client cert
+    @admin path /api/v1/admin/*
+    handle @admin {
+        @verified header X-Client-Verified true
+        handle @verified {
+            reverse_proxy 127.0.0.1:8080 {
+                header_up X-Client-Cert {http.request.tls.client.certificate_pem}
+                header_up X-Client-Verified {http.request.tls.client.verified}
+            }
+        }
+        # Admin route but no valid cert → 403
+        handle {
+            respond "Admin access requires valid client certificate" 403
+        }
+    }
+
+    # Non-admin routes — pass through, no cert required
+    handle {
+        reverse_proxy 127.0.0.1:8080 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+        }
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+    }
+}
+EOF
+    info "Caddyfile written (TLS mode: $TLS_MODE, admin mTLS: enabled)"
+else
+    cat > /etc/venya/Caddyfile << EOF
 $VAULT_HOSTNAME {
     reverse_proxy 127.0.0.1:8080 {
         header_up X-Real-IP {remote_host}
@@ -314,7 +437,6 @@ $VAULT_HOSTNAME {
 
     tls $TLS_MODE
 
-    # Security headers
     header {
         Strict-Transport-Security "max-age=31536000"
         X-Content-Type-Options nosniff
@@ -322,8 +444,31 @@ $VAULT_HOSTNAME {
     }
 }
 EOF
+    info "Caddyfile written (TLS mode: $TLS_MODE, admin mTLS: disabled)"
+fi
 
-info "Caddyfile written to /etc/venya/Caddyfile (TLS mode: $TLS_MODE)"
+# --- Admin mTLS bootstrap instructions ---
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    echo ""
+    echo "==============================================================="
+    echo "  ADMIN mTLS IS ENABLED"
+    echo "==============================================================="
+    echo "  Your admin certificate is at:"
+    echo "    $ADMIN_CERT_DIR/admin.crt"
+    echo "    $ADMIN_CERT_DIR/admin.key"
+    echo ""
+    echo "  Copy these to your workstation:"
+    echo "    scp root@${VAULT_HOSTNAME}:$ADMIN_CERT_DIR/admin.crt ~/venya-admin.crt"
+    echo "    scp root@${VAULT_HOSTNAME}:$ADMIN_CERT_DIR/admin.key ~/venya-admin.key"
+    echo ""
+    echo "  Admin CA passphrase saved to: $INSTALL_DIR/.env"
+    echo "  Read it with: cat $INSTALL_DIR/.env"
+    echo ""
+    echo "  Until you do, admin endpoints will return 403."
+    echo "  To disable: set VENYA_ADMIN_MTLS_ENABLED=false and reinstall."
+    echo "==============================================================="
+    echo ""
+fi
 
 # Copy Caddyfile to Caddy's default location
 sudo cp /etc/venya/Caddyfile /etc/caddy/Caddyfile
