@@ -4,8 +4,9 @@ import hashlib
 import hmac
 import json
 import logging
-import secrets
 from datetime import datetime, timedelta, timezone
+
+from vault.utils.entropy import get_secure_token
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -1154,7 +1155,7 @@ async def admin_enroll_executor(
         client_ip = request.client.host if request.client else None
         user_agent = request.headers.get("user-agent")
 
-        plaintext = "enrl_exec_" + secrets.token_urlsafe(32)
+        plaintext = "enrl_exec_" + get_secure_token(32)
         pepper = config.recovery_code_pepper if config else ""
         token_hash = hmac.new(
             pepper.encode("utf-8"),
