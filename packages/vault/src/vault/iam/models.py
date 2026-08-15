@@ -173,7 +173,6 @@ class ExecutorEnrollmentToken(Base):
     id = Column(Integer, primary_key=True)
     executor_id = Column(String(64), nullable=False)
     token_hash = Column(String(64), unique=True, nullable=False)
-    binding_hash = Column(String(64), nullable=False, default="")
     state = Column(String(16), nullable=False, default="created")
     created_by = Column(String(64), ForeignKey("users.user_id"), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
