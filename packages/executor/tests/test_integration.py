@@ -27,7 +27,7 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from executor.config import ExecutorConfig
-from executor.daemon import CertificateManager
+from executor.daemon import CertificateManager, CertificateValidationError
 from server.ca import CAManager
 from server.routes import executors as executors_routes
 
@@ -257,7 +257,7 @@ class TestMTLSHandshake:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
-            with pytest.raises(RuntimeError, match="CA validation failed"):
+            with pytest.raises(CertificateValidationError, match="not signed by trusted CA"):
                 mgr.register("test-executor")
 
 

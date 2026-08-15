@@ -35,6 +35,12 @@ from .strategies.factory import create_strategy
 
 logger = logging.getLogger("venya.executor.daemon")
 
+CLOCK_SKEW_TOLERANCE = timedelta(seconds=300)
+
+
+class CertificateValidationError(Exception):
+    """Raised when an executor certificate fails validation."""
+
 
 class DaemonState:
     """Tracks daemon runtime state."""
@@ -136,8 +142,8 @@ class CertificateManager:
         self.serial = data["serial_number"]
         self._not_after = datetime.fromisoformat(data["not_after"]).replace(tzinfo=UTC)
 
-        # Validate CA signature before saving
-        _validate_ca_signature(cert_pem, ca_cert_pem)
+        # Validate certificate before saving
+        validate_executor_certificate(cert_pem, ca_cert_pem, executor_id)
 
         # Save CA certificate
         Path(self.ca_cert_path).write_bytes(ca_cert_pem)
@@ -223,8 +229,8 @@ class CertificateManager:
         self.serial = data["serial_number"]
         self._not_after = datetime.fromisoformat(data["not_after"]).replace(tzinfo=UTC)
 
-        # Validate CA signature
-        _validate_ca_signature(cert_pem, ca_cert_pem)
+        # Validate certificate
+        validate_executor_certificate(cert_pem, ca_cert_pem, executor_id)
 
         # Replace on disk
         Path(self.cert_path).write_bytes(cert_pem)
@@ -345,34 +351,130 @@ def _create_csr(private_key: ec.EllipticCurvePrivateKey, executor_id: str) -> by
     return csr.public_bytes(serialization.Encoding.PEM)
 
 
-def _validate_ca_signature(cert_pem: bytes, ca_cert_pem: bytes) -> None:
-    """Validate that a certificate was signed by the given CA.
+def _extract_common_name(cert: x509.Certificate) -> str | None:
+    """Extract the CN from a certificate.
 
     Args:
-        cert_pem: PEM-encoded certificate to validate.
-        ca_cert_pem: PEM-encoded CA certificate.
+        cert: The X.509 certificate.
+
+    Returns:
+        The CN value, or None if not found.
+    """
+    attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    if not attrs:
+        return None
+    value = attrs[0].value
+    return value.decode() if isinstance(value, bytes) else value
+
+
+def _verify_ca_signature(cert: x509.Certificate, ca_cert: x509.Certificate) -> None:
+    """Verify that cert is signed by ca_cert's public key.
+
+    Args:
+        cert: The certificate to verify.
+        ca_cert: The CA certificate.
 
     Raises:
-        RuntimeError: If the certificate was not signed by the CA.
+        CertificateValidationError: If the signature is invalid or key type unsupported.
+    """
+    from cryptography.exceptions import InvalidSignature
+
+    ca_public_key = ca_cert.public_key()
+
+    try:
+        if isinstance(ca_public_key, ec.EllipticCurvePublicKey):
+            hash_algo = cert.signature_hash_algorithm
+            if hash_algo is None:
+                raise CertificateValidationError("Certificate has no signature hash algorithm")
+            ca_public_key.verify(
+                cert.signature,
+                cert.tbs_certificate_bytes,
+                ec.ECDSA(hash_algo),
+            )
+        else:
+            from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+            if isinstance(ca_public_key, rsa.RSAPublicKey):
+                hash_algo = cert.signature_hash_algorithm
+                if hash_algo is None:
+                    raise CertificateValidationError("Certificate has no signature hash algorithm")
+                ca_public_key.verify(
+                    cert.signature,
+                    cert.tbs_certificate_bytes,
+                    padding.PKCS1v15(),
+                    hash_algo,
+                )
+            else:
+                raise CertificateValidationError(
+                    f"Unsupported CA key type: {type(ca_public_key).__name__}"
+                )
+    except InvalidSignature:
+        raise CertificateValidationError("Certificate not signed by trusted CA")
+
+
+def validate_executor_certificate(
+    cert_pem: bytes,
+    ca_cert_pem: bytes,
+    expected_executor_id: str,
+) -> None:
+    """Validate an executor certificate against all security requirements.
+
+    Checks are ordered by cost — cheapest first so most rejections
+    short-circuit before expensive crypto operations.
+
+    Args:
+        cert_pem: PEM-encoded executor certificate.
+        ca_cert_pem: PEM-encoded CA certificate.
+        expected_executor_id: The expected executor ID (matches CN).
+
+    Raises:
+        CertificateValidationError: If any check fails.
     """
     cert = x509.load_pem_x509_certificate(cert_pem)
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
+    now = datetime.now(UTC)
 
+    # 1. Validity period (cheapest — no extension parsing)
+    not_before = cert.not_valid_before_utc
+    not_after = cert.not_valid_after_utc
+    if now + CLOCK_SKEW_TOLERANCE < not_before:
+        raise CertificateValidationError("Certificate not yet valid")
+    if now - CLOCK_SKEW_TOLERANCE > not_after:
+        raise CertificateValidationError("Certificate expired")
+
+    # 2. CN matches executor_id (string comparison)
+    cn = _extract_common_name(cert)
+    if cn != expected_executor_id:
+        raise CertificateValidationError(
+            f"CN mismatch: expected {expected_executor_id!r}, got {cn!r}"
+        )
+
+    # 3. BasicConstraints CA=False
     try:
-        ca_public_key = ca_cert.public_key()
-        # CA uses ECDSA P-256 (enforced by server CAManager)
-        from cryptography.hazmat.primitives.asymmetric.ec import ECDSA, EllipticCurvePublicKey
+        bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)
+        if bc.value.ca:
+            raise CertificateValidationError("Certificate has CA=True (must be leaf cert)")
+    except x509.ExtensionNotFound:
+        raise CertificateValidationError("Missing BasicConstraints extension")
 
-        if not isinstance(ca_public_key, EllipticCurvePublicKey):
-            raise TypeError(
-                f"CA public key is {type(ca_public_key).__name__}, expected ECDSA"
-            )
-        hash_algo = cert.signature_hash_algorithm
-        if hash_algo is None:
-            raise RuntimeError("Certificate has no signature hash algorithm")
-        ca_public_key.verify(cert.signature, cert.tbs_certificate_bytes, ECDSA(hash_algo))
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"Certificate CA validation failed: {e}")
+    # 4. KeyUsage includes digitalSignature
+    try:
+        ku = cert.extensions.get_extension_for_class(x509.KeyUsage)
+        if not ku.value.digital_signature:
+            raise CertificateValidationError("KeyUsage missing digitalSignature")
+    except x509.ExtensionNotFound:
+        raise CertificateValidationError("Missing KeyUsage extension")
+
+    # 5. ExtendedKeyUsage includes clientAuth
+    try:
+        eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+        if x509.ExtendedKeyUsageOID.CLIENT_AUTH not in eku.value:
+            raise CertificateValidationError("EKU missing clientAuth")
+    except x509.ExtensionNotFound:
+        raise CertificateValidationError("Missing ExtendedKeyUsage extension")
+
+    # 6. CA signature verification (most expensive — do last)
+    _verify_ca_signature(cert, ca_cert)
 
 
 def _extract_executor_id_from_cert(cert_path: str) -> str:

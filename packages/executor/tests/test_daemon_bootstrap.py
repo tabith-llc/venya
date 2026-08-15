@@ -158,7 +158,7 @@ class TestDaemonRegistrationTLSVerification:
         with patch("executor.daemon.httpx2.Client") as MockClient, \
              patch("executor.daemon._generate_ecdsa_p256_keypair"), \
              patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon._validate_ca_signature"), \
+             patch("executor.daemon.validate_executor_certificate"), \
              patch("executor.daemon.Path") as MockPath, \
              patch("executor.daemon.os.chmod"):
             MockPath.return_value.write_bytes = MagicMock()
@@ -193,7 +193,7 @@ class TestDaemonRegistrationTLSVerification:
         with patch("executor.daemon.httpx2.Client") as MockClient, \
              patch("executor.daemon._generate_ecdsa_p256_keypair"), \
              patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon._validate_ca_signature"), \
+             patch("executor.daemon.validate_executor_certificate"), \
              patch("executor.daemon.Path") as MockPath, \
              patch("executor.daemon.os.chmod"):
             MockPath.return_value.write_bytes = MagicMock()
@@ -227,7 +227,7 @@ class TestDaemonRegistrationTLSVerification:
         with patch("executor.daemon.httpx2.Client") as MockClient, \
              patch("executor.daemon._generate_ecdsa_p256_keypair"), \
              patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon._validate_ca_signature"), \
+             patch("executor.daemon.validate_executor_certificate"), \
              patch("executor.daemon.Path") as MockPath, \
              patch("executor.daemon.os.chmod"), \
              caplog.at_level("WARNING"):
@@ -275,7 +275,7 @@ class TestDaemonRegistrationTLSVerification:
         with patch("executor.daemon.httpx2.Client") as MockClient, \
              patch("executor.daemon._generate_ecdsa_p256_keypair"), \
              patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon._validate_ca_signature"), \
+             patch("executor.daemon.validate_executor_certificate"), \
              patch("executor.daemon.Path") as MockPath, \
              patch("executor.daemon.os.chmod"):
             MockPath.return_value.write_bytes = MagicMock()
@@ -335,7 +335,7 @@ class TestDaemonRegistrationTLSVerification:
         with patch("executor.daemon.httpx2.Client") as MockClient, \
              patch("executor.daemon._generate_ecdsa_p256_keypair"), \
              patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon._validate_ca_signature"), \
+             patch("executor.daemon.validate_executor_certificate"), \
              patch("executor.daemon.Path") as MockPath, \
              patch("executor.daemon.os.chmod"):
             MockPath.return_value.write_bytes = MagicMock()

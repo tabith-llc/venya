@@ -23,10 +23,12 @@ from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 from executor.config import ExecutorConfig, MtlsConfig, CertificateRotationConfig
 from executor.daemon import (
     CertificateManager,
+    CertificateValidationError,
     _create_csr,
     _extract_executor_id_from_cert,
     _generate_ecdsa_p256_keypair,
-    _validate_ca_signature,
+    _verify_ca_signature,
+    validate_executor_certificate,
 )
 
 
@@ -289,7 +291,7 @@ class TestRegisterErrors:
                 cert_manager.register("test-executor")
 
     def test_register_invalid_ca_signature(self, config: ExecutorConfig):
-        """Registration raises RuntimeError when cert is not signed by CA."""
+        """Registration raises CertificateValidationError when cert is not signed by CA."""
         # Create a cert signed by a DIFFERENT CA
         ca_key1, ca_cert1 = _make_ca_pair()
         other_ca_key, other_ca_cert = _make_ca_pair()
@@ -302,7 +304,7 @@ class TestRegisterErrors:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
-            with pytest.raises(RuntimeError, match="CA validation failed"):
+            with pytest.raises(CertificateValidationError, match="not signed by trusted CA"):
                 mgr.register("test-executor")
 
 
@@ -523,9 +525,9 @@ class TestHelperFunctions:
         executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor")
 
         # Should not raise
-        _validate_ca_signature(
-            executor_cert.public_bytes(serialization.Encoding.PEM),
-            ca_cert.public_bytes(serialization.Encoding.PEM),
+        _verify_ca_signature(
+            executor_cert,
+            ca_cert,
         )
 
     def test_validate_ca_signature_invalid(self):
@@ -534,10 +536,485 @@ class TestHelperFunctions:
         ca_key2, ca_cert2 = _make_ca_pair()
         executor_cert = _make_executor_cert(ca_key2, ca_cert2, "test-executor")
 
-        with pytest.raises(RuntimeError, match="CA validation failed"):
-            _validate_ca_signature(
+        with pytest.raises(CertificateValidationError, match="not signed by trusted CA"):
+            _verify_ca_signature(
+                executor_cert,
+                ca_cert1,
+            )
+
+
+class TestValidateExecutorCertificate:
+    """Tests for validate_executor_certificate()."""
+
+    def test_valid_cert_passes(self, tmp_ca_dir: Path):
+        """A properly formed cert with all correct extensions passes validation."""
+        ca_key, ca_cert = _make_ca_pair()
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor")
+
+        # Should not raise
+        validate_executor_certificate(
+            executor_cert.public_bytes(serialization.Encoding.PEM),
+            ca_cert.public_bytes(serialization.Encoding.PEM),
+            "test-executor",
+        )
+
+    def test_cn_mismatch_raises(self, tmp_ca_dir: Path):
+        """Rejects cert where CN does not match expected executor_id."""
+        ca_key, ca_cert = _make_ca_pair()
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "other-executor")
+
+        with pytest.raises(CertificateValidationError, match="CN mismatch"):
+            validate_executor_certificate(
+                executor_cert.public_bytes(serialization.Encoding.PEM),
+                ca_cert.public_bytes(serialization.Encoding.PEM),
+                "test-executor",
+            )
+
+    def test_expired_cert_raises(self, tmp_ca_dir: Path):
+        """Rejects cert that has expired."""
+        ca_key, ca_cert = _make_ca_pair()
+        now = datetime.now(timezone.utc)
+        expired_cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=60))
+            .not_valid_after(now - timedelta(days=1))
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test-executor")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        with pytest.raises(CertificateValidationError, match="Certificate expired"):
+            validate_executor_certificate(
+                expired_cert.public_bytes(serialization.Encoding.PEM),
+                ca_cert.public_bytes(serialization.Encoding.PEM),
+                "test-executor",
+            )
+
+    def test_not_yet_valid_raises(self, tmp_ca_dir: Path):
+        """Rejects cert that is not yet valid."""
+        ca_key, ca_cert = _make_ca_pair()
+        now = datetime.now(timezone.utc)
+        future_cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now + timedelta(days=30))
+            .not_valid_after(now + timedelta(days=60))
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test-executor")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        with pytest.raises(CertificateValidationError, match="Certificate not yet valid"):
+            validate_executor_certificate(
+                future_cert.public_bytes(serialization.Encoding.PEM),
+                ca_cert.public_bytes(serialization.Encoding.PEM),
+                "test-executor",
+            )
+
+    def test_ca_true_raises(self, tmp_ca_dir: Path):
+        """Rejects cert with BasicConstraints CA=True."""
+        ca_key, ca_cert = _make_ca_pair()
+        ca_cert_with_ca_true = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+            .add_extension(
+                x509.BasicConstraints(ca=True, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test-executor")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        with pytest.raises(CertificateValidationError, match="CA=True"):
+            validate_executor_certificate(
+                ca_cert_with_ca_true.public_bytes(serialization.Encoding.PEM),
+                ca_cert.public_bytes(serialization.Encoding.PEM),
+                "test-executor",
+            )
+
+    def test_missing_basic_constraints_raises(self, tmp_ca_dir: Path):
+        """Rejects cert missing BasicConstraints extension."""
+        ca_key, ca_cert = _make_ca_pair()
+        cert_no_bc = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test-executor")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        with pytest.raises(CertificateValidationError, match="Missing BasicConstraints"):
+            validate_executor_certificate(
+                cert_no_bc.public_bytes(serialization.Encoding.PEM),
+                ca_cert.public_bytes(serialization.Encoding.PEM),
+                "test-executor",
+            )
+
+    def test_missing_key_usage_raises(self, tmp_ca_dir: Path):
+        """Rejects cert missing KeyUsage extension."""
+        ca_key, ca_cert = _make_ca_pair()
+        cert_no_ku = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test-executor")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        with pytest.raises(CertificateValidationError, match="Missing KeyUsage"):
+            validate_executor_certificate(
+                cert_no_ku.public_bytes(serialization.Encoding.PEM),
+                ca_cert.public_bytes(serialization.Encoding.PEM),
+                "test-executor",
+            )
+
+    def test_missing_eku_raises(self, tmp_ca_dir: Path):
+        """Rejects cert missing ExtendedKeyUsage extension."""
+        ca_key, ca_cert = _make_ca_pair()
+        cert_no_eku = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test-executor")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        with pytest.raises(CertificateValidationError, match="Missing ExtendedKeyUsage"):
+            validate_executor_certificate(
+                cert_no_eku.public_bytes(serialization.Encoding.PEM),
+                ca_cert.public_bytes(serialization.Encoding.PEM),
+                "test-executor",
+            )
+
+    def test_eku_missing_client_auth_raises(self, tmp_ca_dir: Path):
+        """Rejects cert with EKU but without clientAuth."""
+        ca_key, ca_cert = _make_ca_pair()
+        cert_server_auth = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.now(timezone.utc))
+            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test-executor")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        with pytest.raises(CertificateValidationError, match="EKU missing clientAuth"):
+            validate_executor_certificate(
+                cert_server_auth.public_bytes(serialization.Encoding.PEM),
+                ca_cert.public_bytes(serialization.Encoding.PEM),
+                "test-executor",
+            )
+
+    def test_bad_ca_signature_raises(self, tmp_ca_dir: Path):
+        """Rejects cert signed by a different CA."""
+        ca_key1, ca_cert1 = _make_ca_pair()
+        ca_key2, ca_cert2 = _make_ca_pair()
+        executor_cert = _make_executor_cert(ca_key2, ca_cert2, "test-executor")
+
+        with pytest.raises(CertificateValidationError, match="not signed by trusted CA"):
+            validate_executor_certificate(
                 executor_cert.public_bytes(serialization.Encoding.PEM),
                 ca_cert1.public_bytes(serialization.Encoding.PEM),
+                "test-executor",
+            )
+
+    def test_clock_skew_tolerance_within_limit(self, tmp_ca_dir: Path):
+        """Accepts cert expired within 5-minute clock skew tolerance."""
+        ca_key, ca_cert = _make_ca_pair()
+        now = datetime.now(timezone.utc)
+        # Expired 2 minutes ago — within 5-minute tolerance
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=30))
+            .not_valid_after(now - timedelta(minutes=2))
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test-executor")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        # Should not raise — within tolerance
+        validate_executor_certificate(
+            cert.public_bytes(serialization.Encoding.PEM),
+            ca_cert.public_bytes(serialization.Encoding.PEM),
+            "test-executor",
+        )
+
+    def test_clock_skew_tolerance_beyond_limit(self, tmp_ca_dir: Path):
+        """Rejects cert expired beyond 5-minute clock skew tolerance."""
+        ca_key, ca_cert = _make_ca_pair()
+        now = datetime.now(timezone.utc)
+        # Expired 10 minutes ago — beyond 5-minute tolerance
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+            ]))
+            .issuer_name(ca_cert.subject)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=30))
+            .not_valid_after(now - timedelta(minutes=10))
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("test-executor")]),
+                critical=False,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        with pytest.raises(CertificateValidationError, match="Certificate expired"):
+            validate_executor_certificate(
+                cert.public_bytes(serialization.Encoding.PEM),
+                ca_cert.public_bytes(serialization.Encoding.PEM),
+                "test-executor",
             )
 
     def test_extract_executor_id_from_cert(self):
