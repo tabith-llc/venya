@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
     PublicFormat,
 )
-from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+from cryptography.x509.oid import ExtensionOID, NameOID, ExtendedKeyUsageOID
 
 logger = logging.getLogger("venya.ca")
 
@@ -530,6 +530,289 @@ class CAManager:
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         deleted_count = db_session.query(ExecutorCertRevocation).filter(
             ExecutorCertRevocation.revoked_at < cutoff
+        ).delete(synchronize_session=False)
+        db_session.commit()
+        return deleted_count
+
+
+# --- Admin CA constants ---
+
+ADMIN_CA_VALIDITY_DAYS = 3650  # 10 years
+ADMIN_CERT_VALIDITY_DAYS = 90  # 90 days
+
+
+class AdminCAManager:
+    """Manages the admin CA keypair, certificates, and signing operations.
+
+    Separate from CAManager (executor CA). The admin CA is used exclusively
+    for signing admin client certificates used in mTLS authentication of
+    admin endpoints.
+
+    The admin CA key is encrypted on disk using a passphrase from the
+    VENYA_ADMIN_CA_KEY_PASSPHRASE environment variable.
+    """
+
+    def __init__(self, ca_path: Path, ca_security: CASecurityConfig | None = None) -> None:
+        self.ca_path = ca_path
+        self.ca_key_path = self.ca_path / "admin-ca.key"
+        self.ca_cert_path = self.ca_path / "admin-ca.crt"
+
+        if ca_security is not None:
+            self._key_passphrase_env = ca_security.key_passphrase_env
+        else:
+            self._key_passphrase_env = "VENYA_ADMIN_CA_KEY_PASSPHRASE"
+
+    @property
+    def has_ca(self) -> bool:
+        """Check if admin CA key/cert pair exists on disk."""
+        return self.ca_key_path.exists() and self.ca_cert_path.exists()
+
+    def initialize(self) -> None:
+        """Generate a new admin CA keypair and self-signed certificate.
+
+        Creates the admin CA directory (if needed), generates an ECDSA P-256
+        keypair, and creates a self-signed admin CA certificate. If a passphrase
+        is set via VENYA_ADMIN_CA_KEY_PASSPHRASE, the key will be encrypted on disk.
+
+        Raises:
+            RuntimeError: If admin CA already exists.
+        """
+        if self.has_ca:
+            raise RuntimeError(f"Admin CA already exists at {self.ca_path}")
+
+        self.ca_path.mkdir(parents=True, exist_ok=True)
+        os.chmod(str(self.ca_path), 0o700)
+
+        # Generate ECDSA P-256 keypair
+        private_key = ec.generate_private_key(ec.SECP256R1())
+
+        # Load passphrase for encryption
+        passphrase = _load_passphrase(self._key_passphrase_env)
+
+        # Store private key (encrypted if passphrase provided)
+        key_pem = _serialize_key_encrypted(private_key, passphrase)
+        self.ca_key_path.write_bytes(key_pem)
+        os.chmod(str(self.ca_key_path), 0o600)
+
+        # Create self-signed admin CA certificate
+        now = datetime.now(timezone.utc)
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin Certificate Authority"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Venya Admin CA"),
+        ])
+
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=ADMIN_CA_VALIDITY_DAYS))
+            .add_extension(
+                x509.BasicConstraints(ca=True, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=False,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+        )
+
+        cert = builder.sign(private_key, hashes.SHA256())
+
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+        self.ca_cert_path.write_bytes(cert_pem)
+        os.chmod(str(self.ca_cert_path), 0o644)
+
+        logger.info("Admin CA initialized at %s (encrypted=%s)", self.ca_path, passphrase is not None)
+
+    def _load_ca_key(self) -> ec.EllipticCurvePrivateKey:
+        """Load the admin CA private key from disk.
+
+        Decrypts using the passphrase from VENYA_ADMIN_CA_KEY_PASSPHRASE.
+
+        Returns:
+            ECDSA private key instance.
+
+        Raises:
+            RuntimeError: If the key cannot be decrypted or passphrase not set.
+        """
+        passphrase = _load_passphrase(self._key_passphrase_env)
+        key_data = self.ca_key_path.read_bytes()
+
+        is_encrypted = b"ENCRYPTED" in key_data
+
+        if is_encrypted and not passphrase:
+            raise RuntimeError(
+                f"Admin CA key is encrypted but {self._key_passphrase_env} is not set. "
+                "Set the environment variable before starting the server."
+            )
+
+        if not is_encrypted and passphrase:
+            logger.warning("Admin CA key is unencrypted but passphrase is set — ignoring passphrase")
+
+        return _deserialize_key(key_data, passphrase)
+
+    def sign_admin_cert(self, admin_identity: str) -> tuple[x509.Certificate, bytes, bytes]:
+        """Sign an admin certificate for the given identity.
+
+        Generates a new ECDSA P-256 keypair, signs it with the admin CA,
+        and returns the certificate, private key PEM, and certificate PEM.
+
+        Args:
+            admin_identity: The admin identity (used as CN and SAN DNS name).
+
+        Returns:
+            Tuple of (certificate, key_pem, cert_pem).
+        """
+        ca_cert, ca_key = self._load_ca_cert_and_key()
+        now = datetime.now(timezone.utc)
+        serial = int.from_bytes(secrets.token_bytes(8), "big")
+
+        # Generate new keypair for this admin cert
+        admin_key = ec.generate_private_key(ec.SECP256R1())
+
+        subject = x509.Name([
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+            x509.NameAttribute(NameOID.COMMON_NAME, admin_identity),
+        ])
+
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(ca_cert.subject)
+            .public_key(admin_key.public_key())
+            .serial_number(serial)
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=ADMIN_CERT_VALIDITY_DAYS))
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([
+                    ExtendedKeyUsageOID.CLIENT_AUTH,
+                ]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName(admin_identity)]),
+                critical=False,
+            )
+        )
+
+        cert = builder.sign(ca_key, hashes.SHA256())
+
+        key_pem = admin_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+
+        return cert, key_pem, cert_pem
+
+    def _load_ca_cert_and_key(self) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
+        """Load the admin CA certificate and private key.
+
+        Returns:
+            Tuple of (certificate, private_key).
+        """
+        ca_cert = x509.load_pem_x509_certificate(self.ca_cert_path.read_bytes())
+        ca_key = self._load_ca_key()
+        return ca_cert, ca_key
+
+    def get_admin_ca_cert_pem(self) -> bytes:
+        """Get the admin CA certificate in PEM format.
+
+        Returns:
+            PEM-encoded admin CA certificate bytes.
+        """
+        return self.ca_cert_path.read_bytes()
+
+    def generate_crl(self, db_session, max_entries: int = 1000) -> bytes:
+        """Generate a DER-encoded Certificate Revocation List for admin certs.
+
+        Args:
+            db_session: SQLAlchemy session for querying revocations.
+            max_entries: Maximum number of revocations to include.
+
+        Returns:
+            DER-encoded CRL bytes.
+        """
+        from sqlalchemy import desc
+
+        from vault.iam.models import AdminCertRevocation
+
+        ca_cert, ca_key = self._load_ca_cert_and_key()
+        now = datetime.now(timezone.utc)
+
+        revocations = (
+            db_session.query(AdminCertRevocation)
+            .order_by(desc(AdminCertRevocation.revoked_at))
+            .limit(max_entries)
+            .all()
+        )
+
+        builder = x509.CertificateRevocationListBuilder()
+        builder = builder.issuer_name(ca_cert.subject)
+        builder = builder.last_update(now)
+        builder = builder.next_update(now + timedelta(hours=1))
+
+        for rev in revocations:
+            revoked_cert = (
+                x509.RevokedCertificateBuilder()
+                .serial_number(int(rev.serial_number, 16))
+                .revocation_date(rev.revoked_at)
+                .build(hashes.SHA256())
+            )
+            builder = builder.add_revoked_certificate(revoked_cert)
+
+        crl = builder.sign(ca_key, hashes.SHA256())
+        return crl.public_bytes(serialization.Encoding.DER)
+
+    def purge_expired_revocations(self, db_session, retention_days: int) -> int:
+        """Delete admin cert revocation records older than retention_days.
+
+        Args:
+            db_session: SQLAlchemy session.
+            retention_days: Keep records for this many days.
+
+        Returns:
+            Number of deleted records.
+        """
+        from vault.iam.models import AdminCertRevocation
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        deleted_count = db_session.query(AdminCertRevocation).filter(
+            AdminCertRevocation.revoked_at < cutoff
         ).delete(synchronize_session=False)
         db_session.commit()
         return deleted_count

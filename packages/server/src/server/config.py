@@ -184,6 +184,27 @@ class CORSConfig(BaseModel):
     max_age: int = Field(default=3600, ge=0, description="Preflight cache in seconds")
 
 
+class AdminMTLSConfig(BaseModel):
+    """Configuration for admin mTLS authentication."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Require mTLS for admin endpoints",
+    )
+    ca_cert: str | None = Field(
+        default=None,
+        description="Path to admin CA certificate for verifying client certs",
+    )
+    ca_key_passphrase_env: str = Field(
+        default="VENYA_ADMIN_CA_KEY_PASSPHRASE",
+        description="Environment variable containing the admin CA key passphrase",
+    )
+    known_admin_ids: list[str] = Field(
+        default_factory=list,
+        description="Allowed admin certificate identities (SAN DNS or CN values)",
+    )
+
+
 class ServerConfig(BaseSettings):
     """Server configuration.
 
@@ -242,6 +263,9 @@ class ServerConfig(BaseSettings):
 
     # CORS
     cors: CORSConfig = Field(default_factory=CORSConfig)
+
+    # Admin mTLS
+    admin_mtls: AdminMTLSConfig = Field(default_factory=AdminMTLSConfig)
 
     # Audit forwarding
     audit_remote_url: str | None = Field(default=None, description="Remote syslog URL (tls://host:port)")
