@@ -29,19 +29,22 @@ logger = logging.getLogger("venya.server")
 def _extract_identity_from_cert(cert: x509.Certificate) -> str:
     """Extract admin identity from a client certificate.
 
-    Prefers SAN DNS names, falls back to CN.
+    Prefers SAN RFC822Name (email), then SAN DNSName, falls back to CN.
 
     Args:
         cert: The X.509 certificate to extract identity from.
 
     Returns:
-        The identity string (SAN DNS or CN value).
+        The identity string (SAN RFC822, SAN DNS, or CN value).
 
     Raises:
         ValueError: If certificate has neither SAN nor CN.
     """
     try:
         san_ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        emails = san_ext.value.get_values_for_type(x509.RFC822Name)
+        if emails:
+            return emails[0]
         dns_names = san_ext.value.get_values_for_type(x509.DNSName)
         if dns_names:
             return dns_names[0]
