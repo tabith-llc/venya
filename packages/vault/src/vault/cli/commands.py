@@ -401,6 +401,12 @@ def cmd_admin(client: APIClient, args: Any) -> int:
         return cmd_admin_split_ca_key(args)
     elif admin_command == "restore-ca-key":
         return cmd_admin_restore_ca_key(args)
+    elif admin_command == "init-admin-ca":
+        return cmd_admin_init_admin_ca(args)
+    elif admin_command == "generate-admin-cert":
+        return cmd_admin_generate_admin_cert(args)
+    elif admin_command == "revoke-admin-cert":
+        return cmd_admin_revoke_admin_cert(client, args)
     else:
         print(f"Unknown admin command: {admin_command}", file=sys.stderr)
         return 1
@@ -2080,3 +2086,305 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
     print("WARNING: All existing executor certificates signed by this CA are now valid again.")
     print("Consider rotating executor certificates after restore.")
     return 0
+
+
+# --- Admin CA Management Commands ---
+
+
+def cmd_admin_init_admin_ca(args: Any) -> int:
+    """Initialize the admin CA (create key/cert pair locally).
+
+    Creates a new ECDSA P-256 keypair and self-signed admin CA certificate.
+    If VENYA_ADMIN_CA_KEY_PASSPHRASE is set, the key is encrypted on disk.
+    """
+    import os
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import (
+        BestAvailableEncryption,
+        PrivateFormat,
+        PublicFormat,
+    )
+    from cryptography.x509.oid import ExtensionOID, NameOID
+
+    output_dir = Path(args.output_dir)
+
+    if output_dir.exists() and (output_dir / "admin-ca.key").exists():
+        print(f"Error: admin CA already exists at {output_dir}", file=sys.stderr)
+        return 1
+
+    try:
+        # Generate ECDSA P-256 keypair
+        private_key = ec.generate_private_key(ec.SECP256R1())
+
+        # Load passphrase for encryption
+        passphrase = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
+        passphrase_bytes = passphrase.encode("utf-8") if passphrase else None
+
+        if passphrase_bytes:
+            key_pem = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=PrivateFormat.PKCS8,
+                encryption_algorithm=BestAvailableEncryption(passphrase_bytes),
+            )
+        else:
+            key_pem = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+
+        # Create directory
+        output_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(str(output_dir), 0o700)
+
+        # Write key
+        key_path = output_dir / "admin-ca.key"
+        key_path.write_bytes(key_pem)
+        key_path.chmod(0o600)
+
+        # Create self-signed CA certificate
+        now = datetime.now(timezone.utc)
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin Certificate Authority"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Venya Admin CA"),
+        ])
+
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=3650))
+            .add_extension(
+                x509.BasicConstraints(ca=True, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=False,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+        )
+
+        cert = builder.sign(private_key, hashes.SHA256())
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+
+        cert_path = output_dir / "admin-ca.crt"
+        cert_path.write_bytes(cert_pem)
+        cert_path.chmod(0o644)
+
+        print(f"Admin CA initialized at {output_dir}")
+        print(f"  Key:  {key_path} (permissions: 600)")
+        print(f"  Cert: {cert_path} (permissions: 644)")
+        return 0
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Failed to initialize admin CA: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_admin_generate_admin_cert(args: Any) -> int:
+    """Sign an admin client certificate using the admin CA.
+
+    Generates a new ECDSA P-256 keypair, signs it with the admin CA,
+    and writes the cert and key to the output directory.
+    """
+    import os
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import PrivateFormat
+    from cryptography.x509.oid import ExtensionOID, NameOID, ExtendedKeyUsageOID
+
+    identity = args.identity
+    output_dir = Path(args.output_dir)
+
+    # Resolve admin CA directory
+    ca_dir_str = getattr(args, "ca_dir", None) or os.environ.get(
+        "VENYA_ADMIN_CA_DIR", "/var/lib/venya/ca/admin-ca"
+    )
+    ca_dir = Path(ca_dir_str)
+
+    ca_key_path = ca_dir / "admin-ca.key"
+    ca_cert_path = ca_dir / "admin-ca.crt"
+
+    if not ca_key_path.exists():
+        print(f"Error: admin CA key not found at {ca_key_path}", file=sys.stderr)
+        print("Run 'venya admin init-admin-ca' first.", file=sys.stderr)
+        return 1
+
+    if not ca_cert_path.exists():
+        print(f"Error: admin CA cert not found at {ca_cert_path}", file=sys.stderr)
+        print("Run 'venya admin init-admin-ca' first.", file=sys.stderr)
+        return 1
+
+    try:
+        # Load admin CA key
+        passphrase = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
+        key_data = ca_key_path.read_bytes()
+        is_encrypted = b"ENCRYPTED" in key_data
+
+        if is_encrypted and not passphrase:
+            print(
+                f"Error: CA key is encrypted but VENYA_ADMIN_CA_KEY_PASSPHRASE is not set",
+                file=sys.stderr,
+            )
+            return 1
+
+        ca_key = serialization.load_pem_private_key(key_data, password=passphrase.encode() if passphrase else None)
+        ca_cert = x509.load_pem_x509_certificate(ca_cert_path.read_bytes())
+
+        # Generate new keypair for admin cert
+        admin_key = ec.generate_private_key(ec.SECP256R1())
+
+        # Build certificate
+        now = datetime.now(timezone.utc)
+        subject = x509.Name([
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+            x509.NameAttribute(NameOID.COMMON_NAME, identity),
+        ])
+
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(ca_cert.subject)
+            .public_key(admin_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=90))
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
+                critical=False,
+            )
+            .add_extension(
+                x509.SubjectAlternativeName([x509.DNSName(identity)]),
+                critical=False,
+            )
+        ).sign(ca_key, hashes.SHA256())
+
+        # Create output directory
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write key (unencrypted — operator manages security)
+        key_pem = admin_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        key_path = output_dir / "admin.key"
+        key_path.write_bytes(key_pem)
+        key_path.chmod(0o600)
+
+        # Write cert
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+        cert_path = output_dir / "admin.crt"
+        cert_path.write_bytes(cert_pem)
+        cert_path.chmod(0o644)
+
+        # Print details
+        serial_hex = format(cert.serial_number, "016x")
+        not_after = cert.not_valid_after_utc
+
+        print(f"Admin certificate signed for '{identity}'")
+        print(f"  Serial:   {serial_hex}")
+        print(f"  Expires:  {not_after.isoformat()}")
+        print(f"  Key:      {key_path} (permissions: 600)")
+        print(f"  Cert:     {cert_path} (permissions: 644)")
+        return 0
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Failed to sign admin certificate: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_admin_revoke_admin_cert(client: APIClient, args: Any) -> int:
+    """Revoke an admin certificate by serial number via the API.
+
+    Requires bearer token authentication and admin role.
+    """
+    import os
+    import sys
+
+    serial = args.serial
+    reason = getattr(args, "reason", "unspecified")
+    server_url = getattr(args, "server_url", None)
+
+    # Resolve server URL
+    if not server_url:
+        server_url = os.environ.get("VENYA_SERVER_URL", "")
+        if not server_url:
+            server_url = client.config.server_url
+
+    if not server_url:
+        print("Error: server URL required. Pass --server-url or set VENYA_SERVER_URL", file=sys.stderr)
+        return 1
+
+    # Validate serial format (must be valid hex, up to 16 chars)
+    try:
+        int(serial, 16)
+        if len(serial) > 16:
+            raise ValueError("Serial too long")
+    except ValueError as e:
+        print(f"Error: invalid serial format — must be hex string (up to 16 chars): {e}", file=sys.stderr)
+        return 1
+
+    url = server_url.rstrip("/")
+    try:
+        result = client.post(
+            f"{url}/api/v1/admin/certs/revoke",
+            json={"serial": serial, "reason": reason},
+        )
+        print(f"Certificate {serial} revoked (reason: {reason})")
+        return 0
+    except APIClientAuthenticationError as e:
+        print(f"Authentication failed: {e}", file=sys.stderr)
+        return 1
+    except APIClientError as e:
+        print(f"Revocation failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Revocation failed: {e}", file=sys.stderr)
+        return 1

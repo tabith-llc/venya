@@ -356,6 +356,55 @@ def create_parser() -> argparse.ArgumentParser:
         help="CA directory path (default: /etc/venya/ca)",
     )
 
+    # admin init-admin-ca
+    init_admin_ca_parser = admin_sub.add_parser(
+        "init-admin-ca", help="Initialize the admin CA (create key/cert pair)"
+    )
+    init_admin_ca_parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory to create admin CA key/cert in",
+    )
+
+    # admin generate-admin-cert
+    gen_admin_cert_parser = admin_sub.add_parser(
+        "generate-admin-cert", help="Sign an admin client certificate"
+    )
+    gen_admin_cert_parser.add_argument(
+        "identity",
+        help="Admin identity (used as CN and SAN DNS name)",
+    )
+    gen_admin_cert_parser.add_argument(
+        "--ca-dir",
+        default=None,
+        help="Admin CA directory path (default: $VENYA_ADMIN_CA_DIR or /var/lib/venya/ca/admin-ca)",
+    )
+    gen_admin_cert_parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory to write admin cert/key to",
+    )
+
+    # admin revoke-admin-cert
+    revoke_admin_cert_parser = admin_sub.add_parser(
+        "revoke-admin-cert", help="Revoke an admin certificate by serial number"
+    )
+    revoke_admin_cert_parser.add_argument(
+        "--serial",
+        required=True,
+        help="Hex serial number of certificate to revoke",
+    )
+    revoke_admin_cert_parser.add_argument(
+        "--reason",
+        default="unspecified",
+        help="Revocation reason (default: unspecified)",
+    )
+    revoke_admin_cert_parser.add_argument(
+        "--server-url",
+        default=None,
+        help="Vault server URL (default: from config or VENYA_SERVER_URL)",
+    )
+
     # role
     role_parser = subparsers.add_parser("role", help="Role management")
     role_sub = role_parser.add_subparsers(dest="role_command")
