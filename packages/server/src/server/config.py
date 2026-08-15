@@ -163,6 +163,27 @@ class ExecutorEnrollmentConfig(BaseModel):
         return v
 
 
+class CORSConfig(BaseModel):
+    """Cross-Origin Resource Sharing configuration."""
+
+    origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost"],
+        description="Allowed CORS origins. Empty list = deny all cross-origin.",
+    )
+    allow_credentials: bool = True
+    allow_methods: list[str] = Field(
+        default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
+    )
+    allow_headers: list[str] = Field(
+        default_factory=lambda: ["Authorization", "Content-Type"],
+    )
+    expose_headers: list[str] = Field(
+        default_factory=lambda: ["X-Request-ID", "X-Total-Count"],
+        description="Response headers exposed to browser clients",
+    )
+    max_age: int = Field(default=3600, ge=0, description="Preflight cache in seconds")
+
+
 class ServerConfig(BaseSettings):
     """Server configuration.
 
@@ -220,10 +241,7 @@ class ServerConfig(BaseSettings):
     )
 
     # CORS
-    cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost"],
-        description="Allowed CORS origins",
-    )
+    cors: CORSConfig = Field(default_factory=CORSConfig)
 
     # Audit forwarding
     audit_remote_url: str | None = Field(default=None, description="Remote syslog URL (tls://host:port)")
