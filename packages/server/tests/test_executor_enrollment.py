@@ -433,6 +433,7 @@ class TestRegisterEndpointWithToken:
 
         mock_token = MagicMock()
         mock_token.state = "consumed"
+        mock_token.executor_id = "other-exec"
         mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
 
         token_query = MagicMock()
@@ -450,7 +451,7 @@ class TestRegisterEndpointWithToken:
             },
         )
         assert response.status_code == 401
-        assert "already consumed" in response.json()["detail"]
+        assert "consumed by a different executor" in response.json()["detail"]
 
     def test_no_token_backward_compatible(self):
         """Without token, uses executor_id from request body."""
@@ -701,12 +702,30 @@ class TestTokenAtomicConsumption:
         backend.get_session.return_value = mock_db
         app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
 
+        # Pre-check sees "created"
         mock_token = _make_mock_token("race-exec-1", "enrl_exec_race", "created")
 
-        token_query = MagicMock()
-        token_query.filter.return_value.first.return_value = mock_token
+        # Re-read sees "consumed" (was consumed by concurrent request)
+        consumed_token = _make_mock_token("race-exec-1", "enrl_exec_race", "consumed")
 
-        mock_db.query.side_effect = lambda model: token_query
+        call_num = [0]
+
+        def query_side_effect(model):
+            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+                call_num[0] += 1
+                if call_num[0] == 1:
+                    # Pre-check query: returns "created" token
+                    q = MagicMock()
+                    q.filter.return_value.first.return_value = mock_token
+                    return q
+                else:
+                    # Re-read query: returns "consumed" token
+                    q = MagicMock()
+                    q.filter.return_value.first.return_value = consumed_token
+                    return q
+            return MagicMock()
+
+        mock_db.query.side_effect = query_side_effect
 
         # Simulate race: pre-check passed but atomic UPDATE found nothing
         mock_result = MagicMock()
@@ -765,6 +784,7 @@ class TestTokenAtomicConsumption:
 
         mock_token = MagicMock()
         mock_token.state = "consumed"
+        mock_token.executor_id = "other-exec"
         mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
 
         token_query = MagicMock()
@@ -782,9 +802,200 @@ class TestTokenAtomicConsumption:
             },
         )
         assert response.status_code == 401
-        assert "already consumed" in response.json()["detail"]
+        assert "consumed by a different executor" in response.json()["detail"]
         # Atomic UPDATE should NOT be called for already consumed tokens
         assert not mock_db.execute.called
+
+    def test_sequential_replay_after_successful_registration(self):
+        """A token consumed by a successful registration cannot be reused."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(
+            backend=backend, auth_user={"user_id": "admin"},
+            ca_manager=_make_mock_ca(),
+        )
+
+        mock_token = _make_mock_token("replay-exec", "enrl_exec_replay", "created")
+        mock_token.id = 1
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+        user_query = MagicMock()
+        user_query.filter.return_value.first.return_value = None
+
+        def query_side_effect(model):
+            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+                return token_query
+            return user_query
+
+        mock_db.query.side_effect = query_side_effect
+
+        # Track whether first registration has completed
+        first_done = [False]
+
+        def execute_side_effect(*args, **kwargs):
+            if not first_done[0]:
+                first_done[0] = True
+                mock_token.state = "consumed"
+                mock_token.used_at = datetime.now(timezone.utc)
+                mock_result = MagicMock()
+                mock_result.rowcount = 1
+                return mock_result
+            else:
+                # Second call: token already consumed
+                mock_result = MagicMock()
+                mock_result.rowcount = 0
+                return mock_result
+
+        mock_db.execute.side_effect = execute_side_effect
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        # First registration — succeeds
+        response1 = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "replay-exec",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_replay",
+            },
+        )
+        assert response1.status_code == 201
+        assert response1.json()["executor_id"] == "replay-exec"
+
+        # Replay the same token — must fail with 409 (same executor)
+        response2 = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "replay-exec",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_replay",
+            },
+        )
+        assert response2.status_code == 409
+        assert "already registered" in response2.json()["detail"].lower()
+
+    def test_409_for_same_executor_replay(self):
+        """Consumed token for same executor returns 409 Conflict."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(
+            backend=backend, auth_user={"user_id": "admin"},
+            ca_manager=_make_mock_ca(),
+        )
+
+        mock_token = MagicMock()
+        mock_token.state = "consumed"
+        mock_token.executor_id = "conflict-exec"
+        mock_token.used_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+
+        mock_db.query.side_effect = lambda model: token_query
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "conflict-exec",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_conflict",
+            },
+        )
+        assert response.status_code == 409
+        assert "already registered" in response.json()["detail"].lower()
+
+    def test_401_for_different_executor_consumed_token(self):
+        """Consumed token for different executor returns 401."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(
+            backend=backend, auth_user={"user_id": "admin"},
+            ca_manager=_make_mock_ca(),
+        )
+
+        mock_token = MagicMock()
+        mock_token.state = "consumed"
+        mock_token.executor_id = "other-exec"
+        mock_token.used_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+
+        mock_db.query.side_effect = lambda model: token_query
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "different-exec",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_other",
+            },
+        )
+        assert response.status_code == 401
+        assert "consumed by a different executor" in response.json()["detail"]
+
+    def test_atomic_update_revoked_token_returns_specific_error(self):
+        """Atomic UPDATE fails and re-read shows revoked state."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(
+            backend=backend, auth_user={"user_id": "admin"},
+            ca_manager=_make_mock_ca(),
+        )
+
+        # Pre-check sees "created"
+        mock_token = _make_mock_token("revoked-race-exec", "enrl_exec_revoked_race", "created")
+
+        # Re-read sees "revoked"
+        revoked_token = MagicMock()
+        revoked_token.state = "revoked"
+        revoked_token.executor_id = "revoked-race-exec"
+
+        mock_token_query = MagicMock()
+        mock_token_query.filter.return_value.first.return_value = mock_token
+
+        revoked_query = MagicMock()
+        revoked_query.filter.return_value.first.return_value = revoked_token
+
+        call_num = [0]
+
+        def query_side_effect(model):
+            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+                call_num[0] += 1
+                if call_num[0] == 1:
+                    return mock_token_query
+                else:
+                    return revoked_query
+            return MagicMock()
+
+        mock_db.query.side_effect = query_side_effect
+
+        # Atomic UPDATE fails (rowcount=0)
+        mock_result = MagicMock()
+        mock_result.rowcount = 0
+        mock_db.execute.return_value = mock_result
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "revoked-race-exec",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_revoked_race",
+            },
+        )
+        assert response.status_code == 401
+        assert "revoked" in response.json()["detail"]
+        assert mock_db.rollback.called
 
 
 class TestTokenBinding:
@@ -796,6 +1007,11 @@ class TestTokenBinding:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+        from server.config import ServerConfig, ExecutorEnrollmentConfig
+        app.state.config = ServerConfig(
+            recovery_code_pepper="test-pepper-12345",
+            executor_enrollment=ExecutorEnrollmentConfig(enabled=False),
+        )
 
         mock_token = _make_mock_token("binding-exec", "enrl_exec_binding", "created")
 
@@ -829,10 +1045,19 @@ class TestTokenBinding:
 
     def test_binding_mismatch_returns_401(self):
         """Wrong binding hash causes 401 (executor_id must match to reach binding check)."""
+        from server.config import ServerConfig, ExecutorEnrollmentConfig
+
         mock_db = MagicMock()
         backend = MagicMock()
         backend.get_session.return_value = mock_db
-        app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+        app = _create_test_app(
+            backend=backend, ca_manager=_make_mock_ca(),
+            pepper="test-pepper-12345",
+        )
+        app.state.config = ServerConfig(
+            recovery_code_pepper="test-pepper-12345",
+            executor_enrollment=ExecutorEnrollmentConfig(enabled=False),
+        )
 
         # Token bound to "binding-exec" but with WRONG binding hash
         mock_token = MagicMock()
@@ -871,6 +1096,11 @@ class TestTokenBinding:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+        from server.config import ServerConfig, ExecutorEnrollmentConfig
+        app.state.config = ServerConfig(
+            recovery_code_pepper="test-pepper-12345",
+            executor_enrollment=ExecutorEnrollmentConfig(enabled=False),
+        )
 
         mock_token = MagicMock()
         mock_token.executor_id = "legacy-exec"
@@ -901,6 +1131,11 @@ class TestTokenBinding:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(backend=backend, ca_manager=_make_mock_ca())
+        from server.config import ServerConfig, ExecutorEnrollmentConfig
+        app.state.config = ServerConfig(
+            recovery_code_pepper="test-pepper-12345",
+            executor_enrollment=ExecutorEnrollmentConfig(enabled=False),
+        )
 
         mock_token = MagicMock()
         mock_token.executor_id = "legacy-exec-2"

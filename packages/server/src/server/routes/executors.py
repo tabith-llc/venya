@@ -165,9 +165,15 @@ async def register_executor(
                     detail="Enrollment token has been revoked",
                 )
             if token.state == "consumed":
+                if token.executor_id == req.executor_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Executor already registered with this enrollment token. "
+                               "Check if the previous registration succeeded.",
+                    )
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Enrollment token already consumed",
+                    detail="Enrollment token has already been consumed by a different executor",
                 )
             if token.expires_at <= datetime.now(timezone.utc):
                 raise HTTPException(
@@ -209,10 +215,30 @@ async def register_executor(
             if result.rowcount != 1:
                 # Lost the race — token was consumed between pre-check and UPDATE
                 db.rollback()
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Enrollment token was consumed concurrently",
-                )
+                # Re-read to determine why
+                token = db.query(ExecutorEnrollmentToken).filter(
+                    ExecutorEnrollmentToken.token_hash == token_hash
+                ).first()
+                if token is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Enrollment token not found",
+                    )
+                elif token.state == "revoked":
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Enrollment token has been revoked",
+                    )
+                elif token.state == "consumed":
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Enrollment token was consumed concurrently",
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Enrollment token is invalid or expired",
+                    )
 
             resolved_executor_id = token.executor_id
             token_audit_fields = {"with_token": True, "token_verified": True, "token_id": token.id}
@@ -291,19 +317,30 @@ async def register_executor(
         )
         db.add(audit_event)
 
-        db.commit()
+        try:
+            db.commit()
 
-        # Return signed certificate + CA chain
-        cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
-        ca_cert_pem = ca_manager.get_ca_cert_pem().decode()
+            # Return signed certificate + CA chain
+            cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+            ca_cert_pem = ca_manager.get_ca_cert_pem().decode()
 
-        return ExecutorRegisterResponse(
-            executor_id=resolved_executor_id,
-            cert_pem=cert_pem,
-            ca_cert_pem=ca_cert_pem,
-            serial_number=serial_hex,
-            not_after=cert.not_valid_after_utc.isoformat(),
-        )
+            return ExecutorRegisterResponse(
+                executor_id=resolved_executor_id,
+                cert_pem=cert_pem,
+                ca_cert_pem=ca_cert_pem,
+                serial_number=serial_hex,
+                not_after=cert.not_valid_after_utc.isoformat(),
+            )
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception:
+            db.rollback()
+            logger.exception("Registration failed — token state rolled back")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Registration failed",
+            )
     finally:
         db.close()
 
