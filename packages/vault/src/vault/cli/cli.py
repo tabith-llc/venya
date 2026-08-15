@@ -35,6 +35,12 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable verbose output",
     )
+    parser.add_argument(
+        "--show-sensitive",
+        action="store_true",
+        help="Show sensitive values (tokens, recovery codes) in output. "
+        "By default these are redacted.",
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 

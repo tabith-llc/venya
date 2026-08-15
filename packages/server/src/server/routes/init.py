@@ -311,10 +311,12 @@ async def init_complete(
         # Convert browser response to fido2 format
         logger.info("init_complete received: user_id=%s, challenge_id=%s", req.user_id, req.challenge_id)
         logger.info("response keys: %s", list(req.response.keys()))
-        logger.info("response.response: %s", req.response.get("response"))
+        resp_data = req.response.get("response")
+        if resp_data:
+            logger.info("response.response length: %d", len(resp_data))
         try:
             fido2_response = browser_registration_to_fido2(req.response)
-            logger.info("fido2_response: %s", fido2_response)
+            logger.info("fido2_response type: %s", type(fido2_response).__name__)
         except Exception as e:
             logger.error("browser_registration_to_fido2 failed: %s: %s", type(e).__name__, e)
             import traceback
