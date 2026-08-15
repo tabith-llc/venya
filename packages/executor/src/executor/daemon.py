@@ -905,10 +905,14 @@ def main() -> None:
         config.daemonize = True
 
     # Setup logging
+    from executor.sensitive_log_filter import SensitiveFieldFilter
+
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper()),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    for handler in logging.root.handlers:
+        handler.addFilter(SensitiveFieldFilter())
 
     # Create and start daemon
     daemon = ExecutorDaemon(config)

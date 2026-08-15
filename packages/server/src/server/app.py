@@ -172,10 +172,14 @@ def main() -> None:
 
     config = ServerConfig()
 
+    from server.utils.sensitive_log_filter import SensitiveFieldFilter
+
     logging.basicConfig(
         level=logging.DEBUG if config.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    for handler in logging.root.handlers:
+        handler.addFilter(SensitiveFieldFilter())
 
     app = create_app(config)
 

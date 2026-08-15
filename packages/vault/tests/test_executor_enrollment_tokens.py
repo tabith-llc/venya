@@ -2,12 +2,10 @@
 
 Tests cover:
 - CLI parsing for admin executor-enroll
-- _is_tls_error() helper
-- APIClient.register_executor() with TLS fallback
+- APIClient.register_executor() success/error paths
 - Token format validation
 """
 
-import ssl
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,48 +13,7 @@ from unittest.mock import MagicMock, patch
 import httpx2
 import pytest
 
-from vault.cli.api_client import APIClient, APIClientError, _is_tls_error
-from unittest.mock import call
-
-
-class TestIsTLSError:
-    """Tests for the _is_tls_error() helper."""
-
-    def test_ssl_cert_verification_error(self):
-        """ssl.SSLCertVerificationError is detected as TLS error."""
-        exc = httpx2.ConnectError("SSL: CERTIFICATE_VERIFY_FAILED")
-        exc.__cause__ = ssl.SSLCertVerificationError("cert failed")
-        assert _is_tls_error(exc) is True
-
-    def test_ssl_error(self):
-        """ssl.SSLError is detected as TLS error."""
-        exc = httpx2.ConnectError("SSL handshake failed")
-        exc.__cause__ = ssl.SSLError("handshake error")
-        assert _is_tls_error(exc) is True
-
-    def test_connection_refused(self):
-        """Connection refused is NOT a TLS error."""
-        exc = httpx2.ConnectError("Connection refused")
-        assert _is_tls_error(exc) is False
-
-    def test_timeout(self):
-        """ConnectTimeout is NOT a TLS error."""
-        exc = httpx2.ConnectTimeout("Connection timed out")
-        assert _is_tls_error(exc) is False
-
-    def test_deep_cause_chain(self):
-        """TLS error deep in cause chain is detected."""
-        inner = ssl.SSLCertVerificationError("deep cert error")
-        middle = RuntimeError("middle wrapper")
-        middle.__cause__ = inner
-        outer = httpx2.ConnectError("outer")
-        outer.__cause__ = middle
-        assert _is_tls_error(outer) is True
-
-    def test_no_cause(self):
-        """Exception with no cause chain returns False."""
-        exc = RuntimeError("plain error")
-        assert _is_tls_error(exc) is False
+from vault.cli.api_client import APIClient, APIClientError
 
 
 class TestAPIClientRegisterExecutor:
@@ -148,47 +105,8 @@ class TestAPIClientRegisterExecutor:
                 client.close()
         config_file.unlink()
 
-    def test_register_tls_fallback(self):
-        """On TLS error, falls back to verify=False throwaway client."""
-        client, config_file = self._make_client()
-
-        tls_error = httpx2.ConnectError("SSL: CERTIFICATE_VERIFY_FAILED")
-        tls_error.__cause__ = ssl.SSLCertVerificationError("cert failed")
-
-        fallback_response = MagicMock()
-        fallback_response.status_code = 201
-        fallback_response.json.return_value = {
-            "executor_id": "test-1", "cert_pem": "CERT",
-            "ca_cert_pem": "CA", "serial_number": "01",
-            "not_after": "2026-09-01",
-        }
-        fallback_response.content = b'{}'
-        fallback_response.raise_for_status.return_value = None
-
-        call_count = [0]
-
-        def post_side_effect(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise tls_error
-            return fallback_response
-
-        with patch("vault.cli.api_client.httpx2.Client") as MockClient:
-            MockClient.return_value.__enter__.return_value = MockClient.return_value
-            MockClient.return_value.post.side_effect = post_side_effect
-
-            try:
-                result = client.register_executor("test-1", "CSR_PEM")
-                assert result["executor_id"] == "test-1"
-                assert MockClient.call_count == 2
-                assert MockClient.call_args_list[0] == call(verify=True, timeout=30.0)
-                assert MockClient.call_args_list[1] == call(verify=False, timeout=30.0)
-            finally:
-                client.close()
-        config_file.unlink()
-
     def test_register_network_error_re_raises(self):
-        """On network error (not TLS), re-raises as APIClientError without fallback."""
+        """On network error, re-raises as APIClientError without fallback."""
         client, config_file = self._make_client()
 
         network_error = httpx2.ConnectError("Connection refused")
@@ -198,7 +116,7 @@ class TestAPIClientRegisterExecutor:
             MockClient.return_value.post.side_effect = network_error
 
             try:
-                with pytest.raises(APIClientError, match="Connection failed"):
+                with pytest.raises(APIClientError, match="Registration failed"):
                     client.register_executor("test-1", "CSR_PEM")
                 MockClient.assert_called_once_with(verify=True, timeout=30.0)
             finally:
