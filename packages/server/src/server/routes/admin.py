@@ -1165,13 +1165,14 @@ async def admin_enroll_executor(
             expires_at=expires_at,
         )
         db.add(token)
-        db.commit()
+        db.flush()
 
         audit_event = AuditEvent(
             event_type="executor_enrollment_token_created",
             user_id=admin_user_id,
             fields={
                 "executor_id": executor_id,
+                "token_id": token.id,
                 "expires_in_seconds": ttl_seconds,
             },
             timestamp=now,
