@@ -92,8 +92,18 @@ if ! id venya &>/dev/null; then
         read -rs VENYA_PASSWORD
         echo ""
     fi
+    # Password strength check
+    if [ "${#VENYA_PASSWORD}" -lt 8 ]; then
+        error "Password must be at least 8 characters long."
+        exit 1
+    fi
     useradd -m -s /bin/bash venya
-    echo "venya:$VENYA_PASSWORD" | chpasswd
+    # Write password to secure temp file to avoid exposing it in process list
+    PW_FILE=$(mktemp /tmp/venya-pw-XXXXXX)
+    chmod 600 "$PW_FILE"
+    printf 'venya:%s\n' "$VENYA_PASSWORD" > "$PW_FILE"
+    chpasswd < "$PW_FILE"
+    rm -f "$PW_FILE"
     info "Created venya user"
 fi
 
@@ -248,6 +258,20 @@ chown -R venya:venya /var/lib/venya
 chown -R venya:venya /var/log/venya
 chown -R venya:venya "$INSTALL_DIR"
 chmod 700 /var/lib/venya/ca
+
+# --- Harden permissions on sensitive paths ---
+if [ -d /etc/venya/executor ]; then
+    chmod 700 /etc/venya/executor
+fi
+if [ -f /etc/venya/executor.toml ]; then
+    chmod 600 /etc/venya/executor.toml
+fi
+if [ -d /etc/venya/executor ]; then
+    find /etc/venya/executor -name '*.key' -exec chmod 600 {} \; 2>/dev/null || true
+    find /etc/venya/executor -name '*.crt' -exec chmod 644 {} \; 2>/dev/null || true
+fi
+chmod 750 /var/log/venya
+chown venya:adm /var/log/venya 2>/dev/null || chown venya:venya /var/log/venya
 
 # --- Install Docker Sandboxes (sbx) CLI ---
 info "Installing Docker Sandboxes (sbx) CLI..."
