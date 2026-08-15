@@ -303,7 +303,9 @@ async def register_executor(
 
         # Sign the CSR
         try:
-            cert = ca_manager.sign_csr(csr, resolved_executor_id)
+            server_config = getattr(request.app.state, "config", None)
+            crl_url = server_config.crl.crl_url if server_config and hasattr(server_config, "crl") else None
+            cert = ca_manager.sign_csr(csr, resolved_executor_id, crl_url=crl_url)
         except RuntimeError as e:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -397,6 +399,40 @@ async def get_revocation_list(
         revocations = db.query(ExecutorCertRevocation).all()
         serials = [r.serial_number for r in revocations]
         return RevocationListResponse(revoked_serials=serials)
+    finally:
+        db.close()
+
+
+@router.get(
+    "/executors/certs/crl",
+)
+async def get_crl(
+    request: Request,
+) -> Response:
+    """Get the signed Certificate Revocation List in DER format.
+
+    Public endpoint — no authentication required. Purges expired
+    revocation records before generating the CRL.
+    """
+    from fastapi.responses import Response
+
+    db = _get_db(request)
+    ca_manager = _get_ca_manager(request)
+    try:
+        server_config = getattr(request.app.state, "config", None)
+        retention_days = (
+            server_config.crl.crl_retention_days
+            if server_config and hasattr(server_config, "crl")
+            else 90
+        )
+
+        ca_manager.purge_expired_revocations(db, retention_days)
+        crl_der = ca_manager.generate_crl(db)
+
+        return Response(
+            content=crl_der,
+            media_type="application/pkix-crl",
+        )
     finally:
         db.close()
 
