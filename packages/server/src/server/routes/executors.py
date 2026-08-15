@@ -12,11 +12,12 @@ import logging
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..ca import CAManager
+from ..rate_limit import rate_limit_registration
 from vault.iam.models import AuditEvent, ExecutorEnrollmentToken, User, ExecutorCert
 
 logger = logging.getLogger("venya.server")
@@ -94,6 +95,7 @@ def _get_ca_manager(request: Request) -> CAManager:
 async def register_executor(
     req: ExecutorRegisterRequest,
     request: Request,
+    _rl: None = Depends(rate_limit_registration),
 ) -> ExecutorRegisterResponse:
     """Register an executor and obtain a signed mTLS certificate.
 
@@ -144,14 +146,20 @@ async def register_executor(
                     detail="Enrollment token has expired",
                 )
 
+            if token.executor_id != req.executor_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Enrollment token bound to different executor_id",
+                )
+
             resolved_executor_id = token.executor_id
             token.state = "consumed"
             token.used_at = datetime.now(timezone.utc)
             token_audit_fields = {"with_token": True, "token_verified": True}
             logger.info("Enrollment token verified for executor: %s", resolved_executor_id)
         else:
-            server_config = getattr(request.app.state, "server_config", None)
-            if server_config and server_config.executor_registration_require_token:
+            server_config = getattr(request.app.state, "config", None)
+            if server_config and server_config.executor_enrollment.require_token:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Enrollment token required. Contact your administrator.",

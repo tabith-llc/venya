@@ -61,8 +61,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     from .middleware import rbac
     from .middleware import rate_limit
     from .middleware import security_headers
+    from .middleware import rate_limit_headers
 
     app.add_middleware(security_headers.SecurityHeadersMiddleware)
+    app.add_middleware(rate_limit_headers.RateLimitHeaderMiddleware)
     app.add_middleware(rate_limit.RateLimitMiddleware, config=config.rate_limit)
     app.add_middleware(auth_middleware.SessionMiddleware)
     app.add_middleware(rbac.RBACMiddleware)
@@ -108,7 +110,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     # Initialize CA if not already done
     from .ca import CAManager
 
-    ca_manager = CAManager(config.ca_dir)
+    ca_manager = CAManager(config.ca_dir, config.ca_security)
     if not ca_manager.has_ca:
         ca_manager.initialize()
     app.state.ca_manager = ca_manager  # type: ignore[attr-defined]

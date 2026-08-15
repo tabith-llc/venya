@@ -6,8 +6,10 @@ import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+
+from ..rate_limit import rate_limit_admin_token_gen
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -188,7 +190,8 @@ class AdminRevokeExecutorResponse(BaseModel):
 class AdminEnrollExecutorResponse(BaseModel):
     executor_id: str
     enrollment_token: str
-    expires_in_seconds: int = 900
+    expires_in_seconds: int
+    expires_at: str
 
 
 # --- Helper functions ---
@@ -1099,10 +1102,11 @@ async def admin_revoke_executor(
 async def admin_enroll_executor(
     executor_id: str,
     request: Request,
+    _rl: None = Depends(rate_limit_admin_token_gen),
 ) -> AdminEnrollExecutorResponse:
     """Generate an enrollment token for executor bootstrap registration (admin only).
 
-    Creates a token in the format `enrl_exec_{base64url}` with 15-minute expiry.
+    Creates a token in the format `enrl_exec_{base64url}` with configurable expiry.
     The token is hashed and stored in the database. The plaintext token is
     returned only once.
 
@@ -1119,18 +1123,27 @@ async def admin_enroll_executor(
         )
     db = backend.get_session()
     try:
+        config = getattr(request.app.state, "config", None)
+        ttl_seconds = (
+            config.executor_enrollment.token_ttl_seconds
+            if config
+            else 1800
+        )
+
         caller = getattr(request.state, "auth_user", {})
         admin_user_id = caller.get("user_id", "unknown")
 
         plaintext = "enrl_exec_" + secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(seconds=ttl_seconds)
 
         token = ExecutorEnrollmentToken(
             executor_id=executor_id,
             token_hash=token_hash,
             state="created",
             created_by=admin_user_id,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+            expires_at=expires_at,
         )
         db.add(token)
         db.commit()
@@ -1140,22 +1153,23 @@ async def admin_enroll_executor(
             user_id=admin_user_id,
             fields={
                 "executor_id": executor_id,
-                "expires_in_seconds": 900,
+                "expires_in_seconds": ttl_seconds,
             },
-            timestamp=datetime.now(timezone.utc),
+            timestamp=now,
         )
         db.add(audit_event)
         db.commit()
 
         logger.info(
-            "Admin created executor enrollment token for %s (by %s)",
-            executor_id, admin_user_id,
+            "Admin created executor enrollment token for %s (by %s, ttl=%ds)",
+            executor_id, admin_user_id, ttl_seconds,
         )
 
         return AdminEnrollExecutorResponse(
             executor_id=executor_id,
             enrollment_token=plaintext,
-            expires_in_seconds=900,
+            expires_in_seconds=ttl_seconds,
+            expires_at=expires_at.isoformat(),
         )
     except HTTPException:
         raise
