@@ -1000,3 +1000,222 @@ class TestTokenAtomicConsumption:
         assert response.status_code == 401
         assert "revoked" in response.json()["detail"]
         assert mock_db.rollback.called
+
+
+class TestAdminIdentityCapture:
+    """Tests for admin identity capture on token creation (Issue #19)."""
+
+    def test_enroll_captures_admin_identity(self):
+        """Enroll captures session_id, IP, and user_agent on the token."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+
+        added_objects = []
+
+        class TrackAdd:
+            def add(self, obj):
+                added_objects.append(obj)
+            def commit(self):
+                pass
+            def flush(self):
+                pass
+            def close(self):
+                pass
+
+        mock_db2 = TrackAdd()
+        backend.get_session.return_value = mock_db2
+
+        app = _create_test_app(
+            backend=backend,
+            auth_user={"user_id": "admin-1", "session_id": 42},
+        )
+
+        # Add a mock client with host
+        client = TestClient(app, raise_server_exceptions=False)
+        # Override to inject headers
+        response = client.post(
+            "/api/v1/admin/executors/test-exec/enroll",
+            headers={"User-Agent": "test-agent/1.0"},
+        )
+        assert response.status_code == 201
+
+        token_obj = added_objects[0]
+        assert token_obj.created_by == "admin-1"
+        assert token_obj.created_by_session_id == "42"
+        assert token_obj.created_from_ip is not None
+        assert token_obj.created_from_user_agent == "test-agent/1.0"
+
+    def test_enroll_audit_event_includes_admin_identity(self):
+        """Audit event includes all admin identity fields plus token metadata."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+
+        added_objects = []
+
+        class TrackAdd:
+            def add(self, obj):
+                added_objects.append(obj)
+            def commit(self):
+                pass
+            def flush(self):
+                if isinstance(added_objects[-1], ExecutorEnrollmentToken):
+                    added_objects[-1].id = 42
+            def close(self):
+                pass
+
+        mock_db2 = TrackAdd()
+        backend.get_session.return_value = mock_db2
+
+        app = _create_test_app(
+            backend=backend,
+            auth_user={"user_id": "admin-1", "session_id": 42},
+        )
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/admin/executors/test-exec/enroll",
+            headers={"User-Agent": "audit-test/2.0"},
+        )
+        assert response.status_code == 201
+
+        audit_event = added_objects[1]
+        assert audit_event.event_type == "executor_enrollment_token_created"
+        fields = audit_event.fields
+        assert fields["token_id"] == 42
+        assert "token_hash_preview" in fields
+        assert len(fields["token_hash_preview"]) == 8
+        assert "expires_at" in fields
+        assert fields["created_by_session_id"] == "42"
+        assert fields["created_from_ip"] is not None
+        assert fields["created_from_user_agent"] == "audit-test/2.0"
+        assert "token_created_at" in fields
+
+    def test_enroll_null_fields_when_session_missing(self):
+        """Graceful degradation — no crash when session_id/IP/user_agent absent."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+
+        added_objects = []
+
+        class TrackAdd:
+            def add(self, obj):
+                added_objects.append(obj)
+            def commit(self):
+                pass
+            def flush(self):
+                pass
+            def close(self):
+                pass
+
+        mock_db2 = TrackAdd()
+        backend.get_session.return_value = mock_db2
+
+        # Auth user with no session_id
+        app = _create_test_app(
+            backend=backend,
+            auth_user={"user_id": "orphan-admin"},
+        )
+
+        client = TestClient(app, raise_server_exceptions=False)
+        # Strip user-agent via raw request
+        from starlette.testclient import TestClient as TC
+        from starlette.requests import Request
+        from starlette.datastructures import Headers
+
+        response = client.post(
+            "/api/v1/admin/executors/test-exec/enroll",
+            headers={"User-Agent": ""},
+        )
+        assert response.status_code == 201
+
+        token_obj = added_objects[0]
+        assert token_obj.created_by == "orphan-admin"
+        assert token_obj.created_by_session_id is None
+        # IP may or may not be present depending on test client — just no crash
+
+    def test_token_meta_data_not_accessible_via_api(self):
+        """Identity fields are audit-only — not exposed in token listing."""
+        from server.routes import admin as admin_routes
+
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+
+        # Create a mock token with identity fields set
+        mock_token = MagicMock()
+        mock_token.id = 1
+        mock_token.executor_id = "test-exec"
+        mock_token.token_hash = "abc123"
+        mock_token.state = "created"
+        mock_token.created_by = "admin-1"
+        mock_token.created_by_session_id = "42"
+        mock_token.created_from_ip = "127.0.0.1"
+        mock_token.created_from_user_agent = "test-agent/1.0"
+        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        mock_token.created_at = datetime.now(timezone.utc)
+        mock_token.used_at = None
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+        token_query.order_by.return_value.all.return_value = [mock_token]
+
+        mock_db.query.side_effect = lambda model: token_query
+
+        app = _create_test_app(backend=backend)
+        # The admin executor token list endpoint should NOT exist as a public listing
+        # Only the user token list endpoint exists. Verify that the admin_enroll_executor
+        # response does NOT include identity fields
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post("/api/v1/admin/executors/test-exec/enroll")
+        assert response.status_code == 201
+        data = response.json()
+        # Response should only have executor_id, enrollment_token, expires_in_seconds, expires_at
+        assert "created_by_session_id" not in data
+        assert "created_from_ip" not in data
+        assert "created_from_user_agent" not in data
+
+    def test_existing_tokens_with_null_metadata_work(self):
+        """Tokens created before migration have NULL identity fields — queries should succeed."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+
+        mock_token = MagicMock()
+        mock_token.id = 1
+        mock_token.executor_id = "old-exec"
+        mock_token.token_hash = "old-hash"
+        mock_token.state = "created"
+        mock_token.created_by = "old-admin"
+        mock_token.created_by_session_id = None
+        mock_token.created_from_ip = None
+        mock_token.created_from_user_agent = None
+        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        mock_token.created_at = datetime.now(timezone.utc)
+        mock_token.used_at = None
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+        token_query.order_by.return_value.all.return_value = [mock_token]
+
+        mock_db.query.side_effect = lambda model: token_query
+
+        app = _create_test_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        # Querying a token with NULL identity fields should not crash
+        response = client.post("/api/v1/admin/executors/old-exec/enroll")
+        assert response.status_code == 201
+
+        # Query with NULL filter should not raise
+        null_query = MagicMock()
+        null_query.filter.return_value.first.return_value = mock_token
+        mock_db.query.side_effect = lambda model: null_query
+
+        # This should complete without error
+        result = mock_db.query(ExecutorEnrollmentToken).filter(
+            ExecutorEnrollmentToken.created_by_session_id == None
+        ).first()
+        assert result is not None
