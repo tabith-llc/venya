@@ -7,10 +7,12 @@ list polling for mTLS-based executor authentication.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 
 from cryptography import x509
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -20,10 +22,41 @@ from sqlalchemy.orm import Session
 from ..ca import CAManager
 from ..rate_limit import rate_limit_registration
 from ..utils.executor_id import EXECUTOR_ID_PATTERN, validate_executor_id
-from ..utils.token_binding import verify_binding_hash
 from vault.iam.models import AuditEvent, ExecutorEnrollmentToken, User, ExecutorCert
 
 logger = logging.getLogger("venya.server")
+
+
+def validate_csr_key_strength(csr: x509.CertificateSigningRequest) -> None:
+    """Validate that the CSR's public key meets minimum strength requirements.
+
+    Args:
+        csr: The parsed Certificate Signing Request.
+
+    Raises:
+        ValueError: If the key type or strength is insufficient.
+    """
+    public_key = csr.public_key()
+
+    if isinstance(public_key, rsa.RSAPublicKey):
+        if public_key.key_size < 2048:
+            raise ValueError(
+                f"RSA key too weak: {public_key.key_size} bits (minimum 2048). "
+                f"Use RSA >= 2048 bits or ECDSA P-256/P-384/P-521."
+            )
+    elif isinstance(public_key, ec.EllipticCurvePublicKey):
+        curve_name = public_key.curve.name
+        if curve_name not in ("secp256r1", "secp384r1", "secp521r1"):
+            raise ValueError(
+                f"Weak or unsupported curve: {curve_name}. "
+                f"Use ECDSA P-256 (secp256r1), P-384 (secp384r1), or P-521 (secp521r1)."
+            )
+    else:
+        raise ValueError(
+            f"Unsupported key type: {type(public_key).__name__}. "
+            f"Use RSA >= 2048 bits or ECDSA P-256/P-384/P-521."
+        )
+
 
 router = APIRouter()
 
@@ -140,12 +173,26 @@ async def register_executor(
                 detail=f"Invalid CSR: {e}",
             )
 
+        # Validate key strength — reject weak keys before any CA/DB work
+        try:
+            validate_csr_key_strength(csr)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
+
         # --- Token validation (optional bootstrap auth) ---
         resolved_executor_id = req.executor_id
         token_audit_fields = {}
 
         if req.enrollment_token:
-            token_hash = hashlib.sha256(req.enrollment_token.encode("utf-8")).hexdigest()
+            pepper = getattr(getattr(request.app.state, "config", None), "recovery_code_pepper", "") or ""
+            token_hash = hmac.new(
+                pepper.encode("utf-8"),
+                req.enrollment_token.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
 
             # Pre-check for diagnostic specificity (non-authoritative)
             token = (
@@ -185,20 +232,6 @@ async def register_executor(
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Enrollment token bound to different executor_id",
-                )
-
-            # Verify cryptographic binding to executor_id
-            server_config = getattr(request.app.state, "config", None)
-            pepper = getattr(server_config, "recovery_code_pepper", "") if server_config else ""
-            if not verify_binding_hash(
-                entity_id=token.executor_id,
-                plaintext_token=req.enrollment_token,
-                server_secret=pepper,
-                stored_binding_hash=token.binding_hash,
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Enrollment token binding mismatch — token has been invalidated",
                 )
 
             # Authoritative atomic consumption — closes race window

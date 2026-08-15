@@ -1,6 +1,7 @@
 """Admin operation endpoints."""
 
 import hashlib
+import hmac
 import json
 import logging
 import secrets
@@ -1151,15 +1152,18 @@ async def admin_enroll_executor(
         admin_user_id = caller.get("user_id", "unknown")
 
         plaintext = "enrl_exec_" + secrets.token_urlsafe(32)
-        token_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
-        binding_hash = compute_binding_hash(executor_id, plaintext, config.recovery_code_pepper)
+        pepper = config.recovery_code_pepper if config else ""
+        token_hash = hmac.new(
+            pepper.encode("utf-8"),
+            plaintext.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(seconds=ttl_seconds)
 
         token = ExecutorEnrollmentToken(
             executor_id=executor_id,
             token_hash=token_hash,
-            binding_hash=binding_hash,
             state="created",
             created_by=admin_user_id,
             expires_at=expires_at,
