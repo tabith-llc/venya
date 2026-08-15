@@ -43,7 +43,7 @@ class TestBrowserEnrollStart:
 
         # Mock token lookup
         mock_token = SimpleNamespace(
-            user_id=1, state="created",
+            user_id=1, state="created", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         )
         mock_user = SimpleNamespace(id=1, user_id="newuser", display_name="New User")
@@ -76,19 +76,20 @@ class TestBrowserEnrollStart:
 
         app = _create_test_app(fido2_manager=fido2, backend=backend)
 
-        with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
-            with patch.object(EnrollmentManager, "validate_token_for_start", mock_em.validate_token_for_start):
-                with patch.object(EnrollmentManager, "mark_token_in_progress", mock_em.mark_token_in_progress):
-                    client = TestClient(app, raise_server_exceptions=False)
-                    resp = client.post(
-                        "/api/v1/enroll/browser/start",
-                        json={"enrollment_token": "test-token"},
-                    )
-                    assert resp.status_code == 200
-                    data = resp.json()
-                    assert data["challenge_id"] == "challenge-123"
-                    assert "challenge" in data["options"]
-                    assert "rp" in data["options"]
+        with patch("server.routes.enroll.verify_binding_hash", return_value=True):
+            with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
+                with patch.object(EnrollmentManager, "validate_token_for_start", mock_em.validate_token_for_start):
+                    with patch.object(EnrollmentManager, "mark_token_in_progress", mock_em.mark_token_in_progress):
+                        client = TestClient(app, raise_server_exceptions=False)
+                        resp = client.post(
+                            "/api/v1/enroll/browser/start",
+                            json={"enrollment_token": "test-token"},
+                        )
+                        assert resp.status_code == 200
+                        data = resp.json()
+                        assert data["challenge_id"] == "challenge-123"
+                        assert "challenge" in data["options"]
+                        assert "rp" in data["options"]
 
     def test_enroll_start_invalid_token(self):
         """Should return 400 for invalid token."""
@@ -116,7 +117,7 @@ class TestBrowserEnrollStart:
     def test_enroll_start_no_fido2(self):
         """Should return 503 if FIDO2 not initialized."""
         mock_token = SimpleNamespace(
-            user_id=1, state="created",
+            user_id=1, state="created", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         )
 
@@ -131,14 +132,15 @@ class TestBrowserEnrollStart:
         app = _create_test_app(backend=backend)
         del app.state.fido2_manager
 
-        with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
-            with patch.object(EnrollmentManager, "validate_token_for_start", mock_em.validate_token_for_start):
-                with patch.object(EnrollmentManager, "mark_token_in_progress", mock_em.mark_token_in_progress):
-                    client = TestClient(app, raise_server_exceptions=False)
-                    resp = client.post(
-                        "/api/v1/enroll/browser/start",
-                        json={"enrollment_token": "test-token"},
-                    )
+        with patch("server.routes.enroll.verify_binding_hash", return_value=True):
+            with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
+                with patch.object(EnrollmentManager, "validate_token_for_start", mock_em.validate_token_for_start):
+                    with patch.object(EnrollmentManager, "mark_token_in_progress", mock_em.mark_token_in_progress):
+                        client = TestClient(app, raise_server_exceptions=False)
+                        resp = client.post(
+                            "/api/v1/enroll/browser/start",
+                            json={"enrollment_token": "test-token"},
+                        )
                     assert resp.status_code == 503
 
 
@@ -150,7 +152,7 @@ class TestBrowserEnrollComplete:
         from vault.iam.enrollment_manager import EnrollmentManager
 
         mock_token = SimpleNamespace(
-            user_id=1, state="in_progress",
+            user_id=1, state="in_progress", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         )
         mock_user = SimpleNamespace(
@@ -184,33 +186,34 @@ class TestBrowserEnrollComplete:
 
         app = _create_test_app(fido2_manager=fido2, backend=backend)
 
-        with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
-            with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
-                with patch.object(EnrollmentManager, "complete_enrollment", mock_em.complete_enrollment):
-                    with patch("vault.iam.session_manager.SessionManager", return_value=mock_sm):
-                        client = TestClient(app, raise_server_exceptions=False)
-                        resp = client.post(
-                            "/api/v1/enroll/browser/complete",
-                            json={
-                                "enrollment_token": "test-token",
-                                "challenge_id": "challenge-123",
-                                "response": {"id": "dGVzdA==", "response": {}},
-                                "label": "Primary key",
-                            },
-                        )
-                        assert resp.status_code == 200
-                        data = resp.json()
-                        assert data["status"] == "ok"
-                        # Check session cookie was set
-                    set_cookie = resp.headers.get("set-cookie", "")
-                    assert "venya_access_token" in set_cookie
+        with patch("server.routes.enroll.verify_binding_hash", return_value=True):
+            with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
+                with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
+                    with patch.object(EnrollmentManager, "complete_enrollment", mock_em.complete_enrollment):
+                        with patch("vault.iam.session_manager.SessionManager", return_value=mock_sm):
+                            client = TestClient(app, raise_server_exceptions=False)
+                            resp = client.post(
+                                "/api/v1/enroll/browser/complete",
+                                json={
+                                    "enrollment_token": "test-token",
+                                    "challenge_id": "challenge-123",
+                                    "response": {"id": "dGVzdA==", "response": {}},
+                                    "label": "Primary key",
+                                },
+                            )
+                            assert resp.status_code == 200
+                            data = resp.json()
+                            assert data["status"] == "ok"
+                            # Check session cookie was set
+                        set_cookie = resp.headers.get("set-cookie", "")
+                        assert "venya_access_token" in set_cookie
 
     def test_enroll_complete_invalid_challenge(self):
         """Should return 400 for invalid WebAuthn challenge."""
         from vault.iam.enrollment_manager import EnrollmentManager
 
         mock_token = SimpleNamespace(
-            user_id=1, state="in_progress",
+            user_id=1, state="in_progress", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         )
 
@@ -226,26 +229,27 @@ class TestBrowserEnrollComplete:
 
         app = _create_test_app(fido2_manager=fido2, backend=backend)
 
-        with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
-            with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
-                client = TestClient(app, raise_server_exceptions=False)
-                resp = client.post(
-                    "/api/v1/enroll/browser/complete",
-                    json={
-                        "enrollment_token": "test-token",
-                        "challenge_id": "expired",
-                        "response": {"id": "dGVzdA==", "response": {}},
-                        "label": "Primary key",
-                    },
-                )
-                assert resp.status_code == 400
+        with patch("server.routes.enroll.verify_binding_hash", return_value=True):
+            with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
+                with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
+                    client = TestClient(app, raise_server_exceptions=False)
+                    resp = client.post(
+                        "/api/v1/enroll/browser/complete",
+                        json={
+                            "enrollment_token": "test-token",
+                            "challenge_id": "expired",
+                            "response": {"id": "dGVzdA==", "response": {}},
+                            "label": "Primary key",
+                        },
+                    )
+                    assert resp.status_code == 400
 
     def test_enroll_complete_no_fido2(self):
         """Should return 503 if FIDO2 not initialized."""
         from vault.iam.enrollment_manager import EnrollmentManager
 
         mock_token = SimpleNamespace(
-            user_id=1, state="in_progress",
+            user_id=1, state="in_progress", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         )
 
@@ -259,16 +263,17 @@ class TestBrowserEnrollComplete:
         app = _create_test_app(backend=backend)
         del app.state.fido2_manager
 
-        with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
-            with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
-                client = TestClient(app, raise_server_exceptions=False)
-                resp = client.post(
-                    "/api/v1/enroll/browser/complete",
-                    json={
-                        "enrollment_token": "test-token",
-                        "challenge_id": "challenge-123",
-                        "response": {"id": "dGVzdA==", "response": {}},
-                        "label": "Primary key",
-                    },
-                )
-                assert resp.status_code == 503
+        with patch("server.routes.enroll.verify_binding_hash", return_value=True):
+            with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
+                with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
+                    client = TestClient(app, raise_server_exceptions=False)
+                    resp = client.post(
+                        "/api/v1/enroll/browser/complete",
+                        json={
+                            "enrollment_token": "test-token",
+                            "challenge_id": "challenge-123",
+                            "response": {"id": "dGVzdA==", "response": {}},
+                            "label": "Primary key",
+                        },
+                    )
+                    assert resp.status_code == 503
