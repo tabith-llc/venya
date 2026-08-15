@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from vault.utils.entropy import get_secure_token
+
 
 @dataclass
 class StoredChallenge:
@@ -131,7 +133,7 @@ class Fido2Manager:
             The options_dict contains the PublicKeyCredentialCreationOptions
             serialized to a dict for the client.
         """
-        challenge_id = secrets.token_urlsafe(16)
+        challenge_id = get_secure_token(16)
         raw_challenge = secrets.token_bytes(32)
 
         # Store challenge metadata
@@ -243,7 +245,7 @@ class Fido2Manager:
         Returns:
             Tuple of (challenge_id, options_dict).
         """
-        challenge_id = secrets.token_urlsafe(16)
+        challenge_id = get_secure_token(16)
 
         allow_credentials = None
         if user_id:

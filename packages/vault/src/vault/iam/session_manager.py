@@ -7,7 +7,6 @@ Two-tier token system:
 
 from __future__ import annotations
 
-import secrets
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -15,6 +14,8 @@ from typing import Any
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+
+from vault.utils.entropy import get_secure_token
 
 from .models import Session as SessionModel, User
 
@@ -95,7 +96,7 @@ class SessionManager:
 
         # Create access token first
         access_token = AccessToken(
-            token=secrets.token_urlsafe(32),
+            token=get_secure_token(32),
             user_id=user_id,
             roles=roles or [],
             expires_at=now + self.config.access_token_ttl,
@@ -190,7 +191,7 @@ class SessionManager:
 
         # Create new access token
         new_token = AccessToken(
-            token=secrets.token_urlsafe(32),
+            token=get_secure_token(32),
             user_id=session.user_id,
             expires_at=datetime.now(timezone.utc) + self.config.access_token_ttl,
         )

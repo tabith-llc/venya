@@ -11,12 +11,13 @@ Handles enrollment token lifecycle:
 from __future__ import annotations
 
 import hashlib
-import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
+
+from vault.utils.entropy import get_secure_token
 
 from .models import EnrollmentToken, User
 
@@ -81,7 +82,7 @@ class EnrollmentManager:
                 f"User ID {user_id} already has 3 active enrollment tokens"
             )
 
-        plaintext = secrets.token_urlsafe(32)
+        plaintext = get_secure_token(32)
         token = EnrollmentToken(
             user_id=user_id,
             token_hash=self._hash_token(plaintext),

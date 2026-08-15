@@ -89,6 +89,11 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     """Lifespan context manager for FastAPI."""
     config: ServerConfig = app.state.config  # type: ignore[attr-defined]
 
+    # CSPRNG self-test at startup
+    from .utils.entropy import csprng_self_test
+
+    csprng_self_test()
+
     # Warn if CORS origins are still default in non-debug environment
     if not config.debug and config.cors.origins == ["http://localhost"]:
         logger.warning(
