@@ -81,6 +81,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         max_age=config.cors.max_age,
     )
 
+    # Wrap with pure ASGI request size limit middleware — outermost layer,
+    # runs before all FastAPI middleware so oversized requests are rejected
+    # before auth/rate-limit/RBAC processing cost.
+    from .middleware.request_size import RequestSizeLimitMiddleware
+
+    app = RequestSizeLimitMiddleware(app, max_body_bytes=config.max_request_body_bytes)  # type: ignore[assignment]
+
     # FIDO2 manager initialized in lifespan after DB is ready
     return app
 
@@ -271,6 +278,7 @@ def main() -> None:
         "host": config.host,
         "port": config.port,
         "log_level": "debug" if config.debug else "info",
+        "limit_max_body": config.max_request_body_bytes,
     }
 
     if config.ssl_cert and config.ssl_key:
