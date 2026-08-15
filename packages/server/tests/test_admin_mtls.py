@@ -17,11 +17,14 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509 import load_pem_x509_certificates
 from cryptography.x509.oid import ExtensionOID, NameOID, ExtendedKeyUsageOID
+from fastapi import FastAPI, Request
 from starlette.testclient import TestClient
 
 from server.ca import AdminCAManager
-from server.config import CASecurityConfig
+from server.config import AdminMTLSConfig, CASecurityConfig, ServerConfig
+from server.middleware.auth import SessionMiddleware
 
 
 # ---------------------------------------------------------------------------
@@ -1069,3 +1072,293 @@ class TestRevokeAdminCertEndpoint:
             json={"serial": "a" * 20, "reason": "test"},
         )
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Tests: Phase 7 — Integration Tests
+# ---------------------------------------------------------------------------
+
+
+def _write_pem_bundle(certs: list[bytes], path: Path) -> None:
+    """Write multiple PEM certificates to a single file."""
+    path.write_bytes(b"".join(c if c.endswith(b"\n") else c + b"\n" for c in certs))
+
+
+def _create_concurrent_test_app(admin_ca_dir: str):
+    """Create a test app for concurrency tests."""
+    from fastapi import FastAPI, Request
+    from starlette.requests import Request as StarletteRequest
+
+    from server.config import AdminMTLSConfig, ServerConfig
+    from server.middleware.auth import SessionMiddleware
+
+    config = ServerConfig(
+        admin_mtls=AdminMTLSConfig(
+            enabled=True,
+            ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
+            known_admin_ids=["dust@montana"],
+        ),
+    )
+
+    app = FastAPI()
+    app.add_middleware(SessionMiddleware)
+    app.state.config = config
+
+    @app.get("/api/v1/admin/test")
+    def admin_test(request: Request):
+        user = getattr(request.state, "auth_user", None)
+        return {"user": user, "path": "/api/v1/admin/test"}
+
+    @app.get("/api/v1/health")
+    def health():
+        return {"status": "ok"}
+
+    return app
+
+
+class TestAdminMTLSConcurrency:
+    """Tests for concurrent admin mTLS requests."""
+
+    def test_concurrent_admin_requests_with_same_cert(self, admin_ca_dir, admin_ca_security):
+        """10 simultaneous requests with same cert should all pass mTLS (no race conditions)."""
+        import concurrent.futures
+
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        cert_pem_str = cert_pem.decode("utf-8")
+
+        app = _create_concurrent_test_app(admin_ca_dir)
+
+        results = []
+
+        def make_request():
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get(
+                "/api/v1/admin/test",
+                headers={
+                    "X-Client-Cert": cert_pem_str,
+                    "X-Client-Verified": "true",
+                },
+            )
+            return resp.status_code
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(make_request) for _ in range(10)]
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    results.append(f.result())
+                except Exception as e:
+                    results.append(f"exception: {e}")
+
+        # All 10 should pass mTLS (return 401 — no bearer token)
+        # None should crash (500) or cause exceptions
+        assert len(results) == 10
+        for r in results:
+            assert r == 401, f"Expected 401 (mTLS passed, no bearer), got {r}"
+
+
+class TestAdminCARotation:
+    """Tests for admin CA rotation with PEM bundle support."""
+
+    def test_admin_ca_rotation_preserves_existing_certs(self, admin_ca_dir, admin_ca_security):
+        """During CA rotation overlap, certs from both old and new CA are accepted."""
+        from cryptography.x509 import load_pem_x509_certificates
+
+        # 1. Create old CA and issue cert
+        old_ca_dir = Path(admin_ca_dir) / "old-ca"
+        old_ca_security = CASecurityConfig(key_passphrase_env="OLD_CA_PASSPHRASE")
+        os.environ["OLD_CA_PASSPHRASE"] = "test_passphrase"
+        old_ca = AdminCAManager(old_ca_dir, old_ca_security)
+        old_ca.initialize()
+        old_cert, old_key_pem, old_cert_pem = old_ca.sign_admin_cert("admin@old")
+        old_cert_pem_str = old_cert_pem.decode("utf-8")
+
+        # 2. Create new CA
+        new_ca_dir = Path(admin_ca_dir) / "new-ca"
+        new_ca_security = CASecurityConfig(key_passphrase_env="NEW_CA_PASSPHRASE")
+        os.environ["NEW_CA_PASSPHRASE"] = "test_passphrase"
+        new_ca = AdminCAManager(new_ca_dir, new_ca_security)
+        new_ca.initialize()
+        new_cert, new_key_pem, new_cert_pem = new_ca.sign_admin_cert("admin@new")
+        new_cert_pem_str = new_cert_pem.decode("utf-8")
+
+        # 3. Create PEM bundle (old + new)
+        bundle_path = Path(admin_ca_dir) / "admin-ca-bundle.crt"
+        _write_pem_bundle([old_ca.get_admin_ca_cert_pem(), new_ca.get_admin_ca_cert_pem()], bundle_path)
+
+        # 4. Create app with bundle path and preload trusted CAs
+        config = ServerConfig(
+            admin_mtls=AdminMTLSConfig(
+                enabled=True,
+                ca_cert=str(bundle_path),
+                known_admin_ids=["admin@old", "admin@new"],
+            ),
+        )
+
+        from cryptography.x509 import load_pem_x509_certificates as load_bundled_cas
+        app = FastAPI()
+        app.add_middleware(SessionMiddleware)
+        app.state.config = config
+        app.state.admin_trusted_cas = load_bundled_cas(bundle_path.read_bytes())
+
+        @app.get("/api/v1/admin/test")
+        def admin_test(request: Request):
+            user = getattr(request.state, "auth_user", None)
+            return {"user": user, "path": "/api/v1/admin/test"}
+
+        @app.get("/api/v1/health")
+        def health():
+            return {"status": "ok"}
+
+        # 5. Both old and new certs should pass mTLS during overlap
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp_old = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": old_cert_pem_str,
+                "X-Client-Verified": "true",
+            },
+        )
+        assert resp_old.status_code == 401, f"Old cert should pass during overlap, got {resp_old.status_code}: {resp_old.json()}"
+
+        resp_new = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": new_cert_pem_str,
+                "X-Client-Verified": "true",
+            },
+        )
+        assert resp_new.status_code == 401, f"New cert should pass during overlap, got {resp_new.status_code}: {resp_new.json()}"
+
+        # 6. After rotation complete (remove old CA from bundle), old cert should be rejected
+        _write_pem_bundle([new_ca.get_admin_ca_cert_pem()], bundle_path)
+        app.state.admin_trusted_cas = load_bundled_cas(bundle_path.read_bytes())
+
+        resp_old_after = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": old_cert_pem_str,
+                "X-Client-Verified": "true",
+            },
+        )
+        assert resp_old_after.status_code == 403, f"Old cert should be rejected after rotation, got {resp_old_after.status_code}"
+
+        resp_new_after = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": new_cert_pem_str,
+                "X-Client-Verified": "true",
+            },
+        )
+        assert resp_new_after.status_code == 401, f"New cert should still pass after rotation, got {resp_new_after.status_code}"
+
+    def test_pem_bundle_with_single_cert(self, admin_ca_dir, admin_ca_security):
+        """A PEM bundle with a single cert should work the same as a single CA file."""
+        from cryptography.x509 import load_pem_x509_certificates
+
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
+        manager.initialize()
+
+        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        cert_pem_str = cert_pem.decode("utf-8")
+
+        # Create a bundle with just one cert
+        bundle_path = Path(admin_ca_dir) / "single-cert-bundle.crt"
+        _write_pem_bundle([manager.get_admin_ca_cert_pem()], bundle_path)
+
+        config = ServerConfig(
+            admin_mtls=AdminMTLSConfig(
+                enabled=True,
+                ca_cert=str(bundle_path),
+                known_admin_ids=["dust@montana"],
+            ),
+        )
+
+        app = FastAPI()
+        app.add_middleware(SessionMiddleware)
+        app.state.config = config
+        app.state.admin_trusted_cas = load_pem_x509_certificates(bundle_path.read_bytes())
+
+        @app.get("/api/v1/admin/test")
+        def admin_test(request: Request):
+            user = getattr(request.state, "auth_user", None)
+            return {"user": user, "path": "/api/v1/admin/test"}
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "X-Client-Cert": cert_pem_str,
+                "X-Client-Verified": "true",
+            },
+        )
+        # Should pass mTLS (401 = no bearer token)
+        assert resp.status_code == 401
+
+    def test_pem_bundle_with_three_cas(self, admin_ca_dir, admin_ca_security):
+        """A PEM bundle with 3 CAs should verify against any of them."""
+        from cryptography.x509 import load_pem_x509_certificates
+
+        # Create 3 separate CAs
+        ca_dirs = []
+        for i in range(3):
+            ca_dir = Path(admin_ca_dir) / f"ca-{i}"
+            env_var = f"CA_PASS_{i}"
+            ca_security = CASecurityConfig(key_passphrase_env=env_var)
+            os.environ[env_var] = "test_passphrase"
+            ca = AdminCAManager(ca_dir, ca_security)
+            ca.initialize()
+            ca_dirs.append((ca, ca_dir))
+
+        # Create a cert from CA 1
+        cert1, _, cert1_pem = ca_dirs[0][0].sign_admin_cert("admin@ca1")
+        cert1_pem_str = cert1_pem.decode("utf-8")
+
+        # Create a cert from CA 2
+        cert2, _, cert2_pem = ca_dirs[1][0].sign_admin_cert("admin@ca2")
+        cert2_pem_str = cert2_pem.decode("utf-8")
+
+        # Create a cert from CA 3
+        cert3, _, cert3_pem = ca_dirs[2][0].sign_admin_cert("admin@ca3")
+        cert3_pem_str = cert3_pem.decode("utf-8")
+
+        # Create a bundle with all 3 CAs
+        bundle_path = Path(admin_ca_dir) / "three-ca-bundle.crt"
+        certs_pem = [ca[0].get_admin_ca_cert_pem() for ca in ca_dirs]
+        _write_pem_bundle(certs_pem, bundle_path)
+
+        config = ServerConfig(
+            admin_mtls=AdminMTLSConfig(
+                enabled=True,
+                ca_cert=str(bundle_path),
+                known_admin_ids=["admin@ca1", "admin@ca2", "admin@ca3"],
+            ),
+        )
+
+        app = FastAPI()
+        app.add_middleware(SessionMiddleware)
+        app.state.config = config
+        app.state.admin_trusted_cas = load_pem_x509_certificates(bundle_path.read_bytes())
+
+        @app.get("/api/v1/admin/test")
+        def admin_test(request: Request):
+            user = getattr(request.state, "auth_user", None)
+            return {"user": user, "path": "/api/v1/admin/test"}
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        # All 3 certs should pass
+        for pem_str, label in [(cert1_pem_str, "cert1"), (cert2_pem_str, "cert2"), (cert3_pem_str, "cert3")]:
+            resp = client.get(
+                "/api/v1/admin/test",
+                headers={
+                    "X-Client-Cert": pem_str,
+                    "X-Client-Verified": "true",
+                },
+            )
+            assert resp.status_code == 401, f"{label} should pass mTLS in 3-CA bundle, got {resp.status_code}"

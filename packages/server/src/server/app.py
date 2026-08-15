@@ -128,6 +128,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     from pathlib import Path
 
     from .ca import AdminCAManager
+    from cryptography.x509 import load_pem_x509_certificates
 
     admin_ca_dir = Path(config.ca_dir) / "admin-ca"
     admin_ca_manager = AdminCAManager(admin_ca_dir, config.ca_security)
@@ -137,6 +138,18 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             "Run: venya admin init-admin-ca"
         )
     app.state.admin_ca_manager = admin_ca_manager  # type: ignore[attr-defined]
+
+    # Load admin CA PEM bundle (supports rotation — multiple certs concatenated)
+    if config.admin_mtls.enabled and config.admin_mtls.ca_cert:
+        try:
+            admin_trusted_cas = load_pem_x509_certificates(
+                Path(config.admin_mtls.ca_cert).read_bytes()
+            )
+            app.state.admin_trusted_cas = admin_trusted_cas  # type: ignore[attr-defined]
+            logger.info("Loaded %d trusted admin CA cert(s) from %s", len(admin_trusted_cas), config.admin_mtls.ca_cert)
+        except Exception:
+            logger.exception("Failed to load admin CA PEM bundle from %s", config.admin_mtls.ca_cert)
+            raise
 
     # Periodic session cleanup
     from datetime import datetime, timezone

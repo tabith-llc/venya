@@ -17,6 +17,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID, NameOID
+from cryptography.x509 import load_pem_x509_certificates
 from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
@@ -215,7 +216,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
                     content={"detail": "Admin access requires valid client certificate"},
                 )
 
-        # Step 3: Verify cert signature against admin CA
+        # Step 3: Verify cert signature against admin CA (supports PEM bundle)
         admin_ca_cert_path = config.admin_mtls.ca_cert
         if not admin_ca_cert_path:
             logger.warning("Admin route %s: admin CA cert path not configured", path)
@@ -224,19 +225,29 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Admin access requires valid client certificate"},
             )
 
-        try:
-            admin_ca_cert = x509.load_pem_x509_certificate(Path(admin_ca_cert_path).read_bytes())
-        except Exception:
-            logger.exception("Admin route %s: failed to load admin CA cert", path)
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={"detail": "Admin access requires valid client certificate"},
-            )
+        # Load trusted CAs from app.state (pre-loaded at startup), fallback to file
+        trusted_cas = getattr(request.app.state, "admin_trusted_cas", None)
+        if trusted_cas is None:
+            try:
+                trusted_cas = load_pem_x509_certificates(Path(admin_ca_cert_path).read_bytes())
+            except Exception:
+                logger.exception("Admin route %s: failed to load admin CA cert(s)", path)
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "Admin access requires valid client certificate"},
+                )
 
-        try:
-            _verify_cert_against_ca(cert, admin_ca_cert)
-        except Exception:
-            logger.warning("Admin route %s: cert signature verification failed", path)
+        verified = False
+        for admin_ca_cert in trusted_cas:
+            try:
+                _verify_cert_against_ca(cert, admin_ca_cert)
+                verified = True
+                break
+            except Exception:
+                continue
+
+        if not verified:
+            logger.warning("Admin route %s: cert signature verification failed against all trusted CAs", path)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": "Admin access requires valid client certificate"},
