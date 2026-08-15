@@ -144,12 +144,12 @@ class TestAdminListUsers:
     def test_list_users(self):
         """GET /admin/users should return list of users."""
         user1 = SimpleNamespace(
-            user_id="user1", auth_mode="security-key",
-            enrolled_at=None, session_timeout=900,
+            user_id="user1", display_name=None, status="pending_enrollment",
+            auth_mode="security-key", enrolled_at=None, session_timeout=900,
         )
         user2 = SimpleNamespace(
-            user_id="user2", auth_mode="platform",
-            enrolled_at=None, session_timeout=1800,
+            user_id="user2", display_name="User Two", status="active",
+            auth_mode="platform", enrolled_at=None, session_timeout=1800,
         )
         db = MagicMock()
         db.query.return_value.order_by.return_value.all.return_value = [user1, user2]
