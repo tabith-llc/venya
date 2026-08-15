@@ -215,7 +215,7 @@ async def register_executor(
                 )
 
             resolved_executor_id = token.executor_id
-            token_audit_fields = {"with_token": True, "token_verified": True}
+            token_audit_fields = {"with_token": True, "token_verified": True, "token_id": token.id}
             logger.info("Enrollment token verified for executor: %s", resolved_executor_id)
         else:
             server_config = getattr(request.app.state, "config", None)

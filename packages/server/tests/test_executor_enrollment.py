@@ -26,6 +26,7 @@ from starlette.testclient import TestClient
 
 from server.routes import admin as admin_routes, executors as executors_routes
 from server.utils.token_binding import compute_binding_hash
+from vault.iam.models import ExecutorEnrollmentToken
 
 _TEST_PEPPER = "test-pepper-12345"
 
@@ -144,6 +145,8 @@ class TestAdminEnrollExecutor:
                 added_objects.append(obj)
             def commit(self):
                 pass
+            def flush(self):
+                pass
             def close(self):
                 pass
 
@@ -159,6 +162,39 @@ class TestAdminEnrollExecutor:
         # Check that two objects were added (token + audit event)
         assert len(added_objects) == 2
 
+    def test_enroll_audit_event_includes_token_id(self):
+        """Audit event for token creation includes token_id in fields."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+
+        added_objects = []
+
+        class TrackAdd:
+            def add(self, obj):
+                added_objects.append(obj)
+            def commit(self):
+                pass
+            def flush(self):
+                # Simulate flush assigning an ID to the token
+                if isinstance(added_objects[-1], ExecutorEnrollmentToken):
+                    added_objects[-1].id = 42
+            def close(self):
+                pass
+
+        mock_db2 = TrackAdd()
+        backend.get_session.return_value = mock_db2
+
+        app = _create_test_app(backend=backend, auth_user={"user_id": "admin-1"})
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post("/api/v1/admin/executors/test-exec/enroll")
+        assert response.status_code == 201
+
+        audit_event = added_objects[1]
+        assert audit_event.event_type == "executor_enrollment_token_created"
+        assert audit_event.fields["token_id"] == 42
+
     def test_enroll_uses_requester_as_created_by(self):
         """Enroll records the requesting admin as created_by."""
         mock_db = MagicMock()
@@ -171,6 +207,8 @@ class TestAdminEnrollExecutor:
             def add(self, obj):
                 added_objects.append(obj)
             def commit(self):
+                pass
+            def flush(self):
                 pass
             def close(self):
                 pass
@@ -235,6 +273,72 @@ class TestRegisterEndpointWithToken:
         assert response.status_code == 201
         data = response.json()
         assert data["executor_id"] == "token-exec-1"
+
+    def test_register_audit_event_includes_token_id(self):
+        """Audit event for executor registration includes token_id when token used."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(
+            backend=backend, auth_user={"user_id": "admin"},
+            ca_manager=_make_mock_ca(),
+        )
+
+        mock_token = _make_mock_token("token-exec-1", "enrl_exec_testtoken", "created")
+        mock_token.id = 99
+
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+        user_query = MagicMock()
+        user_query.filter.return_value.first.return_value = None
+
+        def query_side_effect(model):
+            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+                return token_query
+            return user_query
+
+        mock_db.query.side_effect = query_side_effect
+
+        mock_result = MagicMock()
+        mock_result.rowcount = 1
+        mock_db.execute.return_value = mock_result
+
+        added_objects = []
+
+        class TrackAdd:
+            def add(self, obj):
+                added_objects.append(obj)
+            def commit(self):
+                pass
+            def flush(self):
+                pass
+            def close(self):
+                pass
+            def query(self, model):
+                if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+                    return token_query
+                return user_query
+            def execute(self, *args, **kwargs):
+                return mock_result
+
+        mock_db2 = TrackAdd()
+        backend.get_session.return_value = mock_db2
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "token-exec-1",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_testtoken",
+            },
+        )
+        assert response.status_code == 201
+
+        audit_event = [o for o in added_objects if hasattr(o, 'event_type')]
+        assert len(audit_event) == 1
+        assert audit_event[0].event_type == "executor_registered"
+        assert audit_event[0].fields["token_id"] == 99
 
     def test_token_mismatched_executor_id_returns_401(self):
         """Token executor_id must match request executor_id."""
