@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from ..rate_limit import rate_limit_admin_token_gen
+from ..utils.token_binding import compute_binding_hash
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -250,6 +251,9 @@ async def admin_enroll(
 
         # Create enrollment token
         token, plaintext = em.create_enrollment_token(user.id)
+        config = getattr(request.app.state, "config", None)
+        if config and config.recovery_code_pepper:
+            token.binding_hash = compute_binding_hash(req.user_id, plaintext, config.recovery_code_pepper)
         db.commit()
 
         return AdminEnrollResponse(
@@ -323,6 +327,9 @@ async def admin_create_user(
 
         # Create enrollment token
         token, plaintext = em.create_enrollment_token(user.id)
+        config = getattr(request.app.state, "config", None)
+        if config and config.recovery_code_pepper:
+            token.binding_hash = compute_binding_hash(req.username, plaintext, config.recovery_code_pepper)
         db.commit()
 
         logger.info(
@@ -1135,12 +1142,14 @@ async def admin_enroll_executor(
 
         plaintext = "enrl_exec_" + secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+        binding_hash = compute_binding_hash(executor_id, plaintext, config.recovery_code_pepper)
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(seconds=ttl_seconds)
 
         token = ExecutorEnrollmentToken(
             executor_id=executor_id,
             token_hash=token_hash,
+            binding_hash=binding_hash,
             state="created",
             created_by=admin_user_id,
             expires_at=expires_at,
@@ -1238,6 +1247,9 @@ async def admin_re_enroll(
 
         # Generate new enrollment token
         token, plaintext = em.create_enrollment_token(user.id)
+        config = getattr(request.app.state, "config", None)
+        if config and config.recovery_code_pepper:
+            token.binding_hash = compute_binding_hash(user_id, plaintext, config.recovery_code_pepper)
         db.commit()
 
         logger.info(
@@ -1352,6 +1364,9 @@ async def admin_create_user_token(
 
         # Create new token
         token, plaintext = em.create_enrollment_token(user.id)
+        config = getattr(request.app.state, "config", None)
+        if config and config.recovery_code_pepper:
+            token.binding_hash = compute_binding_hash(user_id, plaintext, config.recovery_code_pepper)
         db.commit()
 
         return AdminUserTokenCreateResponse(
