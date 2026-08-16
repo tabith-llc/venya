@@ -13,7 +13,7 @@ from typing import Final
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.exceptions import InvalidTag
 from argon2.low_level import hash_secret_raw, Type
-from Crypto.Cipher import AES as PyCryptoAES
+from Crypto.Cipher import AES as PyCryptoAES  # nosec B413 — AES-KW per RFC 5649 requires pycryptodome
 
 # Argon2id parameters per plan: 3 iterations, 4 lanes, 64MB memory
 ARGON2_TIME_COST: Final[int] = 3
@@ -196,7 +196,7 @@ def _aes_kw_wrap(kek: bytes, plaintext: bytes) -> bytes:
     # AES-KW wrap algorithm (RFC 5649 Section 2.2.3)
     for i in range(1, n + 1):
         # Encrypt A || R[i]
-        cipher = PyCryptoAES.new(kek, PyCryptoAES.MODE_ECB)
+        cipher = PyCryptoAES.new(kek, PyCryptoAES.MODE_ECB)  # nosec B305 — AES-KW per RFC 5649 requires ECB
         encrypted = cipher.encrypt(a + plaintext[(i - 1) * 8 : i * 8])
 
         # Split result
@@ -243,7 +243,7 @@ def _aes_kw_unwrap(kek: bytes, ciphertext: bytes) -> bytes:
         a = a_int.to_bytes(8, "big")
 
         # Decrypt A || R[i]
-        cipher = PyCryptoAES.new(kek, PyCryptoAES.MODE_ECB)
+        cipher = PyCryptoAES.new(kek, PyCryptoAES.MODE_ECB)  # nosec B305 — AES-KW per RFC 5649 requires ECB
         decrypted = cipher.decrypt(a + plaintext[(i - 1) * 8 : i * 8])
 
         # Split result
@@ -255,24 +255,6 @@ def _aes_kw_unwrap(kek: bytes, ciphertext: bytes) -> bytes:
         raise DecryptionError("Unwrap failed: integrity check failed (wrong key)")
 
     return plaintext
-
-
-def _aes_block_encrypt(key: bytes, block: bytes) -> bytes:
-    """Encrypt a single 16-byte block with AES-256 in ECB mode."""
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
-    cipher = Cipher(algorithms.AES(key), modes.ECB())
-    encryptor = cipher.encryptor()
-    return encryptor.update(block) + encryptor.finalize()
-
-
-def _aes_block_decrypt(key: bytes, block: bytes) -> bytes:
-    """Decrypt a single 16-byte block with AES-256 in ECB mode."""
-    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
-    cipher = Cipher(algorithms.AES(key), modes.ECB())
-    decryptor = cipher.decryptor()
-    return decryptor.update(block) + decryptor.finalize()
 
 
 def _bytes_to_int(b: bytes) -> int:
