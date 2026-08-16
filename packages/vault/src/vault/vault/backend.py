@@ -148,12 +148,20 @@ class Backend:
         from .rate_limiter import RateLimiter
 
         kek = None
-        effective_passphrase = passphrase or (
-            self.config.passphrase.decode("utf-8") if self.config.passphrase else None
-        )
+        # Explicit is not None check preserves empty strings (which fail derive_kek intentionally)
+        if passphrase is not None:
+            effective_passphrase = passphrase
+        elif self.config.passphrase is not None:
+            effective_passphrase = self.config.passphrase.decode("utf-8")
+        else:
+            effective_passphrase = None
         if effective_passphrase:
             from .encryption import derive_kek
             kek, _ = derive_kek(effective_passphrase.encode("utf-8"))
+        elif kek is None and self.config.kek is not None:
+            # Fallback: use backend's KEK when no passphrase provided
+            # (e.g., VaultFactory.with_kek() used to create the backend)
+            kek = self.config.kek
 
         return Vault(
             backend=self,
