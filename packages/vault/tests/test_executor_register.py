@@ -2,7 +2,7 @@
 
 Tests cover:
 - CLI argument parsing for run, exec register, exec cert status
-- RSA key generation
+- ECDSA P-256 key generation
 - CSR creation
 - executor_register() flow with mocked API
 - executor_cert_status() with real certificate files
@@ -20,8 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from vault.cli.api_client import APIClient, APIClientError, Config
@@ -62,8 +61,8 @@ def _make_mock_client(config_file=None):
 
 
 def _generate_test_keypair():
-    """Generate an RSA 2048-bit keypair for testing."""
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    """Generate an ECDSA P-256 keypair for testing."""
+    private_key = ec.generate_private_key(ec.SECP256R1())
     return private_key
 
 
@@ -267,23 +266,20 @@ class TestCLIParsing:
 
 
 class TestKeyGeneration:
-    """Tests for RSA key generation."""
+    """Tests for ECDSA P-256 key generation."""
 
-    def test_rsa_key_generation(self):
-        """RSA 2048-bit key generation produces valid keypair."""
+    def test_ecdsa_key_generation(self):
+        """ECDSA P-256 key generation produces valid keypair."""
         private_key = _generate_test_keypair()
-        assert private_key.key_size == 2048
+        from cryptography.hazmat.primitives.asymmetric import ec
+        assert isinstance(private_key.curve, ec.SECP256R1)
         public_key = private_key.public_key()
-        # Verify the key can encrypt/decrypt
-        plaintext = b"test data"
-        ciphertext = public_key.encrypt(
-            plaintext,
-            PKCS1v15(),
-        )
-        decrypted = private_key.decrypt(ciphertext, PKCS1v15())
-        assert decrypted == plaintext
+        # Verify the key can sign/verify
+        message = b"test data"
+        signature = private_key.sign(message, ec.ECDSA(hashes.SHA256()))
+        public_key.verify(signature, message, ec.ECDSA(hashes.SHA256()))
 
-    def test_rsa_key_serialization(self):
+    def test_ecdsa_key_serialization(self):
         """Private key can be serialized to PEM format."""
         private_key = _generate_test_keypair()
         pem = private_key.private_bytes(
@@ -295,7 +291,7 @@ class TestKeyGeneration:
         assert pem.endswith(b"-----END PRIVATE KEY-----\n")
         # Can be re-loaded
         loaded = serialization.load_pem_private_key(pem, password=None)
-        assert loaded.key_size == 2048
+        assert isinstance(loaded.curve, ec.SECP256R1)
 
 
 # ---------------------------------------------------------------------------

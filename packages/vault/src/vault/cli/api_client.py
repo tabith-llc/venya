@@ -399,7 +399,8 @@ class APIClient:
             )
 
         try:
-            with httpx2.Client(verify=tls_verify, timeout=30.0) as client:
+            timeout = int(os.environ.get("VENYA_EXECUTION_TIMEOUT", "30"))
+            with httpx2.Client(verify=tls_verify, timeout=timeout) as client:
                 response = client.post(url, json=payload)
             response.raise_for_status()
             return response.json() if response.content else {}

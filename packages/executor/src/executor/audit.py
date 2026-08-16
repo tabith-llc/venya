@@ -121,7 +121,7 @@ class AuditLogger:
 
         while not self._shutdown:
             try:
-                with httpx2.Client(verify=False, timeout=10.0) as client:
+                with httpx2.Client(verify=False, timeout=self._config.request_timeout_seconds) as client:
                     response = client.post(
                         remote_url,
                         content=payload,

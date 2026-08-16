@@ -227,6 +227,23 @@ class AdminMTLSConfig(BaseModel):
     )
 
 
+class NetworkConfig(BaseModel):
+    """Network timeout configuration."""
+
+    request_timeout_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=120,
+        description="Default timeout for server API calls in seconds (5-120)",
+    )
+    registration_timeout_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=120,
+        description="Timeout for executor registration/rotation in seconds (5-120)",
+    )
+
+
 class ServerConfig(BaseSettings):
     """Server configuration.
 
@@ -291,6 +308,9 @@ class ServerConfig(BaseSettings):
 
     # Clock skew tolerance
     clock_skew: ClockSkewConfig = Field(default_factory=ClockSkewConfig)
+
+    # Network timeouts
+    network: NetworkConfig = Field(default_factory=NetworkConfig)
 
     # Request size limits
     max_request_body_bytes: int = Field(

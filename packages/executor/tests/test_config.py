@@ -15,6 +15,7 @@ from executor.config import (
     CommandValidatorConfig,
     ExecutorConfig,
     MtlsConfig,
+    NetworkConfig,
     OutputCaptureConfig,
     ReaperConfig,
     SessionConfig,
@@ -130,6 +131,14 @@ class TestAuditForwarderConfig:
         cfg = AuditForwarderConfig()
         assert cfg.retry_max_delay == 300.0
 
+    def test_default_request_timeout_seconds(self):
+        cfg = AuditForwarderConfig()
+        assert cfg.request_timeout_seconds == 10
+
+    def test_custom_request_timeout_seconds(self):
+        cfg = AuditForwarderConfig(request_timeout_seconds=30)
+        assert cfg.request_timeout_seconds == 30
+
     def test_default_local_retention_days(self):
         cfg = AuditForwarderConfig()
         assert cfg.local_retention_days == 90
@@ -145,6 +154,75 @@ class TestReaperConfig:
     def test_default_secret_ttl_seconds(self):
         cfg = ReaperConfig()
         assert cfg.secret_ttl_seconds == 300
+
+
+class TestNetworkConfig:
+    """Tests for NetworkConfig default values."""
+
+    def test_default_request_timeout(self):
+        cfg = NetworkConfig()
+        assert cfg.request_timeout_seconds == 10
+
+    def test_default_registration_timeout(self):
+        cfg = NetworkConfig()
+        assert cfg.registration_timeout_seconds == 30
+
+    def test_custom_request_timeout(self):
+        cfg = NetworkConfig(request_timeout_seconds=15)
+        assert cfg.request_timeout_seconds == 15
+
+    def test_custom_registration_timeout(self):
+        cfg = NetworkConfig(registration_timeout_seconds=60)
+        assert cfg.registration_timeout_seconds == 60
+
+    def test_min_request_timeout(self):
+        cfg = NetworkConfig(request_timeout_seconds=1)
+        assert cfg.request_timeout_seconds == 1
+
+    def test_min_registration_timeout(self):
+        cfg = NetworkConfig(registration_timeout_seconds=5)
+        assert cfg.registration_timeout_seconds == 5
+
+    def test_max_request_timeout(self):
+        cfg = NetworkConfig(request_timeout_seconds=120)
+        assert cfg.request_timeout_seconds == 120
+
+    def test_max_registration_timeout(self):
+        cfg = NetworkConfig(registration_timeout_seconds=120)
+        assert cfg.registration_timeout_seconds == 120
+
+    def test_request_timeout_below_min_rejected(self):
+        with pytest.raises(ValidationError):
+            NetworkConfig(request_timeout_seconds=0)
+
+    def test_registration_timeout_below_min_rejected(self):
+        with pytest.raises(ValidationError):
+            NetworkConfig(registration_timeout_seconds=4)
+
+    def test_request_timeout_above_max_rejected(self):
+        with pytest.raises(ValidationError):
+            NetworkConfig(request_timeout_seconds=121)
+
+    def test_registration_timeout_above_max_rejected(self):
+        with pytest.raises(ValidationError):
+            NetworkConfig(registration_timeout_seconds=121)
+
+
+class TestExecutorConfigNetwork:
+    """Tests for ExecutorConfig network config integration."""
+
+    def test_default_network_config(self):
+        cfg = ExecutorConfig()
+        assert isinstance(cfg.network, NetworkConfig)
+        assert cfg.network.request_timeout_seconds == 10
+        assert cfg.network.registration_timeout_seconds == 30
+
+    def test_env_overrides_network(self, monkeypatch):
+        monkeypatch.setenv("VENYA_EXECUTOR_NETWORK__REQUEST_TIMEOUT_SECONDS", "45")
+        monkeypatch.setenv("VENYA_EXECUTOR_NETWORK__REGISTRATION_TIMEOUT_SECONDS", "60")
+        cfg = ExecutorConfig()
+        assert cfg.network.request_timeout_seconds == 45
+        assert cfg.network.registration_timeout_seconds == 60
 
 
 class TestExecutorConfigDefaults:
@@ -197,6 +275,10 @@ class TestExecutorConfigDefaults:
     def test_default_reaper_config(self):
         cfg = ExecutorConfig()
         assert isinstance(cfg.reaper, ReaperConfig)
+
+    def test_default_network_config(self):
+        cfg = ExecutorConfig()
+        assert isinstance(cfg.network, NetworkConfig)
 
 
 class TestExecutorConfigFromEnv:
