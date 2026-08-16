@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from ..dependencies import get_current_user
+from .. import metrics
 
 logger = logging.getLogger("venya.server")
 
@@ -193,6 +194,7 @@ async def auth_login_complete(
     try:
         result = fido2_manager.finish_authentication(req.challenge_id, req.response)
     except ValueError as e:
+        metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="failure").inc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
@@ -232,6 +234,7 @@ async def auth_login_complete(
             roles=[str(rid) for rid in role_ids],
         )
         db.commit()
+        metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="success").inc()
 
         return AuthenticationCompleteResponse(
             user_id=result["user_id"],
@@ -298,6 +301,7 @@ async def auth_refresh(
         )
 
         if session is None:
+            metrics.AUTH_REFRESH_TOTAL.labels(result="invalid").inc()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",
@@ -305,6 +309,7 @@ async def auth_refresh(
 
         # Check session expiry
         if not manager.check_expiry(session):
+            metrics.AUTH_REFRESH_TOTAL.labels(result="expired").inc()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Session expired",
@@ -313,12 +318,14 @@ async def auth_refresh(
         # Issue new token
         new_token = manager.refresh_token(token)
         if new_token is None:
+            metrics.AUTH_REFRESH_TOTAL.labels(result="failed").inc()
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token refresh failed",
             )
 
         db.commit()
+        metrics.AUTH_REFRESH_TOTAL.labels(result="success").inc()
 
         return AuthenticationRefreshResponse(access_token=new_token.token)
     finally:

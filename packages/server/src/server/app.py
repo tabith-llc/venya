@@ -63,7 +63,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     from .middleware import rate_limit
     from .middleware import security_headers
     from .middleware import rate_limit_headers
+    from .middleware import metrics as metrics_middleware
 
+    app.add_middleware(metrics_middleware.MetricsMiddleware)
     app.add_middleware(security_headers.SecurityHeadersMiddleware, cors_origins=config.cors.origins)
     app.add_middleware(rate_limit_headers.RateLimitHeaderMiddleware)
     app.add_middleware(rate_limit.RateLimitMiddleware, config=config.rate_limit)
@@ -289,6 +291,15 @@ def main() -> None:
         handler.addFilter(SensitiveFieldFilter())
 
     app = create_app(config)
+
+    # Start Prometheus metrics HTTP server on loopback (if configured)
+    metrics_port = os.environ.get("VENYA_METRICS_PORT")
+    if metrics_port:
+        from prometheus_client import start_http_server
+
+        port = int(metrics_port)
+        start_http_server(port, addr="127.0.0.1")
+        logger.info("Prometheus metrics server started on 127.0.0.1:%d", port)
 
     uvicorn_kwargs = {
         "app": app,

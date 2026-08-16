@@ -16,6 +16,8 @@ from starlette.responses import JSONResponse, Response
 
 from vault.vault.rate_limiter import RateLimiter as VaultRateLimiter, RateLimitExceededError
 
+from .. import metrics
+
 logger = logging.getLogger("venya.server")
 
 
@@ -107,6 +109,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         count = sum(1 for t in requests.get(ip, []) if t > window_start)
 
         if count >= limit:
+            metrics.RATE_LIMIT_HIT_TOTAL.labels(limit_type="ip").inc()
             raise RateLimitExceededError(
                 f"IP {ip} exceeded {limit} requests per minute"
             )

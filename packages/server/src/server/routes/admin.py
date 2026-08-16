@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from ..rate_limit import rate_limit_admin_token_gen
 from ..utils.executor_id import validate_executor_id
 from ..utils.token_binding import compute_binding_hash
+from .. import metrics
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -334,6 +335,7 @@ async def admin_create_user(
         if config and config.recovery_code_pepper:
             token.binding_hash = compute_binding_hash(req.username, plaintext, config.recovery_code_pepper)
         db.commit()
+        metrics.TOKEN_CREATED.labels(type="user").inc()
 
         logger.info(
             "Admin created user '%s' (ID: %d) with roles: %s",
@@ -1093,9 +1095,9 @@ async def admin_revoke_executor(
         )
         db.add(revocation)
         db.commit()
+        metrics.TOKEN_REVOKED.labels(reason="executor_revoked").inc()
 
         logger.info(
-            "Revoked executor certificate: %s (serial: %s)",
             executor_id,
             cert.serial_number,
         )
@@ -1212,6 +1214,7 @@ async def admin_enroll_executor(
         )
         db.add(audit_event)
         db.commit()
+        metrics.TOKEN_CREATED.labels(type="executor").inc()
 
         logger.info(
             "Admin created executor enrollment token for %s (by %s, ttl=%ds)",
@@ -1451,6 +1454,8 @@ async def admin_revoke_token(
         em = EnrollmentManager(db)
         revoked = em.revoke_token(token_id)
         db.commit()
+        if revoked:
+            metrics.TOKEN_REVOKED.labels(reason="admin_revoked").inc()
 
         return AdminTokenRevokeResponse(revoked=revoked, token_id=token_id)
     except Exception as e:

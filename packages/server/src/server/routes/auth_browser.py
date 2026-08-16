@@ -18,6 +18,7 @@ from ..fido2.browser_adapter import (
     challenge_to_browser_options,
     browser_assertion_to_fido2,
 )
+from .. import metrics
 from ..dependencies import get_current_session, get_db
 
 logger = logging.getLogger("venya.server")
@@ -225,6 +226,7 @@ async def browser_login_assert(
             req.challenge_id, fido2_response,
         )
     except ValueError as e:
+        metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
@@ -259,11 +261,13 @@ async def browser_login_assert(
             roles=role_ids,
         )
         db.commit()
+        metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="success").inc()
 
         response = JSONResponse(content={"status": "ok"})
         _set_session_cookie(response, access_token.token)
         return response
     except Exception:
+        metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
         import traceback
         logger.error("Login failed:\n%s", traceback.format_exc())
         db.rollback()
@@ -310,12 +314,14 @@ async def browser_refresh(
     current_token = request.cookies.get(COOKIE_NAME, "")
     new_token = manager.refresh_token(current_token)
     if new_token is None:
+        metrics.AUTH_REFRESH_TOTAL.labels(result="failed").inc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token refresh failed",
         )
 
     db.commit()
+    metrics.AUTH_REFRESH_TOTAL.labels(result="success").inc()
 
     response = Response(
         content='{"status": "ok"}',

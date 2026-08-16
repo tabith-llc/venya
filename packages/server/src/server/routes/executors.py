@@ -12,7 +12,7 @@ import logging
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import ec
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -23,6 +23,7 @@ from ..ca import CAManager
 from ..rate_limit import rate_limit_registration
 from ..utils.executor_id import EXECUTOR_ID_PATTERN, validate_executor_id
 from ..utils.time import effective_expiry_check_time, is_expired
+from .. import metrics
 from vault.iam.models import AuditEvent, ExecutorEnrollmentToken, User, ExecutorCert
 
 logger = logging.getLogger("venya.server")
@@ -30,6 +31,8 @@ logger = logging.getLogger("venya.server")
 
 def validate_csr_key_strength(csr: x509.CertificateSigningRequest) -> None:
     """Validate that the CSR's public key meets minimum strength requirements.
+
+    Only ECDSA P-256, P-384, and P-521 are accepted.
 
     Args:
         csr: The parsed Certificate Signing Request.
@@ -39,23 +42,17 @@ def validate_csr_key_strength(csr: x509.CertificateSigningRequest) -> None:
     """
     public_key = csr.public_key()
 
-    if isinstance(public_key, rsa.RSAPublicKey):
-        if public_key.key_size < 2048:
-            raise ValueError(
-                f"RSA key too weak: {public_key.key_size} bits (minimum 2048). "
-                f"Use RSA >= 2048 bits or ECDSA P-256/P-384/P-521."
-            )
-    elif isinstance(public_key, ec.EllipticCurvePublicKey):
-        curve_name = public_key.curve.name
-        if curve_name not in ("secp256r1", "secp384r1", "secp521r1"):
-            raise ValueError(
-                f"Weak or unsupported curve: {curve_name}. "
-                f"Use ECDSA P-256 (secp256r1), P-384 (secp384r1), or P-521 (secp521r1)."
-            )
-    else:
+    if not isinstance(public_key, ec.EllipticCurvePublicKey):
         raise ValueError(
             f"Unsupported key type: {type(public_key).__name__}. "
-            f"Use RSA >= 2048 bits or ECDSA P-256/P-384/P-521."
+            f"Use ECDSA P-256 (secp256r1), P-384 (secp384r1), or P-521 (secp521r1)."
+        )
+
+    curve_name = public_key.curve.name
+    if curve_name not in ("secp256r1", "secp384r1", "secp521r1"):
+        raise ValueError(
+            f"Weak or unsupported curve: {curve_name}. "
+            f"Use ECDSA P-256 (secp256r1), P-384 (secp384r1), or P-521 (secp521r1)."
         )
 
 
@@ -169,6 +166,7 @@ async def register_executor(
         try:
             csr = x509.load_pem_x509_csr(req.csr_pem.strip().encode())
         except Exception as e:
+            metrics.EXECUTOR_REGISTERED.labels(result="invalid_csr").inc()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid CSR: {e}",
@@ -178,6 +176,7 @@ async def register_executor(
         try:
             validate_csr_key_strength(csr)
         except ValueError as e:
+            metrics.EXECUTOR_REGISTERED.labels(result="weak_key").inc()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
@@ -203,22 +202,26 @@ async def register_executor(
             )
 
             if token is None:
+                metrics.TOKEN_CONSUMED.labels(result="invalid").inc()
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid enrollment token",
                 )
             if token.state == "revoked":
+                metrics.TOKEN_CONSUMED.labels(result="revoked").inc()
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Enrollment token has been revoked",
                 )
             if token.state == "consumed":
                 if token.executor_id == req.executor_id:
+                    metrics.TOKEN_CONSUMED.labels(result="consumed").inc()
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail="Executor already registered with this enrollment token. "
                                "Check if the previous registration succeeded.",
                     )
+                metrics.TOKEN_CONSUMED.labels(result="consumed").inc()
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Enrollment token has already been consumed by a different executor",
@@ -230,12 +233,14 @@ async def register_executor(
                 else 60
             )
             if is_expired(token.expires_at, tolerance):
+                metrics.TOKEN_CONSUMED.labels(result="expired").inc()
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Enrollment token has expired",
                 )
 
             if token.executor_id != req.executor_id:
+                metrics.TOKEN_CONSUMED.labels(result="binding_mismatch").inc()
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Enrollment token bound to different executor_id",
@@ -260,21 +265,25 @@ async def register_executor(
                     ExecutorEnrollmentToken.token_hash == token_hash
                 ).first()
                 if token is None:
+                    metrics.TOKEN_CONSUMED.labels(result="invalid").inc()
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Enrollment token not found",
                     )
                 elif token.state == "revoked":
+                    metrics.TOKEN_CONSUMED.labels(result="revoked").inc()
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Enrollment token has been revoked",
                     )
                 elif token.state == "consumed":
+                    metrics.TOKEN_CONSUMED.labels(result="consumed").inc()
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Enrollment token was consumed concurrently",
                     )
                 else:
+                    metrics.TOKEN_CONSUMED.labels(result="expired").inc()
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
                         detail="Enrollment token is invalid or expired",
@@ -286,6 +295,7 @@ async def register_executor(
         else:
             server_config = getattr(request.app.state, "config", None)
             if server_config and server_config.executor_enrollment.require_token:
+                metrics.EXECUTOR_REGISTERED.labels(result="token_required").inc()
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Enrollment token required. Contact your administrator.",
@@ -313,7 +323,9 @@ async def register_executor(
             server_config = getattr(request.app.state, "config", None)
             crl_url = server_config.crl.crl_url if server_config and hasattr(server_config, "crl") else None
             cert = ca_manager.sign_csr(csr, resolved_executor_id, crl_url=crl_url)
+            metrics.CA_SIGNED_TOTAL.labels(cert_type="executor").inc()
         except RuntimeError as e:
+            metrics.EXECUTOR_REGISTERED.labels(result="ca_error").inc()
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=str(e),
@@ -361,6 +373,7 @@ async def register_executor(
 
         try:
             db.commit()
+            metrics.EXECUTOR_REGISTERED.labels(result="success").inc()
 
             # Return signed certificate + CA chain
             cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
@@ -375,9 +388,11 @@ async def register_executor(
             )
         except HTTPException:
             db.rollback()
+            metrics.EXECUTOR_REGISTERED.labels(result="db_error").inc()
             raise
         except Exception:
             db.rollback()
+            metrics.EXECUTOR_REGISTERED.labels(result="db_error").inc()
             logger.exception("Registration failed — token state rolled back")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -434,7 +449,9 @@ async def get_crl(
         )
 
         ca_manager.purge_expired_revocations(db, retention_days)
+        metrics.CA_REVOCATIONS_PURGED_TOTAL.inc()
         crl_der = ca_manager.generate_crl(db)
+        metrics.CA_CRL_GENERATED_TOTAL.inc()
 
         return Response(
             content=crl_der,
@@ -495,6 +512,7 @@ async def heartbeat(
                 if not_after < expiry_threshold:
                     new_cert_required = True
 
+        metrics.EXECUTOR_HEARTBEAT_TOTAL.inc()
         return HeartbeatResponse(
             revoked=revoked,
             new_cert_required=new_cert_required,
