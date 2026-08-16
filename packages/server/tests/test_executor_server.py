@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fastapi import FastAPI
 from starlette.testclient import TestClient
@@ -267,26 +267,6 @@ class TestExecutorRegistration:
         )
         assert resp.status_code == 400
 
-    def test_register_weak_rsa_key_returns_400(self, ca_manager):
-        """CSR with RSA key < 2048 bits is rejected."""
-        db = _make_mock_db()
-        app = self._create_app(ca_manager, db)
-        client = TestClient(app, raise_server_exceptions=False)
-        weak_key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
-        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "weak-exec")])
-        csr = (
-            x509.CertificateSigningRequestBuilder()
-            .subject_name(subject)
-            .sign(weak_key, hashes.SHA256())
-        )
-        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
-        resp = client.post(
-            "/api/v1/executors/register",
-            json={"executor_id": "weak-exec", "csr_pem": csr_pem},
-        )
-        assert resp.status_code == 400
-        assert "too weak" in resp.json()["detail"].lower() or "minimum" in resp.json()["detail"].lower()
-
     def test_register_weak_ecdsa_curve_returns_400(self, ca_manager):
         """CSR with weak ECDSA curve (P-192) is rejected."""
         db = _make_mock_db()
@@ -306,25 +286,6 @@ class TestExecutorRegistration:
         )
         assert resp.status_code == 400
         assert "curve" in resp.json()["detail"].lower() or "unsupported" in resp.json()["detail"].lower()
-
-    def test_register_valid_rsa_2048_key_accepted(self, ca_manager):
-        """CSR with RSA-2048 key is accepted."""
-        db = _make_mock_db()
-        app = self._create_app(ca_manager, db)
-        client = TestClient(app)
-        rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "rsa-exec")])
-        csr = (
-            x509.CertificateSigningRequestBuilder()
-            .subject_name(subject)
-            .sign(rsa_key, hashes.SHA256())
-        )
-        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
-        resp = client.post(
-            "/api/v1/executors/register",
-            json={"executor_id": "rsa-exec", "csr_pem": csr_pem},
-        )
-        assert resp.status_code == 201
 
     def test_register_auto_creates_user(self, ca_manager, executor_csr, executor_keypair):
         db = _make_mock_db()

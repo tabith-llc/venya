@@ -17,7 +17,7 @@ import pytest
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fastapi import FastAPI
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -84,7 +84,7 @@ def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manag
 
 def _generate_test_csr():
     """Generate a valid CSR for testing."""
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
         x509.NameAttribute(NameOID.COMMON_NAME, "test-exec"),

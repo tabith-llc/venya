@@ -1585,7 +1585,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     """Register this machine as an executor with the vault.
 
     Flow:
-        1. Generate RSA 2048-bit keypair locally
+        1. Generate ECDSA P-256 keypair locally
         2. Create CSR with CN=executor_id
         3. Submit CSR via client.register_executor() (with TLS fallback)
         4. Save signed cert + key to output-dir
@@ -1594,7 +1594,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     """
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import NameOID
     from pathlib import Path
     import os
@@ -1621,13 +1621,10 @@ def executor_register(client: APIClient, args: Any) -> int:
         print("Error: vault URL required. Set it in config (~/.config/venya/config.json) or pass --vault-url", file=sys.stderr)
         return 1
 
-    # Step 1: Generate RSA keypair
+    # Step 1: Generate ECDSA P-256 keypair
     try:
-        print("Generating RSA 2048-bit keypair...")
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048,
-        )
+        print("Generating ECDSA P-256 keypair...")
+        private_key = ec.generate_private_key(ec.SECP256R1())
     except Exception as e:
         print(f"Key generation failed: {e}", file=sys.stderr)
         return 1

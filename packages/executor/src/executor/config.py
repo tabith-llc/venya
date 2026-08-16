@@ -107,9 +107,32 @@ class AuditForwarderConfig(BaseModel):
         default=300.0,
         description="Retry max delay in seconds",
     )
+    request_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description="Request timeout for audit forward in seconds (1-120)",
+    )
     local_retention_days: int = Field(
         default=90,
         description="Local audit log retention days",
+    )
+
+
+class NetworkConfig(BaseModel):
+    """Network timeout configuration."""
+
+    request_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description="Default timeout for server API calls in seconds (1-120)",
+    )
+    registration_timeout_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=120,
+        description="Timeout for registration/rotation in seconds (5-120)",
     )
 
 
@@ -170,6 +193,9 @@ class ExecutorConfig(BaseSettings):
         default="default",
         description="Unique executor identifier (lowercase alphanumeric + hyphens)",
     )
+
+    # Network timeouts
+    network: NetworkConfig = Field(default_factory=NetworkConfig)
 
     # mTLS
     mtls: MtlsConfig = Field(default_factory=MtlsConfig)
