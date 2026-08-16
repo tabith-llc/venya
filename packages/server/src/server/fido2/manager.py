@@ -112,7 +112,7 @@ class Fido2Manager:
                     self.store.store_credential(stored)
             finally:
                 db.close()
-        except Exception:
+        except Exception:  # nosec B110 — db cleanup in finally block, outer scope handles error
             pass
 
     def start_registration(

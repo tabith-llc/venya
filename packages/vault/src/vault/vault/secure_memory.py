@@ -213,5 +213,5 @@ class SecureBuffer:
                     except OSError:
                         pass
                     self._locked = False
-            except Exception:
+            except Exception:  # nosec B110 — best-effort unlock in __del__, no stack to unwind
                 pass  # Best effort in __del__

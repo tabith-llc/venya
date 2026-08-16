@@ -2,7 +2,7 @@
 
 import logging
 import os
-import subprocess
+import subprocess  # nosec B404 — disk encryption check requires subprocess for system commands
 from pathlib import Path
 
 logger = logging.getLogger("venya.server")
@@ -106,7 +106,7 @@ def _find_mount_point(path: str) -> str | None:
     current = os.path.realpath(path)
     while current != "/":
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # nosec
                 ["findmnt", "-n", "-o", "TARGET", current],
                 capture_output=True,
                 text=True,
@@ -127,7 +127,7 @@ def _get_fstype_via_lsblk(mount_point: str) -> str | None:
     Returns the FSTYPE if found, None otherwise.
     """
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec
             ["lsblk", "-d", "-b", "-o", "NAME,FSTYPE,MOUNTPOINT"],
             capture_output=True,
             text=True,
@@ -152,7 +152,7 @@ def _has_crypt_target(mount_point: str) -> bool:
     Returns True if a crypt target is found, False otherwise.
     """
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec
             ["dmsetup", "table"],
             capture_output=True,
             text=True,

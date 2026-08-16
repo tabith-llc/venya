@@ -262,7 +262,7 @@ async def credentials_add_complete(
     except Exception as e:
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # nosec B110 — rollback best-effort before raising HTTPException
             pass
         logger.error("Credential add complete failed: %s", e)
         raise HTTPException(

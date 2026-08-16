@@ -124,7 +124,7 @@ class CertificateManager:
             )
 
         try:
-            with httpx2.Client(verify=tls_verify, timeout=30.0) as client:
+            with httpx2.Client(verify=tls_verify, timeout=self.config.network.registration_timeout_seconds) as client:
                 response = client.post(url, json=payload)
             response.raise_for_status()
         except httpx2.ConnectError as e:
@@ -219,7 +219,7 @@ class CertificateManager:
                 "executor_id": executor_id,
                 "csr_pem": csr_pem.decode(),
             },
-            timeout=30.0,
+            timeout=self.config.network.registration_timeout_seconds,
         )
         response.raise_for_status()
         data = response.json()
@@ -284,7 +284,7 @@ class CertificateManager:
         try:
             response = self.client.get(
                 "/api/v1/executors/certs/revocation-list",
-                timeout=10.0,
+                timeout=self.config.network.request_timeout_seconds,
             )
             response.raise_for_status()
             data = response.json()
@@ -368,7 +368,7 @@ def _extract_common_name(cert: x509.Certificate) -> str | None:
 
 
 def _verify_ca_signature(cert: x509.Certificate, ca_cert: x509.Certificate) -> None:
-    """Verify that cert is signed by ca_cert's public key.
+    """Verify that cert is signed by ca_cert's ECDSA public key.
 
     Args:
         cert: The certificate to verify.
@@ -381,33 +381,20 @@ def _verify_ca_signature(cert: x509.Certificate, ca_cert: x509.Certificate) -> N
 
     ca_public_key = ca_cert.public_key()
 
-    try:
-        if isinstance(ca_public_key, ec.EllipticCurvePublicKey):
-            hash_algo = cert.signature_hash_algorithm
-            if hash_algo is None:
-                raise CertificateValidationError("Certificate has no signature hash algorithm")
-            ca_public_key.verify(
-                cert.signature,
-                cert.tbs_certificate_bytes,
-                ec.ECDSA(hash_algo),
-            )
-        else:
-            from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    if not isinstance(ca_public_key, ec.EllipticCurvePublicKey):
+        raise CertificateValidationError(
+            f"Unsupported CA key type: {type(ca_public_key).__name__}"
+        )
 
-            if isinstance(ca_public_key, rsa.RSAPublicKey):
-                hash_algo = cert.signature_hash_algorithm
-                if hash_algo is None:
-                    raise CertificateValidationError("Certificate has no signature hash algorithm")
-                ca_public_key.verify(
-                    cert.signature,
-                    cert.tbs_certificate_bytes,
-                    padding.PKCS1v15(),
-                    hash_algo,
-                )
-            else:
-                raise CertificateValidationError(
-                    f"Unsupported CA key type: {type(ca_public_key).__name__}"
-                )
+    try:
+        hash_algo = cert.signature_hash_algorithm
+        if hash_algo is None:
+            raise CertificateValidationError("Certificate has no signature hash algorithm")
+        ca_public_key.verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            ec.ECDSA(hash_algo),
+        )
     except InvalidSignature:
         raise CertificateValidationError("Certificate not signed by trusted CA")
 
@@ -510,7 +497,7 @@ class ReaperLoop:
         self,
         config: ExecutorConfig,
         state: DaemonState,
-        tmpfs_dir: str = "/tmp/venya-secrets",
+        tmpfs_dir: str = "/tmp/venya-secrets",  # nosec B108 — tmpfs, not persistent disk
         http_client: Any | None = None,
         session_id: str | None = None,
     ) -> None:
@@ -607,7 +594,7 @@ class ReaperLoop:
                 self.http_client.post(
                     f"/api/v1/sessions/{self.session_id}/secrets/revoke",
                     json={"secret_ids": orphaned_secret_ids},
-                    timeout=10.0,
+                    timeout=self.config.network.request_timeout_seconds,
                 )
                 logger.info(
                     "Revoked tokens for %d orphaned secrets in session %s",
@@ -648,7 +635,7 @@ class ExecutorDaemon:
         self.reaper = ReaperLoop(
             config,
             self.state,
-            tmpfs_dir="/tmp/venya-secrets",
+            tmpfs_dir="/tmp/venya-secrets",  # nosec B108 — tmpfs, not persistent disk
         )
 
         # Signal handling
@@ -660,7 +647,7 @@ class ExecutorDaemon:
             base_url=self.config.server_url,
             cert=(self.config.mtls.cert, self.config.mtls.key),
             verify=self.config.mtls.ca_cert,
-            timeout=30.0,
+            timeout=self.config.network.request_timeout_seconds,
         )
 
     def _clear_enrollment_token(self) -> None:
@@ -718,6 +705,7 @@ class ExecutorDaemon:
             injection_strategy=strategy,
             audit_logger=audit_logger,
             http_client=self.client,
+            config=self.config,
         )
 
     def start(self) -> None:
@@ -812,7 +800,7 @@ class ExecutorDaemon:
                     "executor_id": self.state.executor_id,
                     "cert_fingerprint": fingerprint,
                 },
-                timeout=10.0,
+                timeout=self.config.network.request_timeout_seconds,
             )
         except httpx2.RequestError:
             logger.debug("Heartbeat failed (server unreachable)")

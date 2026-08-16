@@ -116,7 +116,7 @@ class CAManager:
         if ca_security is not None:
             self._key_passphrase_env = ca_security.key_passphrase_env
         else:
-            self._key_passphrase_env = "VENYA_CA_KEY_PASSPHRASE"
+            self._key_passphrase_env = "VENYA_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password
 
     @property
     def has_ca(self) -> bool:
@@ -578,7 +578,7 @@ class AdminCAManager:
         if ca_security is not None:
             self._key_passphrase_env = ca_security.key_passphrase_env
         else:
-            self._key_passphrase_env = "VENYA_ADMIN_CA_KEY_PASSPHRASE"
+            self._key_passphrase_env = "VENYA_ADMIN_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password
 
     @property
     def has_ca(self) -> bool:

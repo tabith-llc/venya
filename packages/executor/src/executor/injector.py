@@ -163,7 +163,7 @@ def parse_sentinels(data: bytes) -> list[tuple[str, bytes]]:
 
 def inject_via_file(
     secret_value: bytes,
-    tmpfs_dir: str = "/tmp/venya-secrets",
+    tmpfs_dir: str = "/tmp/venya-secrets",  # nosec B108 — tmpfs, not persistent disk
 ) -> SecretInjection:
     """Inject a secret via a tmpfs file.
 
@@ -194,9 +194,9 @@ def inject_via_file(
     logger.info("Injected secret via file: %s (mode 0400)", path)
 
     return SecretInjection(
-        secret_id="",  # Set by caller
+        secret_id="",  # nosec B106 — placeholder set by caller
         injection_path=path,
-        sentinel_hash="",  # Set by caller
+        sentinel_hash="",  # nosec B106 — placeholder set by caller
     )
 
 
@@ -232,9 +232,9 @@ def inject_via_memfd(secret_value: bytes) -> tuple[int, SecretInjection]:
         logger.info("Injected secret via memfd: fd=%d", fd)
 
         injection = SecretInjection(
-            secret_id="",
+            secret_id="",  # nosec B106 — placeholder set by caller
             injection_path=f"memfd:{fd}",
-            sentinel_hash="",
+            sentinel_hash="",  # nosec B106 — placeholder set by caller
         )
         return fd, injection
 
@@ -273,9 +273,9 @@ def inject_via_fifo(path: str, secret_value: bytes) -> SecretInjection:
     logger.info("Injected secret via FIFO: %s", path)
 
     return SecretInjection(
-        secret_id="",
+        secret_id="",  # nosec B106 — placeholder set by caller
         injection_path=path,
-        sentinel_hash="",
+        sentinel_hash="",  # nosec B106 — placeholder set by caller
     )
 
 

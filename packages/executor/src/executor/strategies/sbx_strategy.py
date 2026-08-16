@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import subprocess
+import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx commands
 import tempfile
 from collections.abc import Callable
 
@@ -27,10 +27,10 @@ from .base import InjectionResult, InjectionStrategy
 logger = logging.getLogger("venya.executor.strategies.sbx")
 
 # tmpfs base on host — secrets never touch disk
-SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"
+SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec
 
 # Where secrets appear inside the sandbox
-CONTAINER_SECRET_DIR = "/run/venya/secrets"
+CONTAINER_SECRET_DIR = "/run/venya/secrets"  # nosec
 
 # How long to wait for sandbox commands
 SBX_TIMEOUT = 3600  # 1 hour
@@ -149,7 +149,7 @@ class SbxStrategy(InjectionStrategy):
         if workspace:
             cmd.append(workspace)
 
-        result = subprocess.run(
+        result = subprocess.run(  # nosec
             cmd,
             capture_output=True,
             text=True,
@@ -172,7 +172,7 @@ class SbxStrategy(InjectionStrategy):
             raise RuntimeError("Sandbox not created yet")
 
         # Create secrets directory inside sandbox
-        subprocess.run(
+        subprocess.run(  # nosec
             ["sbx", "exec", self._sandbox_name, "mkdir", "-p", CONTAINER_SECRET_DIR],
             capture_output=True,
             text=True,
@@ -181,7 +181,7 @@ class SbxStrategy(InjectionStrategy):
 
         for mount in mounts:
             container_path = mount.container_path
-            result = subprocess.run(
+            result = subprocess.run(  # nosec
                 ["sbx", "cp", mount.path, f"{self._sandbox_name}:{container_path}"],
                 capture_output=True,
                 text=True,
@@ -192,7 +192,7 @@ class SbxStrategy(InjectionStrategy):
                 raise RuntimeError(f"Failed to copy secret {mount.secret_id} into sandbox")
 
             # Set read-only permissions inside sandbox
-            subprocess.run(
+            subprocess.run(  # nosec
                 ["sbx", "exec", self._sandbox_name, "chmod", "400", container_path],
                 capture_output=True,
                 text=True,
@@ -217,7 +217,7 @@ class SbxStrategy(InjectionStrategy):
         for host_info in allowed_hosts:
             host = host_info["host"]
             # sbx policy works at domain/IP level, not port-specific
-            result = subprocess.run(
+            result = subprocess.run(  # nosec
                 ["sbx", "policy", "allow", "network", host],
                 capture_output=True,
                 text=True,
@@ -240,7 +240,7 @@ class SbxStrategy(InjectionStrategy):
         if not self._sandbox_name:
             raise RuntimeError("Sandbox not created yet")
 
-        result = subprocess.run(
+        result = subprocess.run(  # nosec
             ["sbx", "exec", self._sandbox_name, "sh", "-c", command],
             capture_output=True,
             timeout=SBX_TIMEOUT,
@@ -252,7 +252,7 @@ class SbxStrategy(InjectionStrategy):
         if not self._sandbox_name:
             return
 
-        result = subprocess.run(
+        result = subprocess.run(  # nosec
             ["sbx", "rm", "--force", self._sandbox_name],
             capture_output=True,
             text=True,
@@ -274,7 +274,7 @@ class SbxStrategy(InjectionStrategy):
             value: The API key value.
         """
         # Write value to stdin for non-interactive storage
-        result = subprocess.run(
+        result = subprocess.run(  # nosec
             ["sbx", "secret", "set", secret_id],
             input=value,
             capture_output=True,
