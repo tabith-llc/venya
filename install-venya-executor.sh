@@ -205,14 +205,7 @@ cd ../..
 # --- Apply code fixes ---
 info "Applying code fixes..."
 
-# Fix 1: Add database_url field to DatabaseConfig in config.py
-if ! grep -q "database_url: str | None" "$INSTALL_DIR/packages/server/src/server/config.py" 2>/dev/null; then
-    sed -i '/database_path: str = Field/i\    database_url: str | None = Field(default=None, description="PostgreSQL database URL")' \
-        "$INSTALL_DIR/packages/server/src/server/config.py"
-    info "  Added database_url field to DatabaseConfig"
-fi
-
-# Fix 2: Update init_db to use db_config.database_url in dependencies.py
+# Fix 1: Update init_db to use db_config.database_url in dependencies.py
 if grep -q 'database_url = os.environ.get("VENYA_DB_URL")' "$INSTALL_DIR/packages/server/src/server/dependencies.py" 2>/dev/null; then
     sed -i 's|database_url = os.environ.get("VENYA_DB_URL")|database_url = db_config.database_url or os.environ.get("VENYA_DB_URL")|' \
         "$INSTALL_DIR/packages/server/src/server/dependencies.py"
@@ -223,7 +216,7 @@ if grep -q 'database_url = os.environ.get("VENYA_DB_URL")' "$INSTALL_DIR/package
     info "  Fixed init_db to use db_config.database_url"
 fi
 
-# Fix 3: Fix init.py imports (from ..iam.models → from vault.iam.models)
+# Fix 2: Fix init.py imports (from ..iam.models → from vault.iam.models)
 for f in "$INSTALL_DIR/packages/server/src/server/routes/init.py"; do
     if [ -f "$f" ]; then
         sed -i 's/from \.\.iam\.models/from vault.iam.models/g' "$f"
@@ -231,7 +224,7 @@ for f in "$INSTALL_DIR/packages/server/src/server/routes/init.py"; do
     fi
 done
 
-# Fix 4: Ensure db.flush() after admin_role creation in init.py
+# Fix 3: Ensure db.flush() after admin_role creation in init.py
 for f in "$INSTALL_DIR/packages/server/src/server/routes/init.py"; do
     if [ -f "$f" ]; then
         if ! grep -q 'db\.flush()' "$f" 2>/dev/null; then
@@ -241,7 +234,7 @@ for f in "$INSTALL_DIR/packages/server/src/server/routes/init.py"; do
     fi
 done
 
-# Fix 5: Ensure timezone-aware datetimes in executors.py heartbeat
+# Fix 4: Ensure timezone-aware datetimes in executors.py heartbeat
 for f in "$INSTALL_DIR/packages/server/src/server/routes/executors.py"; do
     if [ -f "$f" ]; then
         if ! grep -q 'not_after\.tzinfo' "$f" 2>/dev/null; then

@@ -112,8 +112,16 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     from .dependencies import init_db
 
     backend = init_db(config.db, db_url=config.db.database_url)
-    logger.info("Database initialized: %s", config.db.database_path)
+    logger.info("Database initialized: %s", config.db.database_url or "not configured")
     app.state.backend = backend  # type: ignore[attr-defined]
+
+    # Hard failure on missing passphrase in production — prevents silent unencrypted storage
+    if not config.debug and not config.db.passphrase:
+        raise RuntimeError(
+            "VENYA_DB_PASSPHRASE is not set. "
+            "Vault secrets cannot be encrypted without a passphrase. "
+            "Set the passphrase in your secrets manager and restart."
+        )
 
     vault = backend.get_vault(config.db.passphrase)
     app.state.vault = vault  # type: ignore[attr-defined]

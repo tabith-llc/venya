@@ -15,8 +15,7 @@ class DatabaseConfig(BaseModel):
     """Database configuration."""
 
     database_url: str | None = Field(default=None, description="PostgreSQL database URL")
-    database_path: str = Field(default="venya.db", description="Path to SQLCipher database")
-    passphrase: str | None = Field(default=None, description="Master passphrase for key derivation")
+    passphrase: str | None = Field(default=None, description="Vault encryption passphrase for DEK/KEK key derivation (required in production)")
     wal_mode: bool = Field(default=True, description="Enable WAL mode")
 
 
@@ -251,7 +250,7 @@ class ServerConfig(BaseSettings):
     debug: bool = Field(default=False, description="Enable debug mode")
 
     # Database
-    db_url: str | None = Field(default=None, description="PostgreSQL database URL (overrides db.database_path)")
+    db_url: str | None = Field(default=None, description="PostgreSQL database URL")
     db: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
     # Sessions
