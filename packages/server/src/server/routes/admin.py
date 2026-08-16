@@ -1176,6 +1176,23 @@ async def admin_enroll_executor(
             expires_at=expires_at,
         )
         db.add(token)
+
+        # Encrypt forensic identity fields into JSON blob before flush
+        meta_dict = {
+            "ip": client_ip,
+            "ua": user_agent,
+            "sid": str(session_id) if session_id else None,
+        }
+        vault = getattr(request.app.state, "vault", None)
+        if vault is None:
+            raise RuntimeError("Vault not initialized — cannot encrypt admin metadata")
+        wrapped_dek, nonce, ciphertext = vault.encrypt(
+            json.dumps(meta_dict).encode("utf-8")
+        )
+        token.admin_meta_wrapped_dek = wrapped_dek
+        token.admin_meta_nonce = nonce
+        token.admin_meta_ciphertext = ciphertext
+
         db.flush()
 
         audit_event = AuditEvent(

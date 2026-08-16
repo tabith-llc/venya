@@ -215,11 +215,15 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
                             text("""UPDATE executor_enrollment_tokens
                                     SET created_by_session_id = NULL,
                                         created_from_ip = NULL,
-                                        created_from_user_agent = NULL
+                                        created_from_user_agent = NULL,
+                                        admin_meta_wrapped_dek = NULL,
+                                        admin_meta_nonce = NULL,
+                                        admin_meta_ciphertext = NULL
                                     WHERE created_at < :cutoff
                                       AND (created_by_session_id IS NOT NULL
                                            OR created_from_ip IS NOT NULL
-                                           OR created_from_user_agent IS NOT NULL)"""),
+                                           OR created_from_user_agent IS NOT NULL
+                                           OR admin_meta_wrapped_dek IS NOT NULL)"""),
                             {"cutoff": cutoff},
                         )
                         db.commit()

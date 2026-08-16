@@ -175,7 +175,7 @@ class Vault:
             raise VaultError("KEK not configured")
 
         # Encrypt the secret
-        wrapped_dek, nonce, ciphertext = self._encrypt(value)
+        wrapped_dek, nonce, ciphertext = self.encrypt(value)
 
         session = self.backend.get_session()
         try:
@@ -331,8 +331,15 @@ class Vault:
         finally:
             session.close()
 
-    def _encrypt(self, value: bytes) -> tuple[bytes, bytes, bytes]:
-        """Encrypt a value using the vault's KEK."""
+    def encrypt(self, value: bytes) -> tuple[bytes, bytes, bytes]:
+        """Encrypt a value using the vault's KEK.
+
+        Returns:
+            Tuple of (wrapped_dek, nonce, ciphertext).
+
+        Raises:
+            VaultError: If KEK not configured.
+        """
         if self.kek is None:
             raise VaultError("KEK not configured")
 
