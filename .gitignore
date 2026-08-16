@@ -38,8 +38,7 @@ POC*/
 .env.local
 handoff.md
 
-# Dev docs only (not tracked)
-docs/
+
 
 # Generated project overviews
 project_overview_*.md

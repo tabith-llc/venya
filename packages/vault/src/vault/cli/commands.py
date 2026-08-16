@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from cryptography import x509
+import hashlib
 import json
 import os
 import sys
 from pathlib import Path
 from typing import Any
+
+import httpx2
 
 from .api_client import APIClient, APIClientAuthenticationError, APIClientError
 
@@ -659,17 +663,16 @@ def cmd_admin_rotate_key(client: APIClient, args: Any) -> int:
 
 
 def cmd_admin_revoke_executor(client: APIClient, args: Any) -> int:
-    """Revoke executor certificate."""
-    try:
-        client.post(f"/api/v1/admin/executors/{args.executor_id}/revoke")
-        print(f"Executor '{args.executor_id}' certificate revoked.")
-        return 0
-    except APIClientError as e:
-        print(f"Revoke failed: {e}", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"Revoke failed: {e}", file=sys.stderr)
-        return 1
+    """Revoke executor certificate (admin command entry point).
+
+    Delegates to executor_cert_revoke() with the admin client.
+    """
+    # Build a minimal args-like object with executor_id
+    class _RevokeArgs:
+        executor_id = args.executor_id
+        cert_path = "/etc/venya/executor.pem"
+
+    return executor_cert_revoke(_RevokeArgs(), client=client)
 
 
 def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
@@ -1731,14 +1734,84 @@ def executor_cert(client: APIClient, args: Any) -> int:
     if cert_command == "status":
         return executor_cert_status(args)
     elif cert_command == "renew":
-        print("Not yet implemented.")
-        return 0
+        return executor_cert_renew(args)
     elif cert_command == "revoke":
-        print("Not yet implemented.")
-        return 0
+        return executor_cert_revoke(args)
     else:
         print(f"Unknown cert command: {cert_command}", file=sys.stderr)
         return 1
+
+
+def _parse_executor_cert(cert_path: str) -> dict[str, Any] | None:
+    """Parse executor certificate and return metadata.
+
+    Returns None if cert doesn't exist or can't be parsed.
+    """
+    from cryptography import x509
+    from cryptography.x509 import load_pem_x509_certificate
+    from datetime import datetime, timezone
+
+    path = Path(cert_path)
+    if not path.exists():
+        return None
+
+    try:
+        cert_data = path.read_bytes()
+        cert = load_pem_x509_certificate(cert_data)
+        not_after = cert.not_valid_after_utc
+        now = datetime.now(timezone.utc)
+        days_remaining = (not_after - now).days
+
+        cn = "unknown"
+        for attr in cert.subject:
+            if attr.oid == x509.oid.NameOID.COMMON_NAME:
+                cn = attr.value
+                break
+
+        return {
+            "executor_id": cn,
+            "serial": format(cert.serial_number, "X"),
+            "subject": cert.subject.rfc4514_string(),
+            "not_after": not_after,
+            "days_remaining": days_remaining,
+        }
+    except Exception:
+        return None
+
+
+def _get_server_url(args: Any) -> str:
+    """Resolve server URL from args, config, or executor.toml.
+
+    Fallback chain:
+    1. --vault-url arg
+    2. ~/.config/venya/config.json via Config()
+    3. /etc/venya/executor.toml via tomllib
+    4. "unknown" as last resort
+    """
+    if getattr(args, "vault_url", None):
+        return args.vault_url
+
+    try:
+        from vault.cli.api_client import Config as CLIConfig
+
+        config = CLIConfig()
+        url = config.server_url
+        if url and url != "http://localhost:8000":
+            return url
+    except Exception:
+        pass
+
+    executor_config_path = getattr(args, "config_path", "/etc/venya/executor.toml")
+    try:
+        import tomllib
+
+        with open(executor_config_path, "rb") as f:
+            data = tomllib.load(f)
+        return data.get("server_url", "unknown")
+    except FileNotFoundError:
+        return "unknown"
+    except Exception:
+        return "unknown"
 
 
 def executor_cert_status(args: Any) -> int:
@@ -1746,69 +1819,449 @@ def executor_cert_status(args: Any) -> int:
 
     Reads the certificate file and prints days until expiry.
     """
-    from cryptography import x509
-    from cryptography.x509 import load_pem_x509_certificate
-    from datetime import datetime, timezone
-    from pathlib import Path
-
     cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+    info = _parse_executor_cert(cert_path)
 
-    path = Path(cert_path)
-    if not path.exists():
+    if info is None:
         print(f"Error: certificate not found at {cert_path}", file=sys.stderr)
         print("Run 'venya exec register' to create a certificate.", file=sys.stderr)
         return 1
 
+    print(f"Certificate: {cert_path}")
+    print(f"  Subject: {info['executor_id']}")
+    print(f"  Expires: {info['not_after'].isoformat()}")
+    print(f"  Days remaining: {info['days_remaining']}")
+
+    if info["days_remaining"] < 0:
+        print("  STATUS: EXPIRED", file=sys.stderr)
+        return 1
+    elif info["days_remaining"] < 7:
+        print("  WARNING: Certificate expires in less than 7 days!", file=sys.stderr)
+        return 0
+    else:
+        print("  STATUS: OK")
+        return 0
+
+
+def executor_cert_renew(args: Any) -> int:
+    """Renew executor certificate.
+
+    Generates a new ECDSA P-256 keypair + CSR, submits via mTLS to
+    /api/v1/executors/register, and saves the new cert/key atomically.
+    """
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+    key_path = getattr(args, "key_path", None)
+    if key_path is None:
+        key_path = str(Path(cert_path).with_suffix(".key"))
+
+    info = _parse_executor_cert(cert_path)
+    if info is None:
+        print(f"Error: certificate not found at {cert_path}", file=sys.stderr)
+        print("Run 'venya exec register' to create a certificate.", file=sys.stderr)
+        return 1
+
+    if not Path(key_path).exists():
+        print(f"Error: private key not found at {key_path}", file=sys.stderr)
+        return 1
+
+    executor_id = info["executor_id"]
+
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    # Generate new ECDSA P-256 keypair + CSR
     try:
-        cert_data = path.read_bytes()
-        cert = load_pem_x509_certificate(cert_data)
-        not_after = cert.not_valid_after_utc
-        now = datetime.now(timezone.utc)
-        delta = not_after - now
-        days_remaining = delta.days
-
-        subject = cert.subject
-        cn = "unknown"
-        for attr in subject:
-            if attr.oid == x509.oid.NameOID.COMMON_NAME:
-                cn = attr.value
-                break
-
-        print(f"Certificate: {cert_path}")
-        print(f"  Subject: {cn}")
-        print(f"  Expires: {not_after.isoformat()}")
-        print(f"  Days remaining: {days_remaining}")
-
-        if days_remaining < 0:
-            print("  STATUS: EXPIRED", file=sys.stderr)
-            return 1
-        elif days_remaining < 7:
-            print("  WARNING: Certificate expires in less than 7 days!", file=sys.stderr)
-            return 1
-        else:
-            print("  STATUS: OK")
-            return 0
+        print("Generating new ECDSA P-256 keypair...")
+        new_private_key = ec.generate_private_key(ec.SECP256R1())
     except Exception as e:
-        print(f"Failed to read certificate: {e}", file=sys.stderr)
+        print(f"Key generation failed: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        print(f"Creating CSR with CN={executor_id}...")
+        subject = x509.Name([
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ])
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(subject)
+            .sign(new_private_key, hashes.SHA256())
+        )
+        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
+    except Exception as e:
+        print(f"CSR creation failed: {e}", file=sys.stderr)
+        return 1
+
+    # Build mTLS client with current cert
+    server_url = _get_server_url(args)
+    if server_url == "unknown":
+        print("Error: server URL not configured. Use --vault-url or set config.", file=sys.stderr)
+        return 1
+
+    try:
+        tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
+        if tls_verify_env.lower() == "false":
+            tls_verify = False
+            print("WARNING: VENYA_TLS_VERIFY=false — TLS verification disabled (dev only)", file=sys.stderr)
+        else:
+            tls_verify = True
+
+        print("Submitting renewal request via mTLS...")
+        with httpx2.Client(
+            cert=(cert_path, key_path),
+            verify=tls_verify,
+            timeout=30.0,
+        ) as http_client:
+            url = f"{server_url}/api/v1/executors/register"
+            response = http_client.post(
+                url,
+                json={
+                    "executor_id": executor_id,
+                    "csr_pem": csr_pem,
+                },
+            )
+            response.raise_for_status()
+            result = response.json() if response.content else {}
+    except httpx2.HTTPStatusError as e:
+        error_msg = "Unknown error"
+        try:
+            error_data = e.response.json()
+            error_msg = error_data.get("detail", str(e))
+        except Exception:
+            error_msg = str(e)
+        if e.response.status_code in (401, 403):
+            print(f"mTLS authentication failed: {error_msg}", file=sys.stderr)
+        else:
+            print(f"Renewal failed: {error_msg}", file=sys.stderr)
+        return 1
+    except httpx2.ConnectError as e:
+        print(f"Connection failed: {e}", file=sys.stderr)
+        return 1
+    except httpx2.TimeoutException as e:
+        print(f"Request timed out: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Renewal failed: {e}", file=sys.stderr)
+        return 1
+
+    cert_pem = result.get("cert_pem", "")
+    ca_cert_pem = result.get("ca_cert_pem", "")
+    serial_number = result.get("serial_number", "")
+    not_after = result.get("not_after", "")
+
+    if not cert_pem:
+        print("Renewal failed: no certificate returned", file=sys.stderr)
+        return 1
+
+    # Atomic write: write to temp files, then rename
+    try:
+        output_dir = str(Path(cert_path).parent)
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        cert_tmp = Path(cert_path).with_suffix(".pem.tmp")
+        key_tmp = Path(key_path).with_suffix(".key.tmp")
+
+        cert_tmp.write_bytes(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
+
+        key_pem = new_private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        key_tmp.write_bytes(key_pem)
+        key_tmp.chmod(0o600)
+
+        if ca_cert_pem:
+            ca_cert_path = Path(cert_path).with_name("ca.pem")
+            ca_tmp = ca_cert_path.with_suffix(".pem.tmp")
+            ca_tmp.write_bytes(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
+            ca_tmp.rename(ca_cert_path)
+
+        key_tmp.rename(key_path)
+        cert_tmp.rename(cert_path)
+    except OSError as e:
+        # Clean up temp files on failure
+        for tmp in (cert_tmp, key_tmp):
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        print(f"Failed to save certificate: {e}", file=sys.stderr)
+        return 1
+
+    # Verify auth with revocation list
+    try:
+        print("Verifying authentication...")
+        with httpx2.Client(
+            cert=(cert_path, key_path),
+            verify=tls_verify,
+            timeout=30.0,
+        ) as http_client:
+            url = f"{server_url}/api/v1/executors/certs/revocation-list"
+            response = http_client.get(url)
+            response.raise_for_status()
+        print("Authentication verified.")
+    except Exception:
+        print("Certificate was renewed, but auth verification failed.", file=sys.stderr)
+
+    print(f"\nCertificate renewed successfully.")
+    print(f"  Executor ID:    {executor_id}")
+    print(f"  Serial:         {serial_number}")
+    print(f"  Expires:        {not_after}")
+    print(f"  Cert:           {cert_path}")
+    print(f"  Key:            {key_path}")
+    return 0
+
+
+def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
+    """Revoke an executor certificate.
+
+    Dual-mode operation:
+    - With --executor-id: revoke a remote executor by ID (admin action)
+    - Without --executor-id: read CN from local cert file and revoke that executor
+
+    Requires admin bearer token in config.json (Authorization: Bearer <token>).
+
+    Args:
+        args: Parsed CLI arguments.
+        client: Optional APIClient. If None, creates one from config.
+
+    Returns:
+        0 on success, 1 on error.
+    """
+    executor_id = getattr(args, "executor_id", None)
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+
+    # Resolve executor_id: explicit arg > local cert CN
+    if executor_id is None:
+        info = _parse_executor_cert(cert_path)
+        if info is None:
+            print(f"Error: certificate not found at {cert_path}", file=sys.stderr)
+            print("Specify --executor-id or ensure the cert file exists.", file=sys.stderr)
+            return 1
+        executor_id = info["executor_id"]
+
+    # Create client if not provided (for exec cert revoke entry point)
+    if client is None:
+        client = APIClient()
+
+    try:
+        result = client.post(f"/api/v1/admin/executors/{executor_id}/revoke")
+        revoked = result.get("revoked", False) if result else False
+        print("Certificate revoked.")
+        print(f"  Executor ID:  {executor_id}")
+        print(f"  Revoked:      {'Yes' if revoked else 'No'}")
+        return 0
+    except APIClientAuthenticationError as e:
+        print(f"Authentication failed: {e}", file=sys.stderr)
+        print("This command requires admin credentials (bearer token in config.json).", file=sys.stderr)
+        return 1
+    except APIClientError as e:
+        print(f"Revoke failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Revoke failed: {e}", file=sys.stderr)
         return 1
 
 
 def executor_heartbeat(args: Any) -> int:
-    """Send heartbeat to vault."""
-    print("Not yet implemented.")
+    """Send heartbeat to vault.
+
+    Reads the executor certificate to extract the executor_id (CN),
+    computes the cert fingerprint, and POSTs to /api/v1/heartbeat
+    using an mTLS client. Prints the server's response.
+    """
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+    key_path = getattr(args, "key_path", None)
+    if key_path is None:
+        key_path = str(Path(cert_path).with_suffix(".key"))
+
+    info = _parse_executor_cert(cert_path)
+    if info is None:
+        print(f"Error: certificate not found at {cert_path}", file=sys.stderr)
+        print("Run 'venya exec register' to create a certificate.", file=sys.stderr)
+        return 1
+
+    if not Path(key_path).exists():
+        print(f"Error: private key not found at {key_path}", file=sys.stderr)
+        return 1
+
+    server_url = _get_server_url(args)
+    if server_url == "unknown":
+        print("Error: server URL not configured. Use --vault-url or set config.", file=sys.stderr)
+        return 1
+
+    # Compute SHA-256 fingerprint of the certificate
+    try:
+        cert_pem = Path(cert_path).read_bytes()
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        fingerprint = hashlib.sha256(cert_pem).hexdigest()
+    except Exception as e:
+        print(f"Failed to compute certificate fingerprint: {e}", file=sys.stderr)
+        return 1
+
+    executor_id = info["executor_id"]
+    url = f"{server_url}/api/v1/heartbeat"
+
+    # Build mTLS client
+    try:
+        with httpx2.Client(
+            cert=(cert_path, key_path),
+            verify=server_url.startswith("https://"),
+            timeout=10.0,
+        ) as http_client:
+            response = http_client.post(
+                url,
+                json={"executor_id": executor_id, "cert_fingerprint": fingerprint},
+            )
+            response.raise_for_status()
+            data = response.json() if response.content else {}
+    except httpx2.HTTPStatusError as e:
+        print(f"Heartbeat failed: {e}", file=sys.stderr)
+        return 1
+    except httpx2.ConnectError as e:
+        print(f"Connection failed: {e}", file=sys.stderr)
+        return 1
+    except httpx2.TimeoutException as e:
+        print(f"Request timed out: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Heartbeat failed: {e}", file=sys.stderr)
+        return 1
+
+    revoked = data.get("revoked", False)
+    new_cert_required = data.get("new_cert_required", False)
+
+    print("Heartbeat Response")
+    print(f"  Executor ID:     {executor_id}")
+    print(f"  Revoked:         {'YES' if revoked else 'No'}")
+    print(f"  Cert Rotation:   {'Required' if new_cert_required else 'Not Required'}")
+    print(f"  Fingerprint:     {fingerprint}")
+
+    if revoked:
+        print("WARNING: This executor's certificate has been revoked.", file=sys.stderr)
+        return 1
+
     return 0
 
 
 def executor_audit(client: APIClient, args: Any) -> int:
-    """View executor audit log."""
-    print("Not yet implemented.")
-    return 0
+    """View executor audit log.
+
+    Dual-mode operation:
+    - With explicit executor_id: audit a specific executor
+    - Without executor_id: read CN from local cert file (same as exec cert revoke)
+
+    Requires admin or auditor permission (bearer token in config.json).
+    """
+    executor_id = getattr(args, "executor_id", None)
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+
+    # Resolve executor_id: explicit arg > local cert CN
+    if executor_id is None:
+        info = _parse_executor_cert(cert_path)
+        if info is None:
+            print(f"Error: certificate not found at {cert_path}", file=sys.stderr)
+            print("Specify an executor ID or ensure the cert file exists.", file=sys.stderr)
+            return 1
+        executor_id = info["executor_id"]
+
+    try:
+        params = {
+            "limit": getattr(args, "limit", 100),
+            "offset": getattr(args, "offset", 0),
+        }
+        if getattr(args, "hours", None):
+            params["hours"] = args.hours
+        if getattr(args, "days", None):
+            params["days"] = args.days
+
+        result = client.get("/api/v1/audit", params={**params, "executor_id": executor_id})
+        events = result.get("events", [])
+
+        if not events:
+            print(f"No audit events found for {executor_id}.")
+            return 0
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        print(f"Audit Events for {executor_id}")
+        print(f"  {'ID':<5} | {'EVENT_TYPE':<25} | {'EXECUTOR_ID':<18} | {'USER':<10} | TIMESTAMP")
+        print(f"  {'-'*5}-+-{'-'*25}-+-{'-'*18}-+-{'-'*10}-+-{'-'*23}")
+        for event in events:
+            fields = event.get("fields") or {}
+            evt_executor_id = fields.get("executor_id", "-")
+            user_id = event.get("user_id") or "-"
+            print(
+                f"  {event['id']:<5} | {event['event_type']:<25} | {evt_executor_id:<18} | "
+                f"{user_id:<10} | {event['timestamp']}"
+            )
+        return 0
+    except APIClientAuthenticationError as e:
+        print(f"Authentication failed: {e}", file=sys.stderr)
+        print("This command requires admin or auditor credentials.", file=sys.stderr)
+        return 1
+    except APIClientError as e:
+        print(f"Audit query failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Audit query failed: {e}", file=sys.stderr)
+        return 1
 
 
 def executor_status(args: Any) -> int:
-    """Show executor registration status."""
-    print("Not yet implemented.")
-    return 0
+    """Show executor registration status.
+
+    Reads local cert file and config to display registration status,
+    certificate details, and health. No network calls.
+    """
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+    server_url = _get_server_url(args)
+    info = _parse_executor_cert(cert_path)
+
+    if info is None:
+        print("Executor Status")
+        print(f"  Server URL:     {server_url}")
+        print(f"  Registered:     No")
+        print(f"  Certificate:    {cert_path}")
+        print("  Status:         NOT REGISTERED")
+        print("Run 'venya exec register' to register this executor.", file=sys.stderr)
+        return 1
+
+    not_after = info["not_after"]
+    days_remaining = info["days_remaining"]
+
+    if days_remaining < 0:
+        status = "EXPIRED"
+        exit_code = 1
+    elif days_remaining < 7:
+        status = "WARNING"
+        exit_code = 0
+    else:
+        status = "OK"
+        exit_code = 0
+
+    print("Executor Status")
+    print(f"  Executor ID:    {info['executor_id']}")
+    print(f"  Server URL:     {server_url}")
+    print(f"  Registered:     Yes")
+    print(f"  Certificate:    {cert_path}")
+    print(f"  Serial:         {info['serial']}")
+    print(f"  Subject:        {info['executor_id']}")
+    print(f"  Expires:        {not_after.isoformat()}")
+    print(f"  Days Remaining: {days_remaining}")
+    print(f"  Status:         {status}")
+
+    if status == "WARNING":
+        print("WARNING: Certificate expires in less than 7 days!", file=sys.stderr)
+    elif status == "EXPIRED":
+        print("  STATUS: EXPIRED", file=sys.stderr)
+
+    return exit_code
 
 
 # --- CA Key Management Commands (local, run on server) ---

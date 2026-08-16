@@ -261,3 +261,128 @@ class TestAuditList:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/audit")
         assert resp.status_code == 503
+
+    def test_list_with_executor_id_filter(self):
+        """GET /audit should filter by executor_id in fields JSON."""
+        db = MagicMock()
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def count(self):
+                return 1
+            def order_by(self, *args, **kwargs):
+                return self
+            def offset(self, *args, **kwargs):
+                return self
+            def limit(self, *args, **kwargs):
+                return self
+            def all(self):
+                return []
+
+        db.query.return_value = MockQuery()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit", params={"executor_id": "jump-1"})
+        assert resp.status_code == 200
+
+    def test_list_executor_id_with_hours(self):
+        """GET /audit should combine executor_id and hours filters."""
+        db = MagicMock()
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def count(self):
+                return 5
+            def order_by(self, *args, **kwargs):
+                return self
+            def offset(self, *args, **kwargs):
+                return self
+            def limit(self, *args, **kwargs):
+                return self
+            def all(self):
+                return []
+
+        db.query.return_value = MockQuery()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit", params={"executor_id": "jump-1", "hours": 24})
+        assert resp.status_code == 200
+
+    def test_list_executor_id_with_limit_offset(self):
+        """GET /audit should combine executor_id with pagination."""
+        db = MagicMock()
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def count(self):
+                return 50
+            def order_by(self, *args, **kwargs):
+                return self
+            def offset(self, offset_val, **kwargs):
+                assert offset_val == 10
+                return self
+            def limit(self, limit_val, **kwargs):
+                assert limit_val == 20
+                return self
+            def all(self):
+                return []
+
+        db.query.return_value = MockQuery()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/audit",
+            params={"executor_id": "jump-1", "limit": 20, "offset": 10},
+        )
+        assert resp.status_code == 200
+
+    def test_list_empty_fields_no_crash(self):
+        """GET /audit should handle events with empty fields gracefully."""
+        from types import SimpleNamespace
+
+        event = SimpleNamespace(
+            id=1,
+            event_type="heartbeat",
+            user_id=None,
+            fields=None,
+            timestamp=__import__("datetime").datetime(2024, 1, 1, 12, 0, 0, tzinfo=__import__("datetime").timezone.utc),
+        )
+
+        db = MagicMock()
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def count(self):
+                return 1
+            def order_by(self, *args, **kwargs):
+                return self
+            def offset(self, *args, **kwargs):
+                return self
+            def limit(self, *args, **kwargs):
+                return self
+            def all(self):
+                return [event]
+
+        db.query.return_value = MockQuery()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit", params={"executor_id": "jump-1"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1

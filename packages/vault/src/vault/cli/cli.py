@@ -543,27 +543,102 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # exec cert renew
-    cert_subparsers.add_parser(
-        "renew", help="Renew executor certificate (not yet implemented)"
+    cert_renew_parser = cert_subparsers.add_parser(
+        "renew", help="Renew executor certificate"
+    )
+    cert_renew_parser.add_argument(
+        "--cert-path",
+        default="/etc/venya/executor.pem",
+        help="Path to executor certificate (default: /etc/venya/executor.pem)",
+    )
+    cert_renew_parser.add_argument(
+        "--key-path",
+        dest="key_path",
+        default=None,
+        help="Path to executor private key (default: derive from --cert-path)",
     )
 
     # exec cert revoke
-    cert_subparsers.add_parser(
-        "revoke", help="Revoke executor certificate (not yet implemented)"
+    revoke_parser = cert_subparsers.add_parser(
+        "revoke", help="Revoke an executor certificate (admin action)"
+    )
+    revoke_parser.add_argument(
+        "--executor-id",
+        dest="executor_id",
+        default=None,
+        help="Executor ID to revoke (default: read from local cert file)",
+    )
+    revoke_parser.add_argument(
+        "--cert-path",
+        dest="cert_path",
+        default="/etc/venya/executor.pem",
+        help="Path to executor certificate file (used for ID fallback, default: /etc/venya/executor.pem)",
     )
 
     # exec heartbeat
     heartbeat_parser = exec_subparsers.add_parser(
-        "heartbeat", help="Send heartbeat to vault (not yet implemented)"
+        "heartbeat", help="Send heartbeat to vault"
     )
     heartbeat_parser.add_argument(
         "--vault-url",
         help="Vault server URL (default: from config)",
     )
+    heartbeat_parser.add_argument(
+        "--cert-path",
+        default="/etc/venya/executor.pem",
+        help="Path to executor certificate (default: /etc/venya/executor.pem)",
+    )
+    heartbeat_parser.add_argument(
+        "--key-path",
+        dest="key_path",
+        default=None,
+        help="Path to executor private key (default: derive from --cert-path)",
+    )
 
     # exec audit
-    exec_subparsers.add_parser(
-        "audit", help="View executor audit log (not yet implemented)"
+    audit_parser = exec_subparsers.add_parser(
+        "audit", help="View executor audit log"
+    )
+    audit_parser.add_argument(
+        "executor_id",
+        nargs="?",
+        default=None,
+        help="Executor ID to audit (default: read from local cert file)",
+    )
+    audit_parser.add_argument(
+        "--cert-path",
+        dest="cert_path",
+        default="/etc/venya/executor.pem",
+        help="Path to executor certificate file (used for ID fallback, default: /etc/venya/executor.pem)",
+    )
+    audit_parser.add_argument(
+        "--hours",
+        type=int,
+        default=None,
+        help="Query last N hours",
+    )
+    audit_parser.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Query last N days",
+    )
+    audit_parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="Max results (default: 100)",
+    )
+    audit_parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Result offset (default: 0)",
+    )
+    audit_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
     )
 
     # exec status
