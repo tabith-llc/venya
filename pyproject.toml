@@ -2,7 +2,7 @@
 name = "venya"
 version = "0.1.0"
 description = "A secrets broker system for LLMs"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "vault",
     "server",
