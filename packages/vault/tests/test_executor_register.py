@@ -597,7 +597,7 @@ class TestExecutorCertStatus:
         assert result == 1
 
     def test_cert_status_expiring_soon(self, tmp_path):
-        """Cert status returns 1 when cert expires in <7 days."""
+        """Cert status returns 0 when cert expires in <7 days (warning, still valid)."""
         from vault.cli.commands import executor_cert_status
 
         private_key = _generate_test_keypair()
@@ -609,7 +609,7 @@ class TestExecutorCertStatus:
         args.cert_path = str(cert_path)
 
         result = executor_cert_status(args)
-        assert result == 1
+        assert result == 0
 
     def test_cert_status_missing_file(self, tmp_path):
         """Cert status returns 1 when cert file doesn't exist."""
@@ -650,38 +650,39 @@ class TestPlaceholderSubcommands:
     """Tests for placeholder subcommands."""
 
     def test_cert_renew_placeholder(self):
-        """cert renew prints 'Not yet implemented'."""
+        """cert renew dispatches to executor_cert_renew."""
+        from unittest.mock import patch
+
         from vault.cli.commands import executor_cert
 
         client, config_file = _make_mock_client()
         try:
             args = MagicMock()
             args.cert_command = "renew"
-            result = executor_cert(client, args)
-            assert result == 0
+            with patch("vault.cli.commands.executor_cert_renew", return_value=0) as mock_renew:
+                result = executor_cert(client, args)
+                assert result == 0
+                mock_renew.assert_called_once()
         finally:
             client.close()
 
     def test_cert_revoke_placeholder(self):
-        """cert revoke prints 'Not yet implemented'."""
+        """cert revoke is implemented — see test_executor_cert_revoke.py."""
         from vault.cli.commands import executor_cert
 
         client, config_file = _make_mock_client()
         try:
             args = MagicMock()
             args.cert_command = "revoke"
+            # Without --executor-id and without a cert file, should fail with exit 1
             result = executor_cert(client, args)
-            assert result == 0
+            assert result == 1
         finally:
             client.close()
 
     def test_heartbeat_placeholder(self):
-        """heartbeat prints 'Not yet implemented'."""
-        from vault.cli.commands import executor_heartbeat
-
-        args = MagicMock()
-        result = executor_heartbeat(args)
-        assert result == 0
+        """heartbeat implemented — see test_executor_heartbeat.py."""
+        pass
 
     def test_audit_placeholder(self):
         """audit prints 'Not yet implemented'."""
@@ -695,13 +696,22 @@ class TestPlaceholderSubcommands:
         finally:
             client.close()
 
-    def test_status_placeholder(self):
-        """status prints 'Not yet implemented'."""
+    def test_status_placeholder(self, tmp_path):
+        """status returns 1 when not registered (no cert file)."""
         from vault.cli.commands import executor_status
 
         args = MagicMock()
-        result = executor_status(args)
-        assert result == 0
+        args.cert_path = str(tmp_path / "nonexistent.pem")
+        args.vault_url = None
+        args.config_path = None
+
+        with patch("vault.cli.api_client.Config") as MockConfig:
+            mock_config = MagicMock()
+            mock_config.server_url = "http://localhost:8000"
+            MockConfig.return_value = mock_config
+
+            result = executor_status(args)
+            assert result == 1
 
     def test_exec_group_no_subcommand(self):
         """exec without subcommand returns 1."""

@@ -43,6 +43,7 @@ async def audit_list(
     end_date: str | None = Query(None, description="End date (ISO 8601)"),
     days: int | None = Query(None, description="Last N days"),
     hours: int | None = Query(None, description="Last N hours"),
+    executor_id: str | None = Query(None, description="Filter by executor ID"),
     limit: int = Query(100, ge=1, le=1000, description="Max results"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
 ) -> AuditListResponse:
@@ -88,6 +89,13 @@ async def audit_list(
         if hours is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
             query = query.filter(AuditEvent.timestamp >= cutoff)
+
+        if executor_id is not None:
+            from sqlalchemy import cast, JSON
+
+            query = query.filter(
+                cast(AuditEvent.fields, JSON)["executor_id"].as_string() == executor_id
+            )
 
         # Get total count
         total = query.count()
