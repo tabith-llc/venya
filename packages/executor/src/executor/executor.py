@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import select
-import subprocess
+import subprocess  # nosec B404 — executor requires subprocess to run commands
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -82,6 +82,7 @@ class Executor:
     audit_logger: AuditLogger | None = None
     _sentinel_registry: SentinelRegistry | None = None
     http_client: Any = None  # httpx2.Client for server API calls
+    config: Any = None  # ExecutorConfig for timeout access
     _injection_result: InjectionResult | None = field(init=False, default=None)
     _bundles: list[SecretBundle] = field(init=False, default_factory=list)
 
@@ -251,7 +252,7 @@ class Executor:
         # Create subprocess
         process = subprocess.Popen(
             command,
-            shell=True,
+            shell=True,  # nosec B602 — core executor design, runs user commands via shell
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -610,10 +611,15 @@ class Executor:
             return
 
         try:
+            timeout = (
+                self.config.network.request_timeout_seconds
+                if self.config
+                else 10
+            )
             self.http_client.post(
                 f"/api/v1/sessions/{self.session_id}/secrets/revoke",
                 json={"secret_ids": secret_ids},
-                timeout=10.0,
+                timeout=timeout,
             )
             logger.info(
                 "Revoked tokens for %d secrets in session %s",
@@ -651,10 +657,15 @@ class Executor:
             "secrets": secret_entries,
         }
 
+        timeout = (
+            self.config.network.request_timeout_seconds
+            if self.config
+            else 30
+        )
         response = self.http_client.post(
             f"/api/v1/sessions/{self.session_id}/filter",
             json=payload,
-            timeout=30.0,
+            timeout=timeout,
         )
         data = response.json()
 

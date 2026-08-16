@@ -90,7 +90,7 @@ async def rate_limit_registration(request: Request) -> None:
     try:
         body = await request.json()
         executor_id = body.get("executor_id")
-    except Exception:
+    except Exception:  # nosec B110 — best-effort JSON parse, None falls through
         pass
 
     # Check global emergency limit first (100/min)
@@ -121,7 +121,7 @@ async def rate_limit_registration(request: Request) -> None:
                 is_first = cert is None
             finally:
                 db.close()
-        except Exception:
+        except Exception:  # nosec B110 — best-effort DB query, None falls through
             pass
 
     # Build keys for atomic check-and-consume

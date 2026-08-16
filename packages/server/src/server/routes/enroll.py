@@ -281,13 +281,13 @@ async def browser_enroll_complete(
     except HTTPException:
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # nosec B110 — rollback best-effort before re-raising HTTPException
             pass
         raise
     except Exception as e:
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # nosec B110 — rollback best-effort before raising HTTPException
             pass
         logger.error("Enrollment complete failed: %s", e)
         raise HTTPException(

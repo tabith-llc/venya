@@ -121,7 +121,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/static",
     })
 
-    ACCESS_TOKEN_COOKIE = "venya_access_token"
+    ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password
 
     def __init__(self, app: Any = None, max_token_age: float = 300.0) -> None:
         """
@@ -243,7 +243,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 _verify_cert_against_ca(cert, admin_ca_cert)
                 verified = True
                 break
-            except Exception:
+            except Exception:  # nosec B112 — iterate over trusted CAs, continue on each cert failure
                 continue
 
         if not verified:

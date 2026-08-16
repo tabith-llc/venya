@@ -581,7 +581,7 @@ async def browser_elevate_assert(
     except Exception as e:
         try:
             db.rollback()
-        except Exception:
+        except Exception:  # nosec B110 — rollback best-effort before raising HTTPException
             pass
         logger.error("Elevation assertion failed: %s", e)
         raise HTTPException(

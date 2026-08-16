@@ -275,7 +275,7 @@ async def secrets_get(
         except Exception as e:
             try:
                 db.rollback()
-            except Exception:
+            except Exception:  # nosec B110 — rollback best-effort before raising HTTPException
                 pass
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
