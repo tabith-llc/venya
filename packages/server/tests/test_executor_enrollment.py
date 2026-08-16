@@ -64,6 +64,11 @@ def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manag
     if ca_manager is not None:
         app.state.ca_manager = ca_manager
 
+    # Mock vault for encrypt() — returns valid tuple for encrypted metadata
+    mock_vault = MagicMock()
+    mock_vault.encrypt.return_value = (b"wrapped_dek", b"nonce", b"ciphertext")
+    app.state.vault = mock_vault
+
     app.include_router(admin_routes.router, prefix="/api/v1")
     app.include_router(executors_routes.router, prefix="/api/v1")
 

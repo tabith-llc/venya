@@ -186,6 +186,12 @@ class ExecutorEnrollmentToken(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False,
     )
     used_at = Column(DateTime(timezone=True), nullable=True)
+    admin_meta_wrapped_dek = Column(LargeBinary, nullable=True,
+        comment="Encrypted admin metadata (ip, ua, sid) — nullify after 90 days")
+    admin_meta_nonce = Column(LargeBinary, nullable=True,
+        comment="Encrypted admin metadata nonce")
+    admin_meta_ciphertext = Column(LargeBinary, nullable=True,
+        comment="Encrypted admin metadata ciphertext")
 
 
 class KeyVersion(Base):
