@@ -123,6 +123,11 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             "Set the passphrase in your secrets manager and restart."
         )
 
+    # Best-effort check: verify disk encryption for PostgreSQL data directory
+    from .utils.disk_encryption import check_disk_encryption
+
+    check_disk_encryption(config.db.database_url)
+
     vault = backend.get_vault(config.db.passphrase)
     app.state.vault = vault  # type: ignore[attr-defined]
 
