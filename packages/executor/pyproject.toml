@@ -31,8 +31,12 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools-rust]
-packages = ["venya_filter"]
+bind = "PyO3"
 binding-rustc-flags = ["-Cstrip=debuginfo"]
+strip = "debuginfo"
+
+[[tool.setuptools-rust.rust_extensions]]
+package = "."
 
 [tool.ruff]
 target-version = "py314"

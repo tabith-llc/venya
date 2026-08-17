@@ -39,7 +39,7 @@ fn filter_output(
     let state = filter::FilterState::new(&secret_entries);
     let (result, ids) = filter::filter_output(output, &state);
 
-    Ok((PyBytes::new_bound(py, &result).into(), ids))
+    Ok((PyBytes::new(py, &result).into(), ids))
 }
 
 /// Rust-powered venya filter module
