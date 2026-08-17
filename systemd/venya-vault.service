@@ -7,6 +7,7 @@ Type=simple
 User=venya
 Group=venya
 ExecStart=/opt/venya/.venv/bin/venya-server --config /etc/venya/server.toml
+Environment=VENYA_ENV_DIR=/opt/venya
 Restart=always
 
 # Capability isolation: mlock requires CAP_IPC_LOCK

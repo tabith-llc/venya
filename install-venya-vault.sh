@@ -496,7 +496,7 @@ info "Database migrations complete"
 # --- Install systemd service ---
 info "Installing systemd service..."
 SYSTEMD_DIR="/etc/systemd/system"
-cp "$INSTALL_DIR/systemd/venya-vault.service" "$SYSTEMD_DIR/"
+sed "s|VENYA_ENV_DIR=/opt/venya|VENYA_ENV_DIR=$INSTALL_DIR|" "$INSTALL_DIR/systemd/venya-vault.service" > "$SYSTEMD_DIR/venya-vault.service"
 systemctl daemon-reload
 systemctl enable venya-vault.service
 systemctl start venya-vault.service
