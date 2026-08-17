@@ -10,7 +10,7 @@ path = "src/rust/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.25", features = ["extension-module"] }
 sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
