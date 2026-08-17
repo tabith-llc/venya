@@ -118,7 +118,6 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/admin/tokens",
         "/credentials",
         "/favicon.ico",
-        "/static",
     })
 
     ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password
@@ -326,10 +325,6 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         # Skip auth for public paths
         if path in self.PUBLIC_PATHS:
-            return await call_next(request)
-
-        # Skip auth for static assets (any path starting with /static/)
-        if path.startswith("/static/"):
             return await call_next(request)
 
         # Skip mTLS paths (executor)
