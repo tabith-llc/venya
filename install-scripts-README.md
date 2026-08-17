@@ -4,24 +4,24 @@ Installation scripts for Venya components, served via HTTP for VM provisioning.
 
 ## Scripts
 
-### `install-venya-vault.sh`
+### `install-venya-core.sh`
 
-Installs the Venya Vault server on a fresh VM. Includes:
+Installs the Venya Core server on a fresh VM. Includes:
 
 - **venya** user creation
 - System packages: `curl`, `sudo`
 - **Caddy** reverse proxy (installed first for TLS)
 - **PostgreSQL** (user, database, trust auth for localhost)
-- Python virtual environment + vault/server packages
+- Python virtual environment + core/server packages
 - Code fixes (database_url, imports, timezone handling)
 - Configuration: `server.toml`, `.env`, `Caddyfile`
 - Caddy CA trust installation
 - Database migrations
-- `venya-vault.service` systemd unit
+- `venya-core.service` systemd unit
 
 **Usage:**
 ```bash
-curl -fsSL http://10.27.27.35:8080/install-venya-vault.sh | sudo bash
+curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo bash
 ```
 
 **Environment variables:**
@@ -33,8 +33,8 @@ curl -fsSL http://10.27.27.35:8080/install-venya-vault.sh | sudo bash
 | `VENYA_PASSWORD` | (prompt) | OS venya user password |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL venya user password |
 | `VENYA_DB_PASSPHRASE` | `venya_test_passphrase_2024` | Server encryption passphrase |
-| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-vault-install.tar.gz` | Tarball URL |
-| `VAULT_HOSTNAME` | `$(hostname)` | Hostname for TLS/Caddy (auto-detected by default) |
+| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-core-install.tar.gz` | Tarball URL |
+| `CORE_HOSTNAME` | `$(hostname)` | Hostname for TLS/Caddy (auto-detected by default) |
 | `TLS_MODE` | `internal` | Caddy TLS mode (`internal`, `manual`, `email`) |
 
 ### `install-venya-executor.sh`
@@ -44,9 +44,9 @@ Installs the Venya Executor daemon on a fresh VM. Includes:
 - **venya** user creation
 - System packages: `curl`, `sudo`, `build-essential`
 - **Rust** toolchain (root + venya user)
-- Python virtual environment + executor/vault packages
+- Python virtual environment + executor/core packages
 - Rust extension build (`venya_filter.so`)
-- Code fixes (same as vault)
+- Code fixes (same as core)
 - **sbx** CLI (Docker Sandboxes)
 - Configuration: `executor.toml`
 - `venya-executor.service` systemd unit
@@ -65,7 +65,7 @@ curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
 | `VENYA_PASSWORD` | (prompt) | OS venya user password |
 | `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-executor-install.tar.gz` | Tarball URL |
 | `VENYA_EXECUTOR_ID` | `jump-1` | Executor identifier |
-| `VENYA_SERVER_URL` | `http://localhost:8080` | Vault server URL |
+| `VENYA_SERVER_URL` | `http://localhost:8080` | Core server URL |
 
 ### `install-debug-tools.sh`
 
@@ -80,11 +80,11 @@ curl -fsSL http://10.27.27.35:8080/install-debug-tools.sh | sudo bash
 
 ### `install.sh` (original)
 
-The original monolithic installer. Supports `VENYA_MODE=vault`, `VENYA_MODE=executor`, or `VENYA_MODE=both`. **Not modified** — kept for reference and backward compatibility.
+The original monolithic installer. Supports `VENYA_MODE=core`, `VENYA_MODE=executor`, or `VENYA_MODE=both`. **Not modified** — kept for reference and backward compatibility.
 
 **Usage:**
 ```bash
-curl -fsSL http://10.27.27.35:8080/install.sh | sudo VENYA_MODE=vault bash -
+curl -fsSL http://10.27.27.35:8080/install.sh | sudo VENYA_MODE=core bash -
 ```
 
 ## Deployment
@@ -96,13 +96,13 @@ cd /media/dust/dust-ext1/projects/venya-installer
 ./create-tarball-and-serve.sh
 ```
 
-This creates two tarballs (`venya-vault-install.tar.gz` and `venya-executor-install.tar.gz`), copies all install scripts to the serving directory, and starts an HTTP server on port 8080.
+This creates two tarballs (`venya-core-install.tar.gz` and `venya-executor-install.tar.gz`), copies all install scripts to the serving directory, and starts an HTTP server on port 8080.
 
 ### Install on VMs
 
 ```bash
-# Vault VM
-curl -fsSL http://10.27.27.35:8080/install-venya-vault.sh | sudo bash
+# Core VM
+curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo bash
 
 # Executor VM
 curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
@@ -113,7 +113,7 @@ pkill -f 'python3 -m http.server 8080'
 
 ## Dependency Summary
 
-| Dependency | Vault | Executor | Debug Tools |
+| Dependency | Core | Executor | Debug Tools |
 |---|---|---|---|
 | `curl` | Yes | Yes | — |
 | `sudo` | Yes | Yes | — |
@@ -126,18 +126,18 @@ pkill -f 'python3 -m http.server 8080'
 
 ## Post-Install
 
-### Vault
+### Core
 
 ```bash
-sudo systemctl start venya-vault
-curl -sk https://<vault-hostname>/api/v1/health
+sudo systemctl start venya-core
+curl -sk https://<core-hostname>/api/v1/health
 # Expected: {"status":"ok"}
 ```
 
 ### Executor
 
 ```bash
-# 1. Generate mTLS certs on vault server
+# 1. Generate mTLS certs on core server
 # 2. Copy ca.crt, executor.crt, executor.key to /etc/venya/executor/
 sudo systemctl start venya-executor
 ```

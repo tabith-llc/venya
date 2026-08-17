@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Installs Venya Executor on a fresh VM:
 #   - venya user, system packages, Rust, uv
-#   - Python venv, executor + vault packages
+#   - Python venv, executor + core packages
 #   - Rust extension build
 #   - sbx CLI, executor.toml
 #   - venya-executor.service
@@ -17,14 +17,14 @@ set -euo pipefail
 #   VENYA_PASSWORD      - OS venya user password (prompts if unset)
 #   VENYA_TARBALL       - URL of the tarball to install (auto-detected if on same host)
 #   VENYA_EXECUTOR_ID              - Executor ID (default: jump-1)
-#   VENYA_SERVER_URL               - Vault server URL (default: https://venya-vault)
+#   VENYA_SERVER_URL               - Core server URL (default: https://venya-core)
 #   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
 ###############################################################################
 
 # --- Defaults ---
 TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-executor-install.tar.gz}"
 EXECUTOR_ID="${VENYA_EXECUTOR_ID:-jump-1}"
-SERVER_URL="${VENYA_SERVER_URL:-https://venya-vault}"
+SERVER_URL="${VENYA_SERVER_URL:-https://venya-core}"
 
 # --- Source common library ---
 COMMON_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -142,28 +142,28 @@ EOF
 
 info "Executor config written to /etc/venya/executor.toml"
 
-# --- Register mTLS certificate (if enrollment token provided and vault reachable) ---
+# --- Register mTLS certificate (if enrollment token provided and core reachable) ---
 if [ -n "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" ]; then
     info "Attempting mTLS certificate registration..."
 
-    # Retry loop: wait for vault to be reachable
-    VAULT_REACHABLE=false
+    # Retry loop: wait for core to be reachable
+    CORE_REACHABLE=false
     for i in $(seq 1 5); do
         if curl -sf --insecure "$SERVER_URL/api/v1/health" >/dev/null 2>&1; then
-            VAULT_REACHABLE=true
+            CORE_REACHABLE=true
             break
         fi
         if [ "$i" -lt 5 ]; then
-            info "Vault not reachable at $SERVER_URL — retrying ($i/5), waiting 10s..."
+            info "Core not reachable at $SERVER_URL — retrying ($i/5), waiting 10s..."
             sleep 10
         fi
     done
 
-    if [ "$VAULT_REACHABLE" = true ]; then
+    if [ "$CORE_REACHABLE" = true ]; then
         # Run registration
         REG_OUTPUT=$("$INSTALL_DIR/.venv/bin/venya" exec register \
             --executor-id "$EXECUTOR_ID" \
-            --vault-url "$SERVER_URL" \
+            --core-url "$SERVER_URL" \
             --output-dir /etc/venya/executor \
             --enrollment-token "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" \
             2>&1) || true
@@ -177,12 +177,12 @@ if [ -n "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" ]; then
             warn "Check output above for errors"
         fi
     else
-        warn "Vault unreachable at $SERVER_URL after 5 attempts — skipping cert registration"
+        warn "Core unreachable at $SERVER_URL after 5 attempts — skipping cert registration"
         echo ""
-        echo "  Run this after vault is reachable:"
+        echo "  Run this after core is reachable:"
         echo "    $INSTALL_DIR/.venv/bin/venya exec register \\"
         echo "      --executor-id $EXECUTOR_ID \\"
-        echo "      --vault-url $SERVER_URL \\"
+        echo "      --core-url $SERVER_URL \\"
         echo "      --output-dir /etc/venya/executor \\"
         echo "      --enrollment-token '$VENYA_EXECUTOR_ENROLLMENT_TOKEN'"
         echo ""

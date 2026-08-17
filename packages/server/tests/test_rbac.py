@@ -89,7 +89,7 @@ class TestRBACMiddleware:
             return any(p == "read-write" for p in perms.values())
 
         rm_mock.has_permission.side_effect = has_permission_side_effect
-        patcher = patch("vault.iam.role_manager.RoleManager", return_value=rm_mock)
+        patcher = patch("core.iam.role_manager.RoleManager", return_value=rm_mock)
         return patcher, rm_mock
 
     def test_write_denied_for_read_only_user(self):

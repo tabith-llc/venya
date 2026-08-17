@@ -87,8 +87,8 @@ Each line has a corresponding `# nosec` comment added to the source.
 | `packages/server/src/server/routes/enroll.py` | 284 | Rollback best-effort before re-raising HTTPException |
 | `packages/server/src/server/routes/enroll.py` | 290 | Rollback best-effort before raising HTTPException |
 | `packages/server/src/server/routes/secrets.py` | 278 | Rollback best-effort before raising HTTPException |
-| `packages/vault/src/vault/vault/secure_memory.py` | 216 | Best-effort unlock in `__del__`, no stack to unwind |
-| `packages/vault/src/vault/cli/commands.py` | 1801 | Best-effort config fallback, falls through to next source |
+| `packages/core/src/core/engine/secure_memory.py` | 216 | Best-effort unlock in `__del__`, no stack to unwind |
+| `packages/core/src/core/cli/commands.py` | 1801 | Best-effort config fallback, falls through to next source |
 
 ## B112 — Try/except continue
 

@@ -20,7 +20,7 @@ class TestPassphraseStartupCheck:
             with pytest.raises(RuntimeError, match="VENYA_DB_PASSPHRASE is not set"):
                 raise RuntimeError(
                     "VENYA_DB_PASSPHRASE is not set. "
-                    "Vault secrets cannot be encrypted without a passphrase. "
+                    "Core secrets cannot be encrypted without a passphrase. "
                     "Set the passphrase in your secrets manager and restart."
                 )
         else:
@@ -68,7 +68,7 @@ class TestPassphraseStartupCheck:
             with pytest.raises(RuntimeError, match="VENYA_DB_PASSPHRASE is not set"):
                 raise RuntimeError(
                     "VENYA_DB_PASSPHRASE is not set. "
-                    "Vault secrets cannot be encrypted without a passphrase. "
+                    "Core secrets cannot be encrypted without a passphrase. "
                     "Set the passphrase in your secrets manager and restart."
                 )
         else:

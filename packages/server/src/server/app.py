@@ -110,7 +110,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             "Update VENYA__CORS__ORIGINS to allow browser clients."
         )
 
-    # Startup: initialize DB, vault, and CA (FIDO2 is already initialized)
+    # Startup: initialize DB, core, and CA (FIDO2 is already initialized)
     from .dependencies import init_db
 
     backend = init_db(config.db, db_url=config.db.database_url)
@@ -121,7 +121,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     if not config.debug and not config.db.passphrase:
         raise RuntimeError(
             "VENYA_DB_PASSPHRASE is not set. "
-            "Vault secrets cannot be encrypted without a passphrase. "
+            "Core secrets cannot be encrypted without a passphrase. "
             "Set the passphrase in your secrets manager and restart."
         )
 
@@ -130,8 +130,8 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 
     check_disk_encryption(config.db.database_url)
 
-    vault = backend.get_vault(config.db.passphrase)
-    app.state.vault = vault  # type: ignore[attr-defined]
+    core = backend.get_core(config.db.passphrase)
+    app.state.core = core  # type: ignore[attr-defined]
 
     # Initialize FIDO2 manager after DB is ready
     from .fido2.manager import Fido2Manager
@@ -193,7 +193,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
                 db = backend.get_session()
                 try:
                     now = datetime.now(timezone.utc)
-                    from vault.iam.session_manager import SessionConfig
+                    from core.iam.session_manager import SessionConfig
                     config = SessionConfig()
                     hard_cap_threshold = now - (config.max_session_duration - config.session_timeout)
                     # Apply clock skew tolerance to cleanup threshold

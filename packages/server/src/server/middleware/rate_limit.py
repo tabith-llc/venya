@@ -14,7 +14,7 @@ from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 
-from vault.vault.rate_limiter import RateLimiter as VaultRateLimiter, RateLimitExceededError
+from core.engine.rate_limiter import RateLimiter as CoreRateLimiter, RateLimitExceededError
 
 from .. import metrics
 
@@ -25,7 +25,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     """Per-IP rate limiting middleware.
 
     Tracks request counts per IP address and enforces limits.
-    Works in tandem with the vault's per-account rate limiter.
+    Works in tandem with the core's per-account rate limiter.
     """
 
     def __init__(

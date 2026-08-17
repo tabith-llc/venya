@@ -5,7 +5,7 @@ import secrets
 
 import pytest
 
-from vault.utils.entropy import csprng_self_test, get_secure_token
+from core.utils.entropy import csprng_self_test, get_secure_token
 
 
 class TestGetSecureToken:

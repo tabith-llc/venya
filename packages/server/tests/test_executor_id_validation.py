@@ -260,10 +260,10 @@ class TestAdminEnrollValidation:
             backend.get_session.return_value = MagicMock()
         app.state.backend = backend
         app.state.config = ServerConfig(recovery_code_pepper="test-pepper")
-        # Mock vault for encrypt() — returns valid tuple for encrypted metadata
-        mock_vault = MagicMock()
-        mock_vault.encrypt.return_value = (b"wrapped_dek", b"nonce", b"ciphertext")
-        app.state.vault = mock_vault
+        # Mock core for encrypt() — returns valid tuple for encrypted metadata
+        mock_core = MagicMock()
+        mock_core.encrypt.return_value = (b"wrapped_dek", b"nonce", b"ciphertext")
+        app.state.core = mock_core
         app.include_router(admin_routes.router, prefix="/api/v1")
         return app
 

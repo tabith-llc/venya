@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A secrets broker system for LLMs"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "vault",
+    "core",
     "server",
     "executor",
 ]
@@ -19,12 +19,12 @@ default-groups = ["dev"]
 members = ["packages/*"]
 
 [tool.uv.sources]
-vault = { workspace = true }
+core = { workspace = true }
 server = { workspace = true }
 executor = { workspace = true }
 
 [tool.pytest.ini_options]
-testpaths = ["packages/vault/tests"]
+testpaths = ["packages/core/tests"]
 asyncio_mode = "auto"
 
 [tool.ruff]

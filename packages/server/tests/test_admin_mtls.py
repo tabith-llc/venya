@@ -694,7 +694,7 @@ class TestAdminMTLSMiddleware:
 
         # Create mock backend with revoked cert
         db = MagicMock()
-        from vault.iam.models import AdminCertRevocation
+        from core.iam.models import AdminCertRevocation
         revoked_entry = MagicMock()
         db.query.return_value.filter.return_value.first.return_value = revoked_entry
         backend = MagicMock()
@@ -931,7 +931,7 @@ def _create_revoke_test_app():
 
     from server.config import ServerConfig
     from server.routes import admin as admin_routes
-    from vault.iam.models import AdminCertRevocation
+    from core.iam.models import AdminCertRevocation
 
     app = FastAPI()
     app.state.config = ServerConfig()

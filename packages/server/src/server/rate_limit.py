@@ -116,7 +116,7 @@ async def rate_limit_registration(request: Request) -> None:
             backend = get_backend(request)
             db = backend.get_session()
             try:
-                from vault.iam.models import ExecutorCert
+                from core.iam.models import ExecutorCert
                 cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
                 is_first = cert is None
             finally:

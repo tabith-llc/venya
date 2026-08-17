@@ -486,7 +486,7 @@ class CAManager:
         """
         from sqlalchemy import desc
 
-        from vault.iam.models import ExecutorCertRevocation
+        from core.iam.models import ExecutorCertRevocation
 
         ca_cert, ca_key = self.load_ca()
         now = datetime.now(timezone.utc)
@@ -525,7 +525,7 @@ class CAManager:
         Returns:
             Number of deleted records.
         """
-        from vault.iam.models import ExecutorCertRevocation
+        from core.iam.models import ExecutorCertRevocation
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         deleted_count = db_session.query(ExecutorCertRevocation).filter(
@@ -787,7 +787,7 @@ class AdminCAManager:
         """
         from sqlalchemy import desc
 
-        from vault.iam.models import AdminCertRevocation
+        from core.iam.models import AdminCertRevocation
 
         ca_cert, ca_key = self._load_ca_cert_and_key()
         now = datetime.now(timezone.utc)
@@ -826,7 +826,7 @@ class AdminCAManager:
         Returns:
             Number of deleted records.
         """
-        from vault.iam.models import AdminCertRevocation
+        from core.iam.models import AdminCertRevocation
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         deleted_count = db_session.query(AdminCertRevocation).filter(

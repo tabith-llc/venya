@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "FastAPI server: WebAuthn, REST API"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "vault",
+    "core",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "fido2>=2.0.0",

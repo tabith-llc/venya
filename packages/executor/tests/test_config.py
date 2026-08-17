@@ -335,7 +335,7 @@ class TestExecutorConfigFromFile:
         config_file = tmp_path / "config.toml"
         config_file.write_text(
             """
-server_url = "https://vault.example.com"
+server_url = "https://core.example.com"
 executor_id = "executor-42"
 log_level = "warning"
 
@@ -351,7 +351,7 @@ secret_ttl_seconds = 60
 
         cfg = ExecutorConfig.from_file(config_file)
 
-        assert cfg.server_url == "https://vault.example.com"
+        assert cfg.server_url == "https://core.example.com"
         assert cfg.executor_id == "executor-42"
         assert cfg.log_level == "warning"
         assert cfg.cert_rotation.rotation_days == 14

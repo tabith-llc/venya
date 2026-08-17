@@ -60,7 +60,7 @@ async def audit_list(
             detail="Backend not initialized",
         )
 
-    from vault.iam.models import AuditEvent
+    from core.iam.models import AuditEvent
 
     db = backend.get_session()
     try:

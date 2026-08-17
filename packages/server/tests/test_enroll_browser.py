@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from server.routes import enroll
-from vault.iam.enrollment_manager import EnrollmentManager
+from core.iam.enrollment_manager import EnrollmentManager
 
 
 def _create_test_app(fido2_manager=None, backend=None, config=None):
@@ -39,7 +39,7 @@ class TestBrowserEnrollStart:
 
     def test_enroll_start_success(self):
         """Should return WebAuthn challenge for valid token."""
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         # Mock token lookup
         mock_token = SimpleNamespace(
@@ -93,7 +93,7 @@ class TestBrowserEnrollStart:
 
     def test_enroll_start_invalid_token(self):
         """Should return 400 for invalid token."""
-        from vault.iam.enrollment_manager import EnrollmentError
+        from core.iam.enrollment_manager import EnrollmentError
 
         mock_em = MagicMock()
         mock_em.validate_token_for_start.side_effect = EnrollmentError("Invalid enrollment token")
@@ -149,7 +149,7 @@ class TestBrowserEnrollComplete:
 
     def test_enroll_complete_success(self):
         """Should store credential, activate user, create session."""
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         mock_token = SimpleNamespace(
             user_id=1, state="in_progress", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
@@ -190,7 +190,7 @@ class TestBrowserEnrollComplete:
             with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
                 with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
                     with patch.object(EnrollmentManager, "complete_enrollment", mock_em.complete_enrollment):
-                        with patch("vault.iam.session_manager.SessionManager", return_value=mock_sm):
+                        with patch("core.iam.session_manager.SessionManager", return_value=mock_sm):
                             client = TestClient(app, raise_server_exceptions=False)
                             resp = client.post(
                                 "/api/v1/enroll/browser/complete",
@@ -210,7 +210,7 @@ class TestBrowserEnrollComplete:
 
     def test_enroll_complete_invalid_challenge(self):
         """Should return 400 for invalid WebAuthn challenge."""
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         mock_token = SimpleNamespace(
             user_id=1, state="in_progress", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
@@ -246,7 +246,7 @@ class TestBrowserEnrollComplete:
 
     def test_enroll_complete_no_fido2(self):
         """Should return 503 if FIDO2 not initialized."""
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         mock_token = SimpleNamespace(
             user_id=1, state="in_progress", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
