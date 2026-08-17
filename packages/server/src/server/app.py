@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     config: ServerConfig = app.state.config  # type: ignore[attr-defined]
 
     # CSPRNG self-test at startup
-    from .utils.entropy import csprng_self_test
+    from core.utils.entropy import csprng_self_test
 
     csprng_self_test()
 
@@ -305,7 +305,6 @@ def main() -> None:
         "host": config.host,
         "port": config.port,
         "log_level": "debug" if config.debug else "info",
-        "limit_max_body": config.max_request_body_bytes,
     }
 
     if config.ssl_cert and config.ssl_key:

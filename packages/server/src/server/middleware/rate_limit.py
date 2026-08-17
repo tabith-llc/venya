@@ -106,7 +106,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         window_start = now - 60  # 1-minute window
 
         # Count requests in current window
-        count = sum(1 for t in requests.get(ip, [], timeout=5.0) if t > window_start)
+        count = sum(1 for t in requests.get(ip, []) if t > window_start)  # nosec B113
 
         if count >= limit:
             metrics.RATE_LIMIT_HIT_TOTAL.labels(limit_type="ip").inc()

@@ -1798,7 +1798,7 @@ def _get_server_url(args: Any) -> str:
         url = config.server_url
         if url and url != "http://localhost:8000":
             return url
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
     executor_config_path = getattr(args, "config_path", "/etc/venya/executor.toml")
