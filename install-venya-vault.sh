@@ -23,6 +23,7 @@ set -euo pipefail
 
 # --- Defaults ---
 INSTALL_DIR="${VENYA_INSTALL_DIR:-}"
+# NOTE: This is a development-only default. Production must override via VENYA_DB_PASSPHRASE.
 DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-venya_test_passphrase_2024}"
 SKIP_PROMPT="${VENYA_SKIP_PROMPT:-}"
 TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-vault-install.tar.gz}"
@@ -98,6 +99,10 @@ if ! id venya &>/dev/null; then
         echo -n "Enter password for venya user: "
         read -rs VENYA_PASSWORD
         echo ""
+    fi
+    if [ "${#VENYA_PASSWORD}" -lt 8 ]; then
+        error "Password must be at least 8 characters long."
+        exit 1
     fi
     useradd -m -s /bin/bash venya
     echo "venya:$VENYA_PASSWORD" | chpasswd
@@ -250,7 +255,7 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
 
     # Generate admin CA
     export VENYA_ADMIN_CA_KEY_PASSPHRASE="$ADMIN_CA_PASSPHRASE"
-    sudo -u venya PATH="/opt/venya/.venv/bin:$PATH" \
+    sudo -u venya PATH="$INSTALL_DIR/.venv/bin:$PATH" \
         python -c "
 from pathlib import Path
 from server.ca import AdminCAManager
@@ -262,7 +267,7 @@ print('Admin CA initialized')
 "
 
     # Generate first admin cert
-    sudo -u venya PATH="/opt/venya/.venv/bin:$PATH" \
+    sudo -u venya PATH="$INSTALL_DIR/.venv/bin:$PATH" \
         python -c "
 from pathlib import Path
 from server.ca import AdminCAManager
@@ -485,7 +490,7 @@ systemctl restart caddy > /dev/null 2>&1
 
 # --- Run database migrations ---
 info "Running database migrations..."
-sudo -u venya PATH="/opt/venya/.venv/bin:$PATH" VENYA_DB_URL="postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya" bash -c "cd $INSTALL_DIR && python -c \"from vault.cli.commands import _run_migrations; _run_migrations()\""
+sudo -u venya PATH="$INSTALL_DIR/.venv/bin:$PATH" VENYA_DB_URL="postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya" bash -c "cd $INSTALL_DIR && python -c \"from vault.cli.commands import _run_migrations; _run_migrations()\""
 info "Database migrations complete"
 
 # --- Install systemd service ---
