@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator
@@ -254,7 +255,7 @@ class ServerConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="VENYA_",
         env_nested_delimiter="__",
-        env_file="/opt/venya/.env",
+        env_file=os.path.join(os.environ.get("VENYA_ENV_DIR", "/opt/venya"), ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
