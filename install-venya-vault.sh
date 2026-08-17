@@ -467,6 +467,23 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     echo ""
 fi
 
+# --- Executor enrollment token instructions ---
+echo ""
+echo "==============================================================="
+echo "  EXECUTOR ENROLLMENT"
+echo "==============================================================="
+echo ""
+echo "To register an executor, run on this vault server:"
+echo ""
+echo "  sudo -u venya PATH='$INSTALL_DIR/.venv/bin:\$PATH' \\"
+echo "    $INSTALL_DIR/.venv/bin/venya admin executor-enroll <executor-id>"
+echo ""
+echo "Then pass the printed token to the executor operator."
+echo "The token is consumed on first use and cannot be reused."
+echo ""
+echo "==============================================================="
+echo ""
+
 # Copy Caddyfile to Caddy's default location
 sudo cp /etc/venya/Caddyfile /etc/caddy/Caddyfile
 

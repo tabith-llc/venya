@@ -297,9 +297,55 @@ key = "/etc/venya/executor/executor.key"
 EOF
 
 info "Executor config written to /etc/venya/executor.toml"
-info "Note: mTLS certs must be generated on the vault server and copied here."
 
-# --- Write bootstrap config (enrollment token) ---
+# --- Register mTLS certificate (if enrollment token provided and vault reachable) ---
+if [ -n "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" ]; then
+    info "Attempting mTLS certificate registration..."
+
+    # Retry loop: wait for vault to be reachable
+    VAULT_REACHABLE=false
+    for i in $(seq 1 5); do
+        if curl -sf --insecure "$SERVER_URL/api/v1/health" >/dev/null 2>&1; then
+            VAULT_REACHABLE=true
+            break
+        fi
+        if [ "$i" -lt 5 ]; then
+            info "Vault not reachable at $SERVER_URL — retrying ($i/5), waiting 10s..."
+            sleep 10
+        fi
+    done
+
+    if [ "$VAULT_REACHABLE" = true ]; then
+        # Run registration
+        REG_OUTPUT=$("$INSTALL_DIR/.venv/bin/venya" exec register \
+            --executor-id "$EXECUTOR_ID" \
+            --vault-url "$SERVER_URL" \
+            --output-dir /etc/venya/executor \
+            --enrollment-token "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" \
+            2>&1) || true
+        echo "$REG_OUTPUT"
+
+        # Check if certs were created
+        if [ -f /etc/venya/executor/executor.crt ] && [ -f /etc/venya/executor/executor.key ]; then
+            info "mTLS certificates generated successfully"
+        else
+            warn "Certificate registration completed but cert files not found"
+            warn "Check output above for errors"
+        fi
+    else
+        warn "Vault unreachable at $SERVER_URL after 5 attempts — skipping cert registration"
+        echo ""
+        echo "  Run this after vault is reachable:"
+        echo "    $INSTALL_DIR/.venv/bin/venya exec register \\"
+        echo "      --executor-id $EXECUTOR_ID \\"
+        echo "      --vault-url $SERVER_URL \\"
+        echo "      --output-dir /etc/venya/executor \\"
+        echo "      --enrollment-token '$VENYA_EXECUTOR_ENROLLMENT_TOKEN'"
+        echo ""
+    fi
+fi
+
+# --- Write bootstrap config (enrollment token for heartbeat) ---
 if [ -n "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" ]; then
     cat >> /etc/venya/executor.toml << EOF
 
@@ -376,12 +422,9 @@ echo "============================================"
 echo "  Venya Executor installed to $INSTALL_DIR"
 echo "============================================"
 echo ""
-echo "To start the executor:"
-echo "  systemctl start venya-executor"
+echo "Manage the executor:"
+echo "  systemctl start|stop|restart|status venya-executor"
 echo ""
 echo "Next steps:"
-echo "  1. Generate mTLS certs on vault server"
-echo "  2. Copy ca.crt, executor.crt, executor.key to /etc/venya/executor/"
-echo "  3. systemctl start venya-executor"
-echo "  4. Run 'newgrp kvm' or re-login to activate KVM group"
+echo "  1. Run 'newgrp kvm' or re-login to activate KVM group"
 echo ""
