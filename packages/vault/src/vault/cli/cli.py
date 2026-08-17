@@ -290,7 +290,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     export_cert_parser.add_argument(
         "--ca-dir",
-        help="CA directory path (default: /etc/venya/ca)",
+        help="CA directory path (default: /var/lib/venya/ca)",
     )
 
     # admin export-ca-key
@@ -304,7 +304,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     export_key_parser.add_argument(
         "--ca-dir",
-        help="CA directory path (default: /etc/venya/ca)",
+        help="CA directory path (default: /var/lib/venya/ca)",
     )
 
     # admin split-ca-key
@@ -330,7 +330,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     split_key_parser.add_argument(
         "--ca-dir",
-        help="CA directory path (default: /etc/venya/ca)",
+        help="CA directory path (default: /var/lib/venya/ca)",
     )
 
     # admin restore-ca-key
@@ -353,7 +353,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     restore_key_parser.add_argument(
         "--ca-dir",
-        help="CA directory path (default: /etc/venya/ca)",
+        help="CA directory path (default: /var/lib/venya/ca)",
     )
 
     # admin init-admin-ca
@@ -643,7 +643,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     # exec status
     exec_subparsers.add_parser(
-        "status", help="Show executor registration status (not yet implemented)"
+        "status", help="Show executor registration status"
     )
 
     # config
