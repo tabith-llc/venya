@@ -315,6 +315,7 @@ info "Installing systemd service..."
 SYSTEMD_DIR="/etc/systemd/system"
 cp "$INSTALL_DIR/systemd/venya-executor.service" "$SYSTEMD_DIR/"
 cp "$INSTALL_DIR/systemd/tmp-venya_secrets.mount" "$SYSTEMD_DIR/"
+cp "$INSTALL_DIR/systemd/venya-executor.seccomp" "$SYSTEMD_DIR/"
 systemctl daemon-reload
 systemctl enable venya-executor.service tmp-venya_secrets.mount
 systemctl start venya-executor.service

@@ -27,5 +27,10 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 PrivateDevices=true
 
+# Seccomp: deny dangerous syscall groups (executor never needs these)
+# Full JSON profile at /etc/venya/systemd/venya-executor.seccomp (reference)
+SystemCallFilter=~@cpu-emulation @debug @module @mount @obsolete @swap @chroot @keyring @clock @ptrace
+SystemCallErrorNumber=EPERM
+
 [Install]
 WantedBy=multi-user.target
