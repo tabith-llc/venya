@@ -298,7 +298,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         if backend is not None:
             db = backend.get_session()
             try:
-                from vault.iam.models import AdminCertRevocation
+                from core.iam.models import AdminCertRevocation
                 serial_hex = hex(cert.serial_number)[2:]  # Remove '0x' prefix
                 # Pad to even length for consistent hex representation
                 if len(serial_hex) % 2:
@@ -416,12 +416,12 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         db = backend.get_session()
         try:
-            from vault.iam.session_manager import SessionManager
-            from vault.iam.session_manager import SessionConfig as VaultSessionConfig
-            from vault.iam.models import Session as SessionModel
+            from core.iam.session_manager import SessionManager
+            from core.iam.session_manager import SessionConfig as CoreSessionConfig
+            from core.iam.models import Session as SessionModel
             from datetime import timedelta
 
-            config = VaultSessionConfig(
+            config = CoreSessionConfig(
                 session_timeout=timedelta(minutes=15),
                 access_token_ttl=timedelta(minutes=5),
                 max_session_duration=timedelta(hours=4),
@@ -451,7 +451,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             }
 
             # Get role IDs for this user
-            from vault.iam.role_manager import RoleManager
+            from core.iam.role_manager import RoleManager
             rm = RoleManager(db)
             user_roles = rm.get_user_roles(user.user_id)
             user_info["roles"] = [str(m.role_id) for m in user_roles]

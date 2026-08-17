@@ -115,10 +115,10 @@ CA_REVOCATIONS_PURGED_TOTAL = Counter(
     [],
 )
 
-# --- Vault metrics ---
+# --- Core metrics ---
 
-VAULT_OPERATIONS_TOTAL = Counter(
-    "venya_vault_operations_total",
-    "Total vault cryptographic operations",
+CORE_OPERATIONS_TOTAL = Counter(
+    "venya_core_operations_total",
+    "Total core cryptographic operations",
     ["operation", "result"],
 )

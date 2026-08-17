@@ -119,9 +119,9 @@ def _get_session_from_cookie(
 
     db = backend.get_session()
     try:
-        from vault.iam.models import Session as SessionModel
-        from vault.iam.role_manager import RoleManager
-        from vault.iam.session_manager import SessionConfig, SessionManager
+        from core.iam.models import Session as SessionModel
+        from core.iam.role_manager import RoleManager
+        from core.iam.session_manager import SessionConfig, SessionManager
 
         session_config = SessionConfig(
             session_timeout=timedelta(minutes=15),
@@ -241,9 +241,9 @@ async def browser_login_assert(
 
     db = backend.get_session()
     try:
-        from vault.iam.models import Session as SessionModel
-        from vault.iam.role_manager import RoleManager
-        from vault.iam.session_manager import SessionConfig, SessionManager
+        from core.iam.models import Session as SessionModel
+        from core.iam.role_manager import RoleManager
+        from core.iam.session_manager import SessionConfig, SessionManager
 
         session_config = SessionConfig(
             session_timeout=timedelta(minutes=15),
@@ -302,7 +302,7 @@ async def browser_refresh(
 
     db, session_model = session
 
-    from vault.iam.session_manager import SessionConfig, SessionManager
+    from core.iam.session_manager import SessionConfig, SessionManager
 
     session_config = SessionConfig(
         session_timeout=timedelta(minutes=15),
@@ -353,7 +353,7 @@ async def browser_logout(
 
     db, session, user_info = result
     try:
-        from vault.iam.session_manager import SessionConfig, SessionManager
+        from core.iam.session_manager import SessionConfig, SessionManager
 
         session_config = SessionConfig(
             session_timeout=timedelta(minutes=15),
@@ -399,7 +399,7 @@ def _create_elevation_challenge(db, session, fido2_manager, request):
     Returns:
         Tuple of (challenge_id, browser_options).
     """
-    from vault.iam.models import WebAuthnCredential
+    from core.iam.models import WebAuthnCredential
 
     # Get user's credentials for the allow list
     credentials = (
@@ -557,7 +557,7 @@ async def browser_elevate_assert(
             seconds=ELEVATION_TOKEN_TTL_SECONDS
         )
 
-        from vault.iam.models import ElevationToken
+        from core.iam.models import ElevationToken
 
         elevation_record = ElevationToken(
             token_hash=token_hash,
@@ -622,7 +622,7 @@ async def auth_me(request: Request) -> AuthMeResponse:
     logger.info("AUTH_ME DEBUG: got session, user_id=%s", result[1].user_id if result and len(result) > 1 else "unknown")
     db, session, user_info = result
     try:
-        from vault.iam.models import User
+        from core.iam.models import User
 
         user = db.query(User).filter(User.user_id == session.user_id).first()
         if user is None:
@@ -631,7 +631,7 @@ async def auth_me(request: Request) -> AuthMeResponse:
                 detail="User not found",
             )
 
-        from vault.iam.role_manager import RoleManager
+        from core.iam.role_manager import RoleManager
 
         role_manager = RoleManager(db)
         role_members = role_manager.get_user_roles(session.user_id)

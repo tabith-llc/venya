@@ -55,7 +55,7 @@ class TestEnrollmentCreateToken:
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
+        with patch("core.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/enrollment/tokens",
@@ -75,7 +75,7 @@ class TestEnrollmentCreateToken:
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
+        with patch("core.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/enrollment/tokens",
@@ -130,7 +130,7 @@ class TestEnrollmentRevokeToken:
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
+        with patch("core.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/api/v1/enrollment/tokens/1/revoke")
             assert resp.status_code == 200
@@ -147,7 +147,7 @@ class TestEnrollmentRevokeToken:
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=em):
+        with patch("core.iam.enrollment_manager.EnrollmentManager", return_value=em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/api/v1/enrollment/tokens/999/revoke")
             assert resp.status_code == 200

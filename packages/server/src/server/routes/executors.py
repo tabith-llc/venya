@@ -24,7 +24,7 @@ from ..rate_limit import rate_limit_registration
 from ..utils.executor_id import EXECUTOR_ID_PATTERN, validate_executor_id
 from ..utils.time import effective_expiry_check_time, is_expired
 from .. import metrics
-from vault.iam.models import AuditEvent, ExecutorEnrollmentToken, User, ExecutorCert
+from core.iam.models import AuditEvent, ExecutorEnrollmentToken, User, ExecutorCert
 
 logger = logging.getLogger("venya.server")
 
@@ -414,7 +414,7 @@ async def get_revocation_list(
     Executors poll this endpoint periodically (every 60s) to check
     if their certificate has been revoked.
     """
-    from vault.iam.models import ExecutorCertRevocation
+    from core.iam.models import ExecutorCertRevocation
 
     db = _get_db(request)
     try:
@@ -477,7 +477,7 @@ async def heartbeat(
 
     This is a public endpoint — no authentication required.
     """
-    from vault.iam.models import ExecutorCert, ExecutorCertRevocation
+    from core.iam.models import ExecutorCert, ExecutorCertRevocation
 
     db = _get_db(request)
     try:

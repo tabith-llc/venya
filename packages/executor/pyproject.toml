@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Venya jump host executor daemon and credential injector"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "vault",
+    "core",
     "cryptography>=50.0.0",
     "httpx2>=0.27.0",
     "websockets",

@@ -151,15 +151,15 @@ async def secrets_create(
     Requires read-write permission on all specified roles.
     """
     user_info = await _get_user_info(request)
-    vault = getattr(request.app.state, "vault", None)
-    if vault is None:
+    core = getattr(request.app.state, "core", None)
+    if core is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Vault not initialized",
+            detail="Core not initialized",
         )
 
     try:
-        record = vault.put(
+        record = core.put(
             key=req.key,
             value=req.value.encode("utf-8"),
             user_id=user_info["user_id"],
@@ -197,11 +197,11 @@ async def secrets_get(
     Browser users need a valid elevation token to unmask.
     """
     user_info = await _get_user_info(request)
-    vault = getattr(request.app.state, "vault", None)
-    if vault is None:
+    core = getattr(request.app.state, "core", None)
+    if core is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Vault not initialized",
+            detail="Core not initialized",
         )
 
     # For browser users requesting unmask, validate elevation token
@@ -217,7 +217,7 @@ async def secrets_get(
         try:
             import hashlib
             from datetime import datetime, timezone
-            from vault.iam.models import ElevationToken
+            from core.iam.models import ElevationToken
 
             from ..utils.time import is_expired
 
@@ -234,7 +234,7 @@ async def secrets_get(
 
             if elevation is None:
                 # No valid elevation token - return masked
-                value = vault.get(
+                value = core.get(
                     secret_key=key,
                     caller=caller,
                     unmask=False,
@@ -250,7 +250,7 @@ async def secrets_get(
             )
             if is_expired(elevation.expires_at, tolerance):
                 # Expired token - return masked
-                value = vault.get(
+                value = core.get(
                     secret_key=key,
                     caller=caller,
                     unmask=False,
@@ -264,7 +264,7 @@ async def secrets_get(
 
             # Elevation valid - return plaintext
             try:
-                value = vault.get(
+                value = core.get(
                     secret_key=key,
                     caller=caller,
                     unmask=True,
@@ -292,7 +292,7 @@ async def secrets_get(
             db.close()
 
     try:
-        value = vault.get(
+        value = core.get(
             secret_key=key,
             caller=caller,
             unmask=unmask,
@@ -320,15 +320,15 @@ async def secrets_get_executor(
     Returns sentinel-wrapped plaintext with detection hashes.
     This endpoint is for executor (mTLS) use only.
     """
-    vault = getattr(request.app.state, "vault", None)
-    if vault is None:
+    core = getattr(request.app.state, "core", None)
+    if core is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Vault not initialized",
+            detail="Core not initialized",
         )
 
     try:
-        plaintext = vault.get(
+        plaintext = core.get(
             secret_key=key,
             caller="executor",
         )
@@ -359,14 +359,14 @@ async def secrets_list(
     Only shows secrets the authenticated user has read access to.
     """
     user_info = await _get_user_info(request)
-    vault = getattr(request.app.state, "vault", None)
-    if vault is None:
+    core = getattr(request.app.state, "core", None)
+    if core is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Vault not initialized",
+            detail="Core not initialized",
         )
 
-    records = vault.list(
+    records = core.list(
         prefix=prefix,
         user_id=user_info.get("user_id"),
     )
@@ -400,14 +400,14 @@ async def secrets_delete(
     Requires read-write permission on the secret's role(s).
     """
     user_info = await _get_user_info(request)
-    vault = getattr(request.app.state, "vault", None)
-    if vault is None:
+    core = getattr(request.app.state, "core", None)
+    if core is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Vault not initialized",
+            detail="Core not initialized",
         )
 
-    deleted = vault.delete(
+    deleted = core.delete(
         key=key,
         user_id=user_info["user_id"],
     )
@@ -462,7 +462,7 @@ async def revoke_session_secrets(
     """
     from datetime import datetime, timezone
 
-    from vault.iam.models import AuditEvent
+    from core.iam.models import AuditEvent
 
     # Verify caller is executor (mTLS)
     caller = getattr(request.state, "auth_user", {})
@@ -521,7 +521,7 @@ async def get_active_key_version(
     """
     db = _get_db(request)
     try:
-        from vault.iam.models import KeyVersion
+        from core.iam.models import KeyVersion
 
         active_version = (
             db.query(KeyVersion)

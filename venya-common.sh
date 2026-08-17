@@ -2,7 +2,7 @@
 ###############################################################################
 # Venya Installer Common Library
 #
-# Shared functions for install-venya-vault.sh and install-venya-executor.sh.
+# Shared functions for install-venya-core.sh and install-venya-executor.sh.
 # Source this file from your installer script before using any functions.
 #
 # Required variables (must be set by the caller before sourcing):
@@ -18,7 +18,7 @@
 #   venya_install_uv            # Install uv for root
 #   venya_source_paths          # Source shell env files
 #   venya_install_uv_user       # Install uv for venya user
-#   venya_download_tarball      # Download tarball (type=vault|executor)
+#   venya_download_tarball      # Download tarball (type=core|executor)
 #   venya_extract_tarball       # Extract tarball to INSTALL_DIR
 #   venya_create_venv           # Create Python venv + install packages
 #   venya_apply_code_fixes      # Apply Python code patches (sed)
@@ -174,8 +174,8 @@ venya_install_uv_user() {
 # --- 10. Download tarball ---
 
 venya_download_tarball() {
-    # Args: $1 = tarball_type (vault|executor)
-    local tarball_type="${1:-vault}"
+    # Args: $1 = tarball_type (core|executor)
+    local tarball_type="${1:-core}"
     if [ -z "$TARBALL_URL" ]; then
         if [ -f "/tmp/venya-install.tar.gz" ]; then
             TARBALL_URL="file:///tmp/venya-${tarball_type}-install.tar.gz"
@@ -241,10 +241,10 @@ venya_apply_code_fixes() {
         info "  Fixed init_db to use db_config.database_url"
     fi
 
-    # Fix 2: Fix init.py imports (from ..iam.models -> from vault.iam.models)
+    # Fix 2: Fix init.py imports (from ..iam.models -> from core.iam.models)
     for f in "$INSTALL_DIR/packages/server/src/server/routes/init.py"; do
         if [ -f "$f" ]; then
-            sed -i 's/from \.\.iam\.models/from vault.iam.models/g' "$f"
+            sed -i 's/from \.\.iam\.models/from core.iam.models/g' "$f"
             info "  Fixed init.py imports"
         fi
     done
@@ -284,7 +284,7 @@ venya_create_directories() {
 # --- 15. Service start retry loop ---
 
 venya_service_retry() {
-    # Args: $1 = service_name (e.g., venya-vault, venya-executor)
+    # Args: $1 = service_name (e.g., venya-core, venya-executor)
     local service_name="${1:-}"
     if [ -z "$service_name" ]; then
         error "venya_service_retry requires service_name argument"

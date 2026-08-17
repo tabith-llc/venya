@@ -125,7 +125,7 @@ async def auth_registration_complete(
     if backend is not None:
         db = backend.get_session()
         try:
-            from vault.iam.models import WebAuthnCredential
+            from core.iam.models import WebAuthnCredential
 
             credential = WebAuthnCredential(
                 user_id=cred.user_id,
@@ -203,9 +203,9 @@ async def auth_login_complete(
     # Create session and issue token
     from datetime import timedelta
 
-    from vault.iam.role_manager import RoleManager
-    from vault.iam.session_manager import SessionConfig as VaultSessionConfig
-    from vault.iam.session_manager import SessionManager
+    from core.iam.role_manager import RoleManager
+    from core.iam.session_manager import SessionConfig as CoreSessionConfig
+    from core.iam.session_manager import SessionManager
 
     backend = getattr(request.app.state, "backend", None)
     if backend is None:
@@ -216,7 +216,7 @@ async def auth_login_complete(
 
     db = backend.get_session()
     try:
-        session_config = VaultSessionConfig(
+        session_config = CoreSessionConfig(
             session_timeout=timedelta(minutes=15),
             access_token_ttl=timedelta(minutes=5),
             max_session_duration=timedelta(hours=4),
@@ -264,9 +264,9 @@ async def auth_refresh(
     """
     from datetime import timedelta
 
-    from vault.iam.models import Session as SessionModel
-    from vault.iam.session_manager import SessionConfig as VaultSessionConfig
-    from vault.iam.session_manager import SessionManager
+    from core.iam.models import Session as SessionModel
+    from core.iam.session_manager import SessionConfig as CoreSessionConfig
+    from core.iam.session_manager import SessionManager
 
     backend = getattr(request.app.state, "backend", None)
     if backend is None:
@@ -286,7 +286,7 @@ async def auth_refresh(
 
     db = backend.get_session()
     try:
-        session_config = VaultSessionConfig(
+        session_config = CoreSessionConfig(
             session_timeout=timedelta(minutes=15),
             access_token_ttl=timedelta(minutes=5),
             max_session_duration=timedelta(hours=4),

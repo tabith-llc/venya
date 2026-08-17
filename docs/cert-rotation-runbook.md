@@ -4,7 +4,7 @@ Procedures for managing executor mTLS certificates and CA key rotation.
 
 ## Prerequisites
 
-- Access to the Vault Server (as `venya-vault` user or admin)
+- Access to the Core Server (as `venya-core` user or admin)
 - `venya` CLI installed and configured
 - Access to executor machines (for CA cert distribution)
 
@@ -183,7 +183,7 @@ sudo rm -f /etc/venya/ca/ca.key
 sudo rm -f /etc/venya/ca/ca.crt
 
 # Re-initialize CA (this creates a new CA keypair)
-# This must be done on the Vault Server
+# This must be done on the Core Server
 venya init --skip-migrations
 ```
 
@@ -302,7 +302,7 @@ diff /etc/venya/ca/ca.crt /path/to/server/ca.crt
 sudo journalctl -u venya-executor -n 50
 
 # Check server logs for registration errors
-sudo journalctl -u venya-vault -n 50 | grep -i "cert\|csr\|register"
+sudo journalctl -u venya-core -n 50 | grep -i "cert\|csr\|register"
 ```
 
 ### Revocation list not syncing
@@ -322,9 +322,9 @@ sudo journalctl -u venya-executor -f | grep -i revocation
 
 ```bash
 # Fix permissions
-sudo chown venya-vault:venya-vault /etc/venya/ca/ca.key
+sudo chown venya-core:venya-core /etc/venya/ca/ca.key
 sudo chmod 600 /etc/venya/ca/ca.key
 
-# Restart vault server
-sudo systemctl restart venya-vault
+# Restart core server
+sudo systemctl restart venya-core
 ```

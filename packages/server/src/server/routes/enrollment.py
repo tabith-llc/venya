@@ -73,8 +73,8 @@ async def enrollment_create_token(
     try:
         from datetime import timezone as tz
 
-        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
-        from vault.iam.models import User
+        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.models import User
 
         em = EnrollmentManager(db)
 
@@ -125,7 +125,7 @@ async def enrollment_list_tokens(
     try:
         from datetime import timezone as tz
 
-        from vault.iam.models import EnrollmentToken
+        from core.iam.models import EnrollmentToken
 
         server_config = getattr(request.app.state, "config", None)
         tolerance = (
@@ -173,7 +173,7 @@ async def enrollment_revoke_token(
     """
     db = _get_db(request)
     try:
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         em = EnrollmentManager(db)
         revoked = em.revoke_token(token_id)

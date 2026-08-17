@@ -54,7 +54,7 @@ class TestClearEnrollmentToken:
         """Token is removed from executor.toml and empty bootstrap section is deleted."""
         config_file = tmp_path / "executor.toml"
         config_file.write_text("""
-server_url = "https://venya-vault"
+server_url = "https://venya-core"
 executor_id = "jump-1"
 
 [bootstrap]
@@ -87,7 +87,7 @@ enrollment_token = "enrl_exec_abc123"
         """When only enrollment_token is in bootstrap, entire section is removed."""
         config_file = tmp_path / "executor.toml"
         config_file.write_text("""
-server_url = "https://venya-vault"
+server_url = "https://venya-core"
 executor_id = "jump-1"
 
 [bootstrap]
@@ -120,7 +120,7 @@ enrollment_token = "enrl_exec_abc123"
         """If bootstrap section has no enrollment_token, nothing is removed."""
         config_file = tmp_path / "executor.toml"
         config_file.write_text("""
-server_url = "https://venya-vault"
+server_url = "https://venya-core"
 
 [bootstrap]
 tls_verify = false
@@ -172,7 +172,7 @@ class TestDaemonRegistrationTLSVerification:
 
             from executor.daemon import CertificateManager
 
-            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            config = ExecutorConfig.model_validate({"server_url": "https://core", "executor_id": "test-1"})
             cm = CertificateManager(config)
             cm.register("test-1")
 
@@ -207,7 +207,7 @@ class TestDaemonRegistrationTLSVerification:
 
             from executor.daemon import CertificateManager
 
-            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            config = ExecutorConfig.model_validate({"server_url": "https://core", "executor_id": "test-1"})
             cm = CertificateManager(config)
             cm.register("test-1")
 
@@ -242,7 +242,7 @@ class TestDaemonRegistrationTLSVerification:
 
             from executor.daemon import CertificateManager
 
-            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            config = ExecutorConfig.model_validate({"server_url": "https://core", "executor_id": "test-1"})
             cm = CertificateManager(config)
             cm.register("test-1")
 
@@ -258,7 +258,7 @@ class TestDaemonRegistrationTLSVerification:
              patch("executor.daemon._create_csr", return_value=b"CSR"):
             from executor.daemon import CertificateManager
 
-            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            config = ExecutorConfig.model_validate({"server_url": "https://core", "executor_id": "test-1"})
             cm = CertificateManager(config)
 
             with pytest.raises(RuntimeError, match="Invalid VENYA_TLS_VERIFY"):
@@ -289,7 +289,7 @@ class TestDaemonRegistrationTLSVerification:
 
             from executor.daemon import CertificateManager
 
-            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            config = ExecutorConfig.model_validate({"server_url": "https://core", "executor_id": "test-1"})
             cm = CertificateManager(config)
 
             with pytest.raises(RuntimeError, match="Registration failed. Verify server CA is trusted"):
@@ -315,7 +315,7 @@ class TestDaemonRegistrationTLSVerification:
 
             from executor.daemon import CertificateManager
 
-            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            config = ExecutorConfig.model_validate({"server_url": "https://core", "executor_id": "test-1"})
             cm = CertificateManager(config)
 
             with pytest.raises(httpx2.ConnectError):
@@ -349,7 +349,7 @@ class TestDaemonRegistrationTLSVerification:
 
             from executor.daemon import CertificateManager
 
-            config = ExecutorConfig.model_validate({"server_url": "https://vault", "executor_id": "test-1"})
+            config = ExecutorConfig.model_validate({"server_url": "https://core", "executor_id": "test-1"})
             cm = CertificateManager(config)
             cm.register("test-1")
 

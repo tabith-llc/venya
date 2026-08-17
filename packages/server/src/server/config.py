@@ -16,7 +16,7 @@ class DatabaseConfig(BaseModel):
     """Database configuration."""
 
     database_url: str | None = Field(default=None, description="PostgreSQL database URL")
-    passphrase: str | None = Field(default=None, description="Vault encryption passphrase for DEK/KEK key derivation (required in production)")
+    passphrase: str | None = Field(default=None, description="Core encryption passphrase for DEK/KEK key derivation (required in production)")
     wal_mode: bool = Field(default=True, description="Enable WAL mode")
 
 

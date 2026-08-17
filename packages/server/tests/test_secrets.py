@@ -10,17 +10,17 @@ from starlette.testclient import TestClient
 from server.routes import secrets as secrets_routes
 
 
-def _create_test_app(vault=None, backend=None, auth_user=None):
+def _create_test_app(core=None, backend=None, auth_user=None):
     """Create a minimal test app with secrets routes.
 
     Args:
-        vault: Vault instance mock. Pass None to test "vault not initialized".
+        core: Core instance mock. Pass None to test "core not initialized".
         backend: Backend instance mock.
         auth_user: User dict to set on request state, or None to skip auth.
     """
     app = FastAPI()
-    if vault is not None:
-        app.state.vault = vault
+    if core is not None:
+        app.state.core = core
 
     if backend is not None:
         backend.get_session.return_value = MagicMock()
@@ -39,19 +39,19 @@ def _create_test_app(vault=None, backend=None, auth_user=None):
     return app
 
 
-def _make_mock_vault():
-    """Create a mock vault with realistic behavior."""
-    vault = MagicMock()
+def _make_mock_core():
+    """Create a mock core with realistic behavior."""
+    core = MagicMock()
 
-    vault.put.return_value = MagicMock(
+    core.put.return_value = MagicMock(
         id=42,
         key="test-key",
         role_ids=["dev"],
     )
 
-    vault.get.return_value = "\u2022" * 8
+    core.get.return_value = "\u2022" * 8
 
-    vault.list.return_value = [
+    core.list.return_value = [
         MagicMock(
             id=42,
             key="test-key",
@@ -65,18 +65,18 @@ def _make_mock_vault():
         )
     ]
 
-    vault.delete.return_value = True
+    core.delete.return_value = True
 
-    return vault
+    return core
 
 
 class TestSecretsCreate:
     """Tests for secret creation endpoint."""
 
     def test_create_success(self):
-        """POST /secrets should create a secret via vault.put()."""
-        vault = _make_mock_vault()
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        """POST /secrets should create a secret via core.put()."""
+        core = _make_mock_core()
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post(
@@ -95,7 +95,7 @@ class TestSecretsCreate:
         assert data["role_ids"] == ["dev"]
         assert data["id"] == 42
 
-        vault.put.assert_called_once_with(
+        core.put.assert_called_once_with(
             key="db-password",
             value=b"super-secret",
             user_id="test-user",
@@ -105,8 +105,8 @@ class TestSecretsCreate:
 
     def test_create_unauthenticated(self):
         """POST /secrets should return 401 without auth."""
-        vault = _make_mock_vault()
-        app = _create_test_app(vault=vault)
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
 
         # Remove auth_user from request state by not adding middleware
         client = TestClient(app, raise_server_exceptions=False)
@@ -122,9 +122,9 @@ class TestSecretsCreate:
         # Without auth middleware, auth_user is None -> 401
         assert resp.status_code == 401
 
-    def test_create_vault_not_initialized(self):
-        """POST /secrets should return 503 if vault not initialized."""
-        app = _create_test_app(vault=None, auth_user={"user_id": "test-user"})
+    def test_create_core_not_initialized(self):
+        """POST /secrets should return 503 if core not initialized."""
+        app = _create_test_app(core=None, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post(
@@ -137,13 +137,13 @@ class TestSecretsCreate:
             },
         )
         assert resp.status_code == 503
-        assert "Vault not initialized" in resp.json()["detail"]
+        assert "Core not initialized" in resp.json()["detail"]
 
-    def test_create_vault_error(self):
-        """POST /secrets should return 400 on vault error."""
-        vault = MagicMock()
-        vault.put.side_effect = Exception("Role not found: invalid-role")
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+    def test_create_core_error(self):
+        """POST /secrets should return 400 on core error."""
+        core = MagicMock()
+        core.put.side_effect = Exception("Role not found: invalid-role")
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post(
@@ -164,9 +164,9 @@ class TestSecretsGet:
 
     def test_get_success_human_masked(self):
         """GET /secrets/{key} should return masked value for human."""
-        vault = _make_mock_vault()
-        vault.get.return_value = "\u2022" * 8
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/db-password")
@@ -176,7 +176,7 @@ class TestSecretsGet:
         assert data["value"] == "\u2022" * 8
         assert data["masked"] is True
 
-        vault.get.assert_called_once_with(
+        core.get.assert_called_once_with(
             secret_key="db-password",
             caller="human",
             unmask=False,
@@ -185,9 +185,9 @@ class TestSecretsGet:
 
     def test_get_success_human_unmasked(self):
         """GET /secrets/{key}?unmask=true should return plaintext for human."""
-        vault = _make_mock_vault()
-        vault.get.return_value = "plaintext-secret"
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/db-password", params={"unmask": True})
@@ -199,9 +199,9 @@ class TestSecretsGet:
 
     def test_get_success_executor(self):
         """GET /secrets/{key}?caller=executor should return plaintext."""
-        vault = _make_mock_vault()
-        vault.get.return_value = "plaintext-secret"
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/db-password", params={"caller": "executor"})
@@ -212,9 +212,9 @@ class TestSecretsGet:
 
     def test_get_not_found(self):
         """GET /secrets/{key} should return 404 for missing secret."""
-        vault = MagicMock()
-        vault.get.side_effect = Exception("Secret not found: missing-key")
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = MagicMock()
+        core.get.side_effect = Exception("Secret not found: missing-key")
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/missing-key")
@@ -226,9 +226,9 @@ class TestSecretsGetExecutor:
 
     def test_executor_returns_sentinel_wrapped(self):
         """GET /secrets/{key}/executor should return sentinel-wrapped value."""
-        vault = MagicMock()
-        vault.get.return_value = "my-api-key"
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = MagicMock()
+        core.get.return_value = "my-api-key"
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/api-key/executor")
@@ -239,16 +239,16 @@ class TestSecretsGetExecutor:
         assert data["wrapped_value"].endswith("[/VENYA]")
         assert len(data["detection_hashes"]) >= 1
 
-        vault.get.assert_called_once_with(
+        core.get.assert_called_once_with(
             secret_key="api-key",
             caller="executor",
         )
 
     def test_executor_not_found(self):
         """GET /secrets/{key}/executor should return 404 for missing secret."""
-        vault = MagicMock()
-        vault.get.side_effect = Exception("Secret not found: missing-key")
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = MagicMock()
+        core.get.side_effect = Exception("Secret not found: missing-key")
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/missing-key/executor")
@@ -260,8 +260,8 @@ class TestSecretsList:
 
     def test_list_success(self):
         """GET /secrets should return list of secrets."""
-        vault = _make_mock_vault()
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = _make_mock_core()
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets")
@@ -272,30 +272,30 @@ class TestSecretsList:
         assert data["secrets"][0]["id"] == 42
         assert data["secrets"][0]["role_ids"] == ["dev"]
 
-        vault.list.assert_called_once_with(
+        core.list.assert_called_once_with(
             prefix=None,
             user_id="test-user",
         )
 
     def test_list_with_prefix(self):
         """GET /secrets?prefix= should filter by prefix."""
-        vault = _make_mock_vault()
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = _make_mock_core()
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets", params={"prefix": "db-"})
         assert resp.status_code == 200
 
-        vault.list.assert_called_once_with(
+        core.list.assert_called_once_with(
             prefix="db-",
             user_id="test-user",
         )
 
     def test_list_empty(self):
         """GET /secrets should return empty list when no secrets."""
-        vault = MagicMock()
-        vault.list.return_value = []
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = MagicMock()
+        core.list.return_value = []
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets")
@@ -308,9 +308,9 @@ class TestSecretsDelete:
 
     def test_delete_success(self):
         """DELETE /secrets/{key} should delete the secret."""
-        vault = _make_mock_vault()
-        vault.delete.return_value = True
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = _make_mock_core()
+        core.delete.return_value = True
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.delete("/api/v1/secrets/db-password")
@@ -319,16 +319,16 @@ class TestSecretsDelete:
         assert data["deleted"] is True
         assert data["key"] == "db-password"
 
-        vault.delete.assert_called_once_with(
+        core.delete.assert_called_once_with(
             key="db-password",
             user_id="test-user",
         )
 
     def test_delete_not_found(self):
         """DELETE /secrets/{key} should return deleted=false for missing secret."""
-        vault = MagicMock()
-        vault.delete.return_value = False
-        app = _create_test_app(vault=vault, auth_user={"user_id": "test-user"})
+        core = MagicMock()
+        core.delete.return_value = False
+        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.delete("/api/v1/secrets/missing-key")
@@ -336,9 +336,9 @@ class TestSecretsDelete:
         data = resp.json()
         assert data["deleted"] is False
 
-    def test_delete_vault_error(self):
-        """DELETE /secrets/{key} should return 503 if vault not initialized."""
-        app = _create_test_app(vault=None, auth_user={"user_id": "test-user"})
+    def test_delete_core_error(self):
+        """DELETE /secrets/{key} should return 503 if core not initialized."""
+        app = _create_test_app(core=None, auth_user={"user_id": "test-user"})
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.delete("/api/v1/secrets/db-password")
@@ -350,15 +350,15 @@ class TestRevokeSessionSecrets:
 
     def test_revoke_executor_success(self):
         """POST /sessions/{id}/secrets/revoke should work for executor."""
-        vault = _make_mock_vault()
+        core = _make_mock_core()
         backend = MagicMock()
         session = MagicMock()
         backend.get_session.return_value = session
-        app = _create_test_app(vault=vault, backend=backend, auth_user=None)
+        app = _create_test_app(core=core, backend=backend, auth_user=None)
 
         # Mock AuditEvent import (import is local to the endpoint function)
         mock_audit_event = MagicMock()
-        with patch("vault.iam.models.AuditEvent", mock_audit_event):
+        with patch("core.iam.models.AuditEvent", mock_audit_event):
             # Simulate executor auth via request state
             class ExecutorAuthMiddleware(BaseHTTPMiddleware):
                 async def dispatch(self, request: Request, call_next):
@@ -383,13 +383,13 @@ class TestRevokeSessionSecrets:
 
     def test_revoke_non_executor_denied(self):
         """POST /sessions/{id}/secrets/revoke should deny non-executor."""
-        vault = _make_mock_vault()
+        core = _make_mock_core()
         backend = MagicMock()
         backend.get_session.return_value = MagicMock()
-        app = _create_test_app(vault=vault, backend=backend, auth_user=None)
+        app = _create_test_app(core=core, backend=backend, auth_user=None)
 
         mock_audit_event = MagicMock()
-        with patch("vault.iam.models.AuditEvent", mock_audit_event):
+        with patch("core.iam.models.AuditEvent", mock_audit_event):
             client = TestClient(app, raise_server_exceptions=False)
 
             resp = client.post(

@@ -1,0 +1,4 @@
+# Venya Core Host Requirements
+# Server + Core packages (includes FastAPI, WebAuthn, PostgreSQL client)
+./packages/core
+./packages/server

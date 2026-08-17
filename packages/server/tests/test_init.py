@@ -82,7 +82,7 @@ class MockFido2Manager:
         )
 
 
-class TestInitVault:
+class TestInitCore:
     """Tests for POST /init endpoint."""
 
     def test_init_fresh(self):
@@ -110,7 +110,7 @@ class TestInitVault:
         assert db.add.called
 
     def test_init_already_initialized(self):
-        """Init on fully initialized vault returns 409."""
+        """Init on fully initialized core returns 409."""
         admin_role = _make_role()
         admin_user = _make_user("alice", enrolled_at="2026-01-01")
         membership = _make_membership()

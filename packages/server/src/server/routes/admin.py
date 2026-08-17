@@ -6,7 +6,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 
-from vault.utils.entropy import get_secure_token
+from core.utils.entropy import get_secure_token
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -234,8 +234,8 @@ async def admin_enroll(
     try:
         from datetime import timezone as tz
 
-        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
-        from vault.iam.models import User
+        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.models import User
 
         em = EnrollmentManager(db)
 
@@ -302,8 +302,8 @@ async def admin_create_user(
     try:
         from datetime import timezone as tz
 
-        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
-        from vault.iam.models import Role, RoleMember, User
+        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.models import Role, RoleMember, User
 
         em = EnrollmentManager(db)
 
@@ -378,7 +378,7 @@ async def admin_remove(
     """Remove a user (admin only)."""
     db = _get_db(request)
     try:
-        from vault.iam.models import RoleMember, Session, User
+        from core.iam.models import RoleMember, Session, User
 
         user = db.query(User).filter(User.user_id == user_id).first()
         if user is None:
@@ -393,7 +393,7 @@ async def admin_remove(
         # Remove sessions
         db.query(Session).filter(Session.user_id == user_id).delete()
         # Remove enrollment tokens (user_id is integer FK)
-        from vault.iam.models import EnrollmentToken
+        from core.iam.models import EnrollmentToken
 
         db.query(EnrollmentToken).filter(EnrollmentToken.user_id == user.id).delete()
         # Remove the user
@@ -424,7 +424,7 @@ async def admin_list_users(
     """List all registered users (admin only)."""
     db = _get_db(request)
     try:
-        from vault.iam.models import User
+        from core.iam.models import User
 
         users = db.query(User).order_by(User.enrolled_at).all()
         result = [
@@ -455,7 +455,7 @@ async def admin_configure_user(
     """Configure user settings (admin only)."""
     db = _get_db(request)
     try:
-        from vault.iam.models import User
+        from core.iam.models import User
 
         user = db.query(User).filter(User.user_id == user_id).first()
         if user is None:
@@ -498,7 +498,7 @@ async def admin_key_version_list(
     """List all key versions (admin only)."""
     db = _get_db(request)
     try:
-        from vault.iam.models import KeyVersion
+        from core.iam.models import KeyVersion
 
         versions = db.query(KeyVersion).order_by(KeyVersion.created_at.desc()).all()
         result = [
@@ -531,7 +531,7 @@ async def admin_key_version_rotate(
     """
     db = _get_db(request)
     try:
-        from vault.iam.models import KeyVersion, KeyRotationJob, KeyRotationSecret, Secret
+        from core.iam.models import KeyVersion, KeyRotationJob, KeyRotationSecret, Secret
 
         # Get current active key version
         active_version = (
@@ -606,7 +606,7 @@ async def admin_key_version_rollback(
     """Roll back a failed rotation job (admin only)."""
     db = _get_db(request)
     try:
-        from vault.iam.models import KeyRotationJob
+        from core.iam.models import KeyRotationJob
 
         job = (
             db.query(KeyRotationJob)
@@ -621,7 +621,7 @@ async def admin_key_version_rollback(
             )
 
         # Count restored secrets (those that were rotated before rollback)
-        from vault.iam.models import KeyRotationSecret
+        from core.iam.models import KeyRotationSecret
 
         restored = (
             db.query(KeyRotationSecret)
@@ -670,7 +670,7 @@ async def admin_set_command_policy(
     """Set executor command policy (admin only)."""
     db = _get_db(request)
     try:
-        from vault.iam.models import CommandPolicy
+        from core.iam.models import CommandPolicy
 
         policy = (
             db.query(CommandPolicy)
@@ -723,7 +723,7 @@ async def admin_recovery(
     """
     db = _get_db(request)
     try:
-        from vault.iam.models import User
+        from core.iam.models import User
 
         # In production, this would validate the recovery code against
         # a secure store and verify the WebAuthn assertion.
@@ -747,7 +747,7 @@ async def admin_recovery(
         db.add(new_user)
 
         # Add admin role (assuming admin role exists with name "admin")
-        from vault.iam.models import Role, RoleMember
+        from core.iam.models import Role, RoleMember
 
         admin_role = (
             db.query(Role).filter(Role.name == "admin").first()
@@ -791,7 +791,7 @@ async def admin_add_allowed_command(
     """Add a command to the allowlist (admin only)."""
     db = _get_db(request)
     try:
-        from vault.iam.models import CommandPolicy
+        from core.iam.models import CommandPolicy
 
         policy = (
             db.query(CommandPolicy)
@@ -841,7 +841,7 @@ async def admin_key_version_deactivate(
     """
     db = _get_db(request)
     try:
-        from vault.iam.models import KeyVersion
+        from core.iam.models import KeyVersion
 
         version = (
             db.query(KeyVersion)
@@ -892,7 +892,7 @@ async def admin_key_version_revoke(
     """
     db = _get_db(request)
     try:
-        from vault.iam.models import KeyVersion, Secret
+        from core.iam.models import KeyVersion, Secret
 
         version = (
             db.query(KeyVersion)
@@ -951,7 +951,7 @@ async def admin_key_rotation_status(
     """Show progress of active rotation jobs (admin only)."""
     db = _get_db(request)
     try:
-        from vault.iam.models import KeyRotationJob
+        from core.iam.models import KeyRotationJob
 
         jobs = (
             db.query(KeyRotationJob)
@@ -987,7 +987,7 @@ async def admin_key_rotation_job_rollback(
     """Roll back a failed or interrupted rotation job (admin only)."""
     db = _get_db(request)
     try:
-        from vault.iam.models import KeyRotationJob, KeyRotationSecret
+        from core.iam.models import KeyRotationJob, KeyRotationSecret
 
         job = (
             db.query(KeyRotationJob)
@@ -1053,7 +1053,7 @@ async def admin_revoke_executor(
     """
     from datetime import datetime, timezone
 
-    from vault.iam.models import ExecutorCert, ExecutorCertRevocation
+    from core.iam.models import ExecutorCert, ExecutorCertRevocation
 
     backend = getattr(request.app.state, "backend", None)
     if backend is None:
@@ -1134,7 +1134,7 @@ async def admin_enroll_executor(
             detail=str(e),
         )
 
-    from vault.iam.models import AuditEvent, ExecutorEnrollmentToken
+    from core.iam.models import AuditEvent, ExecutorEnrollmentToken
 
     backend = getattr(request.app.state, "backend", None)
     if backend is None:
@@ -1185,10 +1185,10 @@ async def admin_enroll_executor(
             "ua": user_agent,
             "sid": str(session_id) if session_id else None,
         }
-        vault = getattr(request.app.state, "vault", None)
-        if vault is None:
-            raise RuntimeError("Vault not initialized — cannot encrypt admin metadata")
-        wrapped_dek, nonce, ciphertext = vault.encrypt(
+        core = getattr(request.app.state, "core", None)
+        if core is None:
+            raise RuntimeError("Core not initialized — cannot encrypt admin metadata")
+        wrapped_dek, nonce, ciphertext = core.encrypt(
             json.dumps(meta_dict).encode("utf-8")
         )
         token.admin_meta_wrapped_dek = wrapped_dek
@@ -1263,8 +1263,8 @@ async def admin_re_enroll(
     try:
         from datetime import timezone as tz
 
-        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
-        from vault.iam.models import User, WebAuthnCredential
+        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.models import User, WebAuthnCredential
 
         em = EnrollmentManager(db)
 
@@ -1347,7 +1347,7 @@ async def admin_list_user_tokens(
     """
     db = _get_db(request)
     try:
-        from vault.iam.models import EnrollmentToken, User
+        from core.iam.models import EnrollmentToken, User
 
         user = db.query(User).filter(User.user_id == user_id).first()
         if user is None:
@@ -1394,8 +1394,8 @@ async def admin_create_user_token(
     """
     db = _get_db(request)
     try:
-        from vault.iam.enrollment_manager import EnrollmentManager
-        from vault.iam.models import User
+        from core.iam.enrollment_manager import EnrollmentManager
+        from core.iam.models import User
 
         em = EnrollmentManager(db)
 
@@ -1449,7 +1449,7 @@ async def admin_revoke_token(
     """
     db = _get_db(request)
     try:
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         em = EnrollmentManager(db)
         revoked = em.revoke_token(token_id)
@@ -1523,7 +1523,7 @@ async def admin_revoke_admin_cert(
     # Check if already revoked (idempotent)
     db = backend.get_session()
     try:
-        from vault.iam.models import AdminCertRevocation
+        from core.iam.models import AdminCertRevocation
 
         existing = (
             db.query(AdminCertRevocation)

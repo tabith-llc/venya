@@ -12,12 +12,12 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger("venya.server")
 
-from vault.vault.backend import Backend, BackendConfig
-from vault.vault.factory import VaultFactory
-from vault.vault.vault import Caller
-from vault.iam.models import Session as SessionModel
-from vault.iam.session_manager import SessionConfig as VaultSessionConfig, SessionManager
-from vault.iam.role_manager import RoleManager
+from core.engine.backend import Backend, BackendConfig
+from core.engine.factory import CoreFactory
+from core.engine.core import Caller
+from core.iam.models import Session as SessionModel
+from core.iam.session_manager import SessionConfig as CoreSessionConfig, SessionManager
+from core.iam.role_manager import RoleManager
 from .utils.time import is_expired
 
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -98,7 +98,7 @@ def get_current_session(
         return None
 
     # Check expiry
-    from vault.iam.session_manager import SessionConfig
+    from core.iam.session_manager import SessionConfig
 
     config = SessionConfig()
     server_config = getattr(request.app.state, "config", None)
@@ -127,7 +127,7 @@ def get_session_manager(backend: Backend = Depends(get_backend)) -> SessionManag
     # Get the config from app state
     # We'll create a temporary session for the manager
     db = backend.get_session()
-    config = getattr(backend, "_session_config", VaultSessionConfig())
+    config = getattr(backend, "_session_config", CoreSessionConfig())
     return SessionManager(db, config)
 
 

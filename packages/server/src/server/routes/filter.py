@@ -137,7 +137,7 @@ async def filter_session_output(
             detail="Backend not initialized",
         )
 
-    from vault.iam.models import Secret, Session as SessionModel
+    from core.iam.models import Secret, Session as SessionModel
 
     db = backend.get_session()
     try:

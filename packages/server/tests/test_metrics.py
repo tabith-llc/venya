@@ -117,9 +117,9 @@ class TestMetricDefinitions:
         assert c is not None
         assert set(c._labelnames) == set()
 
-    def test_vault_operations_counter(self):
-        """venya_vault_operations has operation and result labels."""
-        c = _find_collector("venya_vault_operations")
+    def test_core_operations_counter(self):
+        """venya_core_operations has operation and result labels."""
+        c = _find_collector("venya_core_operations")
         assert c is not None
         assert set(c._labelnames) == {"operation", "result"}
 

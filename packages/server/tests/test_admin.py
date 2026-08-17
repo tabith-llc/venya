@@ -64,7 +64,7 @@ class TestAdminEnroll:
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=mock_em):
+        with patch("core.iam.enrollment_manager.EnrollmentManager", return_value=mock_em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/admin/enroll",
@@ -87,7 +87,7 @@ class TestAdminEnroll:
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        with patch("vault.iam.enrollment_manager.EnrollmentManager", return_value=mock_em):
+        with patch("core.iam.enrollment_manager.EnrollmentManager", return_value=mock_em):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/admin/enroll",
@@ -108,7 +108,7 @@ class TestAdminRemove:
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
 
-        with patch("vault.iam.models.User", user):
+        with patch("core.iam.models.User", user):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.delete("/api/v1/admin/users/user1")
             assert resp.status_code == 200
@@ -730,7 +730,7 @@ class TestAdminReEnroll:
 
     def test_re_enroll_success(self):
         """Should deactivate credentials, revoke tokens, create new token."""
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         mock_user = SimpleNamespace(id=1, user_id="user1", status="active")
         mock_token = SimpleNamespace(id=10)
@@ -803,7 +803,7 @@ class TestAdminReEnroll:
 
     def test_re_enroll_enrollment_error(self):
         """Should return 400 on enrollment manager error."""
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         mock_user = SimpleNamespace(id=1, user_id="user1", status="active")
         db = MagicMock()
@@ -907,7 +907,7 @@ class TestAdminCreateUserToken:
 
     def test_create_token_success(self):
         """Should revoke existing tokens and issue new one."""
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         mock_user = SimpleNamespace(id=1, user_id="user1")
         mock_token = SimpleNamespace(id=11)
@@ -972,7 +972,7 @@ class TestAdminRevokeToken:
 
     def test_revoke_token_success(self):
         """Should revoke a specific enrollment token."""
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         db = MagicMock()
 
@@ -1004,7 +1004,7 @@ class TestAdminRevokeToken:
 
     def test_revoke_token_not_found(self):
         """Should return 400 if token does not exist or cannot be revoked."""
-        from vault.iam.enrollment_manager import EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentManager
 
         db = MagicMock()
 

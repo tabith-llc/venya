@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from vault.utils.entropy import get_secure_token
+from core.utils.entropy import get_secure_token
 
 
 @dataclass
@@ -93,7 +93,7 @@ class Fido2Manager:
 
     def _load_credentials_from_db(self) -> None:
         """Load WebAuthn credentials from the database into the in-memory store."""
-        from vault.iam.models import WebAuthnCredential
+        from core.iam.models import WebAuthnCredential
 
         try:
             db = self.backend.get_session()

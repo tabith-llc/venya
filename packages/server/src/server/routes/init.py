@@ -55,7 +55,7 @@ class ResetResponse(BaseModel):
 async def init_reset(
     request: Request,
 ) -> ResetResponse:
-    """Reset the vault to pre-initialization state.
+    """Reset the core to pre-initialization state.
 
     Only permitted when no users are enrolled (enrolled_at IS NULL for all users).
     Deletes admin role, all users, all role members, and enrollment tokens.
@@ -63,7 +63,7 @@ async def init_reset(
     This is a safety net for failed first-time enrollment attempts.
     """
     from ..dependencies import get_backend
-    from vault.iam.models import Role, RoleMember, User, EnrollmentToken
+    from core.iam.models import Role, RoleMember, User, EnrollmentToken
 
     backend = get_backend(request)
     db = backend.get_session()
@@ -78,7 +78,7 @@ async def init_reset(
         if enrolled_count > 0:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Vault already initialized. Cannot reset.",
+                detail="Core already initialized. Cannot reset.",
             )
 
         # Delete in order to respect foreign key constraints
@@ -88,11 +88,11 @@ async def init_reset(
         db.query(Role).filter(Role.name == "admin").delete()
         db.commit()
 
-        logger.info("Vault reset to pre-initialization state")
+        logger.info("Core reset to pre-initialization state")
 
         return ResetResponse(
             success=True,
-            message="Vault reset to pre-initialization state.",
+            message="Core reset to pre-initialization state.",
         )
     except HTTPException:
         raise
@@ -111,11 +111,11 @@ async def init_reset(
     response_model=InitResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def init_vault(
+async def init_core(
     req: InitRequest,
     request: Request,
 ) -> InitResponse:
-    """Bootstrap the vault: create admin role + generate FIDO2 challenge.
+    """Bootstrap the core: create admin role + generate FIDO2 challenge.
 
     Step 1 of two-step FIDO2 enrollment. Creates the admin role and user
     in pending state (not enrolled), then returns a FIDO2 registration
@@ -129,7 +129,7 @@ async def init_vault(
 
     from ..ca import CAManager
     from ..dependencies import get_backend
-    from vault.iam.models import Role, RoleMember, User
+    from core.iam.models import Role, RoleMember, User
 
     backend = get_backend(request)
     db = backend.get_session()
@@ -158,7 +158,7 @@ async def init_vault(
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
-                        f"Vault already initialized with admin '{user_id_str}'. "
+                        f"Core already initialized with admin '{user_id_str}'. "
                         "Use --installation-reset to start over."
                     ),
                 )
@@ -207,7 +207,7 @@ async def init_vault(
             if not ca_manager.has_ca:
                 try:
                     ca_manager.initialize()
-                    logger.info("CA initialized during vault bootstrap")
+                    logger.info("CA initialized during core bootstrap")
                 except RuntimeError:
                     logger.debug("CA already exists on disk")
 
@@ -295,7 +295,7 @@ async def init_complete(
 
     from ..dependencies import get_backend
     from ..fido2.browser_adapter import browser_registration_to_fido2
-    from vault.iam.models import User, WebAuthnCredential
+    from core.iam.models import User, WebAuthnCredential
     import json
 
     backend = get_backend(request)

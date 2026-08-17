@@ -153,7 +153,7 @@ class BootstrapConfig(BaseModel):
     """Bootstrap configuration for initial executor registration.
 
     These settings are used only during the one-time registration
-    with the vault server. After registration, the enrollment token
+    with the core server. After registration, the enrollment token
     is cleared from the config.
     """
 
@@ -179,7 +179,7 @@ class ExecutorConfig(BaseSettings):
     # Server connection
     server_url: str = Field(
         default="https://localhost:8080",
-        description="Vault server URL",
+        description="Core server URL",
     )
 
     # Bootstrap (registration-only)

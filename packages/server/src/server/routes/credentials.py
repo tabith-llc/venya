@@ -104,7 +104,7 @@ def _verify_elevation(request: Request, db) -> bool:
             detail="Elevation token required. Touch your authenticator to proceed.",
         )
 
-    from vault.iam.models import ElevationToken
+    from core.iam.models import ElevationToken
 
     token_hash = __import__("hashlib").sha256(token.encode()).hexdigest()
     server_config = getattr(request.app.state, "config", None)
@@ -162,7 +162,7 @@ async def credentials_add_start(
             )
 
         # Get existing credential IDs to exclude
-        from vault.iam.models import WebAuthnCredential
+        from core.iam.models import WebAuthnCredential
 
         existing = (
             db.query(WebAuthnCredential.credential_id)
@@ -238,7 +238,7 @@ async def credentials_add_complete(
             ) from e
 
         # Store WebAuthn credential
-        from vault.iam.models import WebAuthnCredential
+        from core.iam.models import WebAuthnCredential
 
         webauthn_cred = WebAuthnCredential(
             user_id=user_id,
@@ -292,7 +292,7 @@ async def credentials_remove(
         user_id = _get_current_user_id(request)
         _verify_elevation(request, db)
 
-        from vault.iam.models import WebAuthnCredential
+        from core.iam.models import WebAuthnCredential
 
         # Find credential
         cred = (
@@ -361,7 +361,7 @@ async def credentials_list(
     try:
         user_id = _get_current_user_id(request)
 
-        from vault.iam.models import WebAuthnCredential
+        from core.iam.models import WebAuthnCredential
 
         credentials = (
             db.query(WebAuthnCredential)

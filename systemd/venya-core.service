@@ -1,0 +1,31 @@
+[Unit]
+Description=Venya Core Server
+After=network.target
+
+[Service]
+Type=simple
+User=venya
+Group=venya
+ExecStart=/opt/venya/.venv/bin/venya-server --config /etc/venya/server.toml
+Environment=VENYA_ENV_DIR=/opt/venya
+Restart=always
+
+# Capability isolation: mlock requires CAP_IPC_LOCK
+AmbientCapabilities=CAP_IPC_LOCK
+
+# Additional hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/venya /var/log/venya /home/venya
+ReadOnlyPaths=/etc/venya
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target

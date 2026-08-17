@@ -1,4 +1,4 @@
 # Venya Executor Host Requirements
-# Executor + Vault packages (includes credential injection, mTLS)
-./packages/vault
+# Executor + Core packages (includes credential injection, mTLS)
+./packages/core
 ./packages/executor

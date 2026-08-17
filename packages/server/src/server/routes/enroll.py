@@ -90,8 +90,8 @@ async def browser_enroll_start(
     """
     db = _get_db(request)
     try:
-        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
-        from vault.iam.models import User
+        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.models import User
 
         em = EnrollmentManager(db)
 
@@ -170,8 +170,8 @@ async def browser_enroll_complete(
     """
     db = _get_db(request)
     try:
-        from vault.iam.enrollment_manager import EnrollmentError, EnrollmentManager
-        from vault.iam.models import User, WebAuthnCredential
+        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.models import User, WebAuthnCredential
 
         em = EnrollmentManager(db)
 
@@ -257,7 +257,7 @@ async def browser_enroll_complete(
         user.auth_mode = "webauthn"
 
         # Create session
-        from vault.iam.session_manager import SessionManager
+        from core.iam.session_manager import SessionManager
 
         sm = SessionManager(db)
         roles = [rm.role_id for rm in user.roles] if user and user.roles else []

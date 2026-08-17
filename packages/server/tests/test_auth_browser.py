@@ -121,8 +121,8 @@ class TestBrowserLoginAssert:
         backend = MagicMock()
         backend.get_session.return_value = db
 
-        with patch("vault.iam.session_manager.SessionManager") as mock_sm, \
-             patch("vault.iam.role_manager.RoleManager") as mock_rm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
+             patch("core.iam.role_manager.RoleManager") as mock_rm:
 
             mock_sm.return_value.create_session.return_value = (session_mock, token_mock)
             mock_rm.return_value.get_user_roles.return_value = []
@@ -196,7 +196,7 @@ class TestBrowserRefresh:
         backend = MagicMock()
         backend.get_session.return_value = db
 
-        with patch("vault.iam.session_manager.SessionManager") as mock_sm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm:
             mock_sm.return_value.refresh_token.return_value = token_mock
             mock_sm.return_value.check_expiry.return_value = True
 
@@ -253,7 +253,7 @@ class TestBrowserLogout:
         backend = MagicMock()
         backend.get_session.return_value = db
 
-        with patch("vault.iam.session_manager.SessionManager") as mock_sm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm:
             mock_sm.return_value.revoke_session.return_value = True
 
             app = _create_test_app(backend=backend)

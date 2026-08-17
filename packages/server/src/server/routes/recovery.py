@@ -49,7 +49,7 @@ async def recovery(
 
     db = backend.get_session()
     try:
-        from vault.iam.models import Role, RoleMember, User
+        from core.iam.models import Role, RoleMember, User
 
         # Validate recovery code against stored hash
         pepper = getattr(

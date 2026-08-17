@@ -25,7 +25,7 @@ from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from server.routes import admin as admin_routes, executors as executors_routes
-from vault.iam.models import ExecutorEnrollmentToken
+from core.iam.models import ExecutorEnrollmentToken
 
 _TEST_PEPPER = "test-pepper-12345"
 
@@ -64,10 +64,10 @@ def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manag
     if ca_manager is not None:
         app.state.ca_manager = ca_manager
 
-    # Mock vault for encrypt() — returns valid tuple for encrypted metadata
-    mock_vault = MagicMock()
-    mock_vault.encrypt.return_value = (b"wrapped_dek", b"nonce", b"ciphertext")
-    app.state.vault = mock_vault
+    # Mock core for encrypt() — returns valid tuple for encrypted metadata
+    mock_core = MagicMock()
+    mock_core.encrypt.return_value = (b"wrapped_dek", b"nonce", b"ciphertext")
+    app.state.core = mock_core
 
     app.include_router(admin_routes.router, prefix="/api/v1")
     app.include_router(executors_routes.router, prefix="/api/v1")

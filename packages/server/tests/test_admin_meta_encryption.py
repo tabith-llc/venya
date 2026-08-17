@@ -11,11 +11,11 @@ from starlette.testclient import TestClient
 
 from server.routes import admin as admin_routes
 from server.config import ServerConfig
-from vault.iam.models import ExecutorEnrollmentToken
+from core.iam.models import ExecutorEnrollmentToken
 
 
-def _create_test_app_with_vault(backend=None, auth_user=None, vault_encrypt_side_effect=None):
-    """Create a minimal test app with admin routes and a mock vault."""
+def _create_test_app_with_core(backend=None, auth_user=None, core_encrypt_side_effect=None):
+    """Create a minimal test app with admin routes and a mock core."""
     app = FastAPI()
     if backend is None:
         backend = MagicMock()
@@ -23,12 +23,12 @@ def _create_test_app_with_vault(backend=None, auth_user=None, vault_encrypt_side
     app.state.backend = backend
     app.state.config = ServerConfig(recovery_code_pepper="test-pepper")
 
-    mock_vault = MagicMock()
-    if vault_encrypt_side_effect:
-        mock_vault.encrypt.side_effect = vault_encrypt_side_effect
+    mock_core = MagicMock()
+    if core_encrypt_side_effect:
+        mock_core.encrypt.side_effect = core_encrypt_side_effect
     else:
-        mock_vault.encrypt.return_value = (b"wrapped_dek", b"nonce", b"ciphertext")
-    app.state.vault = mock_vault
+        mock_core.encrypt.return_value = (b"wrapped_dek", b"nonce", b"ciphertext")
+    app.state.core = mock_core
 
     app.include_router(admin_routes.router, prefix="/api/v1")
 
@@ -39,19 +39,19 @@ def _create_test_app_with_vault(backend=None, auth_user=None, vault_encrypt_side
             return await call_next(request)
 
     app.add_middleware(AuthMiddleware)
-    return app, mock_vault
+    return app, mock_core
 
 
 class TestAdminMetaEncryption:
     """Tests for encrypted admin metadata on enrollment tokens."""
 
     def test_encrypt_called_on_token_creation(self):
-        """vault.encrypt() is called with JSON blob of forensic metadata."""
+        """core.encrypt() is called with JSON blob of forensic metadata."""
         mock_db = MagicMock()
         backend = MagicMock()
         backend.get_session.return_value = mock_db
 
-        app, mock_vault = _create_test_app_with_vault(
+        app, mock_core = _create_test_app_with_core(
             backend=backend,
             auth_user={"user_id": "admin-1", "session_id": "sess-123"},
         )
@@ -60,16 +60,16 @@ class TestAdminMetaEncryption:
         resp = client.post("/api/v1/admin/executors/test-exec/enroll")
         assert resp.status_code == 201
 
-        # vault.encrypt was called with JSON metadata
-        mock_vault.encrypt.assert_called_once()
-        call_args = mock_vault.encrypt.call_args[0][0]
+        # core.encrypt was called with JSON metadata
+        mock_core.encrypt.assert_called_once()
+        call_args = mock_core.encrypt.call_args[0][0]
         meta = json.loads(call_args)
         assert meta["sid"] == "sess-123"
         assert "ip" in meta
         assert "ua" in meta
 
-    def test_encrypt_fails_gracefully_when_vault_missing(self):
-        """admin_enroll_executor raises clear error when vault not initialized."""
+    def test_encrypt_fails_gracefully_when_core_missing(self):
+        """admin_enroll_executor raises clear error when core not initialized."""
         mock_db = MagicMock()
         backend = MagicMock()
         backend.get_session.return_value = mock_db
@@ -77,14 +77,14 @@ class TestAdminMetaEncryption:
         app = FastAPI()
         app.state.backend = backend
         app.state.config = ServerConfig(recovery_code_pepper="test-pepper")
-        # No vault set — should cause clear error
+        # No core set — should cause clear error
         app.include_router(admin_routes.router, prefix="/api/v1")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/admin/executors/test-exec/enroll")
         # RuntimeError caught by generic handler → 400 with clear message
         assert resp.status_code == 400
-        assert "Vault not initialized" in resp.json()["detail"]
+        assert "Core not initialized" in resp.json()["detail"]
 
     def test_encrypted_columns_set_on_token(self):
         """Encrypted metadata columns are set on the token before flush."""
@@ -95,7 +95,7 @@ class TestAdminMetaEncryption:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
 
-        app, mock_vault = _create_test_app_with_vault(backend=backend)
+        app, mock_core = _create_test_app_with_core(backend=backend)
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/admin/executors/test-exec/enroll")
@@ -116,7 +116,7 @@ class TestAdminMetaEncryption:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
 
-        app, mock_vault = _create_test_app_with_vault(
+        app, mock_core = _create_test_app_with_core(
             backend=backend,
             auth_user={"user_id": "admin-1"},  # No session_id
         )
@@ -125,6 +125,6 @@ class TestAdminMetaEncryption:
         resp = client.post("/api/v1/admin/executors/test-exec/enroll")
         assert resp.status_code == 201
 
-        call_args = mock_vault.encrypt.call_args[0][0]
+        call_args = mock_core.encrypt.call_args[0][0]
         meta = json.loads(call_args)
         assert meta["sid"] is None
