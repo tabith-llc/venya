@@ -317,7 +317,28 @@ cp "$INSTALL_DIR/systemd/venya-executor.service" "$SYSTEMD_DIR/"
 cp "$INSTALL_DIR/systemd/tmp-venya_secrets.mount" "$SYSTEMD_DIR/"
 systemctl daemon-reload
 systemctl enable venya-executor.service tmp-venya_secrets.mount
-info "Enabled venya-executor.service"
+systemctl start venya-executor.service
+
+# Wait for service to be running (retry up to 5 times)
+RETRY=0
+MAX_RETRY=5
+while [ $RETRY -lt $MAX_RETRY ]; do
+    if systemctl is-active --quiet venya-executor.service 2>/dev/null; then
+        break
+    fi
+    RETRY=$((RETRY + 1))
+    info "Service not ready, retrying ($RETRY/$MAX_RETRY)..."
+    sleep 2
+    systemctl restart venya-executor.service
+done
+
+if [ $RETRY -eq $MAX_RETRY ]; then
+    error "venya-executor.service failed to start after $MAX_RETRY attempts"
+    systemctl status venya-executor.service --no-pager
+    exit 1
+fi
+
+info "venya-executor.service is running"
 
 # --- Verification ---
 info "Verifying installation..."
