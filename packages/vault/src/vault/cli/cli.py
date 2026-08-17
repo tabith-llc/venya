@@ -516,8 +516,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     register_parser.add_argument(
         "--output-dir",
-        default="/etc/venya",
-        help="Directory to save cert and key (default: /etc/venya)",
+        default="/etc/venya/executor",
+        help="Directory to save cert and key (default: /etc/venya/executor)",
     )
     register_parser.add_argument(
         "--enrollment-token",
@@ -538,8 +538,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     cert_status_parser.add_argument(
         "--cert-path",
-        default="/etc/venya/executor.pem",
-        help="Path to executor certificate (default: /etc/venya/executor.pem)",
+        default="/etc/venya/executor/executor.crt",
+        help="Path to executor certificate (default: /etc/venya/executor/executor.crt)",
     )
 
     # exec cert renew
@@ -548,8 +548,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     cert_renew_parser.add_argument(
         "--cert-path",
-        default="/etc/venya/executor.pem",
-        help="Path to executor certificate (default: /etc/venya/executor.pem)",
+        default="/etc/venya/executor/executor.crt",
+        help="Path to executor certificate (default: /etc/venya/executor/executor.crt)",
     )
     cert_renew_parser.add_argument(
         "--key-path",
@@ -571,8 +571,8 @@ def create_parser() -> argparse.ArgumentParser:
     revoke_parser.add_argument(
         "--cert-path",
         dest="cert_path",
-        default="/etc/venya/executor.pem",
-        help="Path to executor certificate file (used for ID fallback, default: /etc/venya/executor.pem)",
+        default="/etc/venya/executor/executor.crt",
+        help="Path to executor certificate file (used for ID fallback, default: /etc/venya/executor/executor.crt)",
     )
 
     # exec heartbeat
@@ -585,8 +585,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     heartbeat_parser.add_argument(
         "--cert-path",
-        default="/etc/venya/executor.pem",
-        help="Path to executor certificate (default: /etc/venya/executor.pem)",
+        default="/etc/venya/executor/executor.crt",
+        help="Path to executor certificate (default: /etc/venya/executor/executor.crt)",
     )
     heartbeat_parser.add_argument(
         "--key-path",
@@ -608,8 +608,8 @@ def create_parser() -> argparse.ArgumentParser:
     audit_parser.add_argument(
         "--cert-path",
         dest="cert_path",
-        default="/etc/venya/executor.pem",
-        help="Path to executor certificate file (used for ID fallback, default: /etc/venya/executor.pem)",
+        default="/etc/venya/executor/executor.crt",
+        help="Path to executor certificate file (used for ID fallback, default: /etc/venya/executor/executor.crt)",
     )
     audit_parser.add_argument(
         "--hours",

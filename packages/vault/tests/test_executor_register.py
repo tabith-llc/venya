@@ -160,7 +160,7 @@ class TestCLIParsing:
         args = parser.parse_args(["exec", "register"])
         assert args.exec_command == "register"
         assert args.executor_id == "venya-exec"
-        assert args.output_dir == "/etc/venya"
+        assert args.output_dir == "/etc/venya/executor"
         assert args.vault_url is None
 
     def test_exec_register_custom_params(self):
@@ -186,7 +186,7 @@ class TestCLIParsing:
         args = parser.parse_args(["exec", "cert", "status"])
         assert args.exec_command == "cert"
         assert args.cert_command == "status"
-        assert args.cert_path == "/etc/venya/executor.pem"
+        assert args.cert_path == "/etc/venya/executor/executor.crt"
 
     def test_exec_cert_status_custom_path(self):
         """exec cert status accepts --cert-path."""
@@ -379,8 +379,8 @@ class TestExecutorRegister:
 
                 # Verify files were created
                 assert (tmp_path / "certs" / "executor.key").exists()
-                assert (tmp_path / "certs" / "executor.pem").exists()
-                assert (tmp_path / "certs" / "ca.pem").exists()
+                assert (tmp_path / "certs" / "executor.crt").exists()
+                assert (tmp_path / "certs" / "ca.crt").exists()
 
                 # Verify key file permissions
                 key_stat = os.stat(tmp_path / "certs" / "executor.key")

@@ -59,7 +59,7 @@ def _setup_cert_files(tmp_path, executor_id="test-exec", validity_days=30):
     private_key = _generate_test_keypair()
     cert = _generate_test_cert(private_key, executor_id, validity_days)
 
-    cert_path = tmp_path / "executor.pem"
+    cert_path = tmp_path / "executor.crt"
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
     key_path = tmp_path / "executor.key"
@@ -169,7 +169,7 @@ class TestRenewSuccess:
         assert b"CERTIFICATE" in new_cert_data
 
         # Verify CA cert was saved
-        ca_cert_path = tmp_path / "ca.pem"
+        ca_cert_path = tmp_path / "ca.crt"
         assert ca_cert_path.exists()
 
     def test_renew_success_with_custom_paths(self, tmp_path, capsys):
@@ -238,7 +238,7 @@ class TestRenewErrors:
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "test-exec", 30)
 
-        cert_path = tmp_path / "executor.pem"
+        cert_path = tmp_path / "executor.crt"
         cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
         # Intentionally do NOT create the key file
@@ -349,7 +349,7 @@ class TestRenewErrors:
 
     def test_renew_invalid_cert(self, tmp_path, capsys):
         """Corrupt cert file returns exit code 1."""
-        cert_path = tmp_path / "executor.pem"
+        cert_path = tmp_path / "executor.crt"
         cert_path.write_text("this is not a valid certificate")
         key_path = tmp_path / "executor.key"
         key_path.write_text("not a key either")
