@@ -398,3 +398,46 @@ class TestRevokeSessionSecrets:
             )
             assert resp.status_code == 403
             assert "Executor mTLS authentication required" in resp.json()["detail"]
+
+    def test_get_active_key_version_success(self):
+        """GET /key-versions/active should return active key version."""
+        backend = MagicMock()
+        mock_version = MagicMock()
+        mock_version.version_label = "kv-2026-08-16"
+        mock_version.created_at = None
+        mock_query = MagicMock()
+        mock_filtered = MagicMock()
+        mock_filtered.first.return_value = mock_version
+        mock_query.filter.return_value = mock_filtered
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        backend.get_session.return_value = mock_session
+        app = _create_test_app(backend=backend, auth_user={"user_id": "test-user"})
+        # Re-set after _create_test_app which overwrites it
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/key-versions/active")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["key_version_id"] == "kv-2026-08-16"
+        assert "created_at" in data
+
+    def test_get_active_key_version_not_found(self):
+        """GET /key-versions/active should return 503 if no active version."""
+        backend = MagicMock()
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = None
+        mock_session = MagicMock()
+        mock_session.query.return_value = mock_query
+        backend.get_session.return_value = mock_session
+        app = _create_test_app(backend=backend, auth_user={"user_id": "test-user"})
+        # Re-set after _create_test_app which overwrites it
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/key-versions/active")
+
+        assert resp.status_code == 503
+        assert "No active key version" in resp.json()["detail"]

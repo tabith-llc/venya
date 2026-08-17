@@ -79,6 +79,13 @@ class RevokeSecretsResponse(BaseModel):
     session_id: str
 
 
+class ActiveKeyVersionResponse(BaseModel):
+    """Response for the active key version."""
+
+    key_version_id: str
+    created_at: str
+
+
 # --- Helper functions ---
 
 
@@ -495,5 +502,42 @@ async def revoke_session_secrets(
     except Exception:
         db.rollback()
         raise
+    finally:
+        db.close()
+
+
+@router.get(
+    "/key-versions/active",
+    response_model=ActiveKeyVersionResponse,
+)
+async def get_active_key_version(
+    request: Request,
+) -> ActiveKeyVersionResponse:
+    """Return the currently active key version ID.
+
+    Used by the frontend to validate key_version_id before
+    encrypting secrets. Non-admin endpoint — only exposes the active
+    version.
+    """
+    db = _get_db(request)
+    try:
+        from vault.iam.models import KeyVersion
+
+        active_version = (
+            db.query(KeyVersion)
+            .filter(KeyVersion.active == True)  # noqa: E712
+            .first()
+        )
+        if active_version is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No active key version configured",
+            )
+        return ActiveKeyVersionResponse(
+            key_version_id=active_version.version_label,
+            created_at=active_version.created_at.isoformat()
+            if active_version.created_at
+            else "",
+        )
     finally:
         db.close()

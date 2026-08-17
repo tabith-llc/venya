@@ -461,16 +461,15 @@
         }
 
         try {
-            // We need key_version_id - for now, use a default or fetch it
-            // The API requires key_version_id, so we need to get it from somewhere
-            // For now, we'll try without and see what happens
-            // Actually, let's check if there's a way to get key versions
-            // For MVP, we'll use a placeholder - the server should handle this
+            var kvResponse = await apiFetch(API_BASE + "/key-versions/active");
+            if (!kvResponse) return;
+            var keyVersionId = kvResponse.key_version_id;
+
             var payload = {
                 key: key,
                 value: value,
                 roles: [roles],
-                key_version_id: "default", // TODO: get from API
+                key_version_id: keyVersionId,
             };
 
             var result = await apiFetch(API_BASE + "/secrets", {
