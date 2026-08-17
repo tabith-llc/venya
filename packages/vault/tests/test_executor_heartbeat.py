@@ -61,7 +61,7 @@ def _setup_cert_files(tmp_path, executor_id="test-exec", validity_days=30):
     private_key = _generate_test_keypair()
     cert = _generate_test_cert(private_key, executor_id, validity_days)
 
-    cert_path = tmp_path / "executor.pem"
+    cert_path = tmp_path / "executor.crt"
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
     key_path = tmp_path / "executor.key"
@@ -388,7 +388,7 @@ class TestHeartbeatInvalidCert:
         from vault.cli.commands import executor_heartbeat
 
         # Write invalid PEM content
-        cert_path = tmp_path / "executor.pem"
+        cert_path = tmp_path / "executor.crt"
         cert_path.write_text("this is not a certificate")
 
         # Also write a valid key (so we get past the key check)
@@ -502,7 +502,7 @@ class TestHeartbeatKeyPath:
 
         assert result == 0
         call_kwargs = MockClient.call_args.kwargs if MockClient.call_args.kwargs else MockClient.call_args[1]
-        # key_path was derived: executor.pem -> executor.key
+        # key_path was derived: executor.crt -> executor.key
         assert call_kwargs["cert"] == (str(cert_path), str(key_path))
 
     def test_heartbeat_custom_key_path(self, tmp_path):
@@ -510,7 +510,7 @@ class TestHeartbeatKeyPath:
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "test-exec", validity_days=30)
 
-        cert_path = tmp_path / "executor.pem"
+        cert_path = tmp_path / "executor.crt"
         cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
         # Custom key path

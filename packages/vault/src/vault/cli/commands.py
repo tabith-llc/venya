@@ -670,7 +670,7 @@ def cmd_admin_revoke_executor(client: APIClient, args: Any) -> int:
     # Build a minimal args-like object with executor_id
     class _RevokeArgs:
         executor_id = args.executor_id
-        cert_path = "/etc/venya/executor.pem"
+        cert_path = "/etc/venya/executor/executor.crt"
 
     return executor_cert_revoke(_RevokeArgs(), client=client)
 
@@ -1688,11 +1688,11 @@ def executor_register(client: APIClient, args: Any) -> int:
         os.chmod(str(key_path), 0o600)
 
         # Save signed certificate
-        cert_path = output_path / "executor.pem"
+        cert_path = output_path / "executor.crt"
         cert_path.write_bytes(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
 
         # Save CA certificate
-        ca_cert_path = output_path / "ca.pem"
+        ca_cert_path = output_path / "ca.crt"
         if ca_cert_pem:
             ca_cert_path.write_bytes(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
 
@@ -1819,7 +1819,7 @@ def executor_cert_status(args: Any) -> int:
 
     Reads the certificate file and prints days until expiry.
     """
-    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor/executor.crt")
     info = _parse_executor_cert(cert_path)
 
     if info is None:
@@ -1849,7 +1849,7 @@ def executor_cert_renew(args: Any) -> int:
     Generates a new ECDSA P-256 keypair + CSR, submits via mTLS to
     /api/v1/executors/register, and saves the new cert/key atomically.
     """
-    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor/executor.crt")
     key_path = getattr(args, "key_path", None)
     if key_path is None:
         key_path = str(Path(cert_path).with_suffix(".key"))
@@ -1974,7 +1974,7 @@ def executor_cert_renew(args: Any) -> int:
         key_tmp.chmod(0o600)
 
         if ca_cert_pem:
-            ca_cert_path = Path(cert_path).with_name("ca.pem")
+            ca_cert_path = Path(cert_path).with_name("ca.crt")
             ca_tmp = ca_cert_path.with_suffix(".pem.tmp")
             ca_tmp.write_bytes(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
             ca_tmp.rename(ca_cert_path)
@@ -2032,7 +2032,7 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
         0 on success, 1 on error.
     """
     executor_id = getattr(args, "executor_id", None)
-    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor/executor.crt")
 
     # Resolve executor_id: explicit arg > local cert CN
     if executor_id is None:
@@ -2073,7 +2073,7 @@ def executor_heartbeat(args: Any) -> int:
     computes the cert fingerprint, and POSTs to /api/v1/heartbeat
     using an mTLS client. Prints the server's response.
     """
-    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor/executor.crt")
     key_path = getattr(args, "key_path", None)
     if key_path is None:
         key_path = str(Path(cert_path).with_suffix(".key"))
@@ -2157,7 +2157,7 @@ def executor_audit(client: APIClient, args: Any) -> int:
     Requires admin or auditor permission (bearer token in config.json).
     """
     executor_id = getattr(args, "executor_id", None)
-    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor/executor.crt")
 
     # Resolve executor_id: explicit arg > local cert CN
     if executor_id is None:
@@ -2219,7 +2219,7 @@ def executor_status(args: Any) -> int:
     Reads local cert file and config to display registration status,
     certificate details, and health. No network calls.
     """
-    cert_path = getattr(args, "cert_path", "/etc/venya/executor.pem")
+    cert_path = getattr(args, "cert_path", "/etc/venya/executor/executor.crt")
     server_url = _get_server_url(args)
     info = _parse_executor_cert(cert_path)
 

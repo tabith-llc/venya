@@ -57,7 +57,7 @@ def _setup_cert_files(tmp_path, executor_id="test-exec", validity_days=30):
     private_key = _generate_test_keypair()
     cert = _generate_test_cert(private_key, executor_id, validity_days)
 
-    cert_path = tmp_path / "executor.pem"
+    cert_path = tmp_path / "executor.crt"
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
     key_path = tmp_path / "executor.key"
@@ -87,7 +87,7 @@ class TestExecutorCertRevoke:
 
         args = MagicMock()
         args.executor_id = "jump-1"
-        args.cert_path = str(tmp_path / "executor.pem")
+        args.cert_path = str(tmp_path / "executor.crt")
 
         from vault.cli.commands import executor_cert_revoke
 
@@ -132,7 +132,7 @@ class TestExecutorCertRevoke:
 
         args = MagicMock()
         args.executor_id = "jump-1"
-        args.cert_path = str(tmp_path / "executor.pem")
+        args.cert_path = str(tmp_path / "executor.crt")
 
         from vault.cli.commands import executor_cert_revoke
 
@@ -153,7 +153,7 @@ class TestExecutorCertRevoke:
 
         args = MagicMock()
         args.executor_id = "unknown-exec"
-        args.cert_path = str(tmp_path / "executor.pem")
+        args.cert_path = str(tmp_path / "executor.crt")
 
         from vault.cli.commands import executor_cert_revoke
 
@@ -174,7 +174,7 @@ class TestExecutorCertRevoke:
 
         args = MagicMock()
         args.executor_id = "jump-1"
-        args.cert_path = str(tmp_path / "executor.pem")
+        args.cert_path = str(tmp_path / "executor.crt")
 
         from vault.cli.commands import executor_cert_revoke
 
