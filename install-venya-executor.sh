@@ -16,8 +16,9 @@ set -euo pipefail
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
 #   VENYA_PASSWORD      - OS venya user password (prompts if unset)
 #   VENYA_TARBALL       - URL of the tarball to install (auto-detected if on same host)
-#   VENYA_EXECUTOR_ID   - Executor ID (default: jump-1)
-#   VENYA_SERVER_URL    - Vault server URL (default: http://localhost:8080)
+#   VENYA_EXECUTOR_ID              - Executor ID (default: jump-1)
+#   VENYA_SERVER_URL               - Vault server URL (default: https://venya-vault)
+#   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
 ###############################################################################
 
 # --- Defaults ---
