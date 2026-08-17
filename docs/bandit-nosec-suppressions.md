@@ -7,9 +7,9 @@ Each line has a corresponding `# nosec` comment added to the source.
 
 | File | Line | Reason |
 |------|------|--------|
-| `packages/executor/src/executor/daemon.py` | 500 | `/tmp/venya-secrets` is on tmpfs, not persistent disk |
-| `packages/executor/src/executor/daemon.py` | 638 | `/tmp/venya-secrets` is on tmpfs, not persistent disk |
-| `packages/executor/src/executor/injector.py` | 166 | `/tmp/venya-secrets` is on tmpfs, not persistent disk |
+| `packages/executor/src/executor/daemon.py` | 500 | `/tmp/venya_secrets` is on tmpfs, not persistent disk |
+| `packages/executor/src/executor/daemon.py` | 638 | `/tmp/venya_secrets` is on tmpfs, not persistent disk |
+| `packages/executor/src/executor/injector.py` | 166 | `/tmp/venya_secrets` is on tmpfs, not persistent disk |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | 30 | `/dev/shm/venya-secrets` is tmpfs, not persistent disk |
 
 ## B105 — Hardcoded password string (non-password strings)

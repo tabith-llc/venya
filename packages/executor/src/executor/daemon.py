@@ -497,7 +497,7 @@ class ReaperLoop:
         self,
         config: ExecutorConfig,
         state: DaemonState,
-        tmpfs_dir: str = "/tmp/venya-secrets",  # nosec B108 — tmpfs, not persistent disk
+        tmpfs_dir: str = "/tmp/venya_secrets",  # nosec B108 — tmpfs, not persistent disk
         http_client: Any | None = None,
         session_id: str | None = None,
     ) -> None:
@@ -635,7 +635,7 @@ class ExecutorDaemon:
         self.reaper = ReaperLoop(
             config,
             self.state,
-            tmpfs_dir="/tmp/venya-secrets",  # nosec B108 — tmpfs, not persistent disk
+            tmpfs_dir="/tmp/venya_secrets",  # nosec B108 — tmpfs, not persistent disk
         )
 
         # Signal handling

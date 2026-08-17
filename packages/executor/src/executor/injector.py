@@ -163,7 +163,7 @@ def parse_sentinels(data: bytes) -> list[tuple[str, bytes]]:
 
 def inject_via_file(
     secret_value: bytes,
-    tmpfs_dir: str = "/tmp/venya-secrets",  # nosec B108 — tmpfs, not persistent disk
+    tmpfs_dir: str = "/tmp/venya_secrets",  # nosec B108 — tmpfs, not persistent disk
 ) -> SecretInjection:
     """Inject a secret via a tmpfs file.
 
