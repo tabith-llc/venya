@@ -101,12 +101,14 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     # Create directories
     mkdir -p "$ADMIN_CA_DIR"
     chmod 700 "$ADMIN_CA_DIR"
+    chown venya:venya "$ADMIN_CA_DIR"
     mkdir -p "$ADMIN_CERT_DIR"
     chmod 700 "$ADMIN_CERT_DIR"
+    chown venya:venya "$ADMIN_CERT_DIR"
 
     # Generate admin CA
     export VENYA_ADMIN_CA_KEY_PASSPHRASE="$ADMIN_CA_PASSPHRASE"
-    sudo -u venya PATH="$INSTALL_DIR/.venv/bin:$PATH" \
+    sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" \
         python -c "
 from pathlib import Path
 from server.ca import AdminCAManager
@@ -118,7 +120,7 @@ print('Admin CA initialized')
 "
 
     # Generate first admin cert
-    sudo -u venya PATH="$INSTALL_DIR/.venv/bin:$PATH" \
+    sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" \
         python -c "
 from pathlib import Path
 from server.ca import AdminCAManager
@@ -355,7 +357,7 @@ systemctl restart caddy > /dev/null 2>&1
 
 # --- Run database migrations (core-specific) ---
 info "Running database migrations..."
-sudo -u venya PATH="$INSTALL_DIR/.venv/bin:$PATH" VENYA_DB_URL="postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya" bash -c "cd $INSTALL_DIR && python -c \"from core.cli.commands import _run_migrations; _run_migrations()\""
+sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" VENYA_DB_URL="postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya" bash -c "cd $INSTALL_DIR && python -c \"from core.cli.commands import _run_migrations; _run_migrations()\""
 info "Database migrations complete"
 
 # --- Install systemd service (core-specific) ---

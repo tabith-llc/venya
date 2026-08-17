@@ -213,7 +213,7 @@ venya_create_venv() {
     local requirements_file="${1:-}"
     shift || true
     local extra_paths="$@"
-    local full_path="/home/venya/.local/bin:${extra_paths}"
+    local full_path="/home/venya/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${extra_paths}"
 
     info "Creating Python virtual environment..."
     VENYA_UV="/home/venya/.local/bin/uv"
