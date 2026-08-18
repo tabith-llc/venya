@@ -100,7 +100,7 @@ class TestAuthRegistrationComplete:
         assert backend.get_session.return_value.add.called
 
     def test_complete_no_backend(self):
-        """POST /auth/registration/complete should work without backend (DB optional)."""
+        """POST /auth/registration/complete must fail without backend — credential must be persisted."""
         cred = SimpleNamespace(
             credential_id="cred-123",
             user_id="user1",
@@ -119,7 +119,8 @@ class TestAuthRegistrationComplete:
                 "response": {"id": "dGVzdA==", "response": {}},
             },
         )
-        assert resp.status_code == 201
+        assert resp.status_code == 503
+        assert "Backend not initialized" in resp.json()["detail"]
 
     def test_complete_invalid_challenge(self):
         """POST /auth/registration/complete should return 400 for invalid challenge."""
@@ -233,7 +234,7 @@ class TestAuthRefresh:
 
     def test_refresh_success(self):
         """POST /auth/refresh should return new access token."""
-        session_mock = SimpleNamespace(id=1, access_token_jti="old-token")
+        session_mock = SimpleNamespace(id=1, access_token="old-token", access_token_jti="uuid-hex")
 
         db = MagicMock()
         db.query.return_value.filter.return_value.first.return_value = session_mock

@@ -120,26 +120,31 @@ async def auth_registration_complete(
             detail=str(e),
         ) from e
 
-    # Store credential in database
+    # Backend must be available — credential was created in FIDO2 manager and must be persisted
     backend = getattr(request.app.state, "backend", None)
-    if backend is not None:
-        db = backend.get_session()
-        try:
-            from core.iam.models import WebAuthnCredential
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backend not initialized",
+        )
 
-            credential = WebAuthnCredential(
-                user_id=cred.user_id,
-                credential_id=cred.credential_id,
-                public_key=cred.public_key,
-                sign_count=cred.sign_count,
-                is_active=True,
-            )
-            db.add(credential)
-            db.commit()
-        except Exception:
-            db.rollback()
-        finally:
-            db.close()
+    db = backend.get_session()
+    try:
+        from core.iam.models import WebAuthnCredential
+
+        credential = WebAuthnCredential(
+            user_id=cred.user_id,
+            credential_id=cred.credential_id,
+            public_key=cred.public_key,
+            sign_count=cred.sign_count,
+            is_active=True,
+        )
+        db.add(credential)
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
 
     return RegistrationCompleteResponse(credential_id=cred.credential_id)
 
@@ -293,10 +298,10 @@ async def auth_refresh(
         )
         manager = SessionManager(db, session_config)
 
-        # Find session by access token JTI
+        # Find session by access token
         session = (
             db.query(SessionModel)
-            .filter(SessionModel.access_token_jti == token)
+            .filter(SessionModel.access_token == token)
             .first()
         )
 
