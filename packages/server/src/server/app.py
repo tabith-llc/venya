@@ -1,9 +1,10 @@
 """FastAPI app factory + lifespan."""
 
-from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from datetime import timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,11 +40,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.config = config  # type: ignore[attr-defined]
 
     # Register routes at creation time (needed for OpenAPI docs)
-    from .routes import admin, audit, auth, auth_browser, credentials, enroll, enrollment, executors, filter as filter_routes, health, init as init_route, recovery, roles, secrets
+    from .routes import admin, audit, auth, auth_elevation, credentials, debug, enroll, enrollment, executors, filter as filter_routes, health, init as init_route, recovery, roles, secrets
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")
-    app.include_router(auth_browser.router, prefix="/api/v1")
+    app.include_router(auth_elevation.router, prefix="/api/v1")
     app.include_router(enroll.router, prefix="/api/v1")
     app.include_router(init_route.router, prefix="/api/v1")
     app.include_router(executors.router, prefix="/api/v1")
@@ -53,6 +54,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(roles.router, prefix="/api/v1")
     app.include_router(enrollment.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
+    app.include_router(debug.router, prefix="/api/v1/admin")
     app.include_router(credentials.router, prefix="/api/v1")
     app.include_router(filter_routes.router, prefix="/api/v1")
 
@@ -113,7 +115,8 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     from .dependencies import init_db
 
     backend = init_db(config.db, db_url=config.db.database_url)
-    logger.info("Database initialized: %s", config.db.database_url or "not configured")
+    from core.utils.sensitive_log import secret
+    logger.info("Database initialized: %s", secret(config.db.database_url) if config.db.database_url else "not configured")
     app.state.backend = backend  # type: ignore[attr-defined]
 
     # Hard failure on missing passphrase in production — prevents silent unencrypted storage
@@ -122,6 +125,14 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             "VENYA_DB_PASSPHRASE is not set. "
             "Core secrets cannot be encrypted without a passphrase. "
             "Set the passphrase in your secrets manager and restart."
+        )
+
+    # Hard failure on missing recovery code pepper — prevents rainbow table attacks
+    if not config.recovery_code_pepper:
+        raise RuntimeError(
+            "Recovery code pepper must be configured. Set VENYA_RECOVERY_PEPPER "
+            "or config.recovery_code_pepper. Recovery codes without a server-side "
+            "pepper are vulnerable to rainbow table attacks."
         )
 
     # Best-effort check: verify disk encryption for PostgreSQL data directory
@@ -204,8 +215,8 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
                     )
                     cleanup_threshold = hard_cap_threshold - __import__("datetime").timedelta(seconds=tolerance)
                     deleted = db.execute(
-                        text("DELETE FROM sessions WHERE expires_at < :threshold"),
-                        {"threshold": cleanup_threshold},
+                        text("DELETE FROM sessions WHERE expires_at < :threshold LIMIT :limit"),
+                        {"threshold": cleanup_threshold, "limit": 1000},
                     )
                     db.commit()
                     logger.info("Session cleanup: deleted %d expired sessions", deleted.rowcount)
@@ -233,6 +244,19 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
                     except Exception:
                         db.rollback()
                         logger.exception("Admin identity metadata purge failed")
+
+                    # Clean up expired rate limit counters (older than 1 hour)
+                    try:
+                        deleted = db.execute(
+                            text("DELETE FROM rate_limit_failures WHERE window_start < :threshold"),
+                            {"threshold": now - timedelta(hours=1)},
+                        )
+                        db.commit()
+                        if deleted.rowcount:
+                            logger.info("Cleaned up %d expired rate limit counters", deleted.rowcount)
+                    except Exception:
+                        db.rollback()
+                        logger.exception("Rate limit cleanup failed")
                 except Exception:
                     db.rollback()
                     logger.exception("Session cleanup failed")
@@ -241,7 +265,8 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             except Exception:
                 logger.exception("Session cleanup loop error")
 
-    cleanup_task = asyncio.create_task(session_cleanup_loop())
+    cleanup_task = asyncio.create_task(session_cleanup_loop(), name="session-cleanup")
+    cleanup_task._created_at = time.monotonic()  # type: ignore[attr-defined]
 
     yield
 
@@ -280,14 +305,14 @@ def main() -> None:
             f"admin_mtls.enabled requires {passphrase_env} environment variable to be set."
         )
 
-    from server.utils.sensitive_log_filter import SensitiveFieldFilter
+    from core.utils.sensitive_log import RedactingFormatter
 
     logging.basicConfig(
         level=logging.DEBUG if config.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     for handler in logging.root.handlers:
-        handler.addFilter(SensitiveFieldFilter())
+        handler.setFormatter(RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 
     app = create_app(config)
 
