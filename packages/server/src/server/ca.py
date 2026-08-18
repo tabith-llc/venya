@@ -207,7 +207,10 @@ class CAManager:
             RuntimeError: If the key cannot be decrypted.
         """
         passphrase = _load_passphrase(self._key_passphrase_env)
-        key_data = self.ca_key_path.read_bytes()
+        try:
+            key_data = self.ca_key_path.read_bytes()
+        except FileNotFoundError:
+            raise RuntimeError(f"CA key file not found at {self.ca_key_path}")
 
         # Check if key appears encrypted
         is_encrypted = b"ENCRYPTED" in key_data
@@ -222,7 +225,11 @@ class CAManager:
             logger.warning("CA key is unencrypted but passphrase is set — ignoring passphrase")
 
         private_key = _deserialize_key(key_data, passphrase)
-        cert = x509.load_pem_x509_certificate(self.ca_cert_path.read_bytes())
+        try:
+            cert_pem = self.ca_cert_path.read_bytes()
+        except FileNotFoundError:
+            raise RuntimeError(f"CA cert file not found at {self.ca_cert_path}")
+        cert = x509.load_pem_x509_certificate(cert_pem)
         return cert, private_key
 
     def sign_csr(
