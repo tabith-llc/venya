@@ -5,7 +5,6 @@ user info to request state. Supports mTLS-based admin endpoint
 authentication via Caddy-layer client certificate verification.
 """
 
-from __future__ import annotations
 
 import logging
 import time
@@ -23,6 +22,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import JSONResponse, Response
 
 from ..utils.time import has_not_yet_started, is_expired
+from core.utils.sensitive_log import token as sensitive_token
 
 logger = logging.getLogger("venya.server")
 
@@ -102,22 +102,8 @@ class SessionMiddleware(BaseHTTPMiddleware):
         "/api/v1/executors/certs/revocation-list",
         "/api/v1/executors/certs/crl",
         "/api/v1/heartbeat",
-        "/api/v1/auth/login/browser/challenge",
-        "/api/v1/auth/login/browser/assert",
-        "/api/v1/auth/refresh/browser",
-        "/api/v1/auth/logout/browser",
         "/api/v1/enroll/browser/start",
         "/api/v1/enroll/browser/complete",
-        "/api/v1/auth/elevate/browser/challenge",
-        "/api/v1/auth/elevate/browser/assert",
-        "/",
-        "/enroll",
-        "/enroll-admin",
-        "/dashboard",
-        "/admin/users",
-        "/admin/tokens",
-        "/credentials",
-        "/favicon.ico",
     })
 
     ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password
@@ -352,7 +338,12 @@ class SessionMiddleware(BaseHTTPMiddleware):
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]
 
-        logger.info("AUTH DEBUG: cookies=%s, ACCESS_TOKEN_COOKIE=%s, token=%s", dict(request.cookies), self.ACCESS_TOKEN_COOKIE, token[:20] if token else "None")
+        logger.info(
+            "AUTH DEBUG: cookies=%s, ACCESS_TOKEN_COOKIE=%s, token=%s",
+            dict(request.cookies),
+            self.ACCESS_TOKEN_COOKIE,
+            sensitive_token(token, "ACCESS") if token else "None",
+        )
 
         if not token:
             return JSONResponse(
@@ -451,13 +442,14 @@ class SessionMiddleware(BaseHTTPMiddleware):
             user_roles = rm.get_user_roles(user.user_id)
             user_info["roles"] = [str(m.role_id) for m in user_roles]
 
-            # Auto-refresh: if token is near expiry, create new token
+            # Extend session if nearing expiry (self-debouncing: after extension,
+            # expires_at resets to now + session_timeout, so the condition
+            # can only re-fire >= session_timeout * 2/3 later).
+            # 5-minute threshold on a 15-minute session = extend when <1/3 remains.
             now = datetime.now(timezone.utc)
-            if session.expires_at < now + timedelta(seconds=60):
-                new_token = manager.refresh_token(token)
-                if new_token:
-                    user_info["session_id"] = session.id
-                    # Token will be refreshed in response headers by a separate mechanism
+            if session.expires_at < now + timedelta(minutes=5):
+                manager.extend_session(session.id)
+                db.commit()
 
             return user_info
         finally:

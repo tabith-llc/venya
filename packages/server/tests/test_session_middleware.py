@@ -76,9 +76,9 @@ class TestCookieAuth:
             app.state.backend = backend
 
             client = TestClient(app, raise_server_exceptions=False)
+            client.cookies.set("venya_access_token", "token-123")
             resp = client.get(
                 "/api/v1/protected",
-                cookies={"venya_access_token": "token-123"},
             )
             assert resp.status_code == 200
             data = resp.json()
@@ -92,9 +92,9 @@ class TestCookieAuth:
         app.state.backend = backend
 
         client = TestClient(app, raise_server_exceptions=False)
+        client.cookies.set("venya_access_token", "nonexistent")
         resp = client.get(
             "/api/v1/protected",
-            cookies={"venya_access_token": "nonexistent"},
         )
         assert resp.status_code == 401
         assert resp.json()["detail"] == "Invalid or expired token"
@@ -113,9 +113,9 @@ class TestCookieAuth:
             app.state.backend = backend
 
             client = TestClient(app, raise_server_exceptions=False)
+            client.cookies.set("venya_access_token", "expired-token")
             resp = client.get(
                 "/api/v1/protected",
-                cookies={"venya_access_token": "expired-token"},
             )
             assert resp.status_code == 401
 
@@ -234,34 +234,6 @@ class TestPublicPaths:
         resp = client.get("/api/v1/health")
         assert resp.status_code == 200
 
-    def test_browser_challenge_public(self):
-        """Browser login challenge should be public."""
-        from server.routes import auth_browser
-
-        app = _create_test_app()
-        app.include_router(auth_browser.router, prefix="/api/v1")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/auth/login/browser/challenge",
-            json={"user_id": "user1"},
-        )
-        assert resp.status_code == 503  # 503 because FIDO2 not initialized, not 401
-
-    def test_browser_assert_public(self):
-        """Browser login assert should be public."""
-        from server.routes import auth_browser
-
-        app = _create_test_app()
-        app.include_router(auth_browser.router, prefix="/api/v1")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/auth/login/browser/assert",
-            json={"challenge_id": "x", "response": {}},
-        )
-        assert resp.status_code == 503  # FIDO2 not initialized, not 401
-
     def test_enroll_browser_public(self):
         """Browser enrollment start should be public."""
         from server.routes import enroll
@@ -290,31 +262,6 @@ class TestPublicPaths:
         )
         assert resp.status_code == 503  # Backend not initialized, not 401
 
-    def test_elevate_challenge_public(self):
-        """Browser elevate challenge should be public."""
-        from server.routes import auth_browser
-
-        app = _create_test_app()
-        app.include_router(auth_browser.router, prefix="/api/v1")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/auth/elevate/browser/challenge")
-        assert resp.status_code == 503  # Backend not initialized, not 401
-
-    def test_elevate_assert_public(self):
-        """Browser elevate assert should be public."""
-        from server.routes import auth_browser
-
-        app = _create_test_app()
-        app.include_router(auth_browser.router, prefix="/api/v1")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/auth/elevate/browser/assert",
-            json={"challenge_id": "x", "response": {}},
-        )
-        assert resp.status_code == 503  # Backend not initialized, not 401
-
 
 class TestMtlsBypass:
     """Tests for mTLS request bypass."""
@@ -329,3 +276,122 @@ class TestMtlsBypass:
         # verify the _is_mtls_request method exists and is called
         middleware = SessionMiddleware(app)
         assert hasattr(middleware, "_is_mtls_request")
+
+
+class TestSessionExtension:
+    """Tests for middleware session extension (M-19 fix)."""
+
+    def _make_session(self, user_id="user1", expires_at=None, access_token="token-123"):
+        if expires_at is None:
+            expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        user_mock = SimpleNamespace(user_id=user_id)
+        return SimpleNamespace(
+            id=1, user_id=user_id, expires_at=expires_at,
+            user=user_mock, access_token=access_token,
+        )
+
+    def _make_backend(self, session=None, db=None):
+        if db is None:
+            db = MagicMock()
+            db.query.return_value.filter.return_value.first.return_value = session
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        return backend, db
+
+    def test_extend_when_nearing_expiry(self):
+        """Session within 5 minutes of expiry should be extended + committed."""
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=3)
+        session = self._make_session(expires_at=expires_at)
+        backend, db = self._make_backend(session)
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
+             patch("core.iam.role_manager.RoleManager") as mock_rm:
+            mock_sm.return_value.check_expiry.return_value = True
+            mock_sm.return_value.extend_session.return_value = True
+            mock_rm.return_value.get_user_roles.return_value = []
+
+            app = _create_test_app()
+            app.state.backend = backend
+
+            client = TestClient(
+                app, raise_server_exceptions=False,
+                headers={"authorization": "Bearer token-123"},
+            )
+            resp = client.get("/api/v1/protected")
+            assert resp.status_code == 200
+
+            mock_sm.return_value.extend_session.assert_called_once_with(1)
+            db.commit.assert_called_once()
+
+    def test_no_extend_when_fresh(self):
+        """Session with >5 minutes left should not be extended."""
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        session = self._make_session(expires_at=expires_at)
+        backend, db = self._make_backend(session)
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
+             patch("core.iam.role_manager.RoleManager") as mock_rm:
+            mock_sm.return_value.check_expiry.return_value = True
+            mock_sm.return_value.extend_session.return_value = True
+            mock_rm.return_value.get_user_roles.return_value = []
+
+            app = _create_test_app()
+            app.state.backend = backend
+
+            client = TestClient(
+                app, raise_server_exceptions=False,
+                headers={"authorization": "Bearer token-123"},
+            )
+            resp = client.get("/api/v1/protected")
+            assert resp.status_code == 200
+
+            mock_sm.return_value.extend_session.assert_not_called()
+            db.commit.assert_not_called()
+
+    def test_no_refresh_token_called(self):
+        """Middleware should extend, never rotate tokens."""
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=3)
+        session = self._make_session(expires_at=expires_at)
+        backend, db = self._make_backend(session)
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
+             patch("core.iam.role_manager.RoleManager") as mock_rm:
+            mock_sm.return_value.check_expiry.return_value = True
+            mock_sm.return_value.extend_session.return_value = True
+            mock_sm.return_value.refresh_token.return_value = None
+            mock_rm.return_value.get_user_roles.return_value = []
+
+            app = _create_test_app()
+            app.state.backend = backend
+
+            client = TestClient(
+                app, raise_server_exceptions=False,
+                headers={"authorization": "Bearer token-123"},
+            )
+            resp = client.get("/api/v1/protected")
+            assert resp.status_code == 200
+
+            mock_sm.return_value.refresh_token.assert_not_called()
+
+    def test_expired_session_returns_401(self):
+        """Expired session should return 401, not extend."""
+        expires_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        session = self._make_session(expires_at=expires_at)
+        backend, db = self._make_backend(session)
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
+             patch("core.iam.role_manager.RoleManager") as mock_rm:
+            mock_sm.return_value.check_expiry.return_value = False
+            mock_rm.return_value.get_user_roles.return_value = []
+
+            app = _create_test_app()
+            app.state.backend = backend
+
+            client = TestClient(
+                app, raise_server_exceptions=False,
+                headers={"authorization": "Bearer token-123"},
+            )
+            resp = client.get("/api/v1/protected")
+            assert resp.status_code == 401
+
+            mock_sm.return_value.extend_session.assert_not_called()
