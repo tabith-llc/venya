@@ -159,6 +159,49 @@ class TestCAManager:
         assert pem.startswith(b"-----BEGIN CERTIFICATE-----")
         assert pem.endswith(b"-----END CERTIFICATE-----\n")
 
+    def test_restore_ca_key_rejects_invalid_padding(self, ca_dir):
+        """restore_ca_key() should reject invalid PKCS7 padding (M-26)."""
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.hazmat.primitives import hashes
+
+        # Craft a valid encrypted payload: salt(16) + iv(16) + ciphertext
+        passphrase = b"test_passphrase"
+        salt = b"\x00" * 16
+        iv = b"\x01" * 16
+
+        # Derive key the same way restore_ca_key does
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600_000)
+        key = kdf.derive(passphrase)
+
+        # Encrypt a minimal PEM-like plaintext with AES-CBC
+        plaintext = b"-----BEGIN PRIVATE KEY-----\ntest data here\n-----END PRIVATE KEY-----\n"
+        # PKCS7 pad
+        pad_len = 16 - (len(plaintext) % 16)
+        padded_plaintext = plaintext + bytes([pad_len]) * pad_len
+
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+        encryptor = cipher.encryptor()
+        ciphertext = encryptor.update(padded_plaintext) + encryptor.finalize()
+
+        # Create valid payload
+        valid_payload = salt + iv + ciphertext
+
+        # Corrupt the last byte of the ciphertext to break padding
+        corrupted_ciphertext = bytearray(ciphertext)
+        corrupted_ciphertext[-1] ^= 0xFF
+        corrupted_payload = salt + iv + bytes(corrupted_ciphertext)
+
+        manager = CAManager(ca_dir)
+
+        # Valid payload should succeed (writes to disk)
+        manager.restore_ca_key(valid_payload, "test_passphrase")
+        assert Path(ca_dir, "ca.key").exists()
+
+        # Corrupted payload should be rejected
+        with pytest.raises(ValueError, match="Invalid passphrase or corrupted data"):
+            manager.restore_ca_key(corrupted_payload, "test_passphrase")
+
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -313,6 +356,7 @@ class TestRevocationList:
         app = FastAPI()
         app.state.backend = MagicMock()
         app.state.backend.get_session.return_value = db
+        ca_manager.purge_expired_revocations = MagicMock(return_value=0)
         app.state.ca_manager = ca_manager
         app.include_router(executors_routes.router, prefix="/api/v1")
         return app
@@ -338,6 +382,38 @@ class TestRevocationList:
         assert resp.status_code == 200
         data = resp.json()
         assert set(data["revoked_serials"]) == {"abc123def4560001", "abc123def4560002"}
+
+    def test_revocation_list_returns_etag(self, ca_manager):
+        """GET /executors/certs/revocation-list should return an ETag header."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        resp = client.get("/api/v1/executors/certs/revocation-list")
+        assert resp.status_code == 200
+        assert "etag" in resp.headers
+
+    def test_revocation_list_304_on_etag_match(self, ca_manager):
+        """GET /executors/certs/revocation-list should return 304 when ETag matches."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+
+        resp1 = client.get("/api/v1/executors/certs/revocation-list")
+        assert resp1.status_code == 200
+        etag = resp1.headers["etag"]
+
+        resp2 = client.get("/api/v1/executors/certs/revocation-list", headers={"If-None-Match": etag})
+        assert resp2.status_code == 304
+        assert resp2.headers["etag"] == etag
+
+    def test_revocation_list_cache_control(self, ca_manager):
+        """GET /executors/certs/revocation-list should return Cache-Control header."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        resp = client.get("/api/v1/executors/certs/revocation-list")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "max-age=300"
 
 
 # ---------------------------------------------------------------------------

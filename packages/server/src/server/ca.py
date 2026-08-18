@@ -5,7 +5,6 @@ Uses ECDSA P-256 for all certificates. Supports passphrase-based
 encryption for CA private key storage.
 """
 
-from __future__ import annotations
 
 import hashlib
 import logging
@@ -447,7 +446,7 @@ class CAManager:
 
         # Remove PKCS7 padding
         padding_len = padded[-1]
-        if padding_len < 1 or padding_len > 16:
+        if padding_len < 1 or padding_len > 16 or padded[-padding_len:] != bytes([padding_len]) * padding_len:
             raise ValueError("Invalid passphrase or corrupted data")
         private_key_pem = padded[:-padding_len]
 
