@@ -4,7 +4,6 @@ Tests registration, rotation, revocation checking, and fingerprint
 computation using real ECDSA P-256 cryptography with mocked HTTP.
 """
 
-from __future__ import annotations
 
 import hashlib
 import os
@@ -452,6 +451,8 @@ class TestCheckRevocation:
         cert_manager.serial = "0000000000000001"
 
         mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"etag": '"abc123"'}
         mock_response.json.return_value = {
             "revoked_serials": ["0000000000000001", "0000000000000002"]
         }
@@ -465,6 +466,8 @@ class TestCheckRevocation:
         cert_manager.serial = "0000000000000001"
 
         mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"etag": '"def456"'}
         mock_response.json.return_value = {"revoked_serials": ["0000000000000002"]}
         mock_response.raise_for_status.return_value = None
 
@@ -476,6 +479,8 @@ class TestCheckRevocation:
         cert_manager.serial = "0000000000000001"
 
         mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"etag": '"empty"'}
         mock_response.json.return_value = {"revoked_serials": []}
         mock_response.raise_for_status.return_value = None
 

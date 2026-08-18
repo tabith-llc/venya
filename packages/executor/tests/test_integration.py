@@ -8,7 +8,6 @@ focus on the TLS/crypto and HTTP layers — proving the executor can
 actually register, rotate, and detect revocation against a real server.
 """
 
-from __future__ import annotations
 
 import hashlib
 import os
@@ -454,6 +453,8 @@ class TestRevocation:
 
         # Mock server response with the serial in the revocation list
         mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"etag": '"abc123"'}
         mock_response.json.return_value = {
             "revoked_serials": [cert_manager.serial, "0000000000000002"]
         }
@@ -477,6 +478,8 @@ class TestRevocation:
         cert_manager.serial = format(initial_cert.serial_number, "016x")
 
         mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"etag": '"def456"'}
         mock_response.json.return_value = {
             "revoked_serials": ["0000000000000001", "0000000000000002"]
         }

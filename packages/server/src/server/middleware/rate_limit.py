@@ -1,61 +1,77 @@
 """Rate limiting middleware.
 
 Per-IP and per-session throttling to prevent brute force attacks.
+Uses PostgreSQL fixed-window counters for multi-worker safety.
 """
 
-from __future__ import annotations
 
-import time
 import logging
-from collections import defaultdict
-from typing import Any
+import time
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 
-from core.engine.rate_limiter import RateLimiter as CoreRateLimiter, RateLimitExceededError
+from core.engine.rate_limiter import RateLimitExceededError
 
 from .. import metrics
 
 logger = logging.getLogger("venya.server")
 
+# Fixed-window bucket sizes
+_GENERIC_WINDOW = timedelta(minutes=1)
+_AUTH_WINDOW = timedelta(minutes=1)
+_BREAK_GLASS_WINDOW = timedelta(hours=1)
+
+
+def _truncate_to_window(dt: datetime, window: timedelta) -> datetime:
+    """Truncate datetime to the start of its fixed-window bucket.
+
+    For 1-minute windows: truncates to the minute.
+    For 1-hour windows: truncates to the hour.
+    """
+    if window == _GENERIC_WINDOW:
+        return dt.replace(second=0, microsecond=0)
+    elif window == _BREAK_GLASS_WINDOW:
+        return dt.replace(minute=0, second=0, microsecond=0)
+    return dt.replace(second=0, microsecond=0)
+
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Per-IP rate limiting middleware.
+    """Per-IP rate limiting middleware backed by PostgreSQL.
 
-    Tracks request counts per IP address and enforces limits.
-    Works in tandem with the core's per-account rate limiter.
+    Uses fixed-window counters stored in the rate_limit_failures table.
+    Each request does a single UPSERT round-trip to increment the counter.
+
+    Fixed-window trade-off: a burst at window boundary allows up to 2x
+    the limit. Acceptable for this use case.
     """
 
     def __init__(
         self,
-        app: Any,
-        config: Any | None = None,
+        app: RequestResponseEndpoint,
+        config=None,
         requests_per_minute: int = 100,
         auth_requests_per_minute: int = 20,
+        break_glass_per_hour: int = 5,
     ) -> None:
-        """
-        Args:
-            app: The next ASGI app.
-            config: RateLimitConfig from server config.
-            requests_per_minute: Max requests per IP per minute.
-            auth_requests_per_minute: Max auth-related requests per IP per minute.
-        """
         super().__init__(app)
 
         if config is not None:
             self.enforce = config.enforce
             self.requests_per_minute = config.ip_rate_limit
             self.auth_requests_per_minute = config.ip_rate_limit
+            self.break_glass_per_hour = config.break_glass_requests_per_hour
         else:
             self.enforce = True
             self.requests_per_minute = requests_per_minute
             self.auth_requests_per_minute = auth_requests_per_minute
+            self.break_glass_per_hour = 5
 
-        # In-memory rate limit counters: ip -> list of timestamps
-        self._requests: dict[str, list[float]] = defaultdict(list)
-        self._auth_requests: dict[str, list[float]] = defaultdict(list)
+        # In-memory break-glass failure tracking for exponential backoff.
+        # Short-lived (seconds), doesn't need to be shared across workers.
+        self._break_glass_failures: dict[str, list[float]] = {}
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
@@ -66,64 +82,128 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not self.enforce:
             return await call_next(request)
 
-        # Check auth rate limit for auth endpoints
-        if self._is_auth_endpoint(request.url.path):
-            self._check_rate_limit(ip, self._auth_requests, self.auth_requests_per_minute)
+        # Determine endpoint type and window
+        if self._is_break_glass_endpoint(request.url.path):
+            endpoint_type = "break_glass"
+            limit = self.break_glass_per_hour
+            window = _BREAK_GLASS_WINDOW
+        elif self._is_auth_endpoint(request.url.path):
+            endpoint_type = "auth"
+            limit = self.auth_requests_per_minute
+            window = _AUTH_WINDOW
         else:
-            self._check_rate_limit(ip, self._requests, self.requests_per_minute)
+            endpoint_type = "generic"
+            limit = self.requests_per_minute
+            window = _GENERIC_WINDOW
 
+        # Check break-glass backoff before processing
+        if endpoint_type == "break_glass" and self._check_break_glass_backoff(ip):
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"detail": "Break-glass endpoint rate limited: too many recent failures"},
+            )
+
+        # UPSERT: atomic increment, returns new count
+        now = datetime.now(timezone.utc)
+        window_start = _truncate_to_window(now, window)
+
+        db = None
+        try:
+            backend = getattr(request.app.state, "backend", None)
+            if backend is None:
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={"detail": "Backend not initialized"},
+                )
+            db = backend.get_session()
+
+            count = self._increment_counter(db, ip, endpoint_type, window_start)
+
+            if count > limit:
+                metrics.RATE_LIMIT_HIT_TOTAL.labels(limit_type=endpoint_type).inc()
+                if endpoint_type == "break_glass":
+                    return JSONResponse(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        content={"detail": "Break-glass endpoint rate limited: too many requests per hour"},
+                    )
+                elif endpoint_type == "auth":
+                    return JSONResponse(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        content={"detail": "Auth endpoint rate limited: too many requests per minute"},
+                    )
+                else:
+                    return JSONResponse(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        content={"detail": "Rate limited: too many requests per minute"},
+                    )
+        finally:
+            if db is not None:
+                db.close()
+
+        # Process the request
         response = await call_next(request)
 
-        # Record the request
-        now = time.time()
-        if self._is_auth_endpoint(request.url.path):
-            self._auth_requests[ip].append(now)
-        else:
-            self._requests[ip].append(now)
-
-        # Clean old entries
-        self._cleanup(ip, now)
+        # Record failure if break-glass returned 401
+        if endpoint_type == "break_glass" and response.status_code == status.HTTP_401_UNAUTHORIZED:
+            self._record_break_glass_failure(ip)
 
         return response
 
-    def _check_rate_limit(
-        self,
-        ip: str,
-        requests: dict[str, list[float]],
-        limit: int,
-    ) -> None:
-        """Check if IP has exceeded rate limit.
+    def _increment_counter(self, db, identifier: str, endpoint_type: str, window_start: datetime) -> int:
+        """Atomically increment a rate limit counter via UPSERT.
 
-        Args:
-            ip: Client IP address.
-            requests: Request timestamp dict.
-            limit: Max requests per window.
+        Returns the new count after increment.
+        """
+        from sqlalchemy import text
 
-        Raises:
-            RateLimitExceededError: If limit exceeded.
+        result = db.execute(
+            text("""
+                INSERT INTO rate_limit_failures (identifier, endpoint_type, window_start, count)
+                VALUES (:identifier, :endpoint_type, :window_start, 1)
+                ON CONFLICT (identifier, endpoint_type, window_start)
+                DO UPDATE SET count = rate_limit_failures.count + 1
+                RETURNING count
+            """),
+            {
+                "identifier": identifier,
+                "endpoint_type": endpoint_type,
+                "window_start": window_start,
+            },
+        )
+        return result.scalar()
+
+    def _check_break_glass_backoff(self, ip: str) -> bool:
+        """Check exponential backoff for break-glass failures.
+
+        Returns True if the client should be delayed/blocked.
+        Backoff: 1s, 2s, 4s, 8s, 16s (capped at 16s).
         """
         now = time.time()
-        window_start = now - 60  # 1-minute window
+        failures = self._break_glass_failures.get(ip, [])
 
-        # Count requests in current window
-        count = sum(1 for t in requests.get(ip, []) if t > window_start)  # nosec B113
+        # Only keep failures within the last hour
+        failures = [t for t in failures if now - t < 3600]
+        if not failures:
+            return False
 
-        if count >= limit:
-            metrics.RATE_LIMIT_HIT_TOTAL.labels(limit_type="ip").inc()
-            raise RateLimitExceededError(
-                f"IP {ip} exceeded {limit} requests per minute"
-            )
+        attempt_count = len(failures)
+        backoff_seconds = min(2 ** (attempt_count - 1), 16)
 
-    def _cleanup(self, ip: str, now: float) -> None:
-        """Remove expired request timestamps."""
-        window_start = now - 60
+        last_failure = failures[-1]
+        elapsed = now - last_failure
 
-        if ip in self._requests:
-            self._requests[ip] = [t for t in self._requests[ip] if t > window_start]
-        if ip in self._auth_requests:
-            self._auth_requests[ip] = [
-                t for t in self._auth_requests[ip] if t > window_start
-            ]
+        if elapsed < backoff_seconds:
+            metrics.RATE_LIMIT_HIT_TOTAL.labels(limit_type="break_glass_backoff").inc()
+            return True
+
+        return False
+
+    def _record_break_glass_failure(self, ip: str) -> None:
+        """Record a break-glass failure for exponential backoff."""
+        now = time.time()
+        if ip not in self._break_glass_failures:
+            self._break_glass_failures[ip] = []
+        self._break_glass_failures[ip].append(now)
 
     def _get_client_ip(self, request: Request) -> str:
         """Extract client IP from request, checking X-Forwarded-For first."""
@@ -142,3 +222,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             "/api/v1/enrollment/",
         )
         return path.startswith(auth_prefixes)
+
+    def _is_break_glass_endpoint(self, path: str) -> bool:
+        """Check if path is a break-glass endpoint."""
+        return path == "/api/v1/recovery"

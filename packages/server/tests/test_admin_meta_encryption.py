@@ -11,6 +11,7 @@ from starlette.testclient import TestClient
 
 from server.routes import admin as admin_routes
 from server.config import ServerConfig
+from server.dependencies import get_current_user, require_admin
 from core.iam.models import ExecutorEnrollmentToken
 
 
@@ -31,6 +32,11 @@ def _create_test_app_with_core(backend=None, auth_user=None, core_encrypt_side_e
     app.state.core = mock_core
 
     app.include_router(admin_routes.router, prefix="/api/v1")
+
+    # Override auth deps so require_admin bypasses real auth
+    TEST_USER = auth_user or {"user_id": "admin-1"}
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+    app.dependency_overrides[require_admin] = lambda: TEST_USER
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -70,6 +76,7 @@ class TestAdminMetaEncryption:
 
     def test_encrypt_fails_gracefully_when_core_missing(self):
         """admin_enroll_executor raises clear error when core not initialized."""
+        from server.dependencies import get_current_user, require_admin
         mock_db = MagicMock()
         backend = MagicMock()
         backend.get_session.return_value = mock_db
@@ -79,6 +86,11 @@ class TestAdminMetaEncryption:
         app.state.config = ServerConfig(recovery_code_pepper="test-pepper")
         # No core set — should cause clear error
         app.include_router(admin_routes.router, prefix="/api/v1")
+
+        # Override auth deps
+        _admin_user = {"user_id": "admin-1"}
+        app.dependency_overrides[get_current_user] = lambda: _admin_user
+        app.dependency_overrides[require_admin] = lambda: _admin_user
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/admin/executors/test-exec/enroll")

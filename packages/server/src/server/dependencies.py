@@ -1,6 +1,5 @@
 """Database session + auth dependencies for FastAPI."""
 
-from __future__ import annotations
 
 import logging
 from collections.abc import Generator
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger("venya.server")
 
 from core.engine.backend import Backend, BackendConfig
+from core.utils.sensitive_log import token as sensitive_token
 from core.engine.factory import CoreFactory
 from core.engine.core import Caller
 from core.iam.models import Session as SessionModel
@@ -94,7 +94,7 @@ def get_current_session(
         .first()
     )
     if session is None:
-        logger.info("GET_SESSION DEBUG: token %s not found in DB", token[:20] if token else "None")
+        logger.info("GET_SESSION DEBUG: token %s not found in DB", sensitive_token(token, "ACCESS") if token else "None")
         return None
 
     # Check expiry
@@ -116,7 +116,7 @@ def get_current_session(
         logger.info("GET_SESSION DEBUG: session %s expired, expires_at=%s, now=%s", session.id, session.expires_at, now)
         return None
 
-    logger.info("GET_SESSION DEBUG: token=%s, session=%s", token[:20] if token else "None", session.id)
+    logger.info("GET_SESSION DEBUG: token=%s, session=%s", sensitive_token(token, "ACCESS") if token else "None", session.id)
     return (db, session)
 
 
@@ -172,22 +172,62 @@ async def get_current_user(
 
 
 def require_role(permission: str):
-    """Dependency factory that requires a specific permission level.
+    """Dependency factory that requires a specific permission tier.
 
     Args:
         permission: Required permission — "read" or "read-write".
 
     Returns:
-        Dependency that checks the user has the required permission.
+        Dependency that allows the request only when the authenticated
+        user holds at least one role whose permission tier meets the
+        required level. "read" passes with any role membership;
+        "read-write" requires at least one read-write role. Executors
+        (mTLS) always pass, consistent with RBACMiddleware.
+
+    Raises:
+        ValueError: If permission is not "read" or "read-write".
+            Raised at factory call time (app startup), not per request.
     """
+    if permission not in ("read", "read-write"):
+        raise ValueError(
+            f"Invalid permission: {permission}. Must be 'read' or 'read-write'"
+        )
+
     async def _checker(
         user_info: dict = Depends(get_current_user),
-        role_manager: RoleManager = Depends(get_role_manager),
-        request: Request = Depends(get_backend),
+        backend: Backend = Depends(get_backend),
     ) -> dict:
-        # This will be properly implemented when we have role context
-        # For now, just return the user info
-        return user_info
+        # Executor (mTLS) has full access — consistent with RBACMiddleware.
+        # Their user_info carries no user_id, so a role lookup is impossible.
+        if user_info.get("caller") == "executor":
+            return user_info
+
+        db = backend.get_session()
+        try:
+            rm = RoleManager(db)
+            permissions = rm.get_user_permissions(user_info["user_id"])
+
+            if permission == "read":
+                if not permissions:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Insufficient permissions",
+                    )
+            else:  # "read-write"
+                if not any(p == "read-write" for p in permissions.values()):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Read-write permission required",
+                    )
+
+            return user_info
+        except HTTPException:
+            raise
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     return _checker
 
@@ -210,3 +250,40 @@ def get_caller(request: Request) -> Caller:
 
     # Otherwise human (CLI)
     return Caller.HUMAN
+
+
+def require_admin(
+    user_info: dict = Depends(get_current_user),
+    backend: Backend = Depends(get_backend),
+) -> dict:
+    """FastAPI dependency that requires admin role.
+
+    Checks that the authenticated user has the admin role by querying
+    the database. Returns user info dict on success, raises HTTPException
+    on failure.
+
+    Raises:
+        HTTPException 403: User lacks admin role.
+    """
+    db = backend.get_session()
+    try:
+        from core.iam.role_manager import RoleManager
+
+        rm = RoleManager(db)
+        admin_role = rm.get_role_by_name("admin")
+        if admin_role is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin role not found",
+            )
+        has_admin = rm.has_permission(
+            user_info["user_id"], admin_role.id, "read-write"
+        )
+        if not has_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin permission required",
+            )
+        return user_info
+    finally:
+        db.close()

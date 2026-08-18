@@ -5,7 +5,6 @@ with configurable clock skew tolerance. Prevents drift across
 call sites by using a single source of truth.
 """
 
-from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone

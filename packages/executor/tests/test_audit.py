@@ -1,6 +1,5 @@
 """Tests for AuditLogger."""
 
-from __future__ import annotations
 
 import threading
 from unittest.mock import MagicMock, patch
@@ -31,10 +30,14 @@ def logger(audit_config: AuditForwarderConfig) -> AuditLogger:
 @pytest.fixture()
 def success_mock() -> MagicMock:
     """Create a properly configured httpx2.Client mock that returns 200."""
-    mock_client = MagicMock()
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_client.__enter__.return_value.post.return_value = mock_response
+
+    mock_client = MagicMock()
+    mock_client.post.return_value = mock_response
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+
     return mock_client
 
 
@@ -111,19 +114,22 @@ class TestAuditLoggerFlush:
         log = AuditLogger(audit_config, session_id="s1")
         log.emit("credential_injected", strategy="memfd", fd_count=1)
 
-        with patch("httpx2.Client", return_value=success_mock) as mock_client_cls:
+        with patch("executor.audit.httpx2.Client", return_value=success_mock) as mock_client_cls:
             log.flush()
 
         mock_client_cls.return_value.__enter__.return_value.post.assert_called_once()
         call_args = mock_client_cls.return_value.__enter__.return_value.post.call_args
-        assert call_args[1]["headers"] == {"Content-Type": "application/x-ndjson"}
+        assert call_args[1]["headers"] == {
+            "Content-Type": "application/x-ndjson",
+            "Content-Encoding": "zstd",
+        }
 
     def test_flush_clears_buffer(self, audit_config: AuditForwarderConfig, success_mock: MagicMock):
         audit_config.remote_url = "http://localhost:9999/audit"
         log = AuditLogger(audit_config, session_id="s1")
         log.emit("credential_injected", strategy="memfd")
 
-        with patch("httpx2.Client", return_value=success_mock):
+        with patch("executor.audit.httpx2.Client", return_value=success_mock):
             log.flush()
 
         assert len(log._buffer) == 0
@@ -146,7 +152,7 @@ class TestAuditLoggerFlush:
         audit_config.max_buffer_size = 5
         log = AuditLogger(audit_config, session_id="s1")
 
-        with patch("httpx2.Client", return_value=success_mock):
+        with patch("executor.audit.httpx2.Client", return_value=success_mock):
             for i in range(5):
                 log.emit("credential_injected", strategy="memfd", fd_count=i + 1)
 
@@ -174,7 +180,7 @@ class TestAuditLoggerShutdown:
         log = AuditLogger(audit_config, session_id="s1")
         log.emit("credential_injected", strategy="memfd")
 
-        with patch("httpx2.Client", return_value=success_mock):
+        with patch("executor.audit.httpx2.Client", return_value=success_mock):
             log.shutdown()
 
         assert len(log._buffer) == 0
@@ -183,3 +189,34 @@ class TestAuditLoggerShutdown:
         log = AuditLogger(audit_config, session_id="s1")
         log.shutdown()
         assert log._shutdown is True
+
+    def test_flush_compressed_with_zstd(self, audit_config: AuditForwarderConfig, success_mock: MagicMock):
+        audit_config.remote_url = "http://localhost:9999/audit"
+        log = AuditLogger(audit_config, session_id="s1")
+        log.emit("credential_injected", strategy="memfd")
+
+        with patch("executor.audit.httpx2.Client", return_value=success_mock) as mock_client_cls:
+            log.flush()
+
+        call_args = mock_client_cls.return_value.__enter__.return_value.post.call_args
+        content = call_args[1]["content"]
+        assert isinstance(content, bytes)
+        import compression.zstd
+        decompressed = compression.zstd.decompress(content)
+        assert b"credential_injected" in decompressed
+
+    def test_flush_compression_reduces_size(self, audit_config: AuditForwarderConfig, success_mock: MagicMock):
+        audit_config.remote_url = "http://localhost:9999/audit"
+        audit_config.max_buffer_size = 1000  # Prevent auto-flush
+        log = AuditLogger(audit_config, session_id="s1")
+        for i in range(100):
+            log.emit("command_executed", command=f"ls -la /path/to/dir_{i}", exit_code=0, duration_ms=42.5)
+
+        with patch("executor.audit.httpx2.Client", return_value=success_mock) as mock_client_cls:
+            log.flush()
+
+        call_args = mock_client_cls.return_value.__enter__.return_value.post.call_args
+        compressed_size = len(call_args[1]["content"])
+        import compression.zstd
+        decompressed = compression.zstd.decompress(call_args[1]["content"])
+        assert compressed_size < len(decompressed)

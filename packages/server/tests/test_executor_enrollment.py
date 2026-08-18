@@ -25,6 +25,7 @@ from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from server.routes import admin as admin_routes, executors as executors_routes
+from server.dependencies import get_current_user, require_admin
 from core.iam.models import ExecutorEnrollmentToken
 
 _TEST_PEPPER = "test-pepper-12345"
@@ -71,6 +72,11 @@ def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manag
 
     app.include_router(admin_routes.router, prefix="/api/v1")
     app.include_router(executors_routes.router, prefix="/api/v1")
+
+    # Override auth deps so require_admin bypasses real auth
+    TEST_USER = auth_user or {"user_id": "test-user"}
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+    app.dependency_overrides[require_admin] = lambda: TEST_USER
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -132,9 +138,15 @@ class TestAdminEnrollExecutor:
 
     def test_enroll_returns_503_when_no_backend(self):
         """Returns 503 when backend is not initialized."""
+        from server.dependencies import get_current_user, require_admin
         app = FastAPI()
         app.state.backend = None
         app.include_router(admin_routes.router, prefix="/api/v1")
+
+        # Override auth deps
+        _admin_user = {"user_id": "test-user"}
+        app.dependency_overrides[get_current_user] = lambda: _admin_user
+        app.dependency_overrides[require_admin] = lambda: _admin_user
 
         client = TestClient(app, raise_server_exceptions=False)
         response = client.post("/api/v1/admin/executors/jump-1/enroll")
@@ -591,7 +603,7 @@ class TestTokenTTL:
         """Default TTL should be 1800 seconds (30 minutes)."""
         from server.config import ServerConfig, ExecutorEnrollmentConfig
 
-        config = ServerConfig()
+        config = ServerConfig(recovery_code_pepper="test-pepper")
         assert config.executor_enrollment.token_ttl_seconds == 1800
 
     def test_token_ttl_uses_configured_value(self):
@@ -608,7 +620,8 @@ class TestTokenTTL:
             auth_user={"user_id": "test-admin"},
         )
         app.state.config = ServerConfig(
-            executor_enrollment=ExecutorEnrollmentConfig(token_ttl_seconds=custom_ttl)
+            executor_enrollment=ExecutorEnrollmentConfig(token_ttl_seconds=custom_ttl),
+            recovery_code_pepper="test-pepper",
         )
 
         client = TestClient(app, raise_server_exceptions=False)

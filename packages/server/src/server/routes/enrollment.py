@@ -6,9 +6,10 @@ Phase 1 admin users endpoint).
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from ..dependencies import require_admin
 from ..utils.time import effective_expiry_check_time
 
 router = APIRouter()
@@ -64,6 +65,7 @@ def _get_db(request: Request):
 async def enrollment_create_token(
     req: EnrollmentTokenCreateRequest,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> EnrollmentTokenCreateResponse:
     """Create an enrollment token for an existing user.
 
@@ -86,7 +88,7 @@ async def enrollment_create_token(
                 detail=f"User '{req.user_id}' not found",
             )
 
-        token, plaintext = em.create_enrollment_token(user.id)
+        token, plaintext = em.create_enrollment_token(user.user_id)
         db.commit()
         return EnrollmentTokenCreateResponse(
             token=plaintext,
@@ -116,6 +118,7 @@ async def enrollment_create_token(
 )
 async def enrollment_list_tokens(
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> EnrollmentTokenListResponse:
     """List active enrollment tokens.
 
@@ -166,6 +169,7 @@ async def enrollment_list_tokens(
 async def enrollment_revoke_token(
     token_id: int,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> EnrollmentTokenRevokeResponse:
     """Revoke an enrollment token.
 

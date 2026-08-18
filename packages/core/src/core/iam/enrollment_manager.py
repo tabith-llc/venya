@@ -8,7 +8,6 @@ Handles enrollment token lifecycle:
 5. Re-enrollment flow (Phase 6)
 """
 
-from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
@@ -54,30 +53,33 @@ class EnrollmentManager:
         """SHA-256 hash a plaintext enrollment token."""
         return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
-    def create_enrollment_token(self, user_id: int) -> tuple[EnrollmentToken, str]:
+    def create_enrollment_token(self, user_id: str) -> tuple[EnrollmentToken, str]:
         """Create an enrollment token for an existing user.
 
         Args:
-            user_id: The integer ID of the user to create a token for.
+            user_id: The user_id of the user to create a token for.
 
         Returns:
             Tuple of (EnrollmentToken record, plaintext token string).
             The plaintext token is returned only once and never stored.
         """
         # Check for active (non-expired, non-completed, non-revoked) tokens
+        # Use FOR UPDATE to prevent race condition: two concurrent calls
+        # must not both see active_count < 3 and both succeed.
         now_minus_tolerance = datetime.now(timezone.utc) - timedelta(
             seconds=self.config.clock_skew_tolerance_seconds
         )
-        active_count = (
+        active_tokens = (
             self.db.query(EnrollmentToken)
             .filter(
                 EnrollmentToken.user_id == user_id,
                 EnrollmentToken.state.in_(["created", "in_progress"]),
                 EnrollmentToken.expires_at > now_minus_tolerance,
             )
-            .count()
+            .with_for_update()
+            .all()
         )
-        if active_count >= 3:
+        if len(active_tokens) >= 3:
             raise EnrollmentError(
                 f"User ID {user_id} already has 3 active enrollment tokens"
             )
@@ -139,7 +141,7 @@ class EnrollmentManager:
         ):
             raise EnrollmentError("Enrollment token has expired")
 
-        user = self.db.query(User).filter(User.id == token.user_id).first()
+        user = self.db.query(User).filter(User.user_id == token.user_id).first()
         if not user or user.status != "pending_enrollment":
             raise EnrollmentError("Linked user does not exist or is not pending enrollment")
 
@@ -210,13 +212,13 @@ class EnrollmentManager:
         self.db.flush()
         return True
 
-    def revoke_all_active_tokens(self, user_id: int) -> int:
+    def revoke_all_active_tokens(self, user_id: str) -> int:
         """Revoke all active enrollment tokens for a user.
 
         Used during re-enrollment (Phase 6).
 
         Args:
-            user_id: The integer ID of the user.
+            user_id: The user_id of the user.
 
         Returns:
             Number of tokens revoked.
@@ -232,11 +234,11 @@ class EnrollmentManager:
         self.db.flush()
         return count
 
-    def get_user_tokens(self, user_id: int) -> list[EnrollmentToken]:
+    def get_user_tokens(self, user_id: str) -> list[EnrollmentToken]:
         """Get all enrollment tokens for a user.
 
         Args:
-            user_id: The integer ID of the user.
+            user_id: The user_id of the user.
 
         Returns:
             List of EnrollmentToken records.

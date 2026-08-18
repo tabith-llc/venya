@@ -11,6 +11,7 @@ from core.utils.entropy import get_secure_token
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from ..dependencies import require_admin
 from ..rate_limit import rate_limit_admin_token_gen
 from ..utils.executor_id import validate_executor_id
 from ..utils.token_binding import compute_binding_hash
@@ -224,6 +225,7 @@ def _get_db(request: Request):
 async def admin_enroll(
     req: AdminEnrollRequest,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminEnrollResponse:
     """Enroll a new user (admin only).
 
@@ -292,6 +294,7 @@ async def admin_enroll(
 async def admin_create_user(
     req: AdminCreateUserRequest,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminCreateUserResponse:
     """Create a new user and enrollment token (admin only).
 
@@ -374,6 +377,7 @@ async def admin_create_user(
 async def admin_remove(
     user_id: str,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminRemoveResponse:
     """Remove a user (admin only)."""
     db = _get_db(request)
@@ -420,6 +424,7 @@ async def admin_remove(
 )
 async def admin_list_users(
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminUserListResponse:
     """List all registered users (admin only)."""
     db = _get_db(request)
@@ -451,6 +456,7 @@ async def admin_configure_user(
     user_id: str,
     req: AdminConfigureUserRequest,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminConfigureUserResponse:
     """Configure user settings (admin only)."""
     db = _get_db(request)
@@ -494,6 +500,7 @@ async def admin_configure_user(
 )
 async def admin_key_version_list(
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminKeyVersionListResponse:
     """List all key versions (admin only)."""
     db = _get_db(request)
@@ -524,6 +531,7 @@ async def admin_key_version_list(
 async def admin_key_version_rotate(
     req: AdminKeyVersionRotateRequest,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminKeyVersionRotateResponse:
     """Start key rotation (admin only).
 
@@ -602,6 +610,7 @@ async def admin_key_version_rotate(
 async def admin_key_version_rollback(
     req: AdminKeyVersionRollbackRequest,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminKeyVersionRollbackResponse:
     """Roll back a failed rotation job (admin only)."""
     db = _get_db(request)
@@ -666,6 +675,7 @@ async def admin_key_version_rollback(
 async def admin_set_command_policy(
     req: AdminSetCommandPolicyRequest,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminSetCommandPolicyResponse:
     """Set executor command policy (admin only)."""
     db = _get_db(request)
@@ -716,6 +726,7 @@ async def admin_set_command_policy(
 async def admin_recovery(
     req: AdminRecoveryRequest,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminRecoveryResponse:
     """Break-glass recovery (admin only).
 
@@ -787,6 +798,7 @@ async def admin_recovery(
 async def admin_add_allowed_command(
     req: AdminAddAllowedCommandRequest,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminAddAllowedCommandResponse:
     """Add a command to the allowlist (admin only)."""
     db = _get_db(request)
@@ -834,6 +846,7 @@ async def admin_add_allowed_command(
 async def admin_key_version_deactivate(
     version_id: int,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminKeyVersionDeactivateResponse:
     """Deactivate a key version (admin only).
 
@@ -884,6 +897,7 @@ async def admin_key_version_deactivate(
 async def admin_key_version_revoke(
     version_id: int,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminKeyVersionRevokeResponse:
     """Revoke a key version (admin only).
 
@@ -947,6 +961,7 @@ async def admin_key_version_revoke(
 )
 async def admin_key_rotation_status(
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminKeyRotationStatusResponse:
     """Show progress of active rotation jobs (admin only)."""
     db = _get_db(request)
@@ -983,6 +998,7 @@ async def admin_key_rotation_status(
 async def admin_key_rotation_job_rollback(
     job_id: int,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminKeyRotationJobRollbackResponse:
     """Roll back a failed or interrupted rotation job (admin only)."""
     db = _get_db(request)
@@ -1045,6 +1061,7 @@ async def admin_key_rotation_job_rollback(
 async def admin_revoke_executor(
     executor_id: str,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminRevokeExecutorResponse:
     """Revoke an executor certificate (admin only).
 
@@ -1098,6 +1115,7 @@ async def admin_revoke_executor(
         metrics.TOKEN_REVOKED.labels(reason="executor_revoked").inc()
 
         logger.info(
+            "Revoked executor cert: executor_id=%s, serial=%s",
             executor_id,
             cert.serial_number,
         )
@@ -1115,6 +1133,7 @@ async def admin_enroll_executor(
     executor_id: str,
     request: Request,
     _rl: None = Depends(rate_limit_admin_token_gen),
+    _: dict = Depends(require_admin),
 ) -> AdminEnrollExecutorResponse:
     """Generate an enrollment token for executor bootstrap registration (admin only).
 
@@ -1250,6 +1269,7 @@ async def admin_enroll_executor(
 async def admin_re_enroll(
     user_id: str,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminReEnrollResponse:
     """Re-enroll a user who has lost all credentials (admin only).
 
@@ -1340,6 +1360,7 @@ async def admin_re_enroll(
 async def admin_list_user_tokens(
     user_id: str,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminUserTokenListResponse:
     """List all enrollment tokens for a user (admin only).
 
@@ -1387,6 +1408,7 @@ async def admin_list_user_tokens(
 async def admin_create_user_token(
     user_id: str,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminUserTokenCreateResponse:
     """Issue a new enrollment token for a user (admin only).
 
@@ -1442,6 +1464,7 @@ async def admin_create_user_token(
 async def admin_revoke_token(
     token_id: int,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminTokenRevokeResponse:
     """Revoke a specific enrollment token (admin only).
 
@@ -1476,6 +1499,7 @@ async def admin_revoke_token(
 async def admin_key_rotation(
     req: AdminKeyVersionRotateRequest,
     request: Request,
+    _: dict = Depends(require_admin),
 ) -> AdminKeyVersionRotateResponse:
     """Start key rotation (alias for /admin/key-versions/rotate).
 
@@ -1492,11 +1516,19 @@ class AdminRevokeCertRequest(BaseModel):
     reason: str = Field(default="unspecified", description="Revocation reason")
 
 
+class AdminRevokeCertResponse(BaseModel):
+    serial: str
+    revoked: bool
+    reason: str
+    already_revoked: bool = False
+
+
 @router.post("/admin/certs/revoke")
 async def admin_revoke_admin_cert(
     req: AdminRevokeCertRequest,
     request: Request,
-) -> dict:
+    _: dict = Depends(require_admin),
+) -> AdminRevokeCertResponse:
     """Revoke an admin certificate by serial number.
 
     Admin only. Idempotent — revoking the same serial twice returns success.
@@ -1533,7 +1565,7 @@ async def admin_revoke_admin_cert(
 
         if existing:
             logger.info("Admin cert %s already revoked (reason: %s)", serial, existing.reason)
-            return {"serial": serial, "revoked": True, "reason": existing.reason, "already_revoked": True}
+            return AdminRevokeCertResponse(serial=serial, revoked=True, reason=existing.reason, already_revoked=True)
 
         # Insert new revocation
         now = datetime.now(timezone.utc)
@@ -1542,7 +1574,7 @@ async def admin_revoke_admin_cert(
         db.commit()
 
         logger.info("Admin cert %s revoked (reason: %s)", serial, req.reason)
-        return {"serial": serial, "revoked": True, "reason": req.reason}
+        return AdminRevokeCertResponse(serial=serial, revoked=True, reason=req.reason)
     except Exception:
         db.rollback()
         raise

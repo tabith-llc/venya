@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from server.routes import admin as admin_routes
+from server.dependencies import get_current_user, require_admin
 
 
 def _create_test_app(backend=None, auth_user=None):
@@ -20,6 +21,11 @@ def _create_test_app(backend=None, auth_user=None):
         backend.get_session.return_value = MagicMock()
     app.state.backend = backend
     app.include_router(admin_routes.router, prefix="/api/v1")
+
+    # Override auth deps so require_admin/require_role bypass real auth
+    TEST_USER = auth_user or {"user_id": "test-user"}
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+    app.dependency_overrides[require_admin] = lambda: TEST_USER
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -100,34 +106,45 @@ class TestAdminRemove:
     """Tests for admin user removal endpoint."""
 
     def test_remove_success(self):
-        """DELETE /admin/users/{id} should remove user."""
-        user = SimpleNamespace(user_id="user1")
-        db = MagicMock()
-        db.query.return_value.first.return_value = user
-        backend = MagicMock()
-        backend.get_session.return_value = db
-        app = _create_test_app(backend=backend)
-
-        with patch("core.iam.models.User", user):
-            client = TestClient(app, raise_server_exceptions=False)
-            resp = client.delete("/api/v1/admin/users/user1")
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["removed"] is True
-            assert data["user_id"] == "user1"
-
-    def test_remove_not_found(self):
-        """DELETE /admin/users/{id} should return 404 for missing user."""
-        db = MagicMock()
+        """DELETE /admin/users/{id} should remove user with row lock."""
+        user = SimpleNamespace(user_id="user1", id=1)
 
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+            def with_for_update(self):
+                return self
             def first(self):
-                return None
-            def delete(self, *args, **kwargs):
+                return user
+            def delete(self):
                 return 0
 
+        db = MagicMock()
+        db.query.return_value = MockQuery()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.delete("/api/v1/admin/users/user1")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["removed"] is True
+        assert data["user_id"] == "user1"
+        db.delete.assert_called_once_with(user)
+        db.commit.assert_called_once()
+
+    def test_remove_not_found(self):
+        """DELETE /admin/users/{id} should return 404 for missing user."""
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def with_for_update(self):
+                return self
+            def first(self):
+                return None
+
+        db = MagicMock()
         db.query.return_value = MockQuery()
         backend = MagicMock()
         backend.get_session.return_value = db
@@ -136,6 +153,36 @@ class TestAdminRemove:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.delete("/api/v1/admin/users/missing")
         assert resp.status_code == 404
+
+    def test_remove_integrity_error(self):
+        """DELETE /admin/users/{id} should return 400 on FK violation."""
+        from sqlalchemy import exc as sqlalchemy_exc
+
+        user = SimpleNamespace(user_id="user1", id=1)
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def with_for_update(self):
+                return self
+            def first(self):
+                return user
+            def delete(self):
+                return 0
+
+        db = MagicMock()
+        db.query.return_value = MockQuery()
+        db.delete.side_effect = sqlalchemy_exc.IntegrityError(
+            "statement", {}, Exception("violates foreign key constraint")
+        )
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.delete("/api/v1/admin/users/user1")
+        assert resp.status_code == 400
+        db.rollback.assert_called_once()
 
 
 class TestAdminListUsers:

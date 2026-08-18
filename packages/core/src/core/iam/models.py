@@ -6,7 +6,6 @@ command policies, executor certificates, elevation tokens, and WebAuthn credenti
 Schema is created via Alembic migrations on install. Models are the ORM interface.
 """
 
-from __future__ import annotations
 
 from datetime import datetime, timezone
 
@@ -19,6 +18,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -69,7 +69,11 @@ class RoleMember(Base):
 
     __tablename__ = "role_members"
 
-    user_id = Column(String(64), ForeignKey("users.user_id"), primary_key=True)
+    user_id = Column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
     role_id = Column(Integer, ForeignKey("roles.id"), primary_key=True)
 
     # Relationships
@@ -82,13 +86,21 @@ class Secret(Base):
 
     __tablename__ = "secrets"
 
+    __table_args__ = (
+        UniqueConstraint("key", "created_by", name="uq_secrets_key_created_by"),
+    )
+
     id = Column(Integer, primary_key=True)
     key = Column(String(512), nullable=False)
     encrypted_value = Column(LargeBinary, nullable=False)
     nonce = Column(LargeBinary, nullable=False)
     wrapped_dek = Column(LargeBinary, nullable=False)
     key_version_id = Column(String(64), nullable=False)
-    created_by = Column(String(64), ForeignKey("users.user_id"), nullable=False)
+    created_by = Column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
@@ -121,10 +133,16 @@ class Session(Base):
     __tablename__ = "sessions"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(String(64), ForeignKey("users.user_id"), nullable=False)
-    expires_at = Column(DateTime(timezone=True), nullable=False)
-    access_token = Column(String(128), nullable=True)
-    access_token_jti = Column(String(64), nullable=True)
+    user_id = Column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    access_token = Column(String(128), nullable=True, unique=True)
+    access_token_jti = Column(String(64), nullable=True, unique=True)
 
     # Relationships
     user = relationship("User", back_populates="sessions")
@@ -137,7 +155,12 @@ class AuditEvent(Base):
 
     id = Column(Integer, primary_key=True)
     event_type = Column(String(64), nullable=False)
-    user_id = Column(String(64), ForeignKey("users.user_id"), nullable=True)
+    user_id = Column(
+        String(64),
+        ForeignKey("users.user_id"),
+        nullable=True,
+        comment="Preserved on user deletion — append-only audit trail",
+    )
     fields = Column(Text, nullable=True)
     timestamp = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
@@ -150,7 +173,11 @@ class EnrollmentToken(Base):
     __tablename__ = "enrollment_tokens"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(ForeignKey("users.id"), nullable=False)
+    user_id = Column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
     token_hash = Column(String(64), unique=True, nullable=False)
     binding_hash = Column(String(64), nullable=False, default="")
     state = Column(String(16), nullable=False, default="created")
@@ -174,7 +201,11 @@ class ExecutorEnrollmentToken(Base):
     executor_id = Column(String(64), nullable=False)
     token_hash = Column(String(64), unique=True, nullable=False)
     state = Column(String(16), nullable=False, default="created")
-    created_by = Column(String(64), ForeignKey("users.user_id"), nullable=False)
+    created_by = Column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
     created_by_session_id = Column(String(64), nullable=True,
         comment="Forensic trace — nullify after 90 days per retention policy")
     created_from_ip = Column(String(45), nullable=True,
@@ -242,13 +273,24 @@ class KeyRotationSecret(Base):
 
 
 class RateLimitFailure(Base):
-    """Restart-recovery for rate limiting."""
+    """Rate limit counters — fixed-window, per-IP/per-user.
+
+    Primary key: (identifier, endpoint_type, window_start).
+    identifier = IP address or user_id depending on scope.
+    endpoint_type = "generic", "auth", or "break_glass".
+    window_start = fixed window bucket start (1min for generic/auth, 1hr for break_glass).
+    count = atomic counter incremented via UPSERT.
+
+    Uses fixed-window buckets (not sliding window). A burst at window
+    boundary allows up to 2x the limit — acceptable for this use case.
+    """
 
     __tablename__ = "rate_limit_failures"
 
-    user_id = Column(String(64), primary_key=True)
-    failed_attempts = Column(Integer, default=0, nullable=False)
-    window_start = Column(DateTime(timezone=True), nullable=False)
+    identifier = Column(String(64), primary_key=True)
+    endpoint_type = Column(String(16), primary_key=True)
+    window_start = Column(DateTime(timezone=True), primary_key=True)
+    count = Column(Integer, default=0, nullable=False)
 
 
 class CommandPolicy(Base):
@@ -277,7 +319,11 @@ class ExecutorCert(Base):
     __tablename__ = "executor_certs"
 
     id = Column(Integer, primary_key=True)
-    executor_id = Column(String(64), ForeignKey("users.user_id"), nullable=False)
+    executor_id = Column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
     serial_number = Column(String(64), unique=True, nullable=False)
     not_before = Column(DateTime(timezone=True), nullable=False)
     not_after = Column(DateTime(timezone=True), nullable=False)
@@ -308,7 +354,11 @@ class ElevationToken(Base):
 
     id = Column(Integer, primary_key=True)
     token_hash = Column(String(64), unique=True, nullable=False)
-    user_id = Column(String(64), ForeignKey("users.user_id"), nullable=False)
+    user_id = Column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used = Column(Boolean, default=False, nullable=False)
 
@@ -319,12 +369,15 @@ class WebAuthnCredential(Base):
     __tablename__ = "webauthn_credentials"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(ForeignKey("users.user_id"), nullable=False)
+    user_id = Column(
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
     credential_id = Column(LargeBinary, unique=True, nullable=False)
     public_key = Column(LargeBinary, nullable=False)
     sign_count = Column(Integer, default=0)
     label = Column(String(64), nullable=True)
-    is_active = Column(Boolean, default=True)
+    is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
 

@@ -253,6 +253,7 @@ class TestAdminEnrollValidation:
     def _create_app(self, backend=None):
         from server.routes import admin as admin_routes
         from server.config import ServerConfig
+        from server.dependencies import get_current_user, require_admin
 
         app = FastAPI()
         if backend is None:
@@ -265,6 +266,11 @@ class TestAdminEnrollValidation:
         mock_core.encrypt.return_value = (b"wrapped_dek", b"nonce", b"ciphertext")
         app.state.core = mock_core
         app.include_router(admin_routes.router, prefix="/api/v1")
+
+        # Override auth deps so require_admin bypasses real auth
+        _admin_user = {"user_id": "admin-1"}
+        app.dependency_overrides[get_current_user] = lambda: _admin_user
+        app.dependency_overrides[require_admin] = lambda: _admin_user
         return app
 
     def test_enroll_valid_executor_id(self):

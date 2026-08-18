@@ -1,10 +1,13 @@
 """Health check endpoints."""
 
+import logging
 import time
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -30,7 +33,8 @@ def _get_cached_check(name: str, check_fn) -> str:
         check_fn()
         result = "ok"
     except Exception as e:
-        result = f"error: {e}"
+        logger.error("Health check '%s' failed: %s", name, e)
+        result = "check_failed"
 
     _health_cache[name] = {"time": now, "result": result}
     return result
@@ -76,9 +80,9 @@ def _determine_status(checks: dict[str, str]) -> tuple[str, int]:
     critical_keys = {"ca"}
     values = list(checks.values())
 
-    has_error = any(v.startswith("error") for v in values)
+    has_error = any(v in ("error", "check_failed") for v in values)
     has_critical_error = any(
-        checks[k].startswith("error") for k in critical_keys if k in checks
+        checks[k] in ("error", "check_failed") for k in critical_keys if k in checks
     )
 
     if has_critical_error:
@@ -146,6 +150,7 @@ async def readiness_check(request: Request) -> dict:
         return {"status": "ok", "checks": {"database": "connected"}}
     except Exception as e:
         db.rollback()
-        return {"status": "degraded", "checks": {"database": f"error: {e}"}}
+        logger.error("Readiness check failed: %s", e)
+        return {"status": "degraded", "checks": {"database": "not_ready"}}
     finally:
         db.close()

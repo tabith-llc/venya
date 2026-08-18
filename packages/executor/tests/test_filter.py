@@ -3,7 +3,6 @@
 Tests hash computation, Stage 1 filtering, performance, and false positive rates.
 """
 
-from __future__ import annotations
 
 import base64
 import hashlib

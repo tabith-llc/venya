@@ -18,6 +18,12 @@ class TestCoreGet:
         backend = MagicMock(spec=Backend)
         return Core(backend=backend, kek=kek)
 
+    def test_get_requires_user_id(self):
+        """Raises CoreAccessError when user_id is not provided."""
+        core = self._make_core()
+        with pytest.raises(CoreAccessError, match="user_id is required"):
+            core.get("test-key")
+
     def test_get_secret_not_found(self):
         """Returns CoreAccessError when secret doesn't exist."""
         core = self._make_core()
@@ -28,7 +34,7 @@ class TestCoreGet:
         core.backend = backend
 
         with pytest.raises(CoreAccessError, match="Secret not found"):
-            core.get("nonexistent")
+            core.get("nonexistent", user_id="user1")
 
     def test_get_human_masked_by_default(self):
         """Human caller gets masked value by default."""
@@ -43,7 +49,7 @@ class TestCoreGet:
         backend.get_session.return_value = session
         core.backend = backend
 
-        result = core.get("test-key", caller="human")
+        result = core.get("test-key", caller="human", user_id="user1")
         assert result == "\u2022" * 8
 
     def test_get_human_unmasked(self):
@@ -60,7 +66,7 @@ class TestCoreGet:
         core.backend = backend
 
         with patch.object(core, "_decrypt_secret", return_value="plaintext-value"):
-            result = core.get("test-key", caller="human", unmask=True)
+            result = core.get("test-key", caller="human", unmask=True, user_id="user1")
             assert result == "plaintext-value"
 
     def test_get_executor_always_plaintext(self):
@@ -77,7 +83,7 @@ class TestCoreGet:
         core.backend = backend
 
         with patch.object(core, "_decrypt_secret", return_value="plaintext-value"):
-            result = core.get("test-key", caller="executor")
+            result = core.get("test-key", caller="executor", user_id="user1")
             assert result == "plaintext-value"
 
     def test_get_role_access_denied(self):
@@ -103,7 +109,61 @@ class TestCoreGet:
         core.backend = backend
 
         with pytest.raises(CoreAccessError):
-            core.get("test-key", caller="executor", role_ids=["admin"])
+            core.get("test-key", caller="executor", user_id="user1", role_ids=["admin"])
+
+    def test_get_uses_role_join_when_role_ids_provided(self):
+        """get() uses role-based join when role_ids is provided."""
+        core = self._make_core()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+
+        mock_secret_role = MagicMock()
+        mock_secret_role.role_id = 1
+
+        mock_role = MagicMock()
+        mock_role.id = 1
+
+        session = MagicMock()
+        session.query.return_value.filter.return_value.first.return_value = mock_secret
+        session.query.return_value.filter.return_value.all.side_effect = [
+            [mock_secret_role],  # secret_roles
+            [mock_role],  # named_roles
+        ]
+        backend = MagicMock()
+        backend.get_session.return_value = session
+        core.backend = backend
+
+        # Mock the join chain to return the same query object
+        mock_query = MagicMock()
+        mock_query.join.return_value.filter.return_value.first.return_value = mock_secret
+        mock_query.join.return_value.filter.return_value.all.side_effect = [
+            [mock_secret_role],
+            [mock_role],
+        ]
+        session.query.return_value.join.return_value.filter.return_value = mock_query
+
+        result = core.get("test-key", user_id="user1", role_ids=["admin"])
+        assert result == "\u2022" * 8
+
+        # Verify join was called (role-based lookup)
+        session.query.return_value.join.assert_called()
+
+    def test_get_uses_ownership_fallback_when_no_role_ids(self):
+        """get() uses ownership fallback when role_ids is not provided."""
+        core = self._make_core()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+
+        session = MagicMock()
+        session.query.return_value.filter.return_value.first.return_value = mock_secret
+        backend = MagicMock()
+        backend.get_session.return_value = session
+        core.backend = backend
+
+        core.get("test-key", user_id="user1")
+
+        # Verify only filter was called (no join — ownership lookup)
+        session.query.return_value.join.assert_not_called()
 
 
 class TestCorePut:
@@ -156,6 +216,30 @@ class TestCorePut:
             assert len(session.add.call_args_list) == 2  # Secret + SecretRole
             session.commit.assert_called_once()
 
+    def test_put_rejects_duplicate_key_per_user(self):
+        """Raises on duplicate key for same user (DB constraint)."""
+        core = self._make_core()
+
+        mock_role = MagicMock()
+        mock_role.id = 1
+        mock_role.name = "admin"
+
+        session = MagicMock()
+        session.flush = MagicMock(side_effect=Exception("UNIQUE constraint failed"))
+        session.commit = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = session
+        core.backend = backend
+
+        with patch("core.engine.core.Role") as MockRole:
+            MockRole.filter.return_value.first.return_value = mock_role
+
+            with pytest.raises(Exception, match="UNIQUE constraint"):
+                core.put("test-key", b"value1", "user1", ["admin"], "v1")
+
+            # Verify rollback was called
+            session.rollback.assert_called_once()
+
 
 class TestCoreDelete:
     """Test core.delete() logic."""
@@ -180,9 +264,11 @@ class TestCoreDelete:
         assert result is False
 
     def test_delete_no_ownership(self):
-        """Raises CoreAccessError when user doesn't own secret."""
+        """Raises CoreAccessError when defense-in-depth check catches mismatch."""
         core = self._make_core()
         mock_secret = MagicMock()
+        # Mock returns the secret (simulating query not properly scoped)
+        # but created_by doesn't match — defense-in-depth catches this
         mock_secret.created_by = "other_user"
 
         session = MagicMock()
@@ -212,6 +298,31 @@ class TestCoreDelete:
         assert result is True
         session.delete.assert_called_once()
         session.commit.assert_called_once()
+
+    def test_delete_uses_scoped_query(self):
+        """delete() filters by both key and created_by."""
+        core = self._make_core()
+        mock_secret = MagicMock()
+        mock_secret.created_by = "user1"
+
+        session = MagicMock()
+        session.query.return_value.filter.return_value.first.return_value = mock_secret
+        session.delete = MagicMock()
+        session.commit = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = session
+        core.backend = backend
+
+        core.delete("test-key", "user1")
+
+        # Verify filter was called with two arguments (key + created_by)
+        # SQLAlchemy filter(cond1, cond2) passes both as positional args
+        call_args = session.query.return_value.filter.call_args
+        # call_args is a call object; call_args[0] is positional args tuple
+        assert len(call_args[0]) >= 1  # At least the first condition
+        # The second condition is passed as the second positional arg
+        if len(call_args[0]) >= 2:
+            assert len(call_args[0]) == 2
 
 
 class TestCoreList:

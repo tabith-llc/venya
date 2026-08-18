@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 from server.routes import enrollment as enrollment_routes
+from server.dependencies import get_current_user, require_admin
 
 
 def _create_test_app(backend=None, auth_user=None):
@@ -20,6 +21,11 @@ def _create_test_app(backend=None, auth_user=None):
         backend.get_session.return_value = MagicMock()
     app.state.backend = backend
     app.include_router(enrollment_routes.router, prefix="/api/v1")
+
+    # Override auth deps so require_admin bypasses real auth
+    TEST_USER = auth_user or {"user_id": "test-user"}
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+    app.dependency_overrides[require_admin] = lambda: TEST_USER
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):

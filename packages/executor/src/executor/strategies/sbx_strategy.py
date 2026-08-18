@@ -12,7 +12,6 @@ the proxy inject credentials into HTTP headers — the raw value
 never enters the VM.
 """
 
-from __future__ import annotations
 
 import logging
 import os

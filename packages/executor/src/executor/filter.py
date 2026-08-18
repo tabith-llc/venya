@@ -9,7 +9,6 @@ The Rust extension implements a 3-stage cascade:
 This module provides the Python API that the executor uses.
 """
 
-from __future__ import annotations
 
 import logging
 from typing import Any

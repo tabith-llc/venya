@@ -8,7 +8,6 @@ wraps the receive callable for chunked/streaming requests (limits
 memory exposure mid-stream).
 """
 
-from __future__ import annotations
 
 import logging
 

@@ -5,7 +5,6 @@ Two-tier token system:
 - Access token: 5 minutes, transparently refreshed within active session
 """
 
-from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
@@ -130,9 +129,8 @@ class SessionManager:
             seconds=self.config.clock_skew_tolerance_seconds
         )
 
-        # Check hard cap
-        session_created_at = session.expires_at - self.config.session_timeout
-        if session_created_at + self.config.max_session_duration < now:
+        # Check hard cap using stored created_at (not derived from expires_at)
+        if session.created_at + self.config.max_session_duration < now:
             return False
 
         # Check idle timeout
@@ -155,9 +153,8 @@ class SessionManager:
 
         now = datetime.now(timezone.utc)
 
-        # Check hard cap
-        session_created_at = session.expires_at - self.config.session_timeout
-        if session_created_at + self.config.max_session_duration < now:
+        # Check hard cap using stored created_at
+        if session.created_at + self.config.max_session_duration < now:
             return False
 
         # Extend idle timeout
@@ -221,13 +218,15 @@ class SessionManager:
     def cleanup_expired(self) -> int:
         """Remove expired sessions.
 
+        Deletes sessions where expires_at has passed (idle timeout expired).
+        This covers both idle-expired sessions and hard-cap expired sessions
+        in a single query.
+
         Returns:
             Number of sessions removed.
         """
         now = datetime.now(timezone.utc)
-        hard_cap_threshold = now - (self.config.max_session_duration - self.config.session_timeout)
-        # Apply clock skew tolerance to cleanup threshold
-        cleanup_threshold = hard_cap_threshold - timedelta(
+        cleanup_threshold = now - timedelta(
             seconds=self.config.clock_skew_tolerance_seconds
         )
         expired = (
@@ -251,9 +250,8 @@ class SessionManager:
             seconds=self.config.clock_skew_tolerance_seconds
         )
 
-        # Hard cap check
-        session_created_at = session.expires_at - self.config.session_timeout
-        if session_created_at + self.config.max_session_duration < now:
+        # Hard cap check using stored created_at
+        if session.created_at + self.config.max_session_duration < now:
             return False
 
         # Idle timeout check

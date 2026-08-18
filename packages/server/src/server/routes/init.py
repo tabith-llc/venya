@@ -84,6 +84,9 @@ async def init_reset(
         # Delete in order to respect foreign key constraints
         db.query(EnrollmentToken).delete()
         db.query(RoleMember).delete()
+        # Defense-in-depth: preserve any system service account even during full reset.
+        # This guard has no functional impact today (no system user exists) but prevents
+        # catastrophic data loss if one is introduced later or if reset is called in prod.
         db.query(User).filter(User.user_id != "system").delete()
         db.query(Role).filter(Role.name == "admin").delete()
         db.commit()

@@ -1,10 +1,14 @@
 """Browser WebAuthn authentication endpoints.
 
+DISABLED — browser auth unmounted as of 2026-08-18.
+Code retained for future web UI re-introduction.
+Elevation endpoints moved to auth_elevation.py (bearer auth).
+"""
+
 Parallel auth endpoints that use Fido2Manager but serialize for browser
 consumption via the browser adapter. Tokens are stored in HttpOnly cookies.
 """
 
-from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
@@ -18,6 +22,7 @@ from ..fido2.browser_adapter import (
     challenge_to_browser_options,
     browser_assertion_to_fido2,
 )
+from core.utils.sensitive_log import token as sensitive_token
 from .. import metrics
 from ..dependencies import get_current_session, get_db
 
@@ -135,7 +140,11 @@ def _get_session_from_cookie(
             .filter(SessionModel.access_token == token)
             .first()
         )
-        logger.info("GET_SESSION DEBUG: token=%s, session=%s", token[:20] if token else "None", session.id if session else "None")
+        logger.info(
+            "GET_SESSION DEBUG: token=%s, session=%s",
+            sensitive_token(token, "ACCESS") if token else "None",
+            session.id if session else "None",
+        )
 
         if session is None:
             logger.info("GET_SESSION DEBUG: session not found in DB")
@@ -292,7 +301,7 @@ async def browser_refresh(
     Validates the existing session cookie and issues a new
     access token cookie with a fresh expiry.
     """
-    logger.info("REFRESH DEBUG: cookies=%s", dict(request.cookies))
+    logger.info("REFRESH DEBUG: cookies=%s", dict(request.cookies))  # noqa: TRY003 — dict repr may contain token, caught by regex fallback
     if session is None:
         logger.info("REFRESH DEBUG: session not found")
         raise HTTPException(

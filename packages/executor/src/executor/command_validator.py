@@ -4,7 +4,6 @@ Enforces an allowlist of permitted commands on the jump host.
 Policy is configurable at initialization and changeable by an admin.
 """
 
-from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any

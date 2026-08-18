@@ -10,7 +10,6 @@ Token model (per plan section 5.1):
     - Tokens stored in memory only (no disk persistence)
 """
 
-from __future__ import annotations
 
 import logging
 import os

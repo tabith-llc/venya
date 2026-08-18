@@ -4,7 +4,6 @@ Tests all three presets (strict, balanced, permissive),
 dangerous pattern detection, custom patterns, and policy management.
 """
 
-from __future__ import annotations
 
 import pytest
 

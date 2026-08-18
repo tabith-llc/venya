@@ -1,6 +1,5 @@
 """Core facade: get/put/delete/list with RBAC enforcement and rate limiting."""
 
-from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -80,7 +79,7 @@ class Core:
             secret_key: The secret key to retrieve.
             caller: Type of caller (human or executor).
             unmask: Whether to return plaintext (requires re-auth for humans).
-            user_id: ID of the requesting user.
+            user_id: ID of the requesting user (required).
             role_ids: Roles to check access against.
 
         Returns:
@@ -91,18 +90,36 @@ class Core:
             CoreAccessError: If access is denied.
             CoreRateLimitError: If rate limit exceeded.
         """
+        if user_id is None:
+            raise CoreAccessError("user_id is required for secret retrieval")
 
-        if user_id:
-            self.rate_limiter.check(user_id)
+        self.rate_limiter.check(user_id)
 
         session = self.backend.get_session()
         try:
-            # Look up the secret
-            secret = (
-                session.query(Secret)
-                .filter(Secret.key == secret_key)
-                .first()
-            )
+            # Look up the secret with scoping
+            if role_ids:
+                # Role-based join: find secret accessible via provided roles
+                secret = (
+                    session.query(Secret)
+                    .join(SecretRole, SecretRole.secret_id == Secret.id)
+                    .join(Role, Role.id == SecretRole.role_id)
+                    .filter(
+                        Secret.key == secret_key,
+                        Role.name.in_(role_ids),
+                    )
+                    .first()
+                )
+            else:
+                # Ownership fallback: only the creator can retrieve
+                secret = (
+                    session.query(Secret)
+                    .filter(
+                        Secret.key == secret_key,
+                        Secret.created_by == user_id,
+                    )
+                    .first()
+                )
 
             if secret is None:
                 raise CoreAccessError(f"Secret not found: {secret_key}")
@@ -242,14 +259,17 @@ class Core:
         try:
             secret = (
                 session.query(Secret)
-                .filter(Secret.key == key)
+                .filter(
+                    Secret.key == key,
+                    Secret.created_by == user_id,
+                )
                 .first()
             )
 
             if secret is None:
                 return False
 
-            # Verify the user created this secret (simple ownership check)
+            # Ownership check as defense-in-depth (redundant with query scope)
             if secret.created_by != user_id:
                 raise CoreAccessError("You do not own this secret")
 

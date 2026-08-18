@@ -9,7 +9,6 @@ Manages the persistent executor daemon lifecycle:
   - Signal handling
 """
 
-from __future__ import annotations
 
 import hashlib
 import logging
@@ -17,6 +16,7 @@ import os
 import signal
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,11 @@ from .command_validator import CommandValidator
 from .config import ExecutorConfig
 from .executor import Executor
 from .strategies.factory import create_strategy
+
+# tomli_w is required for clearing enrollment tokens after registration.
+# Failing fast at import time is correct — a security-critical dependency
+# must not be silently unavailable at runtime.
+import tomli_w  # noqa: E402  # type: ignore[import-not-found]
 
 logger = logging.getLogger("venya.executor.daemon")
 
@@ -53,6 +58,7 @@ class DaemonState:
         self.revoked = False
         self.cert_serial: str | None = None
         self.cert_not_after: datetime | None = None
+        self._consecutive_revocation_failures: int = 0
 
 
 class CertificateManager:
@@ -70,6 +76,12 @@ class CertificateManager:
         self.ca_cert_path = config.mtls.ca_cert
         self.serial: str | None = None
         self._not_after: datetime | None = None
+        self._last_revocation_etag: str | None = None
+
+    @property
+    def not_after(self) -> datetime | None:
+        """Certificate expiry time."""
+        return self._not_after
 
     def register(self, executor_id: str, enrollment_token: str | None = None) -> None:
         """Register executor with server, obtain signed certificate.
@@ -271,7 +283,9 @@ class CertificateManager:
         """Check if this executor's certificate has been revoked.
 
         Polls the server's revocation list endpoint and checks whether the
-        current serial number appears in the list.
+        current serial number appears in the list. Supports conditional GET
+        via ETag to avoid unnecessary network traffic when the list hasn't
+        changed.
 
         Returns:
             True if the certificate is revoked. False if not revoked or if
@@ -282,11 +296,23 @@ class CertificateManager:
             return False
 
         try:
+            headers = {}
+            if self._last_revocation_etag:
+                headers["If-None-Match"] = self._last_revocation_etag
+
             response = self.client.get(
                 "/api/v1/executors/certs/revocation-list",
+                headers=headers,
                 timeout=self.config.network.request_timeout_seconds,
             )
+
+            if response.status_code == 304:
+                logger.debug("Revocation list unchanged, skipping check")
+                return False
+
             response.raise_for_status()
+            self._last_revocation_etag = response.headers.get("etag")
+
             data = response.json()
             revoked_serials = set(data.get("revoked_serials", []))
             is_revoked = self.serial in revoked_serials
@@ -635,11 +661,19 @@ class ExecutorDaemon:
         self.reaper = ReaperLoop(
             config,
             self.state,
-            tmpfs_dir="/tmp/venya_secrets",  # nosec B108 — tmpfs, not persistent disk
+            tmpfs_dir=config.secret_tmpfs_dir,
         )
 
         # Signal handling
         self._shutdown_event = threading.Event()
+
+        # HTTP thread pool — keeps network calls off the main loop
+        self._http_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="http"
+        )
+
+        # HTTP client — initialized in start() after registration
+        self.client: httpx2.Client | None = None
 
     def _create_mtls_client(self) -> httpx2.Client:
         """Create HTTP client with mTLS after certificate registration."""
@@ -675,12 +709,6 @@ class ExecutorDaemon:
             # Remove entire bootstrap section if it's now empty
             if not data["bootstrap"]:
                 del data["bootstrap"]
-
-            try:
-                import tomli_w
-            except ImportError:
-                logger.warning("tomli_w not installed — could not save config")
-                return
 
             path = Path(config_path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -740,7 +768,7 @@ class ExecutorDaemon:
         # Mark as running
         self.state.running = True
         self.state.cert_serial = self.cert_manager.serial
-        self.state.cert_not_after = self.cert_manager._not_after
+        self.state.cert_not_after = self.cert_manager.not_after
 
         # Write PID file
         self._write_pidfile()
@@ -755,11 +783,13 @@ class ExecutorDaemon:
         """Main daemon loop.
 
         Checks certificate rotation, revocation status, and sends heartbeats.
+        Network calls run in a background thread pool to keep the main loop
+        responsive to shutdown signals.
         """
         logger.info("Daemon main loop started")
 
         while self.state.running and not self.state.revoked:
-            # Check certificate rotation
+            # Check certificate rotation (synchronous — rare operation)
             if self.cert_manager.needs_rotation():
                 try:
                     self.cert_manager.rotate()
@@ -767,7 +797,7 @@ class ExecutorDaemon:
                     self.client = self._create_mtls_client()
                     self.cert_manager.client = self.client
                     self.state.cert_serial = self.cert_manager.serial
-                    self.state.cert_not_after = self.cert_manager._not_after
+                    self.state.cert_not_after = self.cert_manager.not_after
                     logger.info(
                         "Certificate rotated in main loop, new expiry: %s",
                         self.state.cert_not_after,
@@ -775,16 +805,43 @@ class ExecutorDaemon:
                 except Exception:
                     logger.exception("Certificate rotation failed")
 
-            # Check revocation status
-            if self.cert_manager.check_revocation():
-                logger.warning("Executor certificate revoked — shutting down")
+            # Check revocation status — run in thread pool
+            revocation_future = self._http_executor.submit(
+                self.cert_manager.check_revocation
+            )
+            try:
+                if revocation_future.result(
+                    timeout=self.config.network.request_timeout_seconds
+                ):
+                    logger.warning("Executor certificate revoked — shutting down")
+                    self.state.revoked = True
+                    break
+                else:
+                    self.state._consecutive_revocation_failures = 0
+            except TimeoutError:
+                logger.debug("Revocation check timed out")
+                self.state._consecutive_revocation_failures += 1
+            except httpx2.RequestError:
+                logger.debug("Revocation check failed (server unreachable)")
+                self.state._consecutive_revocation_failures += 1
+
+            if (
+                self.state._consecutive_revocation_failures
+                >= self.config.cert_rotation.max_revocation_failures
+            ):
+                logger.warning(
+                    "Consecutive revocation check failures (%d) reached threshold (%d) — "
+                    "treating certificate as revoked",
+                    self.state._consecutive_revocation_failures,
+                    self.config.cert_rotation.max_revocation_failures,
+                )
                 self.state.revoked = True
                 break
 
-            # Heartbeat
-            self._send_heartbeat()
+            # Heartbeat — fire and forget in thread pool
+            self._http_executor.submit(self._send_heartbeat)
 
-            # Wait before next iteration
+            # Wait before next iteration (interruptible by signals)
             self._shutdown_event.wait(30.0)
 
     def _send_heartbeat(self) -> None:
@@ -816,16 +873,27 @@ class ExecutorDaemon:
         """Stop the executor daemon."""
         logger.info("Stopping executor daemon")
 
-        # Stop reaper
-        self.reaper.stop()
-
-        # Clean up PID file
-        self._remove_pidfile()
-
-        # Close HTTP client
-        self.client.close()
+        for cleanup in (
+            self._stop_http_pool,
+            self.reaper.stop,
+            self._remove_pidfile,
+            self._close_client,
+        ):
+            try:
+                cleanup()
+            except Exception:
+                logger.exception("Cleanup step failed: %s", cleanup.__name__)
 
         logger.info("Executor daemon stopped")
+
+    def _stop_http_pool(self) -> None:
+        """Stop the HTTP thread pool."""
+        self._http_executor.shutdown(wait=True)
+
+    def _close_client(self) -> None:
+        """Close the HTTP client if it exists."""
+        if self.client is not None:
+            self.client.close()
 
     def _write_pidfile(self) -> None:
         """Write PID file."""
@@ -893,26 +961,43 @@ def main() -> None:
         config.daemonize = True
 
     # Setup logging
-    from executor.sensitive_log_filter import SensitiveFieldFilter
+    from core.utils.sensitive_log import RedactingFormatter
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper()),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     for handler in logging.root.handlers:
-        handler.addFilter(SensitiveFieldFilter())
+        handler.setFormatter(RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 
     # Create and start daemon
     daemon = ExecutorDaemon(config)
 
     if config.daemonize:
-        # Fork to background
+        # First fork — detach from parent
         pid = os.fork()
         if pid > 0:
             # Parent — exit
             print(f"Daemon started with PID {pid}")
             sys.exit(0)
-        # Child — continue as daemon
+        # Child — create new session
         os.setsid()
+        os.umask(0)
+
+        # Second fork — prevent reacquiring controlling terminal
+        pid = os.fork()
+        if pid > 0:
+            os._exit(0)
+
+        # Change to root directory
+        os.chdir("/")
+
+        # Redirect stdin/stdout/stderr to /dev/null
+        devnull_fd = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull_fd, 0)
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        if devnull_fd > 2:
+            os.close(devnull_fd)
 
     daemon.start()

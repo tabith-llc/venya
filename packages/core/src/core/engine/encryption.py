@@ -5,7 +5,6 @@ KEK (32 bytes) wraps plaintext DEK (32 bytes) via AES-256-KW (RFC 5649)
 to produce wrapped DEK (40 bytes: 32-byte DEK + 8-byte AEAD tag).
 """
 
-from __future__ import annotations
 
 import os
 from typing import Final

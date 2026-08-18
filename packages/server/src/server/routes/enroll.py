@@ -5,7 +5,6 @@ Two-step enrollment flow:
 2. POST /enroll/browser/complete — verify WebAuthn, store credential, create session
 """
 
-from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
@@ -44,6 +43,10 @@ class BrowserEnrollCompleteRequest(BaseModel):
     challenge_id: str = Field(..., description="Challenge ID from start response")
     response: dict[str, Any] = Field(..., description="WebAuthn attestation response")
     label: str = Field(..., description="Credential label (e.g. 'Primary key')")
+
+
+class BrowserEnrollCompleteResponse(BaseModel):
+    status: str
 
 
 # --- Helpers ---
@@ -162,7 +165,7 @@ async def browser_enroll_start(
 async def browser_enroll_complete(
     req: BrowserEnrollCompleteRequest,
     request: Request,
-) -> dict[str, str]:
+) -> BrowserEnrollCompleteResponse:
     """Complete browser enrollment: store credential, activate user, create session.
 
     Transitions token state from 'in_progress' to 'completed' and
@@ -268,7 +271,7 @@ async def browser_enroll_complete(
         db.commit()
 
         # Set session cookie
-        response = JSONResponse(content={"status": "ok"})
+        response = JSONResponse(content=BrowserEnrollCompleteResponse(status="ok").model_dump())
         _set_session_cookie(response, access_token.token)
 
         logger.info(

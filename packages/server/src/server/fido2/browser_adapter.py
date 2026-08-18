@@ -5,7 +5,6 @@ without padding. The python-fido2 library uses standard base64 with padding.
 This module handles conversion in both directions.
 """
 
-from __future__ import annotations
 
 import base64
 from typing import Any

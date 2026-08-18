@@ -4,7 +4,6 @@ Creates anonymous memory-backed file descriptors via memfd_create().
 No disk residency. Linux-only.
 """
 
-from __future__ import annotations
 
 import ctypes
 import logging

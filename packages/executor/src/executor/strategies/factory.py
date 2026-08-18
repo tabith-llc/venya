@@ -3,7 +3,6 @@
 Registry-based strategy selection driven by configuration.
 """
 
-from __future__ import annotations
 
 from .base import InjectionStrategy
 from .memfd_strategy import MemfdStrategy
