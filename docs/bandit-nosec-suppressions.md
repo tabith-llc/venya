@@ -82,7 +82,6 @@ Each line has a corresponding `# nosec` comment added to the source.
 | `packages/server/src/server/fido2/manager.py` | 115 | DB cleanup in finally block, outer scope handles error |
 | `packages/server/src/server/rate_limit.py` | 93 | Best-effort JSON parse, None falls through |
 | `packages/server/src/server/rate_limit.py` | 124 | Best-effort DB query, None falls through |
-| `packages/server/src/server/routes/auth_browser.py` | 584 | Rollback best-effort before raising HTTPException |
 | `packages/server/src/server/routes/credentials.py` | 265 | Rollback best-effort before raising HTTPException |
 | `packages/server/src/server/routes/enroll.py` | 284 | Rollback best-effort before re-raising HTTPException |
 | `packages/server/src/server/routes/enroll.py` | 290 | Rollback best-effort before raising HTTPException |

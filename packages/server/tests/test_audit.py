@@ -386,3 +386,57 @@ class TestAuditList:
         assert resp.status_code == 200
         data = resp.json()
         assert data["total"] == 1
+
+    def test_list_invalid_start_date(self):
+        """GET /audit should return 400 for invalid start_date."""
+        db = MagicMock()
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def count(self):
+                return 0
+            def order_by(self, *args, **kwargs):
+                return self
+            def offset(self, *args, **kwargs):
+                return self
+            def limit(self, *args, **kwargs):
+                return self
+            def all(self):
+                return []
+
+        db.query.return_value = MockQuery()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit", params={"start_date": "not-a-date"})
+        assert resp.status_code == 400
+
+    def test_list_invalid_end_date(self):
+        """GET /audit should return 400 for invalid end_date."""
+        db = MagicMock()
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def count(self):
+                return 0
+            def order_by(self, *args, **kwargs):
+                return self
+            def offset(self, *args, **kwargs):
+                return self
+            def limit(self, *args, **kwargs):
+                return self
+            def all(self):
+                return []
+
+        db.query.return_value = MockQuery()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit", params={"end_date": "garbage"})
+        assert resp.status_code == 400

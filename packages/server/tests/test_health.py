@@ -62,7 +62,7 @@ class TestHealthCheck:
         assert resp.status_code == 503
         data = resp.json()
         assert data["status"] == "error"
-        assert data["checks"]["ca"].startswith("error:")
+        assert data["checks"]["ca"] == "check_failed"
 
     def test_health_admin_ca_skipped(self):
         """GET /health should skip admin_ca when mTLS is disabled."""
@@ -114,7 +114,7 @@ class TestHealthCheck:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "degraded"
-        assert data["checks"]["admin_ca"].startswith("error:")
+        assert data["checks"]["admin_ca"] == "check_failed"
 
 
 class TestHealthCache:
@@ -191,4 +191,4 @@ class TestReadinessCheck:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "degraded"
-        assert "error" in data["checks"]["database"]
+        assert data["checks"]["database"] == "not_ready"

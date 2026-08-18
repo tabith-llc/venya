@@ -1,6 +1,5 @@
 """Tests for Executor pipeline: execute(), _prepare_injections(), _capture_output(), _cleanup_injections()."""
 
-from __future__ import annotations
 
 import base64
 import fcntl
@@ -141,7 +140,7 @@ class TestExecute:
         with patch("executor.executor.scan_open_fds", return_value={0, 1, 2}):
             with patch("executor.executor.set_cloexec"):
                 result = executor.execute(
-                    "/usr/bin/echo $MY_VAR",
+                    "/usr/bin/printenv MY_VAR",
                     [],
                     env_override={"MY_VAR": "custom_value"},
                 )
@@ -463,3 +462,142 @@ class TestConstants:
         expected = "... [OUTPUT TRUNCATED: 1024 bytes discarded]\n"
         actual = TRUNCATION_MARKER.format(n=1024)
         assert actual == expected
+
+
+class TestValidateCommandStructure:
+    """Tests for _validate_command_structure metacharacter rejection."""
+
+    def test_accepts_simple_command(self):
+        from executor.executor import _validate_command_structure
+        result = _validate_command_structure("/usr/bin/echo hello")
+        assert result == ["/usr/bin/echo", "hello"]
+
+    def test_accepts_command_with_quoted_args(self):
+        from executor.executor import _validate_command_structure
+        result = _validate_command_structure('/usr/bin/echo "hello world"')
+        assert result == ["/usr/bin/echo", "hello world"]
+
+    def test_accepts_command_with_single_quotes(self):
+        from executor.executor import _validate_command_structure
+        result = _validate_command_structure("/usr/bin/echo 'hello world'")
+        assert result == ["/usr/bin/echo", "hello world"]
+
+    def test_rejects_pipe(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure("/usr/bin/ls | /usr/bin/cat")
+
+    def test_rejects_semicolon(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure("/usr/bin/ls; /usr/bin/cat")
+
+    def test_rejects_dollar_paren(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure("/usr/bin/echo $(whoami)")
+
+    def test_rejects_backtick(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure("/usr/bin/echo `id`")
+
+    def test_rejects_dollar_var(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure("/usr/bin/echo $HOME")
+
+    def test_rejects_redirect(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure("/usr/bin/ls > /tmp/out")
+
+    def test_rejects_ampersand(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure("/usr/bin/ls &")
+
+    def test_rejects_glob(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure("/usr/bin/ls *.txt")
+
+    def test_rejects_newline(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure("/usr/bin/echo hello\n/usr/bin/echo world")
+
+    def test_rejects_empty_command(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Empty command"):
+            _validate_command_structure("")
+
+    def test_rejects_whitespace_only(self):
+        from executor.executor import _validate_command_structure
+        with pytest.raises(ValueError, match="Empty command"):
+            _validate_command_structure("   ")
+
+
+class TestStage2SendsHashes:
+    """Tests for H-44: Stage 2 sends hashes, not plaintext values."""
+
+    def test_send_to_stage2_sends_hashes_not_values(self, executor: Executor, mock_http_client: httpx2.Client):
+        """_send_to_stage2 sends secret hashes, not plaintext values."""
+        import base64
+
+        executor.http_client = mock_http_client
+
+        response = MagicMock()
+        response.json.return_value = {
+            "stdout": base64.b64encode(b"filtered\n").decode(),
+            "stderr": base64.b64encode(b"").decode(),
+            "masked_hashes": [],
+        }
+        response.raise_for_status.return_value = None
+        mock_http_client.post.return_value = response
+
+        from executor.bundles import SecretBundle
+
+        bundle = SecretBundle(
+            secret_id="test-secret",
+            value=b"plaintext-secret-value",
+            wrapped_value=b"wrapped",
+            hash="abc123def456",
+        )
+
+        # Pass only the fields that _send_to_stage2 would send (secret_id + hash)
+        secret_dict = {"secret_id": bundle.secret_id, "hash": bundle.hash}
+        executor._send_to_stage2(b"output", b"", [secret_dict])
+
+        # Verify the call was made with hash, not value
+        call_args = mock_http_client.post.call_args
+        payload = call_args.kwargs["json"] if call_args.kwargs else call_args[1]["json"]
+        assert "secrets" in payload
+        assert payload["secrets"][0]["hash"] == "abc123def456"
+        assert "value" not in payload["secrets"][0]
+
+
+class TestTruncatedAudit:
+    """Tests for L-28: truncated flag in audit events."""
+
+    def test_truncated_flag_in_command_result(self, executor: Executor):
+        """CommandResult.output_truncated is set when output exceeds limit."""
+        result = executor._filter_and_build_result(
+            "/usr/bin/echo test",
+            0,
+            b"A" * 300_000,  # stdout exceeds MAX_OUTPUT_BYTES
+            b"stderr",
+            [],
+        )
+        assert result.output_truncated is True
+
+    def test_not_truncated_when_under_limit(self, executor: Executor):
+        """output_truncated is False when output is under limit."""
+        result = executor._filter_and_build_result(
+            "/usr/bin/echo test",
+            0,
+            b"short output",
+            b"short stderr",
+            [],
+        )
+        assert result.output_truncated is False

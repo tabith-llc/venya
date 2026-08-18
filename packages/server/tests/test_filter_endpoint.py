@@ -135,3 +135,169 @@ class TestFilterSessionOutput:
         data = resp.json()
         assert data["stdout"] == stdout
         assert data["masked_count"] == 0
+
+    def test_filter_redacts_decrypted_secret_value(self):
+        """POST /sessions/{id}/filter should redact decrypted secret values, not key names."""
+        import base64
+        from unittest.mock import patch
+
+        session = SimpleNamespace(id=123, user_id="user1")
+
+        # The actual secret value that should be redacted
+        secret_value = b"AKIAIOSFODNN7EXAMPLE"
+        secret_key_name = "aws_api_key"
+
+        # Mock secret with encrypted fields
+        secret = SimpleNamespace(
+            id=1,
+            key=secret_key_name,
+            created_by="user1",
+            encrypted_value=b"encrypted_data",
+            nonce=b"nonce12345678901",
+            wrapped_dek=b"wrapped_dk12345678",
+        )
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def first(self):
+                return session
+            def all(self):
+                return [secret]
+
+        db = MagicMock()
+        db.query.return_value = MockQuery()
+
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        backend.config.kek = b"A" * 32  # 32-byte KEK
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        # Output contains the plaintext secret value
+        stdout_with_secret = base64.b64encode(
+            b"running command, output: AKIAIOSFODNN7EXAMPLE done"
+        ).decode()
+        stderr = base64.b64encode(b"clean stderr").decode()
+
+        with patch(
+            "core.engine.encryption.decrypt_secret"
+        ) as mock_decrypt:
+            mock_decrypt.return_value = secret_value
+
+            # Use integer session ID so session lookup executes
+            resp = client.post(
+                "/api/v1/sessions/123/filter",
+                json={"stdout": stdout_with_secret, "stderr": stderr},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        decoded_stdout = base64.b64decode(data["stdout"]).decode()
+        # The secret value should be redacted
+        assert "AKIAIOSFODNN7EXAMPLE" not in decoded_stdout
+        assert "[REDACTED:" in decoded_stdout
+        # The key name should NOT be redacted (it wasn't in the output anyway)
+        assert data["masked_count"] == 1
+
+    def test_filter_skips_undecryptable_secret(self):
+        """POST /sessions/{id}/filter should skip secrets that fail decryption."""
+        import base64
+        from unittest.mock import patch
+
+        session = SimpleNamespace(id=123, user_id="user1")
+
+        secret = SimpleNamespace(
+            id=1,
+            key="mysecret",
+            created_by="user1",
+            encrypted_value=b"encrypted_data",
+            nonce=b"nonce12345678901",
+            wrapped_dek=b"wrapped_dk12345678",
+        )
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def first(self):
+                return session
+            def all(self):
+                return [secret]
+
+        db = MagicMock()
+        db.query.return_value = MockQuery()
+
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        backend.config.kek = b"A" * 32
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        stdout = base64.b64encode(b"output with secret AKIAIOSFODNN7EXAMPLE here").decode()
+        stderr = base64.b64encode(b"clean").decode()
+
+        from core.engine.encryption import DecryptionError
+
+        with patch(
+            "core.engine.encryption.decrypt_secret"
+        ) as mock_decrypt:
+            mock_decrypt.side_effect = DecryptionError("invalid tag")
+
+            resp = client.post(
+                "/api/v1/sessions/123/filter",
+                json={"stdout": stdout, "stderr": stderr},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        # Output should be unmodified since decryption failed
+        assert data["stdout"] == stdout
+        assert data["masked_count"] == 0
+
+    def test_filter_skips_when_no_kek(self):
+        """POST /sessions/{id}/filter should skip secrets when KEK is None."""
+        import base64
+
+        session = SimpleNamespace(id=123, user_id="user1")
+
+        secret = SimpleNamespace(
+            id=1,
+            key="mysecret",
+            created_by="user1",
+            encrypted_value=b"encrypted_data",
+            nonce=b"nonce12345678901",
+            wrapped_dek=b"wrapped_dk12345678",
+        )
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+            def first(self):
+                return session
+            def all(self):
+                return [secret]
+
+        db = MagicMock()
+        db.query.return_value = MockQuery()
+
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        backend.config.kek = None
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        stdout = base64.b64encode(b"output with secret AKIAIOSFODNN7EXAMPLE here").decode()
+        stderr = base64.b64encode(b"clean").decode()
+
+        resp = client.post(
+            "/api/v1/sessions/123/filter",
+            json={"stdout": stdout, "stderr": stderr},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["stdout"] == stdout
+        assert data["masked_count"] == 0

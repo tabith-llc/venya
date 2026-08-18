@@ -4,7 +4,6 @@ Simplified interface — actual FIDO2 operations use python-fido2 library.
 The detailed crypto handling is deferred to integration testing.
 """
 
-from __future__ import annotations
 
 import base64
 import secrets
@@ -99,7 +98,7 @@ class Fido2Manager:
             db = self.backend.get_session()
             try:
                 creds = db.query(WebAuthnCredential).filter(
-                    WebAuthnCredential.is_active == True  # noqa: E712
+                    WebAuthnCredential.is_active.is_(True)
                 ).all()
                 for db_cred in creds:
                     stored = StoredCredential(

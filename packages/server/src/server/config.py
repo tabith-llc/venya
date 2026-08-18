@@ -1,6 +1,5 @@
 """Server configuration."""
 
-from __future__ import annotations
 
 import logging
 import os
@@ -55,6 +54,10 @@ class RateLimitConfig(BaseModel):
     ip_rate_limit: int = Field(
         default=1000,
         description="Maximum requests per IP per minute",
+    )
+    break_glass_requests_per_hour: int = Field(
+        default=5,
+        description="Maximum break-glass (recovery) requests per IP per hour",
     )
     lockout_reinstate_minutes: int = Field(
         default=15,
@@ -326,9 +329,10 @@ class ServerConfig(BaseSettings):
     audit_local_retention_days: int = Field(default=90, description="Local audit log retention days")
 
     # Recovery code pepper (server-side secret for hashing break-glass recovery codes)
+    # REQUIRED — deployment fails if not set. Only one pepper version supported;
+    # key rotation will require storing multiple peppers and trying them during verification.
     recovery_code_pepper: str = Field(
-        default="",
-        description="Secret pepper for hashing recovery codes. Must be set in production.",
+        description="Server-side secret for recovery code hashing. REQUIRED — deployment fails if empty.",
     )
 
     @classmethod

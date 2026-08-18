@@ -1,6 +1,5 @@
 """Abstract base class and result type for injection strategies."""
 
-from __future__ import annotations
 
 import abc
 import logging

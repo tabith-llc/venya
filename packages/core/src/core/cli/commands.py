@@ -1,6 +1,5 @@
 """Command implementations for the CLI."""
 
-from __future__ import annotations
 
 from cryptography import x509
 import hashlib
@@ -1211,7 +1210,7 @@ def _elevate(client: APIClient) -> str:
 
     try:
         # Step 1: Get elevation challenge
-        challenge_result = fido2._post("/api/v1/auth/elevate/browser/challenge", {})
+        challenge_result = fido2._post("/api/v1/auth/elevate/challenge", {})
         challenge_id = challenge_result["challenge_id"]
         options = challenge_result["options"]
     except Fido2ClientError as e:
@@ -1302,7 +1301,7 @@ def _elevate(client: APIClient) -> str:
 
     # Step 5: Submit assertion to get elevation token
     try:
-        assert_result = fido2._post("/api/v1/auth/elevate/browser/assert", {
+        assert_result = fido2._post("/api/v1/auth/elevate/assert", {
             "challenge_id": challenge_id,
             "response": response,
         })

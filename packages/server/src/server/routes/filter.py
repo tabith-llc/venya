@@ -157,6 +157,9 @@ async def filter_session_output(
 
         session_secrets: dict[str, bytes] = {}
         if session is not None:
+            from core.engine.encryption import DecryptionError, decrypt_secret as _decrypt_secret_impl
+
+            kek = backend.config.kek
             # Get secrets associated with this session's user
             secrets = (
                 db.query(Secret)
@@ -164,10 +167,26 @@ async def filter_session_output(
                 .all()
             )
             for secret in secrets:
-                # Use the secret key as the lookup value
-                secret_bytes = secret.key.encode() if secret.key else b""
-                hash_hex = hashlib.sha256(secret_bytes).hexdigest()
-                session_secrets[hash_hex] = secret_bytes
+                if kek is None:
+                    logger.warning(
+                        "No KEK configured, cannot decrypt secret %s for session %s",
+                        secret.id,
+                        session_id,
+                    )
+                    continue
+                try:
+                    plaintext = _decrypt_secret_impl(
+                        kek, secret.wrapped_dek, secret.nonce, secret.encrypted_value
+                    )
+                except DecryptionError:
+                    logger.warning(
+                        "Failed to decrypt secret %s for session %s",
+                        secret.id,
+                        session_id,
+                    )
+                    continue
+                hash_hex = hashlib.sha256(plaintext).hexdigest()
+                session_secrets[hash_hex] = plaintext
 
         # Decode base64 input
         try:

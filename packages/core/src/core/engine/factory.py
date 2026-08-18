@@ -1,6 +1,5 @@
 """CoreFactory: builder pattern for creating Core instances."""
 
-from __future__ import annotations
 
 from pathlib import Path
 

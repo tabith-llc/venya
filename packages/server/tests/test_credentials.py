@@ -372,16 +372,24 @@ class TestCredentialRemove:
     def test_remove_success(self):
         """Should soft-delete credential and return removed=True."""
         mock_cred = SimpleNamespace(id=5, is_active=True)
+        active_creds = [SimpleNamespace(id=1, is_active=True), mock_cred]
 
         db = MagicMock()
+
+        call_num = [0]
 
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+            def with_for_update(self):
+                return self
+            def all(self):
+                call_num[0] += 1
+                if call_num[0] == 1:
+                    return active_creds
+                return [mock_cred]
             def first(self):
                 return mock_cred
-            def count(self):
-                return 2
 
         db.query.return_value = MockQuery()
         backend = MagicMock()
@@ -478,20 +486,23 @@ class TestCredentialRemove:
 
         db = MagicMock()
 
-        query_num = [0]
+        call_num = [0]
 
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
 
-            def first(self):
-                query_num[0] += 1
-                if query_num[0] == 1:
-                    return SimpleNamespace(id=1)
-                return mock_cred
+            def with_for_update(self):
+                return self
 
-            def count(self):
-                return 1
+            def all(self):
+                call_num[0] += 1
+                if call_num[0] == 1:
+                    return [mock_cred]  # only 1 active credential
+                return [mock_cred]
+
+            def first(self):
+                return mock_cred
 
         db.query.return_value = MockQuery()
         backend = MagicMock()

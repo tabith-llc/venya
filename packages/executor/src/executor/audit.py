@@ -4,7 +4,6 @@ Buffers audit events locally and forwards to remote URL with retry.
 Thread-safe for use during command execution.
 """
 
-from __future__ import annotations
 
 import json
 import logging
@@ -14,11 +13,16 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx2
+
 from .config import AuditForwarderConfig
+
+# stdlib zstd compression (Python 3.14+, PEP 784)
+import compression.zstd
 
 logger = logging.getLogger("venya.executor.audit")
 
-EVENT_TYPES = ("credential_injected", "command_executed", "command_rejected")
+EVENT_TYPES = ("credential_injected", "command_executed", "command_rejected", "token_revocation_failed")
 
 
 @dataclass
@@ -76,10 +80,11 @@ class AuditLogger:
             extra=kwargs,
         )
 
+        buffer_to_flush: list[AuditEvent] | None = None
+
         with self._lock:
             self._buffer.append(event)
 
-            # Check buffer threshold for alert
             threshold = self._config.max_buffer_size * self._config.alert_threshold
             if len(self._buffer) >= threshold:
                 logger.warning(
@@ -89,48 +94,90 @@ class AuditLogger:
                     self._config.max_buffer_size,
                 )
 
-            # Auto-flush when full
             if len(self._buffer) >= self._config.max_buffer_size:
-                self._flush_unlocked()
+                buffer_to_flush = self._buffer
+                self._buffer = []
+
+        # Flush outside the lock — new events arriving during flush
+        # go into the fresh empty buffer.
+        if buffer_to_flush:
+            self._flush_buffer(buffer_to_flush)
 
     def flush(self) -> None:
         """Flush all buffered events to remote."""
         with self._lock:
-            if self._config.remote_url and self._buffer:
-                self._flush_unlocked()
+            if not self._config.remote_url or not self._buffer:
+                return
+            buffer_to_flush = self._buffer
+            self._buffer = []
 
-    def _flush_unlocked(self) -> None:
-        """Flush buffer (caller must hold lock)."""
-        if not self._buffer or not self._config.remote_url:
-            return
+        self._flush_buffer(buffer_to_flush)
 
-        payload = "\n".join(e.to_json() for e in self._buffer)
-        events_sent = len(self._buffer)
-        self._buffer.clear()
+    def _flush_buffer(self, events: list[AuditEvent]) -> None:
+        """Flush a batch of events to remote URL.
+
+        Args:
+            events: List of audit events to send.
+        """
+        payload = "\n".join(e.to_json() for e in events)
         remote_url = self._config.remote_url
 
-        self._post_with_retry(payload, remote_url)
-        logger.debug("Flushed %d audit events", events_sent)
+        try:
+            self._post_with_retry(payload, remote_url)
+            logger.debug("Flushed %d audit events", len(events))
+        except Exception:
+            # Re-queue events that couldn't be sent
+            with self._lock:
+                self._buffer = events + self._buffer
+            logger.warning(
+                "Re-queued %d audit events after flush failure",
+                len(events),
+            )
 
     def _post_with_retry(self, payload: str, remote_url: str) -> None:
-        """POST payload to remote_url with exponential backoff."""
-        import httpx2
+        """POST payload to remote_url with exponential backoff.
 
+        Args:
+            payload: JSON lines payload to send.
+            remote_url: Target URL.
+
+        Raises:
+            RuntimeError: If all retry attempts are exhausted.
+        """
+        from compression import zstd
+
+        compressed = zstd.compress(payload.encode(), level=3)
         delay = self._config.retry_base_delay
         max_delay = self._config.retry_max_delay
+        max_retries = self._config.max_retries
+        attempts = 0
 
-        while not self._shutdown:
-            try:
-                with httpx2.Client(verify=False, timeout=self._config.request_timeout_seconds) as client:
+        if self._config.ca_cert_path:
+            client = httpx2.Client(
+                verify=self._config.ca_cert_path,
+                timeout=self._config.request_timeout_seconds,
+            )
+        else:
+            client = httpx2.Client(
+                verify=False,
+                timeout=self._config.request_timeout_seconds,
+            )
+
+        with client:
+            while not self._shutdown and attempts < max_retries:
+                attempts += 1
+                try:
                     response = client.post(
                         remote_url,
-                        content=payload,
-                        headers={"Content-Type": "application/x-ndjson"},
+                        content=compressed,
+                        headers={
+                            "Content-Type": "application/x-ndjson",
+                            "Content-Encoding": "zstd",
+                        },
                     )
                     if response.status_code < 400:
                         return
                     if response.status_code == 429:
-                        # Rate limiting — use retry-after or default
                         retry_after = response.headers.get("retry-after")
                         if retry_after:
                             delay = float(retry_after)
@@ -142,15 +189,19 @@ class AuditLogger:
                             response.status_code,
                             response.text[:200],
                         )
-            except httpx2.ConnectError as e:
-                logger.warning("Audit forward connection error: %s", e)
-            except Exception as e:  # noqa: BLE001
-                logger.error("Audit forward error: %s", e)
+                except httpx2.ConnectError as e:
+                    logger.warning("Audit forward connection error: %s", e)
+                except Exception as e:  # noqa: BLE001
+                    logger.error("Audit forward error: %s", e)
 
-            time.sleep(delay)
-            delay = min(delay * 2, max_delay)
+                time.sleep(delay)
+                delay = min(delay * 2, max_delay)
+
+        raise RuntimeError(
+            f"Audit forward failed after {attempts} attempts to {remote_url}"
+        )
 
     def shutdown(self) -> None:
         """Flush remaining events and stop background processing."""
-        self._shutdown = True
         self.flush()
+        self._shutdown = True

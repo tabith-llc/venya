@@ -3,10 +3,11 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from starlette.testclient import TestClient
 
 from server.routes import roles as roles_routes
+from server.dependencies import get_current_user, require_admin
 
 
 def _create_test_app(backend=None, auth_user=None):
@@ -15,6 +16,13 @@ def _create_test_app(backend=None, auth_user=None):
     from starlette.requests import Request
 
     app = FastAPI()
+
+    # Override get_current_user BEFORE including router so require_role/require_admin
+    # dependencies resolve through the override at request time.
+    TEST_USER = auth_user or {"user_id": "test-user"}
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+    app.dependency_overrides[require_admin] = lambda: TEST_USER
+
     if backend is None:
         backend = MagicMock()
         backend.get_session.return_value = MagicMock()
@@ -29,11 +37,10 @@ def _create_test_app(backend=None, auth_user=None):
             return await call_next(request)
 
     app.add_middleware(AuthMiddleware)
-
     return app
 
 
-def _make_mock_role_manager(role=None, roles=None, members=None, error=None):
+def _make_mock_role_manager(role=None, roles=None, members=None, error=None, user_permissions=None):
     """Create a mock RoleManager with realistic behavior."""
     rm = MagicMock()
 
@@ -66,6 +73,15 @@ def _make_mock_role_manager(role=None, roles=None, members=None, error=None):
     rm.add_member.return_value = SimpleNamespace(user_id="user1", role_id=1)
     rm.remove_member.return_value = True
 
+    # Default: user has read permission (makes require_role("read") pass)
+    if user_permissions is None:
+        rm.get_user_permissions.return_value = {"dev": "read"}
+
+    # For require_admin: admin role exists and user has write permission
+    admin_role = make_role(999, "admin", "read-write")
+    rm.get_role_by_name.return_value = admin_role
+    rm.has_permission.return_value = True
+
     return rm
 
 
@@ -80,7 +96,8 @@ class TestRolesCreate:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles",
@@ -104,7 +121,8 @@ class TestRolesCreate:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles",
@@ -113,22 +131,29 @@ class TestRolesCreate:
             assert resp.status_code == 400
             assert "already exists" in resp.json()["detail"]
 
-    def test_create_invalid_permissions(self):
-        """POST /roles should return 400 for invalid permissions."""
-        rm = _make_mock_role_manager(error=Exception("Invalid permissions: admin"))
-        backend = MagicMock()
-        session = MagicMock()
-        backend.get_session.return_value = session
-        app = _create_test_app(backend=backend)
+    def test_create_empty_name(self):
+        """POST /roles should return 422 for empty name."""
+        app = _create_test_app()
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
-            client = TestClient(app, raise_server_exceptions=False)
-            resp = client.post(
-                "/api/v1/roles",
-                json={"name": "admin", "permissions": "admin"},
-            )
-            assert resp.status_code == 400
-            assert "Invalid permissions" in resp.json()["detail"]
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/roles", json={"name": "", "permissions": "read"})
+        assert resp.status_code == 422
+
+    def test_create_special_chars_name(self):
+        """POST /roles should return 422 for name with special chars."""
+        app = _create_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/roles", json={"name": "my role!", "permissions": "read"})
+        assert resp.status_code == 422
+
+    def test_create_invalid_permissions(self):
+        """POST /roles should return 422 for invalid permissions (Literal validation)."""
+        app = _create_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/roles", json={"name": "admin", "permissions": "superadmin"})
+        assert resp.status_code == 422
 
 
 class TestRolesList:
@@ -142,7 +167,8 @@ class TestRolesList:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/roles")
             assert resp.status_code == 200
@@ -162,7 +188,8 @@ class TestRolesGet:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/roles/1")
             assert resp.status_code == 200
@@ -180,7 +207,8 @@ class TestRolesGet:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/roles/999")
             assert resp.status_code == 404
@@ -204,7 +232,8 @@ class TestRolesUpdate:
         rm.update_role.return_value = updated_role
         rm.get_role_members.return_value = []
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
                 "/api/v1/roles/1",
@@ -229,7 +258,8 @@ class TestRolesUpdate:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
                 "/api/v1/roles/999",
@@ -247,7 +277,8 @@ class TestRolesUpdate:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
                 "/api/v1/roles/1",
@@ -257,22 +288,12 @@ class TestRolesUpdate:
             assert "already exists" in resp.json()["detail"]
 
     def test_update_invalid_permissions(self):
-        """PUT /roles/{id} should return 400 for invalid permissions."""
-        rm = _make_mock_role_manager()
-        rm.update_role.side_effect = Exception("Invalid permissions: admin")
-        backend = MagicMock()
-        session = MagicMock()
-        backend.get_session.return_value = session
-        app = _create_test_app(backend=backend)
+        """PUT /roles/{id} should return 422 for invalid permissions (Literal validation)."""
+        app = _create_test_app()
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
-            client = TestClient(app, raise_server_exceptions=False)
-            resp = client.put(
-                "/api/v1/roles/1",
-                json={"permissions": "admin"},
-            )
-            assert resp.status_code == 400
-            assert "Invalid permissions" in resp.json()["detail"]
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.put("/api/v1/roles/1", json={"permissions": "superadmin"})
+        assert resp.status_code == 422
 
     def test_update_partial(self):
         """PUT /roles/{id} should allow partial updates."""
@@ -288,7 +309,8 @@ class TestRolesUpdate:
         rm.update_role.return_value = updated_role
         rm.get_role_members.return_value = []
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.put(
                 "/api/v1/roles/1",
@@ -310,7 +332,8 @@ class TestRolesDelete:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.delete("/api/v1/roles/1")
             assert resp.status_code == 200
@@ -326,7 +349,8 @@ class TestRolesDelete:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.delete("/api/v1/roles/999")
             assert resp.status_code == 404
@@ -347,7 +371,8 @@ class TestRoleMembersList:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/roles/1/members")
             assert resp.status_code == 200
@@ -365,7 +390,8 @@ class TestRoleMembersList:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/roles/1/members")
             assert resp.status_code == 200
@@ -383,7 +409,8 @@ class TestRoleMemberAdd:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles/1/members",
@@ -404,7 +431,8 @@ class TestRoleMemberAdd:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles/1/members",
@@ -422,7 +450,8 @@ class TestRoleMemberAdd:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/roles/1/members",
@@ -443,7 +472,8 @@ class TestRoleMemberRemove:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.delete("/api/v1/roles/1/members/user1")
             assert resp.status_code == 200
@@ -460,7 +490,8 @@ class TestRoleMemberRemove:
         backend.get_session.return_value = session
         app = _create_test_app(backend=backend)
 
-        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), \
+             patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.delete("/api/v1/roles/1/members/nonexistent")
             assert resp.status_code == 404

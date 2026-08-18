@@ -4,7 +4,6 @@ Used by validation tests to construct exactly the malformed cert needed
 for each test case without managing CA infrastructure manually.
 """
 
-from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

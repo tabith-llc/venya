@@ -24,6 +24,7 @@ from starlette.testclient import TestClient
 
 from server.ca import AdminCAManager
 from server.config import AdminMTLSConfig, CASecurityConfig, ServerConfig
+from server.dependencies import get_current_user, require_admin
 from server.middleware.auth import SessionMiddleware
 
 
@@ -446,6 +447,7 @@ def _create_admin_mtls_app(
             ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
             known_admin_ids=known_admin_ids,
         ),
+        recovery_code_pepper="test-pepper",
     )
 
     app = FastAPI()
@@ -784,6 +786,7 @@ class TestStartupEnforcement:
                 ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
                 known_admin_ids=["dust@montana"],
             ),
+            recovery_code_pepper="test-pepper",
         )
 
         with pytest.raises(RuntimeError, match="loopback"):
@@ -808,6 +811,7 @@ class TestStartupEnforcement:
                 ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
                 known_admin_ids=["dust@montana"],
             ),
+            recovery_code_pepper="test-pepper",
         )
 
         # Should not raise
@@ -830,6 +834,7 @@ class TestStartupEnforcement:
                 ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
                 known_admin_ids=["dust@montana"],
             ),
+            recovery_code_pepper="test-pepper",
         )
 
         passphrase_env = config.admin_mtls.ca_key_passphrase_env
@@ -854,6 +859,7 @@ class TestStartupEnforcement:
                 ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
                 known_admin_ids=["dust@montana"],
             ),
+            recovery_code_pepper="test-pepper",
         )
 
         passphrase_env = config.admin_mtls.ca_key_passphrase_env
@@ -880,6 +886,7 @@ class TestStartupEnforcement:
                 ca_cert=admin_ca_missing + "/admin-ca.crt",
                 known_admin_ids=["dust@montana"],
             ),
+            recovery_code_pepper="test-pepper",
         )
 
         admin_ca_manager = AdminCAManager(PPath(admin_ca_missing), config.ca_security)
@@ -909,6 +916,7 @@ class TestStartupEnforcement:
                 ca_cert=str(PPath(admin_ca_dir) / "admin-ca.crt"),
                 known_admin_ids=["dust@montana"],
             ),
+            recovery_code_pepper="test-pepper",
         )
 
         admin_ca_manager = AdminCAManager(PPath(admin_ca_dir), config.ca_security)
@@ -934,7 +942,7 @@ def _create_revoke_test_app():
     from core.iam.models import AdminCertRevocation
 
     app = FastAPI()
-    app.state.config = ServerConfig()
+    app.state.config = ServerConfig(recovery_code_pepper="test-pepper")
 
     # Track revocations
     revocations = []
@@ -1000,6 +1008,12 @@ def _create_revoke_test_app():
             return await call_next(request)
 
     app.add_middleware(AuthMiddleware)
+
+    # Override auth deps so require_admin bypasses real auth
+    _admin_user = {"user_id": "admin", "roles": ["admin"], "permissions": "read-write"}
+    app.dependency_overrides[get_current_user] = lambda: _admin_user
+    app.dependency_overrides[require_admin] = lambda: _admin_user
+
     app.include_router(admin_routes.router, prefix="/api/v1")
 
     return app, backend, revocations
@@ -1098,6 +1112,7 @@ def _create_concurrent_test_app(admin_ca_dir: str):
             ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
             known_admin_ids=["dust@montana"],
         ),
+        recovery_code_pepper="test-pepper",
     )
 
     app = FastAPI()
@@ -1196,6 +1211,7 @@ class TestAdminCARotation:
                 ca_cert=str(bundle_path),
                 known_admin_ids=["admin@old", "admin@new"],
             ),
+            recovery_code_pepper="test-pepper",
         )
 
         from cryptography.x509 import load_pem_x509_certificates as load_bundled_cas
@@ -1277,6 +1293,7 @@ class TestAdminCARotation:
                 ca_cert=str(bundle_path),
                 known_admin_ids=["dust@montana"],
             ),
+            recovery_code_pepper="test-pepper",
         )
 
         app = FastAPI()
@@ -1338,6 +1355,7 @@ class TestAdminCARotation:
                 ca_cert=str(bundle_path),
                 known_admin_ids=["admin@ca1", "admin@ca2", "admin@ca3"],
             ),
+            recovery_code_pepper="test-pepper",
         )
 
         app = FastAPI()

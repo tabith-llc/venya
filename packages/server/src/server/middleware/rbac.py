@@ -3,7 +3,6 @@
 Enforces permission checks on protected endpoints.
 """
 
-from __future__ import annotations
 
 import logging
 

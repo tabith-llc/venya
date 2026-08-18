@@ -71,13 +71,25 @@ async def audit_list(
             query = query.filter(AuditEvent.user_id == user)
 
         if start_date is not None:
-            start = datetime.fromisoformat(start_date)
+            try:
+                start = datetime.fromisoformat(start_date)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid start_date: {start_date!r}. Must be ISO 8601.",
+                )
             if start.tzinfo is None:
                 start = start.replace(tzinfo=timezone.utc)
             query = query.filter(AuditEvent.timestamp >= start)
 
         if end_date is not None:
-            end = datetime.fromisoformat(end_date)
+            try:
+                end = datetime.fromisoformat(end_date)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid end_date: {end_date!r}. Must be ISO 8601.",
+                )
             if end.tzinfo is None:
                 end = end.replace(tzinfo=timezone.utc)
             query = query.filter(AuditEvent.timestamp <= end)
@@ -91,10 +103,10 @@ async def audit_list(
             query = query.filter(AuditEvent.timestamp >= cutoff)
 
         if executor_id is not None:
-            from sqlalchemy import cast, JSON
+            from sqlalchemy import JSON, cast
 
             query = query.filter(
-                cast(AuditEvent.fields, JSON)["executor_id"].as_string() == executor_id
+                cast(AuditEvent.fields, JSON).op("->>")("executor_id") == executor_id
             )
 
         # Get total count

@@ -4,7 +4,6 @@ Provides test CA, executor certificates, mTLS HTTP clients,
 and a FastAPI app with real CAManager for end-to-end testing.
 """
 
-from __future__ import annotations
 
 import hashlib
 import os

@@ -2,12 +2,30 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi import FastAPI, APIRouter
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from server.routes import secrets as secrets_routes
+from server.dependencies import get_current_user
+
+TEST_USER = {"user_id": "test-user", "roles": ["devops"], "caller": "human"}
+
+
+@pytest.fixture(autouse=True)
+def _default_role_permissions():
+    """Default: every user holds a read-write role.
+
+    All secrets CRUD routes enforce require_role (C-06 adoption). This
+    fixture lets existing tests pass the check; tests that need a
+    different mapping re-patch server.dependencies.RoleManager.
+    """
+    rm = MagicMock()
+    rm.get_user_permissions.side_effect = lambda uid: {1: "read-write"}
+    with patch("server.dependencies.RoleManager", return_value=rm):
+        yield rm
 
 
 def _create_test_app(core=None, backend=None, auth_user=None):
@@ -15,26 +33,25 @@ def _create_test_app(core=None, backend=None, auth_user=None):
 
     Args:
         core: Core instance mock. Pass None to test "core not initialized".
-        backend: Backend instance mock.
+        backend: Backend instance mock. Defaults to a MagicMock so the
+            require_role dependency can resolve get_backend.
         auth_user: User dict to set on request state, or None to skip auth.
     """
     app = FastAPI()
     if core is not None:
         app.state.core = core
 
-    if backend is not None:
-        backend.get_session.return_value = MagicMock()
-        app.state.backend = backend
+    if backend is None:
+        backend = MagicMock()
+    backend.get_session.return_value = MagicMock()
+    app.state.backend = backend
 
     app.include_router(secrets_routes.router, prefix="/api/v1")
 
-    class AuthMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
-            if auth_user is not None:
-                request.state.auth_user = auth_user
-            return await call_next(request)
-
-    app.add_middleware(AuthMiddleware)
+    # Override get_current_user so require_role doesn't need a Bearer token.
+    # The real get_current_user checks for an Authorization: Bearer header
+    # first; the override bypasses that check and returns a fixed user dict.
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
 
     return app
 
@@ -76,7 +93,7 @@ class TestSecretsCreate:
     def test_create_success(self):
         """POST /secrets should create a secret via core.put()."""
         core = _make_mock_core()
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post(
@@ -107,8 +124,9 @@ class TestSecretsCreate:
         """POST /secrets should return 401 without auth."""
         core = _make_mock_core()
         app = _create_test_app(core=core)
+        # Remove the override to test unauthenticated access
+        del app.dependency_overrides[get_current_user]
 
-        # Remove auth_user from request state by not adding middleware
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/secrets",
@@ -119,12 +137,11 @@ class TestSecretsCreate:
                 "key_version_id": "v1",
             },
         )
-        # Without auth middleware, auth_user is None -> 401
         assert resp.status_code == 401
 
     def test_create_core_not_initialized(self):
         """POST /secrets should return 503 if core not initialized."""
-        app = _create_test_app(core=None, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=None)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post(
@@ -143,7 +160,7 @@ class TestSecretsCreate:
         """POST /secrets should return 400 on core error."""
         core = MagicMock()
         core.put.side_effect = Exception("Role not found: invalid-role")
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post(
@@ -166,7 +183,7 @@ class TestSecretsGet:
         """GET /secrets/{key} should return masked value for human."""
         core = _make_mock_core()
         core.get.return_value = "\u2022" * 8
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/db-password")
@@ -187,7 +204,7 @@ class TestSecretsGet:
         """GET /secrets/{key}?unmask=true should return plaintext for human."""
         core = _make_mock_core()
         core.get.return_value = "plaintext-secret"
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/db-password", params={"unmask": True})
@@ -201,7 +218,7 @@ class TestSecretsGet:
         """GET /secrets/{key}?caller=executor should return plaintext."""
         core = _make_mock_core()
         core.get.return_value = "plaintext-secret"
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/db-password", params={"caller": "executor"})
@@ -214,7 +231,7 @@ class TestSecretsGet:
         """GET /secrets/{key} should return 404 for missing secret."""
         core = MagicMock()
         core.get.side_effect = Exception("Secret not found: missing-key")
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/missing-key")
@@ -228,7 +245,12 @@ class TestSecretsGetExecutor:
         """GET /secrets/{key}/executor should return sentinel-wrapped value."""
         core = MagicMock()
         core.get.return_value = "my-api-key"
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
+        # Override to return executor user_info
+        app.dependency_overrides[get_current_user] = lambda: {
+            "caller": "executor",
+            "executor_id": "exec-1",
+        }
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/api-key/executor")
@@ -244,11 +266,27 @@ class TestSecretsGetExecutor:
             caller="executor",
         )
 
+    def test_executor_denied_for_human_user(self):
+        """GET /secrets/{key}/executor should deny non-executor callers."""
+        core = MagicMock()
+        core.get.return_value = "my-api-key"
+        app = _create_test_app(core=core)
+        # Default TEST_USER is human
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/api-key/executor")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Executor mTLS authentication required"
+
     def test_executor_not_found(self):
         """GET /secrets/{key}/executor should return 404 for missing secret."""
         core = MagicMock()
         core.get.side_effect = Exception("Secret not found: missing-key")
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "caller": "executor",
+            "executor_id": "exec-1",
+        }
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/missing-key/executor")
@@ -261,7 +299,7 @@ class TestSecretsList:
     def test_list_success(self):
         """GET /secrets should return list of secrets."""
         core = _make_mock_core()
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets")
@@ -280,7 +318,7 @@ class TestSecretsList:
     def test_list_with_prefix(self):
         """GET /secrets?prefix= should filter by prefix."""
         core = _make_mock_core()
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets", params={"prefix": "db-"})
@@ -295,7 +333,7 @@ class TestSecretsList:
         """GET /secrets should return empty list when no secrets."""
         core = MagicMock()
         core.list.return_value = []
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets")
@@ -310,7 +348,7 @@ class TestSecretsDelete:
         """DELETE /secrets/{key} should delete the secret."""
         core = _make_mock_core()
         core.delete.return_value = True
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.delete("/api/v1/secrets/db-password")
@@ -328,7 +366,7 @@ class TestSecretsDelete:
         """DELETE /secrets/{key} should return deleted=false for missing secret."""
         core = MagicMock()
         core.delete.return_value = False
-        app = _create_test_app(core=core, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.delete("/api/v1/secrets/missing-key")
@@ -338,11 +376,97 @@ class TestSecretsDelete:
 
     def test_delete_core_error(self):
         """DELETE /secrets/{key} should return 503 if core not initialized."""
-        app = _create_test_app(core=None, auth_user={"user_id": "test-user"})
+        app = _create_test_app(core=None)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.delete("/api/v1/secrets/db-password")
         assert resp.status_code == 503
+
+
+class TestSecretsRoleEnforcement:
+    """Tests for require_role adoption on secrets CRUD routes (C-06).
+
+    Verifies the dependency is actually wired to the routes: the wrong
+    permission tier must be rejected before any core call is made.
+    """
+
+    def test_create_denied_for_read_only_user(self):
+        """POST /secrets requires read-write; a read-only user gets 403."""
+        core = _make_mock_core()
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {1: "read"}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_test_app(core=core)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/secrets",
+                json={
+                    "key": "db-password",
+                    "value": "secret",
+                    "roles": ["dev"],
+                    "key_version_id": "v1",
+                },
+            )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Read-write permission required"
+        core.put.assert_not_called()
+
+    def test_delete_denied_for_read_only_user(self):
+        """DELETE /secrets/{key} requires read-write; a read-only user gets 403."""
+        core = _make_mock_core()
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {1: "read"}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_test_app(core=core)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.delete("/api/v1/secrets/db-password")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Read-write permission required"
+        core.delete.assert_not_called()
+
+    def test_get_denied_for_user_with_no_roles(self):
+        """GET /secrets/{key} requires any role; zero roles gets 403."""
+        core = _make_mock_core()
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_test_app(core=core)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/secrets/db-password")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Insufficient permissions"
+        core.get.assert_not_called()
+
+    def test_list_denied_for_user_with_no_roles(self):
+        """GET /secrets requires any role; zero roles gets 403."""
+        core = _make_mock_core()
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_test_app(core=core)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/secrets")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Insufficient permissions"
+        core.list.assert_not_called()
+
+    def test_executor_bypasses_role_check(self):
+        """Executor (mTLS) passes the role check without a RoleManager lookup."""
+        core = _make_mock_core()
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = AssertionError(
+            "role lookup must not run for executors"
+        )
+        app = _create_test_app(core=core)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "caller": "executor",
+            "executor_id": "exec-1",
+        }
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/secrets")
+        assert resp.status_code == 200
+        rm.get_user_permissions.assert_not_called()
 
 
 class TestRevokeSessionSecrets:
@@ -354,7 +478,7 @@ class TestRevokeSessionSecrets:
         backend = MagicMock()
         session = MagicMock()
         backend.get_session.return_value = session
-        app = _create_test_app(core=core, backend=backend, auth_user=None)
+        app = _create_test_app(core=core, backend=backend)
 
         # Mock AuditEvent import (import is local to the endpoint function)
         mock_audit_event = MagicMock()
@@ -386,7 +510,7 @@ class TestRevokeSessionSecrets:
         core = _make_mock_core()
         backend = MagicMock()
         backend.get_session.return_value = MagicMock()
-        app = _create_test_app(core=core, backend=backend, auth_user=None)
+        app = _create_test_app(core=core, backend=backend)
 
         mock_audit_event = MagicMock()
         with patch("core.iam.models.AuditEvent", mock_audit_event):
@@ -412,7 +536,7 @@ class TestRevokeSessionSecrets:
         mock_session = MagicMock()
         mock_session.query.return_value = mock_query
         backend.get_session.return_value = mock_session
-        app = _create_test_app(backend=backend, auth_user={"user_id": "test-user"})
+        app = _create_test_app(backend=backend)
         # Re-set after _create_test_app which overwrites it
         backend.get_session.return_value = mock_session
         client = TestClient(app, raise_server_exceptions=False)
@@ -432,7 +556,7 @@ class TestRevokeSessionSecrets:
         mock_session = MagicMock()
         mock_session.query.return_value = mock_query
         backend.get_session.return_value = mock_session
-        app = _create_test_app(backend=backend, auth_user={"user_id": "test-user"})
+        app = _create_test_app(backend=backend)
         # Re-set after _create_test_app which overwrites it
         backend.get_session.return_value = mock_session
         client = TestClient(app, raise_server_exceptions=False)

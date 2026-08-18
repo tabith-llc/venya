@@ -5,7 +5,6 @@ methods: _main_loop(), _send_heartbeat(), _handle_signal(), stop(),
 _write_pidfile(), _remove_pidfile().
 """
 
-from __future__ import annotations
 
 import os
 import signal

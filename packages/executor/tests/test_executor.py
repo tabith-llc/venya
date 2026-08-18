@@ -1,6 +1,5 @@
 """Tests for Executor.revoke_tokens(), _send_to_stage2(), and create_executor()."""
 
-from __future__ import annotations
 
 import os
 import time
@@ -105,6 +104,37 @@ class TestRevokeTokens:
         executor.revoke_tokens(["secret-1"])
 
         assert "Failed to revoke tokens" in caplog.text
+
+    def test_revoke_tokens_emits_audit_event_on_failure(self, executor: Executor, mock_http_client: httpx2.Client):
+        """revoke_tokens emits token_revocation_failed audit event on failure."""
+        mock_http_client.post.side_effect = httpx2.RequestError(
+            "Connection refused", request=MagicMock()
+        )
+        executor.http_client = mock_http_client
+
+        # Create a mock audit logger
+        mock_audit = MagicMock()
+        executor.audit_logger = mock_audit
+
+        executor.revoke_tokens(["secret-1", "secret-2"])
+
+        # Verify audit event was emitted
+        mock_audit.emit.assert_called_once_with(
+            "token_revocation_failed",
+            session_id="test-session-123",
+            secret_ids=["secret-1", "secret-2"],
+        )
+
+    def test_revoke_tokens_no_audit_logger(self, executor: Executor, mock_http_client: httpx2.Client):
+        """revoke_tokens handles missing audit logger gracefully."""
+        mock_http_client.post.side_effect = httpx2.RequestError(
+            "Connection refused", request=MagicMock()
+        )
+        executor.http_client = mock_http_client
+        executor.audit_logger = None
+
+        # Should not raise
+        executor.revoke_tokens(["secret-1"])
 
 
 # --- Tests: create_executor ---

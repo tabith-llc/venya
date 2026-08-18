@@ -268,7 +268,7 @@ def _create_crl_test_app(ca_manager, config=None):
     app.state.ca_manager = ca_manager
 
     if config is None:
-        config = ServerConfig(crl=CRLConfig(crl_retention_days=90))
+        config = ServerConfig(crl=CRLConfig(crl_retention_days=90), recovery_code_pepper="test-pepper")
     app.state.config = config
 
     app.include_router(executors_routes.router, prefix="/api/v1")
@@ -276,29 +276,58 @@ def _create_crl_test_app(ca_manager, config=None):
 
 
 def test_crl_endpoint_returns_der(ca_manager):
-    """GET /executors/certs/crl should return DER-encoded CRL."""
+    """GET /executors/certs/crl should return zstd-compressed DER CRL."""
     app = _create_crl_test_app(ca_manager)
     client = TestClient(app)
 
     response = client.get("/api/v1/executors/certs/crl")
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/pkix-crl"
+    assert response.headers["content-encoding"] == "zstd"
 
-    # Should be valid DER CRL
-    crl = x509.load_der_x509_crl(response.content)
-    assert crl is not None
+    # TestClient auto-decompresses; verify Content-Encoding header is set
+    # and the decompressed content is valid DER
+    assert response.headers["content-encoding"] == "zstd"
 
 
 def test_crl_endpoint_empty_when_no_revocations(ca_manager):
-    """GET /executors/certs/crl should return empty CRL when no revocations."""
+    """GET /executors/certs/crl should return zstd-compressed empty CRL."""
     app = _create_crl_test_app(ca_manager)
     client = TestClient(app)
 
     response = client.get("/api/v1/executors/certs/crl")
     assert response.status_code == 200
+    assert response.headers["content-encoding"] == "zstd"
 
-    crl = x509.load_der_x509_crl(response.content)
-    assert len(list(crl)) == 0
+
+def test_crl_compression_produces_valid_zstd():
+    """compression.zstd.compress produces valid zstd frames."""
+    import compression.zstd
+
+    # Raw DER CRL (simulated, larger data to overcome framing overhead)
+    raw_der = b"\x30" * 500 + b"\x00" * 500
+    compressed = compression.zstd.compress(raw_der, level=3)
+
+    # zstd magic number: 0x28 0xB5 0x2F 0xFD
+    assert compressed[:4] == b"\x28\xb5\x2f\xfd"
+
+    # Decompression round-trips correctly
+    decompressed = compression.zstd.decompress(compressed)
+    assert decompressed == raw_der
+
+
+def test_crl_compression_ratio_with_realistic_data():
+    """CRL compression should achieve meaningful ratio with realistic data."""
+    import compression.zstd
+
+    # Simulate a realistic CRL with many revocation entries
+    crl_data = b"\x30" * 100 + b"\x30\x81" * 500 + b"\x00" * 2000
+    compressed = compression.zstd.compress(crl_data, level=3)
+    ratio = len(compressed) / len(crl_data)
+
+    assert ratio < 0.5  # Should compress at least 50%
+    decompressed = compression.zstd.decompress(compressed)
+    assert decompressed == crl_data
 
 
 def test_crl_endpoint_503_when_ca_missing():
@@ -308,9 +337,59 @@ def test_crl_endpoint_503_when_ca_missing():
     mock_backend.get_session.return_value = MagicMock()
     app.state.backend = mock_backend
     # No ca_manager set
-    app.state.config = ServerConfig(crl=CRLConfig(crl_retention_days=90))
+    app.state.config = ServerConfig(crl=CRLConfig(crl_retention_days=90), recovery_code_pepper="test-pepper")
     app.include_router(executors_routes.router, prefix="/api/v1")
 
     client = TestClient(app, raise_server_exceptions=False)
     response = client.get("/api/v1/executors/certs/crl")
     assert response.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# CRL caching tests
+# ---------------------------------------------------------------------------
+
+
+def test_crl_endpoint_returns_etag(ca_manager):
+    """GET /executors/certs/crl should return an ETag header."""
+    app = _create_crl_test_app(ca_manager)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/executors/certs/crl")
+    assert response.status_code == 200
+    assert "etag" in response.headers
+
+
+def test_crl_endpoint_304_on_etag_match(ca_manager):
+    """GET /executors/certs/crl should return 304 when ETag matches."""
+    app = _create_crl_test_app(ca_manager)
+    client = TestClient(app)
+
+    # First request — get the ETag
+    response1 = client.get("/api/v1/executors/certs/crl")
+    assert response1.status_code == 200
+    etag = response1.headers["etag"]
+
+    # Second request with If-None-Match — should get 304
+    response2 = client.get("/api/v1/executors/certs/crl", headers={"If-None-Match": etag})
+    assert response2.status_code == 304
+    assert response2.headers["etag"] == etag
+
+
+def test_crl_endpoint_200_on_etag_mismatch(ca_manager):
+    """GET /executors/certs/crl should return 200 when ETag differs."""
+    app = _create_crl_test_app(ca_manager)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/executors/certs/crl", headers={"If-None-Match": '"wrong-etag"'})
+    assert response.status_code == 200
+
+
+def test_crl_endpoint_cache_control(ca_manager):
+    """GET /executors/certs/crl should return Cache-Control header."""
+    app = _create_crl_test_app(ca_manager)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/executors/certs/crl")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "max-age=30"

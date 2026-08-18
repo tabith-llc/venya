@@ -1,13 +1,13 @@
-"""Thread-safe sliding window rate limiter.
+"""Asyncio-safe sliding window rate limiter.
 
 Atomic all-or-nothing multi-key check-and-consume for rate limiting.
+Uses asyncio.Lock for compatibility with FastAPI's async context.
 """
 
-from __future__ import annotations
 
+import asyncio
 import time
 from collections import defaultdict
-from threading import Lock
 from typing import Any
 
 
@@ -21,7 +21,7 @@ class SlidingWindowRateLimiter:
         max_requests: Maximum requests allowed per window.
         window_seconds: Window size in seconds.
         _requests: Dict of key -> list of timestamps.
-        _lock: Thread lock for atomicity.
+        _lock: Asyncio lock for atomicity.
     """
 
     def __init__(self, max_requests: int, window_seconds: float = 60) -> None:
@@ -33,9 +33,9 @@ class SlidingWindowRateLimiter:
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self._requests: dict[str, list[float]] = defaultdict(list)
-        self._lock = Lock()
+        self._lock = asyncio.Lock()
 
-    def check_and_consume(self, keys: list[str]) -> tuple[bool, int]:
+    async def check_and_consume(self, keys: list[str]) -> tuple[bool, int]:
         """Atomically check multiple keys and consume slots if all pass.
 
         All-or-nothing: if any key exceeds its limit, none are consumed.
@@ -52,7 +52,7 @@ class SlidingWindowRateLimiter:
         now = time.time()
         cutoff = now - self.window_seconds
 
-        with self._lock:
+        async with self._lock:
             # Clean and check all keys
             oldest_exceeding = 0.0
             for key in keys:
@@ -73,7 +73,7 @@ class SlidingWindowRateLimiter:
 
             return True, 0
 
-    def is_allowed(self, key: str) -> tuple[bool, int]:
+    async def is_allowed(self, key: str) -> tuple[bool, int]:
         """Check a single key and consume if allowed.
 
         Args:
@@ -82,10 +82,10 @@ class SlidingWindowRateLimiter:
         Returns:
             Tuple of (allowed, retry_after_seconds).
         """
-        allowed, retry_after = self.check_and_consume([key])
+        allowed, retry_after = await self.check_and_consume([key])
         return allowed, retry_after
 
-    def get_remaining(self, key: str) -> int:
+    async def get_remaining(self, key: str) -> int:
         """Get remaining requests for a key without consuming.
 
         Args:
@@ -97,11 +97,11 @@ class SlidingWindowRateLimiter:
         now = time.time()
         cutoff = now - self.window_seconds
 
-        with self._lock:
+        async with self._lock:
             requests = [ts for ts in self._requests.get(key, []) if ts > cutoff]
             return max(0, self.max_requests - len(requests))
 
-    def get_reset_time(self, key: str) -> int:
+    async def get_reset_time(self, key: str) -> int:
         """Get seconds until the oldest request in the window expires.
 
         Args:
@@ -113,14 +113,14 @@ class SlidingWindowRateLimiter:
         now = time.time()
         cutoff = now - self.window_seconds
 
-        with self._lock:
+        async with self._lock:
             requests = [ts for ts in self._requests.get(key, []) if ts > cutoff]
             if not requests:
                 return 0
             oldest = min(requests)
             return max(0, int(oldest + self.window_seconds - now) + 1)
 
-    def cleanup_expired(self) -> int:
+    async def cleanup_expired(self) -> int:
         """Remove expired request timestamps.
 
         Returns:
@@ -130,7 +130,7 @@ class SlidingWindowRateLimiter:
         cutoff = now - self.window_seconds
         removed = 0
 
-        with self._lock:
+        async with self._lock:
             keys_to_delete = []
             for key in list(self._requests.keys()):
                 before = len(self._requests[key])

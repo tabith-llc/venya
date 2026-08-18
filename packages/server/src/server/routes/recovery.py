@@ -14,8 +14,6 @@ router = APIRouter()
 class RecoveryRequest(BaseModel):
     code: str = Field(..., description="Break-glass recovery code")
     new_user_id: str = Field(..., description="New admin user ID")
-    force: bool = Field(False, description="Force recovery")
-    confirm: bool = Field(False, description="Confirm recovery action")
 
 
 class RecoveryResponse(BaseModel):
@@ -69,11 +67,25 @@ async def recovery(
             .first()
         )
 
+        client_ip = request.client.host if request.client else "unknown"
+
         if admin_user is None:
+            logger.critical(
+                "Recovery: invalid code attempt from %s (user_id=%s)",
+                client_ip,
+                req.new_user_id,
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid recovery code",
             )
+
+        logger.critical(
+            "Recovery: successful break-glass from %s (source user=%s, new user=%s)",
+            client_ip,
+            admin_user.user_id,
+            req.new_user_id,
+        )
 
         # Check if user already exists
         existing = (
@@ -94,16 +106,22 @@ async def recovery(
         )
         db.add(new_user)
 
-        # Add admin role (assuming admin role exists with name "admin")
+        # Add admin role
         admin_role = (
             db.query(Role).filter(Role.name == "admin").first()
         )
-        if admin_role:
-            membership = RoleMember(
-                user_id=req.new_user_id,
-                role_id=admin_role.id,
+        if admin_role is None:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Admin role not found — admin role must exist before recovery",
             )
-            db.add(membership)
+
+        membership = RoleMember(
+            user_id=req.new_user_id,
+            role_id=admin_role.id,
+        )
+        db.add(membership)
 
         db.commit()
 

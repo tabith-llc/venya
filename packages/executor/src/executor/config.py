@@ -4,7 +4,6 @@ Loaded from environment variables and/or config file.
 Environment variables are prefixed with VENYA_EXECUTOR_.
 """
 
-from __future__ import annotations
 
 from pathlib import Path
 
@@ -34,6 +33,10 @@ class CertificateRotationConfig(BaseModel):
     revocation_poll_seconds: int = Field(
         default=60,
         description="Poll revocation status every N seconds",
+    )
+    max_revocation_failures: int = Field(
+        default=3,
+        description="Consecutive revocation check failures before treating as revoked",
     )
 
 
@@ -91,6 +94,10 @@ class AuditForwarderConfig(BaseModel):
         default=None,
         description="Remote syslog URL (tls://host:port)",
     )
+    ca_cert_path: str | None = Field(
+        default=None,
+        description="Path to CA certificate for TLS verification",
+    )
     max_buffer_size: int = Field(
         default=10_000,
         description="Local event buffer size",
@@ -106,6 +113,10 @@ class AuditForwarderConfig(BaseModel):
     retry_max_delay: float = Field(
         default=300.0,
         description="Retry max delay in seconds",
+    )
+    max_retries: int = Field(
+        default=5,
+        description="Maximum retry attempts per flush before re-queuing",
     )
     request_timeout_seconds: int = Field(
         default=10,
@@ -226,6 +237,10 @@ class ExecutorConfig(BaseSettings):
     secret_base_fd: int = Field(
         default=100,
         description="Base FD number for injected secrets",
+    )
+    secret_tmpfs_dir: str = Field(
+        default="/tmp/venya_secrets",
+        description="Directory on tmpfs for temporary secret storage",
     )
 
     # Logging

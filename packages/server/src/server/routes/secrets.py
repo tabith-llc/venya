@@ -3,10 +3,13 @@
 import base64
 import hashlib
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+
+from server.dependencies import require_role
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -28,14 +31,6 @@ class SecretCreateResponse(BaseModel):
     id: int
     key: str
     role_ids: list[str]
-
-
-class SecretGetRequest(BaseModel):
-    unmask: bool = Field(False, description="Return plaintext instead of masked")
-    caller: str = Field("human", description="Caller type: human or executor")
-    elevation_token: str | None = Field(
-        None, description="Elevation token for unmasking via browser",
-    )
 
 
 class SecretGetResponse(BaseModel):
@@ -145,12 +140,12 @@ def compute_detection_hashes(value: bytes) -> list[str]:
 async def secrets_create(
     req: SecretCreateRequest,
     request: Request,
+    user_info: dict = Depends(require_role("read-write")),
 ) -> SecretCreateResponse:
     """Store a new secret.
 
     Requires read-write permission on all specified roles.
     """
-    user_info = await _get_user_info(request)
     core = getattr(request.app.state, "core", None)
     if core is None:
         raise HTTPException(
@@ -189,6 +184,7 @@ async def secrets_get(
     unmask: bool = False,
     caller: str = "human",
     elevation_token: str | None = None,
+    user_info: dict = Depends(require_role("read")),
 ) -> SecretGetResponse:
     """Retrieve a secret value.
 
@@ -196,7 +192,6 @@ async def secrets_get(
     Executor (mTLS) gets plaintext.
     Browser users need a valid elevation token to unmask.
     """
-    user_info = await _get_user_info(request)
     core = getattr(request.app.state, "core", None)
     if core is None:
         raise HTTPException(
@@ -215,41 +210,37 @@ async def secrets_get(
 
         db = backend.get_session()
         try:
-            import hashlib
-            from datetime import datetime, timezone
+            from sqlalchemy import update
             from core.iam.models import ElevationToken
-
             from ..utils.time import is_expired
 
             token_hash = hashlib.sha256(elevation_token.encode()).hexdigest()
-            elevation = (
-                db.query(ElevationToken)
-                .filter(
-                    ElevationToken.token_hash == token_hash,
-                    ElevationToken.user_id == user_info["user_id"],
-                    ElevationToken.used == False,
-                )
-                .first()
-            )
 
-            if elevation is None:
-                # No valid elevation token - return masked
-                value = core.get(
-                    secret_key=key,
-                    caller=caller,
-                    unmask=False,
-                    user_id=user_info.get("user_id"),
-                )
-                return SecretGetResponse(key=key, value=value, masked=True)
-
+            # Atomic conditional update: consume token only if still unused and not expired
+            now = datetime.now(timezone.utc)
             server_config = getattr(request.app.state, "config", None)
             tolerance = (
                 server_config.clock_skew.token_tolerance_seconds
                 if server_config and hasattr(server_config, "clock_skew")
                 else 60
             )
-            if is_expired(elevation.expires_at, tolerance):
-                # Expired token - return masked
+            
+            # Apply clock skew tolerance to expiry check
+            expiry_cutoff = now - timedelta(seconds=tolerance)
+            result = db.execute(
+                update(ElevationToken)
+                .where(
+                    ElevationToken.token_hash == token_hash,
+                    ElevationToken.user_id == user_info["user_id"],
+                    ElevationToken.used == False,
+                    ElevationToken.expires_at > expiry_cutoff,
+                )
+                .values(used=True)
+            )
+            db.flush()
+
+            if result.rowcount == 0:
+                # Token already consumed by another request, expired, or not found
                 value = core.get(
                     secret_key=key,
                     caller=caller,
@@ -258,11 +249,7 @@ async def secrets_get(
                 )
                 return SecretGetResponse(key=key, value=value, masked=True)
 
-            # Mark token as used
-            elevation.used = True
-            db.commit()
-
-            # Elevation valid - return plaintext
+            # Token consumed atomically — now fetch plaintext
             try:
                 value = core.get(
                     secret_key=key,
@@ -270,8 +257,12 @@ async def secrets_get(
                     unmask=True,
                     user_id=user_info.get("user_id"),
                 )
+                db.commit()
                 return SecretGetResponse(key=key, value=value, masked=False)
+            except HTTPException:
+                raise
             except Exception as e:
+                db.rollback()
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=str(e),
@@ -314,12 +305,20 @@ async def secrets_get(
 async def secrets_get_executor(
     key: str,
     request: Request,
+    user_info: dict = Depends(require_role("read")),
 ) -> SentinelWrappedResponse:
     """Retrieve a secret for executor injection.
 
     Returns sentinel-wrapped plaintext with detection hashes.
     This endpoint is for executor (mTLS) use only.
     """
+    # Verify caller is executor (mTLS)
+    if user_info.get("caller") != "executor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Executor mTLS authentication required",
+        )
+
     core = getattr(request.app.state, "core", None)
     if core is None:
         raise HTTPException(
@@ -353,12 +352,12 @@ async def secrets_get_executor(
 async def secrets_list(
     request: Request,
     prefix: str | None = None,
+    user_info: dict = Depends(require_role("read")),
 ) -> SecretListResponse:
     """List secrets, optionally filtered by key prefix.
 
     Only shows secrets the authenticated user has read access to.
     """
-    user_info = await _get_user_info(request)
     core = getattr(request.app.state, "core", None)
     if core is None:
         raise HTTPException(
@@ -394,12 +393,12 @@ async def secrets_list(
 async def secrets_delete(
     key: str,
     request: Request,
+    user_info: dict = Depends(require_role("read-write")),
 ) -> SecretDeleteResponse:
     """Delete a secret.
 
     Requires read-write permission on the secret's role(s).
     """
-    user_info = await _get_user_info(request)
     core = getattr(request.app.state, "core", None)
     if core is None:
         raise HTTPException(
@@ -413,17 +412,6 @@ async def secrets_delete(
     )
 
     return SecretDeleteResponse(deleted=deleted, key=key)
-
-
-async def _get_user_info(request: Request) -> dict:
-    """Extract user info from request (auth middleware sets this)."""
-    user_info = getattr(request.state, "auth_user", None)
-    if user_info is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-        )
-    return user_info
 
 
 def _get_db(request: Request):
@@ -461,7 +449,6 @@ async def revoke_session_secrets(
         Confirmation of revocation with count.
     """
     from datetime import datetime, timezone
-
     from core.iam.models import AuditEvent
 
     # Verify caller is executor (mTLS)
@@ -512,12 +499,12 @@ async def revoke_session_secrets(
 )
 async def get_active_key_version(
     request: Request,
+    user_info: dict = Depends(require_role("read")),
 ) -> ActiveKeyVersionResponse:
     """Return the currently active key version ID.
 
     Used by the frontend to validate key_version_id before
-    encrypting secrets. Non-admin endpoint — only exposes the active
-    version.
+    encrypting secrets. Now protected by read-level auth.
     """
     db = _get_db(request)
     try:
@@ -525,7 +512,7 @@ async def get_active_key_version(
 
         active_version = (
             db.query(KeyVersion)
-            .filter(KeyVersion.active == True)  # noqa: E712
+            .filter(KeyVersion.active.is_(True))
             .first()
         )
         if active_version is None:

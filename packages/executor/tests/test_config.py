@@ -1,6 +1,5 @@
 """Tests for executor configuration loading and serialization."""
 
-from __future__ import annotations
 
 import json
 from pathlib import Path

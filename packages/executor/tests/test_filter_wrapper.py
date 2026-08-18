@@ -4,7 +4,6 @@ Tests build_filter_entries, filter_output, and filter_and_redact
 functions that wrap the Rust venya_filter extension.
 """
 
-from __future__ import annotations
 
 from typing import Any, cast
 

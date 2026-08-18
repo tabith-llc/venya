@@ -11,7 +11,6 @@ Pattern: ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$
 - DNS-label compatible (RFC 1035)
 """
 
-from __future__ import annotations
 
 import re
 

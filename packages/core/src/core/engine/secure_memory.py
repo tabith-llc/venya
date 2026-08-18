@@ -4,7 +4,6 @@ mlock is used only in the core package (server-side), where secrets
 reside in trusted memory. Requires CAP_IPC_LOCK or root.
 """
 
-from __future__ import annotations
 
 import ctypes
 import ctypes.util

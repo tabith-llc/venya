@@ -6,7 +6,6 @@
 - GET /credentials — list own credentials
 """
 
-from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
@@ -47,6 +46,11 @@ class CredentialAddCompleteRequest(BaseModel):
 class CredentialRemoveResponse(BaseModel):
     removed: bool
     credential_id: int
+
+
+class CredentialAddCompleteResponse(BaseModel):
+    status: str
+    credential_label: str
 
 
 class CredentialInfo(BaseModel):
@@ -168,7 +172,7 @@ async def credentials_add_start(
             db.query(WebAuthnCredential.credential_id)
             .filter(
                 WebAuthnCredential.user_id == user_id,
-                WebAuthnCredential.is_active == True,  # noqa: E712
+                WebAuthnCredential.is_active.is_(True),
             )
             .all()
         )
@@ -207,7 +211,7 @@ async def credentials_add_start(
 async def credentials_add_complete(
     req: CredentialAddCompleteRequest,
     request: Request,
-) -> dict[str, str]:
+) -> CredentialAddCompleteResponse:
     """Complete adding a new credential (requires active session + elevation).
 
     Phase 3, Step 3: Verify elevation, complete WebAuthn registration, store credential.
@@ -256,7 +260,7 @@ async def credentials_add_complete(
             user_id, req.label,
         )
 
-        return {"status": "ok", "credential_label": req.label}
+        return CredentialAddCompleteResponse(status="ok", credential_label=req.label)
     except HTTPException:
         raise
     except Exception as e:
@@ -311,22 +315,24 @@ async def credentials_remove(
             )
 
         # Guard: reject if this is the last active credential
-        active_count = (
+        # with_for_update() locks all active credentials, preventing concurrent deactivation
+        active_credentials = (
             db.query(WebAuthnCredential)
             .filter(
                 WebAuthnCredential.user_id == user_id,
-                WebAuthnCredential.is_active == True,  # noqa: E712
+                WebAuthnCredential.is_active.is_(True),
             )
-            .count()
+            .with_for_update()
+            .all()
         )
 
-        if active_count <= 1:
+        if len(active_credentials) <= 1:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot remove the last active credential",
             )
 
-        # Soft-delete
+        # Soft-delete (under lock)
         cred.is_active = False
         db.commit()
 
@@ -367,7 +373,7 @@ async def credentials_list(
             db.query(WebAuthnCredential)
             .filter(
                 WebAuthnCredential.user_id == user_id,
-                WebAuthnCredential.is_active == True,  # noqa: E712
+                WebAuthnCredential.is_active.is_(True),
             )
             .order_by(WebAuthnCredential.created_at.desc())
             .all()

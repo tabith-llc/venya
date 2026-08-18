@@ -4,6 +4,8 @@ import pytest
 
 from server.config import ServerConfig, DatabaseConfig
 
+_TEST_PEPPER = "test-pepper"
+
 
 class TestPassphraseStartupCheck:
     """Tests for the passphrase startup hard failure in production."""
@@ -13,6 +15,7 @@ class TestPassphraseStartupCheck:
         config = ServerConfig(
             debug=False,
             db=DatabaseConfig(database_url="postgresql://test/test"),
+            recovery_code_pepper=_TEST_PEPPER,
         )
 
         # Replicate the exact check from app.py lifespan
@@ -31,6 +34,7 @@ class TestPassphraseStartupCheck:
         config = ServerConfig(
             debug=True,
             db=DatabaseConfig(database_url="postgresql://test/test"),
+            recovery_code_pepper=_TEST_PEPPER,
         )
 
         # Replicate the exact check from app.py lifespan
@@ -46,6 +50,7 @@ class TestPassphraseStartupCheck:
                 database_url="postgresql://test/test",
                 passphrase="test-passphrase",
             ),
+            recovery_code_pepper=_TEST_PEPPER,
         )
 
         # Replicate the exact check from app.py lifespan
@@ -61,6 +66,7 @@ class TestPassphraseStartupCheck:
                 database_url="postgresql://test/test",
                 passphrase="",
             ),
+            recovery_code_pepper=_TEST_PEPPER,
         )
 
         # Empty string is falsy, so the check triggers

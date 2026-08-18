@@ -4,7 +4,6 @@ Provides FastAPI dependencies that enforce per-admin and per-executor
 rate limits using atomic multi-key sliding window check-and-consume.
 """
 
-from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
@@ -52,10 +51,10 @@ async def rate_limit_admin_token_gen(request: Request) -> None:
         return
 
     key = f"admin:{admin_user_id}"
-    allowed, retry_after = limiter.check_and_consume([key])
+    allowed, retry_after = await limiter.check_and_consume([key])
 
-    remaining = limiter.get_remaining(key)
-    reset_time = limiter.get_reset_time(key)
+    remaining = await limiter.get_remaining(key)
+    reset_time = await limiter.get_reset_time(key)
 
     request.state.rate_limit_info = {  # type: ignore[attr-defined]
         "limit": config.executor_enrollment.token_generation_per_minute,
@@ -96,7 +95,7 @@ async def rate_limit_registration(request: Request) -> None:
     # Check global emergency limit first (100/min)
     global_limiter = SlidingWindowRateLimiter(max_requests=100, window_seconds=60)
     global_key = f"global:{client_ip}"
-    allowed, retry_after = global_limiter.check_and_consume([global_key])
+    allowed, retry_after = await global_limiter.check_and_consume([global_key])
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -142,7 +141,7 @@ async def rate_limit_registration(request: Request) -> None:
     if not keys:
         keys = [ip_key]
 
-    allowed, retry_after = limiter.check_and_consume(keys)
+    allowed, retry_after = await limiter.check_and_consume(keys)
 
     # Calculate most restrictive remaining
     remaining_values = []
@@ -154,8 +153,8 @@ async def rate_limit_registration(request: Request) -> None:
         elif key.startswith("reg_exec:"):
             lim = _get_limiter(config.executor_enrollment, "registration_attempts_per_minute")
         if lim:
-            remaining_values.append(lim.get_remaining(key))
-            reset_values.append(lim.get_reset_time(key))
+            remaining_values.append(await lim.get_remaining(key))
+            reset_values.append(await lim.get_reset_time(key))
 
     most_restrictive_remaining = min(remaining_values) if remaining_values else 0
     max_reset = max(reset_values) if reset_values else 0

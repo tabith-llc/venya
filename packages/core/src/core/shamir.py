@@ -11,7 +11,6 @@ Usage:
     secret = combine(shares[:3])  # any 3 shares work
 """
 
-from __future__ import annotations
 
 import os
 from typing import List, Tuple

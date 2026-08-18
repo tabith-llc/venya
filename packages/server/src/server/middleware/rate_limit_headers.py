@@ -4,7 +4,6 @@ Attaches X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
 headers to all responses. On 429, also adds Retry-After.
 """
 
-from __future__ import annotations
 
 import logging
 from typing import Any

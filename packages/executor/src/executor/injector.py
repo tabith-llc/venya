@@ -4,7 +4,6 @@ Handles sentinel stripping, FD injection (memfd/shm/fifo),
 and sentinel registry management.
 """
 
-from __future__ import annotations
 
 import base64
 import hashlib

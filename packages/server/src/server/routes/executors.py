@@ -4,10 +4,10 @@ Handles executor CSR submission, certificate signing, and revocation
 list polling for mTLS-based executor authentication.
 """
 
-from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 
 from cryptography import x509
@@ -408,19 +408,48 @@ async def register_executor(
 )
 async def get_revocation_list(
     request: Request,
-) -> RevocationListResponse:
+) -> Response:
     """Get the list of revoked certificate serial numbers.
 
     Executors poll this endpoint periodically (every 60s) to check
-    if their certificate has been revoked.
+    if their certificate has been revoked. Supports conditional GET
+    via ETag for caching — returns 304 Not Modified when the list
+    has not changed.
     """
     from core.iam.models import ExecutorCertRevocation
+    from fastapi.responses import Response
 
     db = _get_db(request)
+    ca_manager = _get_ca_manager(request)
     try:
+        # Purge old entries to keep table bounded
+        server_config = getattr(request.app.state, "config", None)
+        retention_days = (
+            server_config.crl.crl_retention_days
+            if server_config and hasattr(server_config, "crl")
+            else 90
+        )
+        deleted_count = ca_manager.purge_expired_revocations(db, retention_days)
+        if deleted_count > 0:
+            logger.debug("Purged %d expired revocations (%d day retention)", deleted_count, retention_days)
+
+        # Fetch remaining revocations
         revocations = db.query(ExecutorCertRevocation).all()
-        serials = [r.serial_number for r in revocations]
-        return RevocationListResponse(revoked_serials=serials)
+        serials = sorted([r.serial_number for r in revocations])
+        payload = json.dumps(serials, sort_keys=True).encode()
+        etag = f'"{hashlib.sha256(payload).hexdigest()}"'
+
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+
+        return Response(
+            content=json.dumps({"revoked_serials": serials}).encode(),
+            media_type="application/json",
+            headers={
+                "ETag": etag,
+                "Cache-Control": "max-age=300",
+            },
+        )
     finally:
         db.close()
 
@@ -434,8 +463,10 @@ async def get_crl(
     """Get the signed Certificate Revocation List in DER format.
 
     Public endpoint — no authentication required. Purges expired
-    revocation records before generating the CRL.
+    revocation records before generating the CRL. Supports conditional
+    GET via ETag for caching.
     """
+    from core.iam.models import ExecutorCertRevocation
     from fastapi.responses import Response
 
     db = _get_db(request)
@@ -453,10 +484,49 @@ async def get_crl(
         crl_der = ca_manager.generate_crl(db)
         metrics.CA_CRL_GENERATED_TOTAL.inc()
 
-        return Response(
-            content=crl_der,
-            media_type="application/pkix-crl",
-        )
+        # ETag based on serial numbers only (CRL timestamps change every request)
+        serials = sorted([r.serial_number for r in db.query(ExecutorCertRevocation).all()])
+        etag_payload = json.dumps(serials, sort_keys=True).encode()
+        etag = f'"{hashlib.sha256(etag_payload).hexdigest()}"'
+
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+
+        # Lazy zstd import with Accept-Encoding validation and graceful fallback
+        accept_encoding = request.headers.get("Accept-Encoding", "")
+        use_zstd = "zstd" in accept_encoding
+
+        if use_zstd:
+            try:
+                from compression import zstd
+
+                compressed = zstd.compress(crl_der, level=3)
+                response_data = compressed
+                content_encoding = "zstd"
+            except Exception:  # noqa: BLE001 — compression failures are localized
+                use_zstd = False
+
+        if use_zstd:
+            return Response(
+                content=compressed,
+                media_type="application/pkix-crl",
+                headers={
+                    "Content-Encoding": "zstd",
+                    "ETag": etag,
+                    "Cache-Control": "max-age=30",
+                    "Vary": "Accept-Encoding",
+                },
+            )
+        else:
+            return Response(
+                content=crl_der,
+                media_type="application/pkix-crl",
+                headers={
+                    "ETag": etag,
+                    "Cache-Control": "max-age=30",
+                    "Vary": "Accept-Encoding",
+                },
+            )
     finally:
         db.close()
 

@@ -9,13 +9,14 @@ Orchestrates the full execution pipeline:
   6. Clean up (delete secrets, revoke tokens)
 """
 
-from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
 import re
 import select
+import shlex
 import subprocess  # nosec B404 — executor requires subprocess to run commands
 import time
 import uuid
@@ -58,6 +59,40 @@ TRUNCATION_MARKER = "... [OUTPUT TRUNCATED: {n} bytes discarded]\n"
 
 # How long to wait for sandbox commands
 SBX_TIMEOUT = 3600  # 1 hour max
+
+# Shell metacharacters that are not permitted in executor commands.
+# The executor runs commands without shell interpretation (shell=False),
+# so these characters are rejected outright. Users needing pipes, redirects,
+# or other shell features should provide a script file.
+SHELL_METACHARS = set("|;&$`(){}<>!*?\n\r")
+
+
+def _validate_command_structure(command: str) -> list[str]:
+    """Split command into arguments and reject shell metacharacters.
+
+    Args:
+        command: The command string to validate and split.
+
+    Returns:
+        List of command arguments from shlex.split().
+
+    Raises:
+        ValueError: If the command contains shell metacharacters or is empty.
+    """
+    if not command or not command.strip():
+        raise ValueError("Empty command")
+
+    if any(c in command for c in SHELL_METACHARS):
+        raise ValueError(
+            "Shell metacharacters are not permitted. "
+            "Wrap complex commands in a script file and execute that instead."
+        )
+
+    args = shlex.split(command)
+    if not args:
+        raise ValueError("Empty command after parsing")
+
+    return args
 
 
 @dataclass
@@ -211,6 +246,7 @@ class Executor:
                 secret_id=secret_id,
                 value=plaintext,
                 wrapped_value=wrapped_value,
+                hash=hashlib.sha256(plaintext).hexdigest(),
             )
             self._bundles.append(bundle)
 
@@ -249,10 +285,13 @@ class Executor:
         if self._injection_result:
             pass_fds.update(self._injection_result.extra_fds)
 
-        # Create subprocess
+        # Validate command structure (rejects shell metacharacters)
+        args = _validate_command_structure(command)
+
+        # Create subprocess — shell=False for security
         process = subprocess.Popen(
-            command,
-            shell=True,  # nosec B602 — core executor design, runs user commands via shell
+            args,
+            shell=False,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -286,46 +325,7 @@ class Executor:
         # Wait for process to complete
         exit_code = process.wait()
 
-        # Stage 1: Local filtering
-        masked_stdout, masked_stderr, stdout_ids, stderr_ids = filter_and_redact(
-            stdout,
-            stderr,
-            [{"secret_id": s.secret_id, "value": s.value} for s in injections],
-        )
-
-        all_masked_ids = sorted(set(stdout_ids + stderr_ids))
-
-        # Stage 2: Server-side definitive filtering
-        stage2_stdout = masked_stdout
-        stage2_stderr = masked_stderr
-        stage2_masked_ids = all_masked_ids
-
-        if self.http_client is not None:
-            try:
-                stage2_stdout, stage2_stderr, stage2_masked_ids = self._send_to_stage2(
-                    stdout,
-                    stderr,
-                    [{"secret_id": s.secret_id, "value": s.value} for s in injections],
-                )
-            except Exception:
-                logger.exception("Stage 2 filter failed — using Stage 1 results")
-
-        logger.info(
-            "Command exited with code %d, %d secrets masked",
-            exit_code,
-            len(stage2_masked_ids),
-        )
-
-        return CommandResult(
-            command=command,
-            exit_code=exit_code,
-            stdout=stage2_stdout,
-            stderr=stage2_stderr,
-            masked_secret_ids=stage2_masked_ids,
-            output_truncated=(len(stdout) > MAX_OUTPUT_BYTES or len(stderr) > MAX_OUTPUT_BYTES),
-            original_stdout_size=len(stdout),
-            original_stderr_size=len(stderr),
-        )
+        return self._filter_and_build_result(command, exit_code, stdout, stderr, injections)
 
     def _capture_output(self, process: subprocess.Popen) -> tuple[bytes, bytes]:
         """Capture stdout/stderr with batch mode and size limit.
@@ -338,6 +338,8 @@ class Executor:
         """
         stdout_truncated = False
         stderr_truncated = False
+        stdout_total = 0
+        stderr_total = 0
 
         stdout_fd = process.stdout  # type: ignore[union-attr]
         stderr_fd = process.stderr  # type: ignore[union-attr]
@@ -353,7 +355,13 @@ class Executor:
         }
         fd_active: dict[int, bool] = {stdout_fd.fileno(): True, stderr_fd.fileno(): True}
 
+        deadline = time.time() + SBX_TIMEOUT
+
         while any(fd_active.values()):
+            if time.time() > deadline:
+                logger.warning("Output capture timed out after %d seconds", SBX_TIMEOUT)
+                break
+
             readable_fds = [fd for fd, active in fd_active.items() if active]
             if not readable_fds:
                 break
@@ -384,8 +392,15 @@ class Executor:
                 buf = chunk_buffers[fd]
                 stream_name = fd_map[fd]
 
-                if len(chunk) > MAX_OUTPUT_BYTES:
-                    buf.extend(chunk[:MAX_OUTPUT_BYTES])
+                if stream_name == "stdout":
+                    stdout_total += len(chunk)
+                else:
+                    stderr_total += len(chunk)
+
+                if len(buf) + len(chunk) > MAX_OUTPUT_BYTES:
+                    remaining = MAX_OUTPUT_BYTES - len(buf)
+                    if remaining > 0:
+                        buf.extend(chunk[:remaining])
                     if stream_name == "stdout":
                         stdout_truncated = True
                     else:
@@ -399,10 +414,12 @@ class Executor:
 
         # Apply truncation markers
         if stdout_truncated and stdout:
-            marker = TRUNCATION_MARKER.format(len(stdout) - MAX_OUTPUT_BYTES).encode()
+            discarded = max(0, stdout_total - MAX_OUTPUT_BYTES)
+            marker = TRUNCATION_MARKER.format(discarded).encode()
             stdout = stdout[:MAX_OUTPUT_BYTES] + marker
         if stderr_truncated and stderr:
-            marker = TRUNCATION_MARKER.format(len(stderr) - MAX_OUTPUT_BYTES).encode()
+            discarded = max(0, stderr_total - MAX_OUTPUT_BYTES)
+            marker = TRUNCATION_MARKER.format(discarded).encode()
             stderr = stderr[:MAX_OUTPUT_BYTES] + marker
 
         return stdout, stderr
@@ -525,7 +542,7 @@ class Executor:
         Returns:
             CommandResult with filtered output.
         """
-        # Stage 1: Local filtering (Rust extension)
+        # Stage 1: Local filtering (Rust extension) — needs raw value for matching
         masked_stdout, masked_stderr, stdout_ids, stderr_ids = filter_and_redact(
             stdout,
             stderr,
@@ -544,10 +561,13 @@ class Executor:
                 stage2_stdout, stage2_stderr, stage2_masked_ids = self._send_to_stage2(
                     stdout,
                     stderr,
-                    [{"secret_id": s.secret_id, "value": s.value} for s in injections],
+                    [{"secret_id": s.secret_id, "hash": s.hash} for s in injections],
                 )
             except Exception:
                 logger.exception("Stage 2 filter failed — using Stage 1 results")
+
+        stdout_truncated = len(stdout) > MAX_OUTPUT_BYTES
+        stderr_truncated = len(stderr) > MAX_OUTPUT_BYTES
 
         logger.info(
             "Command exited with code %d, %d secrets masked",
@@ -561,9 +581,7 @@ class Executor:
             stdout=stage2_stdout,
             stderr=stage2_stderr,
             masked_secret_ids=stage2_masked_ids,
-            output_truncated=(
-                len(stdout) > MAX_OUTPUT_BYTES or len(stderr) > MAX_OUTPUT_BYTES
-            ),
+            output_truncated=stdout_truncated or stderr_truncated,
             original_stdout_size=len(stdout),
             original_stderr_size=len(stderr),
         )
@@ -631,6 +649,12 @@ class Executor:
                 "Failed to revoke tokens for secrets in session %s",
                 self.session_id,
             )
+            if self.audit_logger:
+                self.audit_logger.emit(
+                    "token_revocation_failed",
+                    session_id=self.session_id,
+                    secret_ids=secret_ids,
+                )
 
     def _send_to_stage2(
         self,

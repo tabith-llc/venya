@@ -4,7 +4,6 @@ All token generation in the Venya codebase should flow through
 get_secure_token() to provide a single audit point for entropy usage.
 """
 
-from __future__ import annotations
 
 import os
 import secrets
