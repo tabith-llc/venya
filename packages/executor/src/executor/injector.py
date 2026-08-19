@@ -6,11 +6,13 @@ and sentinel registry management.
 
 
 import base64
+import errno
 import hashlib
 import logging
 import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -265,9 +267,21 @@ def inject_via_fifo(path: str, secret_value: bytes) -> SecretInjection:
     # Write secret to FIFO in a background thread to avoid blocking
     import threading
 
+    FIFO_WRITE_TIMEOUT = 30.0
+
     def write_secret():
+        deadline = time.time() + FIFO_WRITE_TIMEOUT
         try:
-            with open(path, "wb") as f:
+            while True:
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError as e:
+                    if e.errno != errno.ENXIO or time.time() >= deadline:
+                        raise
+                    time.sleep(0.1)
+                    continue
+                break
+            with os.fdopen(fd, "wb") as f:
                 f.write(secret_value)
         except Exception:
             logger.exception("Failed to write secret to FIFO")
