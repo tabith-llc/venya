@@ -182,7 +182,8 @@ class TestBalancedPreset:
         assert valid is False
 
     def test_command_name_only_blocked(self, balanced_validator):
-        valid, reason = balanced_validator.validate("ls")
+        """Unresolvable command name is blocked (not in any trusted path)."""
+        valid, reason = balanced_validator.validate("nonexistent_venya_cmd_xyz")
         assert valid is False
         assert "not in trusted paths" in reason
 
