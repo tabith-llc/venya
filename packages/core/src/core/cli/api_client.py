@@ -13,6 +13,7 @@ Token model (per plan section 5.1):
 
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -54,9 +55,23 @@ class Config:
                 self._data = {}
 
     def save(self) -> None:
-        """Save config to disk."""
+        """Save config to disk with owner-only permissions (0o600)."""
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        self.config_file.write_text(json.dumps(self._data))  # noqa: F821
+        fd = tempfile.NamedTemporaryFile(
+            dir=self.config_file.parent,
+            prefix=".venya-config-",
+            delete=False,
+        )
+        try:
+            fd.write(json.dumps(self._data).encode())
+            fd.flush()
+            os.fchmod(fd.fileno(), 0o600)
+            fd.close()
+            os.replace(fd.name, self.config_file)
+        except BaseException:
+            fd.close()
+            os.unlink(fd.name)
+            raise
 
     @property
     def server_url(self) -> str:
