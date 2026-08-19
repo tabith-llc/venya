@@ -228,6 +228,12 @@ def inject_via_memfd(secret_value: bytes) -> tuple[int, SecretInjection]:
 
         os.write(fd, secret_value)
 
+        # Seal the memfd to prevent any further writes
+        import fcntl
+        F_ADD_SEALS = 1033
+        F_SEAL_WRITE = 0x2
+        fcntl.fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE)
+
         logger.info("Injected secret via memfd: fd=%d", fd)
 
         injection = SecretInjection(
