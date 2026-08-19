@@ -1017,6 +1017,7 @@ def cmd_run(client: APIClient, args: Any) -> int:
 
     if secret_keys:
         print(f"Fetching {len(secret_keys)} secret(s) for executor...")
+        errors = []
         for key in secret_keys:
             try:
                 result = client.get(f"/api/v1/secrets/{key}/executor")
@@ -1026,7 +1027,12 @@ def cmd_run(client: APIClient, args: Any) -> int:
                 })
                 print(f"  Secret '{key}' ready.")
             except APIClientError as e:
-                print(f"  Warning: could not fetch secret '{key}': {e}", file=sys.stderr)
+                errors.append(f"  Secret '{key}': {e}")
+        if errors:
+            print(f"Failed to fetch {len(errors)} secret(s):", file=sys.stderr)
+            for err in errors:
+                print(err, file=sys.stderr)
+            return 1
     else:
         print("No secrets specified. Command will run without injected credentials.")
 
