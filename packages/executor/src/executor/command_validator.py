@@ -251,7 +251,7 @@ class CommandValidator:
         Args:
             policy: New command policy.
         """
-        object.__setattr__(self, "policy", policy)
+        self.policy = policy
 
     def add_custom_pattern(self, pattern: str) -> None:
         """Add a custom dangerous pattern.
