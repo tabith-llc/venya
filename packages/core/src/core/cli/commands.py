@@ -1121,7 +1121,7 @@ def cmd_config_set_server(client: APIClient, args: Any) -> int:
     """Set the server URL."""
     url = args.url
     if not url.startswith(("http://", "https://")):
-        url = "http://" + url
+        url = "https://" + url
     client.config.server_url = url
     print(f"Server URL set to: {url}")
     return 0
