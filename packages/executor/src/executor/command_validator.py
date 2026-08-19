@@ -5,6 +5,8 @@ Policy is configurable at initialization and changeable by an admin.
 """
 
 
+import os
+import shutil
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -235,13 +237,13 @@ class CommandValidator:
         # Get the first word (command)
         first_word = cmd.split()[0] if cmd.split() else cmd
 
-        # If it's an absolute path, return it
+        # If it's an absolute path, normalize (handles ".": "/usr/bin/./ls" -> "/usr/bin/ls")
         if first_word.startswith("/"):
-            return first_word
+            return os.path.normpath(first_word)
 
-        # Otherwise, try to resolve via PATH-like logic
-        # For now, just return the command name
-        return first_word
+        # Otherwise, resolve via PATH (e.g., "ls" -> "/usr/bin/ls")
+        resolved = shutil.which(first_word)
+        return resolved if resolved else first_word
 
     def update_policy(self, policy: CommandPolicy) -> None:
         """Update the current command policy.
