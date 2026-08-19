@@ -66,9 +66,7 @@ class BackendConfig:
 
         # Derive KEK from passphrase if not provided
         if self.kek is None and self.passphrase is not None:
-            self.kek, self._salt = derive_kek(self.passphrase)
-        else:
-            self._salt = b""
+            self.kek, _ = derive_kek(self.passphrase)
 
     @property
     def engine_url(self) -> str:
