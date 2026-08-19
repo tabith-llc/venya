@@ -178,6 +178,7 @@ class SbxStrategy(InjectionStrategy):
             timeout=10,
         )
 
+        copied_paths: list[str] = []
         for mount in mounts:
             container_path = mount.container_path
             result = subprocess.run(  # nosec
@@ -188,7 +189,14 @@ class SbxStrategy(InjectionStrategy):
             )
             if result.returncode != 0:
                 logger.error("sbx cp failed for %s: %s", mount.secret_id, result.stderr)
+                for copied in copied_paths:
+                    subprocess.run(  # nosec
+                        ["sbx", "exec", self._sandbox_name, "rm", "-f", copied],
+                        capture_output=True, text=True, timeout=10,
+                    )
                 raise RuntimeError(f"Failed to copy secret {mount.secret_id} into sandbox")
+
+            copied_paths.append(container_path)
 
             # Set read-only permissions inside sandbox
             subprocess.run(  # nosec
