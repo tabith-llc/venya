@@ -85,6 +85,14 @@ class CommandValidatorConfig(BaseModel):
         default=None,
         description="Explicit allowlist of commands (strict mode)",
     )
+    dangerous_patterns: list[str] | None = Field(
+        default=None,
+        description="Patterns to block using word-boundary matching (e.g., 'sudo', 'mount'). Matches 'sudo' not 'mysudo'.",
+    )
+    match_word_boundaries: bool = Field(
+        default=True,
+        description="Match dangerous patterns using word boundaries (\\b) instead of substring matching.",
+    )
 
 
 class AuditForwarderConfig(BaseModel):
@@ -239,7 +247,7 @@ class ExecutorConfig(BaseSettings):
         description="Base FD number for injected secrets",
     )
     secret_tmpfs_dir: str = Field(
-        default="/tmp/venya_secrets",
+        default="/tmp/venya_secrets",  # nosec B108 — tmpfs-backed, not persistent disk
         description="Directory on tmpfs for temporary secret storage",
     )
 

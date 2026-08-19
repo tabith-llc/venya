@@ -3,8 +3,11 @@
 import hashlib
 import logging
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from ..dependencies import get_db
 
 logger = logging.getLogger("venya.server")
 
@@ -30,6 +33,7 @@ class RecoveryResponse(BaseModel):
 async def recovery(
     req: RecoveryRequest,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> RecoveryResponse:
     """Break-glass recovery (alias for /admin/recovery).
 
@@ -38,14 +42,6 @@ async def recovery(
     """
     from datetime import datetime, timezone
 
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-
-    db = backend.get_session()
     try:
         from core.iam.models import Role, RoleMember, User
 
@@ -92,7 +88,6 @@ async def recovery(
             db.query(User).filter(User.user_id == req.new_user_id).first()
         )
         if existing:
-            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"User already exists: {req.new_user_id}",
@@ -111,7 +106,6 @@ async def recovery(
             db.query(Role).filter(Role.name == "admin").first()
         )
         if admin_role is None:
-            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Admin role not found — admin role must exist before recovery",
@@ -134,10 +128,7 @@ async def recovery(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()

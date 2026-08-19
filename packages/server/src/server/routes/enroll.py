@@ -10,9 +10,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
+from ..dependencies import get_db
 from ..utils.token_binding import verify_binding_hash
 from ..utils.time import is_expired
 from pydantic import BaseModel, Field
@@ -52,17 +54,6 @@ class BrowserEnrollCompleteResponse(BaseModel):
 # --- Helpers ---
 
 
-def _get_db(request: Request):
-    """Get a database session from app state."""
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-    return backend.get_session()
-
-
 def _set_session_cookie(response: JSONResponse, token: str) -> None:
     """Set the venya_access_token cookie."""
     response.set_cookie(
@@ -86,12 +77,12 @@ def _set_session_cookie(response: JSONResponse, token: str) -> None:
 async def browser_enroll_start(
     req: BrowserEnrollStartRequest,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> BrowserEnrollStartResponse:
     """Validate enrollment token and issue WebAuthn registration challenge.
 
     Transitions token state from 'created' to 'in_progress'.
     """
-    db = _get_db(request)
     try:
         from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
         from core.iam.models import User
@@ -154,8 +145,6 @@ async def browser_enroll_start(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Enrollment failed",
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -165,13 +154,13 @@ async def browser_enroll_start(
 async def browser_enroll_complete(
     req: BrowserEnrollCompleteRequest,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> BrowserEnrollCompleteResponse:
     """Complete browser enrollment: store credential, activate user, create session.
 
     Transitions token state from 'in_progress' to 'completed' and
     user status from 'pending_enrollment' to 'active'.
     """
-    db = _get_db(request)
     try:
         from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
         from core.iam.models import User, WebAuthnCredential
@@ -282,20 +271,10 @@ async def browser_enroll_complete(
 
         return response
     except HTTPException:
-        try:
-            db.rollback()
-        except Exception:  # nosec B110 — rollback best-effort before re-raising HTTPException
-            pass
         raise
     except Exception as e:
-        try:
-            db.rollback()
-        except Exception:  # nosec B110 — rollback best-effort before raising HTTPException
-            pass
         logger.error("Enrollment complete failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Enrollment failed",
         ) from e
-    finally:
-        db.close()

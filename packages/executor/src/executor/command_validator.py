@@ -17,6 +17,7 @@ class CommandPolicy:
     allowed_commands: frozenset[str]  # explicit allowlist (strict mode)
     trusted_paths: frozenset[str]  # trusted directories (balanced mode)
     dangerous_patterns: frozenset[str]  # blocked patterns (all modes)
+    match_word_boundaries: bool = True  # use \b regex matching for dangerous patterns
     allowed_hosts: list[dict[str, Any]] = field(default_factory=list)  # network allow rules (sbx)
 
 
@@ -68,6 +69,7 @@ def _load_default_policy() -> CommandPolicy:
         allowed_commands=frozenset(STRICT_DEFAULT_COMMANDS),
         trusted_paths=frozenset(DEFAULT_TRUSTED_PATHS),
         dangerous_patterns=frozenset(DEFAULT_DANGEROUS_PATTERNS),
+        match_word_boundaries=True,
     )
 
 
@@ -97,14 +99,14 @@ class CommandValidator:
         allowed_hosts = self._parse_allow_hosts(command)
 
         # Check dangerous patterns first (applies to all presets)
-        for pattern in self.policy.dangerous_patterns:
-            if pattern in command:
-                return False, f"Dangerous pattern blocked: {pattern!r}"
+        matched, reason = self._matches_dangerous_pattern(command)
+        if matched:
+            return False, reason
 
         # Check custom patterns
-        for pattern in self.custom_patterns:
-            if pattern in command:
-                return False, f"Custom pattern blocked: {pattern!r}"
+        matched, reason = self._matches_custom_pattern(command)
+        if matched:
+            return False, reason
 
         # Preset-specific checks
         if self.policy.preset == "strict":
@@ -160,6 +162,49 @@ class CommandValidator:
                 allowed_hosts.append({"host": host_port, "port": 0})
 
         return allowed_hosts
+
+    def _matches_dangerous_pattern(self, command: str) -> tuple[bool, str]:
+        """Check if command matches any dangerous pattern.
+
+        Args:
+            command: The command string to check.
+
+        Returns:
+            (is_match, reason) — reason is empty if no match.
+        """
+        import re
+
+        for pattern in self.policy.dangerous_patterns:
+            stripped = pattern.strip()
+            if self.policy.match_word_boundaries:
+                regex = r"\b" + re.escape(stripped) + r"\b"
+                if re.search(regex, command):
+                    return True, f"Dangerous pattern blocked: {pattern!r}"
+            else:
+                if stripped in command:
+                    return True, f"Dangerous pattern blocked: {pattern!r}"
+        return False, ""
+
+    def _matches_custom_pattern(self, command: str) -> tuple[bool, str]:
+        """Check if command matches any custom pattern.
+
+        Args:
+            command: The command string to check.
+
+        Returns:
+            (is_match, reason) — reason is empty if no match.
+        """
+        import re
+
+        for pattern in self.custom_patterns:
+            if self.policy.match_word_boundaries:
+                regex = r"\b" + re.escape(pattern) + r"\b"
+                if re.search(regex, command):
+                    return True, f"Custom pattern blocked: {pattern!r}"
+            else:
+                if pattern in command:
+                    return True, f"Custom pattern blocked: {pattern!r}"
+        return False, ""
 
     def _validate_strict(self, command: str) -> tuple[bool, str]:
         """Strict mode: only explicitly allowed commands."""
@@ -237,6 +282,7 @@ def make_strict_policy(allowed_commands: list[str] | None = None) -> CommandPoli
         allowed_commands=frozenset(allowed_commands or STRICT_DEFAULT_COMMANDS),
         trusted_paths=frozenset(),
         dangerous_patterns=frozenset(DEFAULT_DANGEROUS_PATTERNS),
+        match_word_boundaries=True,
     )
 
 
@@ -251,6 +297,7 @@ def make_balanced_policy() -> CommandPolicy:
         allowed_commands=frozenset(),
         trusted_paths=frozenset(DEFAULT_TRUSTED_PATHS),
         dangerous_patterns=frozenset(DEFAULT_DANGEROUS_PATTERNS),
+        match_word_boundaries=True,
     )
 
 
@@ -265,4 +312,5 @@ def make_permissive_policy() -> CommandPolicy:
         allowed_commands=frozenset(),
         trusted_paths=frozenset(),
         dangerous_patterns=frozenset(DEFAULT_DANGEROUS_PATTERNS),
+        match_word_boundaries=True,
     )

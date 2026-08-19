@@ -66,13 +66,18 @@ class RequestSizeLimitMiddleware:
             received_bytes = 0
             limit = self.max_body_bytes
 
+            exceeded = False
+
             async def sized_receive():
-                nonlocal received_bytes
+                nonlocal received_bytes, exceeded
+                if exceeded:
+                    return {"type": "http.request", "body": b""}
                 message = await receive()
                 if message["type"] == "http.request":
                     body = message.get("body", b"")
                     received_bytes += len(body)
                     if received_bytes > limit:
+                        exceeded = True
                         raise RequestTooLargeError()
                 return message
 

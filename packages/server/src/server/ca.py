@@ -17,14 +17,23 @@ from typing import Any
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.serialization import (
     BestAvailableEncryption,
     PrivateFormat,
     PublicFormat,
 )
 from cryptography.x509.oid import ExtensionOID, NameOID, ExtendedKeyUsageOID
+from pydantic import BaseModel
+
+from .config import CASecurityConfig
 
 logger = logging.getLogger("venya.ca")
+
+
+class CAExistsError(RuntimeError):
+    """CA keypair already exists on disk."""
 
 # Certificate validity periods
 CA_VALIDITY_DAYS = 3650  # 10 years
@@ -133,7 +142,7 @@ class CAManager:
             RuntimeError: If CA already exists.
         """
         if self.has_ca:
-            raise RuntimeError(f"CA already exists at {self.ca_dir}")
+            raise CAExistsError(f"CA already exists at {self.ca_dir}")
 
         self.ca_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(str(self.ca_dir), 0o700)
@@ -252,6 +261,16 @@ class CAManager:
         now = datetime.now(timezone.utc)
         serial = int.from_bytes(secrets.token_bytes(8), "big")
 
+        # Validate CSR
+        if not csr.is_signature_valid:
+            raise ValueError("CSR signature verification failed")
+
+        pub_key = csr.public_key()
+        if not isinstance(pub_key, ec.EllipticCurvePublicKey):
+            raise ValueError("CSR must use an ECDSA key")
+        if not isinstance(pub_key.curve, ec.SECP256R1):
+            raise ValueError("CSR must use P-256 curve")
+
         # Extract subject from CSR, replacing CN with executor_id
         csr_name = csr.subject
         # Build new name with executor_id as CN
@@ -351,7 +370,7 @@ class CAManager:
     def export_ca_key(self, passphrase: str) -> bytes:
         """Export the CA private key, encrypted with a passphrase.
 
-        Reads the CA private key from disk, encrypts it using AES-256-CBC
+        Reads the CA private key from disk, encrypts it using AES-256-GCM
         with a user-provided passphrase, and returns the encrypted blob.
 
         The plaintext key is zeroized from memory immediately after use.
@@ -360,11 +379,8 @@ class CAManager:
             passphrase: The passphrase to encrypt with.
 
         Returns:
-            Encrypted key bytes: salt (16) + iv (16) + encrypted data.
+            Encrypted key bytes: salt (16) + nonce (12) + encrypted data (GCM tag appended).
         """
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
         private_key_pem = self.ca_key_path.read_bytes()
 
         # Derive encryption key from passphrase using PBKDF2
@@ -377,47 +393,20 @@ class CAManager:
         )
         key = kdf.derive(passphrase.encode())
 
-        # Encrypt with AES-256-CBC
-        iv = os.urandom(16)
-        cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
-        encryptor = cipher.encryptor()
+        # Encrypt with AES-256-GCM (nonce 12 bytes, tag auto-appended)
+        nonce = os.urandom(12)
+        cipher = AESGCM(key)
+        encrypted = cipher.encrypt(nonce, private_key_pem, None)
 
-        # PKCS7 padding
-        block_size = 16
-        padding_len = block_size - (len(private_key_pem) % block_size)
-        padded = private_key_pem + bytes([padding_len] * padding_len)
-
-        encrypted = encryptor.update(padded) + encryptor.finalize()
-
-        # Zeroize the plaintext key from memory
+        # NOTE: True memory zeroization is not achievable in Python — bytes are
+        # immutable, and the cryptography library holds internal C-level copies.
+        # This overwrite is best-effort and does not guarantee the plaintext key
+        # is purged from all memory. For production hardening, consider running
+        # the CA key operations in a separate process or using an HSM.
         private_key_pem = b"\x00" * len(private_key_pem)
         del private_key_pem
 
-        return salt + iv + encrypted
-
-    def import_ca_key(self, encrypted_key: bytes) -> None:
-        """Import and write an encrypted CA private key.
-
-        Decrypts the provided encrypted key data and writes it to disk
-        with restrictive permissions (0600).
-
-        Args:
-            encrypted_key: Encrypted key bytes (salt + iv + ciphertext).
-        """
-        if len(encrypted_key) < 32:
-            raise ValueError("Encrypted key data too small")
-
-        salt = encrypted_key[:16]
-        iv = encrypted_key[16:32]
-        ciphertext = encrypted_key[32:]
-
-        # We need the passphrase — this is typically called after
-        # the admin provides it interactively. For programmatic use,
-        # pass the passphrase-deriving key directly.
-        raise NotImplementedError(
-            "Use restore_ca_key() with passphrase for decryption, "
-            "or provide encrypted_key as raw PEM for direct import"
-        )
+        return salt + nonce + encrypted
 
     def restore_ca_key(self, encrypted_key: bytes, passphrase: str) -> None:
         """Restore the CA private key from encrypted data.
@@ -426,18 +415,19 @@ class CAManager:
         with restrictive permissions (0600).
 
         Args:
-            encrypted_key: Encrypted key bytes (salt + iv + ciphertext).
+            encrypted_key: Encrypted key bytes (salt + nonce + ciphertext).
             passphrase: The passphrase used to encrypt the key.
         """
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.exceptions import InvalidTag
 
-        if len(encrypted_key) < 32:
+        if len(encrypted_key) < 29:
             raise ValueError("Encrypted key data too small")
 
         salt = encrypted_key[:16]
-        iv = encrypted_key[16:32]
-        ciphertext = encrypted_key[32:]
+        nonce = encrypted_key[16:28]
+        ciphertext = encrypted_key[28:]
 
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
@@ -447,21 +437,22 @@ class CAManager:
         )
         key = kdf.derive(passphrase.encode())
 
-        cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
-        decryptor = cipher.decryptor()
-        padded = decryptor.update(ciphertext) + decryptor.finalize()
-
-        # Remove PKCS7 padding
-        padding_len = padded[-1]
-        if padding_len < 1 or padding_len > 16 or padded[-padding_len:] != bytes([padding_len]) * padding_len:
+        # Decrypt with AES-256-GCM (fails cleanly on tampering via tag check)
+        try:
+            cipher = AESGCM(key)
+            private_key_pem = cipher.decrypt(nonce, ciphertext, None)
+        except InvalidTag:
             raise ValueError("Invalid passphrase or corrupted data")
-        private_key_pem = padded[:-padding_len]
 
         # Write to disk
         self.ca_key_path.write_bytes(private_key_pem)
         os.chmod(str(self.ca_key_path), 0o600)
 
-        # Zeroize from memory
+        # NOTE: True memory zeroization is not achievable in Python — bytes are
+        # immutable, and the cryptography library holds internal C-level copies.
+        # This overwrite is best-effort and does not guarantee the plaintext key
+        # is purged from all memory. For production hardening, consider running
+        # the CA key operations in a separate process or using an HSM.
         private_key_pem = b"\x00" * len(private_key_pem)
         del private_key_pem
 

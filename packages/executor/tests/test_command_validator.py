@@ -490,3 +490,121 @@ class TestEdgeCases:
         v = CommandValidator()
         valid, _ = v.validate(r"/usr/bin/my\ command --arg")
         assert valid is True
+
+
+# ---------------------------------------------------------------------------
+# Word-boundary matching (M-45)
+# ---------------------------------------------------------------------------
+
+
+class TestWordBoundaryMatching:
+    """Tests that dangerous patterns use word-boundary matching by default.
+
+    M-45: Word-boundary matching prevents false positives like
+    "sudo " matching "mysudo command" or "mount" matching "amount something".
+    """
+
+    def test_sudo_does_not_match_mysudo(self):
+        """Word boundary: 'mysudo' should NOT trigger sudo pattern."""
+        policy = make_balanced_policy()
+        v = CommandValidator(policy=policy)
+        valid, reason = v.validate("mysudo --do-something")
+        # "mysudo" is not in trusted paths, so it fails balanced check
+        # but NOT for dangerous pattern — it should fail for "not in trusted paths"
+        assert "Dangerous pattern" not in reason
+        assert "not in trusted paths" in reason
+
+    def test_sudo_still_matches_standalone(self):
+        """Word boundary: standalone 'sudo' should still be blocked."""
+        policy = make_balanced_policy()
+        v = CommandValidator(policy=policy)
+        valid, reason = v.validate("sudo cat /etc/shadow")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+        assert "sudo" in reason.lower() or "Dangerous" in reason
+
+    def test_mount_does_not_match_amount(self):
+        """Word boundary: 'amount' should NOT trigger mount pattern."""
+        policy = make_balanced_policy()
+        v = CommandValidator(policy=policy)
+        valid, reason = v.validate("amount something")
+        # "amount" is not in trusted paths, so it fails balanced check
+        # but NOT for dangerous pattern
+        assert "Dangerous pattern" not in reason
+        assert "not in trusted paths" in reason
+
+    def test_mount_still_matches_standalone(self):
+        """Word boundary: standalone 'mount' should still be blocked."""
+        policy = make_balanced_policy()
+        v = CommandValidator(policy=policy)
+        valid, reason = v.validate("mount /dev/sdb1 /mnt")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_nc_does_not_match_concurrency(self):
+        """Word boundary: 'concurrency' should NOT trigger nc pattern."""
+        policy = make_balanced_policy()
+        v = CommandValidator(policy=policy)
+        valid, reason = v.validate("concurrency check")
+        assert "Dangerous pattern" not in reason
+
+    def test_dd_does_not_match_ddos(self):
+        """Word boundary: 'ddos' should NOT trigger dd pattern."""
+        policy = make_balanced_policy()
+        v = CommandValidator(policy=policy)
+        valid, reason = v.validate("ddos-mitigation tool")
+        assert "Dangerous pattern" not in reason
+
+    def test_word_boundary_disabled_falls_back_to_substring(self):
+        """When match_word_boundaries=False, substring matching is used."""
+        policy = CommandPolicy(
+            preset="permissive",
+            allowed_commands=frozenset(),
+            trusted_paths=frozenset(),
+            dangerous_patterns=frozenset(["sudo "]),
+            match_word_boundaries=False,
+        )
+        v = CommandValidator(policy=policy)
+        valid, reason = v.validate("mysudo --do-something")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_word_boundary_enabled_blocks_substring(self):
+        """Word boundary: 'sudo' in middle of command still matches."""
+        policy = make_balanced_policy()
+        v = CommandValidator(policy=policy)
+        valid, reason = v.validate("run sudo --option arg")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_custom_patterns_also_use_word_boundaries(self):
+        """Custom patterns respect match_word_boundaries setting."""
+        policy = CommandPolicy(
+            preset="permissive",
+            allowed_commands=frozenset(),
+            trusted_paths=frozenset(),
+            dangerous_patterns=frozenset(),
+            match_word_boundaries=True,
+        )
+        v = CommandValidator(policy=policy)
+        v.add_custom_pattern("evil")
+        # 'evil' in 'devil' should NOT match with word boundaries
+        valid, reason = v.validate("devil is in the details")
+        assert "Custom pattern" not in reason
+        # standalone 'evil' should match
+        valid, reason = v.validate("evil command")
+        assert valid is False
+        assert "Custom pattern" in reason
+
+    def test_config_env_match_word_boundaries(self, monkeypatch):
+        """Config field match_word_boundaries loads from env var."""
+        from executor.config import ExecutorConfig
+        monkeypatch.setenv("VENYA_EXECUTOR_COMMAND_VALIDATOR__MATCH_WORD_BOUNDARIES", "false")
+        cfg = ExecutorConfig()
+        assert cfg.command_validator.match_word_boundaries is False
+
+    def test_config_dangerous_patterns_field(self, monkeypatch):
+        """Config field dangerous_patterns accepts custom list."""
+        from executor.config import CommandValidatorConfig
+        cfg = CommandValidatorConfig(dangerous_patterns=["custom-danger"])
+        assert cfg.dangerous_patterns == ["custom-danger"]

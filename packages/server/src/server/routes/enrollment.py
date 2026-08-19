@@ -8,8 +8,9 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
-from ..dependencies import require_admin
+from ..dependencies import get_db, require_admin
 from ..utils.time import effective_expiry_check_time
 
 router = APIRouter()
@@ -40,20 +41,6 @@ class EnrollmentTokenRevokeResponse(BaseModel):
     revoked: bool
 
 
-# --- Helper functions ---
-
-
-def _get_db(request: Request):
-    """Get a database session from the backend on app state."""
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-    return backend.get_session()
-
-
 # --- Endpoints ---
 
 
@@ -64,14 +51,13 @@ def _get_db(request: Request):
 )
 async def enrollment_create_token(
     req: EnrollmentTokenCreateRequest,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> EnrollmentTokenCreateResponse:
     """Create an enrollment token for an existing user.
 
     Requires admin permission.
     """
-    db = _get_db(request)
     try:
         from datetime import timezone as tz
 
@@ -97,19 +83,15 @@ async def enrollment_create_token(
     except HTTPException:
         raise
     except EnrollmentError as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.get(
@@ -119,46 +101,43 @@ async def enrollment_create_token(
 async def enrollment_list_tokens(
     request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> EnrollmentTokenListResponse:
     """List active enrollment tokens.
 
     Requires admin permission.
     """
-    db = _get_db(request)
-    try:
-        from datetime import timezone as tz
+    from datetime import timezone as tz
 
-        from core.iam.models import EnrollmentToken
+    from core.iam.models import EnrollmentToken
 
-        server_config = getattr(request.app.state, "config", None)
-        tolerance = (
-            server_config.clock_skew.token_tolerance_seconds
-            if server_config and hasattr(server_config, "clock_skew")
-            else 60
+    server_config = getattr(request.app.state, "config", None)
+    tolerance = (
+        server_config.clock_skew.token_tolerance_seconds
+        if server_config and hasattr(server_config, "clock_skew")
+        else 60
+    )
+    now_minus_tolerance = effective_expiry_check_time(tolerance)
+    tokens = (
+        db.query(EnrollmentToken)
+        .filter(
+            EnrollmentToken.state.in_(["created", "in_progress"]),
+            EnrollmentToken.expires_at > now_minus_tolerance,
         )
-        now_minus_tolerance = effective_expiry_check_time(tolerance)
-        tokens = (
-            db.query(EnrollmentToken)
-            .filter(
-                EnrollmentToken.state.in_(["created", "in_progress"]),
-                EnrollmentToken.expires_at > now_minus_tolerance,
-            )
-            .order_by(EnrollmentToken.created_at.desc())
-            .all()
-        )
-        result = [
-            {
-                "id": t.id,
-                "user_id": t.user_id,
-                "state": t.state,
-                "created_at": t.created_at.isoformat(),
-                "expires_at": t.expires_at.isoformat(),
-            }
-            for t in tokens
-        ]
-        return EnrollmentTokenListResponse(tokens=result)
-    finally:
-        db.close()
+        .order_by(EnrollmentToken.created_at.desc())
+        .all()
+    )
+    result = [
+        {
+            "id": t.id,
+            "user_id": t.user_id,
+            "state": t.state,
+            "created_at": t.created_at.isoformat(),
+            "expires_at": t.expires_at.isoformat(),
+        }
+        for t in tokens
+    ]
+    return EnrollmentTokenListResponse(tokens=result)
 
 
 @router.post(
@@ -168,26 +147,22 @@ async def enrollment_list_tokens(
 )
 async def enrollment_revoke_token(
     token_id: int,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> EnrollmentTokenRevokeResponse:
     """Revoke an enrollment token.
 
     Requires admin permission.
     """
-    db = _get_db(request)
-    try:
-        from core.iam.enrollment_manager import EnrollmentManager
+    from core.iam.enrollment_manager import EnrollmentManager
 
+    try:
         em = EnrollmentManager(db)
         revoked = em.revoke_token(token_id)
         db.commit()
         return EnrollmentTokenRevokeResponse(revoked=revoked)
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()

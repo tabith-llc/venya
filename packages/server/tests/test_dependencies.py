@@ -1,12 +1,13 @@
-"""Tests for require_role dependency factory (C-06)."""
+"""Tests for require_role dependency factory (C-06) and require_admin (L-11)."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import Depends, FastAPI
 from starlette.testclient import TestClient
 
-from server.dependencies import get_current_user, require_role
+from server.dependencies import get_current_user, require_admin, require_role
 
 
 def _make_rm_mock(user_permissions):
@@ -119,7 +120,7 @@ class TestRequireRoleReadWrite:
 
 
 class TestRequireRoleExecutorBypass:
-    """Executors (mTLS) bypass the role check, consistent with RBACMiddleware."""
+    """Executors (mTLS) bypass the role check (no user_id for a role lookup)."""
 
     def test_executor_passes_without_role_lookup(self):
         """Executor user_info (no user_id) passes and never hits RoleManager."""
@@ -211,6 +212,91 @@ class TestRequireRoleFactory:
         rm.get_user_permissions.side_effect = _boom
         with patch("server.dependencies.RoleManager", return_value=rm):
             app = _create_app({"user_id": "user1"}, "read")
+            app.state.backend = backend
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 500
+        session.rollback.assert_called_once()
+        session.close.assert_called_once()
+
+
+def _create_admin_app(auth_user, with_backend=True):
+    """Create a minimal app with one route protected by require_admin."""
+    app = FastAPI()
+    if with_backend:
+        app.state.backend = MagicMock()
+
+    @app.get("/protected")
+    async def protected(_=Depends(require_admin)):
+        return {"result": "ok"}
+
+    if auth_user is not None:
+        app.dependency_overrides[get_current_user] = lambda: auth_user
+
+    return app
+
+
+def _make_admin_rm_mock(has_admin, role_exists=True, permission_error=None):
+    rm = MagicMock()
+    rm.get_role_by_name.return_value = (
+        SimpleNamespace(id=1) if role_exists else None
+    )
+    if permission_error is not None:
+        rm.has_permission.side_effect = permission_error
+    else:
+        rm.has_permission.return_value = has_admin
+    return rm
+
+
+class TestRequireAdmin:
+    """Session lifecycle tests for require_admin (L-11)."""
+
+    def test_admin_passes(self):
+        """A user with the admin role passes; session is closed."""
+        rm = _make_admin_rm_mock(has_admin=True)
+        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+            app = _create_admin_app({"user_id": "admin1"})
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 200
+        assert resp.json()["result"] == "ok"
+        rm.has_permission.assert_called_once_with("admin1", 1, "read-write")
+
+    def test_denied_for_non_admin(self):
+        """A user without admin permission gets 403; session is closed."""
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        rm = _make_admin_rm_mock(has_admin=False)
+        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+            app = _create_admin_app({"user_id": "user1"})
+            app.state.backend = backend
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Admin permission required"
+        session.close.assert_called_once()
+
+    def test_denied_when_admin_role_missing(self):
+        """403 when the admin role does not exist."""
+        rm = _make_admin_rm_mock(has_admin=True, role_exists=False)
+        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+            app = _create_admin_app({"user_id": "user1"})
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Admin role not found"
+
+    def test_db_rollback_on_lookup_error(self):
+        """A failure in the admin lookup rolls the session back before re-raising."""
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        rm = _make_admin_rm_mock(
+            has_admin=True, permission_error=RuntimeError("db down")
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+            app = _create_admin_app({"user_id": "admin1"})
             app.state.backend = backend
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/protected")

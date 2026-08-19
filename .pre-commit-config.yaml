@@ -5,7 +5,7 @@ repos:
       - id: bandit
         always_run: true
         pass_filenames: false
-        args: ["-r", "packages/", "-x", "packages/executor/tests/,packages/server/tests/,packages/core/tests/"]
+        args: ["-r", "packages/", "-x", "packages/executor/tests/,packages/server/tests/,packages/core/tests/,packages/executor/.venv"]
 
   - repo: local
     hooks:

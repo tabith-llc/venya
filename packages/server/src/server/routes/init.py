@@ -4,8 +4,11 @@ import hashlib
 import logging
 import secrets
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from ..dependencies import get_db
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -53,7 +56,7 @@ class ResetResponse(BaseModel):
     status_code=status.HTTP_200_OK,
 )
 async def init_reset(
-    request: Request,
+    db: Session = Depends(get_db),
 ) -> ResetResponse:
     """Reset the core to pre-initialization state.
 
@@ -62,11 +65,8 @@ async def init_reset(
 
     This is a safety net for failed first-time enrollment attempts.
     """
-    from ..dependencies import get_backend
     from core.iam.models import Role, RoleMember, User, EnrollmentToken
 
-    backend = get_backend(request)
-    db = backend.get_session()
     try:
         # Check if any user is enrolled
         enrolled_count = (
@@ -100,13 +100,10 @@ async def init_reset(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -117,6 +114,7 @@ async def init_reset(
 async def init_core(
     req: InitRequest,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> InitResponse:
     """Bootstrap the core: create admin role + generate FIDO2 challenge.
 
@@ -130,12 +128,9 @@ async def init_core(
     """
     from datetime import datetime, timezone
 
-    from ..ca import CAManager
-    from ..dependencies import get_backend
+    from ..ca import CAExistsError, CAManager
     from core.iam.models import Role, RoleMember, User
 
-    backend = get_backend(request)
-    db = backend.get_session()
     try:
         admin_role = db.query(Role).filter(Role.name == "admin").first()
 
@@ -177,7 +172,6 @@ async def init_core(
 
             if pending_user is None:
                 # Admin role exists but no role members — stale state from failed init
-                db.rollback()
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Admin role exists but no pending enrollment found. Use --installation-reset to start over.",
@@ -211,7 +205,7 @@ async def init_core(
                 try:
                     ca_manager.initialize()
                     logger.info("CA initialized during core bootstrap")
-                except RuntimeError:
+                except ca.CAExistsError:
                     logger.debug("CA already exists on disk")
 
         admin_role = Role(
@@ -268,13 +262,10 @@ async def init_core(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -285,6 +276,7 @@ async def init_core(
 async def init_complete(
     req: InitCompleteRequest,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> InitCompleteResponse:
     """Complete FIDO2 enrollment for first admin.
 
@@ -294,15 +286,10 @@ async def init_complete(
     """
     from datetime import datetime, timezone
 
-    from fastapi import HTTPException
-
-    from ..dependencies import get_backend
     from ..fido2.browser_adapter import browser_registration_to_fido2
     from core.iam.models import User, WebAuthnCredential
     import json
 
-    backend = get_backend(request)
-    db = backend.get_session()
     try:
         fido2_manager = getattr(request.app.state, "fido2_manager", None)
         if fido2_manager is None:
@@ -399,13 +386,10 @@ async def init_complete(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 def _generate_recovery_code() -> str:

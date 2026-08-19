@@ -16,7 +16,6 @@ from core.utils.sensitive_log import token as sensitive_token
 from core.engine.factory import CoreFactory
 from core.engine.core import Caller
 from core.iam.models import Session as SessionModel
-from core.iam.session_manager import SessionConfig as CoreSessionConfig, SessionManager
 from core.iam.role_manager import RoleManager
 from .utils.time import is_expired
 
@@ -60,10 +59,18 @@ def get_backend(request: Request) -> Backend:
 
 
 def get_db(backend: Backend = Depends(get_backend)) -> Generator[Session, None, None]:
-    """FastAPI dependency that yields a DB session."""
+    """FastAPI dependency that yields a DB session.
+
+    Owns the session lifecycle for the route layer: rollback on any exception
+    escaping the route, close on all paths. Routes must never call
+    db.rollback() or db.close() on this session.
+    """
     session = backend.get_session()
     try:
         yield session
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
 
@@ -120,23 +127,6 @@ def get_current_session(
     return (db, session)
 
 
-def get_session_manager(backend: Backend = Depends(get_backend)) -> SessionManager:
-    """FastAPI dependency that yields a SessionManager."""
-    from sqlalchemy.orm import Session as ORMSession
-
-    # Get the config from app state
-    # We'll create a temporary session for the manager
-    db = backend.get_session()
-    config = getattr(backend, "_session_config", CoreSessionConfig())
-    return SessionManager(db, config)
-
-
-def get_role_manager(backend: Backend = Depends(get_backend)) -> RoleManager:
-    """FastAPI dependency that yields a RoleManager."""
-    db = backend.get_session()
-    return RoleManager(db)
-
-
 async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
@@ -171,6 +161,9 @@ async def get_current_user(
     return user_info
 
 
+get_current_user._venya_guard = "auth"
+
+
 def require_role(permission: str):
     """Dependency factory that requires a specific permission tier.
 
@@ -182,7 +175,7 @@ def require_role(permission: str):
         user holds at least one role whose permission tier meets the
         required level. "read" passes with any role membership;
         "read-write" requires at least one read-write role. Executors
-        (mTLS) always pass, consistent with RBACMiddleware.
+        (mTLS) always pass.
 
     Raises:
         ValueError: If permission is not "read" or "read-write".
@@ -197,7 +190,7 @@ def require_role(permission: str):
         user_info: dict = Depends(get_current_user),
         backend: Backend = Depends(get_backend),
     ) -> dict:
-        # Executor (mTLS) has full access — consistent with RBACMiddleware.
+        # Executor (mTLS) has full access.
         # Their user_info carries no user_id, so a role lookup is impossible.
         if user_info.get("caller") == "executor":
             return user_info
@@ -229,6 +222,7 @@ def require_role(permission: str):
         finally:
             db.close()
 
+    _checker._venya_guard = permission
     return _checker
 
 
@@ -285,5 +279,13 @@ def require_admin(
                 detail="Admin permission required",
             )
         return user_info
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
+
+
+require_admin._venya_guard = "admin"

@@ -10,8 +10,9 @@ from core.utils.entropy import get_secure_token
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
-from ..dependencies import require_admin
+from ..dependencies import get_db, require_admin
 from ..rate_limit import rate_limit_admin_token_gen
 from ..utils.executor_id import validate_executor_id
 from ..utils.token_binding import compute_binding_hash
@@ -203,16 +204,6 @@ class AdminEnrollExecutorResponse(BaseModel):
 # --- Helper functions ---
 
 
-def _get_db(request: Request):
-    """Get a database session from the backend on app state."""
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-    return backend.get_session()
-
 
 # --- Endpoints ---
 
@@ -226,13 +217,13 @@ async def admin_enroll(
     req: AdminEnrollRequest,
     request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminEnrollResponse:
     """Enroll a new user (admin only).
 
     Creates an enrollment token that the user can use to complete onboarding.
     DEPRECATED: Use POST /admin/users instead.
     """
-    db = _get_db(request)
     try:
         from datetime import timezone as tz
 
@@ -271,19 +262,15 @@ async def admin_enroll(
     except HTTPException:
         raise
     except EnrollmentError as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -295,13 +282,13 @@ async def admin_create_user(
     req: AdminCreateUserRequest,
     request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminCreateUserResponse:
     """Create a new user and enrollment token (admin only).
 
     Phase 1: Admin creates user + enrollment token in one call.
     The admin delivers the token to the user out-of-band.
     """
-    db = _get_db(request)
     try:
         from datetime import timezone as tz
 
@@ -354,19 +341,15 @@ async def admin_create_user(
     except HTTPException:
         raise
     except EnrollmentError as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.delete(
@@ -376,17 +359,15 @@ async def admin_create_user(
 )
 async def admin_remove(
     user_id: str,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminRemoveResponse:
     """Remove a user (admin only)."""
-    db = _get_db(request)
     try:
         from core.iam.models import RoleMember, Session, User
 
         user = db.query(User).filter(User.user_id == user_id).first()
         if user is None:
-            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"User not found: {user_id}",
@@ -409,13 +390,10 @@ async def admin_remove(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.get(
@@ -423,29 +401,25 @@ async def admin_remove(
     response_model=AdminUserListResponse,
 )
 async def admin_list_users(
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminUserListResponse:
     """List all registered users (admin only)."""
-    db = _get_db(request)
-    try:
-        from core.iam.models import User
+    from core.iam.models import User
 
-        users = db.query(User).order_by(User.enrolled_at).all()
-        result = [
-            {
-                "user_id": u.user_id,
-                "display_name": u.display_name,
-                "status": u.status,
-                "auth_mode": u.auth_mode,
-                "enrolled_at": u.enrolled_at.isoformat() if u.enrolled_at else None,
-                "session_timeout": u.session_timeout,
-            }
-            for u in users
-        ]
-        return AdminUserListResponse(users=result)
-    finally:
-        db.close()
+    users = db.query(User).order_by(User.enrolled_at).all()
+    result = [
+        {
+            "user_id": u.user_id,
+            "display_name": u.display_name,
+            "status": u.status,
+            "auth_mode": u.auth_mode,
+            "enrolled_at": u.enrolled_at.isoformat() if u.enrolled_at else None,
+            "session_timeout": u.session_timeout,
+        }
+        for u in users
+    ]
+    return AdminUserListResponse(users=result)
 
 
 @router.put(
@@ -457,15 +431,14 @@ async def admin_configure_user(
     req: AdminConfigureUserRequest,
     request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminConfigureUserResponse:
     """Configure user settings (admin only)."""
-    db = _get_db(request)
     try:
         from core.iam.models import User
 
         user = db.query(User).filter(User.user_id == user_id).first()
         if user is None:
-            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"User not found: {user_id}",
@@ -485,13 +458,10 @@ async def admin_configure_user(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.get(
@@ -499,28 +469,24 @@ async def admin_configure_user(
     response_model=AdminKeyVersionListResponse,
 )
 async def admin_key_version_list(
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminKeyVersionListResponse:
     """List all key versions (admin only)."""
-    db = _get_db(request)
-    try:
-        from core.iam.models import KeyVersion
+    from core.iam.models import KeyVersion
 
-        versions = db.query(KeyVersion).order_by(KeyVersion.created_at.desc()).all()
-        result = [
-            {
-                "id": v.id,
-                "version_label": v.version_label,
-                "active": v.active,
-                "rotation_pending": v.rotation_pending,
-                "created_at": v.created_at.isoformat() if v.created_at else None,
-            }
-            for v in versions
-        ]
-        return AdminKeyVersionListResponse(versions=result)
-    finally:
-        db.close()
+    versions = db.query(KeyVersion).order_by(KeyVersion.created_at.desc()).all()
+    result = [
+        {
+            "id": v.id,
+            "version_label": v.version_label,
+            "active": v.active,
+            "rotation_pending": v.rotation_pending,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+        }
+        for v in versions
+    ]
+    return AdminKeyVersionListResponse(versions=result)
 
 
 @router.post(
@@ -530,14 +496,13 @@ async def admin_key_version_list(
 )
 async def admin_key_version_rotate(
     req: AdminKeyVersionRotateRequest,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminKeyVersionRotateResponse:
     """Start key rotation (admin only).
 
     Creates a new key version and begins re-wrapping all secrets.
     """
-    db = _get_db(request)
     try:
         from core.iam.models import KeyVersion, KeyRotationJob, KeyRotationSecret, Secret
 
@@ -593,13 +558,10 @@ async def admin_key_version_rotate(
             new_key_version_id=new_version.id,
         )
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -609,11 +571,10 @@ async def admin_key_version_rotate(
 )
 async def admin_key_version_rollback(
     req: AdminKeyVersionRollbackRequest,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminKeyVersionRollbackResponse:
     """Roll back a failed rotation job (admin only)."""
-    db = _get_db(request)
     try:
         from core.iam.models import KeyRotationJob
 
@@ -623,7 +584,6 @@ async def admin_key_version_rollback(
             .first()
         )
         if job is None:
-            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Rotation job {req.job_id} not found",
@@ -658,13 +618,10 @@ async def admin_key_version_rollback(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -674,11 +631,10 @@ async def admin_key_version_rollback(
 )
 async def admin_set_command_policy(
     req: AdminSetCommandPolicyRequest,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminSetCommandPolicyResponse:
     """Set executor command policy (admin only)."""
-    db = _get_db(request)
     try:
         from core.iam.models import CommandPolicy
 
@@ -709,13 +665,10 @@ async def admin_set_command_policy(
             updated=True,
         )
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -725,14 +678,13 @@ async def admin_set_command_policy(
 )
 async def admin_recovery(
     req: AdminRecoveryRequest,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminRecoveryResponse:
     """Break-glass recovery (admin only).
 
     Validates recovery code + WebAuthn assertion from enrolled device.
     """
-    db = _get_db(request)
     try:
         from core.iam.models import User
 
@@ -743,7 +695,6 @@ async def admin_recovery(
             db.query(User).filter(User.user_id == req.new_user_id).first()
         )
         if existing:
-            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"User already exists: {req.new_user_id}",
@@ -781,13 +732,10 @@ async def admin_recovery(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -797,11 +745,10 @@ async def admin_recovery(
 )
 async def admin_add_allowed_command(
     req: AdminAddAllowedCommandRequest,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminAddAllowedCommandResponse:
     """Add a command to the allowlist (admin only)."""
-    db = _get_db(request)
     try:
         from core.iam.models import CommandPolicy
 
@@ -829,13 +776,10 @@ async def admin_add_allowed_command(
         db.commit()
         return AdminAddAllowedCommandResponse(added=True, command_path=req.command_path)
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -845,14 +789,13 @@ async def admin_add_allowed_command(
 )
 async def admin_key_version_deactivate(
     version_id: int,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminKeyVersionDeactivateResponse:
     """Deactivate a key version (admin only).
 
     Marks the version as inactive — no longer used for new encryption.
     """
-    db = _get_db(request)
     try:
         from core.iam.models import KeyVersion
 
@@ -862,7 +805,6 @@ async def admin_key_version_deactivate(
             .first()
         )
         if version is None:
-            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Key version {version_id} not found",
@@ -880,13 +822,10 @@ async def admin_key_version_deactivate(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -896,15 +835,14 @@ async def admin_key_version_deactivate(
 )
 async def admin_key_version_revoke(
     version_id: int,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminKeyVersionRevokeResponse:
     """Revoke a key version (admin only).
 
     Permanently removes the version. All secrets must have been
     re-wrapped to a newer version first.
     """
-    db = _get_db(request)
     try:
         from core.iam.models import KeyVersion, Secret
 
@@ -914,7 +852,6 @@ async def admin_key_version_revoke(
             .first()
         )
         if version is None:
-            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Key version {version_id} not found",
@@ -927,7 +864,6 @@ async def admin_key_version_revoke(
             .count()
         )
         if secret_count > 0:
-            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot revoke: {secret_count} secrets still use this version",
@@ -945,13 +881,10 @@ async def admin_key_version_revoke(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.get(
@@ -960,34 +893,30 @@ async def admin_key_version_revoke(
     status_code=status.HTTP_200_OK,
 )
 async def admin_key_rotation_status(
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminKeyRotationStatusResponse:
     """Show progress of active rotation jobs (admin only)."""
-    db = _get_db(request)
-    try:
-        from core.iam.models import KeyRotationJob
+    from core.iam.models import KeyRotationJob
 
-        jobs = (
-            db.query(KeyRotationJob)
-            .order_by(KeyRotationJob.started_at.desc() if hasattr(KeyRotationJob, 'started_at') else KeyRotationJob.id.desc())
-            .all()
-        )
-        result = [
-            {
-                "id": j.id,
-                "status": j.status,
-                "total_secrets": j.total_secrets,
-                "completed_secrets": j.completed_secrets,
-                "failed_count": j.failed_count,
-                "started_at": j.started_at.isoformat() if j.started_at else None,
-                "completed_at": j.completed_at.isoformat() if j.completed_at else None,
-            }
-            for j in jobs
-        ]
-        return AdminKeyRotationStatusResponse(jobs=result)
-    finally:
-        db.close()
+    jobs = (
+        db.query(KeyRotationJob)
+        .order_by(KeyRotationJob.started_at.desc() if hasattr(KeyRotationJob, 'started_at') else KeyRotationJob.id.desc())
+        .all()
+    )
+    result = [
+        {
+            "id": j.id,
+            "status": j.status,
+            "total_secrets": j.total_secrets,
+            "completed_secrets": j.completed_secrets,
+            "failed_count": j.failed_count,
+            "started_at": j.started_at.isoformat() if j.started_at else None,
+            "completed_at": j.completed_at.isoformat() if j.completed_at else None,
+        }
+        for j in jobs
+    ]
+    return AdminKeyRotationStatusResponse(jobs=result)
 
 
 @router.post(
@@ -997,11 +926,10 @@ async def admin_key_rotation_status(
 )
 async def admin_key_rotation_job_rollback(
     job_id: int,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminKeyRotationJobRollbackResponse:
     """Roll back a failed or interrupted rotation job (admin only)."""
-    db = _get_db(request)
     try:
         from core.iam.models import KeyRotationJob, KeyRotationSecret
 
@@ -1011,7 +939,6 @@ async def admin_key_rotation_job_rollback(
             .first()
         )
         if job is None:
-            db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Rotation job {job_id} not found",
@@ -1044,13 +971,10 @@ async def admin_key_rotation_job_rollback(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -1060,8 +984,8 @@ async def admin_key_rotation_job_rollback(
 )
 async def admin_revoke_executor(
     executor_id: str,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminRevokeExecutorResponse:
     """Revoke an executor certificate (admin only).
 
@@ -1072,56 +996,46 @@ async def admin_revoke_executor(
 
     from core.iam.models import ExecutorCert, ExecutorCertRevocation
 
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
+    # Look up the executor's current certificate
+    cert = (
+        db.query(ExecutorCert)
+        .filter(ExecutorCert.executor_id == executor_id)
+        .first()
+    )
+
+    if cert is None:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-    db = backend.get_session()
-    try:
-        # Look up the executor's current certificate
-        cert = (
-            db.query(ExecutorCert)
-            .filter(ExecutorCert.executor_id == executor_id)
-            .first()
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Executor not found: {executor_id}",
         )
 
-        if cert is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Executor not found: {executor_id}",
-            )
+    # Check if already revoked
+    existing_revocation = (
+        db.query(ExecutorCertRevocation)
+        .filter(ExecutorCertRevocation.serial_number == cert.serial_number)
+        .first()
+    )
 
-        # Check if already revoked
-        existing_revocation = (
-            db.query(ExecutorCertRevocation)
-            .filter(ExecutorCertRevocation.serial_number == cert.serial_number)
-            .first()
-        )
+    if existing_revocation is not None:
+        return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id)
 
-        if existing_revocation is not None:
-            return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id)
+    # Add to revocation list
+    revocation = ExecutorCertRevocation(
+        serial_number=cert.serial_number,
+        executor_id=executor_id,
+        revoked_at=datetime.now(timezone.utc),
+        reason="Admin revocation",
+    )
+    db.add(revocation)
+    db.commit()
+    metrics.TOKEN_REVOKED.labels(reason="executor_revoked").inc()
 
-        # Add to revocation list
-        revocation = ExecutorCertRevocation(
-            serial_number=cert.serial_number,
-            executor_id=executor_id,
-            revoked_at=datetime.now(timezone.utc),
-            reason="Admin revocation",
-        )
-        db.add(revocation)
-        db.commit()
-        metrics.TOKEN_REVOKED.labels(reason="executor_revoked").inc()
-
-        logger.info(
-            "Revoked executor cert: executor_id=%s, serial=%s",
-            executor_id,
-            cert.serial_number,
-        )
-        return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id)
-    finally:
-        db.close()
+    logger.info(
+        "Revoked executor cert: executor_id=%s, serial=%s",
+        executor_id,
+        cert.serial_number,
+    )
+    return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id)
 
 
 @router.post(
@@ -1134,6 +1048,7 @@ async def admin_enroll_executor(
     request: Request,
     _rl: None = Depends(rate_limit_admin_token_gen),
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminEnrollExecutorResponse:
     """Generate an enrollment token for executor bootstrap registration (admin only).
 
@@ -1155,13 +1070,6 @@ async def admin_enroll_executor(
 
     from core.iam.models import AuditEvent, ExecutorEnrollmentToken
 
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-    db = backend.get_session()
     try:
         config = getattr(request.app.state, "config", None)
         ttl_seconds = (
@@ -1249,13 +1157,10 @@ async def admin_enroll_executor(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 # --- Phase 6: Re-enrollment ---
@@ -1270,6 +1175,7 @@ async def admin_re_enroll(
     user_id: str,
     request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminReEnrollResponse:
     """Re-enroll a user who has lost all credentials (admin only).
 
@@ -1279,7 +1185,6 @@ async def admin_re_enroll(
     - Deactivates all WebAuthn credentials
     - Generates new enrollment token
     """
-    db = _get_db(request)
     try:
         from datetime import timezone as tz
 
@@ -1334,19 +1239,15 @@ async def admin_re_enroll(
     except HTTPException:
         raise
     except EnrollmentError as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 # --- Phase 7: Admin Token Management ---
@@ -1359,45 +1260,41 @@ async def admin_re_enroll(
 )
 async def admin_list_user_tokens(
     user_id: str,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminUserTokenListResponse:
     """List all enrollment tokens for a user (admin only).
 
     Phase 7: Shows token states for audit/management.
     """
-    db = _get_db(request)
-    try:
-        from core.iam.models import EnrollmentToken, User
+    from core.iam.models import EnrollmentToken, User
 
-        user = db.query(User).filter(User.user_id == user_id).first()
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User not found: {user_id}",
-            )
-
-        tokens = (
-            db.query(EnrollmentToken)
-            .filter(EnrollmentToken.user_id == user.id)
-            .order_by(EnrollmentToken.created_at.desc())
-            .all()
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User not found: {user_id}",
         )
 
-        result = [
-            {
-                "id": t.id,
-                "state": t.state,
-                "created_at": t.created_at.isoformat(),
-                "expires_at": t.expires_at.isoformat(),
-                "used_at": t.used_at.isoformat() if t.used_at else None,
-            }
-            for t in tokens
-        ]
+    tokens = (
+        db.query(EnrollmentToken)
+        .filter(EnrollmentToken.user_id == user.id)
+        .order_by(EnrollmentToken.created_at.desc())
+        .all()
+    )
 
-        return AdminUserTokenListResponse(tokens=result)
-    finally:
-        db.close()
+    result = [
+        {
+            "id": t.id,
+            "state": t.state,
+            "created_at": t.created_at.isoformat(),
+            "expires_at": t.expires_at.isoformat(),
+            "used_at": t.used_at.isoformat() if t.used_at else None,
+        }
+        for t in tokens
+    ]
+
+    return AdminUserTokenListResponse(tokens=result)
 
 
 @router.post(
@@ -1409,12 +1306,12 @@ async def admin_create_user_token(
     user_id: str,
     request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminUserTokenCreateResponse:
     """Issue a new enrollment token for a user (admin only).
 
     Phase 7: Revokes existing tokens and issues a new one.
     """
-    db = _get_db(request)
     try:
         from core.iam.enrollment_manager import EnrollmentManager
         from core.iam.models import User
@@ -1447,13 +1344,10 @@ async def admin_create_user_token(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.delete(
@@ -1463,14 +1357,13 @@ async def admin_create_user_token(
 )
 async def admin_revoke_token(
     token_id: int,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminTokenRevokeResponse:
     """Revoke a specific enrollment token (admin only).
 
     Phase 7: Revokes a single token by ID.
     """
-    db = _get_db(request)
     try:
         from core.iam.enrollment_manager import EnrollmentManager
 
@@ -1482,13 +1375,10 @@ async def admin_revoke_token(
 
         return AdminTokenRevokeResponse(revoked=revoked, token_id=token_id)
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -1498,14 +1388,14 @@ async def admin_revoke_token(
 )
 async def admin_key_rotation(
     req: AdminKeyVersionRotateRequest,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminKeyVersionRotateResponse:
     """Start key rotation (alias for /admin/key-versions/rotate).
 
     Admin only. Creates a new key version and begins re-wrapping all secrets.
     """
-    return await admin_key_version_rotate(req, request)
+    return await admin_key_version_rotate(req, _, db)
 
 
 # --- Admin mTLS Certificate Revocation ---
@@ -1526,8 +1416,8 @@ class AdminRevokeCertResponse(BaseModel):
 @router.post("/admin/certs/revoke")
 async def admin_revoke_admin_cert(
     req: AdminRevokeCertRequest,
-    request: Request,
     _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
 ) -> AdminRevokeCertResponse:
     """Revoke an admin certificate by serial number.
 
@@ -1545,38 +1435,24 @@ async def admin_revoke_admin_cert(
             detail="Invalid serial format — must be hex string (up to 16 chars)",
         )
 
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Server not initialized",
-        )
-
     # Check if already revoked (idempotent)
-    db = backend.get_session()
-    try:
-        from core.iam.models import AdminCertRevocation
+    from core.iam.models import AdminCertRevocation
 
-        existing = (
-            db.query(AdminCertRevocation)
-            .filter(AdminCertRevocation.serial_number == serial)
-            .first()
-        )
+    existing = (
+        db.query(AdminCertRevocation)
+        .filter(AdminCertRevocation.serial_number == serial)
+        .first()
+    )
 
-        if existing:
-            logger.info("Admin cert %s already revoked (reason: %s)", serial, existing.reason)
-            return AdminRevokeCertResponse(serial=serial, revoked=True, reason=existing.reason, already_revoked=True)
+    if existing:
+        logger.info("Admin cert %s already revoked (reason: %s)", serial, existing.reason)
+        return AdminRevokeCertResponse(serial=serial, revoked=True, reason=existing.reason, already_revoked=True)
 
-        # Insert new revocation
-        now = datetime.now(timezone.utc)
-        revocation = AdminCertRevocation(serial_number=serial, reason=req.reason, revoked_at=now)
-        db.add(revocation)
-        db.commit()
+    # Insert new revocation
+    now = datetime.now(timezone.utc)
+    revocation = AdminCertRevocation(serial_number=serial, reason=req.reason, revoked_at=now)
+    db.add(revocation)
+    db.commit()
 
-        logger.info("Admin cert %s revoked (reason: %s)", serial, req.reason)
-        return AdminRevokeCertResponse(serial=serial, revoked=True, reason=req.reason)
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+    logger.info("Admin cert %s revoked (reason: %s)", serial, req.reason)
+    return AdminRevokeCertResponse(serial=serial, revoked=True, reason=req.reason)

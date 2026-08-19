@@ -28,7 +28,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from .audit import AuditLogger
-from .command_validator import CommandValidator
+from .command_validator import CommandValidator, DEFAULT_DANGEROUS_PATTERNS
 from .config import ExecutorConfig
 from .executor import Executor
 from .strategies.factory import create_strategy
@@ -652,7 +652,18 @@ class ExecutorDaemon:
         self.state.executor_id = config.executor_id
 
         # Command validator
-        self.command_validator = CommandValidator()
+        cv = self.config.command_validator
+        from .command_validator import CommandPolicy, CommandValidator
+
+        self.command_validator = CommandValidator(
+            policy=CommandPolicy(
+                preset=cv.preset,
+                allowed_commands=frozenset(cv.allowed_commands) if cv.allowed_commands else frozenset(),
+                trusted_paths=frozenset(),
+                dangerous_patterns=frozenset(DEFAULT_DANGEROUS_PATTERNS),
+                match_word_boundaries=cv.match_word_boundaries,
+            ),
+        )
 
         # Certificate manager — client created after registration
         self.cert_manager = CertificateManager(config)

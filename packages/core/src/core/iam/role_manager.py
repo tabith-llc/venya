@@ -62,7 +62,7 @@ class RoleManager:
         if existing:
             raise RoleManagerError(f"Role '{name}' already exists")
 
-        role = Role(name=name, permissions=permissions, description=description)
+        role = Role(name=name.lower(), permissions=permissions, description=description)
         self.db.add(role)
         self.db.flush()
         return role
@@ -114,7 +114,7 @@ class RoleManager:
                 permissions = None
 
         if name is not None:
-            role.name = name
+            role.name = name.lower()
         if permissions is not None:
             role.permissions = permissions
         if description is not None:
@@ -147,8 +147,6 @@ class RoleManager:
         if role is None:
             return False
 
-        # Remove memberships first
-        self.db.query(RoleMember).filter(RoleMember.role_id == role_id).delete()
         self.db.delete(role)
         self.db.flush()
         return True
@@ -235,7 +233,6 @@ class RoleManager:
         """
         membership = (
             self.db.query(RoleMember)
-            .join(Role)
             .filter(
                 RoleMember.user_id == user_id,
                 RoleMember.role_id == role_id,

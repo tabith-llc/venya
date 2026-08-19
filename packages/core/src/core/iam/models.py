@@ -74,7 +74,7 @@ class RoleMember(Base):
         ForeignKey("users.user_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    role_id = Column(Integer, ForeignKey("roles.id"), primary_key=True)
+    role_id = Column(Integer, ForeignKey("roles.id", ondelete="CASCADE"), primary_key=True)
 
     # Relationships
     user = relationship("User", back_populates="roles")

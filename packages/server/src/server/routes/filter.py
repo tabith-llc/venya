@@ -4,8 +4,13 @@ import base64
 import hashlib
 import logging
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from core.engine.backend import Backend
+
+from ..dependencies import get_backend, get_db
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -117,7 +122,8 @@ def filter_output(
 async def filter_session_output(
     session_id: str,
     req: FilterRequest,
-    request: Request,
+    db: Session = Depends(get_db),
+    backend: Backend = Depends(get_backend),
 ) -> FilterResponse:
     """Filter secret values from captured process output.
 
@@ -130,85 +136,74 @@ async def filter_session_output(
     Returns:
         Sanitized output with masked secrets.
     """
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-
     from core.iam.models import Secret, Session as SessionModel
 
-    db = backend.get_session()
+    # Look up session to find injected secrets
     try:
-        # Look up session to find injected secrets
-        try:
-            session_id_int = int(session_id)
-        except (ValueError, TypeError):
-            session_id_int = None
+        session_id_int = int(session_id)
+    except (ValueError, TypeError):
+        session_id_int = None
 
-        session = None
-        if session_id_int is not None:
-            session = (
-                db.query(SessionModel)
-                .filter(SessionModel.id == session_id_int)
-                .first()
-            )
-
-        session_secrets: dict[str, bytes] = {}
-        if session is not None:
-            from core.engine.encryption import DecryptionError, decrypt_secret as _decrypt_secret_impl
-
-            kek = backend.config.kek
-            # Get secrets associated with this session's user
-            secrets = (
-                db.query(Secret)
-                .filter(Secret.created_by == session.user_id)
-                .all()
-            )
-            for secret in secrets:
-                if kek is None:
-                    logger.warning(
-                        "No KEK configured, cannot decrypt secret %s for session %s",
-                        secret.id,
-                        session_id,
-                    )
-                    continue
-                try:
-                    plaintext = _decrypt_secret_impl(
-                        kek, secret.wrapped_dek, secret.nonce, secret.encrypted_value
-                    )
-                except DecryptionError:
-                    logger.warning(
-                        "Failed to decrypt secret %s for session %s",
-                        secret.id,
-                        session_id,
-                    )
-                    continue
-                hash_hex = hashlib.sha256(plaintext).hexdigest()
-                session_secrets[hash_hex] = plaintext
-
-        # Decode base64 input
-        try:
-            stdout = base64.b64decode(req.stdout)
-        except Exception:
-            stdout = b""
-
-        try:
-            stderr = base64.b64decode(req.stderr)
-        except Exception:
-            stderr = b""
-
-        filtered_stdout, stdout_hashes = filter_output(stdout, session_secrets)
-        filtered_stderr, stderr_hashes = filter_output(stderr, session_secrets)
-
-        all_hashes = stdout_hashes + stderr_hashes
-
-        return FilterResponse(
-            stdout=base64.b64encode(filtered_stdout).decode("ascii"),
-            stderr=base64.b64encode(filtered_stderr).decode("ascii"),
-            masked_count=len(all_hashes),
-            masked_hashes=all_hashes,
+    session = None
+    if session_id_int is not None:
+        session = (
+            db.query(SessionModel)
+            .filter(SessionModel.id == session_id_int)
+            .first()
         )
-    finally:
-        db.close()
+
+    session_secrets: dict[str, bytes] = {}
+    if session is not None:
+        from core.engine.encryption import DecryptionError, decrypt_secret as _decrypt_secret_impl
+
+        kek = backend.config.kek
+        # Get secrets associated with this session's user
+        secrets = (
+            db.query(Secret)
+            .filter(Secret.created_by == session.user_id)
+            .all()
+        )
+        for secret in secrets:
+            if kek is None:
+                logger.warning(
+                    "No KEK configured, cannot decrypt secret %s for session %s",
+                    secret.id,
+                    session_id,
+                )
+                continue
+            try:
+                plaintext = _decrypt_secret_impl(
+                    kek, secret.wrapped_dek, secret.nonce, secret.encrypted_value
+                )
+            except DecryptionError:
+                logger.warning(
+                    "Failed to decrypt secret %s for session %s",
+                    secret.id,
+                    session_id,
+                )
+                continue
+            hash_hex = hashlib.sha256(plaintext).hexdigest()
+            session_secrets[hash_hex] = plaintext
+
+    # Decode base64 input
+    try:
+        stdout = base64.b64decode(req.stdout)
+    except Exception:
+        stdout = b""
+
+    try:
+        stderr = base64.b64decode(req.stderr)
+    except Exception:
+        stderr = b""
+
+    filtered_stdout, stdout_hashes = filter_output(stdout, session_secrets)
+    filtered_stderr, stderr_hashes = filter_output(stderr, session_secrets)
+
+    all_hashes = stdout_hashes + stderr_hashes
+
+    return FilterResponse(
+        stdout=base64.b64encode(filtered_stdout).decode("ascii"),
+        stderr=base64.b64encode(filtered_stderr).decode("ascii"),
+        masked_count=len(all_hashes),
+        masked_hashes=all_hashes,
+    )
