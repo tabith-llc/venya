@@ -157,7 +157,7 @@ class Backend:
         if effective_passphrase:
             from .encryption import derive_kek
             kek, _ = derive_kek(effective_passphrase.encode("utf-8"))
-        elif kek is None and self.config.kek is not None:
+        elif self.config.kek is not None:
             # Fallback: use backend's KEK when no passphrase provided
             # (e.g., CoreFactory.with_kek() used to create the backend)
             kek = self.config.kek
