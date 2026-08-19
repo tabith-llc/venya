@@ -159,38 +159,29 @@ class TestCAManager:
         assert pem.startswith(b"-----BEGIN CERTIFICATE-----")
         assert pem.endswith(b"-----END CERTIFICATE-----\n")
 
-    def test_restore_ca_key_rejects_invalid_padding(self, ca_dir):
-        """restore_ca_key() should reject invalid PKCS7 padding (M-26)."""
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    def test_restore_ca_key_rejects_corrupted_data(self, ca_dir):
+        """restore_ca_key() should reject tampered or wrong-passphrase data (AES-GCM)."""
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
         from cryptography.hazmat.primitives import hashes
 
-        # Craft a valid encrypted payload: salt(16) + iv(16) + ciphertext
+        # Craft a valid encrypted payload: salt(16) + nonce(12) + ciphertext(tag auto-appended)
         passphrase = b"test_passphrase"
         salt = b"\x00" * 16
-        iv = b"\x01" * 16
+        nonce = b"\x01" * 12
 
         # Derive key the same way restore_ca_key does
         kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600_000)
         key = kdf.derive(passphrase)
 
-        # Encrypt a minimal PEM-like plaintext with AES-CBC
+        # Encrypt a minimal PEM-like plaintext with AES-GCM
         plaintext = b"-----BEGIN PRIVATE KEY-----\ntest data here\n-----END PRIVATE KEY-----\n"
-        # PKCS7 pad
-        pad_len = 16 - (len(plaintext) % 16)
-        padded_plaintext = plaintext + bytes([pad_len]) * pad_len
 
-        cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
-        encryptor = cipher.encryptor()
-        ciphertext = encryptor.update(padded_plaintext) + encryptor.finalize()
+        cipher = AESGCM(key)
+        encrypted = cipher.encrypt(nonce, plaintext, None)
 
         # Create valid payload
-        valid_payload = salt + iv + ciphertext
-
-        # Corrupt the last byte of the ciphertext to break padding
-        corrupted_ciphertext = bytearray(ciphertext)
-        corrupted_ciphertext[-1] ^= 0xFF
-        corrupted_payload = salt + iv + bytes(corrupted_ciphertext)
+        valid_payload = salt + nonce + encrypted
 
         manager = CAManager(ca_dir)
 
@@ -198,7 +189,10 @@ class TestCAManager:
         manager.restore_ca_key(valid_payload, "test_passphrase")
         assert Path(ca_dir, "ca.key").exists()
 
-        # Corrupted payload should be rejected
+        # Corrupted ciphertext should be rejected by GCM tag check
+        corrupted_ciphertext = bytearray(encrypted)
+        corrupted_ciphertext[-1] ^= 0xFF
+        corrupted_payload = salt + nonce + bytes(corrupted_ciphertext)
         with pytest.raises(ValueError, match="Invalid passphrase or corrupted data"):
             manager.restore_ca_key(corrupted_payload, "test_passphrase")
 

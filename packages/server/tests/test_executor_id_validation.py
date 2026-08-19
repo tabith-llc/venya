@@ -141,10 +141,16 @@ class TestValidateExecutorId:
 class TestHeartbeatValidation:
     """Tests for heartbeat endpoint executor_id validation."""
 
-    def _create_app(self):
+    def _create_app(self, with_backend=False):
         from server.routes import executors as executors_routes
 
         app = FastAPI()
+        if with_backend:
+            backend = MagicMock()
+            db = MagicMock()
+            db.query.return_value.filter.return_value.first.return_value = None
+            backend.get_session.return_value = db
+            app.state.backend = backend
         app.include_router(executors_routes.router, prefix="/api/v1")
         return app
 
@@ -161,7 +167,7 @@ class TestHeartbeatValidation:
 
     def test_heartbeat_uppercase_rejected(self):
         """Uppercase executor_id returns 422."""
-        app = self._create_app()
+        app = self._create_app(with_backend=True)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -173,7 +179,7 @@ class TestHeartbeatValidation:
 
     def test_heartbeat_underscore_rejected(self):
         """Underscore in executor_id returns 422."""
-        app = self._create_app()
+        app = self._create_app(with_backend=True)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -183,7 +189,7 @@ class TestHeartbeatValidation:
 
     def test_heartbeat_leading_hyphen_rejected(self):
         """Leading hyphen in executor_id returns 422."""
-        app = self._create_app()
+        app = self._create_app(with_backend=True)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -193,7 +199,7 @@ class TestHeartbeatValidation:
 
     def test_heartbeat_trailing_hyphen_rejected(self):
         """Trailing hyphen in executor_id returns 422."""
-        app = self._create_app()
+        app = self._create_app(with_backend=True)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -203,7 +209,7 @@ class TestHeartbeatValidation:
 
     def test_heartbeat_empty_rejected(self):
         """Empty executor_id returns 422."""
-        app = self._create_app()
+        app = self._create_app(with_backend=True)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -213,7 +219,7 @@ class TestHeartbeatValidation:
 
     def test_heartbeat_single_char_rejected(self):
         """Single character executor_id returns 422."""
-        app = self._create_app()
+        app = self._create_app(with_backend=True)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -223,7 +229,7 @@ class TestHeartbeatValidation:
 
     def test_heartbeat_sql_injection_rejected(self):
         """SQL injection in executor_id returns 422."""
-        app = self._create_app()
+        app = self._create_app(with_backend=True)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -233,7 +239,7 @@ class TestHeartbeatValidation:
 
     def test_heartbeat_shell_metachar_rejected(self):
         """Shell metacharacters in executor_id returns 422."""
-        app = self._create_app()
+        app = self._create_app(with_backend=True)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",

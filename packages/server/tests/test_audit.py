@@ -6,10 +6,11 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
+from server.dependencies import require_admin
 from server.routes import audit as audit_routes
 
 
-def _create_test_app(backend=None):
+def _create_test_app(backend=None, override_guard=True):
     """Create a minimal test app with audit route."""
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
@@ -18,6 +19,11 @@ def _create_test_app(backend=None):
     if backend is not None:
         app.state.backend = backend
     app.include_router(audit_routes.router, prefix="/api/v1")
+    if override_guard:
+        app.dependency_overrides[require_admin] = lambda: {
+            "user_id": "admin",
+            "roles": [42],
+        }
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -440,3 +446,18 @@ class TestAuditList:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/audit", params={"end_date": "garbage"})
         assert resp.status_code == 400
+
+
+class TestAuditGuard:
+    """Guard enforcement on GET /audit (admin only)."""
+
+    def test_no_auth_user_rejected(self):
+        """Without require_admin override (no auth_user set), GET /audit is 401."""
+        backend = MagicMock()
+        backend.get_session.return_value = MagicMock()
+        # override_guard=False leaves require_admin live; no middleware sets auth_user
+        app = _create_test_app(backend=backend, override_guard=False)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit")
+        assert resp.status_code == 401

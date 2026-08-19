@@ -195,6 +195,30 @@ venya_download_tarball() {
     else
         curl -fsSL "$TARBALL_URL" -o "$TARBALL_FILE"
     fi
+
+    # Integrity verification — hard-fail, no exceptions.
+    # This is a security-critical installer; refusing to proceed
+    # without checksum verification is the correct default.
+    if [ -z "${VENYA_TARBALL_SHA256:-}" ]; then
+        error "VENYA_TARBALL_SHA256 is required."
+        error "Set it to the expected sha256sum for the tarball at:"
+        error "  $TARBALL_URL"
+        error "Aborting — refusing to install without integrity verification."
+        rm -f "$TARBALL_FILE"
+        exit 1
+    fi
+
+    info "Verifying tarball SHA-256..."
+    ACTUAL_SHA256=$(sha256sum "$TARBALL_FILE" | awk '{print $1}')
+    if [ "$ACTUAL_SHA256" != "$VENYA_TARBALL_SHA256" ]; then
+        error "Tarball SHA-256 mismatch!"
+        error "  Expected: $VENYA_TARBALL_SHA256"
+        error "  Actual:   $ACTUAL_SHA256"
+        error "Possible MITM or corrupted download. Aborting."
+        rm -f "$TARBALL_FILE"
+        exit 1
+    fi
+    info "SHA-256 verified."
 }
 
 # --- 11. Extract tarball ---

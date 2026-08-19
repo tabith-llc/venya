@@ -11,9 +11,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from ..dependencies import get_db
 
 from ..fido2.browser_adapter import (
     challenge_to_browser_registration_options,
@@ -65,17 +68,6 @@ class CredentialListResponse(BaseModel):
 
 
 # --- Helpers ---
-
-
-def _get_db(request: Request):
-    """Get a database session from app state."""
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-    return backend.get_session()
 
 
 def _get_current_user_id(request: Request) -> str:
@@ -148,12 +140,12 @@ def _verify_elevation(request: Request, db) -> bool:
 async def credentials_add_start(
     req: CredentialAddStartRequest,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> CredentialAddStartResponse:
     """Begin adding a new credential (requires active session + elevation).
 
     Phase 3, Step 2: Verify elevation, start WebAuthn registration.
     """
-    db = _get_db(request)
     try:
         user_id = _get_current_user_id(request)
         _verify_elevation(request, db)
@@ -200,8 +192,6 @@ async def credentials_add_start(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Credential add failed",
         )
-    finally:
-        db.close()
 
 
 @router.post(
@@ -211,12 +201,12 @@ async def credentials_add_start(
 async def credentials_add_complete(
     req: CredentialAddCompleteRequest,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> CredentialAddCompleteResponse:
     """Complete adding a new credential (requires active session + elevation).
 
     Phase 3, Step 3: Verify elevation, complete WebAuthn registration, store credential.
     """
-    db = _get_db(request)
     try:
         user_id = _get_current_user_id(request)
         _verify_elevation(request, db)
@@ -264,17 +254,11 @@ async def credentials_add_complete(
     except HTTPException:
         raise
     except Exception as e:
-        try:
-            db.rollback()
-        except Exception:  # nosec B110 — rollback best-effort before raising HTTPException
-            pass
         logger.error("Credential add complete failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Credential add failed",
         ) from e
-    finally:
-        db.close()
 
 
 @router.delete(
@@ -285,13 +269,13 @@ async def credentials_add_complete(
 async def credentials_remove(
     credential_id: int,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> CredentialRemoveResponse:
     """Remove a credential (requires active session + elevation).
 
     Phase 4: Verifies elevation, checks credential belongs to user,
     prevents lockout by rejecting if this is the last active credential.
     """
-    db = _get_db(request)
     try:
         user_id = _get_current_user_id(request)
         _verify_elevation(request, db)
@@ -342,13 +326,10 @@ async def credentials_remove(
     except HTTPException:
         raise
     except Exception as e:
-        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    finally:
-        db.close()
 
 
 @router.get(
@@ -358,37 +339,34 @@ async def credentials_remove(
 )
 async def credentials_list(
     request: Request,
+    db: Session = Depends(get_db),
 ) -> CredentialListResponse:
     """List own credentials (requires active session).
 
     Phase 5: Returns list of active credentials for the current user.
     """
-    db = _get_db(request)
-    try:
-        user_id = _get_current_user_id(request)
+    user_id = _get_current_user_id(request)
 
-        from core.iam.models import WebAuthnCredential
+    from core.iam.models import WebAuthnCredential
 
-        credentials = (
-            db.query(WebAuthnCredential)
-            .filter(
-                WebAuthnCredential.user_id == user_id,
-                WebAuthnCredential.is_active.is_(True),
-            )
-            .order_by(WebAuthnCredential.created_at.desc())
-            .all()
+    credentials = (
+        db.query(WebAuthnCredential)
+        .filter(
+            WebAuthnCredential.user_id == user_id,
+            WebAuthnCredential.is_active.is_(True),
         )
+        .order_by(WebAuthnCredential.created_at.desc())
+        .all()
+    )
 
-        result = [
-            CredentialInfo(
-                id=c.id,
-                label=c.label,
-                created_at=c.created_at.isoformat(),
-                last_used_at=c.last_used_at.isoformat() if c.last_used_at else None,
-            )
-            for c in credentials
-        ]
+    result = [
+        CredentialInfo(
+            id=c.id,
+            label=c.label,
+            created_at=c.created_at.isoformat(),
+            last_used_at=c.last_used_at.isoformat() if c.last_used_at else None,
+        )
+        for c in credentials
+    ]
 
-        return CredentialListResponse(credentials=result)
-    finally:
-        db.close()
+    return CredentialListResponse(credentials=result)

@@ -126,7 +126,8 @@ class TestAuthRegistrationComplete:
         """POST /auth/registration/complete should return 400 for invalid challenge."""
         fido2 = MagicMock()
         fido2.finish_registration.side_effect = ValueError("Challenge not found or expired")
-        app = _create_test_app(fido2_manager=fido2)
+        # backend present so get_db DI resolves; test targets the fido2 error path (D-6)
+        app = _create_test_app(fido2_manager=fido2, backend=MagicMock())
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -216,7 +217,8 @@ class TestAuthLoginComplete:
         """POST /auth/login/complete should return 401 for invalid assertion."""
         fido2 = MagicMock()
         fido2.finish_authentication.side_effect = ValueError("Invalid assertion")
-        app = _create_test_app(fido2_manager=fido2)
+        # backend present so get_db DI resolves; test targets the fido2 error path (D-6)
+        app = _create_test_app(fido2_manager=fido2, backend=MagicMock())
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(

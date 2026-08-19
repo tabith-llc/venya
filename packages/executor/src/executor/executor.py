@@ -291,7 +291,7 @@ class Executor:
         # Create subprocess — shell=False for security
         process = subprocess.Popen(
             args,
-            shell=False,
+            shell=False,  # nosec B603 — shell explicitly disabled for security
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

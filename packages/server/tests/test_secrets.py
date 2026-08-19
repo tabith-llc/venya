@@ -363,16 +363,18 @@ class TestSecretsDelete:
         )
 
     def test_delete_not_found(self):
-        """DELETE /secrets/{key} should return deleted=false for missing secret."""
+        """DELETE /secrets/{key} returns 404 for missing or non-owned secret.
+
+        Same response whether the secret doesn't exist or exists under a
+        different owner — avoids leaking existence.
+        """
         core = MagicMock()
         core.delete.return_value = False
         app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.delete("/api/v1/secrets/missing-key")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["deleted"] is False
+        assert resp.status_code == 404
 
     def test_delete_core_error(self):
         """DELETE /secrets/{key} should return 503 if core not initialized."""

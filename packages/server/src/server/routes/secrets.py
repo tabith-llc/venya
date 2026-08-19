@@ -8,8 +8,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
-from server.dependencies import require_role
+from server.dependencies import get_db, require_role
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -185,6 +186,7 @@ async def secrets_get(
     caller: str = "human",
     elevation_token: str | None = None,
     user_info: dict = Depends(require_role("read")),
+    db: Session = Depends(get_db),
 ) -> SecretGetResponse:
     """Retrieve a secret value.
 
@@ -201,14 +203,6 @@ async def secrets_get(
 
     # For browser users requesting unmask, validate elevation token
     if caller == "human" and unmask and elevation_token:
-        backend = getattr(request.app.state, "backend", None)
-        if backend is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Backend not initialized",
-            )
-
-        db = backend.get_session()
         try:
             from sqlalchemy import update
             from core.iam.models import ElevationToken
@@ -262,7 +256,6 @@ async def secrets_get(
             except HTTPException:
                 raise
             except Exception as e:
-                db.rollback()
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=str(e),
@@ -271,16 +264,10 @@ async def secrets_get(
         except HTTPException:
             raise
         except Exception as e:
-            try:
-                db.rollback()
-            except Exception:  # nosec B110 — rollback best-effort before raising HTTPException
-                pass
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Elevation token validation failed",
             )
-        finally:
-            db.close()
 
     try:
         value = core.get(
@@ -397,7 +384,9 @@ async def secrets_delete(
 ) -> SecretDeleteResponse:
     """Delete a secret.
 
-    Requires read-write permission on the secret's role(s).
+    Only the creator may delete a secret. Read-write permission
+    is required to reach this endpoint, but deletion is gated by
+    ownership in core.delete().
     """
     core = getattr(request.app.state, "core", None)
     if core is None:
@@ -410,19 +399,13 @@ async def secrets_delete(
         key=key,
         user_id=user_info["user_id"],
     )
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Secret '{key}' not found or not owned by you",
+        )
 
     return SecretDeleteResponse(deleted=deleted, key=key)
-
-
-def _get_db(request: Request):
-    """Get a database session from the backend on app state."""
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-    return backend.get_session()
 
 
 @router.post(
@@ -434,6 +417,7 @@ async def revoke_session_secrets(
     session_id: str,
     req: RevokeSecretsRequest,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> RevokeSecretsResponse:
     """Revoke scoped credentials for secrets injected during this session.
 
@@ -459,38 +443,31 @@ async def revoke_session_secrets(
             detail="Executor mTLS authentication required",
         )
 
-    db = _get_db(request)
-    try:
-        # Log audit event for each revoked secret
-        for secret_id in req.secret_ids:
-            audit_event = AuditEvent(
-                event_type="credential_revoked",
-                user_id=caller.get("executor_id"),
-                fields={
-                    "session_id": session_id,
-                    "secret_id": secret_id,
-                },
-                timestamp=datetime.now(timezone.utc),
-            )
-            db.add(audit_event)
-
-        db.commit()
-        logger.info(
-            "Revoked %d secret credentials for session %s",
-            len(req.secret_ids),
-            session_id,
+    # Log audit event for each revoked secret
+    for secret_id in req.secret_ids:
+        audit_event = AuditEvent(
+            event_type="credential_revoked",
+            user_id=caller.get("executor_id"),
+            fields={
+                "session_id": session_id,
+                "secret_id": secret_id,
+            },
+            timestamp=datetime.now(timezone.utc),
         )
+        db.add(audit_event)
 
-        return RevokeSecretsResponse(
-            revoked=True,
-            count=len(req.secret_ids),
-            session_id=session_id,
-        )
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+    db.commit()
+    logger.info(
+        "Revoked %d secret credentials for session %s",
+        len(req.secret_ids),
+        session_id,
+    )
+
+    return RevokeSecretsResponse(
+        revoked=True,
+        count=len(req.secret_ids),
+        session_id=session_id,
+    )
 
 
 @router.get(
@@ -498,33 +475,29 @@ async def revoke_session_secrets(
     response_model=ActiveKeyVersionResponse,
 )
 async def get_active_key_version(
-    request: Request,
     user_info: dict = Depends(require_role("read")),
+    db: Session = Depends(get_db),
 ) -> ActiveKeyVersionResponse:
     """Return the currently active key version ID.
 
     Used by the frontend to validate key_version_id before
     encrypting secrets. Now protected by read-level auth.
     """
-    db = _get_db(request)
-    try:
-        from core.iam.models import KeyVersion
+    from core.iam.models import KeyVersion
 
-        active_version = (
-            db.query(KeyVersion)
-            .filter(KeyVersion.active.is_(True))
-            .first()
+    active_version = (
+        db.query(KeyVersion)
+        .filter(KeyVersion.active.is_(True))
+        .first()
+    )
+    if active_version is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="No active key version configured",
         )
-        if active_version is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="No active key version configured",
-            )
-        return ActiveKeyVersionResponse(
-            key_version_id=active_version.version_label,
-            created_at=active_version.created_at.isoformat()
-            if active_version.created_at
-            else "",
-        )
-    finally:
-        db.close()
+    return ActiveKeyVersionResponse(
+        key_version_id=active_version.version_label,
+        created_at=active_version.created_at.isoformat()
+        if active_version.created_at
+        else "",
+    )

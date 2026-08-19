@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import time
-from datetime import timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +32,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
         proxy_headers=True,
-        forwarded_allow_ips="*",
+        forwarded_allow_ips=config.trusted_proxies,
     )
 
     # Store config on app state
@@ -60,7 +59,6 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     # Add middleware
     from .middleware import auth as auth_middleware
-    from .middleware import rbac
     from .middleware import rate_limit
     from .middleware import security_headers
     from .middleware import rate_limit_headers
@@ -71,7 +69,6 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.add_middleware(rate_limit_headers.RateLimitHeaderMiddleware)
     app.add_middleware(rate_limit.RateLimitMiddleware, config=config.rate_limit)
     app.add_middleware(auth_middleware.SessionMiddleware)
-    app.add_middleware(rbac.RBACMiddleware)
 
     # CORS — always register; empty origins = deny all (Starlette behavior)
     app.add_middleware(
@@ -119,7 +116,9 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     logger.info("Database initialized: %s", secret(config.db.database_url) if config.db.database_url else "not configured")
     app.state.backend = backend  # type: ignore[attr-defined]
 
-    # Hard failure on missing passphrase in production — prevents silent unencrypted storage
+    # Debug mode allows unencrypted storage for local development convenience.
+    # The recovery_code_pepper check below is unconditional because rainbow table
+    # attacks are viable even in dev — but local DB encryption is a lower risk.
     if not config.debug and not config.db.passphrase:
         raise RuntimeError(
             "VENYA_DB_PASSPHRASE is not set. "
@@ -189,9 +188,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             raise
 
     # Periodic session cleanup
-    from datetime import datetime, timezone
-
-    from sqlalchemy import text
+    from .maintenance import run_maintenance
 
     cleanup_task = None
 
@@ -202,61 +199,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             try:
                 db = backend.get_session()
                 try:
-                    now = datetime.now(timezone.utc)
-                    from core.iam.session_manager import SessionConfig
-                    config = SessionConfig()
-                    hard_cap_threshold = now - (config.max_session_duration - config.session_timeout)
-                    # Apply clock skew tolerance to cleanup threshold
-                    server_config = getattr(app.state, "config", None)
-                    tolerance = (
-                        server_config.clock_skew.token_tolerance_seconds
-                        if server_config and hasattr(server_config, "clock_skew")
-                        else 60
-                    )
-                    cleanup_threshold = hard_cap_threshold - __import__("datetime").timedelta(seconds=tolerance)
-                    deleted = db.execute(
-                        text("DELETE FROM sessions WHERE expires_at < :threshold LIMIT :limit"),
-                        {"threshold": cleanup_threshold, "limit": 1000},
-                    )
-                    db.commit()
-                    logger.info("Session cleanup: deleted %d expired sessions", deleted.rowcount)
-                    # Purge expired admin identity metadata (90-day retention)
-                    try:
-                        cutoff = now - __import__("datetime").timedelta(days=90)
-                        result = db.execute(
-                            text("""UPDATE executor_enrollment_tokens
-                                    SET created_by_session_id = NULL,
-                                        created_from_ip = NULL,
-                                        created_from_user_agent = NULL,
-                                        admin_meta_wrapped_dek = NULL,
-                                        admin_meta_nonce = NULL,
-                                        admin_meta_ciphertext = NULL
-                                    WHERE created_at < :cutoff
-                                      AND (created_by_session_id IS NOT NULL
-                                           OR created_from_ip IS NOT NULL
-                                           OR created_from_user_agent IS NOT NULL
-                                           OR admin_meta_wrapped_dek IS NOT NULL)"""),
-                            {"cutoff": cutoff},
-                        )
-                        db.commit()
-                        if result.rowcount:
-                            logger.info("Purged admin identity metadata for %d expired tokens", result.rowcount)
-                    except Exception:
-                        db.rollback()
-                        logger.exception("Admin identity metadata purge failed")
-
-                    # Clean up expired rate limit counters (older than 1 hour)
-                    try:
-                        deleted = db.execute(
-                            text("DELETE FROM rate_limit_failures WHERE window_start < :threshold"),
-                            {"threshold": now - timedelta(hours=1)},
-                        )
-                        db.commit()
-                        if deleted.rowcount:
-                            logger.info("Cleaned up %d expired rate limit counters", deleted.rowcount)
-                    except Exception:
-                        db.rollback()
-                        logger.exception("Rate limit cleanup failed")
+                    run_maintenance(db, config)
                 except Exception:
                     db.rollback()
                     logger.exception("Session cleanup failed")

@@ -68,7 +68,7 @@ def secret(value: Any) -> Secret:
     return Secret(value)
 
 
-def token(value: Any, token_type: str = "UNKNOWN") -> Token:
+def token(value: Any, token_type: str = "UNKNOWN") -> Token:  # nosec B107 — not a password, just a type label
     """Wrap a token value with a type identifier."""
     return Token(value, token_type)
 

@@ -15,8 +15,9 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
-from ..dependencies import get_current_user
+from ..dependencies import get_current_user, get_db
 from ..fido2.browser_adapter import challenge_to_browser_options, browser_assertion_to_fido2
 
 router = APIRouter()
@@ -62,6 +63,7 @@ def _cleanup_stale_challenges(challenges: dict, ttl_seconds: int) -> None:
 async def elevate_challenge(
     request: Request,
     user_info: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> ElevationChallengeResponse:
     """Issue a WebAuthn challenge for CLI elevation (sensitive operations).
 
@@ -75,52 +77,41 @@ async def elevate_challenge(
             detail="FIDO2 manager not initialized",
         )
 
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
+    from core.iam.models import WebAuthnCredential
+
+    credentials = (
+        db.query(WebAuthnCredential)
+        .filter(WebAuthnCredential.user_id == user_info["user_id"])
+        .all()
+    )
+    if not credentials:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No WebAuthn credentials found",
         )
 
-    db = backend.get_session()
-    try:
-        from core.iam.models import WebAuthnCredential
+    challenge_id, options = fido2_manager.start_authentication(
+        user_id=user_info["user_id"],
+    )
+    browser_options = challenge_to_browser_options(challenge_id, options)
 
-        credentials = (
-            db.query(WebAuthnCredential)
-            .filter(WebAuthnCredential.user_id == user_info["user_id"])
-            .all()
-        )
-        if not credentials:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No WebAuthn credentials found",
-            )
+    # Store challenge with timestamp for TTL-based cleanup
+    if not hasattr(request.app.state, "_elevation_challenges"):
+        request.app.state._elevation_challenges = {}
+    _cleanup_stale_challenges(
+        request.app.state._elevation_challenges,
+        ELEVATION_TOKEN_TTL_SECONDS * 5,
+    )
+    request.app.state._elevation_challenges[challenge_id] = {
+        "session_id": user_info.get("session_id"),
+        "user_id": user_info["user_id"],
+        "created_at": datetime.now(timezone.utc),
+    }
 
-        challenge_id, options = fido2_manager.start_authentication(
-            user_id=user_info["user_id"],
-        )
-        browser_options = challenge_to_browser_options(challenge_id, options)
-
-        # Store challenge with timestamp for TTL-based cleanup
-        if not hasattr(request.app.state, "_elevation_challenges"):
-            request.app.state._elevation_challenges = {}
-        _cleanup_stale_challenges(
-            request.app.state._elevation_challenges,
-            ELEVATION_TOKEN_TTL_SECONDS * 5,
-        )
-        request.app.state._elevation_challenges[challenge_id] = {
-            "session_id": user_info.get("session_id"),
-            "user_id": user_info["user_id"],
-            "created_at": datetime.now(timezone.utc),
-        }
-
-        return ElevationChallengeResponse(
-            challenge_id=challenge_id,
-            options=browser_options,
-        )
-    finally:
-        db.close()
+    return ElevationChallengeResponse(
+        challenge_id=challenge_id,
+        options=browser_options,
+    )
 
 
 @router.post(
@@ -132,6 +123,7 @@ async def elevate_assert(
     req: ElevationAssertRequest,
     request: Request,
     user_info: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> ElevationAssertResponse:
     """Verify WebAuthn assertion and return a short-lived elevation token.
 
@@ -183,25 +175,17 @@ async def elevate_assert(
         seconds=ELEVATION_TOKEN_TTL_SECONDS
     )
 
-    backend = getattr(request.app.state, "backend", None)
-    db = backend.get_session()
-    try:
-        from core.iam.models import ElevationToken
+    from core.iam.models import ElevationToken
 
-        elevation_record = ElevationToken(
-            token_hash=token_hash,
-            user_id=user_info["user_id"],
-            expires_at=expires_at,
-        )
-        db.add(elevation_record)
-        db.commit()
+    elevation_record = ElevationToken(
+        token_hash=token_hash,
+        user_id=user_info["user_id"],
+        expires_at=expires_at,
+    )
+    db.add(elevation_record)
+    db.commit()
 
-        return ElevationAssertResponse(
-            status="ok",
-            elevation_token=elevation_token,
-        )
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+    return ElevationAssertResponse(
+        status="ok",
+        elevation_token=elevation_token,
+    )

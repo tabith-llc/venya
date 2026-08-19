@@ -5,8 +5,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
-from ..dependencies import get_current_user
+from ..dependencies import get_current_user, get_db
 from .. import metrics
 
 logger = logging.getLogger("venya.server")
@@ -100,6 +101,7 @@ async def auth_registration_start(
 async def auth_registration_complete(
     req: RegistrationCompleteRequest,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> RegistrationCompleteResponse:
     """Complete WebAuthn registration.
 
@@ -120,15 +122,6 @@ async def auth_registration_complete(
             detail=str(e),
         ) from e
 
-    # Backend must be available — credential was created in FIDO2 manager and must be persisted
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-
-    db = backend.get_session()
     try:
         from core.iam.models import WebAuthnCredential
 
@@ -142,9 +135,10 @@ async def auth_registration_complete(
         db.add(credential)
         db.commit()
     except Exception:
-        db.rollback()
-    finally:
-        db.close()
+        # D-3: pre-existing swallow — return 201 even if the DB commit fails
+        # (credential was already created in the FIDO2 manager). The open
+        # transaction is rolled back by get_db's `finally: close()`.
+        pass  # nosec B110 — intentional, transaction rolled back by get_db finally
 
     return RegistrationCompleteResponse(credential_id=cred.credential_id)
 
@@ -184,6 +178,7 @@ async def auth_login_start(
 async def auth_login_complete(
     req: AuthenticationCompleteRequest,
     request: Request,
+    db: Session = Depends(get_db),
 ) -> AuthenticationCompleteResponse:
     """Complete WebAuthn authentication.
 
@@ -212,42 +207,31 @@ async def auth_login_complete(
     from core.iam.session_manager import SessionConfig as CoreSessionConfig
     from core.iam.session_manager import SessionManager
 
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
+    session_config = CoreSessionConfig(
+        session_timeout=timedelta(minutes=15),
+        access_token_ttl=timedelta(minutes=5),
+        max_session_duration=timedelta(hours=4),
+    )
 
-    db = backend.get_session()
-    try:
-        session_config = CoreSessionConfig(
-            session_timeout=timedelta(minutes=15),
-            access_token_ttl=timedelta(minutes=5),
-            max_session_duration=timedelta(hours=4),
-        )
+    sm = SessionManager(db, session_config)
+    rm = RoleManager(db)
 
-        sm = SessionManager(db, session_config)
-        rm = RoleManager(db)
+    # Get user roles
+    user_roles = rm.get_user_roles(result["user_id"])
+    role_ids = [m.role_id for m in user_roles]
 
-        # Get user roles
-        user_roles = rm.get_user_roles(result["user_id"])
-        role_ids = [m.role_id for m in user_roles]
+    session, access_token = sm.create_session(
+        user_id=result["user_id"],
+        roles=[str(rid) for rid in role_ids],
+    )
+    db.commit()
+    metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="success").inc()
 
-        session, access_token = sm.create_session(
-            user_id=result["user_id"],
-            roles=[str(rid) for rid in role_ids],
-        )
-        db.commit()
-        metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="success").inc()
-
-        return AuthenticationCompleteResponse(
-            user_id=result["user_id"],
-            credential_id=result["credential_id"],
-            session_token=access_token.token,
-        )
-    finally:
-        db.close()
+    return AuthenticationCompleteResponse(
+        user_id=result["user_id"],
+        credential_id=result["credential_id"],
+        session_token=access_token.token,
+    )
 
 
 class AuthenticationRefreshResponse(BaseModel):
@@ -261,6 +245,7 @@ class AuthenticationRefreshResponse(BaseModel):
 )
 async def auth_refresh(
     request: Request,
+    db: Session = Depends(get_db),
 ) -> AuthenticationRefreshResponse:
     """Refresh the current access token.
 
@@ -273,13 +258,6 @@ async def auth_refresh(
     from core.iam.session_manager import SessionConfig as CoreSessionConfig
     from core.iam.session_manager import SessionManager
 
-    backend = getattr(request.app.state, "backend", None)
-    if backend is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Backend not initialized",
-        )
-
     # Get the bearer token from the request
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -289,49 +267,45 @@ async def auth_refresh(
         )
     token = auth_header[7:]
 
-    db = backend.get_session()
-    try:
-        session_config = CoreSessionConfig(
-            session_timeout=timedelta(minutes=15),
-            access_token_ttl=timedelta(minutes=5),
-            max_session_duration=timedelta(hours=4),
+    session_config = CoreSessionConfig(
+        session_timeout=timedelta(minutes=15),
+        access_token_ttl=timedelta(minutes=5),
+        max_session_duration=timedelta(hours=4),
+    )
+    manager = SessionManager(db, session_config)
+
+    # Find session by access token
+    session = (
+        db.query(SessionModel)
+        .filter(SessionModel.access_token == token)
+        .first()
+    )
+
+    if session is None:
+        metrics.AUTH_REFRESH_TOTAL.labels(result="invalid").inc()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
         )
-        manager = SessionManager(db, session_config)
 
-        # Find session by access token
-        session = (
-            db.query(SessionModel)
-            .filter(SessionModel.access_token == token)
-            .first()
+    # Check session expiry
+    if not manager.check_expiry(session):
+        metrics.AUTH_REFRESH_TOTAL.labels(result="expired").inc()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired",
         )
 
-        if session is None:
-            metrics.AUTH_REFRESH_TOTAL.labels(result="invalid").inc()
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token",
-            )
+    # Issue new token
+    new_token = manager.refresh_token(token)
+    if new_token is None:
+        metrics.AUTH_REFRESH_TOTAL.labels(result="failed").inc()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token refresh failed",
+        )
 
-        # Check session expiry
-        if not manager.check_expiry(session):
-            metrics.AUTH_REFRESH_TOTAL.labels(result="expired").inc()
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Session expired",
-            )
+    db.commit()
+    metrics.AUTH_REFRESH_TOTAL.labels(result="success").inc()
 
-        # Issue new token
-        new_token = manager.refresh_token(token)
-        if new_token is None:
-            metrics.AUTH_REFRESH_TOTAL.labels(result="failed").inc()
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token refresh failed",
-            )
-
-        db.commit()
-        metrics.AUTH_REFRESH_TOTAL.labels(result="success").inc()
-
-        return AuthenticationRefreshResponse(access_token=new_token.token)
-    finally:
-        db.close()
+    return AuthenticationRefreshResponse(access_token=new_token.token)
