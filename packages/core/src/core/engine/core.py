@@ -327,14 +327,20 @@ class Core:
 
             secrets = query.distinct().all()
 
-            records = []
-            for secret in secrets:
-                secret_roles = (
-                    session.query(Role.name)
-                    .join(SecretRole, Role.id == SecretRole.role_id)
-                    .filter(SecretRole.secret_id == secret.id)
+            roles_by_secret: dict[int, list[str]] = {}
+            if secrets:
+                secret_ids = [s.id for s in secrets]
+                role_rows = (
+                    session.query(SecretRole.secret_id, Role.name)
+                    .join(Role, SecretRole.role_id == Role.id)
+                    .filter(SecretRole.secret_id.in_(secret_ids))
                     .all()
                 )
+                for sid, rname in role_rows:
+                    roles_by_secret.setdefault(sid, []).append(rname)
+
+            records = []
+            for secret in secrets:
                 records.append(SecretRecord(
                     id=str(secret.id),
                     key=secret.key,
@@ -344,7 +350,7 @@ class Core:
                     key_version_id=secret.key_version_id,
                     created_by=secret.created_by,
                     created_at=secret.created_at,
-                    role_ids=[r.name for r in secret_roles],
+                    role_ids=roles_by_secret.get(secret.id, []),
                 ))
 
             return records
