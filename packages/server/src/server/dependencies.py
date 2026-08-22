@@ -3,7 +3,7 @@
 
 import logging
 from collections.abc import Generator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -107,16 +107,23 @@ def get_current_session(
     # Check expiry
     from core.iam.session_manager import SessionConfig
 
-    config = SessionConfig()
     server_config = getattr(request.app.state, "config", None)
     tolerance = (
         server_config.clock_skew.token_tolerance_seconds
         if server_config and hasattr(server_config, "clock_skew")
         else 60
     )
+    # Operator-configured hard cap (seconds), core default (4h) if unset —
+    # same source and fallback order as maintenance.py (M-28 class).
+    operator_max = getattr(getattr(server_config, "session", None), "max_session_duration", None)
+    max_session_duration = (
+        timedelta(seconds=operator_max)
+        if operator_max is not None
+        else SessionConfig().max_session_duration
+    )
     now = datetime.now(timezone.utc)
-    session_created_at = session.expires_at - config.session_timeout
-    if session_created_at + config.max_session_duration < now:
+    session_created_at = session.created_at
+    if session_created_at + max_session_duration < now:
         logger.info("GET_SESSION DEBUG: session %s over max cap, created_at=%s, now=%s", session.id, session_created_at, now)
         return None
     if is_expired(session.expires_at, tolerance):
@@ -257,8 +264,20 @@ def require_admin(
     on failure.
 
     Raises:
-        HTTPException 403: User lacks admin role.
+        HTTPException 403: User lacks admin role. Executor (mTLS) callers
+            are denied outright (they carry no user_id; admin routes are
+            human-only).
     """
+    # Executors (mTLS) carry no user_id; the role lookup below would raise
+    # KeyError and surface as a 500. Admin routes are human-only, so deny
+    # cleanly. Mirrors require_role's executor branch (dependencies.py:195),
+    # which passes executors; here we deny them instead.
+    if user_info.get("caller") == "executor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin permission required",
+        )
+
     db = backend.get_session()
     try:
         from core.iam.role_manager import RoleManager

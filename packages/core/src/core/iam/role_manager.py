@@ -138,7 +138,7 @@ class RoleManager:
         return self.db.query(Role).order_by(Role.name).all()
 
     def delete_role(self, role_id: int) -> bool:
-        """Delete a role.
+        """Delete a role and its RoleMember memberships (cascades).
 
         Returns:
             True if deleted, False if not found.

@@ -63,7 +63,7 @@ def _make_mock_core():
     core.put.return_value = MagicMock(
         id=42,
         key="test-key",
-        role_ids=["dev"],
+        role_names=["dev"],
     )
 
     core.get.return_value = "\u2022" * 8
@@ -75,7 +75,7 @@ def _make_mock_core():
             key_version_id="v1",
             created_by="user1",
             created_at=None,
-            role_ids=["dev"],
+            role_names=["dev"],
             encrypted_value=b"encrypted",
             nonce=b"nonce",
             wrapped_dek=b"wrapped",
@@ -109,14 +109,14 @@ class TestSecretsCreate:
         assert resp.status_code == 201
         data = resp.json()
         assert data["key"] == "db-password"
-        assert data["role_ids"] == ["dev"]
+        assert data["role_names"] == ["dev"]
         assert data["id"] == 42
 
         core.put.assert_called_once_with(
             key="db-password",
             value=b"super-secret",
             user_id="test-user",
-            role_ids=["dev"],
+            role_names=["dev"],
             key_version_id="v1",
         )
 
@@ -308,7 +308,7 @@ class TestSecretsList:
         assert len(data["secrets"]) == 1
         assert data["secrets"][0]["key"] == "test-key"
         assert data["secrets"][0]["id"] == 42
-        assert data["secrets"][0]["role_ids"] == ["dev"]
+        assert data["secrets"][0]["role_names"] == ["dev"]
 
         core.list.assert_called_once_with(
             prefix=None,

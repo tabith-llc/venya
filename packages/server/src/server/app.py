@@ -92,6 +92,26 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     return app
 
 
+def _init_core(backend, passphrase):  # type: ignore[no-untyped-def]
+    """Create the core from the backend.
+
+    Logs a fatal, operator-actionable error and re-raises if the KEK salt is
+    missing while secrets already exist (C-11, unrecoverable data loss). The
+    caller (lifespan) propagates the error so startup aborts.
+    """
+    from core.engine.backend import KekSaltMissingError
+
+    try:
+        return backend.get_core(passphrase)
+    except KekSaltMissingError:
+        logger.critical(
+            "Startup aborted: KEK salt missing from venya_config but secrets "
+            "already exist. Previously stored secrets are unrecoverable. "
+            "Restore from a pre-restart backup and retry."
+        )
+        raise
+
+
 async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     """Lifespan context manager for FastAPI."""
     config: ServerConfig = app.state.config  # type: ignore[attr-defined]
@@ -139,7 +159,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 
     check_disk_encryption(config.db.database_url)
 
-    core = backend.get_core(config.db.passphrase)
+    core = _init_core(backend, config.db.passphrase)
     app.state.core = core  # type: ignore[attr-defined]
 
     # Initialize FIDO2 manager after DB is ready

@@ -586,6 +586,7 @@ class TestRevocation:
         self, ca_manager, ca_key, ca_cert
     ):
         """Revocation list endpoint returns all revoked serial numbers."""
+        ca_manager.purge_expired_revocations = MagicMock(return_value=0)
         cert1 = _sign_executor_cert(ca_key, ca_cert, "executor-1", validity_days=30)
         cert2 = _sign_executor_cert(ca_key, ca_cert, "executor-2", validity_days=30)
 

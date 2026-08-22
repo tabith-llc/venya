@@ -22,7 +22,7 @@ logger = logging.getLogger("venya.server")
 class SecretCreateRequest(BaseModel):
     key: str = Field(..., description="Secret key")
     value: str = Field(..., description="Secret value (plaintext)")
-    roles: list[str] = Field(..., description="Role IDs to scope the secret to")
+    roles: list[str] = Field(..., description="Role names to scope the secret to")
     key_version_id: str = Field(
         ..., description="Key version ID for encryption"
     )
@@ -31,7 +31,7 @@ class SecretCreateRequest(BaseModel):
 class SecretCreateResponse(BaseModel):
     id: int
     key: str
-    role_ids: list[str]
+    role_names: list[str]
 
 
 class SecretGetResponse(BaseModel):
@@ -159,7 +159,7 @@ async def secrets_create(
             key=req.key,
             value=req.value.encode("utf-8"),
             user_id=user_info["user_id"],
-            role_ids=req.roles,
+            role_names=req.roles,
             key_version_id=req.key_version_id,
         )
     except Exception as e:
@@ -171,7 +171,7 @@ async def secrets_create(
     return SecretCreateResponse(
         id=int(record.id),
         key=req.key,
-        role_ids=req.roles,
+        role_names=req.roles,
     )
 
 
@@ -226,7 +226,7 @@ async def secrets_get(
                 .where(
                     ElevationToken.token_hash == token_hash,
                     ElevationToken.user_id == user_info["user_id"],
-                    ElevationToken.used == False,
+                    ElevationToken.used.is_(False),
                     ElevationToken.expires_at > expiry_cutoff,
                 )
                 .values(used=True)
@@ -364,7 +364,7 @@ async def secrets_list(
             "key_version_id": r.key_version_id,
             "created_by": r.created_by,
             "created_at": r.created_at.isoformat() if r.created_at else None,
-            "role_ids": r.role_ids,
+            "role_names": r.role_names,
         }
         for r in records
     ]

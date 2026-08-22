@@ -13,7 +13,6 @@ set -euo pipefail
 # Environment variables:
 #   VENYA_INSTALL_DIR   - Install location (default: /opt/venya)
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
-#   VENYA_PASSWORD      - OS venya user password (prompts if unset)
 #   VENYA_DB_PASSWORD   - PostgreSQL venya user password (prompts if unset)
 #   VENYA_DB_PASSPHRASE - Server passphrase (default: venya_test_passphrase_2024)
 #   VENYA_TARBALL       - URL of the tarball to install (auto-detected if on same host)
@@ -44,8 +43,8 @@ venya_check_existing
 
 info "Installing Venya Core to $INSTALL_DIR"
 
-# --- Create venya user (direct chpasswd — no temp file) ---
-venya_create_user false
+# --- Create venya service account (no password, nologin, locked) ---
+venya_create_user
 
 # --- Install system packages ---
 venya_install_system_pkgs curl sudo
@@ -63,9 +62,7 @@ else
     info "Caddy already installed: $(caddy version)"
 fi
 
-# --- Install uv (root + venya user) ---
-venya_install_uv
-venya_source_paths false
+# --- Install uv for venya user ---
 venya_install_uv_user
 
 # --- Download and extract tarball ---
@@ -151,8 +148,13 @@ info "Setting up PostgreSQL..."
 systemctl start postgresql
 systemctl enable postgresql
 
-sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya'" 2>/dev/null | grep -q 1 || \
-    sudo -u postgres psql -c "CREATE USER venya WITH PASSWORD '$VENYA_DB_PASSWORD';" > /dev/null 2>&1
+# Create the venya DB role if missing. Password is fed to psql on stdin (here-doc)
+# so it never appears on any process's /proc/*/cmdline (M-59, same pattern as M-56).
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya'" 2>/dev/null | grep -q 1; then
+    sudo -u postgres psql > /dev/null 2>&1 <<PSL_EOT
+CREATE USER venya WITH PASSWORD '$VENYA_DB_PASSWORD';
+PSL_EOT
+fi
 
 sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/dev/null | grep -q 1 || \
     sudo -u postgres psql -c "CREATE DATABASE venya OWNER venya;" > /dev/null 2>&1
@@ -209,6 +211,10 @@ EOF
     info "Admin mTLS section appended to server.toml"
 fi
 
+# server.toml holds the DB password + encryption passphrase — root-only, venya-owned.
+chmod 600 /etc/venya/server.toml
+chown venya:venya /etc/venya/server.toml
+
 info "Server config written to /etc/venya/server.toml"
 
 # --- Write .env (core-specific) ---
@@ -226,8 +232,11 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     cat >> "$INSTALL_DIR/.env" << EOF
 VENYA_ADMIN_CA_KEY_PASSPHRASE="$ADMIN_CA_PASSPHRASE"
 EOF
-    chmod 600 "$INSTALL_DIR/.env"
 fi
+
+# .env holds the DB password + passphrase — always root/venya-only, even without mTLS.
+chmod 600 "$INSTALL_DIR/.env"
+chown venya:venya "$INSTALL_DIR/.env"
 
 info ".env written to $INSTALL_DIR/.env"
 
@@ -343,7 +352,7 @@ systemctl enable --now caddy > /dev/null 2>&1
 sleep 2
 
 info "Installing Caddy internal CA..."
-CADDY_ROOT_CA="/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt"
+CADDY_ROOT_CA="${VENYA_CADDY_ROOT_CA:-/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt}"
 if [ -f "$CADDY_ROOT_CA" ]; then
     cp "$CADDY_ROOT_CA" /usr/local/share/ca-certificates/caddy-local-ca.crt
     chmod 644 /usr/local/share/ca-certificates/caddy-local-ca.crt
@@ -357,7 +366,13 @@ systemctl restart caddy > /dev/null 2>&1
 
 # --- Run database migrations (core-specific) ---
 info "Running database migrations..."
-sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" VENYA_DB_URL="postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya" bash -c "cd $INSTALL_DIR && python -c \"from core.cli.commands import _run_migrations; _run_migrations()\""
+# DB URL via stdin (here-doc): keeps $VENYA_DB_PASSWORD off every process's /proc/*/cmdline.
+sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" bash -c '
+  set -a; read -r VENYA_DB_URL
+  cd "$1" && python -c "from core.cli.commands import _run_migrations; _run_migrations()"
+' _ "$INSTALL_DIR" <<VENYA_EOT
+postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya
+VENYA_EOT
 info "Database migrations complete"
 
 # --- Install systemd service (core-specific) ---

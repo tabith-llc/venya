@@ -13,10 +13,9 @@
 #   venya_check_root            # Exit if not root
 #   venya_determine_install_dir # Set INSTALL_DIR interactively or from var
 #   venya_check_existing        # Prompt to reinstall if exists
-#   venya_create_user           # Create venya user with password
+#   venya_create_user           # Create locked nologin service account (no password)
 #   venya_install_system_pkgs   # apt-get install (pkg list as args)
 #   venya_install_uv            # Install uv for root
-#   venya_source_paths          # Source shell env files
 #   venya_install_uv_user       # Install uv for venya user
 #   venya_download_tarball      # Download tarball (type=core|executor)
 #   venya_extract_tarball       # Extract tarball to INSTALL_DIR
@@ -98,32 +97,15 @@ venya_check_existing() {
 # --- 5. Create venya user ---
 
 venya_create_user() {
-    # Args: $1 = secure_pw_file (true/false) — whether to use temp file for password
-    local secure_pw_file="${1:-true}"
-
     if ! id venya &>/dev/null; then
-        if [ -z "$VENYA_PASSWORD" ]; then
-            echo -n "Enter password for venya user: "
-            read -rs VENYA_PASSWORD
-            echo ""
-        fi
-        # Password strength check
-        if [ "${#VENYA_PASSWORD}" -lt 8 ]; then
-            error "Password must be at least 8 characters long."
-            exit 1
-        fi
-        useradd -m -s /bin/bash venya
-        if [ "$secure_pw_file" = "true" ]; then
-            # Use secure temp file to avoid exposing password in process list
-            PW_FILE=$(mktemp /tmp/venya-pw-XXXXXX)
-            chmod 600 "$PW_FILE"
-            printf 'venya:%s\n' "$VENYA_PASSWORD" > "$PW_FILE"
-            chpasswd < "$PW_FILE"
-            rm -f "$PW_FILE"
-        else
-            echo "venya:$VENYA_PASSWORD" | chpasswd
-        fi
-        info "Created venya user"
+        # Service account — no interactive login, no password set anywhere (nothing to
+        # leak: M-57 gone by construction). nologin shell + locked account block
+        # ssh/console/PAM login. Root operates it via `sudo -u venya <cmd>` and the
+        # services run as User=venya with an absolute ExecStart — neither needs a usable
+        # password or a login shell.
+        useradd -m -s /usr/sbin/nologin venya
+        usermod -L venya
+        info "Created venya user (service account: nologin + locked)"
     fi
 }
 
@@ -147,17 +129,6 @@ venya_install_uv() {
         curl -LsSf https://astral.sh/uv/install.sh | sh > /dev/null 2>&1
     else
         info "uv already installed: $(uv --version)"
-    fi
-}
-
-# --- 8. Source shell env files ---
-
-venya_source_paths() {
-    # Args: $1 = source_cargo (true/false)
-    local source_cargo="${1:-false}"
-    source "$HOME/.local/bin/env" 2>/dev/null || true
-    if [ "$source_cargo" = "true" ]; then
-        source "$HOME/.cargo/env" 2>/dev/null || true
     fi
 }
 

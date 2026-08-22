@@ -1,4 +1,11 @@
-"""Tests for backend.get_core() passphrase handling."""
+"""Tests for backend.get_core() passphrase handling.
+
+get_core() resolves the KEK via bootstrap_kek() (persisted salt, C-11). These
+tests pin the *passphrase-selection* logic (explicit overrides config, fallback
+to config, empty-string passes through, raw-KEK bypass) by mocking the salt
+lookup to a fixed value so derivation is deterministic. Salt persistence itself
+is covered by test_kek_salt.py.
+"""
 
 import pytest
 from unittest.mock import MagicMock
@@ -6,72 +13,67 @@ from unittest.mock import MagicMock
 from core.engine.backend import Backend, BackendConfig
 from core.engine.encryption import derive_kek
 
+FIXED_SALT = b"\x11" * 16
+
+
+def _backend_with_mock_salt(config: BackendConfig, salt: bytes = FIXED_SALT) -> Backend:
+    """Build a backend whose salt lookup returns a fixed salt (no real DB)."""
+    backend = Backend(config)
+    mock_session = MagicMock()
+    mock_session.query.return_value.filter.return_value.first.return_value = MagicMock(value=salt)
+    backend.get_session = lambda: mock_session
+    return backend
+
 
 class TestGetCorePassphrase:
-    """Tests for Backend.get_core() passphrase fallback logic."""
+    """Tests for Backend.get_core() passphrase selection logic."""
 
-    def _make_backend_with_passphrase(self, passphrase: bytes) -> Backend:
-        """Create a backend with a given passphrase."""
-        config = BackendConfig(
-            database_url="postgresql://test/test",
-            passphrase=passphrase,
-        )
-        return Backend(config)
+    def _config_with_passphrase(self, passphrase: bytes) -> BackendConfig:
+        return BackendConfig(database_url="postgresql://test/test", passphrase=passphrase)
 
-    def _make_backend_with_kek_only(self, kek: bytes) -> Backend:
-        """Create a backend with only a KEK (no passphrase)."""
-        config = BackendConfig(
-            database_url="postgresql://test/test",
-            kek=kek,
-        )
-        return Backend(config)
+    def _config_with_kek_only(self, kek: bytes) -> BackendConfig:
+        return BackendConfig(database_url="postgresql://test/test", kek=kek)
 
     def test_get_core_with_explicit_passphrase(self):
-        """get_core() uses passed passphrase when provided."""
-        backend = self._make_backend_with_passphrase(b"config-passphrase")
+        """get_core() uses the passed explicit passphrase for derivation."""
+        backend = _backend_with_mock_salt(self._config_with_passphrase(b"config-passphrase"))
         core = backend.get_core(passphrase="explicit-passphrase")
 
-        # Core should have a non-None KEK (derived from explicit passphrase)
-        assert core.kek is not None
-        assert len(core.kek) == 32
+        expected, _ = derive_kek(b"explicit-passphrase", FIXED_SALT)
+        assert core.kek == expected
 
     def test_get_core_falls_back_to_config(self):
-        """get_core() uses config passphrase when parameter is None."""
-        backend = self._make_backend_with_passphrase(b"config-passphrase")
+        """get_core(None) derives from the config passphrase."""
+        backend = _backend_with_mock_salt(self._config_with_passphrase(b"config-passphrase"))
         core = backend.get_core(passphrase=None)
 
-        # Core should have a non-None KEK (derived from config passphrase)
-        assert core.kek is not None
-        assert len(core.kek) == 32
+        expected, _ = derive_kek(b"config-passphrase", FIXED_SALT)
+        assert core.kek == expected
 
     def test_get_core_kek_only_backend_with_none_passphrase(self):
-        """get_core(None) on KEK-only backend produces core with no KEK."""
-        kek, _ = derive_kek(b"test-key")
-        backend = self._make_backend_with_kek_only(kek)
+        """get_core(None) on a raw-KEK backend uses that KEK without touching the DB."""
+        backend = Backend(self._config_with_kek_only(b"\xAA" * 32))
+        backend.get_session = lambda: pytest.fail(
+            "get_session must not be called for raw-KEK backends"
+        )
         core = backend.get_core(passphrase=None)
 
-        # Core should use the backend's KEK
-        assert core.kek is not None
-        assert len(core.kek) == 32
+        assert core.kek == b"\xAA" * 32
 
     def test_get_core_preserves_empty_string_passphrase(self):
-        """get_core('') preserves empty string (not None), so it does not fall back to config."""
-        backend = self._make_backend_with_passphrase(b"config-passphrase")
-
-        # Empty string is NOT None, so it should NOT fall through to config passphrase
-        # Instead it gets passed to derive_kek (which derives from empty string — weak but valid)
+        """get_core('') passes the empty string through to derivation (not config fallback)."""
+        backend = _backend_with_mock_salt(self._config_with_passphrase(b"config-passphrase"))
         core = backend.get_core(passphrase="")
 
-        # Core should have a KEK (derived from empty string, not config passphrase)
-        assert core.kek is not None
-        assert len(core.kek) == 32
+        expected, _ = derive_kek(b"", FIXED_SALT)
+        assert core.kek == expected
 
     def test_get_core_explicit_passphrase_overrides_config(self):
-        """Explicit passphrase overrides config passphrase, not config KEK."""
-        config_kek, _ = derive_kek(b"config-passphrase")
-        backend = self._make_backend_with_passphrase(b"config-passphrase")
+        """Explicit passphrase overrides the config passphrase."""
+        backend = _backend_with_mock_salt(self._config_with_passphrase(b"config-passphrase"))
         core = backend.get_core(passphrase="override-passphrase")
 
-        # Core should have a KEK (derived from override passphrase)
-        assert core.kek is not None
-        assert len(core.kek) == 32
+        expected, _ = derive_kek(b"override-passphrase", FIXED_SALT)
+        config_expected, _ = derive_kek(b"config-passphrase", FIXED_SALT)
+        assert core.kek == expected
+        assert core.kek != config_expected

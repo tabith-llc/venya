@@ -303,3 +303,65 @@ class TestRequireAdmin:
         assert resp.status_code == 500
         session.rollback.assert_called_once()
         session.close.assert_called_once()
+
+    def test_executor_denied_403_without_user_id_lookup(self):
+        """An executor (no user_id) hitting require_admin gets 403, not 500.
+
+        Executors carry no user_id and admin routes are human-only, so the
+        guard must deny before any DB access (mirrors require_role's executor
+        branch, but denies instead of passing).
+        """
+        backend = MagicMock()
+        rm = _make_admin_rm_mock(has_admin=True)
+        rm.has_permission.side_effect = AssertionError(
+            "admin lookup must not run for executors"
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm):
+            app = _create_admin_app(
+                {"caller": "executor", "executor_id": "exec-1"}
+            )
+            app.state.backend = backend
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Admin permission required"
+        backend.get_session.assert_not_called()
+
+
+class TestGetCurrentSessionOperatorMaxCap:
+    """C-10-related (fixed 2026-08-21): the per-request hard cap must honor the
+    operator's server_config.session.max_session_duration, not the core 4h
+    default (same bug class M-28 fixed in maintenance.py)."""
+
+    @staticmethod
+    def _call(config, created_age_seconds, expires_in_seconds=600):
+        from datetime import datetime, timedelta, timezone
+
+        from server.dependencies import get_current_session
+
+        now = datetime.now(timezone.utc)
+        session = SimpleNamespace(
+            id="s1",
+            created_at=now - timedelta(seconds=created_age_seconds),
+            expires_at=now + timedelta(seconds=expires_in_seconds),
+            access_token="tok",
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = session
+        request = SimpleNamespace(
+            cookies={"venya_access_token": "tok"},
+            app=SimpleNamespace(state=SimpleNamespace(config=config)),
+        )
+        return get_current_session(request, db)
+
+    def test_operator_cap_rejects_session_beyond_it(self):
+        """2h-old session with operator max=1h -> rejected (the old 4h core
+        default would have allowed it)."""
+        config = SimpleNamespace(session=SimpleNamespace(max_session_duration=3600))
+        assert self._call(config, created_age_seconds=7200) is None
+
+    def test_core_default_cap_when_no_operator_config(self):
+        """No operator config -> core 4h default: 2h-old session allowed,
+        5h-old session rejected."""
+        assert self._call(None, created_age_seconds=7200) is not None
+        assert self._call(None, created_age_seconds=18000) is None

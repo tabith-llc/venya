@@ -8,7 +8,7 @@ Installation scripts for Venya components, served via HTTP for VM provisioning.
 
 Installs the Venya Core server on a fresh VM. Includes:
 
-- **venya** user creation
+- **venya** service account (nologin + locked; no password)
 - System packages: `curl`, `sudo`
 - **Caddy** reverse proxy (installed first for TLS)
 - **PostgreSQL** (user, database, trust auth for localhost)
@@ -30,7 +30,6 @@ curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo bash
 |---|---|---|
 | `VENYA_INSTALL_DIR` | `/opt/venya` | Install location |
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompts |
-| `VENYA_PASSWORD` | (prompt) | OS venya user password |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL venya user password |
 | `VENYA_DB_PASSPHRASE` | `venya_test_passphrase_2024` | Server encryption passphrase |
 | `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-core-install.tar.gz` | Tarball URL |
@@ -41,9 +40,9 @@ curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo bash
 
 Installs the Venya Executor daemon on a fresh VM. Includes:
 
-- **venya** user creation
+- **venya** service account (nologin + locked; no password)
 - System packages: `curl`, `sudo`, `build-essential`
-- **Rust** toolchain (root + venya user)
+- **Rust** toolchain (venya user)
 - Python virtual environment + executor/core packages
 - Rust extension build (`venya_filter.so`)
 - Code fixes (same as core)
@@ -62,7 +61,6 @@ curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
 |---|---|---|
 | `VENYA_INSTALL_DIR` | `/opt/venya` | Install location |
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompts |
-| `VENYA_PASSWORD` | (prompt) | OS venya user password |
 | `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-executor-install.tar.gz` | Tarball URL |
 | `VENYA_EXECUTOR_ID` | `jump-1` | Executor identifier |
 | `VENYA_SERVER_URL` | `http://localhost:8080` | Core server URL |
@@ -76,15 +74,6 @@ Installs development/debugging packages not needed for runtime. Only needed for 
 **Usage:**
 ```bash
 curl -fsSL http://10.27.27.35:8080/install-debug-tools.sh | sudo bash
-```
-
-### `install.sh` (original)
-
-The original monolithic installer. Supports `VENYA_MODE=core`, `VENYA_MODE=executor`, or `VENYA_MODE=both`. **Not modified** — kept for reference and backward compatibility.
-
-**Usage:**
-```bash
-curl -fsSL http://10.27.27.35:8080/install.sh | sudo VENYA_MODE=core bash -
 ```
 
 ## Deployment
@@ -141,3 +130,7 @@ curl -sk https://<core-hostname>/api/v1/health
 # 2. Copy ca.crt, executor.crt, executor.key to /etc/venya/executor/
 sudo systemctl start venya-executor
 ```
+
+### Service account (both)
+
+`venya` is a **locked, nologin service account** — no interactive login (ssh/console/PAM) and no password is set. Root operates it with `sudo -u venya <cmd>` or an interactive `sudo -u venya bash` (break-glass; the account's own shell is nologin, so `su - venya` is refused by design).

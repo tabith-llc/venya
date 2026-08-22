@@ -114,7 +114,7 @@ def _verify_elevation(request: Request, db) -> bool:
         db.query(ElevationToken)
         .filter(
             ElevationToken.token_hash == token_hash,
-            ElevationToken.used == False,  # noqa: E712
+            ElevationToken.used.is_(False),
             ElevationToken.expires_at > now_minus_tolerance,
         )
         .first()
