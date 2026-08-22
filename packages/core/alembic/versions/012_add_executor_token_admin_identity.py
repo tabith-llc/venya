@@ -9,8 +9,8 @@ enrollment token creation tracking. Fields are nullified after 90 days
 per retention policy.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "012"
 down_revision = "011"

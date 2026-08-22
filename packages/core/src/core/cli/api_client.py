@@ -10,7 +10,6 @@ Token model (per plan section 5.1):
     - Tokens stored in memory only (no disk persistence)
 """
 
-
 import logging
 import os
 import tempfile
@@ -50,27 +49,31 @@ class Config:
         """Load config from disk."""
         if self.config_file.exists():
             try:
-                self._data = json.loads(self.config_file.read_text())  # noqa: F821
-            except (json.JSONDecodeError, OSError):  # noqa: F821
+                self._data = json.loads(self.config_file.read_text())
+            except (json.JSONDecodeError, OSError):
                 self._data = {}
 
     def save(self) -> None:
         """Save config to disk with owner-only permissions (0o600)."""
         self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        fd = tempfile.NamedTemporaryFile(
-            dir=self.config_file.parent,
-            prefix=".venya-config-",
-            delete=False,
-        )
+        tmp_path: str | None = None
         try:
-            fd.write(json.dumps(self._data).encode())
-            fd.flush()
-            os.fchmod(fd.fileno(), 0o600)
-            fd.close()
-            os.replace(fd.name, self.config_file)
+            with tempfile.NamedTemporaryFile(
+                dir=self.config_file.parent,
+                prefix=".venya-config-",
+                delete=False,
+            ) as fd:
+                tmp_path = fd.name
+                fd.write(json.dumps(self._data).encode())
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o600)
+                os.replace(tmp_path, self.config_file)
         except BaseException:
-            fd.close()
-            os.unlink(fd.name)
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
             raise
 
     @property
@@ -96,7 +99,7 @@ class Config:
 
 
 # Lazy import json at module level when needed
-import json  # noqa: E402
+import json
 
 
 class APIClient:
@@ -198,7 +201,7 @@ class APIClient:
             try:
                 error_data = e.response.json()
                 error_msg = error_data.get("detail", str(e))
-            except (json.JSONDecodeError, Exception):  # noqa: F841
+            except (json.JSONDecodeError, Exception):
                 error_msg = str(e)
 
             if e.response.status_code == 401:
@@ -312,7 +315,7 @@ class APIClient:
             try:
                 error_data = e.response.json()
                 error_msg = error_data.get("detail", str(e))
-            except (json.JSONDecodeError, Exception):  # noqa: F841
+            except (json.JSONDecodeError, Exception):
                 error_msg = str(e)
             if e.response.status_code == 401:
                 raise APIClientAuthenticationError(error_msg)
@@ -384,6 +387,7 @@ class APIClient:
         """
         # Validate executor_id format before sending to server
         from core.utils.executor_id import validate_executor_id
+
         try:
             executor_id = validate_executor_id(executor_id)
         except ValueError as e:
@@ -399,18 +403,13 @@ class APIClient:
         url = f"{self.config.server_url}/api/v1/executors/register"
 
         tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
-        if tls_verify_env == "":
-            tls_verify = True
-        elif tls_verify_env.lower() == "true":
+        if tls_verify_env == "" or tls_verify_env.lower() == "true":
             tls_verify = True
         elif tls_verify_env.lower() == "false":
             tls_verify = False
             logger.warning("VENYA_TLS_VERIFY=false — TLS verification disabled (dev only)")
         else:
-            raise APIClientError(
-                f"Invalid VENYA_TLS_VERIFY value: '{tls_verify_env}'. "
-                "Must be 'true' or 'false'."
-            )
+            raise APIClientError(f"Invalid VENYA_TLS_VERIFY value: '{tls_verify_env}'. " "Must be 'true' or 'false'.")
 
         try:
             timeout = int(os.environ.get("VENYA_EXECUTION_TIMEOUT", "30"))
@@ -423,14 +422,13 @@ class APIClient:
             try:
                 error_data = e.response.json()
                 error_msg = error_data.get("detail", str(e))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 error_msg = str(e)
             raise APIClientError(error_msg)
         except httpx2.ConnectError as e:
             if tls_verify:
                 raise APIClientError(
-                    f"Registration failed. Verify server CA is trusted. "
-                    "In development, export VENYA_TLS_VERIFY=false"
+                    "Registration failed. Verify server CA is trusted. " "In development, export VENYA_TLS_VERIFY=false"
                 ) from e
             raise APIClientError(f"Connection failed: {e}")
         except httpx2.RequestError as e:

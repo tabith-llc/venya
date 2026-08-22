@@ -1,16 +1,15 @@
 """Tests for disk encryption check utility."""
 
 import logging
-import pytest
-from unittest.mock import patch, MagicMock
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from server.utils.disk_encryption import (
-    check_disk_encryption,
-    _get_pg_data_directory,
     _find_mount_point,
     _get_fstype_via_lsblk,
+    _get_pg_data_directory,
     _has_crypt_target,
+    check_disk_encryption,
 )
 
 

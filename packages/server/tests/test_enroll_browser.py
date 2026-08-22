@@ -1,14 +1,13 @@
 """Tests for browser WebAuthn enrollment endpoints (Phase 2)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from fastapi import FastAPI
-from starlette.testclient import TestClient
-
-from server.routes import enroll
 from core.iam.enrollment_manager import EnrollmentManager
+from fastapi import FastAPI
+from server.routes import enroll
+from starlette.testclient import TestClient
 
 
 def _create_test_app(fido2_manager=None, backend=None, config=None):
@@ -43,8 +42,10 @@ class TestBrowserEnrollStart:
 
         # Mock token lookup
         mock_token = SimpleNamespace(
-            user_id=1, state="created", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            user_id=1,
+            state="created",
+            binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
         mock_user = SimpleNamespace(id=1, user_id="newuser", display_name="New User")
 
@@ -117,8 +118,10 @@ class TestBrowserEnrollStart:
     def test_enroll_start_no_fido2(self):
         """Should return 503 if FIDO2 not initialized."""
         mock_token = SimpleNamespace(
-            user_id=1, state="created", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            user_id=1,
+            state="created",
+            binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
 
         mock_em = MagicMock()
@@ -152,16 +155,23 @@ class TestBrowserEnrollComplete:
         from core.iam.enrollment_manager import EnrollmentManager
 
         mock_token = SimpleNamespace(
-            user_id=1, state="in_progress", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            user_id=1,
+            state="in_progress",
+            binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
         mock_user = SimpleNamespace(
-            id=1, user_id="newuser", status="pending_enrollment",
-            display_name="New User", roles=[],
+            id=1,
+            user_id="newuser",
+            status="pending_enrollment",
+            display_name="New User",
+            roles=[],
         )
         mock_cred = SimpleNamespace(
-            user_id="1", credential_id=b"cred-123",
-            public_key=b"pub-key", sign_count=0,
+            user_id="1",
+            credential_id=b"cred-123",
+            public_key=b"pub-key",
+            sign_count=0,
         )
         mock_session = SimpleNamespace(id=1)
         mock_access_token = SimpleNamespace(token="access-token-xyz")
@@ -213,8 +223,10 @@ class TestBrowserEnrollComplete:
         from core.iam.enrollment_manager import EnrollmentManager
 
         mock_token = SimpleNamespace(
-            user_id=1, state="in_progress", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            user_id=1,
+            state="in_progress",
+            binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
 
         mock_em = MagicMock()
@@ -249,8 +261,10 @@ class TestBrowserEnrollComplete:
         from core.iam.enrollment_manager import EnrollmentManager
 
         mock_token = SimpleNamespace(
-            user_id=1, state="in_progress", binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            user_id=1,
+            state="in_progress",
+            binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
 
         mock_em = MagicMock()

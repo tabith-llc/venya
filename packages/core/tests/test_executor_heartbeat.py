@@ -15,16 +15,13 @@ Tests cover:
 """
 
 import json
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -38,11 +35,13 @@ def _generate_test_keypair():
 
 def _generate_test_cert(private_key, executor_id="venya-exec", validity_days=30):
     """Generate a self-signed certificate for testing."""
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
-    now = datetime.now(timezone.utc)
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
+    )
+    now = datetime.now(UTC)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -121,7 +120,7 @@ class TestHeartbeatSuccess:
 
     def test_heartbeat_success_not_revoked(self, tmp_path, capsys):
         """Heartbeat succeeds when not revoked and no cert rotation needed."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -134,6 +133,7 @@ class TestHeartbeatSuccess:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 0
@@ -145,7 +145,7 @@ class TestHeartbeatSuccess:
 
     def test_heartbeat_success_new_cert_required(self, tmp_path, capsys):
         """Heartbeat succeeds when new cert is required (not revoked)."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -158,6 +158,7 @@ class TestHeartbeatSuccess:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 0
@@ -168,7 +169,7 @@ class TestHeartbeatSuccess:
 
     def test_heartbeat_includes_fingerprint_in_payload(self, tmp_path):
         """SHA-256 hex fingerprint is sent in the POST body."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -179,8 +180,9 @@ class TestHeartbeatSuccess:
             response_data={"revoked": False, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
+        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 0
@@ -204,7 +206,7 @@ class TestHeartbeatRevoked:
 
     def test_heartbeat_revoked(self, tmp_path, capsys):
         """Heartbeat exits 1 and prints WARNING when revoked."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -217,6 +219,7 @@ class TestHeartbeatRevoked:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 1
@@ -227,7 +230,7 @@ class TestHeartbeatRevoked:
 
     def test_heartbeat_revoked_with_cert_rotation(self, tmp_path, capsys):
         """Heartbeat exits 1 when both revoked and cert rotation needed."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -240,6 +243,7 @@ class TestHeartbeatRevoked:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 1
@@ -307,7 +311,7 @@ class TestHeartbeatNetworkErrors:
         """Heartbeat exits 1 on connection error."""
         import httpx2
 
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -320,6 +324,7 @@ class TestHeartbeatNetworkErrors:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 1
@@ -331,7 +336,7 @@ class TestHeartbeatNetworkErrors:
         """Heartbeat exits 1 on timeout."""
         import httpx2
 
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -344,6 +349,7 @@ class TestHeartbeatNetworkErrors:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 1
@@ -353,7 +359,7 @@ class TestHeartbeatNetworkErrors:
 
     def test_heartbeat_server_error_500(self, tmp_path, capsys):
         """Heartbeat exits 1 on 500 server error."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -367,6 +373,7 @@ class TestHeartbeatNetworkErrors:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 1
@@ -465,6 +472,7 @@ class TestHeartbeatMtls:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 0
@@ -498,6 +506,7 @@ class TestHeartbeatKeyPath:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 0
@@ -533,6 +542,7 @@ class TestHeartbeatKeyPath:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 0
@@ -575,6 +585,7 @@ class TestHeartbeatCustomCertPath:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 0
@@ -592,7 +603,7 @@ class TestHeartbeatOutput:
 
     def test_heartbeat_output_includes_fingerprint(self, tmp_path, capsys):
         """Fingerprint appears in stdout output."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -605,6 +616,7 @@ class TestHeartbeatOutput:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 0
@@ -620,7 +632,7 @@ class TestHeartbeatOutput:
 
     def test_heartbeat_output_revoked_format(self, tmp_path, capsys):
         """Revoked field shows 'YES' (not 'No') when revoked."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -633,6 +645,7 @@ class TestHeartbeatOutput:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 1
@@ -643,7 +656,7 @@ class TestHeartbeatOutput:
 
     def test_heartbeat_output_executor_id(self, tmp_path, capsys):
         """Executor ID from cert CN appears in output."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path, "my-executor")
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path, "my-executor")
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -656,6 +669,7 @@ class TestHeartbeatOutput:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_heartbeat
+
             result = executor_heartbeat(args)
 
         assert result == 0

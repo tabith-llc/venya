@@ -1,13 +1,13 @@
 """Tests for enrollment flow endpoints (legacy)."""
 
+from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
-from server.routes import enrollment as enrollment_routes
 from server.dependencies import get_current_user, require_admin
+from server.routes import enrollment as enrollment_routes
+from starlette.testclient import TestClient
 
 
 def _create_test_app(backend=None, auth_user=None):
@@ -95,17 +95,21 @@ class TestEnrollmentListTokens:
 
     def test_list_tokens_success(self):
         """GET /enrollment/tokens should list active tokens."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
 
         token1 = SimpleNamespace(
-            id=1, user_id=1, state="created",
-            created_at=datetime.now(timezone.utc),
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            id=1,
+            user_id=1,
+            state="created",
+            created_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
         token2 = SimpleNamespace(
-            id=2, user_id=1, state="in_progress",
-            created_at=datetime.now(timezone.utc) - timedelta(minutes=5),
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+            id=2,
+            user_id=1,
+            state="in_progress",
+            created_at=datetime.now(UTC) - timedelta(minutes=5),
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
 
         db = MagicMock()

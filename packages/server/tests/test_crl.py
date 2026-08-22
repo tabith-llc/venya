@@ -8,22 +8,19 @@ Tests cover:
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID, NameOID
-from fastapi import FastAPI, status
-from starlette.testclient import TestClient
-
+from fastapi import FastAPI
 from server.ca import CAManager
 from server.config import CRLConfig, ServerConfig
 from server.routes import executors as executors_routes
-
+from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -55,14 +52,12 @@ def executor_keypair():
 @pytest.fixture
 def executor_csr(executor_keypair):
     """Create a CSR for testing."""
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-    ])
-    return (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(subject)
-        .sign(executor_keypair, hashes.SHA256())
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+        ]
     )
+    return x509.CertificateSigningRequestBuilder().subject_name(subject).sign(executor_keypair, hashes.SHA256())
 
 
 @dataclass
@@ -115,7 +110,9 @@ def test_crl_config_max_boundary():
 
 def test_cdp_extension_present(ca_manager, executor_csr):
     """Certificate should include CDP extension when crl_url is provided."""
-    cert = ca_manager.sign_csr(executor_csr, "test-executor", crl_url="https://crl.venya.internal/api/v1/executors/certs/crl")
+    cert = ca_manager.sign_csr(
+        executor_csr, "test-executor", crl_url="https://crl.venya.internal/api/v1/executors/certs/crl"
+    )
 
     cdp_ext = cert.extensions.get_extension_for_oid(ExtensionOID.CRL_DISTRIBUTION_POINTS)
     assert cdp_ext is not None
@@ -156,7 +153,7 @@ def _make_mock_db_session(ca_manager, revocations):
 
 def test_generate_crl_with_entries(ca_manager):
     """generate_crl should produce a valid DER CRL with revocation entries."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     revocations = [
         MockRevocation(serial_number="01a2b3c4d5e6f700", revoked_at=now - timedelta(days=1)),
         MockRevocation(serial_number="02b3c4d5e6f70011", revoked_at=now - timedelta(days=2)),
@@ -190,10 +187,9 @@ def test_generate_crl_empty(ca_manager):
 
 def test_generate_crl_max_entries(ca_manager):
     """generate_crl should respect max_entries limit."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     all_revocations = [
-        MockRevocation(serial_number=format(i, "016x"), revoked_at=now - timedelta(days=i))
-        for i in range(1, 20)
+        MockRevocation(serial_number=format(i, "016x"), revoked_at=now - timedelta(days=i)) for i in range(1, 20)
     ]
     # The generate_crl method queries with .order_by().limit(n).all()
     # We mock at the session level to intercept the chain and return only the limited subset
@@ -215,7 +211,7 @@ def test_generate_crl_max_entries(ca_manager):
 
 def test_purge_expired_revocations(ca_manager):
     """purge_expired_revocations should delete old records."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     mock_old = MagicMock()
     mock_old.revoked_at = now - timedelta(days=100)
@@ -239,7 +235,7 @@ def test_purge_expired_revocations(ca_manager):
 
 def test_purge_expired_revocations_nothing_to_delete(ca_manager):
     """purge_expired_revocations should return 0 when no records are old enough."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     mock_new = MagicMock()
     mock_new.revoked_at = now - timedelta(days=10)

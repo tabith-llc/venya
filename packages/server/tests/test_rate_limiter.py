@@ -1,10 +1,11 @@
 """Tests for the sliding window rate limiter utility."""
 
 import asyncio
-import time
+from types import SimpleNamespace
 
 import pytest
-
+from fastapi import HTTPException
+from server.rate_limit import rate_limit_registration
 from server.utils.rate_limiter import SlidingWindowRateLimiter
 
 
@@ -76,7 +77,7 @@ class TestSlidingWindowRateLimiter:
         await limiter.check_and_consume(["test"])
         allowed, _ = await limiter.check_and_consume(["test"])
         assert allowed is False
-        time.sleep(0.15)
+        await asyncio.sleep(0.15)
         allowed, _ = await limiter.check_and_consume(["test"])
         assert allowed is True
 
@@ -114,7 +115,7 @@ class TestSlidingWindowRateLimiter:
         await limiter.check_and_consume(["key1"])
         await limiter.check_and_consume(["key2"])
         await limiter.check_and_consume(["key3"])
-        time.sleep(0.15)
+        await asyncio.sleep(0.15)
         removed = await limiter.cleanup_expired()
         assert removed == 3
 
@@ -136,7 +137,7 @@ class TestSlidingWindowRateLimiter:
         """Test that retry_after is reasonable."""
         limiter = SlidingWindowRateLimiter(max_requests=2, window_seconds=1)
         await limiter.check_and_consume(["test"])
-        time.sleep(0.1)
+        await asyncio.sleep(0.1)
         await limiter.check_and_consume(["test"])
         allowed, retry = await limiter.check_and_consume(["test"])
         assert allowed is False
@@ -161,14 +162,14 @@ class TestSlidingWindowRateLimiterIntegration:
         limiter = SlidingWindowRateLimiter(max_requests=10, window_seconds=60)
         # Admin generates 10 tokens
         for i in range(10):
-            allowed, _ = await limiter.check_and_consume([f"admin:admin1"])
+            allowed, _ = await limiter.check_and_consume(["admin:admin1"])
             assert allowed is True, f"Token {i+1} should be allowed"
         # 11th should be blocked
-        allowed, retry = await limiter.check_and_consume([f"admin:admin1"])
+        allowed, retry = await limiter.check_and_consume(["admin:admin1"])
         assert allowed is False
         assert retry > 0
         # Different admin should still work
-        allowed, _ = await limiter.check_and_consume([f"admin:admin2"])
+        allowed, _ = await limiter.check_and_consume(["admin:admin2"])
         assert allowed is True
 
     async def test_registration_dual_key(self):
@@ -178,29 +179,94 @@ class TestSlidingWindowRateLimiterIntegration:
 
         # Simulate 5 registrations from same IP for same executor
         for i in range(5):
-            ip_ok, _ = await ip_limiter.check_and_consume([f"reg_ip:10.0.0.1"])
-            exec_ok, _ = await exec_limiter.check_and_consume([f"reg_exec:executor1"])
+            ip_ok, _ = await ip_limiter.check_and_consume(["reg_ip:10.0.0.1"])
+            exec_ok, _ = await exec_limiter.check_and_consume(["reg_exec:executor1"])
             assert ip_ok is True
             assert exec_ok is True, f"Registration {i+1} should pass"
 
         # 6th registration for same executor should fail
-        ip_ok, _ = await ip_limiter.check_and_consume([f"reg_ip:10.0.0.1"])
-        exec_ok, _ = await exec_limiter.check_and_consume([f"reg_exec:executor1"])
+        ip_ok, _ = await ip_limiter.check_and_consume(["reg_ip:10.0.0.1"])
+        exec_ok, _ = await exec_limiter.check_and_consume(["reg_exec:executor1"])
         assert ip_ok is True
         assert exec_ok is False
 
         # Registration for different executor from same IP should work
-        exec_ok, _ = await exec_limiter.check_and_consume([f"reg_exec:executor2"])
+        exec_ok, _ = await exec_limiter.check_and_consume(["reg_exec:executor2"])
         assert exec_ok is True
 
     async def test_first_registration_stricter_limit(self):
         """First registration uses stricter limit."""
         first_limiter = SlidingWindowRateLimiter(max_requests=3, window_seconds=60)
-        normal_limiter = SlidingWindowRateLimiter(max_requests=20, window_seconds=60)
+        SlidingWindowRateLimiter(max_requests=20, window_seconds=60)
 
         # First registration: stricter limit of 3
         for i in range(3):
-            allowed, _ = await first_limiter.check_and_consume([f"reg_ip:10.0.0.1"])
+            allowed, _ = await first_limiter.check_and_consume(["reg_ip:10.0.0.1"])
             assert allowed is True
-        allowed, _ = await first_limiter.check_and_consume([f"reg_ip:10.0.0.1"])
+        allowed, _ = await first_limiter.check_and_consume(["reg_ip:10.0.0.1"])
         assert allowed is False
+
+
+class TestRateLimitRegistrationDep:
+    """M-61 regression: the registration dependency must enforce the per-executor
+    limit on ITS OWN limiter, not the per-IP limiter's cap.
+
+    Before the fix both the reg_ip: and reg_exec: keys were checked against the
+    IP limiter, so an executor rotating IPs was never throttled per-executor
+    (the registration_attempts_per_minute cap only fed the response headers).
+    """
+
+    @pytest.fixture()
+    def fresh_limiters(self):
+        from server import rate_limit as _rl
+
+        saved = dict(_rl._LIMITERS)
+        _rl._LIMITERS.clear()
+        yield
+        _rl._LIMITERS.clear()
+        _rl._LIMITERS.update(saved)
+
+    @staticmethod
+    def _config(**overrides) -> SimpleNamespace:
+        base = {
+            "enabled": True,
+            "registration_ip_per_minute": 1000,  # generous: per-IP must not bind
+            "registration_attempts_per_minute": 2,  # tight: per-executor must bind
+            "token_generation_per_minute": 10,
+        }
+        base.update(overrides)
+        return SimpleNamespace(executor_enrollment=SimpleNamespace(**base))
+
+    @staticmethod
+    def _request(executor_id, config, host="10.0.0.1"):
+        req = SimpleNamespace()
+        # backend=None makes the is_first DB probe raise and fall through
+        # (is_first stays False) without needing a real DB app.state.
+        req.app = SimpleNamespace(state=SimpleNamespace(config=config, backend=None))
+        req.client = SimpleNamespace(host=host)
+        req.state = SimpleNamespace()
+
+        async def _json():
+            return {"executor_id": executor_id} if executor_id is not None else {}
+
+        req.json = _json
+        return req
+
+    async def test_per_executor_cap_is_enforced(self, fresh_limiters):
+        cfg = self._config()
+        # Two registrations (== the exec cap) pass; the third trips it -> 429.
+        await rate_limit_registration(self._request("execA", cfg))
+        await rate_limit_registration(self._request("execA", cfg))
+        with pytest.raises(HTTPException) as exc:
+            await rate_limit_registration(self._request("execA", cfg))
+        assert exc.value.status_code == 429
+
+    async def test_per_executor_is_scoped_not_per_ip(self, fresh_limiters):
+        cfg = self._config()
+        await rate_limit_registration(self._request("execA", cfg))
+        await rate_limit_registration(self._request("execA", cfg))
+        with pytest.raises(HTTPException):
+            await rate_limit_registration(self._request("execA", cfg))
+        # Same IP, fresh executor_id: NOT blocked by execA's exhausted cap.
+        # (If the throttle were per-IP, this would also 429.)
+        await rate_limit_registration(self._request("execB", cfg))

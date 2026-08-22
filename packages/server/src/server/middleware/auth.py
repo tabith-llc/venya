@@ -5,24 +5,21 @@ user info to request state. Supports mTLS-based admin endpoint
 authentication via Caddy-layer client certificate verification.
 """
 
-
 import logging
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from core.utils.sensitive_log import token as sensitive_token
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import ExtensionOID, NameOID
 from cryptography.x509 import load_pem_x509_certificates
+from cryptography.x509.oid import ExtensionOID, NameOID
 from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 
 from ..utils.time import has_not_yet_started, is_expired
-from core.utils.sensitive_log import token as sensitive_token
 
 logger = logging.getLogger("venya.server")
 
@@ -85,26 +82,28 @@ class SessionMiddleware(BaseHTTPMiddleware):
     """
 
     # Paths that don't require authentication
-    PUBLIC_PATHS = frozenset({
-        "/api/v1/health",
-        "/api/v1/ready",
-        "/api/v1/auth/registration/start",
-        "/api/v1/auth/registration/complete",
-        "/api/v1/auth/login/start",
-        "/api/v1/auth/login/complete",
-        "/api/v1/auth/refresh",
-        "/api/v1/enrollment/confirm",
-        "/api/v1/init",
-        "/api/v1/init/complete",
-        "/api/v1/init/reset",
-        "/api/v1/recovery",
-        "/api/v1/executors/register",
-        "/api/v1/executors/certs/revocation-list",
-        "/api/v1/executors/certs/crl",
-        "/api/v1/heartbeat",
-        "/api/v1/enroll/browser/start",
-        "/api/v1/enroll/browser/complete",
-    })
+    PUBLIC_PATHS = frozenset(
+        {
+            "/api/v1/health",
+            "/api/v1/ready",
+            "/api/v1/auth/registration/start",
+            "/api/v1/auth/registration/complete",
+            "/api/v1/auth/login/start",
+            "/api/v1/auth/login/complete",
+            "/api/v1/auth/refresh",
+            "/api/v1/enrollment/confirm",
+            "/api/v1/init",
+            "/api/v1/init/complete",
+            "/api/v1/init/reset",
+            "/api/v1/recovery",
+            "/api/v1/executors/register",
+            "/api/v1/executors/certs/revocation-list",
+            "/api/v1/executors/certs/crl",
+            "/api/v1/heartbeat",
+            "/api/v1/enroll/browser/start",
+            "/api/v1/enroll/browser/complete",
+        }
+    )
 
     ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password
 
@@ -183,6 +182,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 # The header might be base64-encoded DER or raw PEM without headers
                 # Try to decode as base64 first
                 import base64
+
                 der_bytes = base64.b64decode(cert_pem_data)
                 cert = x509.load_der_x509_certificate(der_bytes)
             except Exception:
@@ -228,7 +228,8 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 _verify_cert_against_ca(cert, admin_ca_cert)
                 verified = True
                 break
-            except Exception:  # nosec B112 — iterate over trusted CAs, continue on each cert failure
+            except Exception as e:  # nosec B112 — iterate over trusted CAs, continue on each cert failure
+                logger.debug("Cert verification failed against trusted CA: %s", e)
                 continue
 
         if not verified:
@@ -240,12 +241,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         # Step 4: Verify cert not expired (config-driven clock skew tolerance)
         config = getattr(request.app.state, "config", None)
-        cert_tolerance = (
-            config.clock_skew.cert_tolerance_seconds
-            if config and hasattr(config, "clock_skew")
-            else 300
-        )
-        now = datetime.now(timezone.utc)
+        cert_tolerance = config.clock_skew.cert_tolerance_seconds if config and hasattr(config, "clock_skew") else 300
         if has_not_yet_started(cert.not_valid_before_utc, cert_tolerance):
             logger.warning("Admin route %s: cert not yet valid", path)
             return JSONResponse(
@@ -270,7 +266,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             )
 
         # Step 6: Check identity against known_admin_ids
-        known_ids = config.admin_mtls.known_admin_ids
+        known_ids = config.admin_mtls.known_admin_ids  # type: ignore[union-attr]
         if known_ids and identity not in known_ids:
             logger.warning("Admin route %s: identity '%s' not in known_admin_ids", path, identity)
             return JSONResponse(
@@ -284,14 +280,13 @@ class SessionMiddleware(BaseHTTPMiddleware):
             db = backend.get_session()
             try:
                 from core.iam.models import AdminCertRevocation
+
                 serial_hex = hex(cert.serial_number)[2:]  # Remove '0x' prefix
                 # Pad to even length for consistent hex representation
                 if len(serial_hex) % 2:
                     serial_hex = "0" + serial_hex
                 serial_hex = serial_hex.lower()
-                revoked = db.query(AdminCertRevocation).filter(
-                    AdminCertRevocation.serial_number == serial_hex
-                ).first()
+                revoked = db.query(AdminCertRevocation).filter(AdminCertRevocation.serial_number == serial_hex).first()
                 if revoked:
                     logger.warning("Admin route %s: cert serial %s is revoked", path, serial_hex)
                     return JSONResponse(
@@ -303,9 +298,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         return None  # All checks passed, continue to bearer token auth
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         # Normalize path: strip trailing slash except for root "/"
         path = request.url.path.rstrip("/") if request.url.path != "/" else request.url.path
 
@@ -324,9 +317,11 @@ class SessionMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Admin mTLS validation (before bearer token auth)
-        if getattr(request.app.state, "config", None) and \
-           request.app.state.config.admin_mtls.enabled and \
-           self._is_admin_route(path):
+        if (
+            getattr(request.app.state, "config", None)
+            and request.app.state.config.admin_mtls.enabled
+            and self._is_admin_route(path)
+        ):
             mtls_result = await self._validate_admin_mtls(request)
             if mtls_result is not None:
                 return mtls_result
@@ -384,9 +379,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         return bool(re.match(r"^/api/v1/sessions/[^/]+/secrets/revoke$", path))
 
-    async def _validate_token(
-        self, request: Request, token: str
-    ) -> dict | None:
+    async def _validate_token(self, request: Request, token: str) -> dict | None:
         """Validate a bearer token and return user info.
 
         Args:
@@ -402,10 +395,11 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         db = backend.get_session()
         try:
-            from core.iam.session_manager import SessionManager
-            from core.iam.session_manager import SessionConfig as CoreSessionConfig
-            from core.iam.models import Session as SessionModel
             from datetime import timedelta
+
+            from core.iam.models import Session as SessionModel
+            from core.iam.session_manager import SessionConfig as CoreSessionConfig
+            from core.iam.session_manager import SessionManager
 
             config = CoreSessionConfig(
                 session_timeout=timedelta(minutes=15),
@@ -415,11 +409,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             manager = SessionManager(db, config)
 
             # Find session by access token
-            session = (
-                db.query(SessionModel)
-                .filter(SessionModel.access_token == token)
-                .first()
-            )
+            session = db.query(SessionModel).filter(SessionModel.access_token == token).first()
 
             if session is None:
                 return None
@@ -438,6 +428,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
             # Get role IDs for this user
             from core.iam.role_manager import RoleManager
+
             rm = RoleManager(db)
             user_roles = rm.get_user_roles(user.user_id)
             user_info["roles"] = [str(m.role_id) for m in user_roles]
@@ -446,7 +437,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             # expires_at resets to now + session_timeout, so the condition
             # can only re-fire >= session_timeout * 2/3 later).
             # 5-minute threshold on a 15-minute session = extend when <1/3 remains.
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if session.expires_at < now + timedelta(minutes=5):
                 manager.extend_session(session.id)
                 db.commit()

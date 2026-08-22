@@ -4,11 +4,10 @@ Simplified interface — actual FIDO2 operations use python-fido2 library.
 The detailed crypto handling is deferred to integration testing.
 """
 
-
 import base64
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from core.utils.entropy import get_secure_token
@@ -46,7 +45,9 @@ class Fido2Store:
 
     def store_challenge(self, challenge_id: str, user_id: str, data: dict) -> None:
         self._challenges[challenge_id] = StoredChallenge(
-            user_id=user_id, data=data, created_at=time.time(),
+            user_id=user_id,
+            data=data,
+            created_at=time.time(),
         )
 
     def get_challenge(self, challenge_id: str) -> StoredChallenge | None:
@@ -97,9 +98,7 @@ class Fido2Manager:
         try:
             db = self.backend.get_session()
             try:
-                creds = db.query(WebAuthnCredential).filter(
-                    WebAuthnCredential.is_active.is_(True)
-                ).all()
+                creds = db.query(WebAuthnCredential).filter(WebAuthnCredential.is_active.is_(True)).all()
                 for db_cred in creds:
                     stored = StoredCredential(
                         user_id=db_cred.user_id,
@@ -111,7 +110,7 @@ class Fido2Manager:
                     self.store.store_credential(stored)
             finally:
                 db.close()
-        except Exception:  # nosec B110 — db cleanup in finally block, outer scope handles error
+        except Exception:  # nosec B110 — db cleanup in finally block, outer scope handles error  # noqa: S110
             pass
 
     def start_registration(
@@ -202,9 +201,7 @@ class Fido2Manager:
         attestation_object = None
         resp = response.get("response", {})
         if isinstance(resp, dict):
-            attestation_object = resp.get("authenticatorAttestationResponse", {}).get(
-                "attestationObject"
-            )
+            attestation_object = resp.get("authenticatorAttestationResponse", {}).get("attestationObject")
         if attestation_object is None:
             auth_data_bytes = b""
         elif isinstance(attestation_object, str):
@@ -267,9 +264,7 @@ class Fido2Manager:
         )
 
         options: dict[str, Any] = {
-            "challenge": base64.b64encode(
-                secrets.token_bytes(32)
-            ).decode("ascii"),
+            "challenge": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
             "rpId": self.rp_id,
             "timeout": 60000,
             "userVerification": "discouraged",

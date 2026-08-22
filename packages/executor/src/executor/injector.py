@@ -4,7 +4,6 @@ Handles sentinel stripping, FD injection (memfd/shm/fifo),
 and sentinel registry management.
 """
 
-
 import base64
 import errno
 import hashlib
@@ -92,9 +91,9 @@ class SentinelRegistry:
 
 SENTINEL_PATTERN = re.compile(
     rb"\[VENYA:([a-f0-9]{8})\]"  # [VENYA:{8-hex-char-hash}]
-    rb"([A-Za-z0-9+/]*)"          # base64 data (safe: [ cannot appear in base64)
-    rb"(=*)"                        # optional padding
-    rb"\[/VENYA\]"                  # closing tag
+    rb"([A-Za-z0-9+/]*)"  # base64 data (safe: [ cannot appear in base64)
+    rb"(=*)"  # optional padding
+    rb"\[/VENYA\]"  # closing tag
 )
 SENTINEL_PREFIX_PATTERN = re.compile(rb"\[VENYA:([a-f0-9]{8})\]")
 
@@ -232,6 +231,7 @@ def inject_via_memfd(secret_value: bytes) -> tuple[int, SecretInjection]:
 
         # Seal the memfd to prevent any further writes
         import fcntl
+
         F_ADD_SEALS = 1033
         F_SEAL_WRITE = 0x2
         fcntl.fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE)

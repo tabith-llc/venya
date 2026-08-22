@@ -1,9 +1,8 @@
 """Database session + auth dependencies for FastAPI."""
 
-
 import logging
 from collections.abc import Generator
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -12,11 +11,11 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger("venya.server")
 
 from core.engine.backend import Backend, BackendConfig
-from core.utils.sensitive_log import token as sensitive_token
-from core.engine.factory import CoreFactory
 from core.engine.core import Caller
 from core.iam.models import Session as SessionModel
 from core.iam.role_manager import RoleManager
+from core.utils.sensitive_log import token as sensitive_token
+
 from .utils.time import is_expired
 
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -42,7 +41,7 @@ def init_db(db_config: BackendConfig, db_url: str | None = None) -> Backend:
 
     config = BackendConfig(
         database_url=database_url,
-        passphrase=db_config.passphrase.encode("utf-8") if db_config.passphrase else None,
+        passphrase=db_config.passphrase if db_config.passphrase else None,
     )
     return Backend(config)
 
@@ -58,7 +57,7 @@ def get_backend(request: Request) -> Backend:
     return backend
 
 
-def get_db(backend: Backend = Depends(get_backend)) -> Generator[Session, None, None]:
+def get_db(backend: Backend = Depends(get_backend)) -> Generator[Session]:
     """FastAPI dependency that yields a DB session.
 
     Owns the session lifecycle for the route layer: rollback on any exception
@@ -95,13 +94,11 @@ def get_current_session(
         logger.info("GET_SESSION DEBUG: no token in cookie")
         return None
 
-    session = (
-        db.query(SessionModel)
-        .filter(SessionModel.access_token == token)
-        .first()
-    )
+    session = db.query(SessionModel).filter(SessionModel.access_token == token).first()
     if session is None:
-        logger.info("GET_SESSION DEBUG: token %s not found in DB", sensitive_token(token, "ACCESS") if token else "None")
+        logger.info(
+            "GET_SESSION DEBUG: token %s not found in DB", sensitive_token(token, "ACCESS") if token else "None"
+        )
         return None
 
     # Check expiry
@@ -117,20 +114,22 @@ def get_current_session(
     # same source and fallback order as maintenance.py (M-28 class).
     operator_max = getattr(getattr(server_config, "session", None), "max_session_duration", None)
     max_session_duration = (
-        timedelta(seconds=operator_max)
-        if operator_max is not None
-        else SessionConfig().max_session_duration
+        timedelta(seconds=operator_max) if operator_max is not None else SessionConfig().max_session_duration
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     session_created_at = session.created_at
     if session_created_at + max_session_duration < now:
-        logger.info("GET_SESSION DEBUG: session %s over max cap, created_at=%s, now=%s", session.id, session_created_at, now)
+        logger.info(
+            "GET_SESSION DEBUG: session %s over max cap, created_at=%s, now=%s", session.id, session_created_at, now
+        )
         return None
     if is_expired(session.expires_at, tolerance):
         logger.info("GET_SESSION DEBUG: session %s expired, expires_at=%s, now=%s", session.id, session.expires_at, now)
         return None
 
-    logger.info("GET_SESSION DEBUG: token=%s, session=%s", sensitive_token(token, "ACCESS") if token else "None", session.id)
+    logger.info(
+        "GET_SESSION DEBUG: token=%s, session=%s", sensitive_token(token, "ACCESS") if token else "None", session.id
+    )
     return (db, session)
 
 
@@ -153,8 +152,6 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = credentials.credentials
-
     # Look up session by token JTI in app state
     # The session middleware should have validated and attached user info
     user_info = getattr(request.state, "auth_user", None)
@@ -168,7 +165,7 @@ async def get_current_user(
     return user_info
 
 
-get_current_user._venya_guard = "auth"
+get_current_user._venya_guard = "auth"  # type: ignore[attr-defined]
 
 
 def require_role(permission: str):
@@ -189,9 +186,7 @@ def require_role(permission: str):
             Raised at factory call time (app startup), not per request.
     """
     if permission not in ("read", "read-write"):
-        raise ValueError(
-            f"Invalid permission: {permission}. Must be 'read' or 'read-write'"
-        )
+        raise ValueError(f"Invalid permission: {permission}. Must be 'read' or 'read-write'")
 
     async def _checker(
         user_info: dict = Depends(get_current_user),
@@ -229,11 +224,11 @@ def require_role(permission: str):
         finally:
             db.close()
 
-    _checker._venya_guard = permission
+    _checker._venya_guard = permission  # type: ignore[attr-defined]
     return _checker
 
 
-def get_caller(request: Request) -> Caller:
+def get_caller(request: Request) -> str:
     """Determine the caller type from the request.
 
     mTLS requests come from executor (caller=executor).
@@ -289,9 +284,7 @@ def require_admin(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Admin role not found",
             )
-        has_admin = rm.has_permission(
-            user_info["user_id"], admin_role.id, "read-write"
-        )
+        has_admin = rm.has_permission(user_info["user_id"], admin_role.id, "read-write")
         if not has_admin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -307,4 +300,4 @@ def require_admin(
         db.close()
 
 
-require_admin._venya_guard = "admin"
+require_admin._venya_guard = "admin"  # type: ignore[attr-defined]

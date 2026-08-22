@@ -1,6 +1,7 @@
 """Audit log endpoints."""
 
 import json
+from datetime import UTC
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -55,7 +56,7 @@ async def audit_list(
 
     Requires admin permission.
     """
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from core.iam.models import AuditEvent
 
@@ -74,7 +75,7 @@ async def audit_list(
                 detail=f"Invalid start_date: {start_date!r}. Must be ISO 8601.",
             )
         if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
+            start = start.replace(tzinfo=UTC)
         query = query.filter(AuditEvent.timestamp >= start)
 
     if end_date is not None:
@@ -86,34 +87,27 @@ async def audit_list(
                 detail=f"Invalid end_date: {end_date!r}. Must be ISO 8601.",
             )
         if end.tzinfo is None:
-            end = end.replace(tzinfo=timezone.utc)
+            end = end.replace(tzinfo=UTC)
         query = query.filter(AuditEvent.timestamp <= end)
 
     if days is not None:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         query = query.filter(AuditEvent.timestamp >= cutoff)
 
     if hours is not None:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
         query = query.filter(AuditEvent.timestamp >= cutoff)
 
     if executor_id is not None:
         from sqlalchemy import JSON, cast
 
-        query = query.filter(
-            cast(AuditEvent.fields, JSON).op("->>")("executor_id") == executor_id
-        )
+        query = query.filter(cast(AuditEvent.fields, JSON).op("->>")("executor_id") == executor_id)
 
     # Get total count
     total = query.count()
 
     # Apply pagination and ordering
-    events = (
-        query.order_by(AuditEvent.timestamp.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    events = query.order_by(AuditEvent.timestamp.desc()).offset(offset).limit(limit).all()
 
     result = [
         AuditEventResponse(

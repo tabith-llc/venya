@@ -3,12 +3,12 @@
 Tests hash computation, Stage 1 filtering, performance, and false positive rates.
 """
 
-
 import base64
 import hashlib
 import os
 import time
-from typing import Callable, List, Tuple, Union, cast
+from collections.abc import Callable
+from typing import cast
 
 import pytest
 
@@ -18,8 +18,8 @@ try:
 except ImportError:
     pytest.skip("venya_filter Rust extension not available", allow_module_level=True)
 
-_compute_detection_hashes = cast(Callable[[bytes], List[str]], _compute_detection_hashes)
-_filter_output = cast(Callable[[bytes, list], Tuple[bytes, List[str]]], _filter_output)
+_compute_detection_hashes = cast(Callable[[bytes], list[str]], _compute_detection_hashes)
+_filter_output = cast(Callable[[bytes, list], tuple[bytes, list[str]]], _filter_output)
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +170,7 @@ class TestFilterOutput:
         """Multiple different secrets all masked."""
         s1 = b"first-secret-value"
         s2 = b"second-secret-value"
-        entries = (
-            self._make_entries("secret-one", s1)
-            + self._make_entries("secret-two", s2)
-        )
+        entries = self._make_entries("secret-one", s1) + self._make_entries("secret-two", s2)
         output = f"Value1: {s1.decode()} Value2: {s2.decode()} end".encode()
         masked, masked_ids = _filter_output(output, entries)
         assert s1 not in masked
@@ -243,10 +240,22 @@ class TestFalsePositives:
     def test_common_words_not_matched(self):
         """Common English words should not trigger false positives."""
         common_words = [
-            b"password", b"username", b"configuration", b"environment",
-            b"database", b"connection", b"authentication", b"authorization",
-            b"token", b"session", b"credential", b"certificate",
-            b"encryption", b"decryption", b"hash", b"algorithm",
+            b"password",
+            b"username",
+            b"configuration",
+            b"environment",
+            b"database",
+            b"connection",
+            b"authentication",
+            b"authorization",
+            b"token",
+            b"session",
+            b"credential",
+            b"certificate",
+            b"encryption",
+            b"decryption",
+            b"hash",
+            b"algorithm",
         ]
         for word in common_words:
             entries = self._make_entries("x", b"not-in-output-abc123xyz")
@@ -258,6 +267,7 @@ class TestFalsePositives:
     def test_random_text_not_matched(self):
         """Random text should not match secret hashes."""
         import random
+
         random.seed(42)
         secret = b"my-actual-secret-value"
         entries = self._make_entries("s1", secret)
@@ -288,8 +298,7 @@ class TestFalsePositives:
         secret = b"another-secret-value"
         entries = self._make_entries("s", secret)
         json_output = (
-            b'{"status": "ok", "code": 200, "data": {"name": "test", '
-            b'"count": 42, "active": true, "items": []}}'
+            b'{"status": "ok", "code": 200, "data": {"name": "test", ' b'"count": 42, "active": true, "items": []}}'
         )
         masked, masked_ids = _filter_output(json_output, entries)
         assert masked == json_output
@@ -358,11 +367,7 @@ class TestFalsePositives:
         s1 = b"secret-alpha"
         s2 = b"secret-beta"
         s3 = b"secret-gamma"
-        entries = (
-            self._make_entries("alpha", s1)
-            + self._make_entries("beta", s2)
-            + self._make_entries("gamma", s3)
-        )
+        entries = self._make_entries("alpha", s1) + self._make_entries("beta", s2) + self._make_entries("gamma", s3)
         # Only s2 appears in output
         output = b"Processing secret-beta for user"
         masked, masked_ids = _filter_output(output, entries)
@@ -442,7 +447,7 @@ class TestPerformance:
         for _ in range(iterations):
             masked, _ = _filter_output(output, entries)
         elapsed_ms = (time.monotonic() - start) * 1000
-        avg_ms = elapsed_ms / iterations
+        elapsed_ms / iterations
 
         assert secret not in masked
         # Should handle 1000 small outputs in under 1 second
@@ -483,7 +488,7 @@ class TestPerformance:
         iterations = 50
         start = time.monotonic()
         for _ in range(iterations):
-            masked, masked_ids = _filter_output(output, entries)
+            masked, _masked_ids = _filter_output(output, entries)
         elapsed_ms = (time.monotonic() - start) * 1000
         avg_ms = elapsed_ms / iterations
 

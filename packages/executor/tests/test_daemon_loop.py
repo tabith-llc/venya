@@ -5,11 +5,10 @@ methods: _main_loop(), _send_heartbeat(), _handle_signal(), stop(),
 _write_pidfile(), _remove_pidfile().
 """
 
-
 import os
 import signal
-import stat
 import time
+from datetime import UTC
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -19,7 +18,6 @@ from cryptography.hazmat.primitives import hashes
 
 from executor.config import ExecutorConfig, ReaperConfig
 from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -152,24 +150,26 @@ class TestSendHeartbeat:
 
     def test_heartbeat_sends_fingerprint(self, config: ExecutorConfig, tmp_path: Path):
         """_send_heartbeat posts fingerprint to server."""
-        from cryptography.hazmat.primitives.asymmetric import ec
 
         # Create a real cert so get_fingerprint returns non-empty
-        from executor.daemon import _generate_ecdsa_p256_keypair, _create_csr
+        from executor.daemon import _create_csr, _generate_ecdsa_p256_keypair
+
         key = _generate_ecdsa_p256_keypair()
-        cert_pem = _create_csr(key, "test-exec")
+        _create_csr(key, "test-exec")
 
         # Create a self-signed cert for testing
-        from datetime import datetime, timedelta, timezone
-        import hashlib
+        from datetime import datetime, timedelta
+
         from cryptography import x509
         from cryptography.x509.oid import NameOID
 
-        now = datetime.now(timezone.utc)
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "test-exec"),
-        ])
+        now = datetime.now(UTC)
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "test-exec"),
+            ]
+        )
         test_cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -186,6 +186,7 @@ class TestSendHeartbeat:
         ca_path = str(tmp_path / "ca.crt")
 
         from cryptography.hazmat.primitives import serialization
+
         Path(cert_path).write_bytes(test_cert.public_bytes(serialization.Encoding.PEM))
         Path(key_path).write_bytes(
             key.private_bytes(
@@ -216,9 +217,7 @@ class TestSendHeartbeat:
         """_send_heartbeat logs debug on connection error, does not raise."""
         daemon = ExecutorDaemon(config)
         daemon.client = MagicMock(spec=httpx2.Client)
-        daemon.client.post.side_effect = httpx2.RequestError(
-            "Connection refused", request=MagicMock()
-        )
+        daemon.client.post.side_effect = httpx2.RequestError("Connection refused", request=MagicMock())
 
         # Should not raise
         daemon._send_heartbeat()

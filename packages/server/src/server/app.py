@@ -1,6 +1,5 @@
 """FastAPI app factory + lifespan."""
 
-
 import asyncio
 import logging
 import time
@@ -9,7 +8,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import ServerConfig
-from .utils.time import effective_expiry_check_time
 
 logger = logging.getLogger("venya.server")
 
@@ -39,7 +37,23 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.state.config = config  # type: ignore[attr-defined]
 
     # Register routes at creation time (needed for OpenAPI docs)
-    from .routes import admin, audit, auth, auth_elevation, credentials, debug, enroll, enrollment, executors, filter as filter_routes, health, init as init_route, recovery, roles, secrets
+    from .routes import (
+        admin,
+        audit,
+        auth,
+        auth_elevation,
+        credentials,
+        debug,
+        enroll,
+        enrollment,
+        executors,
+        health,
+        recovery,
+        roles,
+        secrets,
+    )
+    from .routes import filter as filter_routes
+    from .routes import init as init_route
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")
@@ -59,10 +73,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     # Add middleware
     from .middleware import auth as auth_middleware
-    from .middleware import rate_limit
-    from .middleware import security_headers
-    from .middleware import rate_limit_headers
     from .middleware import metrics as metrics_middleware
+    from .middleware import rate_limit, rate_limit_headers, security_headers
 
     app.add_middleware(metrics_middleware.MetricsMiddleware)
     app.add_middleware(security_headers.SecurityHeadersMiddleware, cors_origins=config.cors.origins)
@@ -133,7 +145,10 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 
     backend = init_db(config.db, db_url=config.db.database_url)
     from core.utils.sensitive_log import secret
-    logger.info("Database initialized: %s", secret(config.db.database_url) if config.db.database_url else "not configured")
+
+    logger.info(
+        "Database initialized: %s", secret(config.db.database_url) if config.db.database_url else "not configured"
+    )
     app.state.backend = backend  # type: ignore[attr-defined]
 
     # Debug mode allows unencrypted storage for local development convenience.
@@ -183,24 +198,20 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     # Initialize admin CA (required if admin_mtls is enabled)
     from pathlib import Path
 
-    from .ca import AdminCAManager
     from cryptography.x509 import load_pem_x509_certificates
+
+    from .ca import AdminCAManager
 
     admin_ca_dir = Path(config.ca_dir) / "admin-ca"
     admin_ca_manager = AdminCAManager(admin_ca_dir, config.ca_security)
     if config.admin_mtls.enabled and not admin_ca_manager.has_ca:
-        raise RuntimeError(
-            "admin_mtls.enabled but admin CA not found at admin-ca/. "
-            "Run: venya admin init-admin-ca"
-        )
+        raise RuntimeError("admin_mtls.enabled but admin CA not found at admin-ca/. " "Run: venya admin init-admin-ca")
     app.state.admin_ca_manager = admin_ca_manager  # type: ignore[attr-defined]
 
     # Load admin CA PEM bundle (supports rotation — multiple certs concatenated)
     if config.admin_mtls.enabled and config.admin_mtls.ca_cert:
         try:
-            admin_trusted_cas = load_pem_x509_certificates(
-                Path(config.admin_mtls.ca_cert).read_bytes()
-            )
+            admin_trusted_cas = load_pem_x509_certificates(Path(config.admin_mtls.ca_cert).read_bytes())
             app.state.admin_trusted_cas = admin_trusted_cas  # type: ignore[attr-defined]
             logger.info("Loaded %d trusted admin CA cert(s) from %s", len(admin_trusted_cas), config.admin_mtls.ca_cert)
         except Exception:
@@ -240,9 +251,9 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             await cleanup_task
         except asyncio.CancelledError:
             pass
-    backend = getattr(app.state, "backend", None)
-    if backend is not None:
-        backend.dispose()
+    shutdown_backend = getattr(app.state, "backend", None)
+    if shutdown_backend is not None:
+        shutdown_backend.dispose()
     logger.info("Server shut down")
 
 
@@ -264,9 +275,7 @@ def main() -> None:
 
     passphrase_env = config.admin_mtls.ca_key_passphrase_env
     if config.admin_mtls.enabled and not os.environ.get(passphrase_env):
-        raise RuntimeError(
-            f"admin_mtls.enabled requires {passphrase_env} environment variable to be set."
-        )
+        raise RuntimeError(f"admin_mtls.enabled requires {passphrase_env} environment variable to be set.")
 
     from core.utils.sensitive_log import RedactingFormatter
 

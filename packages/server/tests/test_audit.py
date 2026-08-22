@@ -1,13 +1,13 @@
 """Tests for audit log endpoints."""
 
+from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.dependencies import require_admin
 from server.routes import audit as audit_routes
+from starlette.testclient import TestClient
 
 
 def _create_test_app(backend=None, override_guard=True):
@@ -43,14 +43,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 0
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 
@@ -69,7 +74,7 @@ class TestAuditList:
     def test_list_with_events(self):
         """GET /audit should return events."""
         import json
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         # Events returned newest-first (timestamp desc)
         event1 = SimpleNamespace(
@@ -77,14 +82,14 @@ class TestAuditList:
             event_type="secret.delete",
             user_id="user1",
             fields=None,
-            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2024, 1, 2, 12, 0, 0, tzinfo=UTC),
         )
         event2 = SimpleNamespace(
             id=1,
             event_type="secret.create",
             user_id="user1",
             fields=json.dumps({"key": "mysecret"}),
-            timestamp=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+            timestamp=datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC),
         )
 
         db = MagicMock()
@@ -92,14 +97,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 2
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return [event1, event2]
 
@@ -124,14 +134,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 1
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 
@@ -151,14 +166,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 5
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 
@@ -184,14 +204,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 10
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 
@@ -211,14 +236,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 3
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 
@@ -238,16 +268,21 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 50
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, offset_val, **kwargs):
                 assert offset_val == 20
                 return self
+
             def limit(self, limit_val, **kwargs):
                 assert limit_val == 10
                 return self
+
             def all(self):
                 return []
 
@@ -275,14 +310,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 1
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 
@@ -302,14 +342,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 5
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 
@@ -329,16 +374,21 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 50
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, offset_val, **kwargs):
                 assert offset_val == 10
                 return self
+
             def limit(self, limit_val, **kwargs):
                 assert limit_val == 20
                 return self
+
             def all(self):
                 return []
 
@@ -371,14 +421,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 1
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return [event]
 
@@ -400,14 +455,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 0
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 
@@ -427,14 +487,19 @@ class TestAuditList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def count(self):
                 return 0
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def offset(self, *args, **kwargs):
                 return self
+
             def limit(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 

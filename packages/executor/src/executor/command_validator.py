@@ -4,7 +4,6 @@ Enforces an allowlist of permitted commands on the jump host.
 Policy is configurable at initialization and changeable by an admin.
 """
 
-
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -97,9 +96,6 @@ class CommandValidator:
         # Strip --no-network flag from command for validation
         command = self._strip_flag(command, "--no-network")
 
-        # Extract and validate --allow-host flags
-        allowed_hosts = self._parse_allow_hosts(command)
-
         # Check dangerous patterns first (applies to all presets)
         matched, reason = self._matches_dangerous_pattern(command)
         if matched:
@@ -133,8 +129,8 @@ class CommandValidator:
         import re
 
         # Remove the flag and any trailing whitespace
-        pattern = rf'\s*{re.escape(flag)}\s*'
-        return re.sub(pattern, ' ', command).strip()
+        pattern = rf"\s*{re.escape(flag)}\s*"
+        return re.sub(pattern, " ", command).strip()
 
     def _parse_allow_hosts(self, command: str) -> list[dict[str, Any]]:
         """Parse --allow-host flags from the command string.
@@ -148,12 +144,12 @@ class CommandValidator:
         import re
 
         allowed_hosts: list[dict[str, Any]] = []
-        pattern = r'--allow-host\s+(\S+)'
+        pattern = r"--allow-host\s+(\S+)"
 
         for match in re.finditer(pattern, command):
             host_port = match.group(1)
-            if ':' in host_port:
-                host, port_str = host_port.rsplit(':', 1)
+            if ":" in host_port:
+                host, port_str = host_port.rsplit(":", 1)
                 try:
                     port = int(port_str)
                     allowed_hosts.append({"host": host, "port": port})

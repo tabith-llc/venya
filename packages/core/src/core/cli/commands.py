@@ -1,18 +1,17 @@
 """Command implementations for the CLI."""
 
-
-from cryptography import x509
 import hashlib
 import json
 import os
 import sys
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
 import httpx2
+from cryptography import x509
 
 from .api_client import APIClient, APIClientAuthenticationError, APIClientError
-
 
 # ---------------------------------------------------------------------------
 # Sensitive output helpers
@@ -47,8 +46,8 @@ def _run_migrations(_db_path: str | None = None, _db_key: str | None = None) -> 
     Raises:
         RuntimeError: If VENYA_DB_URL is not set or migrations fail.
     """
-    from alembic.config import Config
     from alembic import command
+    from alembic.config import Config
 
     venya_db_url = os.environ.get("VENYA_DB_URL", "")
     if not venya_db_url:
@@ -73,10 +72,8 @@ def _run_migrations(_db_path: str | None = None, _db_key: str | None = None) -> 
     ini_dir = _alembic_ini.parent
     current_script = alembic_cfg.get_main_option("script_location")
     if current_script and not Path(current_script).is_absolute():
-        alembic_cfg.set_main_option(
-            "script_location", str(ini_dir / current_script)
-        )
-    print(f"Running database migrations...")
+        alembic_cfg.set_main_option("script_location", str(ini_dir / current_script))
+    print("Running database migrations...")
     command.upgrade(alembic_cfg, "head")
     print("Database migrations complete.")
 
@@ -344,10 +341,7 @@ def cmd_audit(client: APIClient, args: Any) -> int:
             return 0
 
         for event in events:
-            print(
-                f"  [{event['timestamp']}] {event['event_type']} "
-                f"(user: {event.get('user_id', 'N/A')})"
-            )
+            print(f"  [{event['timestamp']}] {event['event_type']} " f"(user: {event.get('user_id', 'N/A')})")
         return 0
     except APIClientError as e:
         print(f"Failed to query audit log: {e}", file=sys.stderr)
@@ -491,14 +485,16 @@ def cmd_admin_list(client: APIClient, args: Any) -> int:
         headers = ["USER_ID", "DISPLAY_NAME", "STATUS", "AUTH_MODE", "ENROLLED_AT", "SESSION_TIMEOUT"]
         rows = []
         for u in users:
-            rows.append([
-                u.get("user_id", ""),
-                u.get("display_name") or "-",
-                u.get("status", ""),
-                u.get("auth_mode", ""),
-                u.get("enrolled_at") or "-",
-                str(u.get("session_timeout", "")),
-            ])
+            rows.append(
+                [
+                    u.get("user_id", ""),
+                    u.get("display_name") or "-",
+                    u.get("status", ""),
+                    u.get("auth_mode", ""),
+                    u.get("enrolled_at") or "-",
+                    str(u.get("session_timeout", "")),
+                ]
+            )
 
         widths = [len(h) for h in headers]
         for row in rows:
@@ -531,14 +527,14 @@ def cmd_admin_create_user(client: APIClient, args: Any) -> int:
             print(json.dumps(result, indent=2))
             return 0
 
-        print(f"User created successfully.")
+        print("User created successfully.")
         print(f"  User ID:       {result.get('user_id', '')}")
         print(f"  Status:        {result.get('status', '')}")
         token = result.get("enrollment_token", "")
         expires = result.get("expires_in_seconds", 900)
         print(f"  Enrollment Token: {_SENSITIVE_REDACTED}")
         if token:
-            print(f"    WARNING: Token is printed once and never stored.")
+            print("    WARNING: Token is printed once and never stored.")
             print(f"    Expires in: {expires} seconds")
             _print_sensitive(token, getattr(args, "show_sensitive", False))
         return 0
@@ -666,6 +662,7 @@ def cmd_admin_revoke_executor(client: APIClient, args: Any) -> int:
 
     Delegates to executor_cert_revoke() with the admin client.
     """
+
     # Build a minimal args-like object with executor_id
     class _RevokeArgs:
         executor_id = args.executor_id
@@ -714,13 +711,15 @@ def cmd_admin_list_tokens(client: APIClient, args: Any) -> int:
         headers = ["ID", "STATE", "CREATED_AT", "EXPIRES_AT", "USED_AT"]
         rows = []
         for t in tokens:
-            rows.append([
-                t.get("id", ""),
-                t.get("state", ""),
-                t.get("created_at") or "-",
-                t.get("expires_at") or "-",
-                t.get("used_at") or "-",
-            ])
+            rows.append(
+                [
+                    t.get("id", ""),
+                    t.get("state", ""),
+                    t.get("created_at") or "-",
+                    t.get("expires_at") or "-",
+                    t.get("used_at") or "-",
+                ]
+            )
 
         widths = [len(h) for h in headers]
         for row in rows:
@@ -754,7 +753,7 @@ def cmd_admin_issue_token(client: APIClient, args: Any) -> int:
         token = result.get("enrollment_token", "")
         if token:
             print(f"  Enrollment Token: {_SENSITIVE_REDACTED}")
-            print(f"    WARNING: Token is printed once and never stored.")
+            print("    WARNING: Token is printed once and never stored.")
             _print_sensitive(token, getattr(args, "show_sensitive", False))
         print(f"  Previous tokens revoked: {result.get('previous_tokens_revoked', 0)}")
         print(f"  Expires in: {result.get('expires_in_seconds', 900)} seconds")
@@ -796,7 +795,7 @@ def cmd_admin_re_enroll(client: APIClient, args: Any) -> int:
         token = result.get("enrollment_token", "")
         if token:
             print(f"  Enrollment Token: {_SENSITIVE_REDACTED}")
-            print(f"    WARNING: Token is printed once and never stored.")
+            print("    WARNING: Token is printed once and never stored.")
             _print_sensitive(token, getattr(args, "show_sensitive", False))
         print(f"  Credentials deactivated: {result.get('credentials_deactivated', False)}")
         print(f"  Tokens revoked: {result.get('tokens_revoked', 0)}")
@@ -872,10 +871,7 @@ def cmd_role_list(client: APIClient, args: Any) -> int:
             return 0
 
         for role in roles:
-            print(
-                f"  {role['id']}: {role['name']} "
-                f"({role['permissions']})"
-            )
+            print(f"  {role['id']}: {role['name']} " f"({role['permissions']})")
         return 0
     except APIClientError as e:
         print(f"Failed to list roles: {e}", file=sys.stderr)
@@ -958,9 +954,7 @@ def cmd_role_add_member(client: APIClient, args: Any) -> int:
 def cmd_role_remove_member(client: APIClient, args: Any) -> int:
     """Remove user from role."""
     try:
-        client.delete(
-            f"/api/v1/roles/{args.role_id}/members/{args.user_id}"
-        )
+        client.delete(f"/api/v1/roles/{args.role_id}/members/{args.user_id}")
         print(f"User '{args.user_id}' removed from role '{args.role_id}'.")
         return 0
     except APIClientError as e:
@@ -974,7 +968,7 @@ def cmd_role_remove_member(client: APIClient, args: Any) -> int:
 def cmd_recovery(client: APIClient, args: Any) -> int:
     """Break-glass recovery."""
     try:
-        result = client.post(
+        client.post(
             "/api/v1/recovery",
             json={
                 "code": args.code,
@@ -1021,10 +1015,12 @@ def cmd_run(client: APIClient, args: Any) -> int:
         for key in secret_keys:
             try:
                 result = client.get(f"/api/v1/secrets/{key}/executor")
-                secret_bundles.append({
-                    "secret_id": result["secret_id"],
-                    "value": result["wrapped_value"],
-                })
+                secret_bundles.append(
+                    {
+                        "secret_id": result["secret_id"],
+                        "value": result["wrapped_value"],
+                    }
+                )
                 print(f"  Secret '{key}' ready.")
             except APIClientError as e:
                 errors.append(f"  Secret '{key}': {e}")
@@ -1110,7 +1106,7 @@ def cmd_config_show(client: APIClient) -> int:
     print("Venya CLI Configuration:")
     print(f"  Server URL: {config.server_url}")
     if config.access_token:
-        print(f"  Access Token: [set] (expires soon — run 'venya run' to refresh)")
+        print("  Access Token: [set] (expires soon — run 'venya run' to refresh)")
     else:
         print("  Access Token: [not set]")
     print(f"  Config File: {config.config_file}")
@@ -1169,12 +1165,14 @@ def cmd_credential_list(client: APIClient, args: Any) -> int:
         headers = ["ID", "LABEL", "CREATED_AT", "LAST_USED_AT"]
         rows = []
         for c in credentials:
-            rows.append([
-                c.get("id", ""),
-                c.get("label") or "-",
-                c.get("created_at") or "-",
-                c.get("last_used_at") or "-",
-            ])
+            rows.append(
+                [
+                    c.get("id", ""),
+                    c.get("label") or "-",
+                    c.get("created_at") or "-",
+                    c.get("last_used_at") or "-",
+                ]
+            )
 
         widths = [len(h) for h in headers]
         for row in rows:
@@ -1208,8 +1206,6 @@ def _elevate(client: APIClient) -> str:
         Fido2Auth,
         Fido2ClientError,
         Fido2NotFoundError,
-        Fido2TimeoutError,
-        Fido2UserInteractionRequiredError,
     )
 
     fido2 = Fido2Auth(client.config.server_url)
@@ -1223,22 +1219,26 @@ def _elevate(client: APIClient) -> str:
         raise APIClientError(f"Elevation challenge failed: {e}") from e
 
     # Step 2: Build request options
-    from .fido2_client import _b64url_decode
     from fido2.webauthn import (
         CredentialRequestOptions,
         PublicKeyCredentialDescriptor,
+        PublicKeyCredentialRequestOptions,
         UserVerificationRequirement,
     )
+
+    from .fido2_client import _b64url_decode
 
     challenge = _b64url_decode(options["challenge"])
     allow_credentials = []
     for cred in options.get("allow_credentials", []):
         cred_id = _b64url_decode(cred["id"])
-        allow_credentials.append(PublicKeyCredentialDescriptor(
-            type=cred.get("type", "public-key"),
-            id=cred_id,
-            transports=cred.get("transports"),
-        ))
+        allow_credentials.append(
+            PublicKeyCredentialDescriptor(
+                type=cred.get("type", "public-key"),
+                id=cred_id,
+                transports=cred.get("transports"),
+            )
+        )
 
     uv_map = {
         "discouraged": UserVerificationRequirement.DISCOURAGED,
@@ -1286,6 +1286,7 @@ def _elevate(client: APIClient) -> str:
 
     # Step 4: Format assertion
     from .fido2_client import _b64url_encode, _serialize_auth_data, _serialize_client_data
+
     auth_response = assertion.assertions[0]
     cred_id = auth_response.credential["id"]
     auth_data = auth_response.auth_data
@@ -1307,10 +1308,13 @@ def _elevate(client: APIClient) -> str:
 
     # Step 5: Submit assertion to get elevation token
     try:
-        assert_result = fido2._post("/api/v1/auth/elevate/assert", {
-            "challenge_id": challenge_id,
-            "response": response,
-        })
+        assert_result = fido2._post(
+            "/api/v1/auth/elevate/assert",
+            {
+                "challenge_id": challenge_id,
+                "response": response,
+            },
+        )
     except Fido2ClientError as e:
         raise APIClientError(f"Elevation assertion failed: {e}") from e
 
@@ -1339,20 +1343,18 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
         print("Please touch your security key to register the credential...")
 
         # Step 3: Perform WebAuthn registration
+        from fido2.client import WebAuthnClient
+        from fido2.hid import list_devices
+        from fido2.webauthn import (
+            PublicKeyCredentialDescriptor,
+        )
+
         from .fido2_client import (
             Fido2NotFoundError,
-            Fido2TimeoutError,
-            Fido2UserInteractionRequiredError,
             _b64url_decode,
             _b64url_encode,
             _serialize_auth_data,
             _serialize_client_data,
-        )
-        from fido2.client import WebAuthnClient
-        from fido2.hid import list_devices
-        from fido2.webauthn import (
-            CredentialCreationOptions,
-            PublicKeyCredentialDescriptor,
         )
 
         challenge = _b64url_decode(options["challenge"])
@@ -1360,20 +1362,24 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
 
         pub_key_cred_params = []
         for param in options.get("pubKeyCredParams", []):
-            pub_key_cred_params.append({
-                "type": param.get("type", "public-key"),
-                "alg": param.get("alg"),
-            })
+            pub_key_cred_params.append(
+                {
+                    "type": param.get("type", "public-key"),
+                    "alg": param.get("alg"),
+                }
+            )
 
         exclude_credentials = []
         for cred in options.get("excludeCredentials", []):
             if "id" in cred:
                 cred_id = _b64url_decode(cred["id"])
-                exclude_credentials.append(PublicKeyCredentialDescriptor(
-                    type=cred.get("type", "public-key"),
-                    id=cred_id,
-                    transports=cred.get("transports"),
-                ))
+                exclude_credentials.append(
+                    PublicKeyCredentialDescriptor(
+                        type=cred.get("type", "public-key"),
+                        id=cred_id,
+                        transports=cred.get("transports"),
+                    )
+                )
 
         public_key = {
             "rp": options.get("rp", {}),
@@ -1442,10 +1448,10 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
             print(json.dumps(result, indent=2))
             return 0
 
-        print(f"Credential added successfully.")
+        print("Credential added successfully.")
         print(f"  Credential ID: {result.get('id', '')}")
         print(f"  Label: {result.get('label', label)}")
-        print(f"  Status: ok")
+        print("  Status: ok")
         return 0
     except APIClientError as e:
         print(f"Failed to add credential: {e}", file=sys.stderr)
@@ -1510,9 +1516,9 @@ def cmd_enroll_start(client: APIClient, args: Any) -> int:
             print(json.dumps(result, indent=2))
             return 0
 
-        print(f"Enrollment challenge ready.")
+        print("Enrollment challenge ready.")
         print(f"  Challenge ID: {result.get('challenge_id', '')}")
-        print(f"  Next step: Run 'venya enroll complete' with the WebAuthn attestation response.")
+        print("  Next step: Run 'venya enroll complete' with the WebAuthn attestation response.")
         return 0
     except APIClientError as e:
         print(f"Enrollment start failed: {e}", file=sys.stderr)
@@ -1547,11 +1553,11 @@ def cmd_enroll_complete(client: APIClient, args: Any) -> int:
             print(json.dumps(result, indent=2))
             return 0
 
-        print(f"Enrollment completed successfully.")
-        print(f"  Status: ok")
+        print("Enrollment completed successfully.")
+        print("  Status: ok")
         print(f"  User ID: {result.get('user_id', '')}")
         print(f"  Credential ID: {result.get('credential_id', '')}")
-        print(f"  Next step: Run 'venya run' to authenticate with your new key.")
+        print("  Next step: Run 'venya run' to authenticate with your new key.")
         return 0
     except APIClientError as e:
         print(f"Enrollment complete failed: {e}", file=sys.stderr)
@@ -1600,12 +1606,13 @@ def executor_register(client: APIClient, args: Any) -> int:
         5. Verify auth with GET /api/v1/executors/certs/revocation-list
         6. Print success/failure
     """
+    import os
+    from pathlib import Path
+
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import NameOID
-    from pathlib import Path
-    import os
 
     executor_id = getattr(args, "executor_id", "venya-exec")
     output_dir = getattr(args, "output_dir", "/etc/venya")
@@ -1615,6 +1622,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     # Validate executor_id format before any operations
     try:
         from core.utils.executor_id import validate_executor_id
+
         executor_id = validate_executor_id(executor_id)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1626,7 +1634,10 @@ def executor_register(client: APIClient, args: Any) -> int:
     elif client.config.server_url and client.config.server_url != "http://localhost:8000":
         server_url = client.config.server_url.rstrip("/")
     else:
-        print("Error: core URL required. Set it in config (~/.config/venya/config.json) or pass --core-url", file=sys.stderr)
+        print(
+            "Error: core URL required. Set it in config (~/.config/venya/config.json) or pass --core-url",
+            file=sys.stderr,
+        )
         return 1
 
     # Step 1: Generate ECDSA P-256 keypair
@@ -1640,15 +1651,13 @@ def executor_register(client: APIClient, args: Any) -> int:
     # Step 2: Create CSR
     try:
         print(f"Creating CSR with CN={executor_id}...")
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-        ])
-        csr = (
-            x509.CertificateSigningRequestBuilder()
-            .subject_name(subject)
-            .sign(private_key, hashes.SHA256())
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+            ]
         )
+        csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(private_key, hashes.SHA256())
         csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
     except Exception as e:
         print(f"CSR creation failed: {e}", file=sys.stderr)
@@ -1723,7 +1732,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     print(f"  Serial: {serial_number}")
     print(f"  Expires: {not_after}")
     print(f"  Cert: {cert_path}")
-    print(f"\nTo use mTLS authentication, set VENYA_MTLS_CERT and VENYA_MTLS_KEY:")
+    print("\nTo use mTLS authentication, set VENYA_MTLS_CERT and VENYA_MTLS_KEY:")
     print(f"  export VENYA_MTLS_CERT={cert_path}")
     print(f"  export VENYA_MTLS_KEY={key_path}")
     return 0
@@ -1752,9 +1761,10 @@ def _parse_executor_cert(cert_path: str) -> dict[str, Any] | None:
 
     Returns None if cert doesn't exist or can't be parsed.
     """
+    from datetime import datetime
+
     from cryptography import x509
     from cryptography.x509 import load_pem_x509_certificate
-    from datetime import datetime, timezone
 
     path = Path(cert_path)
     if not path.exists():
@@ -1764,7 +1774,7 @@ def _parse_executor_cert(cert_path: str) -> dict[str, Any] | None:
         cert_data = path.read_bytes()
         cert = load_pem_x509_certificate(cert_data)
         not_after = cert.not_valid_after_utc
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         days_remaining = (not_after - now).days
 
         cn = "unknown"
@@ -1803,7 +1813,7 @@ def _get_server_url(args: Any) -> str:
         url = config.server_url
         if url and url != "http://localhost:8000":
             return url
-    except Exception:  # nosec B110
+    except Exception:  # nosec B110  # noqa: S110
         pass
 
     executor_config_path = getattr(args, "config_path", "/etc/venya/executor.toml")
@@ -1885,15 +1895,13 @@ def executor_cert_renew(args: Any) -> int:
 
     try:
         print(f"Creating CSR with CN={executor_id}...")
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-        ])
-        csr = (
-            x509.CertificateSigningRequestBuilder()
-            .subject_name(subject)
-            .sign(new_private_key, hashes.SHA256())
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+            ]
         )
+        csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(new_private_key, hashes.SHA256())
         csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
     except Exception as e:
         print(f"CSR creation failed: {e}", file=sys.stderr)
@@ -2011,7 +2019,7 @@ def executor_cert_renew(args: Any) -> int:
     except Exception:
         print("Certificate was renewed, but auth verification failed.", file=sys.stderr)
 
-    print(f"\nCertificate renewed successfully.")
+    print("\nCertificate renewed successfully.")
     print(f"  Executor ID:    {executor_id}")
     print(f"  Serial:         {serial_number}")
     print(f"  Expires:        {not_after}")
@@ -2101,7 +2109,7 @@ def executor_heartbeat(args: Any) -> int:
     # Compute SHA-256 fingerprint of the certificate
     try:
         cert_pem = Path(cert_path).read_bytes()
-        cert = x509.load_pem_x509_certificate(cert_pem)
+        x509.load_pem_x509_certificate(cert_pem)
         fingerprint = hashlib.sha256(cert_pem).hexdigest()
     except Exception as e:
         print(f"Failed to compute certificate fingerprint: {e}", file=sys.stderr)
@@ -2231,7 +2239,7 @@ def executor_status(args: Any) -> int:
     if info is None:
         print("Executor Status")
         print(f"  Server URL:     {server_url}")
-        print(f"  Registered:     No")
+        print("  Registered:     No")
         print(f"  Certificate:    {cert_path}")
         print("  Status:         NOT REGISTERED")
         print("Run 'venya exec register' to register this executor.", file=sys.stderr)
@@ -2253,7 +2261,7 @@ def executor_status(args: Any) -> int:
     print("Executor Status")
     print(f"  Executor ID:    {info['executor_id']}")
     print(f"  Server URL:     {server_url}")
-    print(f"  Registered:     Yes")
+    print("  Registered:     Yes")
     print(f"  Certificate:    {cert_path}")
     print(f"  Serial:         {info['serial']}")
     print(f"  Subject:        {info['executor_id']}")
@@ -2320,8 +2328,7 @@ def cmd_admin_export_ca_key(args: Any) -> int:
     """
     from pathlib import Path
 
-    import cryptography.hazmat.primitives.ciphers as ciphers
-    import cryptography.hazmat.primitives.hashes as hashes
+    from cryptography.hazmat.primitives import ciphers, hashes
     from cryptography.hazmat.primitives.ciphers import algorithms, modes
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
@@ -2395,7 +2402,7 @@ def cmd_admin_split_ca_key(args: Any) -> int:
     """
     from pathlib import Path
 
-    from core.shamir import combine, split
+    from core.shamir import split
 
     ca_dir = _resolve_ca_dir(args)
     ca_key_path = Path(ca_dir) / "ca.key"
@@ -2491,9 +2498,7 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
             print(f"Error: backup file not found: {backup_path}", file=sys.stderr)
             return 1
 
-        import cryptography.hazmat.primitives.ciphers as ciphers
-        import cryptography.hazmat.primitives.hashes as hashes
-        from cryptography.hazmat.primitives.ciphers import algorithms, modes
+        from cryptography.hazmat.primitives import ciphers, hashes
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
         encrypted_data = backup_path.read_bytes()
@@ -2553,7 +2558,7 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
     If VENYA_ADMIN_CA_KEY_PASSPHRASE is set, the key is encrypted on disk.
     """
     import os
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from pathlib import Path
 
     from cryptography import x509
@@ -2562,9 +2567,8 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
     from cryptography.hazmat.primitives.serialization import (
         BestAvailableEncryption,
         PrivateFormat,
-        PublicFormat,
     )
-    from cryptography.x509.oid import ExtensionOID, NameOID
+    from cryptography.x509.oid import NameOID
 
     output_dir = Path(args.output_dir)
 
@@ -2603,12 +2607,14 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
         key_path.chmod(0o600)
 
         # Create self-signed CA certificate
-        now = datetime.now(timezone.utc)
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin Certificate Authority"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "Venya Admin CA"),
-        ])
+        now = datetime.now(UTC)
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin Certificate Authority"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "Venya Admin CA"),
+            ]
+        )
 
         builder = (
             x509.CertificateBuilder()
@@ -2664,22 +2670,20 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
     and writes the cert and key to the output directory.
     """
     import os
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
     from pathlib import Path
 
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives.serialization import PrivateFormat
-    from cryptography.x509.oid import ExtensionOID, NameOID, ExtendedKeyUsageOID
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
     identity = args.identity
     output_dir = Path(args.output_dir)
 
     # Resolve admin CA directory
-    ca_dir_str = getattr(args, "ca_dir", None) or os.environ.get(
-        "VENYA_ADMIN_CA_DIR", "/var/lib/venya/ca/admin-ca"
-    )
+    ca_dir_str = getattr(args, "ca_dir", None) or os.environ.get("VENYA_ADMIN_CA_DIR", "/var/lib/venya/ca/admin-ca")
     ca_dir = Path(ca_dir_str)
 
     ca_key_path = ca_dir / "admin-ca.key"
@@ -2703,7 +2707,7 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
 
         if is_encrypted and not passphrase:
             print(
-                f"Error: CA key is encrypted but VENYA_ADMIN_CA_KEY_PASSPHRASE is not set",
+                "Error: CA key is encrypted but VENYA_ADMIN_CA_KEY_PASSPHRASE is not set",
                 file=sys.stderr,
             )
             return 1
@@ -2715,12 +2719,14 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         admin_key = ec.generate_private_key(ec.SECP256R1())
 
         # Build certificate
-        now = datetime.now(timezone.utc)
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
-            x509.NameAttribute(NameOID.COMMON_NAME, identity),
-        ])
+        now = datetime.now(UTC)
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                x509.NameAttribute(NameOID.COMMON_NAME, identity),
+            ]
+        )
 
         cert = (
             x509.CertificateBuilder()
@@ -2828,7 +2834,7 @@ def cmd_admin_revoke_admin_cert(client: APIClient, args: Any) -> int:
 
     url = server_url.rstrip("/")
     try:
-        result = client.post(
+        client.post(
             f"{url}/api/v1/admin/certs/revoke",
             json={"serial": serial, "reason": reason},
         )

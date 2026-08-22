@@ -1,6 +1,5 @@
 """Shared dataclasses for the executor pipeline."""
 
-
 from dataclasses import dataclass
 
 

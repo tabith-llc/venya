@@ -1,8 +1,6 @@
 """Role CRUD + membership + permissions."""
 
-
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -52,13 +50,9 @@ class RoleManager:
             RoleManagerError: If role name already exists or permissions are invalid.
         """
         if permissions not in ("read", "read-write"):
-            raise RoleManagerError(
-                f"Invalid permissions: {permissions}. Must be 'read' or 'read-write'"
-            )
+            raise RoleManagerError(f"Invalid permissions: {permissions}. Must be 'read' or 'read-write'")
 
-        existing = (
-            self.db.query(Role).filter(func.lower(Role.name) == name.lower()).first()
-        )
+        existing = self.db.query(Role).filter(func.lower(Role.name) == name.lower()).first()
         if existing:
             raise RoleManagerError(f"Role '{name}' already exists")
 
@@ -97,19 +91,13 @@ class RoleManager:
             if name == role.name:
                 name = None
             else:
-                existing = (
-                    self.db.query(Role)
-                    .filter(func.lower(Role.name) == name.lower(), Role.id != role_id)
-                    .first()
-                )
+                existing = self.db.query(Role).filter(func.lower(Role.name) == name.lower(), Role.id != role_id).first()
                 if existing:
                     raise RoleManagerError(f"Role '{name}' already exists")
 
         if permissions is not None:
             if permissions not in ("read", "read-write"):
-                raise RoleManagerError(
-                    f"Invalid permissions: {permissions}. Must be 'read' or 'read-write'"
-                )
+                raise RoleManagerError(f"Invalid permissions: {permissions}. Must be 'read' or 'read-write'")
             if permissions == role.permissions:
                 permissions = None
 
@@ -129,9 +117,7 @@ class RoleManager:
 
     def get_role_by_name(self, name: str) -> Role | None:
         """Get a role by name."""
-        return (
-            self.db.query(Role).filter(func.lower(Role.name) == name.lower()).first()
-        )
+        return self.db.query(Role).filter(func.lower(Role.name) == name.lower()).first()
 
     def list_roles(self) -> list[Role]:
         """List all roles."""
@@ -172,9 +158,7 @@ class RoleManager:
 
         # Check for duplicate
         existing = (
-            self.db.query(RoleMember)
-            .filter(RoleMember.user_id == user_id, RoleMember.role_id == role_id)
-            .first()
+            self.db.query(RoleMember).filter(RoleMember.user_id == user_id, RoleMember.role_id == role_id).first()
         )
         if existing:
             raise RoleManagerError(f"User '{user_id}' is already a member of role {role_id}")
@@ -191,9 +175,7 @@ class RoleManager:
             True if removed, False if not found.
         """
         membership = (
-            self.db.query(RoleMember)
-            .filter(RoleMember.user_id == user_id, RoleMember.role_id == role_id)
-            .first()
+            self.db.query(RoleMember).filter(RoleMember.user_id == user_id, RoleMember.role_id == role_id).first()
         )
         if membership is None:
             return False
@@ -204,23 +186,13 @@ class RoleManager:
 
     def get_role_members(self, role_id: int) -> list[RoleMember]:
         """Get all members of a role."""
-        return (
-            self.db.query(RoleMember)
-            .filter(RoleMember.role_id == role_id)
-            .all()
-        )
+        return self.db.query(RoleMember).filter(RoleMember.role_id == role_id).all()
 
     def get_user_roles(self, user_id: str) -> list[RoleMember]:
         """Get all roles a user belongs to."""
-        return (
-            self.db.query(RoleMember)
-            .filter(RoleMember.user_id == user_id)
-            .all()
-        )
+        return self.db.query(RoleMember).filter(RoleMember.user_id == user_id).all()
 
-    def has_permission(
-        self, user_id: str, role_id: int, required_permission: str
-    ) -> bool:
+    def has_permission(self, user_id: str, role_id: int, required_permission: str) -> bool:
         """Check if a user has a required permission in a role.
 
         Args:

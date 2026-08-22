@@ -22,8 +22,8 @@ Session model after migration:
     access_token_jti = Column(String(64), nullable=True, unique=True)
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "017"
 down_revision = "016"
@@ -42,7 +42,8 @@ def upgrade():
 
     # H-11: Check for and resolve duplicate access_token values
     # (keep the newest by id, delete the rest)
-    op.execute("""
+    op.execute(
+        """
         DELETE FROM sessions
         WHERE id NOT IN (
             SELECT MAX(id)
@@ -51,9 +52,11 @@ def upgrade():
             GROUP BY access_token
         )
         AND access_token IS NOT NULL
-    """)
+    """
+    )
 
-    op.execute("""
+    op.execute(
+        """
         DELETE FROM sessions
         WHERE id NOT IN (
             SELECT MAX(id)
@@ -62,7 +65,8 @@ def upgrade():
             GROUP BY access_token_jti
         )
         AND access_token_jti IS NOT NULL
-    """)
+    """
+    )
 
     # H-11: Unique constraints on token columns
     op.create_unique_constraint("uq_sessions_access_token", "sessions", ["access_token"])

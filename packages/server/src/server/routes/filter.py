@@ -4,11 +4,10 @@ import base64
 import hashlib
 import logging
 
+from core.engine.backend import Backend
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-
-from core.engine.backend import Backend
 
 from ..dependencies import get_backend, get_db
 
@@ -136,7 +135,8 @@ async def filter_session_output(
     Returns:
         Sanitized output with masked secrets.
     """
-    from core.iam.models import Secret, Session as SessionModel
+    from core.iam.models import Secret
+    from core.iam.models import Session as SessionModel
 
     # Look up session to find injected secrets
     try:
@@ -146,23 +146,16 @@ async def filter_session_output(
 
     session = None
     if session_id_int is not None:
-        session = (
-            db.query(SessionModel)
-            .filter(SessionModel.id == session_id_int)
-            .first()
-        )
+        session = db.query(SessionModel).filter(SessionModel.id == session_id_int).first()
 
     session_secrets: dict[str, bytes] = {}
     if session is not None:
-        from core.engine.encryption import DecryptionError, decrypt_secret as _decrypt_secret_impl
+        from core.engine.encryption import DecryptionError
+        from core.engine.encryption import decrypt_secret as _decrypt_secret_impl
 
         kek = backend.config.kek
         # Get secrets associated with this session's user
-        secrets = (
-            db.query(Secret)
-            .filter(Secret.created_by == session.user_id)
-            .all()
-        )
+        secrets = db.query(Secret).filter(Secret.created_by == session.user_id).all()
         for secret in secrets:
             if kek is None:
                 logger.warning(
@@ -172,9 +165,7 @@ async def filter_session_output(
                 )
                 continue
             try:
-                plaintext = _decrypt_secret_impl(
-                    kek, secret.wrapped_dek, secret.nonce, secret.encrypted_value
-                )
+                plaintext = _decrypt_secret_impl(kek, secret.wrapped_dek, secret.nonce, secret.encrypted_value)
             except DecryptionError:
                 logger.warning(
                     "Failed to decrypt secret %s for session %s",

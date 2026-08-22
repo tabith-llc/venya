@@ -8,7 +8,6 @@ wraps the receive callable for chunked/streaming requests (limits
 memory exposure mid-stream).
 """
 
-
 import logging
 
 logger = logging.getLogger(__name__)
@@ -35,10 +34,7 @@ class RequestSizeLimitMiddleware:
             return await self.app(scope, receive, send)
 
         # Parse headers from scope
-        headers = dict(
-            (k.decode().lower(), v.decode())
-            for k, v in scope.get("headers", [])
-        )
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         content_length = headers.get("content-length")
 
         if content_length is not None:
@@ -93,14 +89,18 @@ class RequestSizeLimitMiddleware:
     @staticmethod
     async def _send_response(send, status, body):
         """Send a simple JSON response."""
-        await send({
-            "type": "http.response.start",
-            "status": status,
-            "headers": [
-                (b"content-type", b"application/json"),
-            ],
-        })
-        await send({
-            "type": "http.response.body",
-            "body": body,
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                ],
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": body,
+            }
+        )

@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import secrets
+from datetime import UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -65,15 +66,11 @@ async def init_reset(
 
     This is a safety net for failed first-time enrollment attempts.
     """
-    from core.iam.models import Role, RoleMember, User, EnrollmentToken
+    from core.iam.models import EnrollmentToken, Role, RoleMember, User
 
     try:
         # Check if any user is enrolled
-        enrolled_count = (
-            db.query(User)
-            .filter(User.enrolled_at.isnot(None))
-            .count()
-        )
+        enrolled_count = db.query(User).filter(User.enrolled_at.isnot(None)).count()
 
         if enrolled_count > 0:
             raise HTTPException(
@@ -126,10 +123,10 @@ async def init_core(
     If admin role exists but has no enrolled members → resume mode,
     returns a fresh challenge for the pending user.
     """
-    from datetime import datetime, timezone
+
+    from core.iam.models import Role, RoleMember, User
 
     from ..ca import CAExistsError, CAManager
-    from core.iam.models import Role, RoleMember, User
 
     try:
         admin_role = db.query(Role).filter(Role.name == "admin").first()
@@ -146,12 +143,7 @@ async def init_core(
 
             if enrolled_count > 0:
                 # Already fully initialized — reject
-                pending_user = (
-                    db.query(User)
-                    .join(RoleMember)
-                    .filter(RoleMember.role_id == admin_role.id)
-                    .first()
-                )
+                pending_user = db.query(User).join(RoleMember).filter(RoleMember.role_id == admin_role.id).first()
                 user_id_str = pending_user.user_id if pending_user else "unknown"
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -163,12 +155,7 @@ async def init_core(
 
             # Resume mode: admin exists but no enrolled members yet
             # Find the pending user and generate a new challenge
-            pending_user = (
-                db.query(User)
-                .join(RoleMember)
-                .filter(RoleMember.role_id == admin_role.id)
-                .first()
-            )
+            pending_user = db.query(User).join(RoleMember).filter(RoleMember.role_id == admin_role.id).first()
 
             if pending_user is None:
                 # Admin role exists but no role members — stale state from failed init
@@ -205,7 +192,7 @@ async def init_core(
                 try:
                     ca_manager.initialize()
                     logger.info("CA initialized during core bootstrap")
-                except ca.CAExistsError:
+                except CAExistsError:
                     logger.debug("CA already exists on disk")
 
         admin_role = Role(
@@ -284,11 +271,11 @@ async def init_complete(
     stores the WebAuthn credential, generates a recovery code (hashed),
     and marks the user as enrolled.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
+
+    from core.iam.models import User, WebAuthnCredential
 
     from ..fido2.browser_adapter import browser_registration_to_fido2
-    from core.iam.models import User, WebAuthnCredential
-    import json
 
     try:
         fido2_manager = getattr(request.app.state, "fido2_manager", None)
@@ -310,14 +297,13 @@ async def init_complete(
         except Exception as e:
             logger.error("browser_registration_to_fido2 failed: %s: %s", type(e).__name__, e)
             import traceback
+
             logger.error(traceback.format_exc())
             raise
 
         # Verify FIDO2 attestation
         try:
-            cred = fido2_manager.finish_registration(
-                req.challenge_id, fido2_response
-            )
+            cred = fido2_manager.finish_registration(req.challenge_id, fido2_response)
         except ValueError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -326,19 +312,15 @@ async def init_complete(
         except Exception as e:
             logger.error("finish_registration failed: %s: %s", type(e).__name__, e)
             import traceback
+
             logger.error(traceback.format_exc())
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Registration failed: {str(e)}",
+                detail=f"Registration failed: {e!s}",
             ) from e
 
         # Find the pending user
-        user = (
-            db.query(User)
-            .filter(User.user_id == req.user_id)
-            .filter(User.enrolled_at.is_(None))
-            .first()
-        )
+        user = db.query(User).filter(User.user_id == req.user_id).filter(User.enrolled_at.is_(None)).first()
         if user is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -368,7 +350,7 @@ async def init_complete(
 
         user.auth_mode = "webauthn"
         user.status = "active"
-        user.enrolled_at = datetime.now(timezone.utc)
+        user.enrolled_at = datetime.now(UTC)
         user.recovery_code_hash = recovery_code_hash
 
         db.commit()

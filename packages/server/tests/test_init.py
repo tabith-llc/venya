@@ -4,9 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.routes import init as init_routes
+from starlette.testclient import TestClient
 
 
 def _create_test_app(backend=None, fido2_manager=None):
@@ -25,7 +24,6 @@ def _create_test_app(backend=None, fido2_manager=None):
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             response = await call_next(request)
-            from fastapi import HTTPException
             if hasattr(request.state, "http_exception"):
                 raise request.state.http_exception
             return response
@@ -113,7 +111,7 @@ class TestInitCore:
         """Init on fully initialized core returns 409."""
         admin_role = _make_role()
         admin_user = _make_user("alice", enrolled_at="2026-01-01")
-        membership = _make_membership()
+        _make_membership()
 
         class MockQuery:
             def __init__(self, model):

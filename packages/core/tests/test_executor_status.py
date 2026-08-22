@@ -6,20 +6,13 @@ Tests cover:
 - executor_status() with various states
 """
 
-import json
-import tempfile
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-
-from core.cli.api_client import Config
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -33,11 +26,13 @@ def _generate_test_keypair():
 
 def _generate_test_cert(private_key, executor_id="venya-exec", validity_days=30):
     """Generate a self-signed certificate for testing."""
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
-    now = datetime.now(timezone.utc)
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
+    )
+    now = datetime.now(UTC)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -88,7 +83,17 @@ class TestParseExecutorCert:
         result = _parse_executor_cert(str(cert_path))
         assert result is not None
         assert result["executor_id"] == "parse-test"
-        assert "SERIAL" in result["serial"] or result["serial"].replace("A", "").replace("B", "").replace("C", "").replace("D", "").replace("E", "").replace("F", "") != ""
+        assert (
+            "SERIAL" in result["serial"]
+            or result["serial"]
+            .replace("A", "")
+            .replace("B", "")
+            .replace("C", "")
+            .replace("D", "")
+            .replace("E", "")
+            .replace("F", "")
+            != ""
+        )
         assert "parse-test" in result["subject"]
         assert result["days_remaining"] > 0
         assert result["days_remaining"] <= 30
@@ -98,11 +103,13 @@ class TestParseExecutorCert:
         from core.cli.commands import _parse_executor_cert
 
         private_key = _generate_test_keypair()
-        now = datetime.now(timezone.utc)
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "expired-test"),
-        ])
+        now = datetime.now(UTC)
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "expired-test"),
+            ]
+        )
         cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -276,11 +283,13 @@ class TestExecutorStatus:
         from core.cli.commands import executor_status
 
         private_key = _generate_test_keypair()
-        now = datetime.now(timezone.utc)
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "status-expired"),
-        ])
+        now = datetime.now(UTC)
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "status-expired"),
+            ]
+        )
         cert = (
             x509.CertificateBuilder()
             .subject_name(subject)

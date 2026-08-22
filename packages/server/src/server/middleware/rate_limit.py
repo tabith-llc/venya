@@ -4,16 +4,13 @@ Per-IP and per-session throttling to prevent brute force attacks.
 Uses PostgreSQL fixed-window counters for multi-worker safety.
 """
 
-
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
-
-from core.engine.rate_limiter import RateLimitExceededError
 
 from .. import metrics
 
@@ -73,9 +70,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Short-lived (seconds), doesn't need to be shared across workers.
         self._break_glass_failures: dict[str, list[float]] = {}
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         ip = self._get_client_ip(request)
 
         # Skip rate limiting if not enforced
@@ -104,7 +99,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             )
 
         # UPSERT: atomic increment, returns new count
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         window_start = _truncate_to_window(now, window)
 
         db = None
@@ -157,13 +152,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         from sqlalchemy import text
 
         result = db.execute(
-            text("""
+            text(
+                """
                 INSERT INTO rate_limit_failures (identifier, endpoint_type, window_start, count)
                 VALUES (:identifier, :endpoint_type, :window_start, 1)
                 ON CONFLICT (identifier, endpoint_type, window_start)
                 DO UPDATE SET count = rate_limit_failures.count + 1
                 RETURNING count
-            """),
+            """
+            ),
             {
                 "identifier": identifier,
                 "endpoint_type": endpoint_type,

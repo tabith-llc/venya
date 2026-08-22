@@ -1,9 +1,8 @@
 """Tests for request body size limit middleware."""
 
 from fastapi import FastAPI, Request
-from starlette.testclient import TestClient
-
 from server.middleware.request_size import RequestSizeLimitMiddleware
+from starlette.testclient import TestClient
 
 
 def _create_app(max_body_bytes=1_048_576):
@@ -35,7 +34,7 @@ class TestRequestSizeLimit:
         """413 when Content-Length > max."""
         app = _create_app(max_body_bytes=100)
         client = TestClient(app, raise_server_exceptions=False)
-        payload = b'x' * 200
+        payload = b"x" * 200
         resp = client.post("/echo", content=payload)
         assert resp.status_code == 413
         assert "exceeds" in resp.json()["detail"].lower()
@@ -53,7 +52,7 @@ class TestRequestSizeLimit:
         """Request at exactly the limit passes."""
         app = _create_app(max_body_bytes=100)
         client = TestClient(app, raise_server_exceptions=False)
-        payload = b'x' * 100
+        payload = b"x" * 100
         resp = client.post("/echo", content=payload)
         assert resp.status_code == 200
         assert resp.json()["received"] == 100
@@ -85,7 +84,7 @@ class TestRequestSizeLimit:
         resp = client.post("/echo", content=b"hello")
         assert resp.status_code == 200
         # Over limit (50 bytes)
-        resp = client.post("/echo", content=b'x' * 100)
+        resp = client.post("/echo", content=b"x" * 100)
         assert resp.status_code == 413
 
     def test_413_before_auth_runs(self):
@@ -97,7 +96,7 @@ class TestRequestSizeLimit:
         app = _create_app(max_body_bytes=100)
         wrapped = RequestSizeLimitMiddleware(app, max_body_bytes=100)
         client = TestClient(wrapped, raise_server_exceptions=False)
-        resp = client.post("/admin/secret", content=b'x' * 500)
+        resp = client.post("/admin/secret", content=b"x" * 500)
         assert resp.status_code == 413
         assert "exceeds" in resp.json()["detail"].lower()
 
@@ -110,13 +109,9 @@ class TestRequestSizeLimit:
         # (TestClient sets Content-Length by default)
         with client as session:
             # Build a chunked request manually
-            chunked_body = b'x' * 500
+            chunked_body = b"x" * 500
             # Chunked format: size in hex + CRLF + data + CRLF + 0 + CRLF
-            chunked_payload = (
-                f"{len(chunked_body):x}\r\n".encode() +
-                chunked_body +
-                b"\r\n0\r\n\r\n"
-            )
+            chunked_payload = f"{len(chunked_body):x}\r\n".encode() + chunked_body + b"\r\n0\r\n\r\n"
             resp = session.post(
                 "/echo",
                 content=chunked_payload,

@@ -17,17 +17,15 @@ Python version compatibility: 3.13+ (uses task.get_name(), get_coro())
 See: Security Review Item #6 (No asyncio diagnostic endpoint)
 """
 
-
 import asyncio
 import time
 from typing import Any
 
+from core.engine.backend import Backend
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.pool import Pool
 
 from server.dependencies import get_backend, require_admin
-from core.engine.backend import Backend
-
 
 # ============================================================================
 # Helper Functions
@@ -209,10 +207,10 @@ async def get_asyncio_state(
     all_tasks = asyncio.all_tasks(loop)
 
     # Build task info for all tasks
-    tasks = [_build_task_info(task) for task in sorted(
-        all_tasks,
-        key=lambda t: t.get_name() if hasattr(t, "get_name") else ""
-    )]
+    tasks = [
+        _build_task_info(task)
+        for task in sorted(all_tasks, key=lambda t: t.get_name() if hasattr(t, "get_name") else "")
+    ]
 
     # Count pending vs total
     pending_count = sum(1 for t in tasks if t["state"] == "pending")
@@ -234,12 +232,16 @@ async def get_asyncio_state(
             "running": loop.is_running(),
             "latency_us": 50,  # Placeholder — real measurement needs async context
         },
-        "db_pool": db_pool_stats if db_pool_stats else {
-            "checked_in": 0,
-            "checked_out": 0,
-            "overflow": 0,
-            "pool_size": 0,
-            "max_overflow": 0,
-            "utilization_pct": 0.0,
-        },
+        "db_pool": (
+            db_pool_stats
+            if db_pool_stats
+            else {
+                "checked_in": 0,
+                "checked_out": 0,
+                "overflow": 0,
+                "pool_size": 0,
+                "max_overflow": 0,
+                "utilization_pct": 0.0,
+            }
+        ),
     }

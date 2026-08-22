@@ -4,10 +4,9 @@ All token generation in the Venya codebase should flow through
 get_secure_token() to provide a single audit point for entropy usage.
 """
 
-
+import logging
 import os
 import secrets
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +43,8 @@ def csprng_self_test() -> None:
     try:
         data = os.urandom(_SELF_TEST_BYTES)
         if len(data) != _SELF_TEST_BYTES:
-            raise RuntimeError(
-                f"CSPRNG returned {len(data)} bytes, expected {_SELF_TEST_BYTES}"
-            )
-        if data == b'\x00' * _SELF_TEST_BYTES:
+            raise RuntimeError(f"CSPRNG returned {len(data)} bytes, expected {_SELF_TEST_BYTES}")
+        if data == b"\x00" * _SELF_TEST_BYTES:
             raise RuntimeError("CSPRNG returned all-zero output — possible failure")
         logger.info("CSPRNG self-test passed")
     except BlockingIOError:

@@ -81,9 +81,7 @@ def _determine_status(checks: dict[str, str]) -> tuple[str, int]:
     values = list(checks.values())
 
     has_error = any(v in ("error", "check_failed") for v in values)
-    has_critical_error = any(
-        checks[k] in ("error", "check_failed") for k in critical_keys if k in checks
-    )
+    has_critical_error = any(checks[k] in ("error", "check_failed") for k in critical_keys if k in checks)
 
     if has_critical_error:
         return "error", 503
@@ -113,16 +111,13 @@ async def health_check(request: Request) -> JSONResponse:
 
     # Admin CA check — only when config exists and admin_mtls is enabled
     config = getattr(request.app.state, "config", None)
-    if config is not None and getattr(config, "admin_mtls", None) is not None:
-        if config.admin_mtls.enabled:
-            try:
-                admin_ca_result = _get_cached_check(
-                    "admin_ca", lambda: _check_admin_ca(request.app)
-                )
-                if admin_ca_result != "skipped":
-                    checks["admin_ca"] = admin_ca_result
-            except RuntimeError:
-                pass  # admin_ca_manager not yet initialized
+    if config is not None and getattr(config, "admin_mtls", None) is not None and config.admin_mtls.enabled:
+        try:
+            admin_ca_result = _get_cached_check("admin_ca", lambda: _check_admin_ca(request.app))
+            if admin_ca_result != "skipped":
+                checks["admin_ca"] = admin_ca_result
+        except RuntimeError:
+            pass  # admin_ca_manager not yet initialized
 
     status, http_status = _determine_status(checks)
     return JSONResponse(

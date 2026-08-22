@@ -9,7 +9,6 @@ Manages the persistent executor daemon lifecycle:
   - Signal handling
 """
 
-
 import hashlib
 import logging
 import os
@@ -22,21 +21,21 @@ from pathlib import Path
 from typing import Any
 
 import httpx2
+
+# tomli_w is required for clearing enrollment tokens after registration.
+# Failing fast at import time is correct — a security-critical dependency
+# must not be silently unavailable at runtime.
+import tomli_w  # type: ignore[import-not-found]
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from .audit import AuditLogger
-from .command_validator import CommandValidator, DEFAULT_DANGEROUS_PATTERNS
+from .command_validator import DEFAULT_DANGEROUS_PATTERNS, CommandValidator
 from .config import ExecutorConfig
 from .executor import Executor
 from .strategies.factory import create_strategy
-
-# tomli_w is required for clearing enrollment tokens after registration.
-# Failing fast at import time is correct — a security-critical dependency
-# must not be silently unavailable at runtime.
-import tomli_w  # noqa: E402  # type: ignore[import-not-found]
 
 logger = logging.getLogger("venya.executor.daemon")
 
@@ -122,18 +121,13 @@ class CertificateManager:
         url = f"{self.config.server_url}/api/v1/executors/register"
 
         tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
-        if tls_verify_env == "":
-            tls_verify = True
-        elif tls_verify_env.lower() == "true":
+        if tls_verify_env == "" or tls_verify_env.lower() == "true":
             tls_verify = True
         elif tls_verify_env.lower() == "false":
             tls_verify = False
             logger.warning("VENYA_TLS_VERIFY=false — TLS verification disabled (dev only)")
         else:
-            raise RuntimeError(
-                f"Invalid VENYA_TLS_VERIFY value: '{tls_verify_env}'. "
-                "Must be 'true' or 'false'."
-            )
+            raise RuntimeError(f"Invalid VENYA_TLS_VERIFY value: '{tls_verify_env}'. " "Must be 'true' or 'false'.")
 
         try:
             with httpx2.Client(verify=tls_verify, timeout=self.config.network.registration_timeout_seconds) as client:
@@ -142,8 +136,7 @@ class CertificateManager:
         except httpx2.ConnectError as e:
             if tls_verify:
                 raise RuntimeError(
-                    "Registration failed. Verify server CA is trusted. "
-                    "In development, export VENYA_TLS_VERIFY=false"
+                    "Registration failed. Verify server CA is trusted. " "In development, export VENYA_TLS_VERIFY=false"
                 ) from e
             raise
 
@@ -225,7 +218,7 @@ class CertificateManager:
         csr_pem = _create_csr(private_key, executor_id)
 
         # Re-register with server (same endpoint, replaces old cert)
-        response = self.client.post(
+        response = self.client.post(  # type: ignore[union-attr]
             "/api/v1/executors/register",
             json={
                 "executor_id": executor_id,
@@ -300,7 +293,7 @@ class CertificateManager:
             if self._last_revocation_etag:
                 headers["If-None-Match"] = self._last_revocation_etag
 
-            response = self.client.get(
+            response = self.client.get(  # type: ignore[union-attr]
                 "/api/v1/executors/certs/revocation-list",
                 headers=headers,
                 timeout=self.config.network.request_timeout_seconds,
@@ -336,7 +329,7 @@ class CertificateManager:
             cert = x509.load_pem_x509_certificate(Path(self.cert_path).read_bytes())
             self._not_after = cert.not_valid_after_utc
             self.serial = format(cert.serial_number, "016x")
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Corrupted or invalid cert — metadata unavailable but cert
             # still exists, so registration is still skipped.
             logger.warning("Could not parse existing certificate for metadata")
@@ -364,16 +357,14 @@ def _create_csr(private_key: ec.EllipticCurvePrivateKey, executor_id: str) -> by
     Returns:
         PEM-encoded CSR bytes.
     """
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
-
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(subject)
-        .sign(private_key, hashes.SHA256())
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
     )
+
+    csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(private_key, hashes.SHA256())
     return csr.public_bytes(serialization.Encoding.PEM)
 
 
@@ -408,9 +399,7 @@ def _verify_ca_signature(cert: x509.Certificate, ca_cert: x509.Certificate) -> N
     ca_public_key = ca_cert.public_key()
 
     if not isinstance(ca_public_key, ec.EllipticCurvePublicKey):
-        raise CertificateValidationError(
-            f"Unsupported CA key type: {type(ca_public_key).__name__}"
-        )
+        raise CertificateValidationError(f"Unsupported CA key type: {type(ca_public_key).__name__}")
 
     try:
         hash_algo = cert.signature_hash_algorithm
@@ -458,9 +447,7 @@ def validate_executor_certificate(
     # 2. CN matches executor_id (string comparison)
     cn = _extract_common_name(cert)
     if cn != expected_executor_id:
-        raise CertificateValidationError(
-            f"CN mismatch: expected {expected_executor_id!r}, got {cn!r}"
-        )
+        raise CertificateValidationError(f"CN mismatch: expected {expected_executor_id!r}, got {cn!r}")
 
     # 3. BasicConstraints CA=False
     try:
@@ -509,7 +496,7 @@ def _extract_executor_id_from_cert(cert_path: str) -> str:
             raise ValueError("Certificate has no CN (Common Name)")
         value = cn_attributes[0].value
         return value.decode() if isinstance(value, bytes) else value
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise ValueError(f"Failed to extract executor ID from certificate: {e}")
 
 
@@ -653,7 +640,7 @@ class ExecutorDaemon:
 
         # Command validator
         cv = self.config.command_validator
-        from .command_validator import CommandPolicy, CommandValidator
+        from .command_validator import CommandPolicy
 
         self.command_validator = CommandValidator(
             policy=CommandPolicy(
@@ -679,9 +666,7 @@ class ExecutorDaemon:
         self._shutdown_event = threading.Event()
 
         # HTTP thread pool — keeps network calls off the main loop
-        self._http_executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="http"
-        )
+        self._http_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="http")
 
         # HTTP client — initialized in start() after registration
         self.client: httpx2.Client | None = None
@@ -710,7 +695,7 @@ class ExecutorDaemon:
         try:
             with open(config_path, "rb") as f:
                 data = tomllib.load(f)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("Could not read config file to clear enrollment token")
             return
 
@@ -817,13 +802,9 @@ class ExecutorDaemon:
                     logger.exception("Certificate rotation failed")
 
             # Check revocation status — run in thread pool
-            revocation_future = self._http_executor.submit(
-                self.cert_manager.check_revocation
-            )
+            revocation_future = self._http_executor.submit(self.cert_manager.check_revocation)
             try:
-                if revocation_future.result(
-                    timeout=self.config.network.request_timeout_seconds
-                ):
+                if revocation_future.result(timeout=self.config.network.request_timeout_seconds):
                     logger.warning("Executor certificate revoked — shutting down")
                     self.state.revoked = True
                     break
@@ -836,10 +817,7 @@ class ExecutorDaemon:
                 logger.debug("Revocation check failed (server unreachable)")
                 self.state._consecutive_revocation_failures += 1
 
-            if (
-                self.state._consecutive_revocation_failures
-                >= self.config.cert_rotation.max_revocation_failures
-            ):
+            if self.state._consecutive_revocation_failures >= self.config.cert_rotation.max_revocation_failures:
                 logger.warning(
                     "Consecutive revocation check failures (%d) reached threshold (%d) — "
                     "treating certificate as revoked",
@@ -862,7 +840,7 @@ class ExecutorDaemon:
         """
         try:
             fingerprint = self.cert_manager.get_fingerprint()
-            self.client.post(
+            self.client.post(  # type: ignore[union-attr]
                 "/api/v1/heartbeat",
                 json={
                     "executor_id": self.state.executor_id,

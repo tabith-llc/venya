@@ -1,11 +1,8 @@
 """CoreFactory: builder pattern for creating Core instances."""
 
-
-from pathlib import Path
-
 from .backend import Backend, BackendConfig
-from .rate_limiter import RateLimiter
 from .core import Core
+from .rate_limiter import RateLimiter
 
 
 class CoreFactoryError(Exception):
@@ -51,9 +48,7 @@ class CoreFactory:
         """
         database_url = config_dict.get("database_url")
         if database_url is None:
-            raise CoreFactoryError(
-                "config_dict missing required key: 'database_url'"
-            )
+            raise CoreFactoryError("config_dict missing required key: 'database_url'")
         passphrase = config_dict.get("passphrase")
         if isinstance(passphrase, str):
             passphrase = passphrase.encode("utf-8")
@@ -65,9 +60,7 @@ class CoreFactory:
         )
         return cls(config)
 
-    def with_rate_limiter(
-        self, max_attempts: int = 5, window_seconds: float = 300.0
-    ) -> CoreFactory:
+    def with_rate_limiter(self, max_attempts: int = 5, window_seconds: int = 300) -> CoreFactory:
         """Set rate limiter parameters.
 
         Args:
@@ -113,8 +106,7 @@ class CoreFactory:
                 self._kek = backend.bootstrap_kek()
             else:
                 raise CoreFactoryError(
-                    "KEK not available: provide either a passphrase or call "
-                    "with_kek() before build()"
+                    "KEK not available: provide either a passphrase or call " "with_kek() before build()"
                 )
 
         rate_limiter = self._rate_limiter or RateLimiter()

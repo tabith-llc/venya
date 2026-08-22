@@ -4,7 +4,6 @@ Loaded from environment variables and/or config file.
 Environment variables are prefixed with VENYA_EXECUTOR_.
 """
 
-
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -131,6 +130,10 @@ class AuditForwarderConfig(BaseModel):
         ge=1,
         le=120,
         description="Request timeout for audit forward in seconds (1-120)",
+    )
+    spool_path: str | None = Field(
+        default=None,
+        description="Durable audit event spool file (default: ~/.venya/audit-spool.jsonl)",
     )
     local_retention_days: int = Field(
         default=90,
@@ -291,9 +294,7 @@ class ExecutorConfig(BaseSettings):
         try:
             import tomli_w  # type: ignore[import-not-found]
         except ImportError:
-            raise ImportError(
-                "tomli_w is required for config save. Install with: pip install tomli-w"
-            )
+            raise ImportError("tomli_w is required for config save. Install with: pip install tomli-w")
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -313,14 +314,13 @@ class ExecutorConfig(BaseSettings):
         with open(path, "wb") as f:
             tomli_w.dump(data, f)
 
-    def model_post_init(self, __context):
+    def model_post_init(self, _context, /):
         """Validate executor_id on initialization."""
         import re
+
         pattern = r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"
         if len(self.executor_id) < 2 or len(self.executor_id) > 64:
-            raise ValueError(
-                f"executor_id must be 2-64 characters, got {len(self.executor_id)}"
-            )
+            raise ValueError(f"executor_id must be 2-64 characters, got {len(self.executor_id)}")
         if not re.match(pattern, self.executor_id):
             raise ValueError(
                 "executor_id must be lowercase alphanumeric with "

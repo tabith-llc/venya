@@ -8,8 +8,8 @@ is assumed compromised.
 """
 
 import importlib
-import os
 import sys
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -22,6 +22,7 @@ class TestCapabilityIsolation:
     def _reset_secure_memory_state(self):
         """Reset _SYSTEM_LIB cache before each test to avoid test pollution."""
         import core.engine.secure_memory as sm
+
         original = sm._SYSTEM_LIB
         sm._SYSTEM_LIB = None
         yield
@@ -78,27 +79,18 @@ class TestCapabilityIsolation:
         keep = {k: sys.modules[k] for k in sys.modules if "core.engine.secure_memory" in k}
 
         # Clear cached venya imports (except secure_memory which other tests depend on)
-        modules_to_remove = [
-            k for k in sys.modules
-            if k.startswith("venya") and "core.engine.secure_memory" not in k
-        ]
+        modules_to_remove = [k for k in sys.modules if k.startswith("venya") and "core.engine.secure_memory" not in k]
         for mod in modules_to_remove:
             del sys.modules[mod]
 
         # Import CLI
-        from core.cli import cli
 
         # Check that secure_memory is not in any imported module's namespace
-        cli_module_names = [
-            name for name, obj in sys.modules.items()
-            if name and name.startswith("core.cli")
-        ]
+        cli_module_names = [name for name, obj in sys.modules.items() if name and name.startswith("core.cli")]
         for name in cli_module_names:
             mod = sys.modules[name]
             imported = [attr for attr in dir(mod) if not attr.startswith("_")]
-            assert "secure_memory" not in imported, (
-                f"secure_memory should not be imported in {name}"
-            )
+            assert "secure_memory" not in imported, f"secure_memory should not be imported in {name}"
 
         # Restore saved imports for other tests
         for k, mod in keep.items():
@@ -115,8 +107,6 @@ class TestSecureMemoryIsolation:
 
     def test_only_secure_memory_uses_mlock(self):
         """Only secure_memory.py should define or import mlock-related symbols."""
-        import importlib
-        import pkgutil
         import core.engine
 
         secure_memory_symbols = {"secure_mlock", "secure_munlock", "secure_zero", "SecureBuffer", "_load_system_lib"}
@@ -137,7 +127,6 @@ class TestSecureMemoryIsolation:
 
     def test_core_class_does_not_use_secure_memory(self):
         """Core facade should not import secure_memory."""
-        import importlib
         import core.engine.core
 
         source = core.engine.core.__file__
@@ -273,9 +262,7 @@ class TestSecureMemoryIsolation:
         # deterministic salt via a mocked session so no real DB is needed.
         with patch("core.engine.factory.Backend.get_session") as mock_gs:
             mock_session = MagicMock()
-            mock_session.query.return_value.filter.return_value.first.return_value = MagicMock(
-                value=b"\x33" * 16
-            )
+            mock_session.query.return_value.filter.return_value.first.return_value = MagicMock(value=b"\x33" * 16)
             mock_gs.return_value = mock_session
             core = factory.build()
 
@@ -287,10 +274,10 @@ class TestSecureMemoryIsolation:
 
     def test_core_does_not_mlock_by_default(self):
         """Core operations should not lock memory by default."""
-        import core.engine.factory
         from unittest.mock import MagicMock, patch
+
+        import core.engine.factory
         from core.engine.backend import BackendConfig
-        from core.engine.core import Caller
 
         config = BackendConfig(
             database_url="postgresql://venya:venya@localhost:5432/venya_test",
@@ -301,9 +288,7 @@ class TestSecureMemoryIsolation:
         # deterministic salt via a mocked session so no real DB is needed.
         with patch("core.engine.factory.Backend.get_session") as mock_gs:
             mock_session = MagicMock()
-            mock_session.query.return_value.filter.return_value.first.return_value = MagicMock(
-                value=b"\x33" * 16
-            )
+            mock_session.query.return_value.filter.return_value.first.return_value = MagicMock(value=b"\x33" * 16)
             mock_gs.return_value = mock_session
             core = factory.build()
 
@@ -331,34 +316,22 @@ class TestSecureMemoryIsolation:
         import core.engine
 
         # secure_memory should not be directly accessible from the core package
-        assert not hasattr(core.engine, "secure_mlock"), (
-            "secure_mlock should not be re-exported from core.engine"
-        )
-        assert not hasattr(core.engine, "SecureBuffer"), (
-            "SecureBuffer should not be re-exported from core.engine"
-        )
+        assert not hasattr(core.engine, "secure_mlock"), "secure_mlock should not be re-exported from core.engine"
+        assert not hasattr(core.engine, "SecureBuffer"), "SecureBuffer should not be re-exported from core.engine"
 
     def test_secure_memory_not_in_iam_module_exports(self):
         """secure_memory symbols should not be accessible from core.iam."""
         import core.iam
 
-        assert not hasattr(core.iam, "secure_mlock"), (
-            "secure_mlock should not be accessible from core.iam"
-        )
-        assert not hasattr(core.iam, "SecureBuffer"), (
-            "SecureBuffer should not be accessible from core.iam"
-        )
+        assert not hasattr(core.iam, "secure_mlock"), "secure_mlock should not be accessible from core.iam"
+        assert not hasattr(core.iam, "SecureBuffer"), "SecureBuffer should not be accessible from core.iam"
 
     def test_secure_memory_not_in_cli_module_exports(self):
         """secure_memory symbols should not be accessible from core.cli."""
         from core.cli import cli
 
-        assert not hasattr(cli, "secure_mlock"), (
-            "secure_mlock should not be accessible from core.cli"
-        )
-        assert not hasattr(cli, "SecureBuffer"), (
-            "SecureBuffer should not be accessible from core.cli"
-        )
+        assert not hasattr(cli, "secure_mlock"), "secure_mlock should not be accessible from core.cli"
+        assert not hasattr(cli, "SecureBuffer"), "SecureBuffer should not be accessible from core.cli"
 
 
 class TestRuntimeCapabilityIsolation:
@@ -373,7 +346,7 @@ class TestRuntimeCapabilityIsolation:
     """
 
     CAP_IPC_LOCK_BIT = 14  # Linux kernel capability number (CAP_IPC_LOCK)
-    _SYSTEMD_UNIT_PATHS = [
+    _SYSTEMD_UNIT_PATHS: ClassVar[list[str]] = [
         "/etc/systemd/system/venya-core.service",
         "/etc/systemd/system/venya-executor.service",
         "/lib/systemd/system/venya-core.service",
@@ -421,6 +394,7 @@ class TestRuntimeCapabilityIsolation:
                 capture_output=True,
                 text=True,
                 timeout=5,
+                check=False,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return int(result.stdout.strip().split()[0])
@@ -461,8 +435,7 @@ class TestRuntimeCapabilityIsolation:
         if not ambient:
             pytest.skip(f"venya-core.service ({core_unit}) has no AmbientCapabilities")
         assert any("CAP_IPC_LOCK" in c for c in ambient), (
-            f"venya-core.service ({core_unit}) missing AmbientCapabilities=CAP_IPC_LOCK. "
-            f"Found: {ambient}"
+            f"venya-core.service ({core_unit}) missing AmbientCapabilities=CAP_IPC_LOCK. " f"Found: {ambient}"
         )
 
     def test_systemd_unit_no_cap_ipc_lock(self):
@@ -488,9 +461,7 @@ class TestRuntimeCapabilityIsolation:
         config = self._parse_unit_file(executor_unit)
         bounding = config.get("CapabilityBoundingSet", [])
         for b in bounding:
-            assert "CAP_IPC_LOCK" not in b, (
-                f"venya-executor.service has CAP_IPC_LOCK in CapabilityBoundingSet"
-            )
+            assert "CAP_IPC_LOCK" not in b, "venya-executor.service has CAP_IPC_LOCK in CapabilityBoundingSet"
 
     def test_core_running_has_cap_ipc_lock(self):
         """If venya-core is running, verify CapEff includes CAP_IPC_LOCK at runtime."""

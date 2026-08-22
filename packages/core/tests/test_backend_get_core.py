@@ -7,9 +7,9 @@ lookup to a fixed value so derivation is deterministic. Salt persistence itself
 is covered by test_kek_salt.py.
 """
 
-import pytest
 from unittest.mock import MagicMock
 
+import pytest
 from core.engine.backend import Backend, BackendConfig
 from core.engine.encryption import derive_kek
 
@@ -52,13 +52,11 @@ class TestGetCorePassphrase:
 
     def test_get_core_kek_only_backend_with_none_passphrase(self):
         """get_core(None) on a raw-KEK backend uses that KEK without touching the DB."""
-        backend = Backend(self._config_with_kek_only(b"\xAA" * 32))
-        backend.get_session = lambda: pytest.fail(
-            "get_session must not be called for raw-KEK backends"
-        )
+        backend = Backend(self._config_with_kek_only(b"\xaa" * 32))
+        backend.get_session = lambda: pytest.fail("get_session must not be called for raw-KEK backends")
         core = backend.get_core(passphrase=None)
 
-        assert core.kek == b"\xAA" * 32
+        assert core.kek == b"\xaa" * 32
 
     def test_get_core_preserves_empty_string_passphrase(self):
         """get_core('') passes the empty string through to derivation (not config fallback)."""

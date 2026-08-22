@@ -18,9 +18,7 @@ logger = logging.getLogger("venya.server")
 
 class RoleCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, pattern=r"^[a-zA-Z0-9_-]+$", description="Role name (unique)")
-    permissions: Literal["read", "read-write"] = Field(
-        "read", description='Permission tier: "read" or "read-write"'
-    )
+    permissions: Literal["read", "read-write"] = Field("read", description='Permission tier: "read" or "read-write"')
     description: str | None = Field(None, description="Optional description")
 
 
@@ -132,13 +130,15 @@ async def roles_list(
     result = []
     for role in roles:
         members = role_manager.get_role_members(role.id)
-        result.append(RoleGetResponse(
-            id=role.id,
-            name=role.name,
-            permissions=role.permissions,
-            description=role.description,
-            member_count=len(members),
-        ))
+        result.append(
+            RoleGetResponse(
+                id=role.id,
+                name=role.name,
+                permissions=role.permissions,
+                description=role.description,
+                member_count=len(members),
+            )
+        )
     return RoleListResponse(roles=result)
 
 
@@ -269,10 +269,7 @@ async def role_members_list(
 
     role_manager = RoleManager(db)
     members = role_manager.get_role_members(role_id)
-    result = [
-        {"user_id": m.user_id, "role_id": m.role_id}
-        for m in members
-    ]
+    result = [{"user_id": m.user_id, "role_id": m.role_id} for m in members]
     return RoleMemberListResponse(members=result)
 
 

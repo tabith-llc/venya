@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from server.maintenance import (
     cleanup_expired_sessions,
     cleanup_rate_limit_counters,

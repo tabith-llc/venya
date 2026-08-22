@@ -48,3 +48,6 @@ DEVELOPER_NOTE.md
 
 # Qdrant local state
 .qdrant
+
+# mypy
+.mypy_cache/

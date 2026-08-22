@@ -1,28 +1,41 @@
 """Audit event logging and forwarding.
 
-Buffers audit events locally and forwards to remote URL with retry.
-Thread-safe for use during command execution.
+Audit events are appended synchronously to a local spool file (durable
+queue) and forwarded to the remote URL asynchronously by a background
+thread.  emit() touches local disk only — requests are never blocked on
+the audit forwarder, and events survive process restarts (the spool file
+is the source of truth; there is no in-memory buffer).
+
+Serialization failures are written as error-marker lines, never dropped.
 """
 
-
+# stdlib zstd compression (Python 3.14+, PEP 784)
 import json
 import logging
 import threading
 import time
+from compression import zstd
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx2
 
 from .config import AuditForwarderConfig
 
-# stdlib zstd compression (Python 3.14+, PEP 784)
-import compression.zstd
-
 logger = logging.getLogger("venya.executor.audit")
 
-EVENT_TYPES = ("credential_injected", "command_executed", "command_rejected", "token_revocation_failed")
+EVENT_TYPES = (
+    "credential_injected",
+    "command_executed",
+    "command_rejected",
+    "token_revocation_failed",
+)
+
+# Idle poll interval (seconds) for the forwarder between events. Audit
+# forwarding is not latency-critical; this bounds worst-case forward lag.
+FORWARDER_IDLE_POLL_SECONDS = 1.0
 
 
 @dataclass
@@ -47,28 +60,58 @@ class AuditEvent:
 
 
 class AuditLogger:
-    """Buffers and forwards audit events.
+    """Durable audit event spool with asynchronous remote forwarding.
 
-    Events are buffered in memory and flushed when the buffer reaches
-    max_buffer_size or when flush() is called explicitly.
+    Lifetime of an event:
+      1. emit() serializes the event (a failed serialization is written as
+         an error line) and appends it to the spool file under the lock —
+         synchronous, local disk only, no network.
+      2. The background forwarder drains the spool in batches of
+         max_buffer_size lines, zstd-compresses, and POSTs to remote_url.
+         On success the consumed prefix is truncated; on failure the lines
+         are kept and the backoff doubles (capped at retry_max_delay).
+      3. When the spool exceeds max_buffer_size lines the oldest lines are
+         dropped (with a warning) so a long outage cannot grow it without
+         bound.
 
-    If remote_url is configured, events are POSTed as JSON lines.
-    Uses exponential backoff on failure.
+    flush() performs one best-effort drain. shutdown() runs a bounded final
+    drain and stops the forwarder thread.
     """
 
     def __init__(self, config: AuditForwarderConfig, session_id: str) -> None:
         self._config = config
         self._session_id = session_id
-        self._buffer: list[AuditEvent] = []
         self._lock = threading.Lock()
+        self._wakeup = threading.Event()
+        self._forwarding = False
         self._shutdown = False
+        self._spool_path = self._resolve_spool_path(config.spool_path)
+        self._spool_path.parent.mkdir(parents=True, exist_ok=True)
+        self._forwarder = threading.Thread(target=self._forward_loop, daemon=True)
+        self._forwarder.start()
+
+    @staticmethod
+    def _resolve_spool_path(p: str | None) -> Path:
+        # ponytail: spool lives in the executor user's home — the deployment
+        # model is one executor per host; two executor instances sharing a
+        # home would interleave their spools. Upgrade path: add executor_id
+        # to the default filename.
+        if p:
+            return Path(p).expanduser()
+        return Path.home() / ".venya" / "audit-spool.jsonl"
+
+    # -- write path (synchronous, local disk only, never network) ----------
 
     def emit(self, event_type: str, **kwargs: Any) -> None:
-        """Buffer an audit event.
+        """DURABLY record an audit event.
 
         Args:
             event_type: One of the allowed event types.
             **kwargs: Additional fields to include in the event.
+
+        The event is serialized (a failed serialization is written as an
+        error-marker line) and appended to the spool file. No network I/O
+        happens here, ever.
         """
         if event_type not in EVENT_TYPES:
             logger.warning("Unknown audit event type: %s", event_type)
@@ -79,129 +122,159 @@ class AuditLogger:
             session_id=self._session_id,
             extra=kwargs,
         )
-
-        buffer_to_flush: list[AuditEvent] | None = None
+        try:
+            line = event.to_json()
+        except (TypeError, ValueError) as e:
+            # Unserializable extra kwargs — write a marker line instead of
+            # dropping the event entirely.
+            line = json.dumps(
+                {
+                    "event_type": event.event_type,
+                    "session_id": event.session_id,
+                    "timestamp": event.timestamp,
+                    "serialization_error": str(e),
+                }
+            )
 
         with self._lock:
-            self._buffer.append(event)
-
-            threshold = self._config.max_buffer_size * self._config.alert_threshold
-            if len(self._buffer) >= threshold:
+            with self._spool_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            count = self._count_lines()
+            capacity = self._config.max_buffer_size
+            if count >= capacity:
                 logger.warning(
                     "Audit buffer at %.0f%% capacity (%d/%d)",
-                    (len(self._buffer) / self._config.max_buffer_size) * 100,
-                    len(self._buffer),
-                    self._config.max_buffer_size,
+                    100.0,
+                    count,
+                    capacity,
                 )
+                self._drop_oldest(count - capacity)
+            elif count >= capacity * self._config.alert_threshold:
+                logger.warning(
+                    "Audit buffer at %.0f%% capacity (%d/%d)",
+                    (count / capacity) * 100,
+                    count,
+                    capacity,
+                )
+        self._wakeup.set()
 
-            if len(self._buffer) >= self._config.max_buffer_size:
-                buffer_to_flush = self._buffer
-                self._buffer = []
+    def _count_lines(self) -> int:
+        """Number of lines in the spool. Caller must hold the lock."""
+        if not self._spool_path.exists():
+            return 0
+        with self._spool_path.open("r", encoding="utf-8") as f:
+            return sum(1 for _ in f)
 
-        # Flush outside the lock — new events arriving during flush
-        # go into the fresh empty buffer.
-        if buffer_to_flush:
-            self._flush_buffer(buffer_to_flush)
+    def _drop_oldest(self, n: int) -> None:
+        """Drop the n oldest spool lines. Caller must hold the lock."""
+        if n <= 0:
+            return
+        self._truncate_prefix(n)
+        logger.warning("Audit spool full — dropped %d oldest event(s)", n)
+
+    # -- forward path (background thread + on-demand) -----------------------
 
     def flush(self) -> None:
-        """Flush all buffered events to remote."""
-        with self._lock:
-            if not self._config.remote_url or not self._buffer:
-                return
-            buffer_to_flush = self._buffer
-            self._buffer = []
+        """Attempt one best-effort drain of the spool to the remote."""
+        self._forward_once()
 
-        self._flush_buffer(buffer_to_flush)
+    def _forward_loop(self) -> None:
+        backoff = self._config.retry_base_delay
+        while not self._shutdown:
+            self._wakeup.wait(timeout=FORWARDER_IDLE_POLL_SECONDS)
+            self._wakeup.clear()
+            if self._shutdown:
+                break
+            if self._forward_once():
+                backoff = self._config.retry_base_delay
+            else:
+                time.sleep(backoff)
+                backoff = min(backoff * 2, self._config.retry_max_delay)
 
-    def _flush_buffer(self, events: list[AuditEvent]) -> None:
-        """Flush a batch of events to remote URL.
+    def _forward_once(self) -> bool:
+        """Drain up to max_buffer_size spool lines to the remote.
 
-        Args:
-            events: List of audit events to send.
+        Returns:
+            True if nothing was pending or the batch was accepted.
+            False if the remote failed/rejected the batch (lines are kept).
         """
-        payload = "\n".join(e.to_json() for e in events)
         remote_url = self._config.remote_url
+        if not remote_url:
+            return True
 
+        with self._lock:
+            if self._forwarding:
+                return True
+            self._forwarding = True
         try:
-            self._post_with_retry(payload, remote_url)
-            logger.debug("Flushed %d audit events", len(events))
-        except Exception:
-            # Re-queue events that couldn't be sent
             with self._lock:
-                self._buffer = events + self._buffer
-            logger.warning(
-                "Re-queued %d audit events after flush failure",
-                len(events),
-            )
+                lines = self._read_all_lines()[: self._config.max_buffer_size]
+            if not lines:
+                return True
 
-    def _post_with_retry(self, payload: str, remote_url: str) -> None:
-        """POST payload to remote_url with exponential backoff.
-
-        Args:
-            payload: JSON lines payload to send.
-            remote_url: Target URL.
-
-        Raises:
-            RuntimeError: If all retry attempts are exhausted.
-        """
-        from compression import zstd
-
-        compressed = zstd.compress(payload.encode(), level=3)
-        delay = self._config.retry_base_delay
-        max_delay = self._config.retry_max_delay
-        max_retries = self._config.max_retries
-        attempts = 0
-
-        if self._config.ca_cert_path:
+            payload = "".join(lines)
+            compressed = zstd.compress(payload.encode(), level=3)
             client = httpx2.Client(
-                verify=self._config.ca_cert_path,
+                verify=self._config.ca_cert_path if self._config.ca_cert_path else False,
                 timeout=self._config.request_timeout_seconds,
             )
-        else:
-            client = httpx2.Client(
-                verify=False,
-                timeout=self._config.request_timeout_seconds,
-            )
+            with client:
+                response = client.post(
+                    remote_url,
+                    content=compressed,
+                    headers={
+                        "Content-Type": "application/x-ndjson",
+                        "Content-Encoding": "zstd",
+                    },
+                )
+        except Exception as e:
+            logger.warning("Audit forward error: %s", e)
+            return False
+        finally:
+            with self._lock:
+                self._forwarding = False
 
-        with client:
-            while not self._shutdown and attempts < max_retries:
-                attempts += 1
-                try:
-                    response = client.post(
-                        remote_url,
-                        content=compressed,
-                        headers={
-                            "Content-Type": "application/x-ndjson",
-                            "Content-Encoding": "zstd",
-                        },
-                    )
-                    if response.status_code < 400:
-                        return
-                    if response.status_code == 429:
-                        retry_after = response.headers.get("retry-after")
-                        if retry_after:
-                            delay = float(retry_after)
-                        else:
-                            delay = min(delay * 2, max_delay)
-                    else:
-                        logger.error(
-                            "Audit forward failed (HTTP %d): %s",
-                            response.status_code,
-                            response.text[:200],
-                        )
-                except httpx2.ConnectError as e:
-                    logger.warning("Audit forward connection error: %s", e)
-                except Exception as e:  # noqa: BLE001
-                    logger.error("Audit forward error: %s", e)
+        if response.status_code < 400:
+            with self._lock:
+                self._truncate_prefix(len(lines))
+            logger.debug("Forwarded %d audit events", len(lines))
+            return True
 
-                time.sleep(delay)
-                delay = min(delay * 2, max_delay)
-
-        raise RuntimeError(
-            f"Audit forward failed after {attempts} attempts to {remote_url}"
+        logger.error(
+            "Audit forward failed (HTTP %d): %s",
+            response.status_code,
+            response.text[:200],
         )
+        return False
+
+    def _read_all_lines(self) -> list[str]:
+        """Read all spool lines. Caller must hold the lock."""
+        if not self._spool_path.exists():
+            return []
+        with self._spool_path.open("r", encoding="utf-8") as f:
+            return f.readlines()
+
+    def _truncate_prefix(self, n: int) -> None:
+        """Remove the n oldest spool lines. Caller must hold the lock."""
+        lines = self._read_all_lines()
+        self._keep_latest(len(lines) - n)
+
+    def _keep_latest(self, keep: int) -> None:
+        """Rewrite the spool keeping only its last `keep` lines. Caller must
+        hold the lock."""
+        lines = self._read_all_lines()
+        if keep <= 0:
+            if self._spool_path.exists():
+                self._spool_path.unlink()
+            return
+        with self._spool_path.open("w", encoding="utf-8") as f:
+            f.writelines(lines[-keep:])
 
     def shutdown(self) -> None:
-        """Flush remaining events and stop background processing."""
-        self.flush()
+        """Run a bounded final drain and stop the forwarder thread."""
         self._shutdown = True
+        self._wakeup.set()
+        for _ in range(min(self._config.max_retries, 3)):
+            if not self._forward_once():
+                break
+        self._forwarder.join(timeout=5.0)

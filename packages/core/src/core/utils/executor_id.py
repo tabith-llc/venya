@@ -11,7 +11,6 @@ Pattern: ^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$
 - DNS-label compatible (RFC 1035)
 """
 
-
 import re
 
 EXECUTOR_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"
@@ -34,9 +33,7 @@ def validate_executor_id(executor_id: str) -> str:
         ValueError: If the executor_id does not match the pattern.
     """
     if not executor_id or not isinstance(executor_id, str):
-        raise ValueError(
-            f"Invalid executor_id: must be a non-empty string"
-        )
+        raise ValueError("Invalid executor_id: must be a non-empty string")
     if len(executor_id) < EXECUTOR_ID_MIN_LENGTH or len(executor_id) > EXECUTOR_ID_MAX_LENGTH:
         raise ValueError(
             f"Invalid executor_id: must be {EXECUTOR_ID_MIN_LENGTH}-{EXECUTOR_ID_MAX_LENGTH} characters, "

@@ -10,16 +10,15 @@ Revises: 010_remove_executor_token_binding
 Create Date: 2026-08-15
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
-
 from alembic import op
 
 revision: str = "011_admin_cert_revocations"
-down_revision: Union[str, None] = "010_remove_executor_token_binding"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "010_remove_executor_token_binding"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -31,7 +30,9 @@ def upgrade() -> None:
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("reason", sa.String(64), nullable=True),
     )
-    op.create_index(op.f("ix_admin_cert_revocations_serial_number"), "admin_cert_revocations", ["serial_number"], unique=False)
+    op.create_index(
+        op.f("ix_admin_cert_revocations_serial_number"), "admin_cert_revocations", ["serial_number"], unique=False
+    )
 
 
 def downgrade() -> None:

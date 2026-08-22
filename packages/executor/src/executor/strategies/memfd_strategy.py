@@ -4,11 +4,11 @@ Creates anonymous memory-backed file descriptors via memfd_create().
 No disk residency. Linux-only.
 """
 
-
 import ctypes
 import logging
 import os
 from collections.abc import Callable
+from functools import partial
 
 from .base import InjectionResult, InjectionStrategy
 
@@ -57,7 +57,7 @@ class MemfdStrategy(InjectionStrategy):
 
             logical_fd = self.secret_base_fd + i
             extra_fds.append(fd)  # Actual OS FD for pass_fds
-            cleanup_funcs.append(lambda f=fd: os.close(f))
+            cleanup_funcs.append(partial(os.close, fd))
 
             logger.debug(
                 "Injected secret %s via memfd: logical_fd=%d os_fd=%d",

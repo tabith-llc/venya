@@ -6,8 +6,7 @@ command policies, executor certificates, elevation tokens, and WebAuthn credenti
 Schema is created via Alembic migrations on install. Models are the ORM interface.
 """
 
-
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
@@ -25,8 +24,6 @@ from sqlalchemy.orm import DeclarativeBase, relationship
 
 class Base(DeclarativeBase):
     """SQLAlchemy base class."""
-
-    pass
 
 
 class User(Base):
@@ -86,9 +83,7 @@ class Secret(Base):
 
     __tablename__ = "secrets"
 
-    __table_args__ = (
-        UniqueConstraint("key", "created_by", name="uq_secrets_key_created_by"),
-    )
+    __table_args__ = (UniqueConstraint("key", "created_by", name="uq_secrets_key_created_by"),)
 
     id = Column(Integer, primary_key=True)
     key = Column(String(512), nullable=False)
@@ -101,9 +96,7 @@ class Secret(Base):
         ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
 
     # Relationships
     creator = relationship("User", back_populates="created_secrets")
@@ -115,12 +108,8 @@ class SecretRole(Base):
 
     __tablename__ = "secret_roles"
 
-    secret_id = Column(
-        Integer, ForeignKey("secrets.id"), primary_key=True, nullable=False
-    )
-    role_id = Column(
-        Integer, ForeignKey("roles.id"), primary_key=True, nullable=False
-    )
+    secret_id = Column(Integer, ForeignKey("secrets.id"), primary_key=True, nullable=False)
+    role_id = Column(Integer, ForeignKey("roles.id"), primary_key=True, nullable=False)
 
     # Relationships
     secret = relationship("Secret", back_populates="roles")
@@ -139,7 +128,7 @@ class Session(Base):
         nullable=False,
         index=True,
     )
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     access_token = Column(String(128), nullable=True, unique=True)
     access_token_jti = Column(String(64), nullable=True, unique=True)
@@ -162,9 +151,7 @@ class AuditEvent(Base):
         comment="Preserved on user deletion — append-only audit trail",
     )
     fields = Column(Text, nullable=True)
-    timestamp = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
-    )
+    timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
 
 
 class EnrollmentToken(Base):
@@ -182,7 +169,9 @@ class EnrollmentToken(Base):
     binding_hash = Column(String(64), nullable=False, default="")
     state = Column(String(16), nullable=False, default="created")
     created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False,
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
     )
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used_at = Column(DateTime(timezone=True), nullable=True)
@@ -195,6 +184,7 @@ class ExecutorEnrollmentToken(Base):
     executor registration flow. Expired tokens are detected at
     validation time (state is not stored as "expired").
     """
+
     __tablename__ = "executor_enrollment_tokens"
 
     id = Column(Integer, primary_key=True)
@@ -206,23 +196,27 @@ class ExecutorEnrollmentToken(Base):
         ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
-    created_by_session_id = Column(String(64), nullable=True,
-        comment="Forensic trace — nullify after 90 days per retention policy")
-    created_from_ip = Column(String(45), nullable=True,
-        comment="Forensic trace — nullify after 90 days per retention policy")
-    created_from_user_agent = Column(String(256), nullable=True,
-        comment="Forensic trace — nullify after 90 days per retention policy")
+    created_by_session_id = Column(
+        String(64), nullable=True, comment="Forensic trace — nullify after 90 days per retention policy"
+    )
+    created_from_ip = Column(
+        String(45), nullable=True, comment="Forensic trace — nullify after 90 days per retention policy"
+    )
+    created_from_user_agent = Column(
+        String(256), nullable=True, comment="Forensic trace — nullify after 90 days per retention policy"
+    )
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False,
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
     )
     used_at = Column(DateTime(timezone=True), nullable=True)
-    admin_meta_wrapped_dek = Column(LargeBinary, nullable=True,
-        comment="Encrypted admin metadata (ip, ua, sid) — nullify after 90 days")
-    admin_meta_nonce = Column(LargeBinary, nullable=True,
-        comment="Encrypted admin metadata nonce")
-    admin_meta_ciphertext = Column(LargeBinary, nullable=True,
-        comment="Encrypted admin metadata ciphertext")
+    admin_meta_wrapped_dek = Column(
+        LargeBinary, nullable=True, comment="Encrypted admin metadata (ip, ua, sid) — nullify after 90 days"
+    )
+    admin_meta_nonce = Column(LargeBinary, nullable=True, comment="Encrypted admin metadata nonce")
+    admin_meta_ciphertext = Column(LargeBinary, nullable=True, comment="Encrypted admin metadata ciphertext")
 
 
 class KeyVersion(Base):
@@ -232,9 +226,7 @@ class KeyVersion(Base):
 
     id = Column(Integer, primary_key=True)
     version_label = Column(String(64), unique=True, nullable=False)
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
     active = Column(Boolean, default=False, nullable=False)
     rotation_pending = Column(Boolean, default=False, nullable=False)
     encrypted_kek_hash = Column(String(64), nullable=True)
@@ -264,9 +256,7 @@ class KeyRotationSecret(Base):
     __tablename__ = "key_rotation_secrets"
 
     id = Column(Integer, primary_key=True)
-    rotation_job_id = Column(
-        Integer, ForeignKey("key_rotation_jobs.id"), nullable=False
-    )
+    rotation_job_id = Column(Integer, ForeignKey("key_rotation_jobs.id"), nullable=False)
     secret_id = Column(Integer, nullable=False)
     status = Column(String(16), nullable=False, default="pending")
     error_message = Column(Text, nullable=True)
@@ -303,12 +293,10 @@ class CommandPolicy(Base):
     preset = Column(String(32), nullable=False)
     allowed_commands = Column(Text, nullable=True)
     dangerous_patterns = Column(Text, nullable=True)
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
     updated_at = Column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 
@@ -328,9 +316,7 @@ class ExecutorCert(Base):
     not_before = Column(DateTime(timezone=True), nullable=False)
     not_after = Column(DateTime(timezone=True), nullable=False)
     fingerprint = Column(String(64), nullable=False)
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
 
 
 class ExecutorCertRevocation(Base):
@@ -341,9 +327,7 @@ class ExecutorCertRevocation(Base):
     id = Column(Integer, primary_key=True)
     serial_number = Column(String(64), unique=True, nullable=False)
     executor_id = Column(String(64), nullable=True)
-    revoked_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
-    )
+    revoked_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
     reason = Column(Text, nullable=True)
 
 
@@ -378,7 +362,7 @@ class WebAuthnCredential(Base):
     sign_count = Column(Integer, default=0)
     label = Column(String(64), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
 
     user = relationship("User", backref="webauthn_credentials")
@@ -391,7 +375,7 @@ class AdminCertRevocation(Base):
 
     id = Column(Integer, primary_key=True)
     serial_number = Column(String(64), nullable=False, index=True)
-    revoked_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    revoked_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     reason = Column(String(64))
 
 
@@ -410,6 +394,4 @@ class VenyaConfig(Base):
 
     key = Column(String(64), primary_key=True, nullable=False)
     value = Column(LargeBinary, nullable=False)
-    created_at = Column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
-    )
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)

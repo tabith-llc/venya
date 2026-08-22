@@ -6,10 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx2
-import pytest
-
-from core.cli.api_client import APIClient, APIClientError
-from core.cli.commands import cmd_enroll_start, cmd_enroll_complete
+from core.cli.api_client import APIClient
+from core.cli.commands import cmd_enroll_complete, cmd_enroll_start
 
 
 def _make_mock_response(status_code=200, json_data=None):
@@ -233,17 +231,19 @@ class TestEnrollComplete:
         args = MagicMock()
         args.token = "tok_enroll_abc"
         args.challenge_id = "enroll_chal_123"
-        args.response = json.dumps({
-            "id": "cred_id",
-            "rawId": "cmVkX2lk",
-            "response": {
-                "clientDataJSON": "Y2xpZW50IGRhdGE=",
-                "authenticatorData": "YXV0aCBkYXRh",
-                "attestationObject": "YXR0ZXN0YXRpb24=",
-            },
-            "type": "public-key",
-            "clientExtensionResults": {},
-        })
+        args.response = json.dumps(
+            {
+                "id": "cred_id",
+                "rawId": "cmVkX2lk",
+                "response": {
+                    "clientDataJSON": "Y2xpZW50IGRhdGE=",
+                    "authenticatorData": "YXV0aCBkYXRh",
+                    "attestationObject": "YXR0ZXN0YXRpb24=",
+                },
+                "type": "public-key",
+                "clientExtensionResults": {},
+            }
+        )
         args.label = "YubiKey"
         args.json = False
 
@@ -279,17 +279,19 @@ class TestEnrollComplete:
         args = MagicMock()
         args.token = "tok_enroll_abc"
         args.challenge_id = "enroll_chal_123"
-        args.response = json.dumps({
-            "id": "cred_id",
-            "rawId": "cmVkX2lk",
-            "response": {
-                "clientDataJSON": "Y2xpZW50IGRhdGE=",
-                "authenticatorData": "YXV0aCBkYXRh",
-                "attestationObject": "YXR0ZXN0YXRpb24=",
-            },
-            "type": "public-key",
-            "clientExtensionResults": {},
-        })
+        args.response = json.dumps(
+            {
+                "id": "cred_id",
+                "rawId": "cmVkX2lk",
+                "response": {
+                    "clientDataJSON": "Y2xpZW50IGRhdGE=",
+                    "authenticatorData": "YXV0aCBkYXRh",
+                    "attestationObject": "YXR0ZXN0YXRpb24=",
+                },
+                "type": "public-key",
+                "clientExtensionResults": {},
+            }
+        )
         args.label = None
         args.json = True
 
@@ -328,17 +330,19 @@ class TestEnrollComplete:
         args = MagicMock()
         args.token = "tok_enroll_abc"
         args.challenge_id = "enroll_chal_123"
-        args.response = json.dumps({
-            "id": "cred_id",
-            "rawId": "cmVkX2lk",
-            "response": {
-                "clientDataJSON": "Y2xpZW50IGRhdGE=",
-                "authenticatorData": "YXV0aCBkYXRh",
-                "attestationObject": "YXR0ZXN0YXRpb24=",
-            },
-            "type": "public-key",
-            "clientExtensionResults": {},
-        })
+        args.response = json.dumps(
+            {
+                "id": "cred_id",
+                "rawId": "cmVkX2lk",
+                "response": {
+                    "clientDataJSON": "Y2xpZW50IGRhdGE=",
+                    "authenticatorData": "YXV0aCBkYXRh",
+                    "attestationObject": "YXR0ZXN0YXRpb24=",
+                },
+                "type": "public-key",
+                "clientExtensionResults": {},
+            }
+        )
         args.label = None
         args.json = False
 
@@ -406,7 +410,7 @@ class TestEnrollComplete:
     def test_enroll_complete_invalid_json_response(self):
         """Enroll complete with invalid JSON response returns 1."""
         client, config_file = _make_client()
-        mock_http = MagicMock()
+        MagicMock()
 
         args = MagicMock()
         args.token = "tok_enroll"

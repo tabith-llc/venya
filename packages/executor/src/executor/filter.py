@@ -9,7 +9,6 @@ The Rust extension implements a 3-stage cascade:
 This module provides the Python API that the executor uses.
 """
 
-
 import logging
 from typing import Any
 
@@ -52,11 +51,13 @@ def build_filter_entries(
         else:
             hashes = compute_detection_hashes(value)
 
-        entries.append({
-            "secret_id": secret_id,
-            "hashes": hashes,
-            "secret_value": value,
-        })
+        entries.append(
+            {
+                "secret_id": secret_id,
+                "hashes": hashes,
+                "secret_value": value,
+            }
+        )
 
     return entries
 
@@ -117,10 +118,16 @@ def filter_and_redact(
     entries = build_filter_entries(secrets)
 
     masked_stdout, stdout_ids = filter_output(
-        stdout, entries, _window_size, _min_match_length,
+        stdout,
+        entries,
+        _window_size,
+        _min_match_length,
     )
     masked_stderr, stderr_ids = filter_output(
-        stderr, entries, _window_size, _min_match_length,
+        stderr,
+        entries,
+        _window_size,
+        _min_match_length,
     )
 
     return masked_stdout, masked_stderr, stdout_ids, stderr_ids

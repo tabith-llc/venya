@@ -3,13 +3,12 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI
+from server.dependencies import get_current_user
+from server.routes import secrets as secrets_routes
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.testclient import TestClient
-
-from server.routes import secrets as secrets_routes
-from server.dependencies import get_current_user
 
 TEST_USER = {"user_id": "test-user", "roles": ["devops"], "caller": "human"}
 
@@ -456,9 +455,7 @@ class TestSecretsRoleEnforcement:
         """Executor (mTLS) passes the role check without a RoleManager lookup."""
         core = _make_mock_core()
         rm = MagicMock()
-        rm.get_user_permissions.side_effect = AssertionError(
-            "role lookup must not run for executors"
-        )
+        rm.get_user_permissions.side_effect = AssertionError("role lookup must not run for executors")
         app = _create_test_app(core=core)
         app.dependency_overrides[get_current_user] = lambda: {
             "caller": "executor",

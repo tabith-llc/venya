@@ -9,16 +9,15 @@ Revises: 009_executor_id_constraints
 Create Date: 2026-08-15
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import sqlalchemy as sa
-
 from alembic import op
 
 revision: str = "010_remove_executor_token_binding"
-down_revision: Union[str, None] = "009_executor_id_constraints"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "009_executor_id_constraints"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:

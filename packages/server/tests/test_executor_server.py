@@ -2,6 +2,7 @@
 
 import hashlib
 from dataclasses import dataclass
+from datetime import UTC
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -11,11 +12,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.ca import CAManager
 from server.routes import executors as executors_routes
-
+from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -47,24 +46,24 @@ def executor_keypair():
 @pytest.fixture
 def executor_csr(executor_keypair):
     """Create a CSR for testing."""
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-    ])
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(subject)
-        .sign(executor_keypair, hashes.SHA256())
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+        ]
     )
+    csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(executor_keypair, hashes.SHA256())
     return csr
 
 
 @pytest.fixture
 def signed_cert(ca_manager, executor_keypair):
     """Create a signed certificate for testing."""
-    csr = x509.CertificateSigningRequestBuilder().subject_name(
-        x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test-executor")])
-    ).sign(executor_keypair, hashes.SHA256())
+    csr = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test-executor")]))
+        .sign(executor_keypair, hashes.SHA256())
+    )
     return ca_manager.sign_csr(csr, "test-executor")
 
 
@@ -117,17 +116,21 @@ class TestCAManager:
         assert isinstance(key, ec.EllipticCurvePrivateKey)
 
     def test_sign_csr_produces_valid_cert(self, ca_manager, executor_keypair):
-        csr = x509.CertificateSigningRequestBuilder().subject_name(
-            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "my-executor")])
-        ).sign(executor_keypair, hashes.SHA256())
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "my-executor")]))
+            .sign(executor_keypair, hashes.SHA256())
+        )
         cert = ca_manager.sign_csr(csr, "my-executor")
-        ca_cert, ca_key = ca_manager.load_ca()
+        ca_cert, _ca_key = ca_manager.load_ca()
         ca_cert.public_key().verify(
-            cert.signature, cert.tbs_certificate_bytes,
+            cert.signature,
+            cert.tbs_certificate_bytes,
             ec.ECDSA(cert.signature_hash_algorithm),
         )
         eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
         from cryptography.x509.oid import ExtendedKeyUsageOID
+
         assert ExtendedKeyUsageOID.CLIENT_AUTH in eku.value
         bc = cert.extensions.get_extension_for_class(x509.BasicConstraints)
         assert bc.value.ca is False
@@ -135,9 +138,11 @@ class TestCAManager:
         assert cn[0].value == "my-executor"
 
     def test_sign_csr_replaces_csr_cn_with_executor_id(self, ca_manager, executor_keypair):
-        csr = x509.CertificateSigningRequestBuilder().subject_name(
-            x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "wrong-cn")])
-        ).sign(executor_keypair, hashes.SHA256())
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "wrong-cn")]))
+            .sign(executor_keypair, hashes.SHA256())
+        )
         cert = ca_manager.sign_csr(csr, "correct-executor-id")
         cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
         assert cn[0].value == "correct-executor-id"
@@ -161,9 +166,9 @@ class TestCAManager:
 
     def test_restore_ca_key_rejects_corrupted_data(self, ca_dir):
         """restore_ca_key() should reject tampered or wrong-passphrase data (AES-GCM)."""
+        from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-        from cryptography.hazmat.primitives import hashes
 
         # Craft a valid encrypted payload: salt(16) + nonce(12) + ciphertext(tag auto-appended)
         passphrase = b"test_passphrase"
@@ -244,7 +249,7 @@ def _make_mock_db(executor_certs=None, revocations=None):
                                     rv = getattr(r, attr, None)
                                     if rv is not None and rv == val:
                                         filtered.append(r)
-                                except Exception:
+                                except Exception:  # noqa: S110 — best-effort mock attribute matching
                                     pass
                             results = filtered
 
@@ -254,7 +259,11 @@ def _make_mock_db(executor_certs=None, revocations=None):
             return result_filter
 
         m.filter = filter_side_effect
-        m.all = lambda: list(executor_certs) if model.__name__ == "ExecutorCert" else (list(revocations) if model.__name__ == "ExecutorCertRevocation" else [])
+        m.all = lambda: (
+            list(executor_certs)
+            if model.__name__ == "ExecutorCert"
+            else (list(revocations) if model.__name__ == "ExecutorCertRevocation" else [])
+        )
         return m
 
     db.query.side_effect = mock_query
@@ -311,11 +320,7 @@ class TestExecutorRegistration:
         client = TestClient(app, raise_server_exceptions=False)
         weak_key = ec.generate_private_key(ec.SECP192R1())
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "weak-ecdsa")])
-        csr = (
-            x509.CertificateSigningRequestBuilder()
-            .subject_name(subject)
-            .sign(weak_key, hashes.SHA256())
-        )
+        csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(weak_key, hashes.SHA256())
         csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
         resp = client.post(
             "/api/v1/executors/register",
@@ -440,11 +445,12 @@ class TestHeartbeat:
         assert data["new_cert_required"] is False
 
     def test_heartbeat_revoked_executor(self, ca_manager):
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
+
         cert_record = MockExecutorCert(
             executor_id="test-exec",
             serial_number="abc123",
-            not_after=datetime.now(timezone.utc) + timedelta(days=365),
+            not_after=datetime.now(UTC) + timedelta(days=365),
         )
         revocation = MockExecutorCertRevocation(serial_number="abc123")
         db = _make_mock_db(executor_certs=[cert_record], revocations=[revocation])
@@ -459,11 +465,12 @@ class TestHeartbeat:
         assert data["revoked"] is True
 
     def test_heartbeat_cert_expiring_soon(self, ca_manager):
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
+
         cert_record = MockExecutorCert(
             executor_id="test-exec",
             serial_number="abc123",
-            not_after=datetime.now(timezone.utc) + timedelta(days=1),
+            not_after=datetime.now(UTC) + timedelta(days=1),
         )
         db = _make_mock_db(executor_certs=[cert_record])
         app = self._create_app(ca_manager, db)
@@ -477,11 +484,12 @@ class TestHeartbeat:
         assert data["new_cert_required"] is True
 
     def test_heartbeat_cert_not_expiring(self, ca_manager):
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
+
         cert_record = MockExecutorCert(
             executor_id="test-exec",
             serial_number="abc123",
-            not_after=datetime.now(timezone.utc) + timedelta(days=20),
+            not_after=datetime.now(UTC) + timedelta(days=20),
         )
         db = _make_mock_db(executor_certs=[cert_record])
         app = self._create_app(ca_manager, db)

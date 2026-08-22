@@ -1,6 +1,5 @@
 """Tests for MemfdStrategy."""
 
-
 import fcntl
 import os
 import subprocess
@@ -78,13 +77,10 @@ class TestMemfdStrategyPrepare:
 
     def test_prepare_raises_on_memfd_failure(self, strategy):
         """prepare() raises OSError when memfd_create fails."""
-        with patch(
-            "executor.strategies.memfd_strategy.ctypes.CDLL"
-        ) as mock_cdll:
+        with patch("executor.strategies.memfd_strategy.ctypes.CDLL") as mock_cdll:
             mock_libc = MagicMock()
             mock_cdll.return_value = mock_libc
             mock_libc.memfd_create.return_value = -1
-            import ctypes
 
             mock_libc.memfd_create.errno = 38  # ENOSYS
 

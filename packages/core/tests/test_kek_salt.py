@@ -10,28 +10,26 @@ A fresh engine to the same file simulates a process restart.
 """
 
 import os
-
-import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
 from unittest.mock import MagicMock
 
+import pytest
 from core.engine.backend import (
     Backend,
     BackendConfig,
-    BackendConfigurationError,
     KekSaltMissingError,
     ensure_kek_salt,
 )
 from core.engine.encryption import (
     ARGON2_SALT_LEN,
     DecryptionError,
-    derive_kek,
     decrypt_secret,
+    derive_kek,
     encrypt_secret,
 )
 from core.iam.models import Base, Secret, VenyaConfig
+from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
 
 
 def _seed_secret(session, salt: bytes, passphrase: bytes = b"master-passphrase") -> dict:
@@ -126,7 +124,7 @@ class TestEnsureKekSalt:
         # Disable query-triggered autoflush so only the explicit session.flush()
         # inside ensure_kek_salt hits the mock.
         s.autoflush = False
-        s.flush = MagicMock(side_effect=_flush_side_effect)  # noqa: SLF001
+        s.flush = MagicMock(side_effect=_flush_side_effect)
         result = ensure_kek_salt(s)
         assert result == winner_salt
         s.close()
@@ -143,9 +141,7 @@ class TestBootstrapKek:
         assert config.kek is None
         backend = Backend(config)
         mock_session = MagicMock()
-        mock_session.query.return_value.filter.return_value.first.return_value = MagicMock(
-            value=known_salt
-        )
+        mock_session.query.return_value.filter.return_value.first.return_value = MagicMock(value=known_salt)
         backend.get_session = lambda: mock_session
         return backend, config
 
@@ -168,17 +164,17 @@ class TestBootstrapKek:
 
     def test_bootstrap_kek_only_backend_no_db(self):
         # A raw-KEK backend (with_kek path) must not touch the DB for the salt.
-        config = BackendConfig(database_url="postgresql://x/x", kek=b"\xAB" * 32)
+        config = BackendConfig(database_url="postgresql://x/x", kek=b"\xab" * 32)
         backend = Backend(config)
         backend.get_session = lambda: pytest.fail("get_session must not be called")
-        assert backend.bootstrap_kek() == b"\xAB" * 32
+        assert backend.bootstrap_kek() == b"\xab" * 32
 
     def test_get_core_kek_only_falls_back_to_config_kek(self):
-        config = BackendConfig(database_url="postgresql://x/x", kek=b"\xCD" * 32)
+        config = BackendConfig(database_url="postgresql://x/x", kek=b"\xcd" * 32)
         backend = Backend(config)
         backend.get_session = lambda: pytest.fail("get_session must not be called")
         core = backend.get_core(passphrase=None)
-        assert core.kek == b"\xCD" * 32
+        assert core.kek == b"\xcd" * 32
 
 
 class TestTwoProcessRoundTrip:

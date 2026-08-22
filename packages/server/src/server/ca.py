@@ -5,12 +5,11 @@ Uses ECDSA P-256 for all certificates. Supports passphrase-based
 encryption for CA private key storage.
 """
 
-
 import hashlib
 import logging
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,10 +21,8 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.serialization import (
     BestAvailableEncryption,
     PrivateFormat,
-    PublicFormat,
 )
-from cryptography.x509.oid import ExtensionOID, NameOID, ExtendedKeyUsageOID
-from pydantic import BaseModel
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from .config import CASecurityConfig
 
@@ -34,6 +31,7 @@ logger = logging.getLogger("venya.ca")
 
 class CAExistsError(RuntimeError):
     """CA keypair already exists on disk."""
+
 
 # Certificate validity periods
 CA_VALIDITY_DAYS = 3650  # 10 years
@@ -159,12 +157,14 @@ class CAManager:
         os.chmod(str(self.ca_key_path), 0o600)
 
         # Create self-signed CA certificate
-        now = datetime.now(timezone.utc)
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Venya Certificate Authority"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "Venya Root CA"),
-        ])
+        now = datetime.now(UTC)
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Venya Certificate Authority"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "Venya Root CA"),
+            ]
+        )
 
         builder = (
             x509.CertificateBuilder()
@@ -192,7 +192,6 @@ class CAManager:
                 ),
                 critical=True,
             )
-
         )
 
         cert = builder.sign(private_key, hashes.SHA256())
@@ -258,7 +257,7 @@ class CAManager:
             Signed X.509 certificate.
         """
         ca_cert, ca_key = self.load_ca()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         serial = int.from_bytes(secrets.token_bytes(8), "big")
 
         # Validate CSR
@@ -267,9 +266,9 @@ class CAManager:
 
         pub_key = csr.public_key()
         if not isinstance(pub_key, ec.EllipticCurvePublicKey):
-            raise ValueError("CSR must use an ECDSA key")
+            raise TypeError("CSR must use an ECDSA key")
         if not isinstance(pub_key.curve, ec.SECP256R1):
-            raise ValueError("CSR must use P-256 curve")
+            raise TypeError("CSR must use P-256 curve")
 
         # Extract subject from CSR, replacing CN with executor_id
         csr_name = csr.subject
@@ -306,9 +305,11 @@ class CAManager:
                 critical=True,
             )
             .add_extension(
-                x509.ExtendedKeyUsage([
-                    ExtendedKeyUsageOID.CLIENT_AUTH,
-                ]),
+                x509.ExtendedKeyUsage(
+                    [
+                        ExtendedKeyUsageOID.CLIENT_AUTH,
+                    ]
+                ),
                 critical=False,
             )
             .add_extension(
@@ -320,14 +321,16 @@ class CAManager:
         # Add CRL Distribution Point if URL is provided
         if crl_url:
             builder = builder.add_extension(
-                x509.CRLDistributionPoints([
-                    x509.DistributionPoint(
-                        full_name=[x509.UniformResourceIdentifier(crl_url)],
-                        relative_name=None,
-                        reasons=None,
-                        crl_issuer=None,
-                    )
-                ]),
+                x509.CRLDistributionPoints(
+                    [
+                        x509.DistributionPoint(
+                            full_name=[x509.UniformResourceIdentifier(crl_url)],
+                            relative_name=None,
+                            reasons=None,
+                            crl_issuer=None,
+                        )
+                    ]
+                ),
                 critical=False,
             )
 
@@ -418,9 +421,9 @@ class CAManager:
             encrypted_key: Encrypted key bytes (salt + nonce + ciphertext).
             passphrase: The passphrase used to encrypt the key.
         """
+        from cryptography.exceptions import InvalidTag
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-        from cryptography.exceptions import InvalidTag
 
         if len(encrypted_key) < 29:
             raise ValueError("Encrypted key data too small")
@@ -481,12 +484,11 @@ class CAManager:
         Returns:
             DER-encoded CRL bytes.
         """
+        from core.iam.models import ExecutorCertRevocation
         from sqlalchemy import desc
 
-        from core.iam.models import ExecutorCertRevocation
-
         ca_cert, ca_key = self.load_ca()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         revocations = (
             db_session.query(ExecutorCertRevocation)
@@ -524,10 +526,12 @@ class CAManager:
         """
         from core.iam.models import ExecutorCertRevocation
 
-        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-        deleted_count = db_session.query(ExecutorCertRevocation).filter(
-            ExecutorCertRevocation.revoked_at < cutoff
-        ).delete(synchronize_session=False)
+        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+        deleted_count = (
+            db_session.query(ExecutorCertRevocation)
+            .filter(ExecutorCertRevocation.revoked_at < cutoff)
+            .delete(synchronize_session=False)
+        )
         db_session.commit()
         return deleted_count
 
@@ -610,12 +614,14 @@ class AdminCAManager:
         os.chmod(str(self.ca_key_path), 0o600)
 
         # Create self-signed admin CA certificate
-        now = datetime.now(timezone.utc)
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin Certificate Authority"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "Venya Admin CA"),
-        ])
+        now = datetime.now(UTC)
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin Certificate Authority"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "Venya Admin CA"),
+            ]
+        )
 
         builder = (
             x509.CertificateBuilder()
@@ -693,17 +699,19 @@ class AdminCAManager:
             Tuple of (certificate, key_pem, cert_pem).
         """
         ca_cert, ca_key = self._load_ca_cert_and_key()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         serial = int.from_bytes(secrets.token_bytes(8), "big")
 
         # Generate new keypair for this admin cert
         admin_key = ec.generate_private_key(ec.SECP256R1())
 
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
-            x509.NameAttribute(NameOID.COMMON_NAME, admin_identity),
-        ])
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                x509.NameAttribute(NameOID.COMMON_NAME, admin_identity),
+            ]
+        )
 
         builder = (
             x509.CertificateBuilder()
@@ -732,9 +740,11 @@ class AdminCAManager:
                 critical=True,
             )
             .add_extension(
-                x509.ExtendedKeyUsage([
-                    ExtendedKeyUsageOID.CLIENT_AUTH,
-                ]),
+                x509.ExtendedKeyUsage(
+                    [
+                        ExtendedKeyUsageOID.CLIENT_AUTH,
+                    ]
+                ),
                 critical=False,
             )
             .add_extension(
@@ -782,12 +792,11 @@ class AdminCAManager:
         Returns:
             DER-encoded CRL bytes.
         """
+        from core.iam.models import AdminCertRevocation
         from sqlalchemy import desc
 
-        from core.iam.models import AdminCertRevocation
-
         ca_cert, ca_key = self._load_ca_cert_and_key()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         revocations = (
             db_session.query(AdminCertRevocation)
@@ -825,9 +834,11 @@ class AdminCAManager:
         """
         from core.iam.models import AdminCertRevocation
 
-        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-        deleted_count = db_session.query(AdminCertRevocation).filter(
-            AdminCertRevocation.revoked_at < cutoff
-        ).delete(synchronize_session=False)
+        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+        deleted_count = (
+            db_session.query(AdminCertRevocation)
+            .filter(AdminCertRevocation.revoked_at < cutoff)
+            .delete(synchronize_session=False)
+        )
         db_session.commit()
         return deleted_count

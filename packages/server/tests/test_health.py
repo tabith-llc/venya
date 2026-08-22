@@ -4,9 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.routes import health as health_routes
+from starlette.testclient import TestClient
 
 
 def _create_test_app(backend=None, ca_manager=None, admin_ca_manager=None, config=None):
@@ -68,9 +67,7 @@ class TestHealthCheck:
         """GET /health should skip admin_ca when mTLS is disabled."""
         ca = MagicMock()
         ca.load_ca.return_value = (MagicMock(), MagicMock())
-        config = SimpleNamespace(
-            admin_mtls=SimpleNamespace(enabled=False)
-        )
+        config = SimpleNamespace(admin_mtls=SimpleNamespace(enabled=False))
         app = _create_test_app(ca_manager=ca, config=config)
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -86,9 +83,7 @@ class TestHealthCheck:
         ca.load_ca.return_value = (MagicMock(), MagicMock())
         admin_ca = MagicMock()
         admin_ca._load_ca_key.return_value = MagicMock()
-        config = SimpleNamespace(
-            admin_mtls=SimpleNamespace(enabled=True)
-        )
+        config = SimpleNamespace(admin_mtls=SimpleNamespace(enabled=True))
         app = _create_test_app(ca_manager=ca, admin_ca_manager=admin_ca, config=config)
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -104,9 +99,7 @@ class TestHealthCheck:
         ca.load_ca.return_value = (MagicMock(), MagicMock())
         admin_ca = MagicMock()
         admin_ca._load_ca_key.side_effect = RuntimeError("admin key missing")
-        config = SimpleNamespace(
-            admin_mtls=SimpleNamespace(enabled=True)
-        )
+        config = SimpleNamespace(admin_mtls=SimpleNamespace(enabled=True))
         app = _create_test_app(ca_manager=ca, admin_ca_manager=admin_ca, config=config)
 
         client = TestClient(app, raise_server_exceptions=False)

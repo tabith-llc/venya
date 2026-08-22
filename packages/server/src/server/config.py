@@ -1,6 +1,5 @@
 """Server configuration."""
 
-
 import logging
 import os
 from pathlib import Path
@@ -15,7 +14,9 @@ class DatabaseConfig(BaseModel):
     """Database configuration."""
 
     database_url: str | None = Field(default=None, description="PostgreSQL database URL")
-    passphrase: str | None = Field(default=None, description="Core encryption passphrase for DEK/KEK key derivation (required in production)")
+    passphrase: str | None = Field(
+        default=None, description="Core encryption passphrase for DEK/KEK key derivation (required in production)"
+    )
     wal_mode: bool = Field(default=True, description="Enable WAL mode")
 
 
@@ -284,7 +285,9 @@ class ServerConfig(BaseSettings):
     fido2: Fido2Config = Field(default_factory=Fido2Config)
 
     # mTLS (executor communication)
-    mtls_ca_cert: str | None = Field(default=None, description="Path to CA certificate for mTLS (verifying executor certs)")
+    mtls_ca_cert: str | None = Field(
+        default=None, description="Path to CA certificate for mTLS (verifying executor certs)"
+    )
     mtls_ca_key: str | None = Field(default=None, description="Path to CA private key (signing executor certs)")
     mtls_cert: str | None = Field(default=None, description="Path to server mTLS certificate")
     mtls_key: str | None = Field(default=None, description="Path to server mTLS private key")

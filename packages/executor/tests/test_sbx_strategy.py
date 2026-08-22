@@ -1,16 +1,12 @@
 """Tests for Docker Sandboxes (sbx) injection strategy."""
 
-
 import os
-import shutil
-import subprocess
-import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from executor.bundles import SecretBundle
-from executor.strategies.sbx_strategy import SbxStrategy, SECRET_TMPFS_BASE
+from executor.strategies.sbx_strategy import SbxStrategy
 
 
 class TestSbxStrategyName:
@@ -21,10 +17,9 @@ class TestSbxStrategyName:
 
 class TestSbxStrategyValidate:
     def test_raises_when_sbx_not_found(self):
-        with patch("shutil.which", return_value=None):
-            with pytest.raises(RuntimeError, match="sbx CLI not found"):
-                strategy = SbxStrategy()
-                strategy.validate()
+        with patch("shutil.which", return_value=None), pytest.raises(RuntimeError, match="sbx CLI not found"):
+            strategy = SbxStrategy()
+            strategy.validate()
 
     def test_passes_when_sbx_found(self):
         with patch("shutil.which", return_value="/usr/bin/sbx"):
@@ -148,6 +143,28 @@ class TestSbxStrategyCopySecrets:
             ]
             with pytest.raises(RuntimeError, match="Failed to copy secret"):
                 strategy.copy_secrets_into_sandbox(mounts)
+
+    def test_copy_secrets_raises_on_chmod_failure(self):
+        """L-65: a failed chmod 400 must fail closed, not leave the secret at
+        default perms. mkdir + cp succeed, chmod fails -> raise + rollback."""
+        strategy = SbxStrategy()
+        strategy._sandbox_name = "venya-test123"
+        mounts = [
+            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/venya/secrets/pass"),
+        ]
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stderr=""),  # mkdir
+                MagicMock(returncode=0, stderr=""),  # cp
+                MagicMock(returncode=1, stderr="chmod failed"),  # chmod
+                MagicMock(returncode=0, stderr=""),  # rollback rm -f
+            ]
+            with pytest.raises(RuntimeError, match="Failed to set read-only permissions"):
+                strategy.copy_secrets_into_sandbox(mounts)
+
+            # rollback rm -f ran for the already-copied path
+            rollback_calls = [c for c in mock_run.call_args_list if "rm" in c.args[0]]
+            assert rollback_calls, "expected a rollback rm -f after chmod failure"
 
     def test_copy_secrets_raises_without_sandbox(self):
         strategy = SbxStrategy()

@@ -1,9 +1,7 @@
 """CLI argument parser."""
 
-
 import argparse
 import sys
-from typing import Any
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -37,8 +35,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--show-sensitive",
         action="store_true",
-        help="Show sensitive values (tokens, recovery codes) in output. "
-        "By default these are redacted.",
+        help="Show sensitive values (tokens, recovery codes) in output. " "By default these are redacted.",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -133,16 +130,10 @@ def create_parser() -> argparse.ArgumentParser:
     remove_parser.add_argument("user_id", help="User ID to remove")
 
     # admin configure-user
-    configure_parser = admin_sub.add_parser(
-        "configure-user", help="Configure user settings"
-    )
+    configure_parser = admin_sub.add_parser("configure-user", help="Configure user settings")
     configure_parser.add_argument("user_id", help="User ID to configure")
-    configure_parser.add_argument(
-        "--mode", choices=["security-key", "platform"], help="Auth mode"
-    )
-    configure_parser.add_argument(
-        "--timeout", type=int, help="Session timeout in seconds"
-    )
+    configure_parser.add_argument("--mode", choices=["security-key", "platform"], help="Auth mode")
+    configure_parser.add_argument("--timeout", type=int, help="Session timeout in seconds")
 
     # admin list
     admin_list_parser = admin_sub.add_parser("list", help="List all registered users")
@@ -153,9 +144,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin create-user
-    create_user_parser = admin_sub.add_parser(
-        "create-user", help="Create a new user and issue an enrollment token"
-    )
+    create_user_parser = admin_sub.add_parser("create-user", help="Create a new user and issue an enrollment token")
     create_user_parser.add_argument("username", help="User ID (e.g. 'jsmith')")
     create_user_parser.add_argument(
         "--display-name",
@@ -172,22 +161,16 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin set-command-policy
-    set_policy_parser = admin_sub.add_parser(
-        "set-command-policy", help="Set executor command policy"
-    )
+    set_policy_parser = admin_sub.add_parser("set-command-policy", help="Set executor command policy")
     set_policy_parser.add_argument(
         "preset",
         choices=["strict", "balanced", "permissive"],
         help="Policy preset",
     )
-    set_policy_parser.add_argument(
-        "--custom", help="Path to custom policy file"
-    )
+    set_policy_parser.add_argument("--custom", help="Path to custom policy file")
 
     # admin get-command-policy
-    get_policy_parser = admin_sub.add_parser(
-        "get-command-policy", help="Get current executor command policy"
-    )
+    get_policy_parser = admin_sub.add_parser("get-command-policy", help="Get current executor command policy")
     get_policy_parser.add_argument(
         "--json",
         action="store_true",
@@ -195,15 +178,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin add-allowed-command
-    add_cmd_parser = admin_sub.add_parser(
-        "add-allowed-command", help="Add a command to the strict allowlist"
-    )
+    add_cmd_parser = admin_sub.add_parser("add-allowed-command", help="Add a command to the strict allowlist")
     add_cmd_parser.add_argument("command_path", help="Full path to allowed command")
 
     # admin key-version
-    kv_parser = admin_sub.add_parser(
-        "key-version", help="Key version management"
-    )
+    kv_parser = admin_sub.add_parser("key-version", help="Key version management")
     kv_sub = kv_parser.add_subparsers(dest="kv_command")
 
     list_parser = kv_sub.add_parser("list", help="List all key versions")
@@ -220,30 +199,21 @@ def create_parser() -> argparse.ArgumentParser:
     rollback_parser.add_argument("job_id", help="Rotation job ID")
 
     # admin rotate-key
-    rotate_parser = admin_sub.add_parser(
-        "rotate-key", help="Rotate the key encryption key"
-    )
-    rotate_parser.add_argument(
-        "--new-key", help="Path to new KEK file"
-    )
+    rotate_parser = admin_sub.add_parser("rotate-key", help="Rotate the key encryption key")
+    rotate_parser.add_argument("--new-key", help="Path to new KEK file")
 
     # admin revoke-executor
-    revoke_executor_parser = admin_sub.add_parser(
-        "revoke-executor", help="Revoke an executor certificate"
-    )
+    revoke_executor_parser = admin_sub.add_parser("revoke-executor", help="Revoke an executor certificate")
     revoke_executor_parser.add_argument("executor_id", help="Executor ID to revoke")
 
     # admin executor-enroll
     enroll_executor_parser = admin_sub.add_parser(
         "executor-enroll", help="Generate an enrollment token for an executor"
     )
-    enroll_executor_parser.add_argument("executor_id", metavar="EXECUTOR_ID",
-                                       help="Executor ID to enroll")
+    enroll_executor_parser.add_argument("executor_id", metavar="EXECUTOR_ID", help="Executor ID to enroll")
 
     # admin list-tokens
-    list_tokens_parser = admin_sub.add_parser(
-        "list-tokens", help="List all enrollment tokens for a user"
-    )
+    list_tokens_parser = admin_sub.add_parser("list-tokens", help="List all enrollment tokens for a user")
     list_tokens_parser.add_argument("user_id", help="User ID")
     list_tokens_parser.add_argument(
         "--json",
@@ -252,9 +222,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin issue-token
-    issue_token_parser = admin_sub.add_parser(
-        "issue-token", help="Revoke old tokens and issue a new enrollment token"
-    )
+    issue_token_parser = admin_sub.add_parser("issue-token", help="Revoke old tokens and issue a new enrollment token")
     issue_token_parser.add_argument("user_id", help="User ID")
     issue_token_parser.add_argument(
         "--json",
@@ -263,15 +231,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin revoke-token
-    revoke_token_parser = admin_sub.add_parser(
-        "revoke-token", help="Revoke a single enrollment token"
-    )
+    revoke_token_parser = admin_sub.add_parser("revoke-token", help="Revoke a single enrollment token")
     revoke_token_parser.add_argument("token_id", help="Token ID to revoke")
 
     # admin re-enroll
-    re_enroll_parser = admin_sub.add_parser(
-        "re-enroll", help="Deactivate credentials and issue a new enrollment token"
-    )
+    re_enroll_parser = admin_sub.add_parser("re-enroll", help="Deactivate credentials and issue a new enrollment token")
     re_enroll_parser.add_argument("user_id", help="User ID to re-enroll")
     re_enroll_parser.add_argument(
         "--json",
@@ -284,7 +248,8 @@ def create_parser() -> argparse.ArgumentParser:
         "export-ca-cert", help="Export the CA certificate (for distribution to executors)"
     )
     export_cert_parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         help="Output file path (default: stdout)",
     )
     export_cert_parser.add_argument(
@@ -297,7 +262,8 @@ def create_parser() -> argparse.ArgumentParser:
         "export-ca-key", help="Export the CA private key (encrypted with passphrase)"
     )
     export_key_parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         required=True,
         help="Output file path for encrypted key",
     )
@@ -307,23 +273,24 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin split-ca-key
-    split_key_parser = admin_sub.add_parser(
-        "split-ca-key", help="Split CA key using Shamir's Secret Sharing"
-    )
+    split_key_parser = admin_sub.add_parser("split-ca-key", help="Split CA key using Shamir's Secret Sharing")
     split_key_parser.add_argument(
-        "--threshold", "-t",
+        "--threshold",
+        "-t",
         type=int,
         required=True,
         help="Minimum shares needed to reconstruct (K)",
     )
     split_key_parser.add_argument(
-        "--shares", "-s",
+        "--shares",
+        "-s",
         type=int,
         required=True,
         help="Total number of shares to create (N)",
     )
     split_key_parser.add_argument(
-        "--output-dir", "-d",
+        "--output-dir",
+        "-d",
         required=True,
         help="Directory to write share files",
     )
@@ -333,9 +300,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin restore-ca-key
-    restore_key_parser = admin_sub.add_parser(
-        "restore-ca-key", help="Restore CA key from shares or encrypted backup"
-    )
+    restore_key_parser = admin_sub.add_parser("restore-ca-key", help="Restore CA key from shares or encrypted backup")
     restore_key_parser.add_argument(
         "--mode",
         choices=["shares", "backup"],
@@ -343,7 +308,8 @@ def create_parser() -> argparse.ArgumentParser:
         help="Restore mode: from shares (SSS) or from encrypted backup file",
     )
     restore_key_parser.add_argument(
-        "--shares", nargs="+",
+        "--shares",
+        nargs="+",
         help="Share files for SSS restore (e.g., share-1 share-2 share-3)",
     )
     restore_key_parser.add_argument(
@@ -356,9 +322,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin init-admin-ca
-    init_admin_ca_parser = admin_sub.add_parser(
-        "init-admin-ca", help="Initialize the admin CA (create key/cert pair)"
-    )
+    init_admin_ca_parser = admin_sub.add_parser("init-admin-ca", help="Initialize the admin CA (create key/cert pair)")
     init_admin_ca_parser.add_argument(
         "--output-dir",
         required=True,
@@ -366,9 +330,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin generate-admin-cert
-    gen_admin_cert_parser = admin_sub.add_parser(
-        "generate-admin-cert", help="Sign an admin client certificate"
-    )
+    gen_admin_cert_parser = admin_sub.add_parser("generate-admin-cert", help="Sign an admin client certificate")
     gen_admin_cert_parser.add_argument(
         "identity",
         help="Admin identity (used as CN and SAN DNS name)",
@@ -460,25 +422,15 @@ def create_parser() -> argparse.ArgumentParser:
     role_remove.add_argument("user_id", help="User ID to remove")
 
     # recovery
-    recovery_parser = subparsers.add_parser(
-        "recovery", help="Break-glass recovery"
-    )
+    recovery_parser = subparsers.add_parser("recovery", help="Break-glass recovery")
     recovery_parser.add_argument("code", help="Recovery code")
     recovery_parser.add_argument("new_user_id", help="New user ID")
-    recovery_parser.add_argument(
-        "--force", action="store_true", help="Force operation"
-    )
-    recovery_parser.add_argument(
-        "--confirm", action="store_true", help="Confirm recovery action"
-    )
+    recovery_parser.add_argument("--force", action="store_true", help="Force operation")
+    recovery_parser.add_argument("--confirm", action="store_true", help="Confirm recovery action")
 
     # run (formerly exec)
-    run_parser = subparsers.add_parser(
-        "run", help="Execute a command via executor (Stage 1 + Stage 2 filtering)"
-    )
-    run_parser.add_argument(
-        "command_args", help="Command to execute", nargs=argparse.REMAINDER
-    )
+    run_parser = subparsers.add_parser("run", help="Execute a command via executor (Stage 1 + Stage 2 filtering)")
+    run_parser.add_argument("command_args", help="Command to execute", nargs=argparse.REMAINDER)
     run_parser.add_argument(
         "--secret",
         action="append",
@@ -495,15 +447,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # exec — executor lifecycle management
-    exec_parser = subparsers.add_parser(
-        "exec", help="Executor lifecycle operations"
-    )
+    exec_parser = subparsers.add_parser("exec", help="Executor lifecycle operations")
     exec_subparsers = exec_parser.add_subparsers(dest="exec_command")
 
     # exec register
-    register_parser = exec_subparsers.add_parser(
-        "register", help="Register this machine as an executor with the core"
-    )
+    register_parser = exec_subparsers.add_parser("register", help="Register this machine as an executor with the core")
     register_parser.add_argument(
         "--executor-id",
         default="venya-exec",
@@ -526,15 +474,11 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # exec cert — certificate management
-    cert_parser = exec_subparsers.add_parser(
-        "cert", help="Certificate management"
-    )
+    cert_parser = exec_subparsers.add_parser("cert", help="Certificate management")
     cert_subparsers = cert_parser.add_subparsers(dest="cert_command")
 
     # exec cert status
-    cert_status_parser = cert_subparsers.add_parser(
-        "status", help="Show certificate expiry status"
-    )
+    cert_status_parser = cert_subparsers.add_parser("status", help="Show certificate expiry status")
     cert_status_parser.add_argument(
         "--cert-path",
         default="/etc/venya/executor/executor.crt",
@@ -542,9 +486,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # exec cert renew
-    cert_renew_parser = cert_subparsers.add_parser(
-        "renew", help="Renew executor certificate"
-    )
+    cert_renew_parser = cert_subparsers.add_parser("renew", help="Renew executor certificate")
     cert_renew_parser.add_argument(
         "--cert-path",
         default="/etc/venya/executor/executor.crt",
@@ -558,9 +500,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # exec cert revoke
-    revoke_parser = cert_subparsers.add_parser(
-        "revoke", help="Revoke an executor certificate (admin action)"
-    )
+    revoke_parser = cert_subparsers.add_parser("revoke", help="Revoke an executor certificate (admin action)")
     revoke_parser.add_argument(
         "--executor-id",
         dest="executor_id",
@@ -575,9 +515,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # exec heartbeat
-    heartbeat_parser = exec_subparsers.add_parser(
-        "heartbeat", help="Send heartbeat to core"
-    )
+    heartbeat_parser = exec_subparsers.add_parser("heartbeat", help="Send heartbeat to core")
     heartbeat_parser.add_argument(
         "--core-url",
         help="Core server URL (default: from config)",
@@ -595,9 +533,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # exec audit
-    audit_parser = exec_subparsers.add_parser(
-        "audit", help="View executor audit log"
-    )
+    audit_parser = exec_subparsers.add_parser("audit", help="View executor audit log")
     audit_parser.add_argument(
         "executor_id",
         nargs="?",
@@ -641,34 +577,24 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # exec status
-    exec_subparsers.add_parser(
-        "status", help="Show executor registration status"
-    )
+    exec_subparsers.add_parser("status", help="Show executor registration status")
 
     # config
-    config_parser = subparsers.add_parser(
-        "config", help="Manage CLI configuration"
-    )
+    config_parser = subparsers.add_parser("config", help="Manage CLI configuration")
     config_sub = config_parser.add_subparsers(dest="config_command")
 
     # config show
     config_sub.add_parser("show", help="Show current configuration")
 
     # config set-server
-    set_server_parser = config_sub.add_parser(
-        "set-server", help="Set the server URL"
-    )
+    set_server_parser = config_sub.add_parser("set-server", help="Set the server URL")
     set_server_parser.add_argument("url", help="Server URL")
 
     # config clear-token
-    config_sub.add_parser(
-        "clear-token", help="Clear stored access token (forces re-auth)"
-    )
+    config_sub.add_parser("clear-token", help="Clear stored access token (forces re-auth)")
 
     # credential
-    credential_parser = subparsers.add_parser(
-        "credential", help="Manage credentials (security keys)"
-    )
+    credential_parser = subparsers.add_parser("credential", help="Manage credentials (security keys)")
     credential_sub = credential_parser.add_subparsers(dest="credential_command")
 
     # credential list
@@ -693,15 +619,11 @@ def create_parser() -> argparse.ArgumentParser:
     cred_remove.add_argument("credential_id", help="Credential ID to remove")
 
     # enroll
-    enroll_parser = subparsers.add_parser(
-        "enroll", help="Headless enrollment using an enrollment token"
-    )
+    enroll_parser = subparsers.add_parser("enroll", help="Headless enrollment using an enrollment token")
     enroll_sub = enroll_parser.add_subparsers(dest="enroll_command")
 
     # enroll start
-    enroll_start = enroll_sub.add_parser(
-        "start", help="Start enrollment: get WebAuthn challenge from token"
-    )
+    enroll_start = enroll_sub.add_parser("start", help="Start enrollment: get WebAuthn challenge from token")
     enroll_start.add_argument("token", help="Enrollment token")
     enroll_start.add_argument(
         "--json",
@@ -710,9 +632,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # enroll complete
-    enroll_complete = enroll_sub.add_parser(
-        "complete", help="Complete enrollment: submit WebAuthn attestation"
-    )
+    enroll_complete = enroll_sub.add_parser("complete", help="Complete enrollment: submit WebAuthn attestation")
     enroll_complete.add_argument("token", help="Enrollment token")
     enroll_complete.add_argument("challenge_id", help="Challenge ID from enroll start")
     enroll_complete.add_argument("response", help="WebAuthn attestation response (JSON)")

@@ -4,19 +4,18 @@ import hashlib
 import hmac
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from core.utils.entropy import get_secure_token
-
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from .. import metrics
 from ..dependencies import get_db, require_admin
 from ..rate_limit import rate_limit_admin_token_gen
 from ..utils.executor_id import validate_executor_id
 from ..utils.token_binding import compute_binding_hash
-from .. import metrics
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -104,9 +103,7 @@ class AdminKeyVersionListResponse(BaseModel):
 
 
 class AdminKeyVersionRotateRequest(BaseModel):
-    new_key: str | None = Field(
-        None, description="Path to new key file (hex-encoded 32 bytes)"
-    )
+    new_key: str | None = Field(None, description="Path to new key file (hex-encoded 32 bytes)")
 
 
 class AdminKeyVersionRotateResponse(BaseModel):
@@ -127,9 +124,7 @@ class AdminKeyVersionRollbackResponse(BaseModel):
 
 
 class AdminSetCommandPolicyRequest(BaseModel):
-    preset: str = Field(
-        "balanced", description="Policy preset: strict, balanced, permissive"
-    )
+    preset: str = Field("balanced", description="Policy preset: strict, balanced, permissive")
     custom_allowed_commands: list[str] | None = None
     custom_dangerous_patterns: list[str] | None = None
 
@@ -143,9 +138,7 @@ class AdminSetCommandPolicyResponse(BaseModel):
 class AdminRecoveryRequest(BaseModel):
     recovery_code: str = Field(..., description="Break-glass recovery code")
     new_user_id: str = Field(..., description="New admin user ID")
-    webauthn_assertion: dict = Field(
-        ..., description="WebAuthn assertion from enrolled device"
-    )
+    webauthn_assertion: dict = Field(..., description="WebAuthn assertion from enrolled device")
 
 
 class AdminRecoveryResponse(BaseModel):
@@ -204,7 +197,6 @@ class AdminEnrollExecutorResponse(BaseModel):
 # --- Helper functions ---
 
 
-
 # --- Endpoints ---
 
 
@@ -225,7 +217,6 @@ async def admin_enroll(
     DEPRECATED: Use POST /admin/users instead.
     """
     try:
-        from datetime import timezone as tz
 
         from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
         from core.iam.models import User
@@ -290,7 +281,6 @@ async def admin_create_user(
     The admin delivers the token to the user out-of-band.
     """
     try:
-        from datetime import timezone as tz
 
         from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
         from core.iam.models import Role, RoleMember, User
@@ -329,7 +319,9 @@ async def admin_create_user(
 
         logger.info(
             "Admin created user '%s' (ID: %d) with roles: %s",
-            req.username, user.id, req.roles,
+            req.username,
+            user.id,
+            req.roles,
         )
 
         return AdminCreateUserResponse(
@@ -504,14 +496,11 @@ async def admin_key_version_rotate(
     Creates a new key version and begins re-wrapping all secrets.
     """
     try:
-        from core.iam.models import KeyVersion, KeyRotationJob, KeyRotationSecret, Secret
+        from core.iam.models import KeyRotationJob, KeyRotationSecret, KeyVersion, Secret
 
         # Get current active key version
         active_version = (
-            db.query(KeyVersion)
-            .filter(KeyVersion.active.is_(True))
-            .order_by(KeyVersion.created_at.desc())
-            .first()
+            db.query(KeyVersion).filter(KeyVersion.active.is_(True)).order_by(KeyVersion.created_at.desc()).first()
         )
 
         # Create new key version
@@ -578,11 +567,7 @@ async def admin_key_version_rollback(
     try:
         from core.iam.models import KeyRotationJob
 
-        job = (
-            db.query(KeyRotationJob)
-            .filter(KeyRotationJob.id == req.job_id)
-            .first()
-        )
+        job = db.query(KeyRotationJob).filter(KeyRotationJob.id == req.job_id).first()
         if job is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -602,7 +587,7 @@ async def admin_key_version_rollback(
         )
 
         job.status = "rolled_back"
-        job.rolled_back_at = datetime.now(timezone.utc)
+        job.rolled_back_at = datetime.now(UTC)
         db.commit()
 
         logger.info(
@@ -638,11 +623,7 @@ async def admin_set_command_policy(
     try:
         from core.iam.models import CommandPolicy
 
-        policy = (
-            db.query(CommandPolicy)
-            .filter(CommandPolicy.policy_name == "default")
-            .first()
-        )
+        policy = db.query(CommandPolicy).filter(CommandPolicy.policy_name == "default").first()
 
         if policy is None:
             policy = CommandPolicy(
@@ -656,7 +637,7 @@ async def admin_set_command_policy(
             policy.allowed_commands = json.dumps(req.custom_allowed_commands)
         if req.custom_dangerous_patterns is not None:
             policy.dangerous_patterns = json.dumps(req.custom_dangerous_patterns)
-        policy.updated_at = datetime.now(timezone.utc)
+        policy.updated_at = datetime.now(UTC)
 
         db.commit()
         return AdminSetCommandPolicyResponse(
@@ -691,9 +672,7 @@ async def admin_recovery(
         # In production, this would validate the recovery code against
         # a secure store and verify the WebAuthn assertion.
         # For now, we create a new admin user.
-        existing = (
-            db.query(User).filter(User.user_id == req.new_user_id).first()
-        )
+        existing = db.query(User).filter(User.user_id == req.new_user_id).first()
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -704,16 +683,14 @@ async def admin_recovery(
         new_user = User(
             user_id=req.new_user_id,
             auth_mode="security-key",
-            enrolled_at=datetime.now(timezone.utc),
+            enrolled_at=datetime.now(UTC),
         )
         db.add(new_user)
 
         # Add admin role (assuming admin role exists with name "admin")
         from core.iam.models import Role, RoleMember
 
-        admin_role = (
-            db.query(Role).filter(Role.name == "admin").first()
-        )
+        admin_role = db.query(Role).filter(Role.name == "admin").first()
         if admin_role:
             membership = RoleMember(
                 user_id=req.new_user_id,
@@ -752,11 +729,7 @@ async def admin_add_allowed_command(
     try:
         from core.iam.models import CommandPolicy
 
-        policy = (
-            db.query(CommandPolicy)
-            .filter(CommandPolicy.policy_name == "default")
-            .first()
-        )
+        policy = db.query(CommandPolicy).filter(CommandPolicy.policy_name == "default").first()
 
         if policy is None:
             policy = CommandPolicy(
@@ -771,7 +744,7 @@ async def admin_add_allowed_command(
                 allowed.append(req.command_path)
                 policy.allowed_commands = json.dumps(allowed)
 
-            policy.updated_at = datetime.now(timezone.utc)
+            policy.updated_at = datetime.now(UTC)
 
         db.commit()
         return AdminAddAllowedCommandResponse(added=True, command_path=req.command_path)
@@ -799,11 +772,7 @@ async def admin_key_version_deactivate(
     try:
         from core.iam.models import KeyVersion
 
-        version = (
-            db.query(KeyVersion)
-            .filter(KeyVersion.id == version_id)
-            .first()
-        )
+        version = db.query(KeyVersion).filter(KeyVersion.id == version_id).first()
         if version is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -846,11 +815,7 @@ async def admin_key_version_revoke(
     try:
         from core.iam.models import KeyVersion, Secret
 
-        version = (
-            db.query(KeyVersion)
-            .filter(KeyVersion.id == version_id)
-            .first()
-        )
+        version = db.query(KeyVersion).filter(KeyVersion.id == version_id).first()
         if version is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -858,11 +823,7 @@ async def admin_key_version_revoke(
             )
 
         # Check if any secrets still reference this version
-        secret_count = (
-            db.query(Secret)
-            .filter(Secret.key_version_id == str(version_id))
-            .count()
-        )
+        secret_count = db.query(Secret).filter(Secret.key_version_id == str(version_id)).count()
         if secret_count > 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -901,7 +862,9 @@ async def admin_key_rotation_status(
 
     jobs = (
         db.query(KeyRotationJob)
-        .order_by(KeyRotationJob.started_at.desc() if hasattr(KeyRotationJob, 'started_at') else KeyRotationJob.id.desc())
+        .order_by(
+            KeyRotationJob.started_at.desc() if hasattr(KeyRotationJob, "started_at") else KeyRotationJob.id.desc()
+        )
         .all()
     )
     result = [
@@ -933,11 +896,7 @@ async def admin_key_rotation_job_rollback(
     try:
         from core.iam.models import KeyRotationJob, KeyRotationSecret
 
-        job = (
-            db.query(KeyRotationJob)
-            .filter(KeyRotationJob.id == job_id)
-            .first()
-        )
+        job = db.query(KeyRotationJob).filter(KeyRotationJob.id == job_id).first()
         if job is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -955,7 +914,7 @@ async def admin_key_rotation_job_rollback(
         )
 
         job.status = "rolled_back"
-        job.rolled_back_at = datetime.now(timezone.utc)
+        job.rolled_back_at = datetime.now(UTC)
         db.commit()
 
         logger.info(
@@ -992,16 +951,12 @@ async def admin_revoke_executor(
     Adds the executor's certificate serial number to the revocation list.
     The executor will be rejected on next revocation check (polls every 60s).
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from core.iam.models import ExecutorCert, ExecutorCertRevocation
 
     # Look up the executor's current certificate
-    cert = (
-        db.query(ExecutorCert)
-        .filter(ExecutorCert.executor_id == executor_id)
-        .first()
-    )
+    cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
 
     if cert is None:
         raise HTTPException(
@@ -1011,9 +966,7 @@ async def admin_revoke_executor(
 
     # Check if already revoked
     existing_revocation = (
-        db.query(ExecutorCertRevocation)
-        .filter(ExecutorCertRevocation.serial_number == cert.serial_number)
-        .first()
+        db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == cert.serial_number).first()
     )
 
     if existing_revocation is not None:
@@ -1023,7 +976,7 @@ async def admin_revoke_executor(
     revocation = ExecutorCertRevocation(
         serial_number=cert.serial_number,
         executor_id=executor_id,
-        revoked_at=datetime.now(timezone.utc),
+        revoked_at=datetime.now(UTC),
         reason="Admin revocation",
     )
     db.add(revocation)
@@ -1072,11 +1025,7 @@ async def admin_enroll_executor(
 
     try:
         config = getattr(request.app.state, "config", None)
-        ttl_seconds = (
-            config.executor_enrollment.token_ttl_seconds
-            if config
-            else 1800
-        )
+        ttl_seconds = config.executor_enrollment.token_ttl_seconds if config else 1800
 
         caller = getattr(request.state, "auth_user", {})
         admin_user_id = caller.get("user_id", "unknown")
@@ -1091,7 +1040,7 @@ async def admin_enroll_executor(
             plaintext.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = now + timedelta(seconds=ttl_seconds)
 
         token = ExecutorEnrollmentToken(
@@ -1115,9 +1064,7 @@ async def admin_enroll_executor(
         core = getattr(request.app.state, "core", None)
         if core is None:
             raise RuntimeError("Core not initialized — cannot encrypt admin metadata")
-        wrapped_dek, nonce, ciphertext = core.encrypt(
-            json.dumps(meta_dict).encode("utf-8")
-        )
+        wrapped_dek, nonce, ciphertext = core.encrypt(json.dumps(meta_dict).encode("utf-8"))
         token.admin_meta_wrapped_dek = wrapped_dek
         token.admin_meta_nonce = nonce
         token.admin_meta_ciphertext = ciphertext
@@ -1145,7 +1092,9 @@ async def admin_enroll_executor(
 
         logger.info(
             "Admin created executor enrollment token for %s (by %s, ttl=%ds)",
-            executor_id, admin_user_id, ttl_seconds,
+            executor_id,
+            admin_user_id,
+            ttl_seconds,
         )
 
         return AdminEnrollExecutorResponse(
@@ -1186,7 +1135,6 @@ async def admin_re_enroll(
     - Generates new enrollment token
     """
     try:
-        from datetime import timezone as tz
 
         from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
         from core.iam.models import User, WebAuthnCredential
@@ -1226,7 +1174,10 @@ async def admin_re_enroll(
 
         logger.info(
             "Re-enrolled user '%s' (ID: %d), deactivated %d credentials, revoked %d tokens",
-            user_id, user.id, deactivated, tokens_revoked,
+            user_id,
+            user.id,
+            deactivated,
+            tokens_revoked,
         )
 
         return AdminReEnrollResponse(
@@ -1438,18 +1389,14 @@ async def admin_revoke_admin_cert(
     # Check if already revoked (idempotent)
     from core.iam.models import AdminCertRevocation
 
-    existing = (
-        db.query(AdminCertRevocation)
-        .filter(AdminCertRevocation.serial_number == serial)
-        .first()
-    )
+    existing = db.query(AdminCertRevocation).filter(AdminCertRevocation.serial_number == serial).first()
 
     if existing:
         logger.info("Admin cert %s already revoked (reason: %s)", serial, existing.reason)
         return AdminRevokeCertResponse(serial=serial, revoked=True, reason=existing.reason, already_revoked=True)
 
     # Insert new revocation
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     revocation = AdminCertRevocation(serial_number=serial, reason=req.reason, revoked_at=now)
     db.add(revocation)
     db.commit()

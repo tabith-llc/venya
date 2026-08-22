@@ -4,14 +4,13 @@ mlock is used only in the core package (server-side), where secrets
 reside in trusted memory. Requires CAP_IPC_LOCK or root.
 """
 
-
 import ctypes
 import ctypes.util
 import os
 import platform
-from typing import ClassVar
+from typing import Self
 
-_SYSTEM_LIB: ClassVar[str | None] = None
+_SYSTEM_LIB: str | None = None
 
 
 def _load_system_lib() -> ctypes.CDLL | None:
@@ -51,7 +50,6 @@ def secure_mlock(data: bytearray) -> None:
     ret = lib.mlock(ctypes.addressof(ctypes.c_char.from_buffer(data)), len(data))
     if ret != 0:
         errno = ctypes.get_errno()
-        import os as _os
         raise OSError(errno, os.strerror(errno))
 
 
@@ -77,7 +75,6 @@ def secure_munlock(data: bytearray) -> None:
     ret = lib.munlock(ctypes.addressof(ctypes.c_char.from_buffer(data)), len(data))
     if ret != 0:
         errno = ctypes.get_errno()
-        import os as _os
         raise OSError(errno, os.strerror(errno))
 
 
@@ -91,8 +88,7 @@ def secure_zero(data: bytearray | memoryview) -> None:
         data: The buffer to zero.
     """
     if isinstance(data, memoryview):
-        data = data.tobytes()
-        return  # memoryview is immutable after tobytes, use bytearray instead
+        return  # memoryview is immutable here — zero out via its bytearray copy by the caller
     n = len(data)
     for i in range(n):
         data[i] = 0
@@ -189,7 +185,7 @@ class SecureBuffer:
     def __len__(self) -> int:
         return self._size
 
-    def __enter__(self) -> SecureBuffer:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -212,5 +208,5 @@ class SecureBuffer:
                     except OSError:
                         pass
                     self._locked = False
-            except Exception:  # nosec B110 — best-effort unlock in __del__, no stack to unwind
+            except Exception:  # nosec B110 — best-effort unlock in __del__, no stack to unwind  # noqa: S110
                 pass  # Best effort in __del__

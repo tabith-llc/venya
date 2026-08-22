@@ -11,14 +11,14 @@ Revises: 008_token_binding
 Create Date: 2026-08-14
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 from alembic import op
 
 revision: str = "009_executor_id_constraints"
-down_revision: Union[str, None] = "008_token_binding"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "008_token_binding"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 # Pattern enforced by CHECK constraints
 EXECUTOR_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"
@@ -27,10 +27,7 @@ EXECUTOR_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"
 def upgrade() -> None:
     """Add CHECK constraints on executor_id columns."""
     # users.user_id — executor_id becomes user_id for MTLS executors
-    op.execute(
-        f"ALTER TABLE users ADD CONSTRAINT chk_user_id_format "
-        f"CHECK (user_id ~ '{EXECUTOR_ID_PATTERN}')"
-    )
+    op.execute(f"ALTER TABLE users ADD CONSTRAINT chk_user_id_format " f"CHECK (user_id ~ '{EXECUTOR_ID_PATTERN}')")
 
     # executor_enrollment_tokens.executor_id
     op.execute(
@@ -54,7 +51,4 @@ def downgrade() -> None:
         "ALTER TABLE executor_enrollment_tokens "
         "DROP CONSTRAINT IF EXISTS chk_executor_enrollment_tokens_executor_id_format"
     )
-    op.execute(
-        "ALTER TABLE executor_certs "
-        "DROP CONSTRAINT IF EXISTS chk_executor_certs_executor_id_format"
-    )
+    op.execute("ALTER TABLE executor_certs " "DROP CONSTRAINT IF EXISTS chk_executor_certs_executor_id_format")

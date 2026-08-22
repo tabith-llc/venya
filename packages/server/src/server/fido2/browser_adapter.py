@@ -5,7 +5,6 @@ without padding. The python-fido2 library uses standard base64 with padding.
 This module handles conversion in both directions.
 """
 
-
 import base64
 from typing import Any
 
@@ -252,9 +251,7 @@ def browser_registration_to_fido2(registration: dict[str, Any]) -> dict[str, Any
 
     # Copy authenticatorAttestationResponse if present
     if "authenticatorAttestationResponse" in registration:
-        fido2_response["authenticatorAttestationResponse"] = registration[
-            "authenticatorAttestationResponse"
-        ]
+        fido2_response["authenticatorAttestationResponse"] = registration["authenticatorAttestationResponse"]
 
     # Copy clientExtensionResults if present
     if "clientExtensionResults" in registration:

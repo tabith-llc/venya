@@ -13,18 +13,15 @@ import json
 import os
 import stat
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
+from core.cli.api_client import APIClient, APIClientError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-
-from core.cli.api_client import APIClient, APIClientError, Config
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -68,25 +65,25 @@ def _generate_test_keypair():
 
 def _generate_test_csr(private_key, executor_id="venya-exec"):
     """Generate a CSR for testing."""
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(subject)
-        .sign(private_key, hashes.SHA256())
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
     )
+    csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(private_key, hashes.SHA256())
     return csr
 
 
 def _generate_test_cert(private_key, executor_id="venya-exec", validity_days=30):
     """Generate a self-signed cert for testing cert status."""
-    now = datetime.now(timezone.utc)
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
+    now = datetime.now(UTC)
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
+    )
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -122,12 +119,17 @@ class TestCLIParsing:
         from core.cli.cli import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "run",
-            "--secret", "db_password",
-            "--secret", "api_key",
-            "echo", "hello",
-        ])
+        args = parser.parse_args(
+            [
+                "run",
+                "--secret",
+                "db_password",
+                "--secret",
+                "api_key",
+                "echo",
+                "hello",
+            ]
+        )
         assert args.command == "run"
         assert args.secrets == ["db_password", "api_key"]
 
@@ -136,11 +138,14 @@ class TestCLIParsing:
         from core.cli.cli import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "run",
-            "--executor-id", "my-executor",
-            "ls",
-        ])
+        args = parser.parse_args(
+            [
+                "run",
+                "--executor-id",
+                "my-executor",
+                "ls",
+            ]
+        )
         assert args.executor_id == "my-executor"
 
     def test_exec_command_exists(self):
@@ -168,12 +173,18 @@ class TestCLIParsing:
         from core.cli.cli import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "exec", "register",
-            "--executor-id", "my-exec-1",
-            "--core-url", "https://core.example.com",
-            "--output-dir", "/tmp/certs",
-        ])
+        args = parser.parse_args(
+            [
+                "exec",
+                "register",
+                "--executor-id",
+                "my-exec-1",
+                "--core-url",
+                "https://core.example.com",
+                "--output-dir",
+                "/tmp/certs",
+            ]
+        )
         assert args.executor_id == "my-exec-1"
         assert args.core_url == "https://core.example.com"
         assert args.output_dir == "/tmp/certs"
@@ -193,10 +204,15 @@ class TestCLIParsing:
         from core.cli.cli import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "exec", "cert", "status",
-            "--cert-path", "/custom/path.pem",
-        ])
+        args = parser.parse_args(
+            [
+                "exec",
+                "cert",
+                "status",
+                "--cert-path",
+                "/custom/path.pem",
+            ]
+        )
         assert args.cert_path == "/custom/path.pem"
 
     def test_exec_cert_renew(self):
@@ -244,7 +260,6 @@ class TestCLIParsing:
     def test_exec_without_subcommand(self):
         """exec without subcommand prints error."""
         from core.cli.cli import create_parser
-        from core.cli.commands import run_command
 
         parser = create_parser()
         args = parser.parse_args(["exec"])
@@ -272,6 +287,7 @@ class TestKeyGeneration:
         """ECDSA P-256 key generation produces valid keypair."""
         private_key = _generate_test_keypair()
         from cryptography.hazmat.primitives.asymmetric import ec
+
         assert isinstance(private_key.curve, ec.SECP256R1)
         public_key = private_key.public_key()
         # Verify the key can sign/verify
@@ -313,10 +329,7 @@ class TestCSRCreation:
 
         # Verify CSR subject
         loaded_csr = x509.load_pem_x509_csr(csr_pem)
-        cn_attrs = [
-            attr.value for attr in loaded_csr.subject
-            if attr.oid == NameOID.COMMON_NAME
-        ]
+        cn_attrs = [attr.value for attr in loaded_csr.subject if attr.oid == NameOID.COMMON_NAME]
         assert "test-exec-1" in cn_attrs
 
     def test_csr_signing_key_matches(self):
@@ -572,11 +585,13 @@ class TestExecutorCertStatus:
 
         private_key = _generate_test_keypair()
         # Create a cert that expired 5 days ago
-        now = datetime.now(timezone.utc)
-        subject = x509.Name([
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "expired-test"),
-        ])
+        now = datetime.now(UTC)
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "expired-test"),
+            ]
+        )
         cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -655,7 +670,7 @@ class TestPlaceholderSubcommands:
 
         from core.cli.commands import executor_cert
 
-        client, config_file = _make_mock_client()
+        client, _config_file = _make_mock_client()
         try:
             args = MagicMock()
             args.cert_command = "renew"
@@ -670,7 +685,7 @@ class TestPlaceholderSubcommands:
         """cert revoke is implemented — see test_executor_cert_revoke.py."""
         from core.cli.commands import executor_cert
 
-        client, config_file = _make_mock_client()
+        client, _config_file = _make_mock_client()
         try:
             args = MagicMock()
             args.cert_command = "revoke"
@@ -682,13 +697,12 @@ class TestPlaceholderSubcommands:
 
     def test_heartbeat_placeholder(self):
         """heartbeat implemented — see test_executor_heartbeat.py."""
-        pass
 
     def test_audit_placeholder(self):
         """audit prints 'Not yet implemented'."""
         from core.cli.commands import executor_audit
 
-        client, config_file = _make_mock_client()
+        client, _config_file = _make_mock_client()
         try:
             args = MagicMock()
             result = executor_audit(client, args)
@@ -717,7 +731,7 @@ class TestPlaceholderSubcommands:
         """exec without subcommand returns 1."""
         from core.cli.commands import cmd_exec_group
 
-        client, config_file = _make_mock_client()
+        client, _config_file = _make_mock_client()
         try:
             args = MagicMock()
             args.exec_command = None
@@ -730,7 +744,7 @@ class TestPlaceholderSubcommands:
         """exec with unknown subcommand returns 1."""
         from core.cli.commands import cmd_exec_group
 
-        client, config_file = _make_mock_client()
+        client, _config_file = _make_mock_client()
         try:
             args = MagicMock()
             args.exec_command = "fizzbuzz"
@@ -743,7 +757,7 @@ class TestPlaceholderSubcommands:
         """exec cert without subcommand returns 1."""
         from core.cli.commands import executor_cert
 
-        client, config_file = _make_mock_client()
+        client, _config_file = _make_mock_client()
         try:
             args = MagicMock()
             args.cert_command = None

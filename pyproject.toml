@@ -31,6 +31,31 @@ asyncio_mode = "auto"
 target-version = "py314"
 line-length = 120
 
+[tool.ruff.lint]
+# BLE001 (114 src sites) — global keep-as-debt, decided 2026-08-22. Honest
+#   tracked debt, not an interim placeholder: tighten per-file as a file is next
+#   touched (rewrite a deliberate broad catch to the specific exception, or add a
+#   documented `# noqa: BLE001`). A bulk 107-site audit is deferred on purpose.
+# SIM117 — conflicts with black's line-length splitting of long with-contexts.
+extend-ignore = ["BLE001", "SIM117"]
+
+[tool.ruff.lint.per-file-ignores]
+# B008 function-call-in-default-arg: the FastAPI Depends()/require_role() DI
+# idiom (121 src + 3 test sites). Scoped to these locations instead of a global
+# ignore (2026-08-22) so a B008 anywhere else is still caught.
+"packages/server/src/server/routes/*.py" = ["B008"]
+"packages/server/src/server/dependencies.py" = ["B008"]
+"packages/server/tests/test_dependencies.py" = ["B008"]
+# Parked browser-auth module (M-03/M-04) — fix on re-mount
+"packages/server/src/server/routes/auth_browser.py" = ["RUF059", "S110"]
+
+[tool.black]
+line-length = 120
+
+[tool.mypy]
+python_version = "3.14"
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",

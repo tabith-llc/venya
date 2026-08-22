@@ -6,21 +6,17 @@
 - GET /credentials — list own credentials
 """
 
-
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
-
 from ..fido2.browser_adapter import (
-    challenge_to_browser_registration_options,
     browser_registration_to_fido2,
+    challenge_to_browser_registration_options,
 )
 from ..utils.time import effective_expiry_check_time
 
@@ -176,9 +172,7 @@ async def credentials_add_start(
             existing_credential_ids=existing_ids,
         )
 
-        browser_options = challenge_to_browser_registration_options(
-            challenge_id, options
-        )
+        browser_options = challenge_to_browser_registration_options(challenge_id, options)
 
         return CredentialAddStartResponse(
             challenge_id=challenge_id,
@@ -247,7 +241,8 @@ async def credentials_add_complete(
 
         logger.info(
             "User %s added credential '%s'",
-            user_id, req.label,
+            user_id,
+            req.label,
         )
 
         return CredentialAddCompleteResponse(status="ok", credential_label=req.label)

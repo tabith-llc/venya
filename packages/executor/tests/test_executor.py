@@ -1,9 +1,7 @@
 """Tests for Executor.revoke_tokens(), _send_to_stage2(), and create_executor()."""
 
-
 import os
 import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -11,10 +9,9 @@ import httpx2
 import pytest
 
 from executor.command_validator import CommandValidator
-from executor.config import ExecutorConfig, MtlsConfig, CertificateRotationConfig, ReaperConfig
+from executor.config import CertificateRotationConfig, ExecutorConfig, MtlsConfig, ReaperConfig
 from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop
 from executor.executor import Executor
-
 
 # --- Fixtures ---
 
@@ -95,9 +92,7 @@ class TestRevokeTokens:
 
     def test_revoke_tokens_server_error(self, executor: Executor, mock_http_client: httpx2.Client, caplog):
         """revoke_tokens logs error but doesn't raise on server failure."""
-        mock_http_client.post.side_effect = httpx2.RequestError(
-            "Connection refused", request=MagicMock()
-        )
+        mock_http_client.post.side_effect = httpx2.RequestError("Connection refused", request=MagicMock())
         executor.http_client = mock_http_client
         caplog.set_level("ERROR", logger="venya.executor")
 
@@ -107,9 +102,7 @@ class TestRevokeTokens:
 
     def test_revoke_tokens_emits_audit_event_on_failure(self, executor: Executor, mock_http_client: httpx2.Client):
         """revoke_tokens emits token_revocation_failed audit event on failure."""
-        mock_http_client.post.side_effect = httpx2.RequestError(
-            "Connection refused", request=MagicMock()
-        )
+        mock_http_client.post.side_effect = httpx2.RequestError("Connection refused", request=MagicMock())
         executor.http_client = mock_http_client
 
         # Create a mock audit logger
@@ -127,9 +120,7 @@ class TestRevokeTokens:
 
     def test_revoke_tokens_no_audit_logger(self, executor: Executor, mock_http_client: httpx2.Client):
         """revoke_tokens handles missing audit logger gracefully."""
-        mock_http_client.post.side_effect = httpx2.RequestError(
-            "Connection refused", request=MagicMock()
-        )
+        mock_http_client.post.side_effect = httpx2.RequestError("Connection refused", request=MagicMock())
         executor.http_client = mock_http_client
         executor.audit_logger = None
 
@@ -339,9 +330,12 @@ class TestReaperLoop:
 class TestSendToStage2:
     """Tests for Executor._send_to_stage2()."""
 
-    def _create_mock_response(self, stdout_data: bytes = b"filtered output", stderr_data: bytes = b"", masked_hashes: list[str] | None = None):
+    def _create_mock_response(
+        self, stdout_data: bytes = b"filtered output", stderr_data: bytes = b"", masked_hashes: list[str] | None = None
+    ):
         """Create a mock httpx response for Stage 2."""
         import base64
+
         response = MagicMock()
         response.status_code = 200
         response.json.return_value = {
@@ -356,6 +350,7 @@ class TestSendToStage2:
     def test_send_to_stage2_success(self, executor: Executor, mock_http_client: httpx2.Client):
         """_send_to_stage2 sends base64-encoded output and returns filtered result."""
         import base64
+
         executor.http_client = mock_http_client
 
         stdout = b"hello secret_value world"
@@ -369,9 +364,7 @@ class TestSendToStage2:
         )
         mock_http_client.post.return_value = mock_response
 
-        result_stdout, result_stderr, masked_ids = executor._send_to_stage2(
-            stdout, stderr, secret_entries
-        )
+        result_stdout, result_stderr, masked_ids = executor._send_to_stage2(stdout, stderr, secret_entries)
 
         # Verify payload sent to server
         call_args = mock_http_client.post.call_args
@@ -392,6 +385,7 @@ class TestSendToStage2:
         executor.http_client = mock_http_client
 
         import base64
+
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "stdout": base64.b64encode(b"output").decode(),
@@ -410,6 +404,7 @@ class TestSendToStage2:
         executor.http_client = mock_http_client
 
         import base64
+
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "stdout": base64.b64encode(b"output").decode(),
@@ -426,9 +421,7 @@ class TestSendToStage2:
     def test_send_to_stage2_server_error_raises(self, executor: Executor, mock_http_client: httpx2.Client):
         """_send_to_stage2 raises on server connection failure."""
         executor.http_client = mock_http_client
-        mock_http_client.post.side_effect = httpx2.RequestError(
-            "Connection refused", request=MagicMock()
-        )
+        mock_http_client.post.side_effect = httpx2.RequestError("Connection refused", request=MagicMock())
 
         with pytest.raises(httpx2.RequestError):
             executor._send_to_stage2(b"out", b"err", [])

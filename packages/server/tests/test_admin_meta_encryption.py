@@ -1,18 +1,16 @@
 """Tests for admin metadata encryption in enrollment tokens."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
+from core.iam.models import ExecutorEnrollmentToken
 from fastapi import FastAPI
+from server.config import ServerConfig
+from server.dependencies import get_current_user, require_admin
+from server.routes import admin as admin_routes
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.testclient import TestClient
-
-from server.routes import admin as admin_routes
-from server.config import ServerConfig
-from server.dependencies import get_current_user, require_admin
-from core.iam.models import ExecutorEnrollmentToken
 
 
 def _create_test_app_with_core(backend=None, auth_user=None, core_encrypt_side_effect=None):
@@ -77,6 +75,7 @@ class TestAdminMetaEncryption:
     def test_encrypt_fails_gracefully_when_core_missing(self):
         """admin_enroll_executor raises clear error when core not initialized."""
         from server.dependencies import get_current_user, require_admin
+
         mock_db = MagicMock()
         backend = MagicMock()
         backend.get_session.return_value = mock_db
@@ -107,7 +106,7 @@ class TestAdminMetaEncryption:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
 
-        app, mock_core = _create_test_app_with_core(backend=backend)
+        app, _mock_core = _create_test_app_with_core(backend=backend)
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/admin/executors/test-exec/enroll")

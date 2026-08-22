@@ -12,7 +12,6 @@ the proxy inject credentials into HTTP headers — the raw value
 never enters the VM.
 """
 
-
 import logging
 import os
 import shutil
@@ -20,8 +19,7 @@ import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx
 import tempfile
 from collections.abc import Callable
 
-from .base import SecretMount
-from .base import InjectionResult, InjectionStrategy
+from .base import InjectionResult, InjectionStrategy, SecretMount
 
 logger = logging.getLogger("venya.executor.strategies.sbx")
 
@@ -86,9 +84,7 @@ class SbxStrategy(InjectionStrategy):
             InjectionResult with secret mounts and cleanup functions.
         """
         # Create unique session directory on tmpfs
-        self._session_dir = tempfile.mkdtemp(
-            prefix="session_", dir=SECRET_TMPFS_BASE
-        )
+        self._session_dir = tempfile.mkdtemp(prefix="session_", dir=SECRET_TMPFS_BASE)
         os.chmod(self._session_dir, 0o700)
 
         mounts: list[SecretMount] = []
@@ -153,6 +149,7 @@ class SbxStrategy(InjectionStrategy):
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
         if result.returncode != 0:
             logger.error("sbx create failed: %s", result.stderr)
@@ -176,6 +173,7 @@ class SbxStrategy(InjectionStrategy):
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
 
         copied_paths: list[str] = []
@@ -186,25 +184,43 @@ class SbxStrategy(InjectionStrategy):
                 capture_output=True,
                 text=True,
                 timeout=10,
+                check=False,
             )
             if result.returncode != 0:
                 logger.error("sbx cp failed for %s: %s", mount.secret_id, result.stderr)
                 for copied in copied_paths:
                     subprocess.run(  # nosec
                         ["sbx", "exec", self._sandbox_name, "rm", "-f", copied],
-                        capture_output=True, text=True, timeout=10,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
                     )
                 raise RuntimeError(f"Failed to copy secret {mount.secret_id} into sandbox")
 
             copied_paths.append(container_path)
 
-            # Set read-only permissions inside sandbox
-            subprocess.run(  # nosec
+            # Set read-only permissions inside sandbox. Fail-closed (L-65): if
+            # chmod fails, roll back everything copied and abort — a secret left
+            # at default perms (potentially world-readable) must not be injected.
+            chmod_result = subprocess.run(  # nosec
                 ["sbx", "exec", self._sandbox_name, "chmod", "400", container_path],
                 capture_output=True,
                 text=True,
                 timeout=10,
+                check=False,
             )
+            if chmod_result.returncode != 0:
+                logger.error("sbx chmod failed for %s: %s", mount.secret_id, chmod_result.stderr)
+                for copied in copied_paths:
+                    subprocess.run(  # nosec
+                        ["sbx", "exec", self._sandbox_name, "rm", "-f", copied],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+                raise RuntimeError(f"Failed to set read-only permissions on secret {mount.secret_id} in sandbox")
 
             logger.debug("Copied secret %s into sandbox: %s", mount.secret_id, container_path)
 
@@ -222,13 +238,14 @@ class SbxStrategy(InjectionStrategy):
             raise RuntimeError("Sandbox not created yet")
 
         for host_info in allowed_hosts:
-            host = host_info["host"]
+            host = str(host_info["host"])
             # sbx policy works at domain/IP level, not port-specific
             result = subprocess.run(  # nosec
                 ["sbx", "policy", "allow", "network", host],
                 capture_output=True,
                 text=True,
                 timeout=10,
+                check=False,
             )
             if result.returncode == 0:
                 logger.info("Network ALLOW: %s", host)
@@ -251,6 +268,7 @@ class SbxStrategy(InjectionStrategy):
             ["sbx", "exec", self._sandbox_name, "sh", "-c", command],
             capture_output=True,
             timeout=SBX_TIMEOUT,
+            check=False,
         )
         return result
 
@@ -264,6 +282,7 @@ class SbxStrategy(InjectionStrategy):
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
         if result.returncode == 0:
             logger.debug("Removed sandbox: %s", self._sandbox_name)
@@ -287,6 +306,7 @@ class SbxStrategy(InjectionStrategy):
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to store HTTP secret {secret_id}: {result.stderr}")

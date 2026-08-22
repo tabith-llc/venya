@@ -1,12 +1,7 @@
 """Tests for Executor pipeline: execute(), _prepare_injections(), _capture_output(), _cleanup_injections()."""
 
-
 import base64
 import fcntl
-import os
-import stat
-import time
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,11 +9,8 @@ import httpx2
 import pytest
 
 from executor.command_validator import CommandValidator
-from executor.config import ExecutorConfig, MtlsConfig, CertificateRotationConfig, ReaperConfig
-from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop
 from executor.executor import CommandResult, Executor, SecretBundle
 from executor.injector import wrap_with_sentinel
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -97,7 +89,6 @@ class TestExecute:
         executor.http_client = mock_http_client
 
         # Mock Stage 2 to return proper response
-        import base64
         stage2_response = MagicMock()
         stage2_response.json.return_value = {
             "stdout": base64.b64encode(b"test\n").decode(),
@@ -206,8 +197,9 @@ class TestPrepareInjections:
 
     def test_prepare_registers_correct_mapping(self, executor: Executor):
         """Sentinel registry maps hash to secret_id."""
-        from executor.injector import wrap_with_sentinel
         import hashlib
+
+        from executor.injector import wrap_with_sentinel
 
         secret_id = "db-password-prod"
         wrapped = wrap_with_sentinel(secret_id, b"secret")
@@ -308,7 +300,7 @@ class TestCaptureOutput:
 
         with patch("executor.executor.select.select", side_effect=mock_select):
             with patch("executor.executor.scan_open_fds", return_value={0, 1, 2, 4, 5}):
-                stdout, stderr = executor._capture_output(mock_process)
+                _stdout, _stderr = executor._capture_output(mock_process)
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +404,10 @@ class TestCommandResult:
 
     def test_with_masked_ids(self):
         result = CommandResult(
-            command="echo test", exit_code=0, stdout=b"ok", stderr=b"",
+            command="echo test",
+            exit_code=0,
+            stdout=b"ok",
+            stderr=b"",
             masked_secret_ids=["a1b2c3d4", "e5f6g7h8"],
         )
 
@@ -420,7 +415,10 @@ class TestCommandResult:
 
     def test_with_truncation(self):
         result = CommandResult(
-            command="echo test", exit_code=0, stdout=b"x" * 300000, stderr=b"",
+            command="echo test",
+            exit_code=0,
+            stdout=b"x" * 300000,
+            stderr=b"",
             output_truncated=True,
             original_stdout_size=300000,
         )
@@ -455,10 +453,12 @@ class TestConstants:
 
     def test_max_output_bytes(self):
         from executor.executor import MAX_OUTPUT_BYTES
+
         assert MAX_OUTPUT_BYTES == 262144  # 256 KB
 
     def test_truncation_marker_format(self):
         from executor.executor import TRUNCATION_MARKER
+
         expected = "... [OUTPUT TRUNCATED: 1024 bytes discarded]\n"
         actual = TRUNCATION_MARKER.format(n=1024)
         assert actual == expected
@@ -469,71 +469,85 @@ class TestValidateCommandStructure:
 
     def test_accepts_simple_command(self):
         from executor.executor import _validate_command_structure
+
         result = _validate_command_structure("/usr/bin/echo hello")
         assert result == ["/usr/bin/echo", "hello"]
 
     def test_accepts_command_with_quoted_args(self):
         from executor.executor import _validate_command_structure
+
         result = _validate_command_structure('/usr/bin/echo "hello world"')
         assert result == ["/usr/bin/echo", "hello world"]
 
     def test_accepts_command_with_single_quotes(self):
         from executor.executor import _validate_command_structure
+
         result = _validate_command_structure("/usr/bin/echo 'hello world'")
         assert result == ["/usr/bin/echo", "hello world"]
 
     def test_rejects_pipe(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure("/usr/bin/ls | /usr/bin/cat")
 
     def test_rejects_semicolon(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure("/usr/bin/ls; /usr/bin/cat")
 
     def test_rejects_dollar_paren(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure("/usr/bin/echo $(whoami)")
 
     def test_rejects_backtick(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure("/usr/bin/echo `id`")
 
     def test_rejects_dollar_var(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure("/usr/bin/echo $HOME")
 
     def test_rejects_redirect(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure("/usr/bin/ls > /tmp/out")
 
     def test_rejects_ampersand(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure("/usr/bin/ls &")
 
     def test_rejects_glob(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure("/usr/bin/ls *.txt")
 
     def test_rejects_newline(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure("/usr/bin/echo hello\n/usr/bin/echo world")
 
     def test_rejects_empty_command(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Empty command"):
             _validate_command_structure("")
 
     def test_rejects_whitespace_only(self):
         from executor.executor import _validate_command_structure
+
         with pytest.raises(ValueError, match="Empty command"):
             _validate_command_structure("   ")
 
@@ -543,7 +557,6 @@ class TestStage2SendsHashes:
 
     def test_send_to_stage2_sends_hashes_not_values(self, executor: Executor, mock_http_client: httpx2.Client):
         """_send_to_stage2 sends secret hashes, not plaintext values."""
-        import base64
 
         executor.http_client = mock_http_client
 

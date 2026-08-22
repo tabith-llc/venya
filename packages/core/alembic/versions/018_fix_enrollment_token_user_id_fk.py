@@ -12,8 +12,8 @@ Changes:
 2. Drops old FK constraint, adds new one referencing users.user_id
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "018"
 down_revision = "017"
@@ -26,16 +26,17 @@ def upgrade():
     op.drop_constraint("enrollment_tokens_user_id_fkey", "enrollment_tokens", type_="foreignkey")
 
     # Alter column type from Integer to String(64)
-    op.alter_column("enrollment_tokens", "user_id",
-                    existing_type=sa.INTEGER(),
-                    type_=sa.String(64),
-                    existing_nullable=False)
+    op.alter_column(
+        "enrollment_tokens", "user_id", existing_type=sa.INTEGER(), type_=sa.String(64), existing_nullable=False
+    )
 
     # Add new FK constraint referencing users.user_id
     op.create_foreign_key(
         "enrollment_tokens_user_id_fkey",
-        "enrollment_tokens", "users",
-        ["user_id"], ["user_id"],
+        "enrollment_tokens",
+        "users",
+        ["user_id"],
+        ["user_id"],
     )
 
 
@@ -44,14 +45,15 @@ def downgrade():
     op.drop_constraint("enrollment_tokens_user_id_fkey", "enrollment_tokens", type_="foreignkey")
 
     # Alter column back to Integer
-    op.alter_column("enrollment_tokens", "user_id",
-                    existing_type=sa.String(64),
-                    type_=sa.INTEGER(),
-                    existing_nullable=False)
+    op.alter_column(
+        "enrollment_tokens", "user_id", existing_type=sa.String(64), type_=sa.INTEGER(), existing_nullable=False
+    )
 
     # Restore old FK constraint
     op.create_foreign_key(
         "enrollment_tokens_user_id_fkey",
-        "enrollment_tokens", "users",
-        ["user_id"], ["id"],
+        "enrollment_tokens",
+        "users",
+        ["user_id"],
+        ["id"],
     )

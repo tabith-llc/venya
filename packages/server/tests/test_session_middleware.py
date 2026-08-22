@@ -1,13 +1,12 @@
 """Tests for session authentication middleware (dual cookie + bearer)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.middleware.auth import SessionMiddleware
+from starlette.testclient import TestClient
 
 
 def _create_test_app():
@@ -36,11 +35,14 @@ def _create_test_app():
 def _make_session_mock(user_id="user1", expires_at=None, access_token_jti="token-123"):
     """Create a mock session object."""
     if expires_at is None:
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        expires_at = datetime.now(UTC) + timedelta(minutes=10)
     user_mock = SimpleNamespace(user_id=user_id)
     return SimpleNamespace(
-        id=1, user_id=user_id, expires_at=expires_at,
-        user=user_mock, access_token_jti=access_token_jti,
+        id=1,
+        user_id=user_id,
+        expires_at=expires_at,
+        user=user_mock,
+        access_token_jti=access_token_jti,
     )
 
 
@@ -67,8 +69,9 @@ class TestCookieAuth:
         session = _make_session_mock()
         backend = _make_backend(session)
 
-        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
-             patch("core.iam.role_manager.RoleManager") as mock_rm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
             mock_sm.return_value.check_expiry.return_value = True
             mock_rm.return_value.get_user_roles.return_value = []
 
@@ -102,7 +105,7 @@ class TestCookieAuth:
     def test_cookie_auth_expired(self):
         """Expired cookie token should return 401."""
         expired_session = _make_session_mock(
-            expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            expires_at=datetime.now(UTC) - timedelta(minutes=5),
         )
         backend = _make_backend(session=expired_session)
 
@@ -128,8 +131,9 @@ class TestBearerAuth:
         session = _make_session_mock()
         backend = _make_backend(session)
 
-        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
-             patch("core.iam.role_manager.RoleManager") as mock_rm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
             mock_sm.return_value.check_expiry.return_value = True
             mock_rm.return_value.get_user_roles.return_value = []
 
@@ -184,11 +188,17 @@ class TestCookiePriority:
             if model.__name__ == "Session":
                 # Return different sessions based on token value
                 return MagicMock(
-                    filter=MagicMock(return_value=MagicMock(
-                        first=MagicMock(return_value=cookie_session
-                            if "cookie-token" in str(list(model.__dict__.get('_filters', [])))
-                            else bearer_session)
-                    ))
+                    filter=MagicMock(
+                        return_value=MagicMock(
+                            first=MagicMock(
+                                return_value=(
+                                    cookie_session
+                                    if "cookie-token" in str(list(model.__dict__.get("_filters", [])))
+                                    else bearer_session
+                                )
+                            )
+                        )
+                    )
                 )
             return MagicMock()
 
@@ -198,8 +208,9 @@ class TestCookiePriority:
         backend = MagicMock()
         backend.get_session.return_value = db
 
-        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
-             patch("core.iam.role_manager.RoleManager") as mock_rm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
             mock_sm.return_value.check_expiry.return_value = True
             mock_rm.return_value.get_user_roles.return_value = []
 
@@ -271,7 +282,7 @@ class TestMtlsBypass:
         app = _create_test_app()
 
         # Mock mTLS via ASGI scope
-        client = TestClient(app, raise_server_exceptions=False)
+        TestClient(app, raise_server_exceptions=False)
         # Starlette TestClient doesn't easily support mTLS, but we can
         # verify the _is_mtls_request method exists and is called
         middleware = SessionMiddleware(app)
@@ -283,11 +294,14 @@ class TestSessionExtension:
 
     def _make_session(self, user_id="user1", expires_at=None, access_token="token-123"):
         if expires_at is None:
-            expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+            expires_at = datetime.now(UTC) + timedelta(minutes=10)
         user_mock = SimpleNamespace(user_id=user_id)
         return SimpleNamespace(
-            id=1, user_id=user_id, expires_at=expires_at,
-            user=user_mock, access_token=access_token,
+            id=1,
+            user_id=user_id,
+            expires_at=expires_at,
+            user=user_mock,
+            access_token=access_token,
         )
 
     def _make_backend(self, session=None, db=None):
@@ -300,12 +314,13 @@ class TestSessionExtension:
 
     def test_extend_when_nearing_expiry(self):
         """Session within 5 minutes of expiry should be extended + committed."""
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=3)
+        expires_at = datetime.now(UTC) + timedelta(minutes=3)
         session = self._make_session(expires_at=expires_at)
         backend, db = self._make_backend(session)
 
-        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
-             patch("core.iam.role_manager.RoleManager") as mock_rm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
             mock_sm.return_value.check_expiry.return_value = True
             mock_sm.return_value.extend_session.return_value = True
             mock_rm.return_value.get_user_roles.return_value = []
@@ -314,7 +329,8 @@ class TestSessionExtension:
             app.state.backend = backend
 
             client = TestClient(
-                app, raise_server_exceptions=False,
+                app,
+                raise_server_exceptions=False,
                 headers={"authorization": "Bearer token-123"},
             )
             resp = client.get("/api/v1/protected")
@@ -325,12 +341,13 @@ class TestSessionExtension:
 
     def test_no_extend_when_fresh(self):
         """Session with >5 minutes left should not be extended."""
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        expires_at = datetime.now(UTC) + timedelta(minutes=10)
         session = self._make_session(expires_at=expires_at)
         backend, db = self._make_backend(session)
 
-        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
-             patch("core.iam.role_manager.RoleManager") as mock_rm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
             mock_sm.return_value.check_expiry.return_value = True
             mock_sm.return_value.extend_session.return_value = True
             mock_rm.return_value.get_user_roles.return_value = []
@@ -339,7 +356,8 @@ class TestSessionExtension:
             app.state.backend = backend
 
             client = TestClient(
-                app, raise_server_exceptions=False,
+                app,
+                raise_server_exceptions=False,
                 headers={"authorization": "Bearer token-123"},
             )
             resp = client.get("/api/v1/protected")
@@ -350,12 +368,13 @@ class TestSessionExtension:
 
     def test_no_refresh_token_called(self):
         """Middleware should extend, never rotate tokens."""
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=3)
+        expires_at = datetime.now(UTC) + timedelta(minutes=3)
         session = self._make_session(expires_at=expires_at)
-        backend, db = self._make_backend(session)
+        backend, _db = self._make_backend(session)
 
-        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
-             patch("core.iam.role_manager.RoleManager") as mock_rm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
             mock_sm.return_value.check_expiry.return_value = True
             mock_sm.return_value.extend_session.return_value = True
             mock_sm.return_value.refresh_token.return_value = None
@@ -365,7 +384,8 @@ class TestSessionExtension:
             app.state.backend = backend
 
             client = TestClient(
-                app, raise_server_exceptions=False,
+                app,
+                raise_server_exceptions=False,
                 headers={"authorization": "Bearer token-123"},
             )
             resp = client.get("/api/v1/protected")
@@ -375,12 +395,13 @@ class TestSessionExtension:
 
     def test_expired_session_returns_401(self):
         """Expired session should return 401, not extend."""
-        expires_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        expires_at = datetime.now(UTC) - timedelta(minutes=5)
         session = self._make_session(expires_at=expires_at)
-        backend, db = self._make_backend(session)
+        backend, _db = self._make_backend(session)
 
-        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
-             patch("core.iam.role_manager.RoleManager") as mock_rm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
             mock_sm.return_value.check_expiry.return_value = False
             mock_rm.return_value.get_user_roles.return_value = []
 
@@ -388,7 +409,8 @@ class TestSessionExtension:
             app.state.backend = backend
 
             client = TestClient(
-                app, raise_server_exceptions=False,
+                app,
+                raise_server_exceptions=False,
                 headers={"authorization": "Bearer token-123"},
             )
             resp = client.get("/api/v1/protected")

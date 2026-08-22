@@ -12,15 +12,11 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
+from pydantic import ValidationError
 from server.utils.executor_id import (
-    EXECUTOR_ID_PATTERN,
-    EXECUTOR_ID_MAX_LENGTH,
-    EXECUTOR_ID_MIN_LENGTH,
     validate_executor_id,
 )
-
+from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # Validator utility tests
@@ -257,9 +253,9 @@ class TestAdminEnrollValidation:
     """Tests for admin enroll endpoint executor_id validation."""
 
     def _create_app(self, backend=None):
-        from server.routes import admin as admin_routes
         from server.config import ServerConfig
         from server.dependencies import get_current_user, require_admin
+        from server.routes import admin as admin_routes
 
         app = FastAPI()
         if backend is None:
@@ -350,7 +346,7 @@ class TestPydanticModelValidation:
         """Uppercase executor_id fails Pydantic validation."""
         from server.routes.executors import ExecutorRegisterRequest
 
-        with pytest.raises(Exception):  # ValidationError
+        with pytest.raises(ValidationError):
             ExecutorRegisterRequest(
                 executor_id="Jump-1",
                 csr_pem="-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
@@ -360,7 +356,7 @@ class TestPydanticModelValidation:
         """Underscore in executor_id fails Pydantic validation."""
         from server.routes.executors import ExecutorRegisterRequest
 
-        with pytest.raises(Exception):  # ValidationError
+        with pytest.raises(ValidationError):
             ExecutorRegisterRequest(
                 executor_id="jump_1",
                 csr_pem="-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
@@ -370,7 +366,7 @@ class TestPydanticModelValidation:
         """Leading hyphen fails Pydantic validation."""
         from server.routes.executors import ExecutorRegisterRequest
 
-        with pytest.raises(Exception):  # ValidationError
+        with pytest.raises(ValidationError):
             ExecutorRegisterRequest(
                 executor_id="-jump1",
                 csr_pem="-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
@@ -380,7 +376,7 @@ class TestPydanticModelValidation:
         """Trailing hyphen fails Pydantic validation."""
         from server.routes.executors import ExecutorRegisterRequest
 
-        with pytest.raises(Exception):  # ValidationError
+        with pytest.raises(ValidationError):
             ExecutorRegisterRequest(
                 executor_id="jump1-",
                 csr_pem="-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
@@ -390,7 +386,7 @@ class TestPydanticModelValidation:
         """Single character executor_id fails Pydantic validation."""
         from server.routes.executors import ExecutorRegisterRequest
 
-        with pytest.raises(Exception):  # ValidationError
+        with pytest.raises(ValidationError):
             ExecutorRegisterRequest(
                 executor_id="a",
                 csr_pem="-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
@@ -400,7 +396,7 @@ class TestPydanticModelValidation:
         """65-character executor_id fails Pydantic validation."""
         from server.routes.executors import ExecutorRegisterRequest
 
-        with pytest.raises(Exception):  # ValidationError
+        with pytest.raises(ValidationError):
             ExecutorRegisterRequest(
                 executor_id="a" * 65,
                 csr_pem="-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
@@ -420,7 +416,7 @@ class TestPydanticModelValidation:
         """SQL injection in executor_id fails Pydantic validation."""
         from server.routes.executors import ExecutorRegisterRequest
 
-        with pytest.raises(Exception):  # ValidationError
+        with pytest.raises(ValidationError):
             ExecutorRegisterRequest(
                 executor_id="jump1'; DROP TABLE; --",
                 csr_pem="-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",

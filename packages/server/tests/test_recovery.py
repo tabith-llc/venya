@@ -4,9 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.routes import recovery as recovery_routes
+from starlette.testclient import TestClient
 
 
 def _create_test_app(backend=None, pepper="test-pepper"):
@@ -27,7 +26,6 @@ def _create_test_app(backend=None, pepper="test-pepper"):
         async def dispatch(self, request: Request, call_next):
             response = await call_next(request)
             # Re-raise HTTPException so FastAPI handles it properly
-            from fastapi import HTTPException
             if hasattr(request.state, "http_exception"):
                 raise request.state.http_exception
             return response
@@ -110,8 +108,8 @@ class TestRecovery:
             def first(self):
                 self._call_count += 1
                 if self._call_count == 1:
-                    return None  # No matching user
-                return None
+                    return  # No matching user
+                return
 
         db.query.return_value = MockQuery()
 

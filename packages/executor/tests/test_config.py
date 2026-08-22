@@ -1,9 +1,7 @@
 """Tests for executor configuration loading and serialization."""
 
-
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -137,6 +135,10 @@ class TestAuditForwarderConfig:
     def test_custom_request_timeout_seconds(self):
         cfg = AuditForwarderConfig(request_timeout_seconds=30)
         assert cfg.request_timeout_seconds == 30
+
+    def test_default_spool_path(self):
+        cfg = AuditForwarderConfig()
+        assert cfg.spool_path is None
 
     def test_default_local_retention_days(self):
         cfg = AuditForwarderConfig()
