@@ -49,7 +49,11 @@ class CoreFactory:
         Returns:
             Configured CoreFactory instance.
         """
-        database_url = config_dict["database_url"]
+        database_url = config_dict.get("database_url")
+        if database_url is None:
+            raise CoreFactoryError(
+                "config_dict missing required key: 'database_url'"
+            )
         passphrase = config_dict.get("passphrase")
         if isinstance(passphrase, str):
             passphrase = passphrase.encode("utf-8")
@@ -100,19 +104,19 @@ class CoreFactory:
         Raises:
             CoreFactoryError: If KEK is not available.
         """
+        backend = Backend(self._config)
         if self._kek is None:
-            # Try to derive from config passphrase
+            # Resolve the KEK from the config passphrase using the persisted
+            # salt (C-11). bootstrap_kek() reads/creates the salt and also
+            # populates backend.config.kek.
             if self._config.passphrase is not None:
-                from .encryption import derive_kek
-
-                self._kek, _ = derive_kek(self._config.passphrase)
+                self._kek = backend.bootstrap_kek()
             else:
                 raise CoreFactoryError(
                     "KEK not available: provide either a passphrase or call "
                     "with_kek() before build()"
                 )
 
-        backend = Backend(self._config)
         rate_limiter = self._rate_limiter or RateLimiter()
 
         return Core(

@@ -8,6 +8,7 @@ No disk residency. Linux-only.
 import ctypes
 import logging
 import os
+from collections.abc import Callable
 
 from .base import InjectionResult, InjectionStrategy
 
@@ -43,7 +44,7 @@ class MemfdStrategy(InjectionStrategy):
         memfd_create.restype = ctypes.c_int
 
         extra_fds: list[int] = []
-        cleanup_funcs: list[callable] = []  # type: ignore[type-arg]
+        cleanup_funcs: list[Callable[[], None]] = []
 
         for i, bundle in enumerate(secrets):
             fd = memfd_create(b"venya_secret\x00", MFD_CLOEXEC | MFD_ALLOW_SEALING)

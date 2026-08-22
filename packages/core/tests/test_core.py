@@ -109,10 +109,10 @@ class TestCoreGet:
         core.backend = backend
 
         with pytest.raises(CoreAccessError):
-            core.get("test-key", caller="executor", user_id="user1", role_ids=["admin"])
+            core.get("test-key", caller="executor", user_id="user1", role_names=["admin"])
 
-    def test_get_uses_role_join_when_role_ids_provided(self):
-        """get() uses role-based join when role_ids is provided."""
+    def test_get_uses_role_join_when_role_names_provided(self):
+        """get() uses role-based join when role_names is provided."""
         core = self._make_core()
         mock_secret = MagicMock()
         mock_secret.id = 1
@@ -142,14 +142,14 @@ class TestCoreGet:
         ]
         session.query.return_value.join.return_value.filter.return_value = mock_query
 
-        result = core.get("test-key", user_id="user1", role_ids=["admin"])
+        result = core.get("test-key", user_id="user1", role_names=["admin"])
         assert result == "\u2022" * 8
 
         # Verify join was called (role-based lookup)
         session.query.return_value.join.assert_called()
 
-    def test_get_uses_ownership_fallback_when_no_role_ids(self):
-        """get() uses ownership fallback when role_ids is not provided."""
+    def test_get_uses_ownership_fallback_when_no_role_names(self):
+        """get() uses ownership fallback when role_names is not provided."""
         core = self._make_core()
         mock_secret = MagicMock()
         mock_secret.id = 1
@@ -212,7 +212,7 @@ class TestCorePut:
             record = core.put("test-key", b"test-value", "user1", ["admin"], "v1")
 
             assert record.key == "test-key"
-            assert record.role_ids == ["admin"]
+            assert record.role_names == ["admin"]
             assert len(session.add.call_args_list) == 2  # Secret + SecretRole
             session.commit.assert_called_once()
 
@@ -364,7 +364,7 @@ class TestCoreList:
                 key_version_id=mock_secret.key_version_id,
                 created_by=mock_secret.created_by,
                 created_at=mock_secret.created_at,
-                role_ids=[],
+                role_names=[],
             )
         ]):
             records = core.list()

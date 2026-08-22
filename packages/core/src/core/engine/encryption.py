@@ -49,7 +49,7 @@ def derive_kek(passphrase: bytes, salt: bytes | None = None) -> tuple[bytes, byt
         salt: Optional salt (16 bytes). If not provided, a random salt is generated.
 
     Returns:
-        Tuple of (KEK, salt) — both 32 bytes and 16 bytes respectively.
+        Tuple of (KEK, salt): KEK is 32 bytes, salt is 16 bytes.
     """
     if salt is None:
         salt = os.urandom(ARGON2_SALT_LEN)

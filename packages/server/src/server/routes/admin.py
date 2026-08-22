@@ -247,7 +247,7 @@ async def admin_enroll(
         db.flush()
 
         # Create enrollment token
-        token, plaintext = em.create_enrollment_token(user.id)
+        token, plaintext = em.create_enrollment_token(user.user_id)
         config = getattr(request.app.state, "config", None)
         if config and config.recovery_code_pepper:
             token.binding_hash = compute_binding_hash(req.user_id, plaintext, config.recovery_code_pepper)
@@ -320,7 +320,7 @@ async def admin_create_user(
             db.add(membership)
 
         # Create enrollment token
-        token, plaintext = em.create_enrollment_token(user.id)
+        token, plaintext = em.create_enrollment_token(user.user_id)
         config = getattr(request.app.state, "config", None)
         if config and config.recovery_code_pepper:
             token.binding_hash = compute_binding_hash(req.username, plaintext, config.recovery_code_pepper)
@@ -377,10 +377,10 @@ async def admin_remove(
         db.query(RoleMember).filter(RoleMember.user_id == user_id).delete()
         # Remove sessions
         db.query(Session).filter(Session.user_id == user_id).delete()
-        # Remove enrollment tokens (user_id is integer FK)
+        # Remove enrollment tokens (user_id is String FK to users.user_id)
         from core.iam.models import EnrollmentToken
 
-        db.query(EnrollmentToken).filter(EnrollmentToken.user_id == user.id).delete()
+        db.query(EnrollmentToken).filter(EnrollmentToken.user_id == user.user_id).delete()
         # Remove the user
         db.delete(user)
         db.commit()
@@ -509,7 +509,7 @@ async def admin_key_version_rotate(
         # Get current active key version
         active_version = (
             db.query(KeyVersion)
-            .filter(KeyVersion.active == True)  # noqa: E712
+            .filter(KeyVersion.active.is_(True))
             .order_by(KeyVersion.created_at.desc())
             .first()
         )
@@ -1206,19 +1206,19 @@ async def admin_re_enroll(
             db.query(WebAuthnCredential)
             .filter(
                 WebAuthnCredential.user_id == user.user_id,
-                WebAuthnCredential.is_active == True,  # noqa: E712
+                WebAuthnCredential.is_active.is_(True),
             )
             .update({"is_active": False}, synchronize_session="fetch")
         )
 
         # Revoke all active enrollment tokens
-        tokens_revoked = em.revoke_all_active_tokens(user.id)
+        tokens_revoked = em.revoke_all_active_tokens(user.user_id)
 
         # Set user status to pending_enrollment
         user.status = "pending_enrollment"
 
         # Generate new enrollment token
-        token, plaintext = em.create_enrollment_token(user.id)
+        token, plaintext = em.create_enrollment_token(user.user_id)
         config = getattr(request.app.state, "config", None)
         if config and config.recovery_code_pepper:
             token.binding_hash = compute_binding_hash(user_id, plaintext, config.recovery_code_pepper)
@@ -1278,7 +1278,7 @@ async def admin_list_user_tokens(
 
     tokens = (
         db.query(EnrollmentToken)
-        .filter(EnrollmentToken.user_id == user.id)
+        .filter(EnrollmentToken.user_id == user.user_id)
         .order_by(EnrollmentToken.created_at.desc())
         .all()
     )
@@ -1326,10 +1326,10 @@ async def admin_create_user_token(
             )
 
         # Revoke existing active tokens
-        tokens_revoked = em.revoke_all_active_tokens(user.id)
+        tokens_revoked = em.revoke_all_active_tokens(user.user_id)
 
         # Create new token
-        token, plaintext = em.create_enrollment_token(user.id)
+        token, plaintext = em.create_enrollment_token(user.user_id)
         config = getattr(request.app.state, "config", None)
         if config and config.recovery_code_pepper:
             token.binding_hash = compute_binding_hash(user_id, plaintext, config.recovery_code_pepper)

@@ -259,6 +259,8 @@ class TestSecureMemoryIsolation:
 
     def test_core_factory_does_not_enable_mlock_by_default(self):
         """CoreFactory should not enable mlock by default."""
+        from unittest.mock import MagicMock, patch
+
         import core.engine.factory
         from core.engine.backend import BackendConfig
 
@@ -267,7 +269,15 @@ class TestSecureMemoryIsolation:
             passphrase=b"test-passphrase-for-testing",
         )
         factory = core.engine.factory.CoreFactory(config)
-        core = factory.build()
+        # build() now resolves the KEK from the persisted salt (C-11); supply a
+        # deterministic salt via a mocked session so no real DB is needed.
+        with patch("core.engine.factory.Backend.get_session") as mock_gs:
+            mock_session = MagicMock()
+            mock_session.query.return_value.filter.return_value.first.return_value = MagicMock(
+                value=b"\x33" * 16
+            )
+            mock_gs.return_value = mock_session
+            core = factory.build()
 
         # The core should be built without mlock — SecureBuffer is not used
         # by the core facade, so this is implicitly verified by the fact
@@ -278,7 +288,7 @@ class TestSecureMemoryIsolation:
     def test_core_does_not_mlock_by_default(self):
         """Core operations should not lock memory by default."""
         import core.engine.factory
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, patch
         from core.engine.backend import BackendConfig
         from core.engine.core import Caller
 
@@ -287,7 +297,15 @@ class TestSecureMemoryIsolation:
             passphrase=b"isolation-test-passphrase",
         )
         factory = core.engine.factory.CoreFactory(config)
-        core = factory.build()
+        # build() now resolves the KEK from the persisted salt (C-11); supply a
+        # deterministic salt via a mocked session so no real DB is needed.
+        with patch("core.engine.factory.Backend.get_session") as mock_gs:
+            mock_session = MagicMock()
+            mock_session.query.return_value.filter.return_value.first.return_value = MagicMock(
+                value=b"\x33" * 16
+            )
+            mock_gs.return_value = mock_session
+            core = factory.build()
 
         # Mock the backend so we don't need a real DB connection
         # The test is about verifying mlock is NOT used, not about actual storage
@@ -302,7 +320,7 @@ class TestSecureMemoryIsolation:
             key="test_secret",
             value=b"test_secret_value_for_isolation",
             user_id="test_user",
-            role_ids=["test_role"],
+            role_names=["test_role"],
             key_version_id="kv_001",
         )
         assert record is not None

@@ -365,23 +365,3 @@ class ServerConfig(BaseSettings):
             data = tomllib.load(f)
 
         return cls(**data)
-
-    def save_file(self, path: str | Path) -> None:
-        """Save current configuration to a TOML file.
-
-        Args:
-            path: Path to write config file.
-        """
-        try:
-            import tomllib
-        except ImportError:
-            import tomli_w as tomli_w  # type: ignore[import-not-found]
-
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        import json
-
-        data = json.loads(self.model_dump_json())
-        with open(path, "w") as f:
-            tomli_w.dump(data, f)

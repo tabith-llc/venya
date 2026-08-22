@@ -393,3 +393,23 @@ class AdminCertRevocation(Base):
     serial_number = Column(String(64), nullable=False, index=True)
     revoked_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     reason = Column(String(64))
+
+
+class VenyaConfig(Base):
+    """Global key-material config (C-11).
+
+    Stores deployment-wide key parameters that must be stable across process
+    restarts. Currently holds the Argon2 ``kek_salt`` used to derive the KEK
+    from the master passphrase: written once on first initialization, read on
+    every subsequent startup so the KEK is reproducible. Without a persisted
+    salt the same passphrase would derive a different KEK on each start and
+    previously-stored secrets would be unrecoverable.
+    """
+
+    __tablename__ = "venya_config"
+
+    key = Column(String(64), primary_key=True, nullable=False)
+    value = Column(LargeBinary, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )

@@ -3,7 +3,6 @@
 DISABLED — browser auth unmounted as of 2026-08-18.
 Code retained for future web UI re-introduction.
 Elevation endpoints moved to auth_elevation.py (bearer auth).
-"""
 
 Parallel auth endpoints that use Fido2Manager but serialize for browser
 consumption via the browser adapter. Tokens are stored in HttpOnly cookies.

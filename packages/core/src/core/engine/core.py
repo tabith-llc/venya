@@ -32,7 +32,7 @@ class SecretRecord:
     key_version_id: str
     created_by: str
     created_at: datetime
-    role_ids: list[str] = field(default_factory=list)
+    role_names: list[str] = field(default_factory=list)
 
 
 class CoreError(Exception):
@@ -71,7 +71,7 @@ class Core:
         caller: str = "human",
         unmask: bool = False,
         user_id: str | None = None,
-        role_ids: list[str] | None = None,
+        role_names: list[str] | None = None,
     ) -> str:
         """Retrieve a secret.
 
@@ -80,7 +80,7 @@ class Core:
             caller: Type of caller (human or executor).
             unmask: Whether to return plaintext (requires re-auth for humans).
             user_id: ID of the requesting user (required).
-            role_ids: Roles to check access against.
+            role_names: Role names to check access against.
 
         Returns:
             Masked value (default) or plaintext (if unmask=True for humans,
@@ -98,7 +98,7 @@ class Core:
         session = self.backend.get_session()
         try:
             # Look up the secret with scoping
-            if role_ids:
+            if role_names:
                 # Role-based join: find secret accessible via provided roles
                 secret = (
                     session.query(Secret)
@@ -106,7 +106,7 @@ class Core:
                     .join(Role, Role.id == SecretRole.role_id)
                     .filter(
                         Secret.key == secret_key,
-                        Role.name.in_(role_ids),
+                        Role.name.in_(role_names),
                     )
                     .first()
                 )
@@ -124,8 +124,8 @@ class Core:
             if secret is None:
                 raise CoreAccessError(f"Secret not found: {secret_key}")
 
-            # Check role access if role_ids provided
-            if role_ids:
+            # Check role access if role_names provided
+            if role_names:
                 secret_roles = (
                     session.query(SecretRole)
                     .filter(SecretRole.secret_id == secret.id)
@@ -136,7 +136,7 @@ class Core:
                 # Get role IDs for the named roles
                 named_roles = (
                     session.query(Role.id)
-                    .filter(Role.name.in_(role_ids))
+                    .filter(Role.name.in_(role_names))
                     .all()
                 )
                 named_role_ids = {r.id for r in named_roles}
@@ -166,7 +166,7 @@ class Core:
         key: str,
         value: bytes,
         user_id: str,
-        role_ids: list[str],
+        role_names: list[str],
         key_version_id: str,
     ) -> SecretRecord:
         """Store a secret.
@@ -175,7 +175,7 @@ class Core:
             key: Secret key.
             value: Secret value as bytes.
             user_id: ID of the user storing the secret.
-            role_ids: Roles to scope the secret to.
+            role_names: Role names to scope the secret to.
             key_version_id: Key version to use for encryption.
 
         Returns:
@@ -185,7 +185,7 @@ class Core:
             CoreAccessError: If user doesn't have write access.
         """
 
-        if not role_ids:
+        if not role_names:
             raise CoreAccessError("Secret must be scoped to at least one role")
 
         if self.kek is None:
@@ -210,7 +210,7 @@ class Core:
             session.flush()
 
             # Link roles
-            for role_name in role_ids:
+            for role_name in role_names:
                 role = (
                     session.query(Role)
                     .filter(Role.name == role_name)
@@ -231,7 +231,7 @@ class Core:
                 key_version_id=secret.key_version_id,
                 created_by=secret.created_by,
                 created_at=secret.created_at,
-                role_ids=role_ids,
+                role_names=role_names,
             )
 
             return record
@@ -292,14 +292,14 @@ class Core:
         self,
         prefix: str | None = None,
         user_id: str | None = None,
-        role_ids: list[str] | None = None,
+        role_names: list[str] | None = None,
     ) -> list[SecretRecord]:
         """List secrets, optionally filtered by prefix.
 
         Args:
             prefix: Optional key prefix to filter by.
             user_id: ID of the requesting user.
-            role_ids: Roles to filter secrets by.
+            role_names: Role names to filter secrets by.
 
         Returns:
             List of secret records the user has read access to.
@@ -312,11 +312,11 @@ class Core:
             if prefix:
                 query = query.filter(Secret.key.like(f"{prefix}%"))
 
-            if role_ids:
+            if role_names:
                 # Get role IDs for the named roles
                 named_roles = (
                     session.query(Role.id)
-                    .filter(Role.name.in_(role_ids))
+                    .filter(Role.name.in_(role_names))
                     .all()
                 )
                 named_role_ids = {r.id for r in named_roles}
@@ -350,7 +350,7 @@ class Core:
                     key_version_id=secret.key_version_id,
                     created_by=secret.created_by,
                     created_at=secret.created_at,
-                    role_ids=roles_by_secret.get(secret.id, []),
+                    role_names=roles_by_secret.get(secret.id, []),
                 ))
 
             return records

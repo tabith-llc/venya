@@ -14,7 +14,6 @@ set -euo pipefail
 # Environment variables:
 #   VENYA_INSTALL_DIR   - Install location (default: /opt/venya)
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
-#   VENYA_PASSWORD      - OS venya user password (prompts if unset)
 #   VENYA_TARBALL       - URL of the tarball to install (auto-detected if on same host)
 #   VENYA_EXECUTOR_ID              - Executor ID (default: jump-1)
 #   VENYA_SERVER_URL               - Core server URL (default: https://venya-core)
@@ -37,19 +36,11 @@ venya_check_existing
 
 info "Installing Venya Executor to $INSTALL_DIR"
 
-# --- Create venya user (secure password handling) ---
-venya_create_user true
+# --- Create venya service account (no password, nologin, locked) ---
+venya_create_user
 
 # --- Install system packages ---
 venya_install_system_pkgs curl sudo build-essential
-
-# --- Install Rust ---
-if ! command -v rustc &>/dev/null; then
-    info "Installing Rust..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2>&1
-else
-    info "Rust already installed: $(rustc --version)"
-fi
 
 # --- Install Rust for venya user ---
 SU_CARGO="/home/venya/.cargo/bin/cargo"
@@ -58,9 +49,7 @@ if [ ! -f "$SU_CARGO" ]; then
     sudo -u venya bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y" > /dev/null 2>&1
 fi
 
-# --- Install uv (root + venya user) ---
-venya_install_uv
-venya_source_paths true
+# --- Install uv for venya user ---
 venya_install_uv_user
 
 # --- Download and extract tarball ---
@@ -97,17 +86,10 @@ venya_apply_code_fixes
 # --- Create directories ---
 venya_create_directories
 
-# --- Harden permissions on sensitive paths (executor-specific) ---
-if [ -d /etc/venya/executor ]; then
-    chmod 700 /etc/venya/executor
-fi
-if [ -f /etc/venya/executor.toml ]; then
-    chmod 600 /etc/venya/executor.toml
-fi
-if [ -d /etc/venya/executor ]; then
-    find /etc/venya/executor -name '*.key' -exec chmod 600 {} \; 2>/dev/null || true
-    find /etc/venya/executor -name '*.crt' -exec chmod 644 {} \; 2>/dev/null || true
-fi
+# --- Harden log dir (executor-specific) ---
+# NOTE: /etc/venya/executor.toml + /etc/venya/executor creds are hardened AFTER they are
+# written (see "Harden executor credentials" block near the end). Hardening them here was
+# a no-op — the dir/files do not exist yet at this point.
 chmod 750 /var/log/venya
 chown venya:adm /var/log/venya 2>/dev/null || chown venya:venya /var/log/venya
 
@@ -202,6 +184,18 @@ tls_verify = true
 EOF
     info "Bootstrap enrollment token configured"
 fi
+
+# --- Harden executor credentials (executor-specific) ---
+# Runs AFTER the config + any registered certs exist. chown venya:venya (not just chmod
+# 600): venya-executor.service runs User=venya with ReadOnlyPaths=/etc/venya and must READ
+# these — a root-owned 600 file would EACCES and break mTLS.
+chown venya:venya /etc/venya/executor.toml
+chmod 600 /etc/venya/executor.toml
+chown -R venya:venya /etc/venya/executor
+chmod 700 /etc/venya/executor
+find /etc/venya/executor -name '*.key' -exec   chmod 600 {} \; 2>/dev/null || true
+find /etc/venya/executor -name '*.crt' -exec   chmod 644 {} \; 2>/dev/null || true
+info "Executor credentials hardened (venya:venya, dir 700, key 600, cert 644)"
 
 # --- Install systemd service and mount unit (executor-specific) ---
 info "Installing systemd service..."
