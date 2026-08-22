@@ -35,6 +35,9 @@ curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo bash
 | `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-core-install.tar.gz` | Tarball URL |
 | `CORE_HOSTNAME` | `$(hostname)` | Hostname for TLS/Caddy (auto-detected by default) |
 | `TLS_MODE` | `internal` | Caddy TLS mode (`internal`, `manual`, `email`) |
+| `VENYA_ADMIN_MTLS_ENABLED` | `true` | Enforce admin mTLS (admin client cert required) |
+| `VENYA_ADMIN_IDENTITY` | (empty) | Admin CN identity for the admin CA |
+| `VENYA_ADMIN_CA_PASSPHRASE` | (empty) | Passphrase protecting the admin CA key |
 
 ### `install-venya-executor.sh`
 
@@ -63,7 +66,8 @@ curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompts |
 | `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-executor-install.tar.gz` | Tarball URL |
 | `VENYA_EXECUTOR_ID` | `jump-1` | Executor identifier |
-| `VENYA_SERVER_URL` | `http://localhost:8080` | Core server URL |
+| `VENYA_SERVER_URL` | `https://venya-core` | Core server URL |
+| `VENYA_EXECUTOR_ENROLLMENT_TOKEN` | (empty) | Bootstrap enrollment token — enables mTLS cert registration and heartbeat bootstrap at install time |
 
 ### `install-debug-tools.sh`
 
@@ -85,7 +89,9 @@ cd /media/dust/dust-ext1/projects/venya-installer
 ./create-tarball-and-serve.sh
 ```
 
-This creates two tarballs (`venya-core-install.tar.gz` and `venya-executor-install.tar.gz`), copies all install scripts to the serving directory, and starts an HTTP server on port 8080.
+This creates two tarballs (`venya-core-install.tar.gz` and `venya-executor-install.tar.gz`), copies the install scripts **and the shared `venya-common.sh` library** to the serving directory, and starts an HTTP server on port 8080.
+
+The piped install one-liners below work because the install scripts self-fetch `venya-common.sh` from the same origin as `VENYA_TARBALL` when it is not next to the script (no-`$0` case, i.e. `curl | sudo bash`).
 
 ### Install on VMs
 

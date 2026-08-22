@@ -5,6 +5,7 @@ user info to request state. Supports mTLS-based admin endpoint
 authentication via Caddy-layer client certificate verification.
 """
 
+import base64
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -134,7 +135,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         When admin_mtls is enabled and the path is an admin route, this
         performs a 7-step validation chain:
         1. Check X-Client-Verified sentinel header
-        2. Parse X-Client-Cert PEM header
+        2. Parse X-Client-Cert-Base64 header (base64-encoded DER)
         3. Verify cert signature against admin CA
         4. Verify cert not expired (±5min clock skew)
         5. Extract identity (SAN DNS or CN)
@@ -164,42 +165,24 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Admin access requires valid client certificate"},
             )
 
-        # Step 2: Parse X-Client-Cert PEM header
-        cert_pem_header = request.headers.get("x-client-cert")
-        if not cert_pem_header:
-            logger.warning("Admin route %s: missing X-Client-Cert header", path)
+        # Step 2: Parse X-Client-Cert-Base64 header (base64-encoded DER)
+        cert_der_header = request.headers.get("x-client-cert-base64")
+        if not cert_der_header:
+            logger.warning("Admin route %s: missing X-Client-Cert-Base64 header", path)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": "Admin access requires valid client certificate"},
             )
 
-        # Decode PEM header (may have spaces/newlines removed by HTTP layer)
-        cert_pem_data = cert_pem_header.encode("utf-8")
-        # Reconstruct PEM format if needed
-        if b"-----BEGIN CERTIFICATE-----" not in cert_pem_data:
-            # Try adding PEM headers
-            try:
-                # The header might be base64-encoded DER or raw PEM without headers
-                # Try to decode as base64 first
-                import base64
-
-                der_bytes = base64.b64decode(cert_pem_data)
-                cert = x509.load_der_x509_certificate(der_bytes)
-            except Exception:
-                logger.warning("Admin route %s: failed to parse X-Client-Cert header", path)
-                return JSONResponse(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    content={"detail": "Admin access requires valid client certificate"},
-                )
-        else:
-            try:
-                cert = x509.load_pem_x509_certificate(cert_pem_data)
-            except Exception:
-                logger.warning("Admin route %s: failed to parse X-Client-Cert PEM", path)
-                return JSONResponse(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    content={"detail": "Admin access requires valid client certificate"},
-                )
+        try:
+            der_bytes = base64.b64decode(cert_der_header)
+            cert = x509.load_der_x509_certificate(der_bytes)
+        except Exception:
+            logger.warning("Admin route %s: failed to parse X-Client-Cert-Base64 header", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
 
         # Step 3: Verify cert signature against admin CA (supports PEM bundle)
         admin_ca_cert_path = config.admin_mtls.ca_cert
