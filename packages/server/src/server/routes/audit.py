@@ -53,7 +53,7 @@ async def audit_list(
 ) -> AuditListResponse:
     """Query audit log.
 
-    Requires admin or auditor permission.
+    Requires admin permission.
     """
     from datetime import datetime, timedelta, timezone
 
