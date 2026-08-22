@@ -26,8 +26,18 @@ EXECUTOR_ID="${VENYA_EXECUTOR_ID:-jump-1}"
 SERVER_URL="${VENYA_SERVER_URL:-https://venya-core}"
 
 # --- Source common library ---
+# Direct execution: the library sits next to the script. Piped execution
+# (curl | sudo bash): $0 has no directory — fetch from the tarball origin.
 COMMON_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$COMMON_DIR/venya-common.sh"
+if [ -f "$COMMON_DIR/venya-common.sh" ]; then
+    source "$COMMON_DIR/venya-common.sh"
+else
+    FETCH_DIR="$(mktemp -d)"
+    trap 'rm -rf "$FETCH_DIR"' EXIT
+    echo "Fetching shared installer library from ${TARBALL_URL%/*}/venya-common.sh" >&2
+    curl -fsSL "${TARBALL_URL%/*}/venya-common.sh" -o "$FETCH_DIR/venya-common.sh" || exit 1
+    source "$FETCH_DIR/venya-common.sh"
+fi
 
 venya_print_colors
 venya_check_root

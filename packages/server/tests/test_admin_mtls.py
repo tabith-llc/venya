@@ -8,6 +8,7 @@ Tests cover:
 - Middleware mTLS validation chain (Phase 2)
 """
 
+import base64
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -497,21 +498,21 @@ class TestAdminMTLSMiddleware:
     """Tests for admin mTLS middleware validation chain."""
 
     def test_header_injection_rejected(self, admin_ca_dir, admin_ca_security):
-        """Forged X-Client-Cert without Caddy verification should be rejected."""
+        """Forged X-Client-Cert-Base64 without Caddy verification should be rejected."""
         os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
-        cert_pem_str = cert_pem.decode("utf-8")
+        cert, _, _ = manager.sign_admin_cert("dust@montana")
+        cert_base64 = base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
 
         client = TestClient(app, raise_server_exceptions=False)
-        # Send X-Client-Cert but NOT X-Client-Verified
+        # Send X-Client-Cert-Base64 but NOT X-Client-Verified
         resp = client.get(
             "/api/v1/admin/test",
-            headers={"X-Client-Cert": cert_pem_str},
+            headers={"X-Client-Cert-Base64": cert_base64},
         )
         assert resp.status_code == 403
         assert "client certificate" in resp.json()["detail"].lower()
@@ -535,8 +536,8 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
-        cert_pem_str = cert_pem.decode("utf-8")
+        cert, _, _ = manager.sign_admin_cert("dust@montana")
+        cert_base64 = base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
 
@@ -544,7 +545,7 @@ class TestAdminMTLSMiddleware:
         resp = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": cert_pem_str,
+                "X-Client-Cert-Base64": cert_base64,
                 "X-Client-Verified": "true",
             },
         )
@@ -593,7 +594,7 @@ class TestAdminMTLSMiddleware:
             .sign(ca_key, hashes.SHA256())
         )
 
-        expired_pem = expired_cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+        expired_base64 = base64.b64encode(expired_cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
 
@@ -601,7 +602,7 @@ class TestAdminMTLSMiddleware:
         resp = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": expired_pem,
+                "X-Client-Cert-Base64": expired_base64,
                 "X-Client-Verified": "true",
             },
         )
@@ -614,8 +615,8 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        _cert, _, cert_pem = manager.sign_admin_cert("rogue@attacker.internal")
-        cert_pem_str = cert_pem.decode("utf-8")
+        cert, _, _ = manager.sign_admin_cert("rogue@attacker.internal")
+        cert_base64 = base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         # Only dust@montana is known
         app = _create_admin_mtls_app(
@@ -628,7 +629,7 @@ class TestAdminMTLSMiddleware:
         resp = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": cert_pem_str,
+                "X-Client-Cert-Base64": cert_base64,
                 "X-Client-Verified": "true",
             },
         )
@@ -675,7 +676,7 @@ class TestAdminMTLSMiddleware:
             .sign(ca_key, hashes.SHA256())
         )
 
-        cert_pem_str = cert_with_san.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+        cert_san_base64 = base64.b64encode(cert_with_san.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
 
@@ -683,7 +684,7 @@ class TestAdminMTLSMiddleware:
         resp = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": cert_pem_str,
+                "X-Client-Cert-Base64": cert_san_base64,
                 "X-Client-Verified": "true",
             },
         )
@@ -696,8 +697,8 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
-        cert_pem_str = cert_pem.decode("utf-8")
+        cert, _, _ = manager.sign_admin_cert("dust@montana")
+        cert_base64 = base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         # We need a backend with a DB session for the revocation check.
         # Since we can't easily set up a full backend in this test,
@@ -720,7 +721,7 @@ class TestAdminMTLSMiddleware:
         resp = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": cert_pem_str,
+                "X-Client-Cert-Base64": cert_base64,
                 "X-Client-Verified": "true",
             },
         )
@@ -759,8 +760,8 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
-        cert_pem_str = cert_pem.decode("utf-8")
+        cert, _, _ = manager.sign_admin_cert("dust@montana")
+        cert_base64 = base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
 
@@ -768,7 +769,7 @@ class TestAdminMTLSMiddleware:
         resp = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": cert_pem_str,
+                "X-Client-Cert-Base64": cert_base64,
                 "X-Client-Verified": "false",  # Wrong value
             },
         )
@@ -1148,8 +1149,8 @@ class TestAdminMTLSConcurrency:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
-        cert_pem_str = cert_pem.decode("utf-8")
+        cert, _, _ = manager.sign_admin_cert("dust@montana")
+        cert_base64 = base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         app = _create_concurrent_test_app(admin_ca_dir)
 
@@ -1160,7 +1161,7 @@ class TestAdminMTLSConcurrency:
             resp = client.get(
                 "/api/v1/admin/test",
                 headers={
-                    "X-Client-Cert": cert_pem_str,
+                    "X-Client-Cert-Base64": cert_base64,
                     "X-Client-Verified": "true",
                 },
             )
@@ -1193,8 +1194,8 @@ class TestAdminCARotation:
         os.environ["OLD_CA_PASSPHRASE"] = "test_passphrase"
         old_ca = AdminCAManager(old_ca_dir, old_ca_security)
         old_ca.initialize()
-        _old_cert, _old_key_pem, old_cert_pem = old_ca.sign_admin_cert("admin@old")
-        old_cert_pem_str = old_cert_pem.decode("utf-8")
+        old_cert, _old_key_pem, _old_cert_pem = old_ca.sign_admin_cert("admin@old")
+        old_cert_base64 = base64.b64encode(old_cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         # 2. Create new CA
         new_ca_dir = Path(admin_ca_dir) / "new-ca"
@@ -1202,8 +1203,8 @@ class TestAdminCARotation:
         os.environ["NEW_CA_PASSPHRASE"] = "test_passphrase"
         new_ca = AdminCAManager(new_ca_dir, new_ca_security)
         new_ca.initialize()
-        _new_cert, _new_key_pem, new_cert_pem = new_ca.sign_admin_cert("admin@new")
-        new_cert_pem_str = new_cert_pem.decode("utf-8")
+        new_cert, _new_key_pem, _new_cert_pem = new_ca.sign_admin_cert("admin@new")
+        new_cert_base64 = base64.b64encode(new_cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         # 3. Create PEM bundle (old + new)
         bundle_path = Path(admin_ca_dir) / "admin-ca-bundle.crt"
@@ -1241,7 +1242,7 @@ class TestAdminCARotation:
         resp_old = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": old_cert_pem_str,
+                "X-Client-Cert-Base64": old_cert_base64,
                 "X-Client-Verified": "true",
             },
         )
@@ -1252,7 +1253,7 @@ class TestAdminCARotation:
         resp_new = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": new_cert_pem_str,
+                "X-Client-Cert-Base64": new_cert_base64,
                 "X-Client-Verified": "true",
             },
         )
@@ -1267,7 +1268,7 @@ class TestAdminCARotation:
         resp_old_after = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": old_cert_pem_str,
+                "X-Client-Cert-Base64": old_cert_base64,
                 "X-Client-Verified": "true",
             },
         )
@@ -1278,7 +1279,7 @@ class TestAdminCARotation:
         resp_new_after = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": new_cert_pem_str,
+                "X-Client-Cert-Base64": new_cert_base64,
                 "X-Client-Verified": "true",
             },
         )
@@ -1293,8 +1294,8 @@ class TestAdminCARotation:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
-        cert_pem_str = cert_pem.decode("utf-8")
+        cert, _, _ = manager.sign_admin_cert("dust@montana")
+        cert_base64 = base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         # Create a bundle with just one cert
         bundle_path = Path(admin_ca_dir) / "single-cert-bundle.crt"
@@ -1323,7 +1324,7 @@ class TestAdminCARotation:
         resp = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Cert": cert_pem_str,
+                "X-Client-Cert-Base64": cert_base64,
                 "X-Client-Verified": "true",
             },
         )
@@ -1345,16 +1346,16 @@ class TestAdminCARotation:
             ca_dirs.append((ca, ca_dir))
 
         # Create a cert from CA 1
-        _cert1, _, cert1_pem = ca_dirs[0][0].sign_admin_cert("admin@ca1")
-        cert1_pem_str = cert1_pem.decode("utf-8")
+        cert1, _, _ = ca_dirs[0][0].sign_admin_cert("admin@ca1")
+        cert1_base64 = base64.b64encode(cert1.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         # Create a cert from CA 2
-        _cert2, _, cert2_pem = ca_dirs[1][0].sign_admin_cert("admin@ca2")
-        cert2_pem_str = cert2_pem.decode("utf-8")
+        cert2, _, _ = ca_dirs[1][0].sign_admin_cert("admin@ca2")
+        cert2_base64 = base64.b64encode(cert2.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         # Create a cert from CA 3
-        _cert3, _, cert3_pem = ca_dirs[2][0].sign_admin_cert("admin@ca3")
-        cert3_pem_str = cert3_pem.decode("utf-8")
+        cert3, _, _ = ca_dirs[2][0].sign_admin_cert("admin@ca3")
+        cert3_base64 = base64.b64encode(cert3.public_bytes(serialization.Encoding.DER)).decode("utf-8")
 
         # Create a bundle with all 3 CAs
         bundle_path = Path(admin_ca_dir) / "three-ca-bundle.crt"
@@ -1383,11 +1384,11 @@ class TestAdminCARotation:
         client = TestClient(app, raise_server_exceptions=False)
 
         # All 3 certs should pass
-        for pem_str, label in [(cert1_pem_str, "cert1"), (cert2_pem_str, "cert2"), (cert3_pem_str, "cert3")]:
+        for b64_str, label in [(cert1_base64, "cert1"), (cert2_base64, "cert2"), (cert3_base64, "cert3")]:
             resp = client.get(
                 "/api/v1/admin/test",
                 headers={
-                    "X-Client-Cert": pem_str,
+                    "X-Client-Cert-Base64": b64_str,
                     "X-Client-Verified": "true",
                 },
             )

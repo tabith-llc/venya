@@ -33,8 +33,18 @@ ADMIN_IDENTITY="${VENYA_ADMIN_IDENTITY:-}"
 ADMIN_CA_PASSPHRASE="${VENYA_ADMIN_CA_PASSPHRASE:-}"
 
 # --- Source common library ---
+# Direct execution: the library sits next to the script. Piped execution
+# (curl | sudo bash): $0 has no directory — fetch from the tarball origin.
 COMMON_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$COMMON_DIR/venya-common.sh"
+if [ -f "$COMMON_DIR/venya-common.sh" ]; then
+    source "$COMMON_DIR/venya-common.sh"
+else
+    FETCH_DIR="$(mktemp -d)"
+    trap 'rm -rf "$FETCH_DIR"' EXIT
+    echo "Fetching shared installer library from ${TARBALL_URL%/*}/venya-common.sh" >&2
+    curl -fsSL "${TARBALL_URL%/*}/venya-common.sh" -o "$FETCH_DIR/venya-common.sh" || exit 1
+    source "$FETCH_DIR/venya-common.sh"
+fi
 
 venya_print_colors
 venya_check_root
@@ -55,7 +65,6 @@ if ! command -v caddy &>/dev/null; then
     apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl > /dev/null 2>&1
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
     curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-    apt-get update > /dev/null 2>&1
     apt-get install -y -qq caddy > /dev/null 2>&1
     info "Caddy installed: $(caddy version)"
 else
@@ -64,6 +73,9 @@ fi
 
 # --- Install uv for venya user ---
 venya_install_uv_user
+
+# --- Install Python 3.14 for venya user ---
+venya_install_python314
 
 # --- Download and extract tarball ---
 venya_download_tarball core
@@ -115,6 +127,17 @@ if not cm.has_ca:
     cm.initialize()
 print('Admin CA initialized')
 "
+
+    # Copy CA cert to Caddy's cert directory (IT1-013: Caddy needs read access)
+    # CA storage stays hardened (0700 venya:venya); Caddy reads from /etc/caddy/certs/
+    CADDY_CERTS_DIR="/etc/caddy/certs"
+    mkdir -p "$CADDY_CERTS_DIR"
+    chmod 755 "$CADDY_CERTS_DIR"
+    if [ -f "$ADMIN_CA_DIR/ca.crt" ]; then
+        cp "$ADMIN_CA_DIR/ca.crt" "$CADDY_CERTS_DIR/admin-ca.crt"
+        chmod 644 "$CADDY_CERTS_DIR/admin-ca.crt"
+        info "CA cert copied to $CADDY_CERTS_DIR/admin-ca.crt"
+    fi
 
     # Generate first admin cert
     sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" \
@@ -257,7 +280,7 @@ $CORE_HOSTNAME {
         @verified header X-Client-Verified true
         handle @verified {
             reverse_proxy 127.0.0.1:8080 {
-                header_up X-Client-Cert {http.request.tls.client.certificate_pem}
+                header_up X-Client-Cert-Base64 {http.request.tls.client.certificate_der_base64}
                 header_up X-Client-Verified {http.request.tls.client.verified}
             }
         }
@@ -348,8 +371,7 @@ sudo cp /etc/venya/Caddyfile /etc/caddy/Caddyfile
 
 # --- Start Caddy and install CA trust (core-specific) ---
 info "Starting Caddy..."
-systemctl enable --now caddy > /dev/null 2>&1
-sleep 2
+systemctl start caddy > /dev/null 2>&1 || true
 
 info "Installing Caddy internal CA..."
 CADDY_ROOT_CA="${VENYA_CADDY_ROOT_CA:-/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt}"
@@ -362,7 +384,7 @@ else
     warn "Caddy CA not found — TLS may not be trusted"
 fi
 systemctl restart caddy > /dev/null 2>&1
- info "Caddy enabled and started"
+info "Caddy enabled and started"
 
 # --- Run database migrations (core-specific) ---
 info "Running database migrations..."
@@ -408,5 +430,5 @@ echo "  Access: https://$CORE_HOSTNAME"
 echo ""
 echo "Next steps:"
 echo "  1. Verify health: curl -sk https://$CORE_HOSTNAME/api/v1/health"
-echo "  3. Enroll admin: open https://$CORE_HOSTNAME/enroll-admin in browser"
+echo "  2. Enroll admin: open https://$CORE_HOSTNAME/enroll-admin in browser"
 echo ""
