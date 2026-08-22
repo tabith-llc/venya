@@ -11,14 +11,14 @@ work identically for CLI clients.
 
 import hashlib
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_current_user, get_db
-from ..fido2.browser_adapter import challenge_to_browser_options, browser_assertion_to_fido2
+from ..fido2.browser_adapter import browser_assertion_to_fido2, challenge_to_browser_options
 
 router = APIRouter()
 
@@ -46,11 +46,8 @@ def _cleanup_stale_challenges(challenges: dict, ttl_seconds: int) -> None:
     Called at the start of both challenge and assert endpoints to prevent
     unbounded growth of the challenges dict.
     """
-    now = datetime.now(timezone.utc)
-    stale = [
-        cid for cid, info in challenges.items()
-        if (now - info["created_at"]).total_seconds() > ttl_seconds
-    ]
+    now = datetime.now(UTC)
+    stale = [cid for cid, info in challenges.items() if (now - info["created_at"]).total_seconds() > ttl_seconds]
     for cid in stale:
         challenges.pop(cid, None)
 
@@ -79,11 +76,7 @@ async def elevate_challenge(
 
     from core.iam.models import WebAuthnCredential
 
-    credentials = (
-        db.query(WebAuthnCredential)
-        .filter(WebAuthnCredential.user_id == user_info["user_id"])
-        .all()
-    )
+    credentials = db.query(WebAuthnCredential).filter(WebAuthnCredential.user_id == user_info["user_id"]).all()
     if not credentials:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -105,7 +98,7 @@ async def elevate_challenge(
     request.app.state._elevation_challenges[challenge_id] = {
         "session_id": user_info.get("session_id"),
         "user_id": user_info["user_id"],
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
     }
 
     return ElevationChallengeResponse(
@@ -160,7 +153,8 @@ async def elevate_assert(
 
     try:
         fido2_manager.finish_authentication(
-            req.challenge_id, fido2_response,
+            req.challenge_id,
+            fido2_response,
         )
     except ValueError as e:
         raise HTTPException(
@@ -171,9 +165,7 @@ async def elevate_assert(
     # Create elevation token
     elevation_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(elevation_token.encode()).hexdigest()
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        seconds=ELEVATION_TOKEN_TTL_SECONDS
-    )
+    expires_at = datetime.now(UTC) + timedelta(seconds=ELEVATION_TOKEN_TTL_SECONDS)
 
     from core.iam.models import ElevationToken
 

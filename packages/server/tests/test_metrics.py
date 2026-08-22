@@ -1,10 +1,10 @@
 """Tests for Prometheus metrics — registry, middleware, cardinality, PII safety."""
 
-from prometheus_client import generate_latest, REGISTRY
+from prometheus_client import REGISTRY, generate_latest
 
 # Import to register custom metrics with the global registry
 from server import metrics  # noqa: F401
-from server.middleware.metrics import MetricsMiddleware, _normalize_endpoint
+from server.middleware.metrics import _normalize_endpoint
 
 
 def _find_collector(name):
@@ -131,25 +131,19 @@ class TestCardinalityControls:
         """No metric should have executor_id as a label."""
         for name, c in REGISTRY._names_to_collectors.items():
             if name.startswith("venya_") and hasattr(c, "_labelnames"):
-                assert "executor_id" not in c._labelnames, (
-                    f"High-cardinality label 'executor_id' found in {name}"
-                )
+                assert "executor_id" not in c._labelnames, f"High-cardinality label 'executor_id' found in {name}"
 
     def test_no_user_id_in_any_metric(self):
         """No metric should have user_id as a label."""
         for name, c in REGISTRY._names_to_collectors.items():
             if name.startswith("venya_") and hasattr(c, "_labelnames"):
-                assert "user_id" not in c._labelnames, (
-                    f"High-cardinality label 'user_id' found in {name}"
-                )
+                assert "user_id" not in c._labelnames, f"High-cardinality label 'user_id' found in {name}"
 
     def test_no_ip_in_any_metric(self):
         """No metric should have ip as a label."""
         for name, c in REGISTRY._names_to_collectors.items():
             if name.startswith("venya_") and hasattr(c, "_labelnames"):
-                assert "ip" not in c._labelnames, (
-                    f"High-cardinality label 'ip' found in {name}"
-                )
+                assert "ip" not in c._labelnames, f"High-cardinality label 'ip' found in {name}"
 
 
 class TestNoSensitiveData:
@@ -186,15 +180,14 @@ class TestMiddlewareEndpointNormalization:
 
     def test_normalize_uuid(self):
         """UUID segments are replaced with {id}."""
-        assert _normalize_endpoint(
-            "/api/v1/secrets/550e8400-e29b-41d4-a716-446655440000"
-        ) == "/api/v1/secrets/{id}"
+        assert _normalize_endpoint("/api/v1/secrets/550e8400-e29b-41d4-a716-446655440000") == "/api/v1/secrets/{id}"
 
     def test_normalize_mixed(self):
         """Mixed numeric and text segments handled correctly."""
-        assert _normalize_endpoint(
-            "/api/v1/admin/executors/jump-1/certs/999/revoke"
-        ) == "/api/v1/admin/executors/jump-1/certs/{id}/revoke"
+        assert (
+            _normalize_endpoint("/api/v1/admin/executors/jump-1/certs/999/revoke")
+            == "/api/v1/admin/executors/jump-1/certs/{id}/revoke"
+        )
 
 
 class TestCounterIncrements:
@@ -205,9 +198,16 @@ class TestCounterIncrements:
         c = _find_collector("venya_executor_registered")
         assert c is not None
         valid_results = {
-            "success", "invalid_csr", "weak_key", "token_invalid",
-            "token_expired", "token_consumed", "token_revoked",
-            "ca_error", "db_error", "token_required",
+            "success",
+            "invalid_csr",
+            "weak_key",
+            "token_invalid",
+            "token_expired",
+            "token_consumed",
+            "token_revoked",
+            "ca_error",
+            "db_error",
+            "token_required",
         }
         for key in c._metrics:
             assert key[0] in valid_results, f"Unexpected result label: {key[0]}"
@@ -217,7 +217,11 @@ class TestCounterIncrements:
         c = _find_collector("venya_token_consumed")
         assert c is not None
         valid_results = {
-            "success", "invalid", "expired", "consumed", "revoked",
+            "success",
+            "invalid",
+            "expired",
+            "consumed",
+            "revoked",
             "binding_mismatch",
         }
         for key in c._metrics:

@@ -20,7 +20,6 @@ Tables updated:
 """
 
 from alembic import op
-import sqlalchemy as sa
 
 revision = "019"
 down_revision = "018"
@@ -45,8 +44,10 @@ def upgrade():
         op.drop_constraint(constraint, table, type_="foreignkey")
         op.create_foreign_key(
             constraint,
-            table, ref_table,
-            [column], [ref_col],
+            table,
+            ref_table,
+            [column],
+            [ref_col],
             ondelete="CASCADE",
         )
 
@@ -56,6 +57,8 @@ def downgrade():
         op.drop_constraint(constraint, table, type_="foreignkey")
         op.create_foreign_key(
             constraint,
-            table, ref_table,
-            [column], [ref_col],
+            table,
+            ref_table,
+            [column],
+            [ref_col],
         )

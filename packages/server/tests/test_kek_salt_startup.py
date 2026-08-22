@@ -10,9 +10,8 @@ critical log.
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-import server.app as app
 from core.engine.backend import KekSaltMissingError
+from server import app
 
 
 class TestInitCoreKekSalt:
@@ -20,9 +19,8 @@ class TestInitCoreKekSalt:
         backend = MagicMock()
         backend.get_core.side_effect = KekSaltMissingError("salt missing, secrets exist")
 
-        with patch.object(app, "logger") as mock_logger:
-            with pytest.raises(KekSaltMissingError):
-                app._init_core(backend, "pw")
+        with patch.object(app, "logger") as mock_logger, pytest.raises(KekSaltMissingError):
+            app._init_core(backend, "pw")
 
         mock_logger.critical.assert_called_once()
         (msg,) = mock_logger.critical.call_args[0]

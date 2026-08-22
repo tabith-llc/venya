@@ -3,10 +3,9 @@
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
+from server.middleware.rate_limit import RateLimitMiddleware
 from starlette.responses import JSONResponse
 from starlette.testclient import TestClient
-
-from server.middleware.rate_limit import RateLimitMiddleware
 
 
 def _create_test_app(

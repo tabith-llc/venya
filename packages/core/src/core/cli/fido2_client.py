@@ -10,7 +10,6 @@ Flow:
     3. Send assertion to server (POST /auth/login/complete)
 """
 
-
 import base64
 import json
 import logging
@@ -22,8 +21,8 @@ from fido2.hid import list_devices
 from fido2.webauthn import (
     AuthenticatorData,
     CollectedClientData,
-    CredentialRequestOptions,
     CredentialCreationOptions,
+    CredentialRequestOptions,
     PublicKeyCredentialDescriptor,
     PublicKeyCredentialRequestOptions,
     UserVerificationRequirement,
@@ -86,7 +85,7 @@ class Fido2Auth:
             try:
                 error_data = e.response.json()
                 error_msg = error_data.get("detail", str(e))
-            except (json.JSONDecodeError, Exception):  # noqa: F841
+            except (json.JSONDecodeError, Exception):  # noqa: S110
                 pass
             raise Fido2ClientError(error_msg)
         except httpx2.ConnectError as e:
@@ -113,7 +112,7 @@ class Fido2Auth:
             try:
                 error_data = e.response.json()
                 error_msg = error_data.get("detail", str(e))
-            except (json.JSONDecodeError, Exception):  # noqa: F841
+            except (json.JSONDecodeError, Exception):  # noqa: S110
                 pass
             raise Fido2ClientError(error_msg)
         except httpx2.ConnectError as e:
@@ -137,9 +136,12 @@ class Fido2Auth:
         """
         # Step 1: Get challenge from server
         logger.info("Requesting authentication challenge from server")
-        start_result = self._post("/api/v1/auth/login/start", {
-            "user_id": user_id,
-        })
+        start_result = self._post(
+            "/api/v1/auth/login/start",
+            {
+                "user_id": user_id,
+            },
+        )
         challenge_id = start_result["challenge_id"]
         options = start_result["options"]
 
@@ -162,18 +164,19 @@ class Fido2Auth:
         except ValueError as e:
             err_msg = str(e).lower()
             if "user" in err_msg or "presence" in err_msg or "touch" in err_msg:
-                raise Fido2UserInteractionRequiredError(
-                    "Please touch your security key"
-                ) from e
+                raise Fido2UserInteractionRequiredError("Please touch your security key") from e
             raise Fido2ClientError(f"FIDO2 error: {e}") from e
 
         # Step 4: Convert assertion to server format and complete
         logger.info("Sending assertion to server")
         response = self._format_assertion_response(assertion)
-        result = self._post("/api/v1/auth/login/complete", {
-            "challenge_id": challenge_id,
-            "response": response,
-        })
+        result = self._post(
+            "/api/v1/auth/login/complete",
+            {
+                "challenge_id": challenge_id,
+                "response": response,
+            },
+        )
 
         return {
             "user_id": result["user_id"],
@@ -200,9 +203,12 @@ class Fido2Auth:
         """
         # Step 1: Get challenge from server
         logger.info("Requesting registration challenge from server for user %s", user_id)
-        start_result = self._post("/api/v1/init", {
-            "user_id": user_id,
-        })
+        start_result = self._post(
+            "/api/v1/init",
+            {
+                "user_id": user_id,
+            },
+        )
         challenge_id = start_result["challenge_id"]
         options = start_result["options"]
 
@@ -223,25 +229,24 @@ class Fido2Auth:
         except ValueError as e:
             err_msg = str(e).lower()
             if "user" in err_msg or "presence" in err_msg or "touch" in err_msg:
-                raise Fido2UserInteractionRequiredError(
-                    "Please touch your security key"
-                ) from e
+                raise Fido2UserInteractionRequiredError("Please touch your security key") from e
             raise Fido2ClientError(f"FIDO2 error: {e}") from e
 
         # Step 4: Convert credential to server format and complete
         logger.info("Sending attestation to server")
         response = self._format_credential_response(credential)
-        result = self._post("/api/v1/init/complete", {
-            "user_id": user_id,
-            "challenge_id": challenge_id,
-            "response": response,
-        })
+        result = self._post(
+            "/api/v1/init/complete",
+            {
+                "user_id": user_id,
+                "challenge_id": challenge_id,
+                "response": response,
+            },
+        )
 
         return result
 
-    def _build_registration_options(
-        self, options: dict[str, Any]
-    ) -> CredentialCreationOptions:
+    def _build_registration_options(self, options: dict[str, Any]) -> CredentialCreationOptions:
         """Convert server challenge options to fido2 CredentialCreationOptions.
 
         Args:
@@ -254,20 +259,24 @@ class Fido2Auth:
 
         pub_key_cred_params = []
         for param in options.get("pubKeyCredParams", []):
-            pub_key_cred_params.append({
-                "type": param.get("type", "public-key"),
-                "alg": param.get("alg"),
-            })
+            pub_key_cred_params.append(
+                {
+                    "type": param.get("type", "public-key"),
+                    "alg": param.get("alg"),
+                }
+            )
 
         exclude_credentials = []
         for cred in options.get("excludeCredentials", []):
             if "id" in cred:
                 cred_id = _b64url_decode(cred["id"])
-                exclude_credentials.append(PublicKeyCredentialDescriptor(
-                    type=cred.get("type", "public-key"),
-                    id=cred_id,
-                    transports=cred.get("transports"),
-                ))
+                exclude_credentials.append(
+                    PublicKeyCredentialDescriptor(
+                        type=cred.get("type", "public-key"),
+                        id=cred_id,
+                        transports=cred.get("transports"),
+                    )
+                )
 
         user_id = _b64url_decode(options["user"]["id"])
 
@@ -338,9 +347,7 @@ class Fido2Auth:
             "id": _b64url_encode(cred_id),
             "rawId": _b64url_encode(cred_id),
             "response": {
-                "clientDataJSON": _b64url_encode(
-                    _serialize_client_data(client_data)
-                ),
+                "clientDataJSON": _b64url_encode(_serialize_client_data(client_data)),
                 "authenticatorData": _b64url_encode(_serialize_auth_data(auth_data)),
                 "attestationObject": _b64url_encode(attestation_object),
                 "transports": auth_response.transports or [],
@@ -349,9 +356,7 @@ class Fido2Auth:
             "clientExtensionResults": {},
         }
 
-    def _build_request_options(
-        self, options: dict[str, Any]
-    ) -> CredentialRequestOptions:
+    def _build_request_options(self, options: dict[str, Any]) -> CredentialRequestOptions:
         """Convert server challenge options to fido2 CredentialRequestOptions.
 
         Args:
@@ -365,11 +370,13 @@ class Fido2Auth:
         allow_credentials = []
         for cred in options.get("allow_credentials", []):
             cred_id = _b64url_decode(cred["id"])
-            allow_credentials.append(PublicKeyCredentialDescriptor(
-                type=cred.get("type", "public-key"),
-                id=cred_id,
-                transports=cred.get("transports"),
-            ))
+            allow_credentials.append(
+                PublicKeyCredentialDescriptor(
+                    type=cred.get("type", "public-key"),
+                    id=cred_id,
+                    transports=cred.get("transports"),
+                )
+            )
 
         uv_map = {
             "discouraged": UserVerificationRequirement.DISCOURAGED,
@@ -446,9 +453,7 @@ class Fido2Auth:
             "id": _b64url_encode(cred_id),
             "rawId": _b64url_encode(cred_id),
             "response": {
-                "clientDataJSON": _b64url_encode(
-                    _serialize_client_data(client_data)
-                ),
+                "clientDataJSON": _b64url_encode(_serialize_client_data(client_data)),
                 "authenticatorData": _b64url_encode(_serialize_auth_data(auth_data)),
                 "signature": _b64url_encode(signature),
                 "userHandle": None,
@@ -485,6 +490,6 @@ def _serialize_auth_data(auth_data: AuthenticatorData) -> bytes:
     Returns:
         Raw authenticator data bytes.
     """
-    flags_byte = bytes([auth_data.flags.value if hasattr(auth_data.flags, 'value') else int(auth_data.flags)])
+    flags_byte = bytes([auth_data.flags.value if hasattr(auth_data.flags, "value") else int(auth_data.flags)])
     counter_bytes = auth_data.counter.to_bytes(4, byteorder="big")
     return auth_data.rp_id_hash + flags_byte + counter_bytes

@@ -8,33 +8,51 @@ Tests cover:
 """
 
 import hashlib
-import logging
-from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
-
+from core.iam.models import ExecutorEnrollmentToken
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fastapi import FastAPI
+from pydantic import ValidationError
+from server.dependencies import get_current_user, require_admin
+from server.routes import admin as admin_routes
+from server.routes import executors as executors_routes
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.testclient import TestClient
 
-from server.routes import admin as admin_routes, executors as executors_routes
-from server.dependencies import get_current_user, require_admin
-from core.iam.models import ExecutorEnrollmentToken
-
 _TEST_PEPPER = "test-pepper-12345"
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiters():
+    """Isolate the module-level rate limiter cache between tests.
+
+    The M-61 fix routes the per-executor registration key through a persistent
+    limiter (``server.rate_limit._LIMITERS``). Without this reset the shared
+    executor_id ("test-1") accumulates across tests and trips the 429 cap;
+    before the fix the first-attempt key used a fresh limiter (a no-op), which
+    masked the shared state.
+    """
+    from server import rate_limit as _rl
+
+    saved = dict(_rl._LIMITERS)
+    _rl._LIMITERS.clear()
+    yield
+    _rl._LIMITERS.clear()
+    _rl._LIMITERS.update(saved)
 
 
 def _make_mock_token(executor_id, plaintext_token, state="created"):
     """Create a mock enrollment token."""
     pepper = "test-pepper-12345"
     import hmac
+
     mock_token = MagicMock()
     mock_token.executor_id = executor_id
     mock_token.state = state
@@ -43,7 +61,7 @@ def _make_mock_token(executor_id, plaintext_token, state="created"):
         plaintext_token.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
-    mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    mock_token.expires_at = datetime.now(UTC) + timedelta(minutes=10)
     return mock_token
 
 
@@ -55,10 +73,12 @@ def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manag
         backend.get_session.return_value = MagicMock()
     app.state.backend = backend
 
-    from server.config import ServerConfig
-    from server.config import ExecutorEnrollmentConfig
+    from server.config import ExecutorEnrollmentConfig, ServerConfig
+
     if require_token:
-        app.state.config = ServerConfig(executor_enrollment=ExecutorEnrollmentConfig(require_token=True), recovery_code_pepper=pepper)
+        app.state.config = ServerConfig(
+            executor_enrollment=ExecutorEnrollmentConfig(require_token=True), recovery_code_pepper=pepper
+        )
     else:
         app.state.config = ServerConfig(recovery_code_pepper=pepper)
 
@@ -91,15 +111,13 @@ def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manag
 def _generate_test_csr():
     """Generate a valid CSR for testing."""
     private_key = ec.generate_private_key(ec.SECP256R1())
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "test-exec"),
-    ])
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(subject)
-        .sign(private_key, hashes.SHA256())
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "test-exec"),
+        ]
     )
+    csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(private_key, hashes.SHA256())
     return csr.public_bytes(serialization.Encoding.PEM).decode()
 
 
@@ -108,8 +126,8 @@ def _make_mock_ca():
     mock_ca = MagicMock()
     mock_cert = MagicMock()
     mock_cert.serial_number = 12345
-    mock_cert.not_valid_before_utc = datetime.now(timezone.utc)
-    mock_cert.not_valid_after_utc = datetime.now(timezone.utc) + timedelta(days=365)
+    mock_cert.not_valid_before_utc = datetime.now(UTC)
+    mock_cert.not_valid_after_utc = datetime.now(UTC) + timedelta(days=365)
     mock_cert.public_bytes.return_value = b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"
     mock_ca.sign_csr.return_value = mock_cert
     mock_ca.compute_serial_hex.return_value = "00:01:02:03"
@@ -139,6 +157,7 @@ class TestAdminEnrollExecutor:
     def test_enroll_returns_503_when_no_backend(self):
         """Returns 503 when backend is not initialized."""
         from server.dependencies import get_current_user, require_admin
+
         app = FastAPI()
         app.state.backend = None
         app.include_router(admin_routes.router, prefix="/api/v1")
@@ -164,10 +183,13 @@ class TestAdminEnrollExecutor:
         class TrackAdd:
             def add(self, obj):
                 added_objects.append(obj)
+
             def commit(self):
                 pass
+
             def flush(self):
                 pass
+
             def close(self):
                 pass
 
@@ -194,12 +216,15 @@ class TestAdminEnrollExecutor:
         class TrackAdd:
             def add(self, obj):
                 added_objects.append(obj)
+
             def commit(self):
                 pass
+
             def flush(self):
                 # Simulate flush assigning an ID to the token
                 if isinstance(added_objects[-1], ExecutorEnrollmentToken):
                     added_objects[-1].id = 42
+
             def close(self):
                 pass
 
@@ -227,10 +252,13 @@ class TestAdminEnrollExecutor:
         class TrackAdd:
             def add(self, obj):
                 added_objects.append(obj)
+
             def commit(self):
                 pass
+
             def flush(self):
                 pass
+
             def close(self):
                 pass
 
@@ -258,7 +286,8 @@ class TestRegisterEndpointWithToken:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(
-            backend=backend, auth_user={"user_id": "admin"},
+            backend=backend,
+            auth_user={"user_id": "admin"},
             ca_manager=_make_mock_ca(),
         )
 
@@ -271,7 +300,7 @@ class TestRegisterEndpointWithToken:
         user_query.filter.return_value.first.return_value = None
 
         def query_side_effect(model):
-            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+            if hasattr(model, "__tablename__") and model.__tablename__ == "executor_enrollment_tokens":
                 return token_query
             return user_query
 
@@ -301,7 +330,8 @@ class TestRegisterEndpointWithToken:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(
-            backend=backend, auth_user={"user_id": "admin"},
+            backend=backend,
+            auth_user={"user_id": "admin"},
             ca_manager=_make_mock_ca(),
         )
 
@@ -314,7 +344,7 @@ class TestRegisterEndpointWithToken:
         user_query.filter.return_value.first.return_value = None
 
         def query_side_effect(model):
-            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+            if hasattr(model, "__tablename__") and model.__tablename__ == "executor_enrollment_tokens":
                 return token_query
             return user_query
 
@@ -329,16 +359,21 @@ class TestRegisterEndpointWithToken:
         class TrackAdd:
             def add(self, obj):
                 added_objects.append(obj)
+
             def commit(self):
                 pass
+
             def flush(self):
                 pass
+
             def close(self):
                 pass
+
             def query(self, model):
-                if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+                if hasattr(model, "__tablename__") and model.__tablename__ == "executor_enrollment_tokens":
                     return token_query
                 return user_query
+
             def execute(self, *args, **kwargs):
                 return mock_result
 
@@ -356,7 +391,7 @@ class TestRegisterEndpointWithToken:
         )
         assert response.status_code == 201
 
-        audit_event = [o for o in added_objects if hasattr(o, 'event_type')]
+        audit_event = [o for o in added_objects if hasattr(o, "event_type")]
         assert len(audit_event) == 1
         assert audit_event[0].event_type == "executor_registered"
         assert audit_event[0].fields["token_id"] == 99
@@ -367,14 +402,15 @@ class TestRegisterEndpointWithToken:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(
-            backend=backend, auth_user={"user_id": "admin"},
+            backend=backend,
+            auth_user={"user_id": "admin"},
             ca_manager=_make_mock_ca(),
         )
 
         mock_token = MagicMock()
         mock_token.executor_id = "token-exec-1"
         mock_token.state = "created"
-        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        mock_token.expires_at = datetime.now(UTC) + timedelta(minutes=10)
 
         token_query = MagicMock()
         token_query.filter.return_value.first.return_value = mock_token
@@ -426,7 +462,7 @@ class TestRegisterEndpointWithToken:
 
         mock_token = MagicMock()
         mock_token.state = "created"
-        mock_token.expires_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        mock_token.expires_at = datetime.now(UTC) - timedelta(hours=1)
 
         token_query = MagicMock()
         token_query.filter.return_value.first.return_value = mock_token
@@ -455,7 +491,7 @@ class TestRegisterEndpointWithToken:
         mock_token = MagicMock()
         mock_token.state = "consumed"
         mock_token.executor_id = "other-exec"
-        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        mock_token.expires_at = datetime.now(UTC) + timedelta(minutes=10)
 
         token_query = MagicMock()
         token_query.filter.return_value.first.return_value = mock_token
@@ -535,7 +571,7 @@ class TestRegisterEndpointWithToken:
         user_query.filter.return_value.first.return_value = None
 
         def query_side_effect(model):
-            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+            if hasattr(model, "__tablename__") and model.__tablename__ == "executor_enrollment_tokens":
                 return token_query
             return user_query
 
@@ -601,14 +637,14 @@ class TestTokenTTL:
 
     def test_default_ttl_is_1800(self):
         """Default TTL should be 1800 seconds (30 minutes)."""
-        from server.config import ServerConfig, ExecutorEnrollmentConfig
+        from server.config import ServerConfig
 
         config = ServerConfig(recovery_code_pepper="test-pepper")
         assert config.executor_enrollment.token_ttl_seconds == 1800
 
     def test_token_ttl_uses_configured_value(self):
         """Token should use configured TTL, not hardcoded value."""
-        from server.config import ServerConfig, ExecutorEnrollmentConfig
+        from server.config import ExecutorEnrollmentConfig, ServerConfig
 
         mock_db = MagicMock()
         backend = MagicMock()
@@ -634,14 +670,14 @@ class TestTokenTTL:
         """TTL below minimum (120s) should raise validation error."""
         from server.config import ExecutorEnrollmentConfig
 
-        with pytest.raises(Exception):  # Pydantic ValidationError
+        with pytest.raises(ValidationError):
             ExecutorEnrollmentConfig(token_ttl_seconds=60)
 
     def test_token_ttl_maximum_enforced(self):
         """TTL above maximum (86400s) should raise validation error."""
         from server.config import ExecutorEnrollmentConfig
 
-        with pytest.raises(Exception):  # Pydantic ValidationError
+        with pytest.raises(ValidationError):
             ExecutorEnrollmentConfig(token_ttl_seconds=90000)
 
     def test_response_includes_expires_at(self):
@@ -658,6 +694,7 @@ class TestTokenTTL:
         assert "expires_at" in data
         # Should be valid ISO 8601
         from datetime import datetime
+
         expires_at = datetime.fromisoformat(data["expires_at"])
         assert expires_at.tzinfo is not None
 
@@ -691,7 +728,7 @@ class TestTokenAtomicConsumption:
         user_query.filter.return_value.first.return_value = None
 
         def query_side_effect(model):
-            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+            if hasattr(model, "__tablename__") and model.__tablename__ == "executor_enrollment_tokens":
                 return token_query
             return user_query
 
@@ -733,7 +770,7 @@ class TestTokenAtomicConsumption:
         call_num = [0]
 
         def query_side_effect(model):
-            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+            if hasattr(model, "__tablename__") and model.__tablename__ == "executor_enrollment_tokens":
                 call_num[0] += 1
                 if call_num[0] == 1:
                     # Pre-check query: returns "created" token
@@ -807,7 +844,7 @@ class TestTokenAtomicConsumption:
         mock_token = MagicMock()
         mock_token.state = "consumed"
         mock_token.executor_id = "other-exec"
-        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        mock_token.expires_at = datetime.now(UTC) + timedelta(minutes=10)
 
         token_query = MagicMock()
         token_query.filter.return_value.first.return_value = mock_token
@@ -834,7 +871,8 @@ class TestTokenAtomicConsumption:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(
-            backend=backend, auth_user={"user_id": "admin"},
+            backend=backend,
+            auth_user={"user_id": "admin"},
             ca_manager=_make_mock_ca(),
         )
 
@@ -847,7 +885,7 @@ class TestTokenAtomicConsumption:
         user_query.filter.return_value.first.return_value = None
 
         def query_side_effect(model):
-            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+            if hasattr(model, "__tablename__") and model.__tablename__ == "executor_enrollment_tokens":
                 return token_query
             return user_query
 
@@ -860,7 +898,7 @@ class TestTokenAtomicConsumption:
             if not first_done[0]:
                 first_done[0] = True
                 mock_token.state = "consumed"
-                mock_token.used_at = datetime.now(timezone.utc)
+                mock_token.used_at = datetime.now(UTC)
                 mock_result = MagicMock()
                 mock_result.rowcount = 1
                 return mock_result
@@ -904,15 +942,16 @@ class TestTokenAtomicConsumption:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(
-            backend=backend, auth_user={"user_id": "admin"},
+            backend=backend,
+            auth_user={"user_id": "admin"},
             ca_manager=_make_mock_ca(),
         )
 
         mock_token = MagicMock()
         mock_token.state = "consumed"
         mock_token.executor_id = "conflict-exec"
-        mock_token.used_at = datetime.now(timezone.utc) - timedelta(seconds=10)
-        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        mock_token.used_at = datetime.now(UTC) - timedelta(seconds=10)
+        mock_token.expires_at = datetime.now(UTC) + timedelta(minutes=10)
 
         token_query = MagicMock()
         token_query.filter.return_value.first.return_value = mock_token
@@ -937,15 +976,16 @@ class TestTokenAtomicConsumption:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(
-            backend=backend, auth_user={"user_id": "admin"},
+            backend=backend,
+            auth_user={"user_id": "admin"},
             ca_manager=_make_mock_ca(),
         )
 
         mock_token = MagicMock()
         mock_token.state = "consumed"
         mock_token.executor_id = "other-exec"
-        mock_token.used_at = datetime.now(timezone.utc) - timedelta(seconds=10)
-        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+        mock_token.used_at = datetime.now(UTC) - timedelta(seconds=10)
+        mock_token.expires_at = datetime.now(UTC) + timedelta(minutes=10)
 
         token_query = MagicMock()
         token_query.filter.return_value.first.return_value = mock_token
@@ -970,7 +1010,8 @@ class TestTokenAtomicConsumption:
         backend = MagicMock()
         backend.get_session.return_value = mock_db
         app = _create_test_app(
-            backend=backend, auth_user={"user_id": "admin"},
+            backend=backend,
+            auth_user={"user_id": "admin"},
             ca_manager=_make_mock_ca(),
         )
 
@@ -991,7 +1032,7 @@ class TestTokenAtomicConsumption:
         call_num = [0]
 
         def query_side_effect(model):
-            if hasattr(model, '__tablename__') and model.__tablename__ == "executor_enrollment_tokens":
+            if hasattr(model, "__tablename__") and model.__tablename__ == "executor_enrollment_tokens":
                 call_num[0] += 1
                 if call_num[0] == 1:
                     return mock_token_query
@@ -1034,10 +1075,13 @@ class TestAdminIdentityCapture:
         class TrackAdd:
             def add(self, obj):
                 added_objects.append(obj)
+
             def commit(self):
                 pass
+
             def flush(self):
                 pass
+
             def close(self):
                 pass
 
@@ -1075,11 +1119,14 @@ class TestAdminIdentityCapture:
         class TrackAdd:
             def add(self, obj):
                 added_objects.append(obj)
+
             def commit(self):
                 pass
+
             def flush(self):
                 if isinstance(added_objects[-1], ExecutorEnrollmentToken):
                     added_objects[-1].id = 42
+
             def close(self):
                 pass
 
@@ -1121,10 +1168,13 @@ class TestAdminIdentityCapture:
         class TrackAdd:
             def add(self, obj):
                 added_objects.append(obj)
+
             def commit(self):
                 pass
+
             def flush(self):
                 pass
+
             def close(self):
                 pass
 
@@ -1139,9 +1189,6 @@ class TestAdminIdentityCapture:
 
         client = TestClient(app, raise_server_exceptions=False)
         # Strip user-agent via raw request
-        from starlette.testclient import TestClient as TC
-        from starlette.requests import Request
-        from starlette.datastructures import Headers
 
         response = client.post(
             "/api/v1/admin/executors/test-exec/enroll",
@@ -1156,7 +1203,6 @@ class TestAdminIdentityCapture:
 
     def test_token_meta_data_not_accessible_via_api(self):
         """Identity fields are audit-only — not exposed in token listing."""
-        from server.routes import admin as admin_routes
 
         mock_db = MagicMock()
         backend = MagicMock()
@@ -1172,8 +1218,8 @@ class TestAdminIdentityCapture:
         mock_token.created_by_session_id = "42"
         mock_token.created_from_ip = "127.0.0.1"
         mock_token.created_from_user_agent = "test-agent/1.0"
-        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-        mock_token.created_at = datetime.now(timezone.utc)
+        mock_token.expires_at = datetime.now(UTC) + timedelta(minutes=15)
+        mock_token.created_at = datetime.now(UTC)
         mock_token.used_at = None
 
         token_query = MagicMock()
@@ -1210,8 +1256,8 @@ class TestAdminIdentityCapture:
         mock_token.created_by_session_id = None
         mock_token.created_from_ip = None
         mock_token.created_from_user_agent = None
-        mock_token.expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
-        mock_token.created_at = datetime.now(timezone.utc)
+        mock_token.expires_at = datetime.now(UTC) + timedelta(minutes=15)
+        mock_token.created_at = datetime.now(UTC)
         mock_token.used_at = None
 
         token_query = MagicMock()
@@ -1233,7 +1279,7 @@ class TestAdminIdentityCapture:
         mock_db.query.side_effect = lambda model: null_query
 
         # This should complete without error
-        result = mock_db.query(ExecutorEnrollmentToken).filter(
-            ExecutorEnrollmentToken.created_by_session_id == None
-        ).first()
+        result = (
+            mock_db.query(ExecutorEnrollmentToken).filter(ExecutorEnrollmentToken.created_by_session_id == None).first()
+        )
         assert result is not None

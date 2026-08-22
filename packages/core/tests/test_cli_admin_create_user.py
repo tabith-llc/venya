@@ -3,12 +3,10 @@
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import httpx2
-import pytest
-
-from core.cli.api_client import APIClient, APIClientError
+from core.cli.api_client import APIClient
 from core.cli.commands import cmd_admin_create_user, cmd_admin_list
 
 

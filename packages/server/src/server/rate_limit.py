@@ -4,9 +4,8 @@ Provides FastAPI dependencies that enforce per-admin and per-executor
 rate limits using atomic multi-key sliding window check-and-consume.
 """
 
-
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import HTTPException, Request, status
 
@@ -15,20 +14,21 @@ from .utils.rate_limiter import SlidingWindowRateLimiter
 logger = logging.getLogger("venya.server")
 
 
-def _get_limiter(config, limit_name: str) -> SlidingWindowRateLimiter:
+_LIMITERS: dict[str, SlidingWindowRateLimiter] = {}
+
+
+def _get_limiter(config, limit_name: str) -> SlidingWindowRateLimiter | None:
     """Get or create a rate limiter from config."""
     cfg = getattr(config, limit_name, None)
     if cfg is None:
         return None
     key = f"limiter_{limit_name}"
-    if not hasattr(_get_limiter, "_limiters"):
-        _get_limiter._limiters = {}  # type: ignore[attr-defined]
-    if key not in _get_limiter._limiters:
-        _get_limiter._limiters[key] = SlidingWindowRateLimiter(
+    if key not in _LIMITERS:
+        _LIMITERS[key] = SlidingWindowRateLimiter(
             max_requests=cfg,
             window_seconds=60,
         )
-    return _get_limiter._limiters[key]  # type: ignore[return-value]
+    return _LIMITERS[key]
 
 
 async def rate_limit_admin_token_gen(request: Request) -> None:
@@ -59,7 +59,7 @@ async def rate_limit_admin_token_gen(request: Request) -> None:
     request.state.rate_limit_info = {  # type: ignore[attr-defined]
         "limit": config.executor_enrollment.token_generation_per_minute,
         "remaining": remaining,
-        "reset": int(datetime.now(timezone.utc).timestamp()) + reset_time,
+        "reset": int(datetime.now(UTC).timestamp()) + reset_time,
     }
 
     if not allowed:
@@ -89,7 +89,7 @@ async def rate_limit_registration(request: Request) -> None:
     try:
         body = await request.json()
         executor_id = body.get("executor_id")
-    except Exception:  # nosec B110 — best-effort JSON parse, None falls through
+    except Exception:  # nosec B110 — best-effort JSON parse, None falls through  # noqa: S110
         pass
 
     # Check global emergency limit first (100/min)
@@ -107,62 +107,69 @@ async def rate_limit_registration(request: Request) -> None:
     ip_limiter = _get_limiter(config.executor_enrollment, "registration_ip_per_minute")
     first_attempt_limiter = SlidingWindowRateLimiter(max_requests=3, window_seconds=60)
 
+    # Per-executor limit. M-61: the reg_exec: key must be enforced on its OWN
+    # persistent limiter — the old code checked it against the *IP* limiter's
+    # cap, so the executor cap never applied (an executor rotating IPs could
+    # register without bound).
+    exec_limiter = _get_limiter(config.executor_enrollment, "registration_attempts_per_minute")
+
     # Check if this is a first registration (no existing cert)
     is_first = False
     if executor_id and ip_limiter is not None:
         try:
             from ..dependencies import get_backend
+
             backend = get_backend(request)
             db = backend.get_session()
             try:
                 from core.iam.models import ExecutorCert
+
                 cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
                 is_first = cert is None
             finally:
                 db.close()
-        except Exception:  # nosec B110 — best-effort DB query, None falls through
+        except Exception:  # nosec B110 — best-effort DB query, None falls through  # noqa: S110
             pass
 
-    # Build keys for atomic check-and-consume
-    keys: list[str] = []
+    # Dual-key AND check. Every key is guarded by ITS OWN dedicated limiter, so
+    # per-IP and per-executor throttle independently. Both must pass: a request
+    # is allowed only after each limiter confirms a free slot under its own cap,
+    # so neither limit can be exceeded. A request denied by one limiter still
+    # holds the slot it consumed on the limiters that passed (at most one per
+    # denied request) — fail-safe: it only ever tightens the effective limit.
+    ip_limiter = first_attempt_limiter if is_first else ip_limiter
+    checks: list[tuple[SlidingWindowRateLimiter, str]] = []
+    if ip_limiter is not None:
+        checks.append((ip_limiter, f"reg_ip:{client_ip}"))
+    if executor_id and exec_limiter is not None:
+        checks.append((exec_limiter, f"reg_exec:{executor_id}"))
 
-    ip_key = f"reg_ip:{client_ip}"
-    keys.append(ip_key)
-    if is_first:
-        ip_limiter = first_attempt_limiter
+    allowed = True
+    retry_after = 0
+    for limiter, key in checks:
+        ok, ra = await limiter.check_and_consume([key])
+        if ok:
+            continue
+        allowed = False
+        retry_after = ra
+        break
 
-    if executor_id:
-        exec_key = f"reg_exec:{executor_id}"
-        keys.append(exec_key)
-        exec_limiter = _get_limiter(config.executor_enrollment, "registration_attempts_per_minute")
-
-    # Atomic check-and-consume
-    limiter = ip_limiter
-    if not keys:
-        keys = [ip_key]
-
-    allowed, retry_after = await limiter.check_and_consume(keys)
-
-    # Calculate most restrictive remaining
-    remaining_values = []
-    reset_values = []
-    for key in keys:
-        lim = None
-        if key.startswith("reg_ip:"):
-            lim = ip_limiter
-        elif key.startswith("reg_exec:"):
-            lim = _get_limiter(config.executor_enrollment, "registration_attempts_per_minute")
-        if lim:
-            remaining_values.append(await lim.get_remaining(key))
-            reset_values.append(await lim.get_reset_time(key))
-
-    most_restrictive_remaining = min(remaining_values) if remaining_values else 0
-    max_reset = max(reset_values) if reset_values else 0
+    # Headers reflect the tighter (smallest remaining) of the checked limits.
+    tight_remaining: int | None = None
+    tight_reset = 0
+    tight_limit: int | None = None
+    for limiter, key in checks:
+        remaining = await limiter.get_remaining(key)
+        reset = await limiter.get_reset_time(key)
+        if tight_remaining is None or remaining < tight_remaining:
+            tight_remaining, tight_reset, tight_limit = remaining, reset, limiter.max_requests
+    if tight_remaining is None:
+        tight_remaining, tight_reset, tight_limit = 0, 0, 0
 
     request.state.rate_limit_info = {  # type: ignore[attr-defined]
-        "limit": most_restrictive_remaining + (1 if allowed else 0),
-        "remaining": max(0, most_restrictive_remaining - (0 if allowed else 1)),
-        "reset": int(datetime.now(timezone.utc).timestamp()) + max_reset,
+        "limit": tight_limit,
+        "remaining": max(0, tight_remaining),
+        "reset": int(datetime.now(UTC).timestamp()) + tight_reset,
     }
 
     if not allowed:

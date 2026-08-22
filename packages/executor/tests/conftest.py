@@ -4,11 +4,8 @@ Provides test CA, executor certificates, mTLS HTTP clients,
 and a FastAPI app with real CAManager for end-to-end testing.
 """
 
-
-import hashlib
 import os
-import stat
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,13 +15,10 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-from fastapi import FastAPI
-from starlette.testclient import TestClient
+from server.ca import CAManager
 
 from executor.config import CertificateRotationConfig, ExecutorConfig, MtlsConfig
 from executor.daemon import CertificateManager
-from server.ca import CAManager
-
 
 # ---------------------------------------------------------------------------
 # CA and certificate helpers
@@ -34,12 +28,14 @@ from server.ca import CAManager
 def _make_ca_pair() -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
     """Generate an ECDSA P-256 CA keypair and self-signed certificate."""
     ca_key = ec.generate_private_key(ec.SECP256R1())
-    now = datetime.now(timezone.utc)
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Venya Certificate Authority"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "Venya Root CA"),
-    ])
+    now = datetime.now(UTC)
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Venya Certificate Authority"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Venya Root CA"),
+        ]
+    )
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -81,11 +77,13 @@ def _sign_executor_cert(
     """Sign an executor certificate with the given CA keypair."""
     if executor_key is None:
         executor_key = ec.generate_private_key(ec.SECP256R1())
-    now = datetime.now(timezone.utc)
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
+    now = datetime.now(UTC)
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
+    )
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -127,15 +125,13 @@ def _sign_executor_cert(
 
 def _create_csr(private_key: ec.EllipticCurvePrivateKey, executor_id: str) -> bytes:
     """Create a PEM-encoded CSR."""
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(subject)
-        .sign(private_key, hashes.SHA256())
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
     )
+    csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(private_key, hashes.SHA256())
     return csr.public_bytes(serialization.Encoding.PEM)
 
 
@@ -188,7 +184,6 @@ def ca_manager(tmp_ca_dir: Path) -> CAManager:
         password=None,
     )
     # Monkey-patch load_ca to return our pre-generated CA
-    original_load_ca = manager.load_ca
     manager.load_ca = lambda: (cert, private_key)  # type: ignore[method-assign]
     return manager
 
@@ -245,10 +240,11 @@ def tls_client(tmp_ca_dir: Path, tmp_path: Path, ca_key: ec.EllipticCurvePrivate
     Generates a matching keypair and CA-signed cert for this fixture.
     """
     import ssl
+
     # Generate a matching keypair for this test
     test_key = ec.generate_private_key(ec.SECP256R1())
     test_cert = _sign_executor_cert(ca_key, ca_cert, "tls-test-executor", validity_days=30, executor_key=test_key)
-    
+
     cert_pem = test_cert.public_bytes(serialization.Encoding.PEM).decode()
     key_pem = test_key.private_bytes(
         encoding=serialization.Encoding.PEM,

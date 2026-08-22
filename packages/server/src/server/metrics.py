@@ -5,7 +5,7 @@ No high-cardinality labels (executor_id, user_id, ip, session_id).
 All metrics are in-process counters/gauges/histograms — no external calls.
 """
 
-from prometheus_client import Histogram, Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
 
 # --- Request metrics ---
 
@@ -14,7 +14,17 @@ REQUEST_DURATION = Histogram(
     "HTTP request duration in seconds",
     ["endpoint", "method", "status_code"],
     buckets=(
-        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+        0.005,
+        0.01,
+        0.025,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1.0,
+        2.5,
+        5.0,
+        10.0,
     ),
 )
 
@@ -99,7 +109,15 @@ CA_SIGNED_DURATION = Histogram(
     "Time spent signing certificates",
     ["cert_type"],
     buckets=(
-        0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
+        0.001,
+        0.005,
+        0.01,
+        0.025,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1.0,
     ),
 )
 

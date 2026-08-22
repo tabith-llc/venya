@@ -5,15 +5,15 @@ Revises: 006_elevation_tokens
 Create Date: 2026-08-13
 """
 
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision: str = "007_executor_enrollment_tokens"
-down_revision: Union[str, None] = "006_elevation_tokens"
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = "006_elevation_tokens"
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
@@ -29,9 +29,9 @@ def upgrade() -> None:
         sa.Column("used_at", sa.DateTime(timezone=True), nullable=True),
         sa.UniqueConstraint("token_hash", name="uq_executor_enrollment_tokens_token_hash"),
     )
-    op.create_foreign_key("fk_executor_enrollment_tokens_created_by",
-                          "executor_enrollment_tokens", "users",
-                          ["created_by"], ["user_id"])
+    op.create_foreign_key(
+        "fk_executor_enrollment_tokens_created_by", "executor_enrollment_tokens", "users", ["created_by"], ["user_id"]
+    )
     op.create_index(
         "ix_executor_enrollment_tokens_token_hash",
         "executor_enrollment_tokens",

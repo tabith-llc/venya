@@ -4,7 +4,6 @@ import os
 import secrets
 
 import pytest
-
 from core.utils.entropy import csprng_self_test, get_secure_token
 
 

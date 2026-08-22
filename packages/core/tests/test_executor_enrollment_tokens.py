@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
-
 from core.cli.api_client import APIClient, APIClientError
 
 
@@ -60,11 +59,13 @@ class TestAPIClientRegisterExecutor:
         mock_response = MagicMock()
         mock_response.status_code = 201
         mock_response.json.return_value = {
-            "executor_id": "test-1", "cert_pem": "CERT",
-            "ca_cert_pem": "CA", "serial_number": "01",
+            "executor_id": "test-1",
+            "cert_pem": "CERT",
+            "ca_cert_pem": "CA",
+            "serial_number": "01",
             "not_after": "2026-09-01",
         }
-        mock_response.content = b'{}'
+        mock_response.content = b"{}"
         mock_response.raise_for_status.return_value = None
 
         with patch("core.cli.api_client.httpx2.Client") as MockClient:
@@ -86,11 +87,13 @@ class TestAPIClientRegisterExecutor:
         mock_response = MagicMock()
         mock_response.status_code = 201
         mock_response.json.return_value = {
-            "executor_id": "test-1", "cert_pem": "CERT",
-            "ca_cert_pem": "CA", "serial_number": "01",
+            "executor_id": "test-1",
+            "cert_pem": "CERT",
+            "ca_cert_pem": "CA",
+            "serial_number": "01",
             "not_after": "2026-09-01",
         }
-        mock_response.content = b'{}'
+        mock_response.content = b"{}"
         mock_response.raise_for_status.return_value = None
 
         with patch("core.cli.api_client.httpx2.Client") as MockClient:
@@ -184,11 +187,16 @@ class TestCLIParsing:
         from core.cli.cli import create_parser
 
         parser = create_parser()
-        args = parser.parse_args([
-            "exec", "register",
-            "--enrollment-token", "enrl_exec_abc123",
-            "--executor-id", "my-exec",
-        ])
+        args = parser.parse_args(
+            [
+                "exec",
+                "register",
+                "--enrollment-token",
+                "enrl_exec_abc123",
+                "--executor-id",
+                "my-exec",
+            ]
+        )
         assert args.exec_command == "register"
         assert args.enrollment_token == "enrl_exec_abc123"
         assert args.executor_id == "my-exec"

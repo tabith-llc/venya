@@ -111,6 +111,7 @@ def _find_mount_point(path: str) -> str | None:
                 capture_output=True,
                 text=True,
                 timeout=5,
+                check=False,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
@@ -132,6 +133,7 @@ def _get_fstype_via_lsblk(mount_point: str) -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
+            check=False,
         )
         if result.returncode != 0:
             return None
@@ -157,6 +159,7 @@ def _has_crypt_target(mount_point: str) -> bool:
             capture_output=True,
             text=True,
             timeout=5,
+            check=False,
         )
         if result.returncode != 0:
             return False

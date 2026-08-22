@@ -4,7 +4,6 @@ Ties a plaintext token to the entity it was generated for (executor_id or user_i
 via HMAC-SHA256, derived from the server's recovery_code_pepper via HKDF.
 """
 
-
 import hashlib
 import hmac
 

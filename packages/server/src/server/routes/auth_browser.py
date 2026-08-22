@@ -8,22 +8,21 @@ Parallel auth endpoints that use Fido2Manager but serialize for browser
 consumption via the browser adapter. Tokens are stored in HttpOnly cookies.
 """
 
-
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from core.utils.sensitive_log import token as sensitive_token
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from ..fido2.browser_adapter import (
-    challenge_to_browser_options,
-    browser_assertion_to_fido2,
-)
-from core.utils.sensitive_log import token as sensitive_token
 from .. import metrics
-from ..dependencies import get_current_session, get_db
+from ..dependencies import get_current_session
+from ..fido2.browser_adapter import (
+    browser_assertion_to_fido2,
+    challenge_to_browser_options,
+)
 
 logger = logging.getLogger("venya.server")
 
@@ -38,7 +37,8 @@ COOKIE_MAX_AGE = 300  # 5 minutes
 
 class BrowserChallengeRequest(BaseModel):
     user_id: str | None = Field(
-        None, description="Optional user ID to target specific credentials",
+        None,
+        description="Optional user ID to target specific credentials",
     )
 
 
@@ -134,11 +134,7 @@ def _get_session_from_cookie(
         )
         manager = SessionManager(db, session_config)
 
-        session = (
-            db.query(SessionModel)
-            .filter(SessionModel.access_token == token)
-            .first()
-        )
+        session = db.query(SessionModel).filter(SessionModel.access_token == token).first()
         logger.info(
             "GET_SESSION DEBUG: token=%s, session=%s",
             sensitive_token(token, "ACCESS") if token else "None",
@@ -185,9 +181,7 @@ async def browser_login_challenge(
     Returns challenge options for the browser client to present
     to the authenticator via @simplewebauthn/browser.
     """
-    fido2_manager = getattr(
-        request.app.state, "fido2_manager", None
-    )
+    fido2_manager = getattr(request.app.state, "fido2_manager", None)
     if fido2_manager is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -219,9 +213,7 @@ async def browser_login_assert(
     Verifies the assertion via Fido2Manager, creates a session,
     and sets an HttpOnly cookie with the access token.
     """
-    fido2_manager = getattr(
-        request.app.state, "fido2_manager", None
-    )
+    fido2_manager = getattr(request.app.state, "fido2_manager", None)
     if fido2_manager is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -231,7 +223,8 @@ async def browser_login_assert(
     try:
         fido2_response = browser_assertion_to_fido2(req.response)
         result = fido2_manager.finish_authentication(
-            req.challenge_id, fido2_response,
+            req.challenge_id,
+            fido2_response,
         )
     except ValueError as e:
         metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
@@ -249,7 +242,6 @@ async def browser_login_assert(
 
     db = backend.get_session()
     try:
-        from core.iam.models import Session as SessionModel
         from core.iam.role_manager import RoleManager
         from core.iam.session_manager import SessionConfig, SessionManager
 
@@ -277,6 +269,7 @@ async def browser_login_assert(
     except Exception:
         metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
         import traceback
+
         logger.error("Login failed:\n%s", traceback.format_exc())
         db.rollback()
         raise HTTPException(
@@ -300,7 +293,7 @@ async def browser_refresh(
     Validates the existing session cookie and issues a new
     access token cookie with a fresh expiry.
     """
-    logger.info("REFRESH DEBUG: cookies=%s", dict(request.cookies))  # noqa: TRY003 — dict repr may contain token, caught by regex fallback
+    logger.info("REFRESH DEBUG: cookies=%s", dict(request.cookies))
     if session is None:
         logger.info("REFRESH DEBUG: session not found")
         raise HTTPException(
@@ -337,6 +330,7 @@ async def browser_refresh(
     )
     _set_session_cookie(response, new_token.token)
     return response
+
 
 @router.post(
     "/auth/logout/browser",
@@ -393,6 +387,7 @@ ELEVATION_TOKEN_TTL_SECONDS = 60
 def _hash_elevation_token(token: str) -> str:
     """SHA-256 hash an elevation token for secure storage."""
     import hashlib
+
     return hashlib.sha256(token.encode()).hexdigest()
 
 
@@ -410,11 +405,7 @@ def _create_elevation_challenge(db, session, fido2_manager, request):
     from core.iam.models import WebAuthnCredential
 
     # Get user's credentials for the allow list
-    credentials = (
-        db.query(WebAuthnCredential)
-        .filter(WebAuthnCredential.user_id == session.user_id)
-        .all()
-    )
+    credentials = db.query(WebAuthnCredential).filter(WebAuthnCredential.user_id == session.user_id).all()
 
     if not credentials:
         raise HTTPException(
@@ -471,9 +462,7 @@ async def browser_elevate_challenge(
                 detail="FIDO2 manager not initialized",
             )
 
-        challenge_id, browser_options = _create_elevation_challenge(
-            db, session, fido2_manager, request
-        )
+        challenge_id, browser_options = _create_elevation_challenge(db, session, fido2_manager, request)
 
         return BrowserElevateResponse(
             challenge_id=challenge_id,
@@ -523,9 +512,7 @@ async def browser_elevate_assert(
             )
 
         # Verify the challenge was issued for this session
-        elevation_challenges = getattr(
-            request.app.state, "_elevation_challenges", {}
-        )
+        elevation_challenges = getattr(request.app.state, "_elevation_challenges", {})
         challenge_info = elevation_challenges.get(req.challenge_id)
 
         if challenge_info is None:
@@ -545,7 +532,8 @@ async def browser_elevate_assert(
 
         try:
             fido2_manager.finish_authentication(
-                req.challenge_id, fido2_response,
+                req.challenge_id,
+                fido2_response,
             )
         except ValueError as e:
             raise HTTPException(
@@ -561,9 +549,7 @@ async def browser_elevate_assert(
 
         elevation_token = secrets_module.token_urlsafe(32)
         token_hash = _hash_elevation_token(elevation_token)
-        expires_at = datetime.now(timezone.utc) + timedelta(
-            seconds=ELEVATION_TOKEN_TTL_SECONDS
-        )
+        expires_at = datetime.now(UTC) + timedelta(seconds=ELEVATION_TOKEN_TTL_SECONDS)
 
         from core.iam.models import ElevationToken
 
@@ -627,7 +613,9 @@ async def auth_me(request: Request) -> AuthMeResponse:
             detail="Invalid or expired session",
         )
 
-    logger.info("AUTH_ME DEBUG: got session, user_id=%s", result[1].user_id if result and len(result) > 1 else "unknown")
+    logger.info(
+        "AUTH_ME DEBUG: got session, user_id=%s", result[1].user_id if result and len(result) > 1 else "unknown"
+    )
     db, session, user_info = result
     try:
         from core.iam.models import User

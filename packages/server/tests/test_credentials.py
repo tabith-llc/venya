@@ -1,13 +1,12 @@
 """Tests for credential add endpoints (Phase 3)."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.routes import credentials
+from starlette.testclient import TestClient
 
 
 def _create_test_app(fido2_manager=None, backend=None, auth_user=None):
@@ -39,6 +38,7 @@ def _make_valid_elevation_db():
     class MockQuery:
         def filter(self, *args, **kwargs):
             return self
+
         def first(self):
             # Return a truthy object to indicate valid elevation
             return SimpleNamespace(id=1)
@@ -54,6 +54,7 @@ def _make_invalid_elevation_db():
     class MockQuery:
         def filter(self, *args, **kwargs):
             return self
+
         def first(self):
             return None
 
@@ -66,7 +67,7 @@ class TestCredentialAddStart:
 
     def test_add_start_success(self):
         """Should return WebAuthn challenge for authenticated + elevated user."""
-        mock_user = SimpleNamespace(id=1, user_id="user1", display_name="User")
+        SimpleNamespace(id=1, user_id="user1", display_name="User")
 
         mock_query = MagicMock()
         # .query(Model.column).all() returns list of tuples
@@ -180,7 +181,14 @@ class TestCredentialAddStart:
         fido2 = MagicMock()
         fido2.start_registration.return_value = (
             "challenge-789",
-            {"challenge": "dGVzdA==", "rp": {"id": "localhost"}, "pubKeyCredParams": [], "excludeCredentials": [], "timeout": 60000, "attestation": "none"},
+            {
+                "challenge": "dGVzdA==",
+                "rp": {"id": "localhost"},
+                "pubKeyCredParams": [],
+                "excludeCredentials": [],
+                "timeout": 60000,
+                "attestation": "none",
+            },
         )
 
         app = _create_test_app(fido2_manager=fido2, backend=backend, auth_user="user1")
@@ -201,8 +209,10 @@ class TestCredentialAddComplete:
     def test_add_complete_success(self):
         """Should store credential, return status ok."""
         mock_cred = SimpleNamespace(
-            user_id="user1", credential_id=b"new-cred-123",
-            public_key=b"pub-key-data", sign_count=42,
+            user_id="user1",
+            credential_id=b"new-cred-123",
+            public_key=b"pub-key-data",
+            sign_count=42,
         )
 
         db = _make_valid_elevation_db()
@@ -333,8 +343,10 @@ class TestCredentialAddComplete:
     def test_add_complete_stores_credential_correctly(self):
         """Should create WebAuthnCredential with correct fields."""
         mock_cred = SimpleNamespace(
-            user_id="user1", credential_id=b"cred-bytes",
-            public_key=b"pub-key", sign_count=10,
+            user_id="user1",
+            credential_id=b"cred-bytes",
+            public_key=b"pub-key",
+            sign_count=10,
         )
 
         db = _make_valid_elevation_db()
@@ -381,13 +393,16 @@ class TestCredentialRemove:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def with_for_update(self):
                 return self
+
             def all(self):
                 call_num[0] += 1
                 if call_num[0] == 1:
                     return active_creds
                 return [mock_cred]
+
             def first(self):
                 return mock_cred
 
@@ -526,20 +541,25 @@ class TestCredentialList:
 
     def test_list_success(self):
         """Should return list of active credentials ordered by created_at desc."""
-        from datetime import datetime, timezone
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cred1 = SimpleNamespace(
-            id=1, label="Primary key",
-            created_at=now, last_used_at=now,
+            id=1,
+            label="Primary key",
+            created_at=now,
+            last_used_at=now,
         )
         cred2 = SimpleNamespace(
-            id=3, label="Backup key",
-            created_at=now, last_used_at=None,
+            id=3,
+            label="Backup key",
+            created_at=now,
+            last_used_at=None,
         )
         cred3 = SimpleNamespace(
-            id=2, label="Work laptop",
-            created_at=now, last_used_at=now,
+            id=2,
+            label="Work laptop",
+            created_at=now,
+            last_used_at=now,
         )
 
         db = MagicMock()
@@ -547,8 +567,10 @@ class TestCredentialList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return [cred1, cred2, cred3]
 
@@ -586,8 +608,10 @@ class TestCredentialList:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 

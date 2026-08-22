@@ -3,7 +3,7 @@
 import base64
 import hashlib
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -23,9 +23,7 @@ class SecretCreateRequest(BaseModel):
     key: str = Field(..., description="Secret key")
     value: str = Field(..., description="Secret value (plaintext)")
     roles: list[str] = Field(..., description="Role names to scope the secret to")
-    key_version_id: str = Field(
-        ..., description="Key version ID for encryption"
-    )
+    key_version_id: str = Field(..., description="Key version ID for encryption")
 
 
 class SecretCreateResponse(BaseModel):
@@ -113,17 +111,13 @@ def compute_detection_hashes(value: bytes) -> list[str]:
     Returns:
         List of SHA-256 hex digest strings.
     """
-    import hashlib
     import base64 as b64
+    import hashlib
 
     hashes = []
     hashes.append(hashlib.sha256(value).hexdigest())  # raw bytes
-    hashes.append(
-        hashlib.sha256(b64.b64encode(value)).hexdigest()
-    )  # base64 encoding
-    hashes.append(
-        hashlib.sha256(value.hex().encode()).hexdigest()
-    )  # hex encoding
+    hashes.append(hashlib.sha256(b64.b64encode(value)).hexdigest())  # base64 encoding
+    hashes.append(hashlib.sha256(value.hex().encode()).hexdigest())  # hex encoding
     trimmed = value.strip()
     if trimmed != value:
         hashes.append(hashlib.sha256(trimmed).hexdigest())  # whitespace-stripped
@@ -204,21 +198,20 @@ async def secrets_get(
     # For browser users requesting unmask, validate elevation token
     if caller == "human" and unmask and elevation_token:
         try:
-            from sqlalchemy import update
             from core.iam.models import ElevationToken
-            from ..utils.time import is_expired
+            from sqlalchemy import update
 
             token_hash = hashlib.sha256(elevation_token.encode()).hexdigest()
 
             # Atomic conditional update: consume token only if still unused and not expired
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             server_config = getattr(request.app.state, "config", None)
             tolerance = (
                 server_config.clock_skew.token_tolerance_seconds
                 if server_config and hasattr(server_config, "clock_skew")
                 else 60
             )
-            
+
             # Apply clock skew tolerance to expiry check
             expiry_cutoff = now - timedelta(seconds=tolerance)
             result = db.execute(
@@ -263,7 +256,7 @@ async def secrets_get(
 
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Elevation token validation failed",
@@ -432,7 +425,8 @@ async def revoke_session_secrets(
     Returns:
         Confirmation of revocation with count.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     from core.iam.models import AuditEvent
 
     # Verify caller is executor (mTLS)
@@ -452,7 +446,7 @@ async def revoke_session_secrets(
                 "session_id": session_id,
                 "secret_id": secret_id,
             },
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
         )
         db.add(audit_event)
 
@@ -485,11 +479,7 @@ async def get_active_key_version(
     """
     from core.iam.models import KeyVersion
 
-    active_version = (
-        db.query(KeyVersion)
-        .filter(KeyVersion.active.is_(True))
-        .first()
-    )
+    active_version = db.query(KeyVersion).filter(KeyVersion.active.is_(True)).first()
     if active_version is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -497,7 +487,5 @@ async def get_active_key_version(
         )
     return ActiveKeyVersionResponse(
         key_version_id=active_version.version_label,
-        created_at=active_version.created_at.isoformat()
-        if active_version.created_at
-        else "",
+        created_at=active_version.created_at.isoformat() if active_version.created_at else "",
     )

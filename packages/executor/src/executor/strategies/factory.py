@@ -3,7 +3,6 @@
 Registry-based strategy selection driven by configuration.
 """
 
-
 from .base import InjectionStrategy
 from .memfd_strategy import MemfdStrategy
 from .sbx_strategy import SbxStrategy
@@ -29,8 +28,5 @@ def create_strategy(method: str, secret_base_fd: int = 100) -> InjectionStrategy
     """
     cls = STRATEGY_REGISTRY.get(method)
     if cls is None:
-        raise ValueError(
-            f"Unknown injection strategy: {method!r}. "
-            f"Available: {list(STRATEGY_REGISTRY.keys())}"
-        )
+        raise ValueError(f"Unknown injection strategy: {method!r}. " f"Available: {list(STRATEGY_REGISTRY.keys())}")
     return cls(secret_base_fd=secret_base_fd)

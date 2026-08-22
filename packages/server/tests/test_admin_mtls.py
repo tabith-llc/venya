@@ -9,8 +9,7 @@ Tests cover:
 """
 
 import os
-import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -18,15 +17,13 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509 import load_pem_x509_certificates
-from cryptography.x509.oid import ExtensionOID, NameOID, ExtendedKeyUsageOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID, NameOID
 from fastapi import FastAPI, Request
-from starlette.testclient import TestClient
-
 from server.ca import AdminCAManager
 from server.config import AdminMTLSConfig, CASecurityConfig, ServerConfig
 from server.dependencies import get_current_user, require_admin
 from server.middleware.auth import SessionMiddleware
-
+from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -276,7 +273,7 @@ class TestAdminSignCert:
         ca_cert = x509.load_pem_x509_certificate(manager.get_admin_ca_cert_pem())
 
         # Verify signature
-        admin_public_key = cert.public_key()
+        cert.public_key()
         ca_public_key = ca_cert.public_key()
         ca_public_key.verify(
             cert.signature,
@@ -290,7 +287,7 @@ class TestAdminSignCert:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, key_pem, _ = manager.sign_admin_cert("test-admin")
+        _cert, key_pem, _ = manager.sign_admin_cert("test-admin")
 
         # Verify key can be loaded from PEM
         loaded_key = serialization.load_pem_private_key(key_pem, password=None)
@@ -352,26 +349,32 @@ class TestExtractIdentity:
 
         cert_with_both_sans = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "cn-identity"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "cn-identity"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(test_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.now(timezone.utc))
-            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=90))
+            .not_valid_before(datetime.now(UTC))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=90))
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(
                 x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
                 critical=False,
             )
             .add_extension(
-                x509.SubjectAlternativeName([
-                    x509.RFC822Name("email@preferred.local"),
-                    x509.DNSName("dns-not-preferred.local"),
-                ]),
+                x509.SubjectAlternativeName(
+                    [
+                        x509.RFC822Name("email@preferred.local"),
+                        x509.DNSName("dns-not-preferred.local"),
+                    ]
+                ),
                 critical=False,
             )
             .sign(ca_key, hashes.SHA256())
@@ -396,16 +399,20 @@ class TestExtractIdentity:
 
         cert_no_san = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "cn-only-identity"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "cn-only-identity"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(test_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.now(timezone.utc))
-            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=90))
+            .not_valid_before(datetime.now(UTC))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=90))
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(
                 x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
@@ -432,9 +439,7 @@ def _create_admin_mtls_app(
     admin_mtls_enabled: bool = True,
 ):
     """Create a test app with admin mTLS middleware configured."""
-    from fastapi import FastAPI, Request
-    from starlette.requests import Request as StarletteRequest
-
+    from fastapi import FastAPI
     from server.config import AdminMTLSConfig, ServerConfig
     from server.middleware.auth import SessionMiddleware
 
@@ -484,7 +489,7 @@ def _sign_admin_cert_and_pem(
     manager = AdminCAManager(Path(admin_ca_dir), ca_security)
     manager.initialize()
 
-    cert, key_pem, cert_pem = manager.sign_admin_cert(admin_identity)
+    _cert, key_pem, cert_pem = manager.sign_admin_cert(admin_identity)
     return cert_pem.decode("utf-8"), key_pem.decode("utf-8")
 
 
@@ -497,7 +502,7 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
         cert_pem_str = cert_pem.decode("utf-8")
 
         app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
@@ -530,7 +535,7 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
         cert_pem_str = cert_pem.decode("utf-8")
 
         app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
@@ -557,16 +562,20 @@ class TestAdminMTLSMiddleware:
         from cryptography.hazmat.primitives.asymmetric import ec as ec_mod
 
         ca_cert, ca_key = manager._load_ca_cert_and_key()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expired_key = ec_mod.generate_private_key(ec_mod.SECP256R1())
 
         expired_cert = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "dust@montana"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "dust@montana"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(expired_key.public_key())
             .serial_number(x509.random_serial_number())
@@ -605,7 +614,7 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, _, cert_pem = manager.sign_admin_cert("rogue@attacker.internal")
+        _cert, _, cert_pem = manager.sign_admin_cert("rogue@attacker.internal")
         cert_pem_str = cert_pem.decode("utf-8")
 
         # Only dust@montana is known
@@ -640,16 +649,20 @@ class TestAdminMTLSMiddleware:
 
         cert_with_san = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "different@identity.internal"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "different@identity.internal"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(test_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.now(timezone.utc))
-            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=90))
+            .not_valid_before(datetime.now(UTC))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=90))
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(
                 x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
@@ -683,20 +696,19 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
         cert_pem_str = cert_pem.decode("utf-8")
 
         # We need a backend with a DB session for the revocation check.
         # Since we can't easily set up a full backend in this test,
         # we'll test with admin_mtls disabled for the backend path,
         # or mock the backend.
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
 
         # Create mock backend with revoked cert
         db = MagicMock()
-        from core.iam.models import AdminCertRevocation
         revoked_entry = MagicMock()
         db.query.return_value.filter.return_value.first.return_value = revoked_entry
         backend = MagicMock()
@@ -747,7 +759,7 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
         cert_pem_str = cert_pem.decode("utf-8")
 
         app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
@@ -840,9 +852,7 @@ class TestStartupEnforcement:
         passphrase_env = config.admin_mtls.ca_key_passphrase_env
         with pytest.raises(RuntimeError, match=passphrase_env):
             if config.admin_mtls.enabled and not os.environ.get(passphrase_env):
-                raise RuntimeError(
-                    f"admin_mtls.enabled requires {passphrase_env} environment variable to be set."
-                )
+                raise RuntimeError(f"admin_mtls.enabled requires {passphrase_env} environment variable to be set.")
 
     def test_passphrase_set_allows_startup(self, admin_ca_dir, admin_ca_security):
         """admin_mtls.enabled + passphrase env set should pass enforcement."""
@@ -873,8 +883,8 @@ class TestStartupEnforcement:
 
         from pathlib import Path as PPath
 
-        from server.config import AdminMTLSConfig, ServerConfig
         from server.ca import AdminCAManager
+        from server.config import AdminMTLSConfig, ServerConfig
 
         # Use a non-existent admin CA directory
         admin_ca_missing = str(Path(admin_ca_dir) / "nonexistent-admin-ca")
@@ -893,8 +903,7 @@ class TestStartupEnforcement:
         with pytest.raises(RuntimeError, match="admin CA not found"):
             if config.admin_mtls.enabled and not admin_ca_manager.has_ca:
                 raise RuntimeError(
-                    "admin_mtls.enabled but admin CA not found at admin-ca/. "
-                    "Run: venya admin init-admin-ca"
+                    "admin_mtls.enabled but admin CA not found at admin-ca/. " "Run: venya admin init-admin-ca"
                 )
 
     def test_admin_ca_present_at_lifespan(self, admin_ca_dir, admin_ca_security):
@@ -903,8 +912,8 @@ class TestStartupEnforcement:
 
         from pathlib import Path as PPath
 
-        from server.config import AdminMTLSConfig, ServerConfig
         from server.ca import AdminCAManager
+        from server.config import AdminMTLSConfig, ServerConfig
 
         manager = AdminCAManager(PPath(admin_ca_dir), admin_ca_security)
         manager.initialize()
@@ -932,14 +941,13 @@ class TestStartupEnforcement:
 
 def _create_revoke_test_app():
     """Create a minimal test app for revocation endpoint tests."""
-    from fastapi import FastAPI
     from unittest.mock import MagicMock
-    from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.requests import Request
 
+    from core.iam.models import AdminCertRevocation
+    from fastapi import FastAPI
     from server.config import ServerConfig
     from server.routes import admin as admin_routes
-    from core.iam.models import AdminCertRevocation
+    from starlette.middleware.base import BaseHTTPMiddleware
 
     app = FastAPI()
     app.state.config = ServerConfig(recovery_code_pepper="test-pepper")
@@ -1026,7 +1034,7 @@ class TestRevokeAdminCertEndpoint:
         """Valid revocation request should return 200."""
         serial_hex = "01ab2c3d4e5f6789"
 
-        app, backend, revocations = _create_revoke_test_app()
+        app, _backend, revocations = _create_revoke_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -1044,7 +1052,7 @@ class TestRevokeAdminCertEndpoint:
         """Revoking the same serial twice should return 200 (idempotent)."""
         serial_hex = "02abcd1234567890"
 
-        app, backend, revocations = _create_revoke_test_app()
+        app, _backend, revocations = _create_revoke_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
 
@@ -1067,7 +1075,7 @@ class TestRevokeAdminCertEndpoint:
 
     def test_revoke_admin_cert_invalid_serial(self):
         """Invalid serial format should return 400."""
-        app, backend, revocations = _create_revoke_test_app()
+        app, _backend, _revocations = _create_revoke_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -1078,7 +1086,7 @@ class TestRevokeAdminCertEndpoint:
 
     def test_revoke_admin_cert_long_serial(self):
         """Serial too long should return 400."""
-        app, backend, revocations = _create_revoke_test_app()
+        app, _backend, _revocations = _create_revoke_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -1100,9 +1108,7 @@ def _write_pem_bundle(certs: list[bytes], path: Path) -> None:
 
 def _create_concurrent_test_app(admin_ca_dir: str):
     """Create a test app for concurrency tests."""
-    from fastapi import FastAPI, Request
-    from starlette.requests import Request as StarletteRequest
-
+    from fastapi import FastAPI
     from server.config import AdminMTLSConfig, ServerConfig
     from server.middleware.auth import SessionMiddleware
 
@@ -1142,7 +1148,7 @@ class TestAdminMTLSConcurrency:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
         cert_pem_str = cert_pem.decode("utf-8")
 
         app = _create_concurrent_test_app(admin_ca_dir)
@@ -1180,7 +1186,6 @@ class TestAdminCARotation:
 
     def test_admin_ca_rotation_preserves_existing_certs(self, admin_ca_dir, admin_ca_security):
         """During CA rotation overlap, certs from both old and new CA are accepted."""
-        from cryptography.x509 import load_pem_x509_certificates
 
         # 1. Create old CA and issue cert
         old_ca_dir = Path(admin_ca_dir) / "old-ca"
@@ -1188,7 +1193,7 @@ class TestAdminCARotation:
         os.environ["OLD_CA_PASSPHRASE"] = "test_passphrase"
         old_ca = AdminCAManager(old_ca_dir, old_ca_security)
         old_ca.initialize()
-        old_cert, old_key_pem, old_cert_pem = old_ca.sign_admin_cert("admin@old")
+        _old_cert, _old_key_pem, old_cert_pem = old_ca.sign_admin_cert("admin@old")
         old_cert_pem_str = old_cert_pem.decode("utf-8")
 
         # 2. Create new CA
@@ -1197,7 +1202,7 @@ class TestAdminCARotation:
         os.environ["NEW_CA_PASSPHRASE"] = "test_passphrase"
         new_ca = AdminCAManager(new_ca_dir, new_ca_security)
         new_ca.initialize()
-        new_cert, new_key_pem, new_cert_pem = new_ca.sign_admin_cert("admin@new")
+        _new_cert, _new_key_pem, new_cert_pem = new_ca.sign_admin_cert("admin@new")
         new_cert_pem_str = new_cert_pem.decode("utf-8")
 
         # 3. Create PEM bundle (old + new)
@@ -1215,6 +1220,7 @@ class TestAdminCARotation:
         )
 
         from cryptography.x509 import load_pem_x509_certificates as load_bundled_cas
+
         app = FastAPI()
         app.add_middleware(SessionMiddleware)
         app.state.config = config
@@ -1239,7 +1245,9 @@ class TestAdminCARotation:
                 "X-Client-Verified": "true",
             },
         )
-        assert resp_old.status_code == 401, f"Old cert should pass during overlap, got {resp_old.status_code}: {resp_old.json()}"
+        assert (
+            resp_old.status_code == 401
+        ), f"Old cert should pass during overlap, got {resp_old.status_code}: {resp_old.json()}"
 
         resp_new = client.get(
             "/api/v1/admin/test",
@@ -1248,7 +1256,9 @@ class TestAdminCARotation:
                 "X-Client-Verified": "true",
             },
         )
-        assert resp_new.status_code == 401, f"New cert should pass during overlap, got {resp_new.status_code}: {resp_new.json()}"
+        assert (
+            resp_new.status_code == 401
+        ), f"New cert should pass during overlap, got {resp_new.status_code}: {resp_new.json()}"
 
         # 6. After rotation complete (remove old CA from bundle), old cert should be rejected
         _write_pem_bundle([new_ca.get_admin_ca_cert_pem()], bundle_path)
@@ -1261,7 +1271,9 @@ class TestAdminCARotation:
                 "X-Client-Verified": "true",
             },
         )
-        assert resp_old_after.status_code == 403, f"Old cert should be rejected after rotation, got {resp_old_after.status_code}"
+        assert (
+            resp_old_after.status_code == 403
+        ), f"Old cert should be rejected after rotation, got {resp_old_after.status_code}"
 
         resp_new_after = client.get(
             "/api/v1/admin/test",
@@ -1270,17 +1282,18 @@ class TestAdminCARotation:
                 "X-Client-Verified": "true",
             },
         )
-        assert resp_new_after.status_code == 401, f"New cert should still pass after rotation, got {resp_new_after.status_code}"
+        assert (
+            resp_new_after.status_code == 401
+        ), f"New cert should still pass after rotation, got {resp_new_after.status_code}"
 
     def test_pem_bundle_with_single_cert(self, admin_ca_dir, admin_ca_security):
         """A PEM bundle with a single cert should work the same as a single CA file."""
-        from cryptography.x509 import load_pem_x509_certificates
 
         os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
+        _cert, _, cert_pem = manager.sign_admin_cert("dust@montana")
         cert_pem_str = cert_pem.decode("utf-8")
 
         # Create a bundle with just one cert
@@ -1319,7 +1332,6 @@ class TestAdminCARotation:
 
     def test_pem_bundle_with_three_cas(self, admin_ca_dir, admin_ca_security):
         """A PEM bundle with 3 CAs should verify against any of them."""
-        from cryptography.x509 import load_pem_x509_certificates
 
         # Create 3 separate CAs
         ca_dirs = []
@@ -1333,15 +1345,15 @@ class TestAdminCARotation:
             ca_dirs.append((ca, ca_dir))
 
         # Create a cert from CA 1
-        cert1, _, cert1_pem = ca_dirs[0][0].sign_admin_cert("admin@ca1")
+        _cert1, _, cert1_pem = ca_dirs[0][0].sign_admin_cert("admin@ca1")
         cert1_pem_str = cert1_pem.decode("utf-8")
 
         # Create a cert from CA 2
-        cert2, _, cert2_pem = ca_dirs[1][0].sign_admin_cert("admin@ca2")
+        _cert2, _, cert2_pem = ca_dirs[1][0].sign_admin_cert("admin@ca2")
         cert2_pem_str = cert2_pem.decode("utf-8")
 
         # Create a cert from CA 3
-        cert3, _, cert3_pem = ca_dirs[2][0].sign_admin_cert("admin@ca3")
+        _cert3, _, cert3_pem = ca_dirs[2][0].sign_admin_cert("admin@ca3")
         cert3_pem_str = cert3_pem.decode("utf-8")
 
         # Create a bundle with all 3 CAs

@@ -12,8 +12,8 @@ Without this fix, clock skew tolerance calculations could produce
 incorrect results when comparing expires_at values.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "013"
 down_revision = "012"

@@ -1,6 +1,5 @@
 """Abstract base class and result type for injection strategies."""
 
-
 import abc
 import logging
 from collections.abc import Callable

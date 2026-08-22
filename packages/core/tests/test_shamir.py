@@ -1,10 +1,8 @@
 """Tests for Shamir's Secret Sharing module."""
 
 import os
-from pathlib import Path
 
 import pytest
-
 from core.shamir import combine, split
 
 
@@ -49,7 +47,7 @@ class TestShamirSplitCombine:
 
         # Any 4 shares should produce wrong result
         for i in range(5):
-            subset = shares[:i] + shares[i + 1:]
+            subset = shares[:i] + shares[i + 1 :]
             reconstructed = combine(subset)
             assert reconstructed != secret, f"4 shares incorrectly reconstructed for index {i}"
 

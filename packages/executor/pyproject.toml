@@ -42,6 +42,12 @@ package = "."
 target-version = "py314"
 line-length = 120
 
+[tool.ruff.lint]
+# Mirror of root [tool.ruff.lint] extend-ignore (ruff uses nearest config).
+# B008 is per-file-ignored at the root (server FastAPI DI idiom only) — executor
+# has no B008 sites, so this only mirrors BLE001 (tracked debt) + SIM117.
+extend-ignore = ["BLE001", "SIM117"]
+
 [dependency-groups]
 dev = [
     "pip-audit>=2.10.1",

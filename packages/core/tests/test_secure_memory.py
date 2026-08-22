@@ -1,13 +1,9 @@
 """Tests for secure memory: mlock, secure_zero, and SecureBuffer."""
 
 import ctypes
-import gc
-import os
-import sys
 from unittest.mock import patch
 
 import pytest
-
 from core.engine.secure_memory import (
     SecureBuffer,
     secure_mlock,

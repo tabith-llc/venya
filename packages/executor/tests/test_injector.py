@@ -1,23 +1,17 @@
 """Tests for credential injection (sentinels, FD injection, FD whitelisting)."""
 
-
 import base64
+import fcntl
 import os
 import re
 import stat
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
-
-import fcntl
 
 from executor.injector import (
-    SecretInjection,
     SentinelRegistry,
-    inject_via_file,
     inject_via_fifo,
+    inject_via_file,
     inject_via_memfd,
     parse_sentinels,
     scan_open_fds,
@@ -26,7 +20,6 @@ from executor.injector import (
     verify_fd_whitelist,
     wrap_with_sentinel,
 )
-
 
 # ---------------------------------------------------------------------------
 # SentinelRegistry
@@ -134,6 +127,7 @@ class TestSentinelWrapping:
         wrapped = wrap_with_sentinel(secret_id, b"value")
 
         import hashlib
+
         expected_hash = hashlib.sha256(secret_id.encode()).hexdigest()[:8]
 
         assert f"[VENYA:{expected_hash}]".encode() in wrapped
@@ -142,9 +136,7 @@ class TestSentinelWrapping:
         original = b"test-value"
         wrapped = wrap_with_sentinel("s1", original)
 
-        decoded_b64 = base64.b64decode(
-            wrapped.split(b"[VENYA:")[1].split(b"]")[0]
-        )
+        base64.b64decode(wrapped.split(b"[VENYA:")[1].split(b"]")[0])
         # The part between [VENYA:hash] and [/VENYA] is base64
         match = re.search(rb"\[VENYA:[a-f0-9]{8}\](.*?)\[/VENYA\]", wrapped)
         assert match
@@ -193,11 +185,7 @@ class TestParseSentinels:
         assert decoded == b"secret-value"
 
     def test_parse_multiple_sentinels(self):
-        data = (
-            wrap_with_sentinel("s1", b"secret-one")
-            + b" "
-            + wrap_with_sentinel("s2", b"secret-two")
-        )
+        data = wrap_with_sentinel("s1", b"secret-one") + b" " + wrap_with_sentinel("s2", b"secret-two")
         results = parse_sentinels(data)
 
         assert len(results) == 2
@@ -293,9 +281,7 @@ class TestParseSentinels:
     def test_sentinel_format_is_valid(self):
         """Full sentinel format matches expected pattern."""
         wrapped = wrap_with_sentinel("test-secret", b"value")
-        full_pattern = re.compile(
-            rb"\[VENYA:[a-f0-9]{8}\][A-Za-z0-9+/=]*\[/VENYA\]"
-        )
+        full_pattern = re.compile(rb"\[VENYA:[a-f0-9]{8}\][A-Za-z0-9+/=]*\[/VENYA\]")
         assert full_pattern.fullmatch(wrapped)
 
 
@@ -416,6 +402,7 @@ class TestSentinelEdgeCases:
     def test_extra_characters_before_sentinel(self):
         """Sentinel preceded by other characters is still found by search()."""
         import base64
+
         valid_b64 = base64.b64encode(b"test").decode()
         data = b"X[VENYA:abcdef01]" + valid_b64.encode() + b"[/VENYA]"
         result = strip_sentinel(data)
@@ -592,7 +579,7 @@ class TestInjectViaFifo:
     def test_fifo_created(self, tmp_path: Path):
         fifo_path = str(tmp_path / "test.fifo")
 
-        injection = inject_via_fifo(fifo_path, b"secret-data")
+        inject_via_fifo(fifo_path, b"secret-data")
 
         assert os.path.exists(fifo_path)
         assert stat.S_ISFIFO(os.stat(fifo_path).st_mode)
@@ -613,6 +600,7 @@ class TestInjectViaFifo:
 
         # Give the background thread a moment to write
         import time
+
         time.sleep(0.2)
 
         with open(fifo_path, "rb") as f:
@@ -715,6 +703,7 @@ class TestScanOpenFds:
     def test_specific_pid(self, tmp_path: Path):
         """Can scan a specific PID."""
         import subprocess
+
         # Run a simple process
         proc = subprocess.Popen(["sleep", "5"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -736,7 +725,7 @@ class TestSetCloexec:
 
     def test_sets_cloexec_on_fd(self, tmp_path: Path):
         """FD_CLOEXEC flag is set on the file descriptor."""
-        fd, path = tempfile.mkstemp(dir=str(tmp_path))
+        fd, _path = tempfile.mkstemp(dir=str(tmp_path))
         try:
             set_cloexec(fd)
 
@@ -776,6 +765,7 @@ class TestSetCloexec:
             result = subprocess.run(
                 ["python3", "-c", f"import fcntl; fcntl.fcntl({fd}, fcntl.F_GETFL)"],
                 capture_output=True,
+                check=False,
             )
             # CLOEXEC should cause EBADF when child tries to use the FD
             assert result.returncode != 0

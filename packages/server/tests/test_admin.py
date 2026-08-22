@@ -1,13 +1,13 @@
 """Tests for admin operation endpoints."""
 
+from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
-from server.routes import admin as admin_routes
 from server.dependencies import get_current_user, require_admin
+from server.routes import admin as admin_routes
+from starlette.testclient import TestClient
 
 
 def _create_test_app(backend=None, auth_user=None):
@@ -85,9 +85,7 @@ class TestAdminEnroll:
     def test_enroll_too_many_tokens(self):
         """POST /admin/enroll should return 400 if too many tokens."""
         mock_em = MagicMock()
-        mock_em.create_enrollment_token.side_effect = Exception(
-            "User 'user1' already has 3 active enrollment tokens"
-        )
+        mock_em.create_enrollment_token.side_effect = Exception("User 'user1' already has 3 active enrollment tokens")
         db = MagicMock()
         backend = MagicMock()
         backend.get_session.return_value = db
@@ -112,10 +110,13 @@ class TestAdminRemove:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def with_for_update(self):
                 return self
+
             def first(self):
                 return user
+
             def delete(self):
                 return 0
 
@@ -136,11 +137,14 @@ class TestAdminRemove:
 
     def test_remove_not_found(self):
         """DELETE /admin/users/{id} should return 404 for missing user."""
+
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def with_for_update(self):
                 return self
+
             def first(self):
                 return None
 
@@ -163,10 +167,13 @@ class TestAdminRemove:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def with_for_update(self):
                 return self
+
             def first(self):
                 return user
+
             def delete(self):
                 return 0
 
@@ -191,12 +198,20 @@ class TestAdminListUsers:
     def test_list_users(self):
         """GET /admin/users should return list of users."""
         user1 = SimpleNamespace(
-            user_id="user1", display_name=None, status="pending_enrollment",
-            auth_mode="security-key", enrolled_at=None, session_timeout=900,
+            user_id="user1",
+            display_name=None,
+            status="pending_enrollment",
+            auth_mode="security-key",
+            enrolled_at=None,
+            session_timeout=900,
         )
         user2 = SimpleNamespace(
-            user_id="user2", display_name="User Two", status="active",
-            auth_mode="platform", enrolled_at=None, session_timeout=1800,
+            user_id="user2",
+            display_name="User Two",
+            status="active",
+            auth_mode="platform",
+            enrolled_at=None,
+            session_timeout=1800,
         )
         db = MagicMock()
         db.query.return_value.order_by.return_value.all.return_value = [user1, user2]
@@ -232,7 +247,9 @@ class TestAdminConfigureUser:
     def test_configure_success(self):
         """PUT /admin/users/{id} should update user settings."""
         user = SimpleNamespace(
-            user_id="user1", auth_mode="security-key", session_timeout=900,
+            user_id="user1",
+            auth_mode="security-key",
+            session_timeout=900,
         )
         db = MagicMock()
         db.query.return_value.first.return_value = user
@@ -255,6 +272,7 @@ class TestAdminConfigureUser:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return None
 
@@ -277,7 +295,10 @@ class TestAdminKeyVersionList:
     def test_list_key_versions(self):
         """GET /admin/key-versions should return list of versions."""
         v1 = SimpleNamespace(
-            id=1, version_label="v1", active=True, rotation_pending=False,
+            id=1,
+            version_label="v1",
+            active=True,
+            rotation_pending=False,
             created_at=None,
         )
         db = MagicMock()
@@ -307,17 +328,21 @@ class TestAdminKeyVersionRotate:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return active_v
+
             def count(self):
                 return 5
+
             def all(self):
                 return [secret]
 
         db.query.return_value = MockQuery()
-        db.add.side_effect = lambda x: setattr(x, 'id', 99) if not hasattr(x, 'id') or x.id is None else None
+        db.add.side_effect = lambda x: setattr(x, "id", 99) if not hasattr(x, "id") or x.id is None else None
         backend = MagicMock()
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
@@ -337,17 +362,21 @@ class TestAdminKeyVersionRotate:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return None
+
             def count(self):
                 return 0
+
             def all(self):
                 return []
 
         db.query.return_value = MockQuery()
-        db.add.side_effect = lambda x: setattr(x, 'id', 99) if not hasattr(x, 'id') or x.id is None else None
+        db.add.side_effect = lambda x: setattr(x, "id", 99) if not hasattr(x, "id") or x.id is None else None
         backend = MagicMock()
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
@@ -422,8 +451,10 @@ class TestAdminSetCommandPolicy:
     def test_set_policy_existing(self):
         """POST /admin/command-policy should update existing policy."""
         policy = SimpleNamespace(
-            policy_name="default", preset="balanced",
-            allowed_commands='["/bin/ls"]', dangerous_patterns=None,
+            policy_name="default",
+            preset="balanced",
+            allowed_commands='["/bin/ls"]',
+            dangerous_patterns=None,
             updated_at=None,
         )
         db = MagicMock()
@@ -511,10 +542,13 @@ class TestAdminAddAllowedCommand:
     def test_add_command_existing_policy(self):
         """POST /admin/command-policy/allowed should append to existing policy."""
         import json
+
         policy = SimpleNamespace(
-            policy_name="default", preset="balanced",
+            policy_name="default",
+            preset="balanced",
             allowed_commands=json.dumps(["/bin/ls"]),
-            dangerous_patterns=None, updated_at=None,
+            dangerous_patterns=None,
+            updated_at=None,
         )
         db = MagicMock()
         db.query.return_value.filter.return_value.first.return_value = policy
@@ -605,15 +639,20 @@ class TestAdminKeyRotationStatus:
     def test_status_success(self):
         """GET /admin/key-rotation/status should return job list."""
         job1 = SimpleNamespace(
-            id=1, status="running", total_secrets=100,
-            completed_secrets=50, failed_count=0,
-            started_at=None, completed_at=None,
+            id=1,
+            status="running",
+            total_secrets=100,
+            completed_secrets=50,
+            failed_count=0,
+            started_at=None,
+            completed_at=None,
         )
         db = MagicMock()
 
         class MockQuery:
             def order_by(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return [job1]
 
@@ -677,6 +716,7 @@ class TestAdminRevokeExecutor:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 call_num[0] += 1
                 return cert if call_num[0] == 1 else None
@@ -700,6 +740,7 @@ class TestAdminRevokeExecutor:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return None
 
@@ -723,6 +764,7 @@ class TestAdminRevokeExecutor:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 call_num[0] += 1
                 return cert if call_num[0] == 1 else revocation
@@ -750,17 +792,21 @@ class TestAdminKeyRotationAlias:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return active_v
+
             def count(self):
                 return 5
+
             def all(self):
                 return [secret]
 
         db.query.return_value = MockQuery()
-        db.add.side_effect = lambda x: setattr(x, 'id', 99) if not hasattr(x, 'id') or x.id is None else None
+        db.add.side_effect = lambda x: setattr(x, "id", 99) if not hasattr(x, "id") or x.id is None else None
         backend = MagicMock()
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
@@ -787,12 +833,16 @@ class TestAdminReEnroll:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return mock_user
+
             def update(self, *args, **kwargs):
                 return 0
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 
@@ -830,12 +880,16 @@ class TestAdminReEnroll:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return None
+
             def update(self, *args, **kwargs):
                 return 0
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
 
@@ -858,6 +912,7 @@ class TestAdminReEnroll:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return mock_user
 
@@ -882,9 +937,9 @@ class TestAdminListUserTokens:
 
     def test_list_tokens_success(self):
         """Should return list of enrollment tokens for user."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         mock_user = SimpleNamespace(id=1, user_id="user1")
         token1 = SimpleNamespace(id=10, state="created", created_at=now, expires_at=now, used_at=None)
         token2 = SimpleNamespace(id=9, state="completed", created_at=now, expires_at=now, used_at=now)
@@ -896,15 +951,19 @@ class TestAdminListUserTokens:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 query_num[0] += 1
                 if query_num[0] == 1:
                     return mock_user
                 return None
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return [token1, token2]
+
             def update(self, *args, **kwargs):
                 return 0
 
@@ -930,12 +989,16 @@ class TestAdminListUserTokens:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return None
+
             def order_by(self, *args, **kwargs):
                 return self
+
             def all(self):
                 return []
+
             def update(self, *args, **kwargs):
                 return 0
 
@@ -964,8 +1027,10 @@ class TestAdminCreateUserToken:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return mock_user
+
             def update(self, *args, **kwargs):
                 return 0
 
@@ -999,8 +1064,10 @@ class TestAdminCreateUserToken:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return None
+
             def update(self, *args, **kwargs):
                 return 0
 
@@ -1026,8 +1093,10 @@ class TestAdminRevokeToken:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return None
+
             def update(self, *args, **kwargs):
                 return 0
 
@@ -1058,8 +1127,10 @@ class TestAdminRevokeToken:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return None
+
             def update(self, *args, **kwargs):
                 return 0
 

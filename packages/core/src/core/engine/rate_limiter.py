@@ -4,7 +4,6 @@ Tracks failed attempts, enforces lockout, and persists failures
 to the DB for restart recovery.
 """
 
-
 import time
 from dataclasses import dataclass, field
 
@@ -117,9 +116,7 @@ class RateLimiter:
             else:
                 # Still locked out
                 remaining = int(lockout_seconds - (now - record.locked_at))
-                raise RateLimitExceededError(
-                    f"User {user_id} is locked out. Unlock in {remaining} seconds."
-                )
+                raise RateLimitExceededError(f"User {user_id} is locked out. Unlock in {remaining} seconds.")
 
         if record.failed_attempts >= self.max_attempts:
             raise RateLimitExceededError(
@@ -181,12 +178,11 @@ class RateLimiter:
         expired = []
         for uid, record in self._failures.items():
             # Window expired
-            if now - record.window_start > self.window_seconds:
-                expired.append(uid)
-            # Lockout period elapsed (but window hasn't expired yet)
-            elif (record.failed_attempts >= self.max_attempts
-                  and record.locked_at > 0
-                  and now - record.locked_at >= self.lockout_reinstate_minutes * 60):
+            if now - record.window_start > self.window_seconds or (
+                record.failed_attempts >= self.max_attempts
+                and record.locked_at > 0
+                and now - record.locked_at >= self.lockout_reinstate_minutes * 60
+            ):
                 expired.append(uid)
         for uid in expired:
             del self._failures[uid]

@@ -4,14 +4,12 @@ Tests build_filter_entries, filter_output, and filter_and_redact
 functions that wrap the Rust venya_filter extension.
 """
 
-
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
 try:
     from venya_filter import compute_detection_hashes as _compute_detection_hashes  # type: ignore
-    from venya_filter import filter_output as _filter_output  # type: ignore
 except ImportError:
     pytest.skip("venya_filter Rust extension not available", allow_module_level=True)
 
@@ -176,9 +174,7 @@ class TestFilterAndRedact:
 
     def test_empty_both_streams(self):
         """Empty streams return empty."""
-        masked_stdout, masked_stderr, stdout_ids, stderr_ids = filter_and_redact(
-            b"", b"", []
-        )
+        masked_stdout, masked_stderr, stdout_ids, stderr_ids = filter_and_redact(b"", b"", [])
 
         assert masked_stdout == b""
         assert masked_stderr == b""

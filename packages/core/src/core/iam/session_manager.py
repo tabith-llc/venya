@@ -5,18 +5,15 @@ Two-tier token system:
 - Access token: 5 minutes, transparently refreshed within active session
 """
 
-
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from core.utils.entropy import get_secure_token
 
-from .models import Session as SessionModel, User
+from .models import Session as SessionModel
 
 
 class SessionError(Exception):
@@ -40,9 +37,7 @@ class SessionConfig:
 
     session_timeout: timedelta = field(default_factory=lambda: timedelta(minutes=15))
     access_token_ttl: timedelta = field(default_factory=lambda: timedelta(minutes=5))
-    max_session_duration: timedelta = field(
-        default_factory=lambda: timedelta(hours=4)
-    )
+    max_session_duration: timedelta = field(default_factory=lambda: timedelta(hours=4))
     clock_skew_tolerance_seconds: int = field(default=_DEFAULT_CLOCK_SKEW_SECONDS)
 
 
@@ -61,7 +56,7 @@ class AccessToken:
     token: str
     user_id: str
     roles: list[str] = field(default_factory=list)
-    expires_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     jti: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
@@ -78,9 +73,7 @@ class SessionManager:
         self.db = db
         self.config = config or SessionConfig()
 
-    def create_session(
-        self, user_id: str, roles: list[str] | None = None
-    ) -> tuple[SessionModel, AccessToken]:
+    def create_session(self, user_id: str, roles: list[str] | None = None) -> tuple[SessionModel, AccessToken]:
         """Create a new session and access token.
 
         Args:
@@ -90,7 +83,7 @@ class SessionManager:
         Returns:
             Tuple of (Session, AccessToken).
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires_at = now + self.config.session_timeout
 
         # Create access token first
@@ -118,26 +111,19 @@ class SessionManager:
         Returns:
             True if the session is active (not idle-expired and not exceeded max duration).
         """
-        session = (
-            self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
-        )
+        session = self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
         if session is None:
             return False
 
-        now = datetime.now(timezone.utc)
-        now_minus_tolerance = now - timedelta(
-            seconds=self.config.clock_skew_tolerance_seconds
-        )
+        now = datetime.now(UTC)
+        now_minus_tolerance = now - timedelta(seconds=self.config.clock_skew_tolerance_seconds)
 
         # Check hard cap using stored created_at (not derived from expires_at)
         if session.created_at + self.config.max_session_duration < now:
             return False
 
         # Check idle timeout
-        if session.expires_at < now_minus_tolerance:
-            return False
-
-        return True
+        return session.expires_at >= now_minus_tolerance
 
     def extend_session(self, session_id: int) -> bool:
         """Extend a session's idle timeout.
@@ -145,13 +131,11 @@ class SessionManager:
         Returns:
             True if extended, False if hard cap reached.
         """
-        session = (
-            self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
-        )
+        session = self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
         if session is None:
             return False
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Check hard cap using stored created_at
         if session.created_at + self.config.max_session_duration < now:
@@ -172,11 +156,7 @@ class SessionManager:
             New AccessToken if successful, None if session expired or max cap reached.
         """
         # Find session by access token
-        session = (
-            self.db.query(SessionModel)
-            .filter(SessionModel.access_token == access_token)
-            .first()
-        )
+        session = self.db.query(SessionModel).filter(SessionModel.access_token == access_token).first()
         if session is None:
             return None
 
@@ -190,7 +170,7 @@ class SessionManager:
         new_token = AccessToken(
             token=get_secure_token(32),
             user_id=session.user_id,
-            expires_at=datetime.now(timezone.utc) + self.config.access_token_ttl,
+            expires_at=datetime.now(UTC) + self.config.access_token_ttl,
         )
 
         session.access_token = new_token.token
@@ -205,9 +185,7 @@ class SessionManager:
         Returns:
             True if revoked, False if not found.
         """
-        session = (
-            self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
-        )
+        session = self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
         if session is None:
             return False
 
@@ -225,10 +203,8 @@ class SessionManager:
         Returns:
             Number of sessions removed.
         """
-        now = datetime.now(timezone.utc)
-        cleanup_threshold = now - timedelta(
-            seconds=self.config.clock_skew_tolerance_seconds
-        )
+        now = datetime.now(UTC)
+        cleanup_threshold = now - timedelta(seconds=self.config.clock_skew_tolerance_seconds)
         expired = (
             self.db.query(SessionModel)
             .filter(
@@ -245,17 +221,12 @@ class SessionManager:
         Returns:
             False if session has expired (requires re-auth), True if still active.
         """
-        now = datetime.now(timezone.utc)
-        now_minus_tolerance = now - timedelta(
-            seconds=self.config.clock_skew_tolerance_seconds
-        )
+        now = datetime.now(UTC)
+        now_minus_tolerance = now - timedelta(seconds=self.config.clock_skew_tolerance_seconds)
 
         # Hard cap check using stored created_at
         if session.created_at + self.config.max_session_duration < now:
             return False
 
         # Idle timeout check
-        if session.expires_at < now_minus_tolerance:
-            return False
-
-        return True
+        return session.expires_at >= now_minus_tolerance

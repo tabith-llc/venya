@@ -9,7 +9,6 @@ Orchestrates the full execution pipeline:
   6. Clean up (delete secrets, revoke tokens)
 """
 
-
 import base64
 import hashlib
 import logging
@@ -34,7 +33,7 @@ from .injector import (
     strip_sentinel,
     verify_fd_whitelist,
 )
-from .strategies.base import InjectionResult, InjectionStrategy, SecretMount
+from .strategies.base import InjectionResult, InjectionStrategy
 from .strategies.memfd_strategy import MemfdStrategy
 
 logger = logging.getLogger("venya.executor")
@@ -182,13 +181,9 @@ class Executor:
             # Step 3: Execute with injected secrets
             # Branch based on strategy type
             if self.injection_strategy.name() == "sbx":
-                result = self._run_command_sbx(
-                    command, injections, env_override, cwd, allowed_hosts
-                )
+                result = self._run_command_sbx(command, injections, env_override, cwd, allowed_hosts)
             else:
-                result = self._run_command_direct(
-                    command, injections, env_override, cwd
-                )
+                result = self._run_command_direct(command, injections, env_override, cwd)
 
             # Audit: command_executed
             if self.audit_logger:
@@ -233,9 +228,7 @@ class Executor:
             sentinel_hash = ""
             if wrapped_value:
                 match = None
-                for m in re.finditer(
-                    rb"\[VENYA:([a-f0-9]{8})\]", wrapped_value
-                ):
+                for m in re.finditer(rb"\[VENYA:([a-f0-9]{8})\]", wrapped_value):
                     match = m
                     break
                 if match:
@@ -458,7 +451,7 @@ class Executor:
         from .strategies.sbx_strategy import SbxStrategy
 
         if not isinstance(self.injection_strategy, SbxStrategy):
-            raise RuntimeError("SBX strategy required but got: %s" % type(self.injection_strategy).__name__)
+            raise TypeError(f"SBX strategy required but got: {type(self.injection_strategy).__name__}")
 
         strategy = self.injection_strategy
         session_uuid = uuid.uuid4().hex[:12]
@@ -495,9 +488,7 @@ class Executor:
             )
 
             # Stage 1 + Stage 2 filtering (same as direct path)
-            return self._filter_and_build_result(
-                command, result.returncode, stdout, stderr, injections
-            )
+            return self._filter_and_build_result(command, result.returncode, stdout, stderr, injections)
 
         except subprocess.TimeoutExpired:
             logger.error("Sandbox command timed out after %d seconds", SBX_TIMEOUT)
@@ -629,11 +620,7 @@ class Executor:
             return
 
         try:
-            timeout = (
-                self.config.network.request_timeout_seconds
-                if self.config
-                else 10
-            )
+            timeout = self.config.network.request_timeout_seconds if self.config else 10
             self.http_client.post(
                 f"/api/v1/sessions/{self.session_id}/secrets/revoke",
                 json={"secret_ids": secret_ids},
@@ -681,11 +668,7 @@ class Executor:
             "secrets": secret_entries,
         }
 
-        timeout = (
-            self.config.network.request_timeout_seconds
-            if self.config
-            else 30
-        )
+        timeout = self.config.network.request_timeout_seconds if self.config else 30
         response = self.http_client.post(
             f"/api/v1/sessions/{self.session_id}/filter",
             json=payload,

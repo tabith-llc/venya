@@ -59,7 +59,6 @@ async def enrollment_create_token(
     Requires admin permission.
     """
     try:
-        from datetime import timezone as tz
 
         from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
         from core.iam.models import User
@@ -74,7 +73,7 @@ async def enrollment_create_token(
                 detail=f"User '{req.user_id}' not found",
             )
 
-        token, plaintext = em.create_enrollment_token(user.user_id)
+        _token, plaintext = em.create_enrollment_token(user.user_id)
         db.commit()
         return EnrollmentTokenCreateResponse(
             token=plaintext,
@@ -107,7 +106,6 @@ async def enrollment_list_tokens(
 
     Requires admin permission.
     """
-    from datetime import timezone as tz
 
     from core.iam.models import EnrollmentToken
 

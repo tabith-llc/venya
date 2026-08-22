@@ -6,10 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx2
-import pytest
-
 from core.cli.api_client import APIClient, APIClientError
-from core.cli.commands import cmd_credential_list, cmd_credential_add, cmd_credential_remove
+from core.cli.commands import cmd_credential_add, cmd_credential_list, cmd_credential_remove
 
 
 def _make_mock_response(status_code=200, json_data=None):
@@ -310,7 +308,7 @@ class TestCredentialAdd:
     def test_add_credential_no_fido2_device(self):
         """Add credential with no FIDO2 device returns error."""
         client, config_file = _make_client()
-        mock_http = MagicMock()
+        MagicMock()
 
         with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
             with patch("fido2.hid.list_devices", return_value=[]):
@@ -434,7 +432,7 @@ class TestCredentialRemove:
     def test_remove_credential_no_elevation(self):
         """Remove credential with elevation failure returns 1."""
         client, config_file = _make_client()
-        mock_http = MagicMock()
+        MagicMock()
 
         with patch("core.cli.commands._elevate", side_effect=APIClientError("Elevation failed")):
             args = MagicMock()

@@ -4,9 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.routes import filter as filter_routes
+from starlette.testclient import TestClient
 
 
 def _create_test_app(backend=None):
@@ -38,8 +37,10 @@ class TestFilterSessionOutput:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return session
+
             def all(self):
                 return [secret]
 
@@ -52,6 +53,7 @@ class TestFilterSessionOutput:
 
         client = TestClient(app, raise_server_exceptions=False)
         import base64
+
         stdout = base64.b64encode(b"hello world").decode()
         stderr = base64.b64encode(b"error msg").decode()
         resp = client.post(
@@ -81,8 +83,10 @@ class TestFilterSessionOutput:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return session
+
             def all(self):
                 return []
 
@@ -111,8 +115,10 @@ class TestFilterSessionOutput:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return session
+
             def all(self):
                 return []
 
@@ -125,6 +131,7 @@ class TestFilterSessionOutput:
 
         client = TestClient(app, raise_server_exceptions=False)
         import base64
+
         stdout = base64.b64encode(b"output with no secrets").decode()
         stderr = base64.b64encode(b"stderr clean").decode()
         resp = client.post(
@@ -160,8 +167,10 @@ class TestFilterSessionOutput:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return session
+
             def all(self):
                 return [secret]
 
@@ -176,14 +185,10 @@ class TestFilterSessionOutput:
         client = TestClient(app, raise_server_exceptions=False)
 
         # Output contains the plaintext secret value
-        stdout_with_secret = base64.b64encode(
-            b"running command, output: AKIAIOSFODNN7EXAMPLE done"
-        ).decode()
+        stdout_with_secret = base64.b64encode(b"running command, output: AKIAIOSFODNN7EXAMPLE done").decode()
         stderr = base64.b64encode(b"clean stderr").decode()
 
-        with patch(
-            "core.engine.encryption.decrypt_secret"
-        ) as mock_decrypt:
+        with patch("core.engine.encryption.decrypt_secret") as mock_decrypt:
             mock_decrypt.return_value = secret_value
 
             # Use integer session ID so session lookup executes
@@ -220,8 +225,10 @@ class TestFilterSessionOutput:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return session
+
             def all(self):
                 return [secret]
 
@@ -240,9 +247,7 @@ class TestFilterSessionOutput:
 
         from core.engine.encryption import DecryptionError
 
-        with patch(
-            "core.engine.encryption.decrypt_secret"
-        ) as mock_decrypt:
+        with patch("core.engine.encryption.decrypt_secret") as mock_decrypt:
             mock_decrypt.side_effect = DecryptionError("invalid tag")
 
             resp = client.post(
@@ -274,8 +279,10 @@ class TestFilterSessionOutput:
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
+
             def first(self):
                 return session
+
             def all(self):
                 return [secret]
 

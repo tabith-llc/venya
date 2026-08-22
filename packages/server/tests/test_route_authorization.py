@@ -13,11 +13,7 @@ from server.config import ServerConfig
 
 def _norm(path: str) -> str:
     """Canonical form for allowlist matching: {param} segments -> * (positional)."""
-    return "/".join(
-        "*" if seg.startswith("{") and seg.endswith("}") else seg
-        for seg in path.split("/")
-        if seg
-    )
+    return "/".join("*" if seg.startswith("{") and seg.endswith("}") else seg for seg in path.split("/") if seg)
 
 
 # Routes that intentionally rely on non-role authorization, grouped by model.
@@ -100,7 +96,6 @@ def test_every_route_is_guarded_or_allowlisted():
 
     # Never pass vacuously: if traversal silently yields nothing, fail loudly.
     assert seen > 0, "No endpoints found — app.routes traversal is broken"
-    assert not violations, (
-        "Privileged route(s) missing a role/auth guard and not in the allowlist:\n"
-        + "\n".join(violations)
+    assert not violations, "Privileged route(s) missing a role/auth guard and not in the allowlist:\n" + "\n".join(
+        violations
     )

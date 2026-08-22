@@ -14,8 +14,8 @@ then adds the NOT NULL constraint. Semantically correct: credentials are
 either active or inactive — no pending/unknown state.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "020"
 down_revision = "019"

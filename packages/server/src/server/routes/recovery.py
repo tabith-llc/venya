@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+from datetime import UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -40,7 +41,7 @@ async def recovery(
     Validates recovery code + WebAuthn assertion from enrolled device.
     This endpoint provides a shorter path for CLI use.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     try:
         from core.iam.models import Role, RoleMember, User
@@ -84,9 +85,7 @@ async def recovery(
         )
 
         # Check if user already exists
-        existing = (
-            db.query(User).filter(User.user_id == req.new_user_id).first()
-        )
+        existing = db.query(User).filter(User.user_id == req.new_user_id).first()
         if existing:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -97,14 +96,12 @@ async def recovery(
         new_user = User(
             user_id=req.new_user_id,
             auth_mode="security-key",
-            enrolled_at=datetime.now(timezone.utc),
+            enrolled_at=datetime.now(UTC),
         )
         db.add(new_user)
 
         # Add admin role
-        admin_role = (
-            db.query(Role).filter(Role.name == "admin").first()
-        )
+        admin_role = db.query(Role).filter(Role.name == "admin").first()
         if admin_role is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -119,7 +116,9 @@ async def recovery(
 
         db.commit()
 
-        logger.info("Recovery: created new admin user %s (validated by code from %s)", req.new_user_id, admin_user.user_id)
+        logger.info(
+            "Recovery: created new admin user %s (validated by code from %s)", req.new_user_id, admin_user.user_id
+        )
         return RecoveryResponse(
             success=True,
             action="new_admin",

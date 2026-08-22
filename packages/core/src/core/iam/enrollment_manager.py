@@ -8,18 +8,15 @@ Handles enrollment token lifecycle:
 5. Re-enrollment flow (Phase 6)
 """
 
-
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
 from core.utils.entropy import get_secure_token
 
 from .models import EnrollmentToken, User
-
 
 # Default clock skew tolerance for core-side checks
 _DEFAULT_CLOCK_SKEW_SECONDS = 60
@@ -66,9 +63,7 @@ class EnrollmentManager:
         # Check for active (non-expired, non-completed, non-revoked) tokens
         # Use FOR UPDATE to prevent race condition: two concurrent calls
         # must not both see active_count < 3 and both succeed.
-        now_minus_tolerance = datetime.now(timezone.utc) - timedelta(
-            seconds=self.config.clock_skew_tolerance_seconds
-        )
+        now_minus_tolerance = datetime.now(UTC) - timedelta(seconds=self.config.clock_skew_tolerance_seconds)
         active_tokens = (
             self.db.query(EnrollmentToken)
             .filter(
@@ -80,16 +75,14 @@ class EnrollmentManager:
             .all()
         )
         if len(active_tokens) >= 3:
-            raise EnrollmentError(
-                f"User ID {user_id} already has 3 active enrollment tokens"
-            )
+            raise EnrollmentError(f"User ID {user_id} already has 3 active enrollment tokens")
 
         plaintext = get_secure_token(32)
         token = EnrollmentToken(
             user_id=user_id,
             token_hash=self._hash_token(plaintext),
             state="created",
-            expires_at=datetime.now(timezone.utc) + self.config.token_expiry,
+            expires_at=datetime.now(UTC) + self.config.token_expiry,
         )
         self.db.add(token)
         self.db.flush()
@@ -103,11 +96,7 @@ class EnrollmentManager:
             and expiry are NOT checked here — callers should validate.
         """
         token_hash = self._hash_token(token_value)
-        return (
-            self.db.query(EnrollmentToken)
-            .filter(EnrollmentToken.token_hash == token_hash)
-            .first()
-        )
+        return self.db.query(EnrollmentToken).filter(EnrollmentToken.token_hash == token_hash).first()
 
     def validate_token_for_start(self, token_value: str) -> EnrollmentToken:
         """Validate an enrollment token for starting the enrollment flow.
@@ -132,13 +121,9 @@ class EnrollmentManager:
             raise EnrollmentError("Invalid enrollment token")
 
         if token.state not in ("created", "in_progress"):
-            raise EnrollmentError(
-                f"Enrollment token is not in 'created' state (current: {token.state})"
-            )
+            raise EnrollmentError(f"Enrollment token is not in 'created' state (current: {token.state})")
 
-        if token.expires_at <= datetime.now(timezone.utc) - timedelta(
-            seconds=self.config.clock_skew_tolerance_seconds
-        ):
+        if token.expires_at <= datetime.now(UTC) - timedelta(seconds=self.config.clock_skew_tolerance_seconds):
             raise EnrollmentError("Enrollment token has expired")
 
         user = self.db.query(User).filter(User.user_id == token.user_id).first()
@@ -185,7 +170,7 @@ class EnrollmentManager:
             raise EnrollmentError("Invalid enrollment token or not in 'in_progress' state")
 
         token.state = "completed"
-        token.used_at = datetime.now(timezone.utc)
+        token.used_at = datetime.now(UTC)
         self.db.flush()
 
     def revoke_token(self, token_id: int) -> bool:
@@ -197,11 +182,7 @@ class EnrollmentManager:
         Returns:
             True if revoked, False if not found.
         """
-        token = (
-            self.db.query(EnrollmentToken)
-            .filter(EnrollmentToken.id == token_id)
-            .first()
-        )
+        token = self.db.query(EnrollmentToken).filter(EnrollmentToken.id == token_id).first()
         if token is None:
             return False
 
@@ -256,15 +237,12 @@ class EnrollmentManager:
         Returns:
             Number of tokens removed.
         """
-        now = datetime.now(timezone.utc)
-        now_minus_tolerance = now - timedelta(
-            seconds=self.config.clock_skew_tolerance_seconds
-        )
+        now = datetime.now(UTC)
+        now_minus_tolerance = now - timedelta(seconds=self.config.clock_skew_tolerance_seconds)
         count = (
             self.db.query(EnrollmentToken)
             .filter(
-                (EnrollmentToken.expires_at < now_minus_tolerance)
-                | (EnrollmentToken.state == "revoked"),
+                (EnrollmentToken.expires_at < now_minus_tolerance) | (EnrollmentToken.state == "revoked"),
             )
             .delete(synchronize_session="fetch")
         )

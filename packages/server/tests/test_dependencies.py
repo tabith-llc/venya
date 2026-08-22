@@ -1,13 +1,13 @@
 """Tests for require_role dependency factory (C-06) and require_admin (L-11)."""
 
+from datetime import UTC
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import Depends, FastAPI
-from starlette.testclient import TestClient
-
 from server.dependencies import get_current_user, require_admin, require_role
+from starlette.testclient import TestClient
 
 
 def _make_rm_mock(user_permissions):
@@ -17,9 +17,7 @@ def _make_rm_mock(user_permissions):
         user_permissions: Dict mapping user_id -> {role_id: permission}.
     """
     rm = MagicMock()
-    rm.get_user_permissions.side_effect = (
-        lambda uid: user_permissions.get(uid, {})
-    )
+    rm.get_user_permissions.side_effect = lambda uid: user_permissions.get(uid, {})
     return rm
 
 
@@ -125,9 +123,7 @@ class TestRequireRoleExecutorBypass:
     def test_executor_passes_without_role_lookup(self):
         """Executor user_info (no user_id) passes and never hits RoleManager."""
         rm = _make_rm_mock({})
-        rm.get_user_permissions.side_effect = AssertionError(
-            "role lookup must not run for executors"
-        )
+        rm.get_user_permissions.side_effect = AssertionError("role lookup must not run for executors")
         with patch("server.dependencies.RoleManager", return_value=rm):
             app = _create_app(
                 {"caller": "executor", "executor_id": "exec-1"},
@@ -238,9 +234,7 @@ def _create_admin_app(auth_user, with_backend=True):
 
 def _make_admin_rm_mock(has_admin, role_exists=True, permission_error=None):
     rm = MagicMock()
-    rm.get_role_by_name.return_value = (
-        SimpleNamespace(id=1) if role_exists else None
-    )
+    rm.get_role_by_name.return_value = SimpleNamespace(id=1) if role_exists else None
     if permission_error is not None:
         rm.has_permission.side_effect = permission_error
     else:
@@ -292,9 +286,7 @@ class TestRequireAdmin:
         backend = MagicMock()
         session = MagicMock()
         backend.get_session.return_value = session
-        rm = _make_admin_rm_mock(
-            has_admin=True, permission_error=RuntimeError("db down")
-        )
+        rm = _make_admin_rm_mock(has_admin=True, permission_error=RuntimeError("db down"))
         with patch("core.iam.role_manager.RoleManager", return_value=rm):
             app = _create_admin_app({"user_id": "admin1"})
             app.state.backend = backend
@@ -313,13 +305,9 @@ class TestRequireAdmin:
         """
         backend = MagicMock()
         rm = _make_admin_rm_mock(has_admin=True)
-        rm.has_permission.side_effect = AssertionError(
-            "admin lookup must not run for executors"
-        )
+        rm.has_permission.side_effect = AssertionError("admin lookup must not run for executors")
         with patch("core.iam.role_manager.RoleManager", return_value=rm):
-            app = _create_admin_app(
-                {"caller": "executor", "executor_id": "exec-1"}
-            )
+            app = _create_admin_app({"caller": "executor", "executor_id": "exec-1"})
             app.state.backend = backend
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/protected")
@@ -335,11 +323,11 @@ class TestGetCurrentSessionOperatorMaxCap:
 
     @staticmethod
     def _call(config, created_age_seconds, expires_in_seconds=600):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from server.dependencies import get_current_session
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         session = SimpleNamespace(
             id="s1",
             created_at=now - timedelta(seconds=created_age_seconds),

@@ -7,9 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
-
 from core.cli.api_client import APIClient, APIClientAuthenticationError, APIClientError, Config
-
 
 # ---------------------------------------------------------------------------
 # Config tests
@@ -250,10 +248,10 @@ class TestAPIClient:
             client._http = mock_http
 
             # Patch refresh_token to set the token directly
-            original_refresh = client.refresh_token
             def mock_refresh():
                 client.config.access_token = "new-token"
                 return "new-token"
+
             with patch.object(client, "refresh_token", mock_refresh):
                 result = client._request("GET", "/api/v1/secrets")
                 assert result == {"key": "secret"}

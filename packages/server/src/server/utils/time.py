@@ -5,9 +5,8 @@ with configurable clock skew tolerance. Prevents drift across
 call sites by using a single source of truth.
 """
 
-
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger("venya")
 
@@ -26,11 +25,11 @@ def is_expired(expires_at: datetime | None, tolerance_seconds: int = 60) -> bool
     if expires_at is None:
         return False
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Handle timezone-naive datetimes (defensive — all models should be aware)
     if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_at = expires_at.replace(tzinfo=UTC)
 
     expired = expires_at <= now - timedelta(seconds=tolerance_seconds)
 
@@ -38,8 +37,7 @@ def is_expired(expires_at: datetime | None, tolerance_seconds: int = 60) -> bool
         # Technically expired but within tolerance — log for observability
         seconds_past = int((now - expires_at).total_seconds())
         logger.debug(
-            "Token accepted within clock skew tolerance "
-            "(expired %ds ago, tolerance=%ds)",
+            "Token accepted within clock skew tolerance " "(expired %ds ago, tolerance=%ds)",
             seconds_past,
             tolerance_seconds,
         )
@@ -59,7 +57,7 @@ def effective_expiry_check_time(tolerance_seconds: int) -> datetime:
     Returns:
         datetime representing now - tolerance.
     """
-    return datetime.now(timezone.utc) - timedelta(seconds=tolerance_seconds)
+    return datetime.now(UTC) - timedelta(seconds=tolerance_seconds)
 
 
 def has_not_yet_started(valid_from: datetime, tolerance_seconds: int = 60) -> bool:
@@ -72,9 +70,9 @@ def has_not_yet_started(valid_from: datetime, tolerance_seconds: int = 60) -> bo
     Returns:
         True if valid_from is still in the future (beyond tolerance).
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     if valid_from.tzinfo is None:
-        valid_from = valid_from.replace(tzinfo=timezone.utc)
+        valid_from = valid_from.replace(tzinfo=UTC)
 
     return valid_from > now + timedelta(seconds=tolerance_seconds)

@@ -8,7 +8,7 @@ per-pass error isolation, same log lines.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -24,18 +24,20 @@ def cleanup_expired_sessions(
     tolerance: int = 60,
 ) -> int:
     """Delete sessions past their hard cap. Returns the number deleted."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     hard_cap_threshold = now - timedelta(seconds=max_session_duration - session_timeout)
     threshold = hard_cap_threshold - timedelta(seconds=tolerance)
     result = db.execute(
-        text("""
+        text(
+            """
             DELETE FROM sessions
             WHERE id IN (
                 SELECT id FROM sessions
                 WHERE expires_at < :threshold
                 LIMIT :limit
             )
-        """),
+        """
+        ),
         {"threshold": threshold, "limit": 1000},
     )
     db.commit()
@@ -47,9 +49,10 @@ def purge_admin_identity_metadata(db: Session, *, days: int = 90) -> int:
 
     Returns the number of rows updated.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(UTC) - timedelta(days=days)
     result = db.execute(
-        text("""UPDATE executor_enrollment_tokens
+        text(
+            """UPDATE executor_enrollment_tokens
                 SET created_by_session_id = NULL,
                     created_from_ip = NULL,
                     created_from_user_agent = NULL,
@@ -60,7 +63,8 @@ def purge_admin_identity_metadata(db: Session, *, days: int = 90) -> int:
                   AND (created_by_session_id IS NOT NULL
                        OR created_from_ip IS NOT NULL
                        OR created_from_user_agent IS NOT NULL
-                       OR admin_meta_wrapped_dek IS NOT NULL)"""),
+                       OR admin_meta_wrapped_dek IS NOT NULL)"""
+        ),
         {"cutoff": cutoff},
     )
     db.commit()
@@ -71,7 +75,7 @@ def cleanup_rate_limit_counters(db: Session, *, hours: int = 1) -> int:
     """Delete expired rate-limit failure counters. Returns the number deleted."""
     result = db.execute(
         text("DELETE FROM rate_limit_failures WHERE window_start < :threshold"),
-        {"threshold": datetime.now(timezone.utc) - timedelta(hours=hours)},
+        {"threshold": datetime.now(UTC) - timedelta(hours=hours)},
     )
     db.commit()
     return result.rowcount

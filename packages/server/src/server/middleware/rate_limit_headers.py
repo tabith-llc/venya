@@ -4,13 +4,12 @@ Attaches X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
 headers to all responses. On 429, also adds Retry-After.
 """
 
-
 import logging
 from typing import Any
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
 
 logger = logging.getLogger("venya.server")
 
@@ -21,9 +20,7 @@ class RateLimitHeaderMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: Any) -> None:
         super().__init__(app)
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
 
         rl_info = getattr(request.state, "rate_limit_info", None)

@@ -3,8 +3,7 @@
 Adds security-related HTTP headers to all responses.
 """
 
-
-from typing import Any
+from typing import Any, ClassVar
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
@@ -44,18 +43,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             f"connect-src {connect_src}"
         )
 
-    SECURITY_HEADERS_TEMPLATE = {
+    SECURITY_HEADERS_TEMPLATE: ClassVar[dict[str, str]] = {
         "X-Frame-Options": "DENY",
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "strict-origin-when-cross-origin",
-        "Strict-Transport-Security": (
-            "max-age=31536000; includeSubDomains; preload"
-        ),
+        "Strict-Transport-Security": ("max-age=31536000; includeSubDomains; preload"),
     }
 
-    async def dispatch(
-        self, request: Any, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Any, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = self._build_csp()
         for header, value in self.SECURITY_HEADERS_TEMPLATE.items():

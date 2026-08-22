@@ -16,8 +16,8 @@ initialization, read on every subsequent startup, so the KEK is deterministic
 for a given passphrase across restarts.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "021"
 down_revision = "020"

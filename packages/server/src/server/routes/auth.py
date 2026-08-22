@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..dependencies import get_current_user, get_db
 from .. import metrics
+from ..dependencies import get_db
 
 logger = logging.getLogger("venya.server")
 
@@ -134,7 +134,7 @@ async def auth_registration_complete(
         )
         db.add(credential)
         db.commit()
-    except Exception:
+    except Exception:  # noqa: S110
         # D-3: pre-existing swallow — return 201 even if the DB commit fails
         # (credential was already created in the FIDO2 manager). The open
         # transaction is rolled back by get_db's `finally: close()`.
@@ -220,7 +220,7 @@ async def auth_login_complete(
     user_roles = rm.get_user_roles(result["user_id"])
     role_ids = [m.role_id for m in user_roles]
 
-    session, access_token = sm.create_session(
+    _session, access_token = sm.create_session(
         user_id=result["user_id"],
         roles=[str(rid) for rid in role_ids],
     )
@@ -275,11 +275,7 @@ async def auth_refresh(
     manager = SessionManager(db, session_config)
 
     # Find session by access token
-    session = (
-        db.query(SessionModel)
-        .filter(SessionModel.access_token == token)
-        .first()
-    )
+    session = db.query(SessionModel).filter(SessionModel.access_token == token).first()
 
     if session is None:
         metrics.AUTH_REFRESH_TOTAL.labels(result="invalid").inc()

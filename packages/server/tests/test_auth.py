@@ -4,9 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.routes import auth as auth_routes
+from starlette.testclient import TestClient
 
 
 def _create_test_app(fido2_manager=None, backend=None):
@@ -192,8 +191,9 @@ class TestAuthLoginComplete:
         backend = MagicMock()
         backend.get_session.return_value = db
 
-        with patch("core.iam.session_manager.SessionManager") as mock_sm, \
-             patch("core.iam.role_manager.RoleManager") as mock_rm:
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
 
             mock_sm.return_value.create_session.return_value = (session_mock, access_token_mock)
             mock_rm.return_value.get_user_roles.return_value = []

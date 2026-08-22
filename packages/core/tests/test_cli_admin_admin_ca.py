@@ -9,16 +9,14 @@ import os
 from pathlib import Path
 
 import pytest
+from core.cli.commands import (
+    cmd_admin_generate_admin_cert,
+    cmd_admin_init_admin_ca,
+)
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import ExtensionOID, NameOID, ExtendedKeyUsageOID
-
-from core.cli.commands import (
-    cmd_admin_init_admin_ca,
-    cmd_admin_generate_admin_cert,
-)
-
+from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID, NameOID
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -121,11 +119,15 @@ class TestGenerateAdminCert:
     def test_generate_admin_cert_creates_key_and_cert(self, admin_ca_initialized):
         """generate-admin-cert should produce valid signed cert."""
         output_dir = str(Path(admin_ca_initialized).parent / "admin-output")
-        args = type("Args", (), {
-            "identity": "dust@montana",
-            "ca_dir": admin_ca_initialized,
-            "output_dir": output_dir,
-        })()
+        args = type(
+            "Args",
+            (),
+            {
+                "identity": "dust@montana",
+                "ca_dir": admin_ca_initialized,
+                "output_dir": output_dir,
+            },
+        )()
         result = cmd_admin_generate_admin_cert(args)
 
         assert result == 0
@@ -137,11 +139,15 @@ class TestGenerateAdminCert:
     def test_generate_admin_cert_correct_subject_san_eku(self, admin_ca_initialized):
         """Signed admin cert should have correct CN, SAN, EKU."""
         output_dir = str(Path(admin_ca_initialized).parent / "admin-output2")
-        args = type("Args", (), {
-            "identity": "operator@venya.internal",
-            "ca_dir": admin_ca_initialized,
-            "output_dir": output_dir,
-        })()
+        args = type(
+            "Args",
+            (),
+            {
+                "identity": "operator@venya.internal",
+                "ca_dir": admin_ca_initialized,
+                "output_dir": output_dir,
+            },
+        )()
         cmd_admin_generate_admin_cert(args)
 
         cert = x509.load_pem_x509_certificate(Path(output_dir, "admin.crt").read_bytes())
@@ -167,17 +173,21 @@ class TestGenerateAdminCert:
     def test_generate_admin_cert_signed_by_admin_ca(self, admin_ca_initialized):
         """Signed admin cert should verify against admin CA cert."""
         output_dir = str(Path(admin_ca_initialized).parent / "admin-output3")
-        args = type("Args", (), {
-            "identity": "test-admin",
-            "ca_dir": admin_ca_initialized,
-            "output_dir": output_dir,
-        })()
+        args = type(
+            "Args",
+            (),
+            {
+                "identity": "test-admin",
+                "ca_dir": admin_ca_initialized,
+                "output_dir": output_dir,
+            },
+        )()
         cmd_admin_generate_admin_cert(args)
 
         cert = x509.load_pem_x509_certificate(Path(output_dir, "admin.crt").read_bytes())
         ca_cert = x509.load_pem_x509_certificate(Path(admin_ca_initialized, "admin-ca.crt").read_bytes())
 
-        admin_public_key = cert.public_key()
+        cert.public_key()
         ca_public_key = ca_cert.public_key()
         ca_public_key.verify(
             cert.signature,
@@ -188,11 +198,15 @@ class TestGenerateAdminCert:
     def test_generate_admin_cert_missing_ca_key(self, tmp_path):
         """generate-admin-cert should fail if CA key not found."""
         output_dir = str(tmp_path / "output")
-        args = type("Args", (), {
-            "identity": "test",
-            "ca_dir": str(tmp_path / "nonexistent"),
-            "output_dir": output_dir,
-        })()
+        args = type(
+            "Args",
+            (),
+            {
+                "identity": "test",
+                "ca_dir": str(tmp_path / "nonexistent"),
+                "output_dir": output_dir,
+            },
+        )()
         result = cmd_admin_generate_admin_cert(args)
         assert result == 1
 
@@ -203,10 +217,14 @@ class TestGenerateAdminCert:
         cert_path.unlink()
 
         output_dir = str(Path(admin_ca_initialized).parent / "output")
-        args = type("Args", (), {
-            "identity": "test",
-            "ca_dir": admin_ca_initialized,
-            "output_dir": output_dir,
-        })()
+        args = type(
+            "Args",
+            (),
+            {
+                "identity": "test",
+                "ca_dir": admin_ca_initialized,
+                "output_dir": output_dir,
+            },
+        )()
         result = cmd_admin_generate_admin_cert(args)
         assert result == 1

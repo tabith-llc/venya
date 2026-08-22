@@ -50,11 +50,15 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         status_code = str(response.status_code)
 
         metrics.REQUEST_DURATION.labels(
-            endpoint=endpoint, method=method, status_code=status_code,
+            endpoint=endpoint,
+            method=method,
+            status_code=status_code,
         ).observe(elapsed)
 
         metrics.REQUESTS_TOTAL.labels(
-            endpoint=endpoint, method=method, status_code=status_code,
+            endpoint=endpoint,
+            method=method,
+            status_code=status_code,
         ).inc()
 
         return response

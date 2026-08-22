@@ -1,14 +1,10 @@
 """Core facade: get/put/delete/list with RBAC enforcement and rate limiting."""
 
-
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
-from sqlalchemy import and_
-
-from ..iam.models import Secret, SecretRole, Role, RoleMember
-from .backend import Backend, BackendConfig
+from ..iam.models import Role, Secret, SecretRole
+from .backend import Backend
 from .encryption import decrypt_secret as _decrypt_secret_impl
 from .rate_limiter import RateLimiter
 
@@ -126,25 +122,15 @@ class Core:
 
             # Check role access if role_names provided
             if role_names:
-                secret_roles = (
-                    session.query(SecretRole)
-                    .filter(SecretRole.secret_id == secret.id)
-                    .all()
-                )
+                secret_roles = session.query(SecretRole).filter(SecretRole.secret_id == secret.id).all()
                 secret_role_ids = {sr.role_id for sr in secret_roles}
 
                 # Get role IDs for the named roles
-                named_roles = (
-                    session.query(Role.id)
-                    .filter(Role.name.in_(role_names))
-                    .all()
-                )
+                named_roles = session.query(Role.id).filter(Role.name.in_(role_names)).all()
                 named_role_ids = {r.id for r in named_roles}
 
                 if not secret_role_ids.intersection(named_role_ids):
-                    raise CoreAccessError(
-                        "User lacks access to any of the required roles"
-                    )
+                    raise CoreAccessError("User lacks access to any of the required roles")
 
             # For executor: always plaintext
             if caller == Caller.EXECUTOR:
@@ -204,18 +190,14 @@ class Core:
                 wrapped_dek=wrapped_dek,
                 key_version_id=key_version_id,
                 created_by=user_id,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
             session.add(secret)
             session.flush()
 
             # Link roles
             for role_name in role_names:
-                role = (
-                    session.query(Role)
-                    .filter(Role.name == role_name)
-                    .first()
-                )
+                role = session.query(Role).filter(Role.name == role_name).first()
                 if role is None:
                     raise CoreAccessError(f"Role not found: {role_name}")
                 session.add(SecretRole(secret_id=secret.id, role_id=role.id))
@@ -274,9 +256,7 @@ class Core:
                 raise CoreAccessError("You do not own this secret")
 
             # Delete secret roles first (foreign key constraint)
-            session.query(SecretRole).filter(
-                SecretRole.secret_id == secret.id
-            ).delete()
+            session.query(SecretRole).filter(SecretRole.secret_id == secret.id).delete()
 
             # Delete the secret
             session.delete(secret)
@@ -314,16 +294,10 @@ class Core:
 
             if role_names:
                 # Get role IDs for the named roles
-                named_roles = (
-                    session.query(Role.id)
-                    .filter(Role.name.in_(role_names))
-                    .all()
-                )
+                named_roles = session.query(Role.id).filter(Role.name.in_(role_names)).all()
                 named_role_ids = {r.id for r in named_roles}
                 if named_role_ids:
-                    query = query.filter(
-                        SecretRole.role_id.in_(named_role_ids)
-                    )
+                    query = query.filter(SecretRole.role_id.in_(named_role_ids))
 
             secrets = query.distinct().all()
 
@@ -341,17 +315,19 @@ class Core:
 
             records = []
             for secret in secrets:
-                records.append(SecretRecord(
-                    id=str(secret.id),
-                    key=secret.key,
-                    encrypted_value=secret.encrypted_value,
-                    nonce=secret.nonce,
-                    wrapped_dek=secret.wrapped_dek,
-                    key_version_id=secret.key_version_id,
-                    created_by=secret.created_by,
-                    created_at=secret.created_at,
-                    role_names=roles_by_secret.get(secret.id, []),
-                ))
+                records.append(
+                    SecretRecord(
+                        id=str(secret.id),
+                        key=secret.key,
+                        encrypted_value=secret.encrypted_value,
+                        nonce=secret.nonce,
+                        wrapped_dek=secret.wrapped_dek,
+                        key_version_id=secret.key_version_id,
+                        created_by=secret.created_by,
+                        created_at=secret.created_at,
+                        role_names=roles_by_secret.get(secret.id, []),
+                    )
+                )
 
             return records
         finally:

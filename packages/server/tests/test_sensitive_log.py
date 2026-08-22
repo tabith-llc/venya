@@ -8,12 +8,11 @@ Covers:
 See: Issue #16 (Environment Variable Leakage in Logs)
 """
 
-
 import logging
+from dataclasses import FrozenInstanceError
 from io import StringIO
 
 import pytest
-
 from core.utils.sensitive_log import (
     RedactingFormatter,
     Secret,
@@ -21,7 +20,6 @@ from core.utils.sensitive_log import (
     secret,
     token,
 )
-
 
 # ============================================================================
 # Wrapper Type Tests
@@ -41,7 +39,7 @@ class TestSecret:
 
     def test_secret_immutable(self):
         s = Secret("value")
-        with pytest.raises(Exception):
+        with pytest.raises(FrozenInstanceError):
             s.value = "modified"  # type: ignore
 
     def test_secret_with_different_types(self):

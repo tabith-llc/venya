@@ -5,14 +5,13 @@ KEK (32 bytes) wraps plaintext DEK (32 bytes) via AES-256-KW (RFC 5649)
 to produce wrapped DEK (40 bytes: 32-byte DEK + 8-byte AEAD tag).
 """
 
-
 import os
 from typing import Final
 
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from cryptography.exceptions import InvalidTag
-from argon2.low_level import hash_secret_raw, Type
+from argon2.low_level import Type, hash_secret_raw
 from Crypto.Cipher import AES as PyCryptoAES  # nosec B413 — AES-KW per RFC 5649 requires pycryptodome
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 # Argon2id parameters per plan: 3 iterations, 4 lanes, 64MB memory
 ARGON2_TIME_COST: Final[int] = 3
@@ -103,9 +102,7 @@ def unwrap_key(kek: bytes, wrapped_key: bytes) -> bytes:
     if len(kek) != KEK_SIZE:
         raise KeyDerivationError(f"KEK must be {KEK_SIZE} bytes, got {len(kek)}")
     if len(wrapped_key) != KEK_SIZE + 8:  # DEK + ICV tag
-        raise KeyDerivationError(
-            f"Wrapped key must be {KEK_SIZE + 8} bytes, got {len(wrapped_key)}"
-        )
+        raise KeyDerivationError(f"Wrapped key must be {KEK_SIZE + 8} bytes, got {len(wrapped_key)}")
 
     return _aes_kw_unwrap(kek, wrapped_key)
 
@@ -139,9 +136,7 @@ def encrypt_secret(kek: bytes, secret_value: bytes) -> tuple[bytes, bytes, bytes
     return wrapped_dek, nonce, ciphertext
 
 
-def decrypt_secret(
-    kek: bytes, wrapped_dek: bytes, nonce: bytes, ciphertext: bytes
-) -> bytes:
+def decrypt_secret(kek: bytes, wrapped_dek: bytes, nonce: bytes, ciphertext: bytes) -> bytes:
     """Decrypt a secret value.
 
     Uses DEK/KEK model:
@@ -185,9 +180,7 @@ def _aes_kw_wrap(kek: bytes, plaintext: bytes) -> bytes:
     """
     n = len(plaintext) // 8
     if n * 8 != len(plaintext) or n < 1:
-        raise KeyDerivationError(
-            f"Plaintext must be 8-{(2**32 - 2) * 8} bytes and a multiple of 8"
-        )
+        raise KeyDerivationError(f"Plaintext must be 8-{(2**32 - 2) * 8} bytes and a multiple of 8")
 
     # IV per RFC 5649
     a = b"\xa6\xa6\xa6\xa6\xa6\xa6\xa6\xa6"
@@ -226,9 +219,7 @@ def _aes_kw_unwrap(kek: bytes, ciphertext: bytes) -> bytes:
     """
     n = len(ciphertext) // 8 - 1
     if n * 8 + 8 != len(ciphertext) or n < 1:
-        raise DecryptionError(
-            f"Ciphertext must be 9-{(2**32 - 1) * 8} bytes and a multiple of 8"
-        )
+        raise DecryptionError(f"Ciphertext must be 9-{(2**32 - 1) * 8} bytes and a multiple of 8")
 
     # Split ciphertext
     a = ciphertext[:8]

@@ -1,9 +1,8 @@
 """Tests for security headers middleware."""
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.middleware.security_headers import SecurityHeadersMiddleware
+from starlette.testclient import TestClient
 
 
 def _create_test_app():
@@ -80,7 +79,7 @@ class TestSecurityHeaders:
             "referrer-policy",
             "strict-transport-security",
         }
-        actual = set(h.lower() for h in resp.headers.keys())
+        actual = {h.lower() for h in resp.headers}
         assert required.issubset(actual)
 
     def test_headers_on_error_responses(self):

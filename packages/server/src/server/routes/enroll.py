@@ -5,24 +5,22 @@ Two-step enrollment flow:
 2. POST /enroll/browser/complete — verify WebAuthn, store credential, create session
 """
 
-
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
-from ..utils.token_binding import verify_binding_hash
-from ..utils.time import is_expired
-from pydantic import BaseModel, Field
-
 from ..fido2.browser_adapter import (
-    challenge_to_browser_registration_options,
     browser_registration_to_fido2,
+    challenge_to_browser_registration_options,
 )
+from ..utils.time import is_expired
+from ..utils.token_binding import verify_binding_hash
 
 logger = logging.getLogger("venya.server")
 router = APIRouter()
@@ -124,9 +122,7 @@ async def browser_enroll_start(
             username=username,
         )
 
-        browser_options = challenge_to_browser_registration_options(
-            challenge_id, options
-        )
+        browser_options = challenge_to_browser_registration_options(challenge_id, options)
 
         return BrowserEnrollStartResponse(
             challenge_id=challenge_id,
@@ -245,7 +241,7 @@ async def browser_enroll_complete(
 
         # Activate user
         user.status = "active"
-        user.enrolled_at = datetime.now(timezone.utc)
+        user.enrolled_at = datetime.now(UTC)
         user.auth_mode = "webauthn"
 
         # Create session
@@ -253,7 +249,7 @@ async def browser_enroll_complete(
 
         sm = SessionManager(db)
         roles = [rm.role_id for rm in user.roles] if user and user.roles else []
-        session, access_token = sm.create_session(
+        _session, access_token = sm.create_session(
             user_id=user.user_id,
             roles=[str(r) for r in roles],
         )

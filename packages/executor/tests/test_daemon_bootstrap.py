@@ -8,8 +8,6 @@ Tests cover:
 - Network error handling in CertificateManager.register()
 """
 
-
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -52,14 +50,17 @@ class TestClearEnrollmentToken:
     def test_clears_token_from_config(self, tmp_path: Path):
         """Token is removed from executor.toml and empty bootstrap section is deleted."""
         config_file = tmp_path / "executor.toml"
-        config_file.write_text("""
+        config_file.write_text(
+            """
 server_url = "https://venya-core"
 executor_id = "jump-1"
 
 [bootstrap]
 enrollment_token = "enrl_exec_abc123"
-""")
+"""
+        )
         import tomllib
+
         import tomli_w
 
         with open(config_file, "rb") as f:
@@ -85,14 +86,17 @@ enrollment_token = "enrl_exec_abc123"
     def test_removes_empty_bootstrap_section(self, tmp_path: Path):
         """When only enrollment_token is in bootstrap, entire section is removed."""
         config_file = tmp_path / "executor.toml"
-        config_file.write_text("""
+        config_file.write_text(
+            """
 server_url = "https://venya-core"
 executor_id = "jump-1"
 
 [bootstrap]
 enrollment_token = "enrl_exec_abc123"
-""")
+"""
+        )
         import tomllib
+
         import tomli_w
 
         with open(config_file, "rb") as f:
@@ -113,19 +117,19 @@ enrollment_token = "enrl_exec_abc123"
         assert not config_file.exists()
         # _clear_enrollment_token checks config_path.exists() first
         # If file doesn't exist, it returns without error
-        pass
 
     def test_skips_when_no_enrollment_token(self, tmp_path: Path):
         """If bootstrap section has no enrollment_token, nothing is removed."""
         config_file = tmp_path / "executor.toml"
-        config_file.write_text("""
+        config_file.write_text(
+            """
 server_url = "https://venya-core"
 
 [bootstrap]
 tls_verify = false
-""")
+"""
+        )
         import tomllib
-        import tomli_w
 
         with open(config_file, "rb") as f:
             data = tomllib.load(f)
@@ -149,17 +153,22 @@ class TestDaemonRegistrationTLSVerification:
 
         success_response = MagicMock()
         success_response.json.return_value = {
-            "cert_pem": "CERT", "ca_cert_pem": "CA",
-            "serial_number": "01", "not_after": "2026-09-01",
+            "cert_pem": "CERT",
+            "ca_cert_pem": "CA",
+            "serial_number": "01",
+            "not_after": "2026-09-01",
         }
         success_response.raise_for_status.return_value = None
 
-        with patch("executor.daemon.httpx2.Client") as MockClient, \
-             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
-             patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon.validate_executor_certificate"), \
-             patch("executor.daemon.Path") as MockPath, \
-             patch("executor.daemon.os.chmod"):
+        with patch("executor.daemon.httpx2.Client") as MockClient, patch(
+            "executor.daemon._generate_ecdsa_p256_keypair"
+        ), patch("executor.daemon._create_csr", return_value=b"CSR"), patch(
+            "executor.daemon.validate_executor_certificate"
+        ), patch(
+            "executor.daemon.Path"
+        ) as MockPath, patch(
+            "executor.daemon.os.chmod"
+        ):
             MockPath.return_value.write_bytes = MagicMock()
             MockPath.return_value.exists.return_value = False
             MockPath.return_value.chmod = MagicMock()
@@ -184,17 +193,22 @@ class TestDaemonRegistrationTLSVerification:
 
         success_response = MagicMock()
         success_response.json.return_value = {
-            "cert_pem": "CERT", "ca_cert_pem": "CA",
-            "serial_number": "01", "not_after": "2026-09-01",
+            "cert_pem": "CERT",
+            "ca_cert_pem": "CA",
+            "serial_number": "01",
+            "not_after": "2026-09-01",
         }
         success_response.raise_for_status.return_value = None
 
-        with patch("executor.daemon.httpx2.Client") as MockClient, \
-             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
-             patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon.validate_executor_certificate"), \
-             patch("executor.daemon.Path") as MockPath, \
-             patch("executor.daemon.os.chmod"):
+        with patch("executor.daemon.httpx2.Client") as MockClient, patch(
+            "executor.daemon._generate_ecdsa_p256_keypair"
+        ), patch("executor.daemon._create_csr", return_value=b"CSR"), patch(
+            "executor.daemon.validate_executor_certificate"
+        ), patch(
+            "executor.daemon.Path"
+        ) as MockPath, patch(
+            "executor.daemon.os.chmod"
+        ):
             MockPath.return_value.write_bytes = MagicMock()
             MockPath.return_value.exists.return_value = False
             MockPath.return_value.chmod = MagicMock()
@@ -218,18 +232,24 @@ class TestDaemonRegistrationTLSVerification:
 
         success_response = MagicMock()
         success_response.json.return_value = {
-            "cert_pem": "CERT", "ca_cert_pem": "CA",
-            "serial_number": "01", "not_after": "2026-09-01",
+            "cert_pem": "CERT",
+            "ca_cert_pem": "CA",
+            "serial_number": "01",
+            "not_after": "2026-09-01",
         }
         success_response.raise_for_status.return_value = None
 
-        with patch("executor.daemon.httpx2.Client") as MockClient, \
-             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
-             patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon.validate_executor_certificate"), \
-             patch("executor.daemon.Path") as MockPath, \
-             patch("executor.daemon.os.chmod"), \
-             caplog.at_level("WARNING"):
+        with patch("executor.daemon.httpx2.Client") as MockClient, patch(
+            "executor.daemon._generate_ecdsa_p256_keypair"
+        ), patch("executor.daemon._create_csr", return_value=b"CSR"), patch(
+            "executor.daemon.validate_executor_certificate"
+        ), patch(
+            "executor.daemon.Path"
+        ) as MockPath, patch(
+            "executor.daemon.os.chmod"
+        ), caplog.at_level(
+            "WARNING"
+        ):
             MockPath.return_value.write_bytes = MagicMock()
             MockPath.return_value.exists.return_value = False
             MockPath.return_value.chmod = MagicMock()
@@ -252,9 +272,9 @@ class TestDaemonRegistrationTLSVerification:
         """VENYA_TLS_VERIFY with invalid value raises RuntimeError."""
         monkeypatch.setenv("VENYA_TLS_VERIFY", "maybe")
 
-        with patch("executor.daemon.httpx2.Client") as MockClient, \
-             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
-             patch("executor.daemon._create_csr", return_value=b"CSR"):
+        with patch("executor.daemon.httpx2.Client") as MockClient, patch(
+            "executor.daemon._generate_ecdsa_p256_keypair"
+        ), patch("executor.daemon._create_csr", return_value=b"CSR"):
             from executor.daemon import CertificateManager
 
             config = ExecutorConfig.model_validate({"server_url": "https://core", "executor_id": "test-1"})
@@ -271,12 +291,15 @@ class TestDaemonRegistrationTLSVerification:
 
         tls_error = httpx2.ConnectError("SSL: CERTIFICATE_VERIFY_FAILED")
 
-        with patch("executor.daemon.httpx2.Client") as MockClient, \
-             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
-             patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon.validate_executor_certificate"), \
-             patch("executor.daemon.Path") as MockPath, \
-             patch("executor.daemon.os.chmod"):
+        with patch("executor.daemon.httpx2.Client") as MockClient, patch(
+            "executor.daemon._generate_ecdsa_p256_keypair"
+        ), patch("executor.daemon._create_csr", return_value=b"CSR"), patch(
+            "executor.daemon.validate_executor_certificate"
+        ), patch(
+            "executor.daemon.Path"
+        ) as MockPath, patch(
+            "executor.daemon.os.chmod"
+        ):
             MockPath.return_value.write_bytes = MagicMock()
             MockPath.return_value.exists.return_value = False
             MockPath.return_value.chmod = MagicMock()
@@ -303,10 +326,9 @@ class TestDaemonRegistrationTLSVerification:
 
         network_error = httpx2.ConnectError("Connection refused")
 
-        with patch("executor.daemon.httpx2.Client") as MockClient, \
-             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
-             patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon.Path") as MockPath:
+        with patch("executor.daemon.httpx2.Client") as MockClient, patch(
+            "executor.daemon._generate_ecdsa_p256_keypair"
+        ), patch("executor.daemon._create_csr", return_value=b"CSR"), patch("executor.daemon.Path") as MockPath:
             MockPath.return_value.exists.return_value = False
 
             MockClient.return_value.__enter__.return_value = MockClient.return_value
@@ -326,17 +348,22 @@ class TestDaemonRegistrationTLSVerification:
         """register() never uses self.client — always creates new httpx2.Client instances."""
         success_response = MagicMock()
         success_response.json.return_value = {
-            "cert_pem": "CERT", "ca_cert_pem": "CA",
-            "serial_number": "01", "not_after": "2026-09-01",
+            "cert_pem": "CERT",
+            "ca_cert_pem": "CA",
+            "serial_number": "01",
+            "not_after": "2026-09-01",
         }
         success_response.raise_for_status.return_value = None
 
-        with patch("executor.daemon.httpx2.Client") as MockClient, \
-             patch("executor.daemon._generate_ecdsa_p256_keypair"), \
-             patch("executor.daemon._create_csr", return_value=b"CSR"), \
-             patch("executor.daemon.validate_executor_certificate"), \
-             patch("executor.daemon.Path") as MockPath, \
-             patch("executor.daemon.os.chmod"):
+        with patch("executor.daemon.httpx2.Client") as MockClient, patch(
+            "executor.daemon._generate_ecdsa_p256_keypair"
+        ), patch("executor.daemon._create_csr", return_value=b"CSR"), patch(
+            "executor.daemon.validate_executor_certificate"
+        ), patch(
+            "executor.daemon.Path"
+        ) as MockPath, patch(
+            "executor.daemon.os.chmod"
+        ):
             MockPath.return_value.write_bytes = MagicMock()
             MockPath.return_value.exists.return_value = False
             MockPath.return_value.chmod = MagicMock()

@@ -8,27 +8,25 @@ focus on the TLS/crypto and HTTP layers — proving the executor can
 actually register, rotate, and detect revocation against a real server.
 """
 
-
 import hashlib
 import os
 import stat
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fastapi import FastAPI
+from server.routes import executors as executors_routes
 from starlette.testclient import TestClient
 
 from executor.config import ExecutorConfig
 from executor.daemon import CertificateManager, CertificateValidationError
-from server.ca import CAManager
-from server.routes import executors as executors_routes
 
 from .conftest import (
     MockExecutorCert,
@@ -36,7 +34,6 @@ from .conftest import (
     _make_ca_pair,
     _sign_executor_cert,
 )
-
 
 # ---------------------------------------------------------------------------
 # Mock DB helper (same pattern as test_executor_server.py)
@@ -84,7 +81,7 @@ def _make_mock_db(executor_certs=None, revocations=None):
                                     rv = getattr(r, attr, None)
                                     if rv is not None and rv == val:
                                         filtered.append(r)
-                                except Exception:
+                                except Exception:  # noqa: S110 — best-effort mock attribute matching
                                     pass
                             results = filtered
 
@@ -94,8 +91,10 @@ def _make_mock_db(executor_certs=None, revocations=None):
             return result_filter
 
         m.filter = filter_side_effect
-        m.all = lambda: list(executor_certs) if model.__name__ == "ExecutorCert" else (
-            list(revocations) if model.__name__ == "ExecutorCertRevocation" else []
+        m.all = lambda: (
+            list(executor_certs)
+            if model.__name__ == "ExecutorCert"
+            else (list(revocations) if model.__name__ == "ExecutorCertRevocation" else [])
         )
         return m
 
@@ -125,7 +124,7 @@ class TestMTLSHandshake:
         self, ca_manager, executor_key, executor_csr, cert_files, tls_client, executor_config
     ):
         """Executor registers with server, receives signed cert, validates CA."""
-        cert_path, key_path = cert_files
+        _cert_path, _key_path = cert_files
 
         # Create a fresh httpx test client pointing at our test server
         # (tls_client has mTLS cert but the TestClient doesn't do real TLS,
@@ -136,7 +135,7 @@ class TestMTLSHandshake:
         test_client = TestClient(app)
 
         # Step 1: Executor generates a NEW keypair + CSR (not using the fixture's)
-        new_key = ec.generate_private_key(ec.SECP256R1())
+        ec.generate_private_key(ec.SECP256R1())
         csr_pem = executor_csr  # from fixture, already a valid CSR
 
         # Step 2: Submit registration request
@@ -171,7 +170,7 @@ class TestMTLSHandshake:
 
         # Step 6: Verify mTLS cert is parseable and well-formed
         # Full TLS handshake requires a real server; we verify the cert structure
-        returned_key = ec.generate_private_key(ec.SECP256R1())
+        ec.generate_private_key(ec.SECP256R1())
         cert_obj = x509.load_pem_x509_certificate(data["cert_pem"].encode())
         assert isinstance(cert_obj.subject, x509.Name)
         assert "PublicKey" in cert_obj.public_key().__class__.__name__
@@ -216,7 +215,7 @@ class TestMTLSHandshake:
     def test_ca_validation_rejects_wrong_ca(self, tmp_path):
         """Registration fails when returned cert is signed by a different CA."""
         # Create two different CAs
-        ca_key1, ca_cert1 = _make_ca_pair()
+        _ca_key1, ca_cert1 = _make_ca_pair()
         ca_key2, ca_cert2 = _make_ca_pair()
 
         # Sign executor cert with CA2 (wrong CA)
@@ -234,7 +233,7 @@ class TestMTLSHandshake:
         mock_response.raise_for_status.return_value = None
 
         # Create config pointing to CA1
-        from executor.config import CertificateRotationConfig, ExecutorConfig, MtlsConfig
+        from executor.config import CertificateRotationConfig, MtlsConfig
 
         ca_dir = tmp_path / "ca1"
         ca_dir.mkdir()
@@ -268,17 +267,13 @@ class TestMTLSHandshake:
 class TestCertificateRotation:
     """Certificate rotation flow: detect expiry, rotate, verify new cert."""
 
-    def test_rotation_detects_expiry(
-        self, cert_manager, tmp_ca_dir
-    ):
+    def test_rotation_detects_expiry(self, cert_manager, tmp_ca_dir):
         """needs_rotation() returns True when cert expires within threshold."""
         ca_key, ca_cert = _make_ca_pair()
         # 2-day cert (within 3-day rotate_before_days threshold)
         short_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=2)
 
-        Path(cert_manager.cert_path).write_bytes(
-            short_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(short_cert.public_bytes(serialization.Encoding.PEM))
         Path(cert_manager.key_path).write_bytes(
             ec.generate_private_key(ec.SECP256R1()).private_bytes(
                 encoding=serialization.Encoding.PEM,
@@ -289,17 +284,13 @@ class TestCertificateRotation:
 
         assert cert_manager.needs_rotation() is True
 
-    def test_rotation_does_not_trigger_when_fresh(
-        self, cert_manager, tmp_ca_dir
-    ):
+    def test_rotation_does_not_trigger_when_fresh(self, cert_manager, tmp_ca_dir):
         """needs_rotation() returns False when cert has plenty of time."""
         ca_key, ca_cert = _make_ca_pair()
         # 35-day cert (well beyond 3-day threshold)
         fresh_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=35)
 
-        Path(cert_manager.cert_path).write_bytes(
-            fresh_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(fresh_cert.public_bytes(serialization.Encoding.PEM))
         Path(cert_manager.key_path).write_bytes(
             ec.generate_private_key(ec.SECP256R1()).private_bytes(
                 encoding=serialization.Encoding.PEM,
@@ -310,18 +301,16 @@ class TestCertificateRotation:
 
         assert cert_manager.needs_rotation() is False
 
-    def test_full_rotation_flow(
-        self, cert_manager, ca_manager, ca_key, ca_cert, cert_files
-    ):
+    def test_full_rotation_flow(self, cert_manager, ca_manager, ca_key, ca_cert, cert_files):
         """Rotation: new CSR → server signs → new cert installed."""
-        cert_path, key_path = cert_files
+        _cert_path, _key_path = cert_files
 
         # Get initial fingerprint
         initial_fp = cert_manager.get_fingerprint()
         assert initial_fp != ""
 
         # Mock server response with a NEW cert (different keypair = different fingerprint)
-        new_key = ec.generate_private_key(ec.SECP256R1())
+        ec.generate_private_key(ec.SECP256R1())
         new_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
 
         mock_response = MagicMock(spec=httpx2.Response)
@@ -347,9 +336,7 @@ class TestCertificateRotation:
         # Fingerprint should have changed
         new_fp = cert_manager.get_fingerprint()
         assert new_fp != initial_fp
-        assert new_fp == hashlib.sha256(
-            saved_cert.public_bytes(serialization.Encoding.DER)
-        ).hexdigest()
+        assert new_fp == hashlib.sha256(saved_cert.public_bytes(serialization.Encoding.DER)).hexdigest()
 
         # Serial should be updated
         assert cert_manager.serial == format(new_cert.serial_number, "016x")
@@ -372,17 +359,13 @@ class TestCertificateRotation:
         with pytest.raises(RuntimeError, match="must register first"):
             cert_manager.rotate()
 
-    def test_rotation_updates_mtls_client(
-        self, cert_manager, ca_key, ca_cert, tmp_ca_dir
-    ):
+    def test_rotation_updates_mtls_client(self, cert_manager, ca_key, ca_cert, tmp_ca_dir):
         """After rotation, mTLS client cert/key match the new cert."""
         # Create a matching cert/key pair for the initial cert
         initial_key = ec.generate_private_key(ec.SECP256R1())
         initial_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
 
-        Path(cert_manager.cert_path).write_bytes(
-            initial_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(initial_cert.public_bytes(serialization.Encoding.PEM))
         Path(cert_manager.key_path).write_bytes(
             initial_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
@@ -438,26 +421,20 @@ class TestCertificateRotation:
 class TestRevocation:
     """Revocation detection: admin revokes cert, executor detects and shuts down."""
 
-    def test_revocation_detected_by_executor(
-        self, cert_manager, ca_key, ca_cert, cert_files
-    ):
+    def test_revocation_detected_by_executor(self, cert_manager, ca_key, ca_cert, cert_files):
         """check_revocation() returns True when serial is in revocation list."""
-        cert_path, _ = cert_files
+        _cert_path, _ = cert_files
 
         # Register a cert first
         initial_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
-        Path(cert_manager.cert_path).write_bytes(
-            initial_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(initial_cert.public_bytes(serialization.Encoding.PEM))
         cert_manager.serial = format(initial_cert.serial_number, "016x")
 
         # Mock server response with the serial in the revocation list
         mock_response = MagicMock(spec=httpx2.Response)
         mock_response.status_code = 200
         mock_response.headers = {"etag": '"abc123"'}
-        mock_response.json.return_value = {
-            "revoked_serials": [cert_manager.serial, "0000000000000002"]
-        }
+        mock_response.json.return_value = {"revoked_serials": [cert_manager.serial, "0000000000000002"]}
         mock_response.raise_for_status.return_value = None
 
         with MagicMock() as mock_get:
@@ -465,24 +442,18 @@ class TestRevocation:
             cert_manager.client.get = mock_get
             assert cert_manager.check_revocation() is True
 
-    def test_revocation_not_detected_when_clean(
-        self, cert_manager, ca_key, ca_cert, cert_files
-    ):
+    def test_revocation_not_detected_when_clean(self, cert_manager, ca_key, ca_cert, cert_files):
         """check_revocation() returns False when serial is NOT in revocation list."""
-        cert_path, _ = cert_files
+        _cert_path, _ = cert_files
 
         initial_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
-        Path(cert_manager.cert_path).write_bytes(
-            initial_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(initial_cert.public_bytes(serialization.Encoding.PEM))
         cert_manager.serial = format(initial_cert.serial_number, "016x")
 
         mock_response = MagicMock(spec=httpx2.Response)
         mock_response.status_code = 200
         mock_response.headers = {"etag": '"def456"'}
-        mock_response.json.return_value = {
-            "revoked_serials": ["0000000000000001", "0000000000000002"]
-        }
+        mock_response.json.return_value = {"revoked_serials": ["0000000000000001", "0000000000000002"]}
         mock_response.raise_for_status.return_value = None
 
         with MagicMock() as mock_get:
@@ -490,37 +461,29 @@ class TestRevocation:
             cert_manager.client.get = mock_get
             assert cert_manager.check_revocation() is False
 
-    def test_revocation_server_unreachable_graceful(
-        self, cert_manager, ca_key, ca_cert, cert_files
-    ):
+    def test_revocation_server_unreachable_graceful(self, cert_manager, ca_key, ca_cert, cert_files):
         """check_revocation() returns False (not True) when server is unreachable."""
-        cert_path, _ = cert_files
+        _cert_path, _ = cert_files
 
         initial_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
-        Path(cert_manager.cert_path).write_bytes(
-            initial_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(initial_cert.public_bytes(serialization.Encoding.PEM))
         cert_manager.serial = format(initial_cert.serial_number, "016x")
 
         # Simulate server unreachable
         with MagicMock() as mock_get:
-            mock_get.side_effect = httpx2.RequestError(
-                "Connection refused", request=MagicMock()
-            )
+            mock_get.side_effect = httpx2.RequestError("Connection refused", request=MagicMock())
             cert_manager.client.get = mock_get
             # Should return False, not raise — graceful degradation
             assert cert_manager.check_revocation() is False
 
-    def test_revocation_detected_via_heartbeat(
-        self, ca_manager, ca_key, ca_cert, executor_cert
-    ):
+    def test_revocation_detected_via_heartbeat(self, ca_manager, ca_key, ca_cert, executor_cert):
         """Heartbeat returns revoked=True when cert serial is in revocation list."""
         serial_hex = format(executor_cert.serial_number, "016x")
 
         cert_record = MockExecutorCert(
             executor_id="test-executor",
             serial_number=serial_hex,
-            not_after=datetime.now(timezone.utc) + timedelta(days=365),
+            not_after=datetime.now(UTC) + timedelta(days=365),
         )
         revocation = MockExecutorCertRevocation(serial_number=serial_hex)
         db = _make_mock_db(executor_certs=[cert_record], revocations=[revocation])
@@ -528,9 +491,7 @@ class TestRevocation:
         app = _create_test_app(ca_manager, db)
         test_client = TestClient(app)
 
-        fp = hashlib.sha256(
-            executor_cert.public_bytes(serialization.Encoding.DER)
-        ).hexdigest()
+        fp = hashlib.sha256(executor_cert.public_bytes(serialization.Encoding.DER)).hexdigest()
 
         resp = test_client.post(
             "/api/v1/heartbeat",
@@ -542,9 +503,7 @@ class TestRevocation:
         # new_cert_required should be False since cert is valid for 365 days
         assert data["new_cert_required"] is False
 
-    def test_revocation_not_set_when_not_revoked(
-        self, ca_manager, ca_key, ca_cert
-    ):
+    def test_revocation_not_set_when_not_revoked(self, ca_manager, ca_key, ca_cert):
         """Heartbeat returns revoked=False when cert is not in revocation list."""
         cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
         serial_hex = format(cert.serial_number, "016x")
@@ -552,7 +511,7 @@ class TestRevocation:
         cert_record = MockExecutorCert(
             executor_id="test-executor",
             serial_number=serial_hex,
-            not_after=datetime.now(timezone.utc) + timedelta(days=365),
+            not_after=datetime.now(UTC) + timedelta(days=365),
         )
         # No revocation records
         db = _make_mock_db(executor_certs=[cert_record], revocations=[])
@@ -582,9 +541,7 @@ class TestRevocation:
         data = resp.json()
         assert data["revoked"] is False
 
-    def test_revocation_list_endpoint_returns_serials(
-        self, ca_manager, ca_key, ca_cert
-    ):
+    def test_revocation_list_endpoint_returns_serials(self, ca_manager, ca_key, ca_cert):
         """Revocation list endpoint returns all revoked serial numbers."""
         ca_manager.purge_expired_revocations = MagicMock(return_value=0)
         cert1 = _sign_executor_cert(ca_key, ca_cert, "executor-1", validity_days=30)

@@ -4,11 +4,10 @@ Tests registration, rotation, revocation checking, and fingerprint
 computation using real ECDSA P-256 cryptography with mocked HTTP.
 """
 
-
 import hashlib
 import os
 import stat
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,9 +16,9 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from executor.config import ExecutorConfig, MtlsConfig, CertificateRotationConfig
+from executor.config import CertificateRotationConfig, ExecutorConfig, MtlsConfig
 from executor.daemon import (
     CertificateManager,
     CertificateValidationError,
@@ -30,18 +29,19 @@ from executor.daemon import (
     validate_executor_certificate,
 )
 
-
 # --- Fixtures ---
 
 
 def _make_ca_pair() -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
     """Generate a CA keypair and self-signed certificate."""
     ca_key = ec.generate_private_key(ec.SECP256R1())
-    now = datetime.now(timezone.utc)
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "Venya Root CA"),
-    ])
+    now = datetime.now(UTC)
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Venya Root CA"),
+        ]
+    )
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -81,11 +81,13 @@ def _make_executor_cert(
 ) -> x509.Certificate:
     """Sign an executor certificate with the CA."""
     key = ec.generate_private_key(ec.SECP256R1())
-    now = datetime.now(timezone.utc)
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
+    now = datetime.now(UTC)
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
+    )
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -292,7 +294,7 @@ class TestRegisterErrors:
     def test_register_invalid_ca_signature(self, config: ExecutorConfig):
         """Registration raises CertificateValidationError when cert is not signed by CA."""
         # Create a cert signed by a DIFFERENT CA
-        ca_key1, ca_cert1 = _make_ca_pair()
+        _ca_key1, ca_cert1 = _make_ca_pair()
         other_ca_key, other_ca_cert = _make_ca_pair()
         executor_cert = _make_executor_cert(other_ca_key, other_ca_cert, "test-executor")
 
@@ -323,9 +325,7 @@ class TestNeedsRotation:
         # Certificate valid for 35 days (beyond 3-day rotation threshold)
         executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=35)
 
-        Path(cert_manager.cert_path).write_bytes(
-            executor_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(executor_cert.public_bytes(serialization.Encoding.PEM))
 
         assert cert_manager.needs_rotation() is False
 
@@ -335,9 +335,7 @@ class TestNeedsRotation:
         # Certificate valid for 2 days (within 3-day rotation threshold)
         executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=2)
 
-        Path(cert_manager.cert_path).write_bytes(
-            executor_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(executor_cert.public_bytes(serialization.Encoding.PEM))
 
         assert cert_manager.needs_rotation() is True
 
@@ -347,9 +345,7 @@ class TestNeedsRotation:
         # Certificate valid for 1 day (already expired relative to threshold)
         executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=1)
 
-        Path(cert_manager.cert_path).write_bytes(
-            executor_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(executor_cert.public_bytes(serialization.Encoding.PEM))
 
         assert cert_manager.needs_rotation() is True
 
@@ -366,9 +362,7 @@ class TestRotate:
 
         # Create initial cert
         initial_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
-        Path(cert_manager.cert_path).write_bytes(
-            initial_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(initial_cert.public_bytes(serialization.Encoding.PEM))
         Path(cert_manager.key_path).write_bytes(
             ec.generate_private_key(ec.SECP256R1()).private_bytes(
                 encoding=serialization.Encoding.PEM,
@@ -419,9 +413,7 @@ class TestGetFingerprint:
         ca_key, ca_cert = _make_ca_pair()
         executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor")
 
-        Path(cert_manager.cert_path).write_bytes(
-            executor_cert.public_bytes(serialization.Encoding.PEM)
-        )
+        Path(cert_manager.cert_path).write_bytes(executor_cert.public_bytes(serialization.Encoding.PEM))
 
         fingerprint = cert_manager.get_fingerprint()
 
@@ -453,9 +445,7 @@ class TestCheckRevocation:
         mock_response = MagicMock(spec=httpx2.Response)
         mock_response.status_code = 200
         mock_response.headers = {"etag": '"abc123"'}
-        mock_response.json.return_value = {
-            "revoked_serials": ["0000000000000001", "0000000000000002"]
-        }
+        mock_response.json.return_value = {"revoked_serials": ["0000000000000001", "0000000000000002"]}
         mock_response.raise_for_status.return_value = None
 
         with patch.object(cert_manager.client, "get", return_value=mock_response):
@@ -499,7 +489,9 @@ class TestCheckRevocation:
         """Returns False (graceful degradation) when server is unreachable."""
         cert_manager.serial = "0000000000000001"
 
-        with patch.object(cert_manager.client, "get", side_effect=httpx2.RequestError("Connection refused", request=MagicMock())):
+        with patch.object(
+            cert_manager.client, "get", side_effect=httpx2.RequestError("Connection refused", request=MagicMock())
+        ):
             assert cert_manager.check_revocation() is False
 
 
@@ -537,7 +529,7 @@ class TestHelperFunctions:
 
     def test_validate_ca_signature_invalid(self):
         """Rejects a certificate signed by a different CA."""
-        ca_key1, ca_cert1 = _make_ca_pair()
+        _ca_key1, ca_cert1 = _make_ca_pair()
         ca_key2, ca_cert2 = _make_ca_pair()
         executor_cert = _make_executor_cert(ca_key2, ca_cert2, "test-executor")
 
@@ -578,13 +570,17 @@ class TestValidateExecutorCertificate:
     def test_expired_cert_raises(self, tmp_ca_dir: Path):
         """Rejects cert that has expired."""
         ca_key, ca_cert = _make_ca_pair()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expired_cert = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(ca_key.public_key())
             .serial_number(x509.random_serial_number())
@@ -629,13 +625,17 @@ class TestValidateExecutorCertificate:
     def test_not_yet_valid_raises(self, tmp_ca_dir: Path):
         """Rejects cert that is not yet valid."""
         ca_key, ca_cert = _make_ca_pair()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         future_cert = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(ca_key.public_key())
             .serial_number(x509.random_serial_number())
@@ -682,15 +682,19 @@ class TestValidateExecutorCertificate:
         ca_key, ca_cert = _make_ca_pair()
         ca_cert_with_ca_true = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(ca_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.now(timezone.utc))
-            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+            .not_valid_before(datetime.now(UTC))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=30))
             .add_extension(
                 x509.BasicConstraints(ca=True, path_length=None),
                 critical=True,
@@ -732,15 +736,19 @@ class TestValidateExecutorCertificate:
         ca_key, ca_cert = _make_ca_pair()
         cert_no_bc = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(ca_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.now(timezone.utc))
-            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+            .not_valid_before(datetime.now(UTC))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=30))
             .add_extension(
                 x509.KeyUsage(
                     digital_signature=True,
@@ -778,15 +786,19 @@ class TestValidateExecutorCertificate:
         ca_key, ca_cert = _make_ca_pair()
         cert_no_ku = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(ca_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.now(timezone.utc))
-            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+            .not_valid_before(datetime.now(UTC))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=30))
             .add_extension(
                 x509.BasicConstraints(ca=False, path_length=None),
                 critical=True,
@@ -814,15 +826,19 @@ class TestValidateExecutorCertificate:
         ca_key, ca_cert = _make_ca_pair()
         cert_no_eku = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(ca_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.now(timezone.utc))
-            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+            .not_valid_before(datetime.now(UTC))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=30))
             .add_extension(
                 x509.BasicConstraints(ca=False, path_length=None),
                 critical=True,
@@ -860,15 +876,19 @@ class TestValidateExecutorCertificate:
         ca_key, ca_cert = _make_ca_pair()
         cert_server_auth = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(ca_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.now(timezone.utc))
-            .not_valid_after(datetime.now(timezone.utc) + timedelta(days=30))
+            .not_valid_before(datetime.now(UTC))
+            .not_valid_after(datetime.now(UTC) + timedelta(days=30))
             .add_extension(
                 x509.BasicConstraints(ca=False, path_length=None),
                 critical=True,
@@ -907,7 +927,7 @@ class TestValidateExecutorCertificate:
 
     def test_bad_ca_signature_raises(self, tmp_ca_dir: Path):
         """Rejects cert signed by a different CA."""
-        ca_key1, ca_cert1 = _make_ca_pair()
+        _ca_key1, ca_cert1 = _make_ca_pair()
         ca_key2, ca_cert2 = _make_ca_pair()
         executor_cert = _make_executor_cert(ca_key2, ca_cert2, "test-executor")
 
@@ -921,14 +941,18 @@ class TestValidateExecutorCertificate:
     def test_clock_skew_tolerance_within_limit(self, tmp_ca_dir: Path):
         """Accepts cert expired within 5-minute clock skew tolerance."""
         ca_key, ca_cert = _make_ca_pair()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Expired 2 minutes ago — within 5-minute tolerance
         cert = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(ca_key.public_key())
             .serial_number(x509.random_serial_number())
@@ -973,14 +997,18 @@ class TestValidateExecutorCertificate:
     def test_clock_skew_tolerance_beyond_limit(self, tmp_ca_dir: Path):
         """Rejects cert expired beyond 5-minute clock skew tolerance."""
         ca_key, ca_cert = _make_ca_pair()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         # Expired 10 minutes ago — beyond 5-minute tolerance
         cert = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "test-executor"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(ca_key.public_key())
             .serial_number(x509.random_serial_number())
@@ -1039,12 +1067,16 @@ class TestValidateExecutorCertificate:
         """Raises ValueError when certificate has no CN."""
         ca_key, ca_cert = _make_ca_pair()
         # Create cert without CN
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cert_no_cn = (
             x509.CertificateBuilder()
-            .subject_name(x509.Name([
-                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-            ]))
+            .subject_name(
+                x509.Name(
+                    [
+                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                    ]
+                )
+            )
             .issuer_name(ca_cert.subject)
             .public_key(ca_key.public_key())
             .serial_number(x509.random_serial_number())

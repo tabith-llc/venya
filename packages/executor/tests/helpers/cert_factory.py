@@ -4,18 +4,13 @@ Used by validation tests to construct exactly the malformed cert needed
 for each test case without managing CA infrastructure manually.
 """
 
-
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-
-if TYPE_CHECKING:
-    from cryptography.hazmat.primitives.asymmetric import ec as ec_type
 
 
 def make_ca_keypair() -> ec.EllipticCurvePrivateKey:
@@ -25,11 +20,13 @@ def make_ca_keypair() -> ec.EllipticCurvePrivateKey:
 
 def make_ca_cert(ca_key: ec.EllipticCurvePrivateKey) -> x509.Certificate:
     """Generate a self-signed CA certificate."""
-    now = datetime.now(timezone.utc)
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "Venya Test CA"),
-    ])
+    now = datetime.now(UTC)
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Venya Test CA"),
+        ]
+    )
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -88,15 +85,17 @@ def make_test_cert(
     Returns:
         Signed X.509 certificate.
     """
-    now = not_before or datetime.now(timezone.utc)
+    now = not_before or datetime.now(UTC)
     expiry = not_after or now + timedelta(days=30)
 
     key = ec.generate_private_key(ec.SECP256R1())
 
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
+    )
 
     builder = (
         x509.CertificateBuilder()
@@ -124,9 +123,7 @@ def make_test_cert(
             critical=True,
         )
         .add_extension(
-            x509.ExtendedKeyUsage(
-                [ExtendedKeyUsageOID.CLIENT_AUTH] if client_auth else []
-            ),
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH] if client_auth else []),
             critical=False,
         )
     )

@@ -4,11 +4,9 @@ Atomic all-or-nothing multi-key check-and-consume for rate limiting.
 Uses asyncio.Lock for compatibility with FastAPI's async context.
 """
 
-
 import asyncio
 import time
 from collections import defaultdict
-from typing import Any
 
 
 class SlidingWindowRateLimiter:
@@ -59,8 +57,7 @@ class SlidingWindowRateLimiter:
                 self._requests[key] = [ts for ts in self._requests[key] if ts > cutoff]
                 if len(self._requests[key]) >= self.max_requests:
                     oldest = min(self._requests[key])
-                    if oldest > oldest_exceeding:
-                        oldest_exceeding = oldest
+                    oldest_exceeding = max(oldest_exceeding, oldest)
 
             if oldest_exceeding > 0.0:
                 # At least one key exceeded — don't consume any

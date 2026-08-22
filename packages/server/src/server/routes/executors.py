@@ -4,28 +4,28 @@ Handles executor CSR submission, certificate signing, and revocation
 list polling for mTLS-based executor authentication.
 """
 
-
 import hashlib
 import hmac
 import json
 import logging
+from datetime import UTC, datetime
 
+from core.iam.models import AuditEvent, ExecutorCert, ExecutorEnrollmentToken, User
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .. import metrics
 from ..ca import CAManager
 from ..dependencies import get_db
 from ..rate_limit import rate_limit_registration
-from ..utils.executor_id import EXECUTOR_ID_PATTERN, validate_executor_id
+from ..utils.executor_id import EXECUTOR_ID_PATTERN
 from ..utils.time import effective_expiry_check_time, is_expired
-from .. import metrics
-from core.iam.models import AuditEvent, ExecutorEnrollmentToken, User, ExecutorCert
 
 logger = logging.getLogger("venya.server")
 
@@ -44,7 +44,7 @@ def validate_csr_key_strength(csr: x509.CertificateSigningRequest) -> None:
     public_key = csr.public_key()
 
     if not isinstance(public_key, ec.EllipticCurvePublicKey):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004 — API input validation; ValueError → 400 at caller
             f"Unsupported key type: {type(public_key).__name__}. "
             f"Use ECDSA P-256 (secp256r1), P-384 (secp384r1), or P-521 (secp521r1)."
         )
@@ -116,7 +116,6 @@ class HeartbeatResponse(BaseModel):
 # --- Helpers ---
 
 
-
 def _get_ca_manager(request: Request) -> CAManager:
     """Get the CA manager from app state."""
     ca_manager = getattr(request.app.state, "ca_manager", None)
@@ -185,11 +184,7 @@ async def register_executor(
         ).hexdigest()
 
         # Pre-check for diagnostic specificity (non-authoritative)
-        token = (
-            db.query(ExecutorEnrollmentToken)
-            .filter(ExecutorEnrollmentToken.token_hash == token_hash)
-            .first()
-        )
+        token = db.query(ExecutorEnrollmentToken).filter(ExecutorEnrollmentToken.token_hash == token_hash).first()
 
         if token is None:
             metrics.TOKEN_CONSUMED.labels(result="invalid").inc()
@@ -209,7 +204,7 @@ async def register_executor(
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="Executor already registered with this enrollment token. "
-                           "Check if the previous registration succeeded.",
+                    "Check if the previous registration succeeded.",
                 )
             metrics.TOKEN_CONSUMED.labels(result="consumed").inc()
             raise HTTPException(
@@ -239,20 +234,20 @@ async def register_executor(
         # Authoritative atomic consumption — closes race window
         now_minus_tolerance = effective_expiry_check_time(tolerance)
         result = db.execute(
-            text("""
+            text(
+                """
                 UPDATE executor_enrollment_tokens
                 SET state = 'consumed', used_at = :now
                 WHERE token_hash = :hash AND state = 'created' AND expires_at > :now
-            """),
+            """
+            ),
             {"hash": token_hash, "now": now_minus_tolerance},
         )
 
         if result.rowcount != 1:
             # Lost the race — token was consumed between pre-check and UPDATE
             # Re-read to determine why
-            token = db.query(ExecutorEnrollmentToken).filter(
-                ExecutorEnrollmentToken.token_hash == token_hash
-            ).first()
+            token = db.query(ExecutorEnrollmentToken).filter(ExecutorEnrollmentToken.token_hash == token_hash).first()
             if token is None:
                 metrics.TOKEN_CONSUMED.labels(result="invalid").inc()
                 raise HTTPException(
@@ -324,11 +319,7 @@ async def register_executor(
     serial_hex = ca_manager.compute_serial_hex(cert.serial_number)
     fingerprint = ca_manager.compute_fingerprint(cert)
 
-    existing_cert = (
-        db.query(ExecutorCert)
-        .filter(ExecutorCert.executor_id == resolved_executor_id)
-        .first()
-    )
+    existing_cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == resolved_executor_id).first()
 
     cert_record = ExecutorCert(
         executor_id=resolved_executor_id,
@@ -356,7 +347,7 @@ async def register_executor(
             "serial_number": serial_hex,
             **token_audit_fields,
         },
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     db.add(audit_event)
 
@@ -403,16 +394,11 @@ async def get_revocation_list(
     has not changed.
     """
     from core.iam.models import ExecutorCertRevocation
-    from fastapi.responses import Response
 
     ca_manager = _get_ca_manager(request)
     # Purge old entries to keep table bounded
     server_config = getattr(request.app.state, "config", None)
-    retention_days = (
-        server_config.crl.crl_retention_days
-        if server_config and hasattr(server_config, "crl")
-        else 90
-    )
+    retention_days = server_config.crl.crl_retention_days if server_config and hasattr(server_config, "crl") else 90
     deleted_count = ca_manager.purge_expired_revocations(db, retention_days)
     if deleted_count > 0:
         logger.debug("Purged %d expired revocations (%d day retention)", deleted_count, retention_days)
@@ -450,15 +436,10 @@ async def get_crl(
     GET via ETag for caching.
     """
     from core.iam.models import ExecutorCertRevocation
-    from fastapi.responses import Response
 
     ca_manager = _get_ca_manager(request)
     server_config = getattr(request.app.state, "config", None)
-    retention_days = (
-        server_config.crl.crl_retention_days
-        if server_config and hasattr(server_config, "crl")
-        else 90
-    )
+    retention_days = server_config.crl.crl_retention_days if server_config and hasattr(server_config, "crl") else 90
 
     ca_manager.purge_expired_revocations(db, retention_days)
     metrics.CA_REVOCATIONS_PURGED_TOTAL.inc()
@@ -482,9 +463,7 @@ async def get_crl(
             from compression import zstd
 
             compressed = zstd.compress(crl_der, level=3)
-            response_data = compressed
-            content_encoding = "zstd"
-        except Exception:  # noqa: BLE001 — compression failures are localized
+        except Exception:
             use_zstd = False
 
     if use_zstd:
@@ -534,11 +513,7 @@ async def heartbeat(
 
     if executor_id:
         # Check if executor's current cert is revoked
-        current_cert = (
-            db.query(ExecutorCert)
-            .filter(ExecutorCert.executor_id == executor_id)
-            .first()
-        )
+        current_cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
 
         if current_cert:
             # Check revocation list
@@ -550,12 +525,13 @@ async def heartbeat(
             )
 
             # Check if cert needs rotation (within 3 days of expiry)
-            from datetime import datetime, timezone, timedelta
-            now = datetime.now(timezone.utc)
+            from datetime import datetime, timedelta
+
+            now = datetime.now(UTC)
             expiry_threshold = now + timedelta(days=3)
             not_after = current_cert.not_after
             if not_after.tzinfo is None:
-                not_after = not_after.replace(tzinfo=timezone.utc)
+                not_after = not_after.replace(tzinfo=UTC)
             if not_after < expiry_threshold:
                 new_cert_required = True
 

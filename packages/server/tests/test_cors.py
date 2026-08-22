@@ -1,9 +1,8 @@
 """Tests for CORS configuration."""
 
 from fastapi import FastAPI
-from starlette.testclient import TestClient
-
 from server.middleware.security_headers import SecurityHeadersMiddleware
+from starlette.testclient import TestClient
 
 
 def _create_test_app(cors_origins=None, middleware_kwargs=None):

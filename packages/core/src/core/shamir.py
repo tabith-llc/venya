@@ -11,10 +11,7 @@ Usage:
     secret = combine(shares[:3])  # any 3 shares work
 """
 
-
 import os
-from typing import List, Tuple
-
 
 # AES irreducible polynomial: x^8 + x^4 + x^3 + x + 1
 _MODULUS = 0x11B
@@ -51,7 +48,7 @@ def _gf256_inv(a: int) -> int:
     return result
 
 
-def _lagrange_interpolate(shares: List[Tuple[int, int]], x: int) -> int:
+def _lagrange_interpolate(shares: list[tuple[int, int]], x: int) -> int:
     """Lagrange interpolation at point x over GF(256)."""
     result = 0
     for i, (x_i, y_i) in enumerate(shares):
@@ -69,7 +66,7 @@ def _lagrange_interpolate(shares: List[Tuple[int, int]], x: int) -> int:
     return result
 
 
-def split(secret: bytes, threshold: int, shares: int) -> List[bytes]:
+def split(secret: bytes, threshold: int, shares: int) -> list[bytes]:
     """Split a secret into shares using Shamir's Secret Sharing.
 
     Args:
@@ -90,7 +87,7 @@ def split(secret: bytes, threshold: int, shares: int) -> List[bytes]:
     if shares > 255:
         raise ValueError("Maximum 255 shares supported")
 
-    result: List[bytes] = []
+    result: list[bytes] = []
 
     for i in range(len(secret)):
         # Random polynomial of degree (threshold - 1) with secret[i] as constant term
@@ -109,7 +106,7 @@ def split(secret: bytes, threshold: int, shares: int) -> List[bytes]:
         result.append(bytes(share_bytes))
 
     # Transpose: each share gets one byte from each position
-    transposed: List[bytearray] = [bytearray() for _ in range(shares)]
+    transposed: list[bytearray] = [bytearray() for _ in range(shares)]
     for share in result:
         for i, byte_val in enumerate(share):
             transposed[i].append(byte_val)
@@ -118,7 +115,7 @@ def split(secret: bytes, threshold: int, shares: int) -> List[bytes]:
     return [bytes([i + 1]) + share for i, share in enumerate(transposed)]
 
 
-def combine(shares: List[bytes]) -> bytes:
+def combine(shares: list[bytes]) -> bytes:
     """Reconstruct a secret from shares.
 
     Args:
@@ -146,8 +143,7 @@ def combine(shares: List[bytes]) -> bytes:
             raise ValueError("Inconsistent share lengths")
 
     # Reconstruct each byte position using Lagrange interpolation at x=0
-    points = [(share[0], share[j + 1]) for share in shares for j in range(data_len)]
-    # Group by position
+    # (group by position below)
     result = []
     for pos in range(data_len):
         share_points = [(s[0], s[pos + 1]) for s in shares]

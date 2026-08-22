@@ -1,11 +1,11 @@
 """Tests for core.py - DB-agnostic logic tests."""
 
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from unittest.mock import MagicMock, patch
 
-from core.engine.core import Core, CoreAccessError, CoreError, SecretRecord
+import pytest
 from core.engine.backend import Backend
+from core.engine.core import Core, CoreAccessError, CoreError, SecretRecord
 from core.engine.encryption import derive_kek
 
 
@@ -206,7 +206,6 @@ class TestCorePut:
 
         # Patch the Role query to return our mock role
         with patch("core.engine.core.Role") as MockRole:
-            MockRole.name == "admin"  # This is how SQLAlchemy filters work
             MockRole.filter.return_value.first.return_value = mock_role
 
             record = core.put("test-key", b"test-value", "user1", ["admin"], "v1")
@@ -346,7 +345,7 @@ class TestCoreList:
         mock_secret.wrapped_dek = b"wrapped"
         mock_secret.key_version_id = "v1"
         mock_secret.created_by = "user1"
-        mock_secret.created_at = datetime.now(timezone.utc)
+        mock_secret.created_at = datetime.now(UTC)
 
         session = MagicMock()
         backend = MagicMock()
@@ -354,19 +353,23 @@ class TestCoreList:
         core.backend = backend
 
         # Mock the entire list method to return our record directly
-        with patch.object(core, "list", return_value=[
-            SecretRecord(
-                id=str(mock_secret.id),
-                key=mock_secret.key,
-                encrypted_value=mock_secret.encrypted_value,
-                nonce=mock_secret.nonce,
-                wrapped_dek=mock_secret.wrapped_dek,
-                key_version_id=mock_secret.key_version_id,
-                created_by=mock_secret.created_by,
-                created_at=mock_secret.created_at,
-                role_names=[],
-            )
-        ]):
+        with patch.object(
+            core,
+            "list",
+            return_value=[
+                SecretRecord(
+                    id=str(mock_secret.id),
+                    key=mock_secret.key,
+                    encrypted_value=mock_secret.encrypted_value,
+                    nonce=mock_secret.nonce,
+                    wrapped_dek=mock_secret.wrapped_dek,
+                    key_version_id=mock_secret.key_version_id,
+                    created_by=mock_secret.created_by,
+                    created_at=mock_secret.created_at,
+                    role_names=[],
+                )
+            ],
+        ):
             records = core.list()
             assert len(records) == 1
             assert records[0].key == "test-key"

@@ -9,16 +9,12 @@ Covers:
 See: Security Review Item #6 (No asyncio diagnostic endpoint)
 """
 
-
 import asyncio
 import time
-from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
 from server.routes.debug import (
     _build_db_pool_stats,
     _build_task_info,
@@ -27,7 +23,6 @@ from server.routes.debug import (
     _task_wall_time_ms,
     router,
 )
-
 
 # ============================================================================
 # Helper Function Tests
@@ -39,6 +34,7 @@ class TestTaskState:
 
     def test_pending_task(self):
         """Pending task returns 'pending'."""
+
         async def dummy():
             await asyncio.sleep(100)
 
@@ -54,6 +50,7 @@ class TestTaskState:
 
     def test_done_task(self):
         """Done task returns 'done'."""
+
         async def completes():
             return "ok"
 
@@ -68,6 +65,7 @@ class TestTaskState:
 
     def test_cancelled_task(self):
         """Cancelled task returns 'cancelled'."""
+
         async def long_running():
             await asyncio.sleep(100)
 
@@ -83,6 +81,7 @@ class TestTaskState:
 
     def test_failed_task(self):
         """Failed task returns 'failed'."""
+
         async def raises():
             raise ValueError("test error")
 
@@ -102,6 +101,7 @@ class TestTaskWallTime:
 
     def test_tracked_task(self):
         """Task with _created_at returns wall time in ms."""
+
         async def dummy():
             await asyncio.sleep(100)
 
@@ -120,6 +120,7 @@ class TestTaskWallTime:
 
     def test_untracked_task(self):
         """Task without _created_at returns None."""
+
         async def dummy():
             await asyncio.sleep(100)
 
@@ -139,6 +140,7 @@ class TestCoroName:
 
     def test_named_coroutine(self):
         """Named coroutine returns function name."""
+
         async def my_coroutine():
             await asyncio.sleep(0)
 
@@ -213,6 +215,7 @@ class TestBuildTaskInfo:
 
     def test_complete_task_info(self):
         """All fields present in task info."""
+
         async def dummy():
             await asyncio.sleep(100)
 
@@ -241,6 +244,7 @@ class TestBuildTaskInfo:
 
     def test_unnamed_task(self):
         """Unnamed task returns task ID as name."""
+
         async def dummy():
             await asyncio.sleep(100)
 
@@ -265,7 +269,6 @@ class TestBuildTaskInfo:
 def _create_test_app(backend=None):
     """Create a minimal test app with debug routes."""
     from server.dependencies import get_backend, require_admin
-
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
 
@@ -361,6 +364,7 @@ class TestAsyncIOStateEndpoint:
 
     def test_db_pool_null_when_no_backend(self):
         """DB pool returns zeros when backend has no engine."""
+
         class NoEngineBackend:
             pass
 

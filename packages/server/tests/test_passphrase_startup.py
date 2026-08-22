@@ -1,8 +1,7 @@
 """Tests for app startup passphrase check."""
 
 import pytest
-
-from server.config import ServerConfig, DatabaseConfig
+from server.config import DatabaseConfig, ServerConfig
 
 _TEST_PEPPER = "test-pepper"
 

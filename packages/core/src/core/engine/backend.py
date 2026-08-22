@@ -1,22 +1,17 @@
 """PostgreSQL backend for the core."""
 
-
-import json
 import os
-import time
-from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, Self
 
 from sqlalchemy import (
     Engine,
     create_engine,
     event,
-    text,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from .encryption import KEK_SIZE, DecryptionError, derive_kek, unwrap_key
+from .encryption import KEK_SIZE, derive_kek
 
 
 class BackendError(Exception):
@@ -61,13 +56,9 @@ class BackendConfig:
         audit_enabled: bool = True,
     ) -> None:
         if passphrase is None and kek is None:
-            raise BackendConfigurationError(
-                "Either passphrase or kek must be provided"
-            )
+            raise BackendConfigurationError("Either passphrase or kek must be provided")
         if kek is not None and len(kek) != KEK_SIZE:
-            raise BackendConfigurationError(
-                f"KEK must be {KEK_SIZE} bytes, got {len(kek)}"
-            )
+            raise BackendConfigurationError(f"KEK must be {KEK_SIZE} bytes, got {len(kek)}")
 
         self.database_url = database_url
         self.passphrase = passphrase
@@ -98,6 +89,7 @@ def ensure_kek_salt(session: Session) -> bytes:
     resolved by the ``key`` primary key: the loser re-reads the winner's salt.
     """
     from core.iam.models import Secret, VenyaConfig
+
     from .encryption import ARGON2_SALT_LEN
 
     row = session.query(VenyaConfig).filter(VenyaConfig.key == "kek_salt").first()
@@ -209,9 +201,7 @@ class Backend:
         if passphrase is None:
             if self.config.kek is not None:
                 return self.config.kek
-            raise BackendConfigurationError(
-                "bootstrap_kek: no passphrase or KEK available"
-            )
+            raise BackendConfigurationError("bootstrap_kek: no passphrase or KEK available")
 
         session = self.get_session()
         try:
@@ -265,7 +255,7 @@ class Backend:
             self._engine = None
             self._session_factory = None
 
-    def __enter__(self) -> Backend:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *args: object) -> None:

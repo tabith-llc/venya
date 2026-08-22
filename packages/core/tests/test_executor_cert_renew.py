@@ -12,17 +12,14 @@ Tests cover:
 """
 
 import json
-import stat
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -36,11 +33,13 @@ def _generate_test_keypair():
 
 def _generate_test_cert(private_key, executor_id="venya-exec", validity_days=30):
     """Generate a self-signed certificate for testing."""
-    now = datetime.now(timezone.utc)
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
+    now = datetime.now(UTC)
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
+    )
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -76,7 +75,7 @@ def _setup_cert_files(tmp_path, executor_id="test-exec", validity_days=30):
 
 def _make_renew_response():
     """Create a mock server response for certificate renewal."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {
         "executor_id": "test-exec",
         "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJAL..." + "X" * 100 + "\n-----END CERTIFICATE-----\n",
@@ -107,11 +106,8 @@ def _make_mock_httpx_response(status_code=200, json_data=None):
 
 def _make_mock_httpx_client(post_response=None, post_error=None, get_response=None, get_error=None):
     """Create a mock httpx2.Client for mTLS calls."""
-    import httpx2
 
-    mock_post_resp = post_response or _make_mock_httpx_response(
-        status_code=200, json_data=_make_renew_response()
-    )
+    mock_post_resp = post_response or _make_mock_httpx_response(status_code=200, json_data=_make_renew_response())
     if post_error:
         mock_post_resp.raise_for_status.side_effect = post_error
 
@@ -148,6 +144,7 @@ class TestRenewSuccess:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_cert_renew
+
             result = executor_cert_renew(args)
 
         assert result == 0
@@ -160,7 +157,6 @@ class TestRenewSuccess:
 
         # Verify new key was written (different from original)
         new_key_data = key_path.read_bytes()
-        original_key_data = key_path  # Note: key was atomically replaced
         assert new_key_data != b""
         assert b"PRIVATE KEY" in new_key_data
 
@@ -200,6 +196,7 @@ class TestRenewSuccess:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_cert_renew
+
             result = executor_cert_renew(args)
 
         assert result == 0
@@ -227,6 +224,7 @@ class TestRenewErrors:
         args.key_path = None
 
         from core.cli.commands import executor_cert_renew
+
         result = executor_cert_renew(args)
 
         assert result == 1
@@ -249,6 +247,7 @@ class TestRenewErrors:
         args.core_url = "https://venya-core"
 
         from core.cli.commands import executor_cert_renew
+
         result = executor_cert_renew(args)
 
         assert result == 1
@@ -271,6 +270,7 @@ class TestRenewErrors:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_cert_renew
+
             result = executor_cert_renew(args)
 
         assert result == 1
@@ -293,6 +293,7 @@ class TestRenewErrors:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_cert_renew
+
             result = executor_cert_renew(args)
 
         assert result == 1
@@ -318,6 +319,7 @@ class TestRenewErrors:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_cert_renew
+
             result = executor_cert_renew(args)
 
         assert result == 1
@@ -341,6 +343,7 @@ class TestRenewErrors:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_cert_renew
+
             result = executor_cert_renew(args)
 
         assert result == 1
@@ -359,6 +362,7 @@ class TestRenewErrors:
         args.key_path = str(key_path)
 
         from core.cli.commands import executor_cert_renew
+
         result = executor_cert_renew(args)
 
         assert result == 1
@@ -376,7 +380,7 @@ class TestRenewAtomicWrite:
 
     def test_atomic_write_failure_preserves_original(self, tmp_path, capsys):
         """If write fails, original cert/key remain intact."""
-        cert_path, key_path, original_key = _setup_cert_files(tmp_path)
+        cert_path, key_path, _original_key = _setup_cert_files(tmp_path)
         original_cert_data = cert_path.read_bytes()
         original_key_data = key_path.read_bytes()
 
@@ -399,6 +403,7 @@ class TestRenewAtomicWrite:
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             with patch.object(Path, "write_bytes", failing_write_bytes):
                 from core.cli.commands import executor_cert_renew
+
                 result = executor_cert_renew(args)
 
         assert result == 1
@@ -424,6 +429,7 @@ class TestRenewAtomicWrite:
 
         with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
             from core.cli.commands import executor_cert_renew
+
             result = executor_cert_renew(args)
 
         assert result == 0

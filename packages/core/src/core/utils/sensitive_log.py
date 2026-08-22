@@ -23,16 +23,15 @@ Wrappers are lightweight dataclasses — the original value is preserved
 on ``.value`` for non-log use (e.g. passing the actual token to an API).
 """
 
-
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, ClassVar
-
+from typing import Any, ClassVar, Literal
 
 # ---------------------------------------------------------------------------
 # Wrapper types
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class Secret:
@@ -77,6 +76,7 @@ def token(value: Any, token_type: str = "UNKNOWN") -> Token:  # nosec B107 — n
 # RedactingFormatter
 # ---------------------------------------------------------------------------
 
+
 class RedactingFormatter(logging.Formatter):
     """Logging formatter with two-layer credential redaction.
 
@@ -109,7 +109,7 @@ class RedactingFormatter(logging.Formatter):
         self,
         fmt: str | None = None,
         datefmt: str | None = None,
-        style: str = "%",
+        style: Literal["%", "{", "$"] = "%",
         validate: bool = True,
         *,
         use_regex_fallback: bool = True,
@@ -148,6 +148,7 @@ class RedactingFormatter(logging.Formatter):
         if self.use_regex_fallback:
             # Protect already-redacted markers from regex over-matching
             import re as _re
+
             # Collect (start, end, original_text) for each marker
             markers: list[tuple[int, int, str]] = []
             for m in _re.finditer(r"\[REDACTED(?::[A-Z_]+)?\]", message):
@@ -166,12 +167,10 @@ class RedactingFormatter(logging.Formatter):
             # Rebuild message: insert original marker text at each position
             result_parts: list[str] = []
             ci = 0
-            mi = 0
             for start, end, orig_text in markers:
                 result_parts.append(cleaned[ci:start])
                 result_parts.append(orig_text)  # preserve original marker
                 ci = start
-                mi += 1
             result_parts.append(cleaned[ci:])
             message = "".join(result_parts)
 

@@ -10,15 +10,13 @@ Tests cover:
 - executor_id extracted from fields JSON
 """
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from datetime import UTC
+from unittest.mock import MagicMock
 
-import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -32,13 +30,15 @@ def _generate_test_keypair():
 
 def _generate_test_cert(private_key, executor_id="venya-exec", validity_days=30):
     """Generate a self-signed certificate for testing."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    now = datetime.now(timezone.utc)
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-        x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
-    ])
+    now = datetime.now(UTC)
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
+    )
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)

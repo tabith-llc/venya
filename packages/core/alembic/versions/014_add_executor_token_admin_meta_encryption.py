@@ -11,8 +11,8 @@ compatibility with existing rows. Nullified after 90 days per retention
 policy.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "014"
 down_revision = "013"
