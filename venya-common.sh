@@ -139,7 +139,9 @@ venya_install_uv_user() {
     SU_UV_BIN="/home/venya/.local/bin/uv"
     if [ ! -f "$SU_UV_BIN" ]; then
         info "Installing uv for venya user..."
-        sudo -u venya bash -c "curl -LsSf https://astral.sh/uv/install.sh | sh" > /dev/null 2>&1
+        # sudo -H ensures HOME is set from passwd db (/home/venya), not preserved
+        # from the invoking user (bot). Without -H, sudo may keep HOME=/home/bot.
+        sudo -H -u venya bash -c "curl -LsSf https://astral.sh/uv/install.sh | sh" > /dev/null 2>&1
     fi
 }
 
