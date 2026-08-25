@@ -2,6 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -233,16 +234,24 @@ class TestRateLimitRegistrationDep:
             "registration_ip_per_minute": 1000,  # generous: per-IP must not bind
             "registration_attempts_per_minute": 2,  # tight: per-executor must bind
             "token_generation_per_minute": 10,
+            "registration_global_per_minute": 100,  # generous: global backstop must not bind
+            "registration_first_attempt_per_minute": 3,  # default; existing tests run is_first=False
         }
         base.update(overrides)
         return SimpleNamespace(executor_enrollment=SimpleNamespace(**base))
 
     @staticmethod
-    def _request(executor_id, config, host="10.0.0.1"):
+    def _request(executor_id, config, host="10.0.0.1", first=False):
         req = SimpleNamespace()
-        # backend=None makes the is_first DB probe raise and fall through
-        # (is_first stays False) without needing a real DB app.state.
-        req.app = SimpleNamespace(state=SimpleNamespace(config=config, backend=None))
+        if first:
+            # Backend mock whose cert probe returns None -> is_first is True.
+            backend = MagicMock()
+            backend.get_session.return_value.query.return_value.filter.return_value.first.return_value = None
+        else:
+            # backend=None makes the is_first DB probe raise and fall through
+            # (is_first stays False) without needing a real DB app.state.
+            backend = None
+        req.app = SimpleNamespace(state=SimpleNamespace(config=config, backend=backend))
         req.client = SimpleNamespace(host=host)
         req.state = SimpleNamespace()
 
@@ -270,3 +279,48 @@ class TestRateLimitRegistrationDep:
         # Same IP, fresh executor_id: NOT blocked by execA's exhausted cap.
         # (If the throttle were per-IP, this would also 429.)
         await rate_limit_registration(self._request("execB", cfg))
+
+    async def test_global_backstop_is_enforced(self, fresh_limiters):
+        """M-62 regression: the global backstop must be a persistent limiter.
+
+        Before the fix the global limiter was instantiated fresh per request, so
+        its counter never accumulated and the 429 branch was unreachable. With a
+        persistent limiter (hoisted to the _LIMITERS cache) the backstop binds:
+        2 requests (== cap) pass, the 3rd from the same IP trips it -> 429.
+        Per-IP and per-exec caps are left generous so only the global binds.
+        """
+        cfg = self._config(
+            registration_global_per_minute=2,  # tight: global backstop must bind
+            registration_ip_per_minute=1000,  # generous: per-IP must not bind
+            registration_attempts_per_minute=1000,  # generous: per-exec must not bind
+        )
+        await rate_limit_registration(self._request("execA", cfg))
+        await rate_limit_registration(self._request("execA", cfg))
+        with pytest.raises(HTTPException) as exc:
+            await rate_limit_registration(self._request("execA", cfg))
+        assert exc.value.status_code == 429
+
+    async def test_first_attempt_per_ip_is_enforced(self, fresh_limiters):
+        """M-63 regression: the first-attempt 3/min per-IP limit must be a
+        persistent limiter. Before the fix it was instantiated fresh per request,
+        so first registrations were never actually capped at 3/min.
+
+        Per-IP and per-exec caps are left generous so ONLY the first-attempt
+        limiter binds: 3 first registrations from the same IP pass, the 4th trips
+        it -> 429. Negative control: a DIFFERENT IP is NOT blocked by the first
+        IP's exhausted counter (proves the key is reg_ip:{client_ip}, not one
+        shared counter).
+        """
+        cfg = self._config(
+            registration_first_attempt_per_minute=3,  # tight: first-attempt must bind
+            registration_ip_per_minute=1000,  # generous
+            registration_attempts_per_minute=1000,  # generous
+        )
+        for _ in range(3):
+            await rate_limit_registration(self._request("execA", cfg, first=True))
+        with pytest.raises(HTTPException) as exc:
+            await rate_limit_registration(self._request("execA", cfg, first=True))
+        assert exc.value.status_code == 429
+        # Negative control: a fresh IP must NOT be blocked by 10.0.0.1's exhausted
+        # first-attempt counter (if the limiter were one shared counter, this 429s).
+        await rate_limit_registration(self._request("execB", cfg, host="10.0.0.2", first=True))

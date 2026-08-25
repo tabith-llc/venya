@@ -92,20 +92,28 @@ async def rate_limit_registration(request: Request) -> None:
     except Exception:  # nosec B110 — best-effort JSON parse, None falls through  # noqa: S110
         pass
 
-    # Check global emergency limit first (100/min)
-    global_limiter = SlidingWindowRateLimiter(max_requests=100, window_seconds=60)
-    global_key = f"global:{client_ip}"
-    allowed, retry_after = await global_limiter.check_and_consume([global_key])
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Server rate limit exceeded",
-            headers={"Retry-After": str(retry_after)},
-        )
+    # Check global emergency limit first (configurable backstop, default 100/min).
+    # M-62: must be a PERSISTENT limiter (via the _LIMITERS cache) — an inline
+    # SlidingWindowRateLimiter() is recreated per request, so its counter never
+    # accumulates across requests and the 429 below was unreachable.
+    global_limiter = _get_limiter(config.executor_enrollment, "registration_global_per_minute")
+    if global_limiter is not None:
+        global_key = f"global:{client_ip}"
+        allowed, retry_after = await global_limiter.check_and_consume([global_key])
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Server rate limit exceeded",
+                headers={"Retry-After": str(retry_after)},
+            )
 
-    # Determine per-IP limit (stricter for first registration)
+    # Determine per-IP limit (stricter for first registration).
+    # M-63: first_attempt_limiter must be a PERSISTENT limiter (via the
+    # _LIMITERS cache) — an inline SlidingWindowRateLimiter() is recreated per
+    # request, so the 3/min first-attempt counter never accumulated and the cap
+    # was inert (the 3 was also hardcoded, not operator-configurable).
     ip_limiter = _get_limiter(config.executor_enrollment, "registration_ip_per_minute")
-    first_attempt_limiter = SlidingWindowRateLimiter(max_requests=3, window_seconds=60)
+    first_attempt_limiter = _get_limiter(config.executor_enrollment, "registration_first_attempt_per_minute")
 
     # Per-executor limit. M-61: the reg_exec: key must be enforced on its OWN
     # persistent limiter — the old code checked it against the *IP* limiter's
@@ -113,11 +121,16 @@ async def rate_limit_registration(request: Request) -> None:
     # register without bound).
     exec_limiter = _get_limiter(config.executor_enrollment, "registration_attempts_per_minute")
 
-    # Check if this is a first registration (no existing cert)
+    # Check if this is a first registration (no existing cert).
+    # M-63 (second root cause): this probe used `from ..dependencies import
+    # get_backend` — one dot too deep for a server/*.py module — which raised
+    # ImportError, swallowed by the blanket except below, so is_first was ALWAYS
+    # False and the first-attempt path was dead. Correct depth is `.dependencies`.
+    # (Making the limiter persistent alone would not have made it live.)
     is_first = False
     if executor_id and ip_limiter is not None:
         try:
-            from ..dependencies import get_backend
+            from .dependencies import get_backend
 
             backend = get_backend(request)
             db = backend.get_session()
@@ -137,7 +150,7 @@ async def rate_limit_registration(request: Request) -> None:
     # so neither limit can be exceeded. A request denied by one limiter still
     # holds the slot it consumed on the limiters that passed (at most one per
     # denied request) — fail-safe: it only ever tightens the effective limit.
-    ip_limiter = first_attempt_limiter if is_first else ip_limiter
+    ip_limiter = first_attempt_limiter if (is_first and first_attempt_limiter is not None) else ip_limiter
     checks: list[tuple[SlidingWindowRateLimiter, str]] = []
     if ip_limiter is not None:
         checks.append((ip_limiter, f"reg_ip:{client_ip}"))

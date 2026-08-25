@@ -1,7 +1,7 @@
 """add executor token admin identity fields
 
 Revision ID: 012
-Revises: 011
+Revises: 011_admin_cert_revocations
 Create Date: 2025-01-01
 
 Adds forensic identity fields to executor_enrollment_tokens for admin
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "012"
-down_revision = "011"
+down_revision = "011_admin_cert_revocations"
 branch_labels = None
 depends_on = None
 

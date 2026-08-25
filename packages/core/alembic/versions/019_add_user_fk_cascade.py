@@ -32,7 +32,7 @@ CASCADE_FKS = [
     ("secrets", "secrets_created_by_fkey", "created_by", "users", "user_id"),
     ("sessions", "sessions_user_id_fkey", "user_id", "users", "user_id"),
     ("enrollment_tokens", "enrollment_tokens_user_id_fkey", "user_id", "users", "user_id"),
-    ("executor_enrollment_tokens", "executor_enrollment_tokens_created_by_fkey", "created_by", "users", "user_id"),
+    ("executor_enrollment_tokens", "fk_executor_enrollment_tokens_created_by", "created_by", "users", "user_id"),
     ("executor_certs", "executor_certs_executor_id_fkey", "executor_id", "users", "user_id"),
     ("elevation_tokens", "elevation_tokens_user_id_fkey", "user_id", "users", "user_id"),
     ("webauthn_credentials", "webauthn_credentials_user_id_fkey", "user_id", "users", "user_id"),
