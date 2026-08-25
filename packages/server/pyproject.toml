@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 venya-server = "server.app:main"
+venya-fido2 = "server.fido2.cli_enroll:main"
 
 [build-system]
 requires = ["hatchling"]
