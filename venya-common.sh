@@ -343,6 +343,7 @@ venya_apply_code_fixes() {
 
 venya_create_directories() {
     mkdir -p /var/lib/venya/ca
+    mkdir -p /var/lib/venya/executor
     mkdir -p /var/log/venya
     chown -R venya:venya /var/lib/venya
     chown -R venya:venya /var/log/venya
