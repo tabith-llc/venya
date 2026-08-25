@@ -109,6 +109,10 @@ chown venya:adm /var/log/venya 2>/dev/null || chown venya:venya /var/log/venya
 # --- Install Docker Sandboxes (sbx) CLI (executor-specific) ---
 info "Installing Docker Sandboxes (sbx) CLI..."
 if ! command -v sbx &>/dev/null; then
+    SBX_SCRIPT=$(mktemp /tmp/docker-sbx-install-XXXXXX.sh)
+    curl -fsSL https://get.docker.com -o "$SBX_SCRIPT"
+    REPO_ONLY=1 sh "$SBX_SCRIPT" > /dev/null 2>&1
+    rm -f "$SBX_SCRIPT"
     apt-get install -y -qq docker-sbx > /dev/null 2>&1
     usermod -aG kvm venya 2>/dev/null || true
     info "sbx CLI installed. venya user added to kvm group."
