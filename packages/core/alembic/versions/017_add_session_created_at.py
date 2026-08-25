@@ -68,18 +68,12 @@ def upgrade():
     """
     )
 
-    # H-11: Unique constraints on token columns
-    op.create_unique_constraint("uq_sessions_access_token", "sessions", ["access_token"])
+    # H-11: Unique constraint on access_token_jti.
+    # (uq_sessions_access_token and the user_id/expires_at indexes already
+    # exist from 001 — do not recreate them here.)
     op.create_unique_constraint("uq_sessions_access_token_jti", "sessions", ["access_token_jti"])
-
-    # L-23: Performance indexes
-    op.create_index("ix_sessions_user_id", "sessions", ["user_id"])
-    op.create_index("ix_sessions_expires_at", "sessions", ["expires_at"])
 
 
 def downgrade():
-    op.drop_index("ix_sessions_expires_at", table_name="sessions")
-    op.drop_index("ix_sessions_user_id", table_name="sessions")
     op.drop_constraint("uq_sessions_access_token_jti", "sessions")
-    op.drop_constraint("uq_sessions_access_token", "sessions")
     op.drop_column("sessions", "created_at")

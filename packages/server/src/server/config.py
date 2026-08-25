@@ -149,6 +149,16 @@ class ExecutorEnrollmentConfig(BaseModel):
         default=20,
         description="Max registration attempts per source IP per minute (batch enrollment)",
     )
+    registration_global_per_minute: int = Field(
+        default=100,
+        ge=1,
+        description="Max registration attempts per IP per minute (emergency backstop)",
+    )
+    registration_first_attempt_per_minute: int = Field(
+        default=3,
+        ge=1,
+        description="Max first-time registrations per source IP per minute",
+    )
 
     enabled: bool = Field(
         default=True,
