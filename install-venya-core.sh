@@ -133,8 +133,8 @@ print('Admin CA initialized')
     CADDY_CERTS_DIR="/etc/caddy/certs"
     mkdir -p "$CADDY_CERTS_DIR"
     chmod 755 "$CADDY_CERTS_DIR"
-    if [ -f "$ADMIN_CA_DIR/ca.crt" ]; then
-        cp "$ADMIN_CA_DIR/ca.crt" "$CADDY_CERTS_DIR/admin-ca.crt"
+    if [ -f "$ADMIN_CA_DIR/admin-ca.crt" ]; then
+        cp "$ADMIN_CA_DIR/admin-ca.crt" "$CADDY_CERTS_DIR/admin-ca.crt"
         chmod 644 "$CADDY_CERTS_DIR/admin-ca.crt"
         info "CA cert copied to $CADDY_CERTS_DIR/admin-ca.crt"
     fi
