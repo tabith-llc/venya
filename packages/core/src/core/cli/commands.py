@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import ssl
 import sys
 from datetime import UTC
 from pathlib import Path
@@ -677,14 +678,80 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
         result = client.post(f"/api/v1/admin/executors/{args.executor_id}/enroll")
         token = result.get("enrollment_token", "")
         expires_in = result.get("expires_in_seconds", 900)
-        print(f"Enrollment token for executor '{args.executor_id}':")
-        print(f"  Token: {_SENSITIVE_REDACTED}")
-        if token:
-            print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
-            _print_sensitive(token, getattr(args, "show_sensitive", False))
+        output_dir = getattr(args, "output_dir", None)
+
+        if output_dir:
+            import hashlib as hashlib_mod
+
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+
+            token_path = output_path / "token"
+            token_path.write_text(token)
+
+            core_ca_path = output_path / "core-server-ca.crt"
+            caddy_root_ca = Path("/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt")
+            if caddy_root_ca.exists():
+                core_ca_path.write_bytes(caddy_root_ca.read_bytes())
+                core_ca_written = True
+            else:
+                venya_ca_path = Path("/var/lib/venya/certs/core-server-ca.crt")
+                if venya_ca_path.exists():
+                    core_ca_path.write_bytes(venya_ca_path.read_bytes())
+                    core_ca_written = True
+                else:
+                    core_ca_written = False
+
+            admin_ca_path = output_path / "admin-ca.crt"
+            admin_ca_dir = Path("/var/lib/venya/ca/admin-ca")
+            if (admin_ca_dir / "admin-ca.crt").exists():
+                admin_ca_path.write_bytes((admin_ca_dir / "admin-ca.crt").read_bytes())
+                admin_ca_written = True
+            else:
+                admin_ca_written = False
+
+            bundle_data = token.encode()
+            if core_ca_written:
+                bundle_data += core_ca_path.read_bytes()
+            if admin_ca_written:
+                bundle_data += admin_ca_path.read_bytes()
+            bundle_hash = hashlib_mod.sha256(bundle_data).hexdigest()
+
+            print(f"Generated enrollment bundle for {args.executor_id}:")
+            print(f"  {token_path}")
+            if core_ca_written:
+                print(f"  {core_ca_path}")
+            else:
+                print(f"  {core_ca_path} (NOT FOUND — install core first)")
+            if admin_ca_written:
+                print(f"  {admin_ca_path}")
+            else:
+                print(f"  {admin_ca_path} (NOT FOUND)")
+            print()
+            print("Bundle fingerprint (verify before copying to executor):")
+            print(f"  SHA256: {bundle_hash}")
+            print()
+            print("To install on executor VM:")
+            print(f"  scp -r {output_dir} bot@venya-exec-1:/tmp/")
+            print()
+            print("  curl -fsSL http://.../install-venya-executor.sh | \\")
+            print("    sudo VENYA_SERVER_URL=https://venya-core-1 \\")
+            print(f"         VENYA_EXECUTOR_ID={args.executor_id} \\")
+            print(f"         VENYA_EXECUTOR_ENROLLMENT_TOKEN=$(cat {token_path}) \\")
+            print(f"         VENYA_CORE_CA_CERT={core_ca_path} \\")
+            print("         bash -s")
+            print()
+            print(f"Note: This bundle is valid for {expires_in // 60} minutes.")
         else:
-            print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
-        print("Deliver this token to the executor operator out-of-band.")
+            print(f"Enrollment token for executor '{args.executor_id}':")
+            print(f"  Token: {_SENSITIVE_REDACTED}")
+            if token:
+                print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
+                _print_sensitive(token, getattr(args, "show_sensitive", False))
+            else:
+                print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
+            print("Deliver this token to the executor operator out-of-band.")
+
         return 0
     except APIClientError as e:
         print(f"Enrollment failed: {e}", file=sys.stderr)
@@ -1618,6 +1685,9 @@ def executor_register(client: APIClient, args: Any) -> int:
     output_dir = getattr(args, "output_dir", "/etc/venya")
     core_url = getattr(args, "core_url", None)
     enrollment_token = getattr(args, "enrollment_token", None)
+    ca_bundle = getattr(args, "ca_bundle", None)
+    if ca_bundle is not None and not isinstance(ca_bundle, str):
+        ca_bundle = None
 
     # Validate executor_id format before any operations
     try:
@@ -1670,6 +1740,7 @@ def executor_register(client: APIClient, args: Any) -> int:
             executor_id=executor_id,
             csr_pem=csr_pem,
             enrollment_token=enrollment_token,
+            ca_bundle=ca_bundle,
         )
         cert_pem = result.get("cert_pem", "")
         ca_cert_pem = result.get("ca_cert_pem", "")
@@ -1867,7 +1938,7 @@ def executor_cert_renew(args: Any) -> int:
     cert_path = getattr(args, "cert_path", "/etc/venya/executor/executor.crt")
     key_path = getattr(args, "key_path", None)
     if key_path is None:
-        key_path = str(Path(cert_path).with_suffix(".key"))
+        key_path = str(Path(cert_path).with_suffix(".key"))  # type: ignore[assignment]
 
     info = _parse_executor_cert(cert_path)
     if info is None:
@@ -1922,9 +1993,16 @@ def executor_cert_renew(args: Any) -> int:
             tls_verify = True
 
         print("Submitting renewal request via mTLS...")
+        ca_cert_path = str(Path(cert_path).parent / "ca.crt")
+        if tls_verify:
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.load_cert_chain(cert_path, key_path)
+            if Path(ca_cert_path).exists():
+                ssl_ctx.load_verify_locations(ca_cert_path)
+        else:
+            ssl_ctx = False  # type: ignore[assignment]
         with httpx2.Client(
-            cert=(cert_path, key_path),
-            verify=tls_verify,
+            verify=ssl_ctx,
             timeout=30.0,
         ) as http_client:
             url = f"{server_url}/api/v1/executors/register"
@@ -1987,8 +2065,8 @@ def executor_cert_renew(args: Any) -> int:
         key_tmp.chmod(0o600)
 
         if ca_cert_pem:
-            ca_cert_path = Path(cert_path).with_name("ca.crt")
-            ca_tmp = ca_cert_path.with_suffix(".pem.tmp")
+            ca_cert_path = Path(cert_path).with_name("ca.crt")  # type: ignore[assignment]
+            ca_tmp = ca_cert_path.with_suffix(".pem.tmp")  # type: ignore[attr-defined]
             ca_tmp.write_bytes(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
             ca_tmp.rename(ca_cert_path)
 
@@ -2007,9 +2085,15 @@ def executor_cert_renew(args: Any) -> int:
     # Verify auth with revocation list
     try:
         print("Verifying authentication...")
+        if tls_verify:
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.load_cert_chain(cert_path, key_path)
+            if Path(ca_cert_path).exists():
+                ssl_ctx.load_verify_locations(ca_cert_path)
+        else:
+            ssl_ctx = False  # type: ignore[assignment]
         with httpx2.Client(
-            cert=(cert_path, key_path),
-            verify=tls_verify,
+            verify=ssl_ctx,
             timeout=30.0,
         ) as http_client:
             url = f"{server_url}/api/v1/executors/certs/revocation-list"
@@ -2089,7 +2173,7 @@ def executor_heartbeat(args: Any) -> int:
     cert_path = getattr(args, "cert_path", "/etc/venya/executor/executor.crt")
     key_path = getattr(args, "key_path", None)
     if key_path is None:
-        key_path = str(Path(cert_path).with_suffix(".key"))
+        key_path = str(Path(cert_path).with_suffix(".key"))  # type: ignore[assignment]
 
     info = _parse_executor_cert(cert_path)
     if info is None:
@@ -2120,9 +2204,17 @@ def executor_heartbeat(args: Any) -> int:
 
     # Build mTLS client
     try:
+        ca_cert_path = str(Path(cert_path).parent / "ca.crt")
+        use_tls = server_url.startswith("https://")
+        if use_tls:
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.load_cert_chain(cert_path, key_path)
+            if Path(ca_cert_path).exists():
+                ssl_ctx.load_verify_locations(ca_cert_path)
+        else:
+            ssl_ctx = False  # type: ignore[assignment]
         with httpx2.Client(
-            cert=(cert_path, key_path),
-            verify=server_url.startswith("https://"),
+            verify=ssl_ctx,
             timeout=10.0,
         ) as http_client:
             response = http_client.post(
