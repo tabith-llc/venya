@@ -32,6 +32,9 @@ ADMIN_MTLS_ENABLED="${VENYA_ADMIN_MTLS_ENABLED:-true}"
 ADMIN_IDENTITY="${VENYA_ADMIN_IDENTITY:-}"
 ADMIN_CA_PASSPHRASE="${VENYA_ADMIN_CA_PASSPHRASE:-}"
 
+# Recovery code pepper — random secret used to derive recovery code hashes
+RECOVERY_PEPPER="${VENYA_RECOVERY_PEPPER:-$(openssl rand -base64 32)}"
+
 # --- Source common library ---
 # Direct execution: the library sits next to the script. Piped execution
 # (curl | sudo bash): $0 has no directory — fetch from the tarball origin.
@@ -221,6 +224,8 @@ cors_origins = ["https://$CORE_HOSTNAME"]
 [audit]
 audit_remote_url = null
 audit_local_retention_days = 90
+
+recovery_code_pepper = "$RECOVERY_PEPPER"
 EOF
 
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
@@ -249,6 +254,7 @@ VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
 VENYA_FIDO2__RP_ID=$CORE_HOSTNAME
 VENYA_FIDO2__RP_NAME=Venya Core
 VENYA_CORS_ORIGINS=["https://$CORE_HOSTNAME"]
+VENYA_RECOVERY_CODE_PEPPER=$RECOVERY_PEPPER
 EOF
 
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
