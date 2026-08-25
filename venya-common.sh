@@ -147,19 +147,30 @@ venya_install_uv_user() {
 
 venya_install_python314() {
     SU_UV_BIN="/home/venya/.local/bin/uv"
-    if [ -f "$SU_UV_BIN" ]; then
-        info "Ensuring Python 3.14 is installed for venya user..."
-        # CRITICAL: In piped execution (curl | sudo bash), stdin is exhausted.
-        # uv's progress display hangs when stdin is neither a TTY nor /dev/null.
-        # Fix: redirect stdin from /dev/null, disable progress, and set install dir.
-        mkdir -p /home/venya/.local/share/uv/python
-        HOME=/home/venya UV_NO_PROGRESS=1 UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv \
-            "$SU_UV_BIN python install 3.14 --no-progress" < /dev/null > /dev/null 2>&1
-        info "Python 3.14 ready"
-    else
-        error "uv not found at $SU_UV_BIN — cannot install Python 3.14"
+    if [ ! -f "$SU_UV_BIN" ]; then
+        error "uv binary not found at $SU_UV_BIN"
         exit 1
     fi
+
+    mkdir -p /home/venya/.local/share/uv/python
+    chown venya:venya /home/venya/.local/share/uv/python
+
+    # CRITICAL: Must run as venya (sudo -H -u venya) so uv resolves its config
+    # path from getpwuid(getuid()) → /home/venya, not /home/bot (the SSH login
+    # user who invoked curl | sudo bash). Without -H, sudo may preserve the
+    # invoking user's HOME depending on sudoers env_keep settings.
+    #
+    # UV_PYTHON_INSTALL_DIR tells uv where to find the managed Python 3.14
+    # installation. UV_NO_PROGRESS + < /dev/null prevent the progress-display
+    # hang in non-interactive (piped) contexts.
+    sudo -H -u venya env \
+        HOME=/home/venya \
+        UV_NO_PROGRESS=1 \
+        UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
+        "$SU_UV_BIN" python install 3.14 < /dev/null
+
+    chown -R venya:venya /home/venya/.local/share/uv/python
+    info "Python 3.14 ensured for venya user"
 }
 
 # --- 10. Download tarball ---
@@ -228,16 +239,51 @@ venya_create_venv() {
     local requirements_file="${1:-}"
     shift || true
     local extra_paths="$@"
-    local full_path="/home/venya/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${extra_paths}"
 
-    info "Creating Python virtual environment..."
-    VENYA_UV="/home/venya/.local/bin/uv"
-    sudo -u venya env PATH="${full_path}" bash -c "cd $INSTALL_DIR && UV_VENV_CLEAR=1 $VENYA_UV venv .venv"
-
-    if [ -n "$requirements_file" ]; then
-        info "Installing Python packages..."
-        sudo -u venya env PATH="${full_path}" bash -c "cd $INSTALL_DIR && $VENYA_UV pip install -r $INSTALL_DIR/$requirements_file"
+    # Build PATH for the venya user: uv bin + cargo bin + system paths + extras
+    local venv_path="/home/venya/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    if [ -n "$extra_paths" ]; then
+        venv_path="$venv_path:$extra_paths"
     fi
+
+    info "Creating Python virtual environment at $INSTALL_DIR/.venv..."
+
+    # CRITICAL: Must run as venya (sudo -H -u venya) so uv resolves its config
+    # path from getpwuid(getuid()) → /home/venya, not /home/bot (the SSH login
+    # user who invoked curl | sudo bash).
+    #
+    # --python 3.14 is explicit: uv's discovery order is not guaranteed to prefer
+    # the managed Python (UV_PYTHON_INSTALL_DIR) over system Python (3.12 on
+    # Ubuntu 24.04). The codebase uses compression.zstd (PEP 784, Python 3.14+),
+    # so a wrong Python version would fail at runtime.
+    #
+    # UV_NO_PROGRESS + < /dev/null prevent the progress-display hang in
+    # non-interactive (piped) contexts.
+    sudo -H -u venya env \
+        HOME=/home/venya \
+        PATH="$venv_path" \
+        UV_NO_PROGRESS=1 \
+        UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
+        UV_PYTHON_BIN_DIR=/home/venya/.local/bin \
+        /home/venya/.local/bin/uv venv \
+            --python 3.14 \
+            "$INSTALL_DIR/.venv" < /dev/null
+
+    if [ -n "$requirements_file" ] && [ -f "$INSTALL_DIR/$requirements_file" ]; then
+        info "Installing requirements from $requirements_file..."
+        sudo -H -u venya env \
+            HOME=/home/venya \
+            PATH="$INSTALL_DIR/.venv/bin:$venv_path" \
+            UV_NO_PROGRESS=1 \
+            UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
+            /home/venya/.local/bin/uv pip install \
+                -r "$INSTALL_DIR/$requirements_file" < /dev/null
+    elif [ -n "$requirements_file" ]; then
+        warn "Requirements file $requirements_file not found — skipping dependency install"
+    fi
+
+    chown -R venya:venya "$INSTALL_DIR/.venv"
+    info "Python venv created at $INSTALL_DIR/.venv"
 }
 
 # --- 13. Apply code fixes (sed patches) ---
