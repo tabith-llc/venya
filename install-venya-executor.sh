@@ -16,14 +16,13 @@ set -euo pipefail
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
 #   VENYA_TARBALL       - URL of the tarball to install (auto-detected if on same host)
 #   VENYA_EXECUTOR_ID              - Executor ID (default: jump-1)
-#   VENYA_SERVER_URL               - Core server URL (default: https://venya-core)
+#   VENYA_SERVER_URL               - Core server URL (required)
 #   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
 ###############################################################################
 
 # --- Defaults ---
 TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-executor-install.tar.gz}"
 EXECUTOR_ID="${VENYA_EXECUTOR_ID:-jump-1}"
-SERVER_URL="${VENYA_SERVER_URL:-https://venya-core}"
 
 # --- Source common library ---
 # Direct execution: the library sits next to the script. Piped execution
@@ -43,6 +42,14 @@ venya_print_colors
 venya_check_root
 venya_determine_install_dir /opt/venya
 venya_check_existing
+
+# --- Require VENYA_SERVER_URL (no default — customer's core server is unknown) ---
+if [ -z "${VENYA_SERVER_URL:-}" ]; then
+    error "VENYA_SERVER_URL is required."
+    error "Set it to your core server URL, e.g.: https://venya-core or https://10.0.1.50"
+    exit 1
+fi
+SERVER_URL="$VENYA_SERVER_URL"
 
 info "Installing Venya Executor to $INSTALL_DIR"
 
