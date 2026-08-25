@@ -173,7 +173,7 @@ venya_install_python314() {
         HOME=/home/venya \
         UV_NO_PROGRESS=1 \
         UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
-        bash -c "cd /tmp && exec \"\$0\" python install 3.14" "$SU_UV_BIN" < /dev/null
+        bash -c 'cd /tmp && exec "$0" python install 3.14' "$SU_UV_BIN" < /dev/null
 
     chown -R venya:venya /home/venya/.local/share/uv/python
     info "Python 3.14 ensured for venya user"
@@ -274,7 +274,7 @@ venya_create_venv() {
         UV_NO_PROGRESS=1 \
         UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
         UV_PYTHON_BIN_DIR=/home/venya/.local/bin \
-        bash -c "cd \"$1\" && exec \"\$0\" venv --python 3.14 .venv" \
+        bash -c 'cd "$1" && exec "$0" venv --python 3.14 .venv' \
             /home/venya/.local/bin/uv "$INSTALL_DIR" < /dev/null
 
     if [ -n "$requirements_file" ] && [ -f "$INSTALL_DIR/$requirements_file" ]; then
@@ -284,7 +284,7 @@ venya_create_venv() {
             PATH="$INSTALL_DIR/.venv/bin:$venv_path" \
             UV_NO_PROGRESS=1 \
             UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
-            bash -c "cd \"$1\" && exec \"\$0\" pip install -r \"$2\"" \
+            bash -c 'cd "$1" && exec "$0" pip install -r "$2"' \
                 /home/venya/.local/bin/uv "$INSTALL_DIR" "$requirements_file" < /dev/null
     elif [ -n "$requirements_file" ]; then
         warn "Requirements file $requirements_file not found — skipping dependency install"
