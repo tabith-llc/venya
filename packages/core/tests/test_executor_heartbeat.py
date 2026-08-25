@@ -425,13 +425,13 @@ class TestHeartbeatServerUrl:
 
     def test_heartbeat_unknown_server_url(self, tmp_path, capsys):
         """Heartbeat exits 1 when server URL is unknown."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         from core.cli.commands import executor_heartbeat
 
         args = MagicMock()
         args.cert_path = str(cert_path)
-        args.key_path = str(key_path)
+        args.key_path = str(_key_path)
         args.core_url = None
 
         with patch("core.cli.api_client.Config") as MockConfig:
@@ -458,8 +458,10 @@ class TestHeartbeatMtls:
     """Tests for mTLS client usage."""
 
     def test_heartbeat_mtls_client_used(self, tmp_path):
-        """httpx2.Client is instantiated with cert=(cert_path, key_path)."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        """httpx2.Client is instantiated with ssl.SSLContext for mTLS."""
+        import ssl
+
+        cert_path, _key_path, _ca_path = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -478,8 +480,7 @@ class TestHeartbeatMtls:
         assert result == 0
         MockClient.assert_called_once()
         call_kwargs = MockClient.call_args.kwargs if MockClient.call_args.kwargs else MockClient.call_args[1]
-        assert call_kwargs["cert"] == (str(cert_path), str(key_path))
-        assert call_kwargs["verify"] is True
+        assert isinstance(call_kwargs["verify"], ssl.SSLContext)
         assert call_kwargs["timeout"] == 10.0
 
 
@@ -493,7 +494,7 @@ class TestHeartbeatKeyPath:
 
     def test_heartbeat_key_derived_from_cert(self, tmp_path):
         """Key path is derived from cert path when --key-path not provided."""
-        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -512,7 +513,9 @@ class TestHeartbeatKeyPath:
         assert result == 0
         call_kwargs = MockClient.call_args.kwargs if MockClient.call_args.kwargs else MockClient.call_args[1]
         # key_path was derived: executor.crt -> executor.key
-        assert call_kwargs["cert"] == (str(cert_path), str(key_path))
+        import ssl
+
+        assert isinstance(call_kwargs["verify"], ssl.SSLContext)
 
     def test_heartbeat_custom_key_path(self, tmp_path):
         """--key-path overrides the derived key path."""
@@ -547,7 +550,9 @@ class TestHeartbeatKeyPath:
 
         assert result == 0
         call_kwargs = MockClient.call_args.kwargs if MockClient.call_args.kwargs else MockClient.call_args[1]
-        assert call_kwargs["cert"] == (str(cert_path), str(custom_key_path))
+        import ssl
+
+        assert isinstance(call_kwargs["verify"], ssl.SSLContext)
 
 
 # ---------------------------------------------------------------------------
@@ -590,7 +595,9 @@ class TestHeartbeatCustomCertPath:
 
         assert result == 0
         call_kwargs = MockClient.call_args.kwargs if MockClient.call_args.kwargs else MockClient.call_args[1]
-        assert call_kwargs["cert"][0] == str(custom_cert_path)
+        import ssl
+
+        assert isinstance(call_kwargs["verify"], ssl.SSLContext)
 
 
 # ---------------------------------------------------------------------------

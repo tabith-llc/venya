@@ -211,6 +211,12 @@ def create_parser() -> argparse.ArgumentParser:
         "executor-enroll", help="Generate an enrollment token for an executor"
     )
     enroll_executor_parser.add_argument("executor_id", metavar="EXECUTOR_ID", help="Executor ID to enroll")
+    enroll_executor_parser.add_argument(
+        "--output-dir",
+        dest="output_dir",
+        default=None,
+        help="Directory to write token and CA certs (creates token, core-server-ca.crt, admin-ca.crt)",
+    )
 
     # admin list-tokens
     list_tokens_parser = admin_sub.add_parser("list-tokens", help="List all enrollment tokens for a user")
@@ -471,6 +477,12 @@ def create_parser() -> argparse.ArgumentParser:
         dest="enrollment_token",
         default=None,
         help="Enrollment token for bootstrap registration (from admin executor-enroll)",
+    )
+    register_parser.add_argument(
+        "--ca-bundle",
+        dest="ca_bundle",
+        default=None,
+        help="Path to CA bundle for verifying core server TLS",
     )
 
     # exec cert — certificate management
