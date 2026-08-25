@@ -270,7 +270,7 @@ $CORE_HOSTNAME {
     tls $TLS_MODE {
         client_auth {
             mode verify_if_given
-            trusted_ca_cert_file /var/lib/venya/ca/admin-ca/admin-ca.crt
+            trusted_ca_cert_file /etc/caddy/certs/admin-ca.crt
         }
     }
 
