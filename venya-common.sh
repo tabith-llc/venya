@@ -159,8 +159,12 @@ venya_install_python314() {
 
     # CRITICAL: Must run as venya (sudo -H -u venya) so uv resolves its config
     # path from getpwuid(getuid()) → /home/venya, not /home/bot (the SSH login
-    # user who invoked curl | sudo bash). Without -H, sudo may preserve the
-    # invoking user's HOME depending on sudoers env_keep settings.
+    # user who invoked curl | sudo bash).
+    #
+    # cd /tmp avoids uv's current-directory config file discovery: uv checks
+    # for uv.toml in the CWD first. If CWD is /home/bot (SSH user's home),
+    # uv tries to stat /home/bot/uv.toml and gets Permission denied because
+    # the venya user can't traverse /home/bot/ (750 bot:bot).
     #
     # UV_PYTHON_INSTALL_DIR tells uv where to find the managed Python 3.14
     # installation. UV_NO_PROGRESS + < /dev/null prevent the progress-display
@@ -169,7 +173,7 @@ venya_install_python314() {
         HOME=/home/venya \
         UV_NO_PROGRESS=1 \
         UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
-        "$SU_UV_BIN" python install 3.14 < /dev/null
+        bash -c "cd /tmp && exec \"\$0\" python install 3.14" "$SU_UV_BIN" < /dev/null
 
     chown -R venya:venya /home/venya/.local/share/uv/python
     info "Python 3.14 ensured for venya user"
@@ -254,10 +258,13 @@ venya_create_venv() {
     # path from getpwuid(getuid()) → /home/venya, not /home/bot (the SSH login
     # user who invoked curl | sudo bash).
     #
-    # --python 3.14 is explicit: uv's discovery order is not guaranteed to prefer
-    # the managed Python (UV_PYTHON_INSTALL_DIR) over system Python (3.12 on
-    # Ubuntu 24.04). The codebase uses compression.zstd (PEP 784, Python 3.14+),
-    # so a wrong Python version would fail at runtime.
+    # cd /tmp avoids uv's current-directory config file discovery (see
+    # venya_install_python314 for details).
+    #
+    # --python 3.14 is explicit: uv's discovery order is not guaranteed to
+    # prefer the managed Python (UV_PYTHON_INSTALL_DIR) over system Python
+    # (3.12 on Ubuntu 24.04). The codebase uses compression.zstd (PEP 784,
+    # Python 3.14+), so a wrong Python version would fail at runtime.
     #
     # UV_NO_PROGRESS + < /dev/null prevent the progress-display hang in
     # non-interactive (piped) contexts.
@@ -267,9 +274,8 @@ venya_create_venv() {
         UV_NO_PROGRESS=1 \
         UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
         UV_PYTHON_BIN_DIR=/home/venya/.local/bin \
-        /home/venya/.local/bin/uv venv \
-            --python 3.14 \
-            "$INSTALL_DIR/.venv" < /dev/null
+        bash -c "cd \"$1\" && exec \"\$0\" venv --python 3.14 .venv" \
+            /home/venya/.local/bin/uv "$INSTALL_DIR" < /dev/null
 
     if [ -n "$requirements_file" ] && [ -f "$INSTALL_DIR/$requirements_file" ]; then
         info "Installing requirements from $requirements_file..."
@@ -278,8 +284,8 @@ venya_create_venv() {
             PATH="$INSTALL_DIR/.venv/bin:$venv_path" \
             UV_NO_PROGRESS=1 \
             UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
-            /home/venya/.local/bin/uv pip install \
-                -r "$INSTALL_DIR/$requirements_file" < /dev/null
+            bash -c "cd \"$1\" && exec \"\$0\" pip install -r \"$2\"" \
+                /home/venya/.local/bin/uv "$INSTALL_DIR" "$requirements_file" < /dev/null
     elif [ -n "$requirements_file" ]; then
         warn "Requirements file $requirements_file not found — skipping dependency install"
     fi
