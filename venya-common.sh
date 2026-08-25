@@ -274,6 +274,7 @@ venya_create_venv() {
         UV_NO_PROGRESS=1 \
         UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
         UV_PYTHON_BIN_DIR=/home/venya/.local/bin \
+        UV_VENV_CLEAR=1 \
         bash -c 'cd "$1" && exec "$0" venv --python 3.14 .venv' \
             /home/venya/.local/bin/uv "$INSTALL_DIR" < /dev/null
 
