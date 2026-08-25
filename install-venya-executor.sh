@@ -43,7 +43,7 @@ venya_check_root
 venya_determine_install_dir /opt/venya
 venya_check_existing
 
-# --- Require VENYA_SERVER_URL (no default — customer's core server is unknown) ---
+# --- Require VENYA_SERVER_URL (no default — server hostname is unknown) ---
 if [ -z "${VENYA_SERVER_URL:-}" ]; then
     error "VENYA_SERVER_URL is required."
     error "Set it to your core server URL, e.g.: https://venya-core or https://10.0.1.50"
@@ -148,7 +148,7 @@ EOF
 info "Executor config written to /etc/venya/executor.toml"
 
 # --- Register mTLS certificate (if enrollment token provided and core reachable) ---
-if [ -n "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" ]; then
+if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     info "Attempting mTLS certificate registration..."
 
     # Retry loop: wait for core to be reachable
@@ -170,7 +170,7 @@ if [ -n "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" ]; then
             --executor-id "$EXECUTOR_ID" \
             --core-url "$SERVER_URL" \
             --output-dir /etc/venya/executor \
-            --enrollment-token "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" \
+            --enrollment-token "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" \
             2>&1) || true
         echo "$REG_OUTPUT"
 
@@ -189,17 +189,17 @@ if [ -n "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" ]; then
         echo "      --executor-id $EXECUTOR_ID \\"
         echo "      --core-url $SERVER_URL \\"
         echo "      --output-dir /etc/venya/executor \\"
-        echo "      --enrollment-token '$VENYA_EXECUTOR_ENROLLMENT_TOKEN'"
+        echo "      --enrollment-token '${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}'"
         echo ""
     fi
 fi
 
 # --- Write bootstrap config (enrollment token for heartbeat) ---
-if [ -n "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" ]; then
+if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     cat >> /etc/venya/executor.toml << EOF
 
 [bootstrap]
-enrollment_token = "$VENYA_EXECUTOR_ENROLLMENT_TOKEN"
+enrollment_token = "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}"
 tls_verify = true
 EOF
     info "Bootstrap enrollment token configured"
