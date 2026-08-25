@@ -62,6 +62,9 @@ fi
 # --- Install uv for venya user ---
 venya_install_uv_user
 
+# --- Install Python 3.14 for venya user ---
+venya_install_python314
+
 # --- Download and extract tarball ---
 venya_download_tarball executor
 venya_extract_tarball
@@ -88,7 +91,7 @@ info "Rust build complete"
 PYTHON_PATH=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
 cp "$INSTALL_DIR/packages/executor/target/release/libvenya_filter.so" "$PYTHON_PATH/venya_filter.so"
 chown venya:venya "$PYTHON_PATH/venya_filter.so"
-cd ../..
+cd "$INSTALL_DIR"
 
 # --- Apply shared code fixes ---
 venya_apply_code_fixes
@@ -106,10 +109,6 @@ chown venya:adm /var/log/venya 2>/dev/null || chown venya:venya /var/log/venya
 # --- Install Docker Sandboxes (sbx) CLI (executor-specific) ---
 info "Installing Docker Sandboxes (sbx) CLI..."
 if ! command -v sbx &>/dev/null; then
-    SBX_SCRIPT=$(mktemp /tmp/docker-sbx-install-XXXXXX.sh)
-    curl -fsSL https://get.docker.com -o "$SBX_SCRIPT"
-    REPO_ONLY=1 sh "$SBX_SCRIPT" > /dev/null 2>&1
-    rm -f "$SBX_SCRIPT"
     apt-get install -y -qq docker-sbx > /dev/null 2>&1
     usermod -aG kvm venya 2>/dev/null || true
     info "sbx CLI installed. venya user added to kvm group."

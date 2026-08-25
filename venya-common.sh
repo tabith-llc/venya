@@ -17,6 +17,7 @@
 #   venya_install_system_pkgs   # apt-get install (pkg list as args)
 #   venya_install_uv            # Install uv for root
 #   venya_install_uv_user       # Install uv for venya user
+#   venya_install_python314     # Install Python 3.14 for venya user
 #   venya_download_tarball      # Download tarball (type=core|executor)
 #   venya_extract_tarball       # Extract tarball to INSTALL_DIR
 #   venya_create_venv           # Create Python venv + install packages
@@ -139,6 +140,25 @@ venya_install_uv_user() {
     if [ ! -f "$SU_UV_BIN" ]; then
         info "Installing uv for venya user..."
         sudo -u venya bash -c "curl -LsSf https://astral.sh/uv/install.sh | sh" > /dev/null 2>&1
+    fi
+}
+
+# --- 9.5. Install Python 3.14 for venya user ---
+
+venya_install_python314() {
+    SU_UV_BIN="/home/venya/.local/bin/uv"
+    if [ -f "$SU_UV_BIN" ]; then
+        info "Ensuring Python 3.14 is installed for venya user..."
+        # CRITICAL: In piped execution (curl | sudo bash), stdin is exhausted.
+        # uv's progress display hangs when stdin is neither a TTY nor /dev/null.
+        # Fix: redirect stdin from /dev/null, disable progress, and set install dir.
+        mkdir -p /home/venya/.local/share/uv/python
+        HOME=/home/venya UV_NO_PROGRESS=1 UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv \
+            "$SU_UV_BIN python install 3.14 --no-progress" < /dev/null > /dev/null 2>&1
+        info "Python 3.14 ready"
+    else
+        error "uv not found at $SU_UV_BIN — cannot install Python 3.14"
+        exit 1
     fi
 }
 
@@ -286,7 +306,16 @@ venya_service_retry() {
         exit 1
     fi
 
-    # Wait for service to be running (retry up to 5 times)
+    # Check current state first — if already running, nothing to do.
+    if systemctl is-active --quiet "${service_name}.service" 2>/dev/null; then
+        info "${service_name}.service is already running"
+        return 0
+    fi
+
+    # Try a single start; if that fails, enter retry loop with restarts.
+    systemctl start "${service_name}.service" 2>/dev/null || true
+    sleep 2
+
     RETRY=0
     MAX_RETRY=5
     while [ $RETRY -lt $MAX_RETRY ]; do
