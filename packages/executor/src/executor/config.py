@@ -204,6 +204,12 @@ class ExecutorConfig(BaseSettings):
         description="Core server URL",
     )
 
+    # CA bundle for TLS verification of core server
+    ca_bundle: str | None = Field(
+        default=None,
+        description="Path to CA bundle certificate for verifying core server TLS",
+    )
+
     # Bootstrap (registration-only)
     bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
 

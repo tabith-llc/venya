@@ -6,6 +6,7 @@ command policies, executor certificates, elevation tokens, and WebAuthn credenti
 Schema is created via Alembic migrations on install. Models are the ORM interface.
 """
 
+import json
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -19,7 +20,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy.orm import DeclarativeBase, relationship, validates
 
 
 class Base(DeclarativeBase):
@@ -152,6 +153,12 @@ class AuditEvent(Base):
     )
     fields = Column(Text, nullable=True)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+
+    @validates("fields")
+    def serialize_fields(self, key, value):
+        if isinstance(value, dict):
+            return json.dumps(value)
+        return value
 
 
 class EnrollmentToken(Base):
