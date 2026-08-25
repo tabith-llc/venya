@@ -13,6 +13,7 @@ import hashlib
 import logging
 import os
 import signal
+import ssl
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -129,8 +130,18 @@ class CertificateManager:
         else:
             raise RuntimeError(f"Invalid VENYA_TLS_VERIFY value: '{tls_verify_env}'. " "Must be 'true' or 'false'.")
 
+        # Build SSL context for TLS verification
+        if tls_verify:
+            ssl_ctx = ssl.create_default_context()
+            ca_bundle = self.config.ca_bundle
+            if ca_bundle and Path(ca_bundle).exists():
+                ssl_ctx.load_verify_locations(ca_bundle)
+            verify_param: object = ssl_ctx
+        else:
+            verify_param = False
+
         try:
-            with httpx2.Client(verify=tls_verify, timeout=self.config.network.registration_timeout_seconds) as client:
+            with httpx2.Client(verify=verify_param, timeout=self.config.network.registration_timeout_seconds) as client:
                 response = client.post(url, json=payload)
             response.raise_for_status()
         except httpx2.ConnectError as e:
@@ -673,10 +684,12 @@ class ExecutorDaemon:
 
     def _create_mtls_client(self) -> httpx2.Client:
         """Create HTTP client with mTLS after certificate registration."""
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.load_cert_chain(self.config.mtls.cert, self.config.mtls.key)
+        ssl_ctx.load_verify_locations(self.config.mtls.ca_cert)
         return httpx2.Client(
             base_url=self.config.server_url,
-            cert=(self.config.mtls.cert, self.config.mtls.key),
-            verify=self.config.mtls.ca_cert,
+            verify=ssl_ctx,
             timeout=self.config.network.request_timeout_seconds,
         )
 
