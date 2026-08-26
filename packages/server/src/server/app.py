@@ -54,6 +54,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     )
     from .routes import filter as filter_routes
     from .routes import init as init_route
+    from .routes import static as static_routes
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")
@@ -70,6 +71,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(debug.router, prefix="/api/v1/admin")
     app.include_router(credentials.router, prefix="/api/v1")
     app.include_router(filter_routes.router, prefix="/api/v1")
+    app.include_router(static_routes.router)
 
     # Add middleware
     from .middleware import auth as auth_middleware

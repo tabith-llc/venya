@@ -48,6 +48,12 @@ NO_ROLE_ROUTES = frozenset(
         "/api/v1/credentials/{credential_id}",  # deletes caller's own credential
         "/api/v1/credentials/add/browser/start",  # add requires FIDO2 elevation token
         "/api/v1/credentials/add/browser/complete",
+        # --- static HTML pages: no auth required ---
+        "/",  # login page (public)
+        "/enroll",  # user enrollment page (public)
+        "/enroll-admin",  # admin enrollment page (public)
+        "/dashboard",  # dashboard page (public)
+        "/static/{file_path:path}",  # static assets (public)
     ]
 )
 
