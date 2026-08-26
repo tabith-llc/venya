@@ -38,7 +38,7 @@ def server_url():
     return url
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def browser_context(server_url):
     """Browser context with virtual WebAuthn authenticator."""
     with sync_playwright() as p:

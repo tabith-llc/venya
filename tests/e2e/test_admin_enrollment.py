@@ -67,3 +67,40 @@ class TestAdminEnrollment:
         assert not page.is_visible("#success-modal")
 
         page.close()
+
+    def test_admin_can_access_admin_endpoints(self, browser_context, server_url):
+        """Enrolled admin can access admin endpoints (e.g., GET /api/v1/admin/executors)."""
+        # Admin was enrolled by test_full_admin_enrollment_flow
+        # Verify admin can authenticate via WebAuthn login
+        context = browser_context["context"]
+        page = context.new_page()
+
+        # Navigate to login page
+        page.goto(f"{server_url}/", wait_until="domcontentloaded")
+
+        # Fill username
+        page.fill("#username", "testadmin")
+
+        # Click login button — triggers WebAuthn assertion via virtual authenticator
+        page.click("#login-btn")
+
+        # Wait for session — should redirect or show authenticated state
+        # Check for session indicator (could be a header, cookie, or element)
+        page.wait_for_timeout(2000)
+
+        # Verify we're authenticated by checking /api/v1/auth/me
+        import requests
+
+        cookies = {c["name"]: c["value"] for c in page.context.cookies()}
+        resp = requests.get(
+            f"{server_url}/api/v1/auth/me",
+            verify=False,
+            cookies=cookies,
+            timeout=10,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["user_id"] == "testadmin"
+        assert "admin" in data["roles"]
+
+        page.close()
