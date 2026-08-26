@@ -144,6 +144,20 @@ async def browser_enroll_start(
 
 
 @router.post(
+    "/enroll/browser",
+    response_model=BrowserEnrollStartResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def enroll_browser_alias(
+    req: BrowserEnrollStartRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> BrowserEnrollStartResponse:
+    """Alias for /enroll/browser/start — validates token, issues WebAuthn challenge."""
+    return await browser_enroll_start(req, request, db)
+
+
+@router.post(
     "/enroll/browser/complete",
     status_code=status.HTTP_200_OK,
 )
