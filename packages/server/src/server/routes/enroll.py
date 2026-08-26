@@ -91,10 +91,11 @@ async def browser_enroll_start(
         token = em.validate_token_for_start(req.enrollment_token)
 
         # Verify cryptographic binding to user's string ID
-        user = db.query(User).filter(User.id == token.user_id).first()
+        user = db.query(User).filter(User.user_id == token.user_id).first()
         username = user.display_name or user.user_id if user else str(token.user_id)
         server_config = getattr(request.app.state, "config", None)
         pepper = getattr(server_config, "recovery_code_pepper", "") if server_config else ""
+        logger.info("enroll_browser: user=%s, username=%s, token_hash=%s, stored_bh=%s, pepper_len=%d", user.user_id if user else None, username, token.token_hash[:16] if token else None, token.binding_hash[:16] if token else None, len(pepper))
         if not verify_binding_hash(
             entity_id=username,
             plaintext_token=req.enrollment_token,
@@ -197,7 +198,7 @@ async def browser_enroll_complete(
             )
 
         # Verify cryptographic binding to user's string ID
-        user = db.query(User).filter(User.id == token.user_id).first()
+        user = db.query(User).filter(User.user_id == token.user_id).first()
         username = user.display_name or user.user_id if user else str(token.user_id)
         server_config = getattr(request.app.state, "config", None)
         pepper = getattr(server_config, "recovery_code_pepper", "") if server_config else ""
@@ -233,7 +234,7 @@ async def browser_enroll_complete(
             ) from e
 
         # Store WebAuthn credential
-        user = db.query(User).filter(User.id == token.user_id).first()
+        user = db.query(User).filter(User.user_id == token.user_id).first()
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

@@ -64,7 +64,7 @@
         const resp = await fetch(apiBase() + "/enroll/browser", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ token: token }),
+            body: JSON.stringify({ enrollment_token: token }),
         });
 
         if (!resp.ok) {
@@ -87,9 +87,10 @@
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                token: token,
+                enrollment_token: token,
                 challenge_id: challengeId,
                 response: response,
+                label: "Security Key",
             }),
         });
 

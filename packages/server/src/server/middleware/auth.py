@@ -105,6 +105,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/api/v1/heartbeat",
             "/api/v1/enroll/browser/start",
             "/api/v1/enroll/browser/complete",
+            "/api/v1/enroll/browser",
             # --- static HTML pages: no auth required ---
             "/",  # login page (public)
             "/enroll",  # user enrollment page (public)
