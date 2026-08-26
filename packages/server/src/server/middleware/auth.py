@@ -103,7 +103,17 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/api/v1/heartbeat",
             "/api/v1/enroll/browser/start",
             "/api/v1/enroll/browser/complete",
+            # --- static HTML pages: no auth required ---
+            "/",  # login page (public)
+            "/enroll",  # user enrollment page (public)
+            "/enroll-admin",  # admin enrollment page (public)
+            "/dashboard",  # dashboard page (public)
         }
+    )
+
+    # Prefixes that don't require authentication
+    PUBLIC_PREFIXES = (
+        "/static/",  # static assets (CSS, JS, images)
     )
 
     ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password
@@ -287,6 +297,10 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         # Skip auth for public paths
         if path in self.PUBLIC_PATHS:
+            return await call_next(request)
+
+        # Skip auth for public path prefixes
+        if any(path.startswith(prefix) for prefix in self.PUBLIC_PREFIXES):
             return await call_next(request)
 
         # Skip mTLS paths (executor)
