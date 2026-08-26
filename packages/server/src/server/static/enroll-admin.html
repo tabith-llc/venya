@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Venya - Admin Enrollment</title>
+    <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+    <div id="nav-container"></div>
+    <script src="/static/js/nav.js?v=1"></script>
+    <div id="app">
+        <h1>Enroll Admin User</h1>
+        <form id="enroll-form">
+            <label>
+                Admin username
+                <input type="text" id="username-input" autocomplete="off" spellcheck="false">
+            </label>
+            <p>Insert FIDO2 security key, and click the Enroll Security Key button.</p>
+            <button type="submit" id="enroll-btn" class="btn-primary">Enroll Security Key</button>
+        </form>
+        <div id="message" class="message" hidden></div>
+    </div>
+    <div id="success-modal" class="modal-overlay" hidden>
+        <div class="modal">
+            <h2 class="modal-title">Enrollment Successful</h2>
+            <div id="success-content">
+                <p class="success-user">Admin user <strong id="success-username"></strong> has been enrolled.</p>
+                <p class="success-label">Your recovery code:</p>
+                <div id="recovery-code-box" class="recovery-code-box"></div>
+                <p class="success-warning">Write this down to use for recovery or you'll have to reinstall, losing your data.</p>
+            </div>
+            <div class="modal-buttons modal-buttons-center">
+                <button type="button" id="acknowledge-btn" class="btn-primary">Acknowledge</button>
+            </div>
+        </div>
+    </div>
+    <script src="/static/js/webauthn.min.js"></script>
+    <script src="/static/js/enroll-admin.js"></script>
+</body>
+</html>
