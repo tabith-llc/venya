@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
+from ..fido2.browser_adapter import challenge_to_browser_options
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -178,7 +179,7 @@ async def init_core(
 
             return InitResponse(
                 challenge_id=challenge_id,
-                options=options,
+                options=challenge_to_browser_options(challenge_id, options),
                 user_id=pending_user.user_id,
             )
 
@@ -243,7 +244,7 @@ async def init_core(
 
         return InitResponse(
             challenge_id=challenge_id,
-            options=options,
+            options=challenge_to_browser_options(challenge_id, options),
             user_id=req.user_id,
         )
     except HTTPException:
