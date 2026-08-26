@@ -320,8 +320,23 @@ async def init_complete(
                 detail=f"Registration failed: {e!s}",
             ) from e
 
-        # Find the pending user
-        user = db.query(User).filter(User.user_id == req.user_id).filter(User.enrolled_at.is_(None)).first()
+        # Find the pending user via the admin role membership
+        from core.iam.models import Role, RoleMember
+
+        admin_role = db.query(Role).filter(Role.name == "admin").first()
+        if admin_role is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Admin role not found",
+            )
+
+        user = (
+            db.query(User)
+            .join(RoleMember, User.user_id == RoleMember.user_id)
+            .filter(RoleMember.role_id == admin_role.id)
+            .filter(User.enrolled_at.is_(None))
+            .first()
+        )
         if user is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
