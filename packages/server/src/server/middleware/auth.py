@@ -91,6 +91,8 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/api/v1/auth/registration/complete",
             "/api/v1/auth/login/start",
             "/api/v1/auth/login/complete",
+            "/api/v1/auth/login/browser/challenge",
+            "/api/v1/auth/login/browser/assert",
             "/api/v1/auth/refresh",
             "/api/v1/enrollment/confirm",
             "/api/v1/init",
@@ -112,9 +114,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
     )
 
     # Prefixes that don't require authentication
-    PUBLIC_PREFIXES = (
-        "/static/",  # static assets (CSS, JS, images)
-    )
+    PUBLIC_PREFIXES = ("/static/",)  # static assets (CSS, JS, images)
 
     ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password
 

@@ -41,6 +41,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         admin,
         audit,
         auth,
+        auth_browser,
         auth_elevation,
         credentials,
         debug,
@@ -58,6 +59,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     app.include_router(health.router, prefix="/api/v1")
     app.include_router(auth.router, prefix="/api/v1")
+    app.include_router(auth_browser.router, prefix="/api/v1")
     app.include_router(auth_elevation.router, prefix="/api/v1")
     app.include_router(enroll.router, prefix="/api/v1")
     app.include_router(init_route.router, prefix="/api/v1")
