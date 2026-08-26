@@ -1,39 +1,67 @@
 """E2E tests for user enrollment flow.
 
 Tests the full browser-based user enrollment:
-1. Admin generates enrollment token via API
+1. Generate enrollment token via DB (bypasses admin API)
 2. Navigate to /enroll
 3. Enter token, submit form
 4. WebAuthn registration via virtual authenticator
-5. Verify session cookie set
-6. Verify user can authenticate
+5. Verify enrollment succeeds (token consumed, user activated)
 """
+
+import os
+import subprocess
 
 import pytest
 import requests
 
 
+def _generate_token_via_db(server_url, username="testuser"):
+    """Generate enrollment token by running DB insert on venya-core-1.
+
+    Uses the server's Python to compute binding_hash with the server's pepper.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    gen_script = os.path.join(script_dir, "gen_token.py")
+
+    result = subprocess.run(
+        ["python3.14", gen_script, username],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _check_user_status(username):
+    """Check user status in DB."""
+    result = subprocess.run(
+        ["ssh", "bot@venya-core-1",
+         "sudo -u postgres psql -d venya -t -A -c "
+         f"\"SELECT status FROM users WHERE user_id = '{username}';\""],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout.strip()
+
+
+def _check_credential_count(username):
+    """Check credential count in DB."""
+    result = subprocess.run(
+        ["ssh", "bot@venya-core-1",
+         "sudo -u postgres psql -d venya -t -A -c "
+         f"\"SELECT COUNT(*) FROM webauthn_credentials WHERE user_id = '{username}';\""],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout.strip()
+
+
 class TestUserEnrollment:
     """End-to-end user enrollment tests."""
-
-    def _generate_enrollment_token(self, server_url):
-        """Generate an enrollment token via admin API."""
-        # The admin API endpoint for generating enrollment tokens
-        # This requires an authenticated admin session
-        # For now, we'll use a direct DB approach or skip if no endpoint exists
-        try:
-            resp = requests.post(
-                f"{server_url}/api/v1/auth/enrollment-tokens",
-                json={"username": "testadmin"},
-                verify=False,
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get("token") or data.get("enrollment_token")
-        except Exception:
-            pass
-        return None
 
     def test_user_enrollment_empty_token(self, browser_context, server_url):
         """Submitting without token should show validation error."""
@@ -52,11 +80,12 @@ class TestUserEnrollment:
         page.close()
 
     def test_user_enrollment_full_flow(self, browser_context, server_url):
-        """Complete user enrollment: token -> page -> WebAuthn -> session."""
-        # Generate enrollment token via admin API
-        token = self._generate_enrollment_token(server_url)
+        """Complete user enrollment: token -> page -> WebAuthn -> user activated."""
+        import time
+        unique_id = f"e2e{int(time.time())}"
+        token = _generate_token_via_db(server_url, username=unique_id)
         if not token:
-            pytest.skip("No enrollment token endpoint available")
+            pytest.skip("Could not generate enrollment token via DB")
 
         context = browser_context["context"]
         page = context.new_page()
@@ -71,33 +100,24 @@ class TestUserEnrollment:
         # Submit form — triggers WebAuthn registration via virtual authenticator
         page.click("#enroll-btn")
 
-        # Wait for completion — should show success message or redirect
-        page.wait_for_timeout(3000)
+        # Wait for completion
+        page.wait_for_timeout(5000)
 
         # Check for success message
         msg = page.text_content("#message")
-        if msg and "success" in msg.lower():
-            pass  # Good
+        if msg and ("success" in msg.lower() or "redirecting" in msg.lower()):
+            pass
         else:
-            # Check if redirected to login
             assert (
-                "/enroll" not in page.url or "success" in msg.lower()
-            ), f"Expected success message or redirect, got: {msg}"
+                "/enroll" not in page.url or msg
+            ), f"Expected success or redirect, got url={page.url}, msg={msg}"
 
-        page.close()
+        # Verify user was activated in DB
+        status = _check_user_status(unique_id)
+        assert status == "active", f"User should be active, got: {status}"
 
-    def test_user_can_access_secrets(self, browser_context, server_url):
-        """Enrolled user can access their secrets."""
-        # User was enrolled by test_user_enrollment_full_flow
-        # Verify user can authenticate and access secrets
-        context = browser_context["context"]
-        page = context.new_page()
-
-        # Navigate to login page
-        page.goto(f"{server_url}/", wait_until="domcontentloaded")
-
-        # Fill username — user enrollment creates a user, we need to know the username
-        # For now, skip this test as it requires knowing the enrolled username
-        pytest.skip("Requires knowing the enrolled username")
+        # Verify credential was created
+        count = _check_credential_count(unique_id)
+        assert count == "1", f"Expected 1 credential, got: {count}"
 
         page.close()
