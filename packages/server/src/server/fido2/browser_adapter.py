@@ -60,7 +60,9 @@ def base64_to_base64url(s: str) -> str:
     Returns:
         Base64url-encoded string without padding.
     """
-    decoded = base64.b64decode(s)
+    # Add padding if missing
+    padding = "=" * (4 - len(s) % 4) if len(s) % 4 else ""
+    decoded = base64.b64decode(s + padding)
     return base64url_encode(decoded)
 
 
