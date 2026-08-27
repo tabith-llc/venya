@@ -54,6 +54,7 @@ def _make_mock_token(executor_id, plaintext_token, state="created"):
     import hmac
 
     mock_token = MagicMock()
+    mock_token.id = 42
     mock_token.executor_id = executor_id
     mock_token.state = state
     mock_token.token_hash = hmac.new(
