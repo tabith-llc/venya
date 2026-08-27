@@ -287,7 +287,7 @@ $CORE_HOSTNAME {
     tls $TLS_MODE {
         client_auth {
             mode verify_if_given
-            trusted_ca_cert_file /etc/caddy/certs/admin-ca.crt
+            trust_pool file /etc/caddy/certs/admin-ca.crt
         }
     }
 
