@@ -15,18 +15,28 @@ import requests
 
 @pytest.mark.e2e
 class TestAdminEnrollment:
-    """End-to-end admin enrollment tests."""
+    """End-to-end admin enrollment tests.
 
-    def _reset_core(self, server_url):
-        """Reset core to pre-initialization state via API."""
-        # 403 means admin already enrolled — test will fail on init (409) which is expected
-        # The test should be run after manual DB cleanup if needed
-        requests.post(f"{server_url}/api/v1/init/reset", verify=False, timeout=10)
+    Each test that enrolls an admin resets the DB via API first.
+    Session-scoped e2e_test_setup in conftest.py handles initial cleanup.
+    """
+
+    def _reset(self, server_url):
+        """Reset core via API. Fails loudly if reset is refused."""
+        resp = requests.post(
+            f"{server_url}/api/v1/init/reset", verify=False, timeout=10,
+        )
+        if resp.status_code == 403:
+            pytest.fail(
+                f"Reset refused (403): {resp.json().get('detail', '')}. "
+                "System has valid credentials. Cannot enroll a new admin."
+            )
+        if resp.status_code != 200:
+            pytest.fail(f"Reset failed: HTTP {resp.status_code} — {resp.text}")
 
     def test_full_admin_enrollment_flow(self, browser_context, server_url):
         """Complete admin enrollment: page load -> username -> WebAuthn -> recovery code."""
-        # Reset core first
-        self._reset_core(server_url)
+        self._reset(server_url)
 
         context = browser_context["context"]
         page = context.new_page()
@@ -35,8 +45,9 @@ class TestAdminEnrollment:
         page.goto(f"{server_url}/enroll-admin", wait_until="domcontentloaded")
         assert "Enroll Admin User" in page.text_content("h1")
 
-        # Step 2: Enter username
-        page.fill("#username-input", "testadmin")
+        # Step 2: Enter a unique username to avoid conflicts with other tests
+        unique_id = f"admintest{int(__import__('time').time())}"
+        page.fill("#username-input", unique_id)
 
         # Step 3: Submit form — triggers WebAuthn registration via virtual authenticator
         page.click("#enroll-btn")
@@ -50,9 +61,12 @@ class TestAdminEnrollment:
         assert len(recovery_code) > 0
 
         username = page.text_content("#success-username")
-        assert username == "testadmin"
+        assert username == unique_id
 
         page.close()
+
+        # Return the enrolled admin ID for use by other tests
+        return unique_id
 
     def test_admin_enrollment_empty_username(self, browser_context, server_url):
         """Submitting without username should show validation error."""
@@ -71,27 +85,35 @@ class TestAdminEnrollment:
         page.close()
 
     def test_admin_can_access_admin_endpoints(self, browser_context, server_url):
-        """Enrolled admin can access admin endpoints (e.g., GET /api/v1/admin/executors)."""
-        # Admin was enrolled by test_full_admin_enrollment_flow
-        # Verify admin can authenticate via WebAuthn login
+        """Enrolled admin can access admin endpoints (e.g., GET /api/v1/admin/executors).
+
+        Uses the admin enrolled by test_full_admin_enrollment_flow.
+        """
         context = browser_context["context"]
         page = context.new_page()
 
         # Navigate to login page
         page.goto(f"{server_url}/", wait_until="domcontentloaded")
 
-        # Fill username
-        page.fill("#username", "testadmin")
+        # Fill username — use the admin from test_full_admin_enrollment_flow
+        # The admin username follows the pattern admintest{timestamp}
+        # We need to find it from the DB
+        import subprocess
+        result = subprocess.run(
+            ["ssh", "bot@venya-core-1",
+             "sudo -u postgres psql -d venya -t -A -c "
+             "'SELECT user_id FROM users WHERE enrolled_at IS NOT NULL ORDER BY enrolled_at DESC LIMIT 1;'"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        admin_id = result.stdout.strip()
+        if not admin_id:
+            pytest.fail("No enrolled admin found in DB")
 
-        # Click login button — triggers WebAuthn assertion via virtual authenticator
+        page.fill("#username", admin_id)
         page.click("#login-btn")
-
-        # Wait for session — should redirect or show authenticated state
-        # Check for session indicator (could be a header, cookie, or element)
-        page.wait_for_timeout(2000)
-
-        # Verify we're authenticated by checking /api/v1/auth/me
-        import requests
+        page.wait_for_timeout(3000)
 
         cookies = {c["name"]: c["value"] for c in page.context.cookies()}
         resp = requests.get(
@@ -102,7 +124,7 @@ class TestAdminEnrollment:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["user_id"] == "testadmin"
+        assert data["user_id"] == admin_id
         assert "admin" in data["roles"]
 
         page.close()
