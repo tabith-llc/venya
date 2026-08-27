@@ -9,9 +9,11 @@ Tests the full browser-based admin enrollment:
 6. Verify recovery code displayed
 """
 
+import pytest
 import requests
 
 
+@pytest.mark.e2e
 class TestAdminEnrollment:
     """End-to-end admin enrollment tests."""
 
