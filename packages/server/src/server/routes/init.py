@@ -62,29 +62,48 @@ async def init_reset(
 ) -> ResetResponse:
     """Reset the core to pre-initialization state.
 
-    Only permitted when no users are enrolled (enrolled_at IS NULL for all users).
-    Deletes admin role, all users, all role members, and enrollment tokens.
+    Permitted when no enrolled user has a valid WebAuthn credential.
+    Covers both fresh installs (no users) and failed enrollment
+    attempts (user record exists but no usable credential).
 
-    This is a safety net for failed first-time enrollment attempts.
+    Refuses to reset when at least one enrolled user has a stored
+    WebAuthn credential — the system is fully initialized and a
+    reset would destroy valid authentication data.
     """
-    from core.iam.models import EnrollmentToken, Role, RoleMember, User
+    from core.iam.models import (
+        EnrollmentToken,
+        Role,
+        RoleMember,
+        User,
+        WebAuthnCredential,
+    )
 
     try:
-        # Check if any user is enrolled
-        enrolled_count = db.query(User).filter(User.enrolled_at.isnot(None)).count()
+        # A user is "fully enrolled" only if they have enrolled_at
+        # set AND a stored WebAuthn credential. A failed enrollment
+        # may leave enrolled_at set without a usable credential —
+        # that broken state must be resettable.
+        fully_enrolled_count = (
+            db.query(User)
+            .join(
+                WebAuthnCredential,
+                User.user_id == WebAuthnCredential.user_id,
+            )
+            .filter(User.enrolled_at.isnot(None))
+            .count()
+        )
 
-        if enrolled_count > 0:
+        if fully_enrolled_count > 0:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Core already initialized. Cannot reset.",
+                detail="Core already initialized with valid credentials. Cannot reset.",
             )
 
-        # Delete in order to respect foreign key constraints
+        # Safe to reset: no enrolled user has a working credential.
+        # Delete in FK-safe order (children before parents).
+        db.query(WebAuthnCredential).delete()
         db.query(EnrollmentToken).delete()
         db.query(RoleMember).delete()
-        # Defense-in-depth: preserve any system service account even during full reset.
-        # This guard has no functional impact today (no system user exists) but prevents
-        # catastrophic data loss if one is introduced later or if reset is called in prod.
         db.query(User).filter(User.user_id != "system").delete()
         db.query(Role).filter(Role.name == "admin").delete()
         db.commit()
