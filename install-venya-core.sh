@@ -294,7 +294,7 @@ $CORE_HOSTNAME {
     # Admin routes — require verified client cert
     @admin path /api/v1/admin/*
     handle @admin {
-        @verified header X-Client-Verified true
+        @verified expression {http.request.tls.client.verified} == "true"
         handle @verified {
             reverse_proxy 127.0.0.1:8080 {
                 header_up X-Client-Cert-Base64 {http.request.tls.client.certificate_der_base64}
