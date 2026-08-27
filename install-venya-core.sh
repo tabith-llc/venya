@@ -142,17 +142,6 @@ if not cm.has_ca:
 print('Admin CA initialized')
 "
 
-    # Copy CA cert to Caddy's cert directory (IT1-013: Caddy needs read access)
-    # CA storage stays hardened (0700 venya:venya); Caddy reads from /etc/caddy/certs/
-    CADDY_CERTS_DIR="/etc/caddy/certs"
-    mkdir -p "$CADDY_CERTS_DIR"
-    chmod 755 "$CADDY_CERTS_DIR"
-    if [ -f "$ADMIN_CA_DIR/admin-ca.crt" ]; then
-        cp "$ADMIN_CA_DIR/admin-ca.crt" "$CADDY_CERTS_DIR/admin-ca.crt"
-        chmod 644 "$CADDY_CERTS_DIR/admin-ca.crt"
-        info "CA cert copied to $CADDY_CERTS_DIR/admin-ca.crt"
-    fi
-
     # Generate first admin cert
     sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" \
         python -c "
@@ -169,6 +158,13 @@ print('Admin cert generated for $ADMIN_IDENTITY')
 "
 
     info "Admin CA and first admin cert generated for $ADMIN_IDENTITY"
+
+    # Copy admin CA cert to caddy-readable location for trust_pool
+    mkdir -p /etc/caddy/certs
+    cp "$ADMIN_CA_DIR/admin-ca.crt" /etc/caddy/certs/admin-ca.crt
+    chmod 644 /etc/caddy/certs/admin-ca.crt
+    chown caddy:caddy /etc/caddy/certs/admin-ca.crt
+
 fi
 
 # --- Install and setup PostgreSQL (core-specific) ---
@@ -291,23 +287,20 @@ $CORE_HOSTNAME {
         }
     }
 
-    # Admin routes — require verified client cert
     @admin path /api/v1/admin/*
     handle @admin {
-        @verified expression {http.request.tls.client.verified} == "true"
+        @verified expression {tls_client_subject} != null
         handle @verified {
             reverse_proxy 127.0.0.1:8080 {
-                header_up X-Client-Cert-Base64 {http.request.tls.client.certificate_der_base64}
-                header_up X-Client-Verified {http.request.tls.client.verified}
+                header_up X-Client-Verified "true"
+                header_up X-Client-Subject {tls_client_subject}
             }
         }
-        # Admin route but no valid cert → 403
         handle {
             respond "Admin access requires valid client certificate" 403
         }
     }
 
-    # Non-admin routes — pass through, no cert required
     handle {
         reverse_proxy 127.0.0.1:8080 {
             header_up X-Real-IP {remote_host}
