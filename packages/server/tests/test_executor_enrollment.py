@@ -239,7 +239,11 @@ class TestAdminEnrollExecutor:
 
         audit_event = added_objects[1]
         assert audit_event.event_type == "executor_enrollment_token_created"
-        assert audit_event.fields["token_id"] == 42
+        # AuditEvent.fields is JSON-serialized by the @validates(serialize_fields) decorator
+        import json
+
+        fields = json.loads(audit_event.fields)
+        assert fields["token_id"] == 42
 
     def test_enroll_uses_requester_as_created_by(self):
         """Enroll records the requesting admin as created_by."""
@@ -394,7 +398,10 @@ class TestRegisterEndpointWithToken:
         audit_event = [o for o in added_objects if hasattr(o, "event_type")]
         assert len(audit_event) == 1
         assert audit_event[0].event_type == "executor_registered"
-        assert audit_event[0].fields["token_id"] == 99
+        import json
+
+        fields = json.loads(audit_event[0].fields)
+        assert fields["token_id"] == 99
 
     def test_token_mismatched_executor_id_returns_401(self):
         """Token executor_id must match request executor_id."""
@@ -1147,7 +1154,9 @@ class TestAdminIdentityCapture:
 
         audit_event = added_objects[1]
         assert audit_event.event_type == "executor_enrollment_token_created"
-        fields = audit_event.fields
+        import json
+
+        fields = json.loads(audit_event.fields)
         assert fields["token_id"] == 42
         assert "token_hash_preview" in fields
         assert len(fields["token_hash_preview"]) == 8

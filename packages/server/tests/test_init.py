@@ -202,18 +202,26 @@ class TestInitComplete:
         fido2 = MockFido2Manager()
         fido2.start_registration("alice", "alice")
 
+        admin_role = _make_role(role_id=1, name="admin")
+        pending_user = _make_user("alice", enrolled_at=None)
+
         class MockQuery:
             def __init__(self, model):
                 self._model = model
+
+            def join(self, *args, **kwargs):
+                return self
 
             def filter(self, *args, **kwargs):
                 return self
 
             def first(self):
+                if self._model is not None and "Role" in str(self._model):
+                    return admin_role
                 return pending_user
 
         db = MagicMock()
-        db.query.return_value = MockQuery(None)
+        db.query.side_effect = lambda model: MockQuery(model)
 
         backend = MagicMock()
         backend.get_session.return_value = db
@@ -262,10 +270,9 @@ class TestInitComplete:
         fido2.start_registration("alice", "alice")
 
         # Mock query returns None (no pending user found because user is already enrolled)
-        # The code does: db.query(User).filter(...).filter(...).first()
-        # So we need to chain filter -> filter -> first
+        # The code does: db.query(User).join(RoleMember).filter(...).filter(...).first()
         db = MagicMock()
-        db.query.return_value.filter.return_value.filter.return_value.first.return_value = None
+        db.query.return_value.join.return_value.filter.return_value.filter.return_value.first.return_value = None
 
         backend = MagicMock()
         backend.get_session.return_value = db

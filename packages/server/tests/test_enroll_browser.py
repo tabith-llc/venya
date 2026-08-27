@@ -44,6 +44,7 @@ class TestBrowserEnrollStart:
         mock_token = SimpleNamespace(
             user_id=1,
             state="created",
+            token_hash="test-token-hash-00000000000000000000000000000000000000000000000000000000",
             binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
@@ -120,6 +121,7 @@ class TestBrowserEnrollStart:
         mock_token = SimpleNamespace(
             user_id=1,
             state="created",
+            token_hash="test-token-hash-00000000000000000000000000000000000000000000000000000000000000000000000",
             binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
@@ -157,6 +159,7 @@ class TestBrowserEnrollComplete:
         mock_token = SimpleNamespace(
             user_id=1,
             state="in_progress",
+            token_hash="test-token-hash-00000000000000000000000000000000000000000000000000000000000000000000000",
             binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
@@ -225,6 +228,7 @@ class TestBrowserEnrollComplete:
         mock_token = SimpleNamespace(
             user_id=1,
             state="in_progress",
+            token_hash="test-token-hash-00000000000000000000000000000000000000000000000000000000000000000000000",
             binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
@@ -263,6 +267,7 @@ class TestBrowserEnrollComplete:
         mock_token = SimpleNamespace(
             user_id=1,
             state="in_progress",
+            token_hash="test-token-hash-00000000000000000000000000000000000000000000000000000000000000000000000",
             binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )

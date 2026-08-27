@@ -29,6 +29,15 @@ NO_ROLE_ROUTES = frozenset(
         "/api/v1/auth/login/start",
         "/api/v1/auth/login/complete",
         "/api/v1/auth/refresh",  # rotates the caller's own token
+        "/api/v1/auth/login/browser/challenge",  # browser login challenge
+        "/api/v1/auth/login/browser/assert",  # browser login assertion
+        "/api/v1/auth/refresh/browser",  # browser token refresh
+        "/api/v1/auth/logout/browser",  # browser logout
+        "/api/v1/auth/elevate/browser/challenge",  # elevation challenge
+        "/api/v1/auth/elevate/browser/assert",  # elevation assertion
+        "/api/v1/auth/debug/cookie",  # debug endpoint (dev only)
+        "/api/v1/auth/me",  # returns caller's own identity (bearer auth)
+        "/api/v1/enroll/browser",  # alias for /enroll/browser/start
         "/api/v1/enroll/browser/start",  # self-registration via issuance token
         "/api/v1/enroll/browser/complete",
         "/api/v1/init",  # bootstrap (gated by FIDO2 / enrolled_count==0)
