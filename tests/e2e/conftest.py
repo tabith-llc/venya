@@ -10,6 +10,7 @@ import sys
 import time
 
 import pytest
+import requests
 from playwright.sync_api import sync_playwright
 
 
@@ -39,6 +40,29 @@ def server_url():
             "VENYA_TEST_SERVER_URL not set. " "Example: https://venya-core-1 or https://10.27.28.11",
         )
     return url
+
+
+@pytest.fixture(scope="session", autouse=True)
+def e2e_test_setup(server_url):
+    """Reset the DB once at the start of the E2E test session.
+
+    Ensures all tests start with a clean slate. Uses the API reset endpoint.
+    If the API refuses (403 — fully enrolled system), the test session fails
+    loudly rather than proceeding with stale state.
+    """
+    resp = requests.post(
+        f"{server_url}/api/v1/init/reset", verify=False, timeout=10,
+    )
+    if resp.status_code == 403:
+        pytest.exit(
+            f"E2E test session aborted: {resp.json().get('detail', '')}. "
+            "The system has valid credentials from a prior run. "
+            "Reimage the VM or manually reset the database before testing."
+        )
+    if resp.status_code != 200:
+        pytest.exit(
+            f"E2E test session aborted: Reset failed HTTP {resp.status_code} — {resp.text}"
+        )
 
 
 @pytest.fixture(scope="session")
@@ -135,7 +159,7 @@ with sync_playwright() as p:
 """
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def admin_cookies(server_url):
     """Authenticate as testadmin via browser login and return session cookies.
 
