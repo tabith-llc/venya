@@ -278,6 +278,10 @@ def require_admin(
             detail="Admin permission required",
         )
 
+    # mTLS admin callers are already verified by Caddy + middleware
+    if user_info.get("caller") == "admin":
+        return user_info
+
     db = backend.get_session()
     try:
         from core.iam.role_manager import RoleManager
