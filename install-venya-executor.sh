@@ -149,20 +149,35 @@ else
 fi
 
 # --- Install Caddy CA into system trust store (for TLS verification) ---
+# TOFU bootstrap: --insecure is the only insecure connection. This fetches a
+# public root CA cert — explicitly sanctioned by the Production Mandate.
 CADDY_CA_URL="${SERVER_URL%/}/.well-known/caddy-ca.crt"
 CA_BUNDLE_PATH="/usr/local/share/ca-certificates/caddy-local-ca.crt"
+CA_INSTALLED=false
 if [ -n "${VENYA_CADDY_CA_FILE:-}" ] && [ -f "$VENYA_CADDY_CA_FILE" ]; then
     cp "$VENYA_CADDY_CA_FILE" "$CA_BUNDLE_PATH"
     chmod 644 "$CA_BUNDLE_PATH"
     update-ca-certificates > /dev/null 2>&1
+    CA_INSTALLED=true
     info "Caddy CA installed from $VENYA_CADDY_CA_FILE"
-elif curl -sf --insecure "$CADDY_CA_URL" -o "$CA_BUNDLE_PATH" 2>/dev/null; then
-    chmod 644 "$CA_BUNDLE_PATH"
-    update-ca-certificates > /dev/null 2>&1
-    info "Caddy CA installed to system trust store from $CADDY_CA_URL"
 else
-    warn "Could not fetch Caddy CA from $CADDY_CA_URL — TLS verification may fail"
-    warn "Pre-copy the CA cert to $CA_BUNDLE_PATH and rerun"
+    for i in $(seq 1 5); do
+        if curl -sf --insecure "$CADDY_CA_URL" -o "$CA_BUNDLE_PATH" 2>/dev/null; then
+            chmod 644 "$CA_BUNDLE_PATH"
+            update-ca-certificates > /dev/null 2>&1
+            CA_INSTALLED=true
+            info "Caddy CA installed to system trust store from $CADDY_CA_URL"
+            break
+        fi
+        if [ "$i" -lt 5 ]; then
+            info "Core not reachable at $SERVER_URL — retrying CA fetch ($i/5), waiting 10s..."
+            sleep 10
+        fi
+    done
+    if [ "$CA_INSTALLED" = false ]; then
+        warn "Could not fetch Caddy CA from $CADDY_CA_URL after 5 attempts — TLS verification may fail"
+        warn "Pre-copy the CA cert to $CA_BUNDLE_PATH and rerun"
+    fi
 fi
 
 # --- Write executor config (after CA installation so ca_bundle path is valid) ---
@@ -186,24 +201,18 @@ EOF
 
 info "Executor config written to /etc/venya/executor.toml"
 
-# --- Register mTLS certificate (if enrollment token provided and core reachable) ---
+# --- Register mTLS certificate (if enrollment token provided) ---
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     info "Attempting mTLS certificate registration..."
 
-    # Retry loop: wait for core to be reachable
-    CORE_REACHABLE=false
-    for i in $(seq 1 5); do
+    if [ "$CA_INSTALLED" = true ]; then
+        # Health check with proper TLS (CA is now trusted)
         if curl -sf "$SERVER_URL/api/v1/health" >/dev/null 2>&1; then
-            CORE_REACHABLE=true
-            break
+            info "Core health check passed (TLS verified)"
+        else
+            warn "Core health check failed — proceeding with registration anyway"
         fi
-        if [ "$i" -lt 5 ]; then
-            info "Core not reachable at $SERVER_URL — retrying ($i/5), waiting 10s..."
-            sleep 10
-        fi
-    done
 
-    if [ "$CORE_REACHABLE" = true ]; then
         # Run registration
         REG_OUTPUT=$("$INSTALL_DIR/.venv/bin/venya" exec register \
             --executor-id "$EXECUTOR_ID" \
@@ -221,7 +230,7 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
             warn "Check output above for errors"
         fi
     else
-        warn "Core unreachable at $SERVER_URL after 5 attempts — skipping cert registration"
+        warn "Caddy CA not installed — skipping cert registration"
         echo ""
         echo "  Run this after core is reachable:"
         echo "    $INSTALL_DIR/.venv/bin/venya exec register \\"
