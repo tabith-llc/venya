@@ -247,8 +247,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             mtls_result = await self._validate_admin_mtls(request)
             if mtls_result is not None:
                 return mtls_result
-            # mTLS validation passed — skip bearer token auth for admin routes
-            request.state.auth_user = {"caller": "admin"}  # type: ignore[attr-defined]
+            # mTLS validation passed — _validate_admin_mtls already set auth_user with identity
             return await call_next(request)
 
         # Extract token: cookie (browser) takes priority, then bearer header (CLI)
