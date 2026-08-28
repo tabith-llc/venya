@@ -285,7 +285,7 @@ venya_create_venv() {
             PATH="$INSTALL_DIR/.venv/bin:$venv_path" \
             UV_NO_PROGRESS=1 \
             UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
-            bash -c 'cd "$1" && exec "$0" pip install --force-reinstall --no-deps -r "$2"' \
+            bash -c 'cd "$1" && exec "$0" pip install --force-reinstall -r "$2"' \
                 /home/venya/.local/bin/uv "$INSTALL_DIR" "$requirements_file" < /dev/null
     elif [ -n "$requirements_file" ]; then
         warn "Requirements file $requirements_file not found — skipping dependency install"
