@@ -19,6 +19,7 @@ set -euo pipefail
 #   VENYA_SERVER_URL               - Core server URL (required)
 #   VENYA_CORE_HOSTNAME    - Core hostname for /etc/hosts resolution (default: venya-core-1)
 #   VENYA_CORE_IP          - Core IP for /etc/hosts resolution (default: 10.27.28.11)
+#   VENYA_CADDY_CA_FILE    - Path to pre-copied Caddy CA cert (offline/air-gapped deployments)
 #   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
 ###############################################################################
 
@@ -167,6 +168,23 @@ else
     fi
 fi
 
+# --- Install Caddy CA into system trust store (for TLS verification) ---
+CADDY_CA_URL="${SERVER_URL%/}/.well-known/caddy-ca.crt"
+if [ -n "${VENYA_CADDY_CA_FILE:-}" ] && [ -f "$VENYA_CADDY_CA_FILE" ]; then
+    cp "$VENYA_CADDY_CA_FILE" /usr/local/share/ca-certificates/caddy-local-ca.crt
+    chmod 644 /usr/local/share/ca-certificates/caddy-local-ca.crt
+    update-ca-certificates > /dev/null 2>&1
+    info "Caddy CA installed from $VENYA_CADDY_CA_FILE"
+elif curl -sf --insecure "$CADDY_CA_URL" -o /tmp/caddy-ca.crt 2>/dev/null; then
+    cp /tmp/caddy-ca.crt /usr/local/share/ca-certificates/caddy-local-ca.crt
+    chmod 644 /usr/local/share/ca-certificates/caddy-local-ca.crt
+    update-ca-certificates > /dev/null 2>&1
+    info "Caddy CA installed to system trust store from $CADDY_CA_URL"
+else
+    warn "Could not fetch Caddy CA from $CADDY_CA_URL — TLS verification may fail"
+    warn "Pre-copy the CA cert to /usr/local/share/ca-certificates/caddy-local-ca.crt and rerun"
+fi
+
 # --- Register mTLS certificate (if enrollment token provided and core reachable) ---
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     info "Attempting mTLS certificate registration..."
@@ -174,7 +192,7 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     # Retry loop: wait for core to be reachable
     CORE_REACHABLE=false
     for i in $(seq 1 5); do
-        if curl -sf --insecure "$SERVER_URL/api/v1/health" >/dev/null 2>&1; then
+        if curl -sf "$SERVER_URL/api/v1/health" >/dev/null 2>&1; then
             CORE_REACHABLE=true
             break
         fi
