@@ -144,10 +144,7 @@
 
             await completeEnrollment(token, challenge.challenge_id, registrationResponse);
 
-            showMessage("Enrollment successful! Redirecting to login...", "success");
-            setTimeout(function () {
-                window.location.href = "/";
-            }, 1500);
+            showMessage("Success! It is now safe to close this browser window.", "success");
         } catch (err) {
             if (err.message && err.message.indexOf("already been used") !== -1) {
                 showMessage("This enrollment token has already been used.", "error");

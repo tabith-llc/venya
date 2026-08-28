@@ -47,7 +47,9 @@
 
     function hideSuccess() {
         successModal.hidden = true;
-        window.location.href = "/";
+        messageDiv.textContent = "Success! It is now safe to close this browser window.";
+        messageDiv.className = "message message-success";
+        messageDiv.hidden = false;
     }
 
     async function startEnrollment(username) {

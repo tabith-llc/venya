@@ -123,7 +123,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/",  # login page (public)
             "/enroll",  # user enrollment page (public)
             "/enroll-admin",  # admin enrollment page (public)
-            "/dashboard",  # dashboard page (public)
+
         }
     )
 
