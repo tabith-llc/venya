@@ -285,11 +285,15 @@ venya_create_venv() {
             PATH="$INSTALL_DIR/.venv/bin:$venv_path" \
             UV_NO_PROGRESS=1 \
             UV_PYTHON_INSTALL_DIR=/home/venya/.local/share/uv/python \
-            bash -c 'cd "$1" && exec "$0" pip install -r "$2"' \
+            bash -c 'cd "$1" && exec "$0" pip install --force-reinstall --no-deps -r "$2"' \
                 /home/venya/.local/bin/uv "$INSTALL_DIR" "$requirements_file" < /dev/null
     elif [ -n "$requirements_file" ]; then
         warn "Requirements file $requirements_file not found — skipping dependency install"
     fi
+
+    # Clear stale bytecode to prevent old .py from being used with new .pyc
+    info "Clearing bytecode cache..."
+    sudo -H -u venya bash -c "find '$INSTALL_DIR/.venv' -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true; find '$INSTALL_DIR/.venv' -name '*.pyc' -delete 2>/dev/null || true"
 
     chown -R venya:venya "$INSTALL_DIR/.venv"
     info "Python venv created at $INSTALL_DIR/.venv"
