@@ -17,6 +17,8 @@ set -euo pipefail
 #   VENYA_TARBALL       - URL of the tarball to install (auto-detected if on same host)
 #   VENYA_EXECUTOR_ID              - Executor ID (default: jump-1)
 #   VENYA_SERVER_URL               - Core server URL (required)
+#   VENYA_CORE_HOSTNAME    - Core hostname for /etc/hosts resolution (default: venya-core-1)
+#   VENYA_CORE_IP          - Core IP for /etc/hosts resolution (default: 10.27.28.11)
 #   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
 ###############################################################################
 
@@ -146,6 +148,24 @@ key = "/etc/venya/executor/executor.key"
 EOF
 
 info "Executor config written to /etc/venya/executor.toml"
+
+# --- Resolve Core Hostname ---
+CORE_HOSTNAME="${VENYA_CORE_HOSTNAME:-venya-core-1}"
+CORE_IP="${VENYA_CORE_IP:-10.27.28.11}"
+
+# Ensure the core hostname is resolvable in /etc/hosts
+if ! grep -q " ${CORE_HOSTNAME}$" /etc/hosts 2>/dev/null; then
+    info "Adding ${CORE_HOSTNAME} (${CORE_IP}) to /etc/hosts"
+    echo "${CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+else
+    # Verify the IP matches if strictness is desired
+    EXISTING_IP=$(grep " ${CORE_HOSTNAME}$" /etc/hosts | awk '{print $1}')
+    if [ "$EXISTING_IP" != "$CORE_IP" ]; then
+        warn "Found ${CORE_HOSTNAME} in /etc/hosts with IP ${EXISTING_IP}, expected ${CORE_IP}. Updating."
+        sed -i "/ ${CORE_HOSTNAME}$/d" /etc/hosts
+        echo "${CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+    fi
+fi
 
 # --- Register mTLS certificate (if enrollment token provided and core reachable) ---
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
