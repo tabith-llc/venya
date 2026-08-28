@@ -35,7 +35,7 @@ def list_fido2_devices() -> list[Ctap2]:
         try:
             conn = Ctap2.open(descriptor)
             devices.append(conn)
-        except Exception:
+        except Exception:  # nosec B110  # noqa: S110 — skip devices that fail to open
             pass
     return devices
 

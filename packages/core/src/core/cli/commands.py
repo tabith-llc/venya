@@ -1699,7 +1699,7 @@ def executor_register(client: APIClient, args: Any) -> int:
                 with open(executor_config_path, "rb") as f:
                     config_data = tomllib.load(f)
                 ca_bundle = config_data.get("ca_bundle")
-            except Exception:
+            except Exception:  # nosec B110  # noqa: S110 — ignore optional config parse errors
                 pass
 
     # Validate executor_id format before any operations
