@@ -426,3 +426,61 @@ venya_verify_install() {
     fi
     info "Installation verified successfully"
 }
+
+# --- 17. Verify deployed code ---
+
+venya_verify_deployment() {
+    info "Verifying deployed code..."
+    local site_packages
+    site_packages=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
+
+    if [ -z "$site_packages" ]; then
+        error "Cannot find site-packages directory"
+        exit 1
+    fi
+
+    local errors=0
+
+    # Check that core package is deployed
+    if [ ! -d "$site_packages/core" ]; then
+        error "core package not found in site-packages"
+        errors=$((errors + 1))
+    fi
+
+    # Check that server package is deployed (core install only)
+    if [ -d "$INSTALL_DIR/packages/server" ]; then
+        if [ ! -d "$site_packages/server" ]; then
+            error "server package not found in site-packages"
+            errors=$((errors + 1))
+        fi
+
+        # Verify the deployed auth.py matches the source auth.py
+        local source_auth="$INSTALL_DIR/packages/server/src/server/middleware/auth.py"
+        local deployed_auth="$site_packages/server/middleware/auth.py"
+        if [ -f "$source_auth" ] && [ -f "$deployed_auth" ]; then
+            if ! diff -q "$source_auth" "$deployed_auth" >/dev/null 2>&1; then
+                error "DEPLOYMENT MISMATCH: auth.py in site-packages differs from source"
+                error "  Source:  $source_auth"
+                error "  Deployed: $deployed_auth"
+                errors=$((errors + 1))
+            fi
+        fi
+    fi
+
+    # Check that executor package is deployed (executor install only)
+    if [ -d "$INSTALL_DIR/packages/executor" ]; then
+        if [ ! -d "$site_packages/executor" ]; then
+            error "executor package not found in site-packages"
+            errors=$((errors + 1))
+        fi
+    fi
+
+    if [ "$errors" -gt 0 ]; then
+        error "Deployment verification FAILED with $errors error(s)"
+        error "The installed code in site-packages does not match the source tarball"
+        error "This is a critical failure — do not start services"
+        exit 1
+    fi
+
+    info "Deployment verified — site-packages matches source tarball"
+}

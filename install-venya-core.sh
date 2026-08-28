@@ -101,6 +101,9 @@ venya_apply_code_fixes
 # --- Build Python venv ---
 venya_create_venv "venya-core-requirements.txt"
 
+# --- Verify deployed code ---
+venya_verify_deployment
+
 # --- Create directories ---
 venya_create_directories
 
