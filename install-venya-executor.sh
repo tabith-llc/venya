@@ -150,6 +150,24 @@ EOF
 
 info "Executor config written to /etc/venya/executor.toml"
 
+# --- Resolve Core Hostname ---
+CORE_HOSTNAME="${VENYA_CORE_HOSTNAME:-venya-core-1}"
+CORE_IP="${VENYA_CORE_IP:-10.27.28.11}"
+
+# Ensure the core hostname is resolvable in /etc/hosts
+if ! grep -q " ${CORE_HOSTNAME}$" /etc/hosts 2>/dev/null; then
+    info "Adding ${CORE_HOSTNAME} (${CORE_IP}) to /etc/hosts"
+    echo "${CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+else
+    # Verify the IP matches if strictness is desired
+    EXISTING_IP=$(grep " ${CORE_HOSTNAME}$" /etc/hosts | awk '{print $1}')
+    if [ "$EXISTING_IP" != "$CORE_IP" ]; then
+        warn "Found ${CORE_HOSTNAME} in /etc/hosts with IP ${EXISTING_IP}, expected ${CORE_IP}. Updating."
+        sed -i "/ ${CORE_HOSTNAME}$/d" /etc/hosts
+        echo "${CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+    fi
+fi
+
 # --- Install Caddy CA into system trust store (for TLS verification) ---
 CADDY_CA_URL="${SERVER_URL%/}/.well-known/caddy-ca.crt"
 if [ -n "${VENYA_CADDY_CA_FILE:-}" ] && [ -f "$VENYA_CADDY_CA_FILE" ]; then

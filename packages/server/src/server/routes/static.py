@@ -77,12 +77,6 @@ async def serve_enroll_admin() -> FileResponse:
     return FileResponse(STATIC_DIR / "enroll-admin.html")
 
 
-@router.get("/dashboard")
-async def serve_dashboard() -> FileResponse:
-    """Serve the dashboard page."""
-    return FileResponse(STATIC_DIR / "dashboard.html")
-
-
 @router.get("/static/{file_path:path}")
 async def serve_static(file_path: str) -> FileResponse:
     """Serve static assets (CSS, JS, images, etc.).

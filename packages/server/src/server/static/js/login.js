@@ -74,7 +74,7 @@
             }
 
             // Success — browser should have set session cookie
-            window.location.href = "/dashboard";
+            showMessage("Success! It is now safe to close this browser window.", "success");
         } catch (err) {
             showMessage(err.message || "Login failed. Please try again.", "error");
         } finally {
