@@ -1689,6 +1689,19 @@ def executor_register(client: APIClient, args: Any) -> int:
     if ca_bundle is not None and not isinstance(ca_bundle, str):
         ca_bundle = None
 
+    # Fall back to executor config ca_bundle if not passed via CLI
+    if ca_bundle is None:
+        executor_config_path = Path("/etc/venya/executor.toml")
+        if executor_config_path.exists():
+            try:
+                import tomllib
+
+                with open(executor_config_path, "rb") as f:
+                    config_data = tomllib.load(f)
+                ca_bundle = config_data.get("ca_bundle")
+            except Exception:
+                pass
+
     # Validate executor_id format before any operations
     try:
         from core.utils.executor_id import validate_executor_id
