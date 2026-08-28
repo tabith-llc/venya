@@ -1754,6 +1754,7 @@ def executor_register(client: APIClient, args: Any) -> int:
             csr_pem=csr_pem,
             enrollment_token=enrollment_token,
             ca_bundle=ca_bundle,
+            server_url=server_url,
         )
         cert_pem = result.get("cert_pem", "")
         ca_cert_pem = result.get("ca_cert_pem", "")

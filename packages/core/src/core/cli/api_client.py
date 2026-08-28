@@ -366,6 +366,7 @@ class APIClient:
         csr_pem: str,
         enrollment_token: str | None = None,
         ca_bundle: str | None = None,
+        server_url: str | None = None,
     ) -> dict[str, Any]:
         """Register an executor with the core server.
 
@@ -402,7 +403,7 @@ class APIClient:
         if enrollment_token:
             payload["enrollment_token"] = enrollment_token
 
-        url = f"{self.config.server_url}/api/v1/executors/register"
+        url = f"{server_url or self.config.server_url}/api/v1/executors/register"
 
         tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
         if tls_verify_env == "" or tls_verify_env.lower() == "true":
