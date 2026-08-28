@@ -304,6 +304,12 @@ $CORE_HOSTNAME {
         }
     }
 
+    # Serve Caddy CA cert publicly for executor bootstrap (TOFU)
+    handle /.well-known/caddy-ca.crt {
+        root * /var/www
+        file_server
+    }
+
     handle {
         reverse_proxy 127.0.0.1:8080 {
             header_up X-Real-IP {remote_host}
@@ -328,6 +334,12 @@ $CORE_HOSTNAME {
     }
 
     tls $TLS_MODE
+
+    # Serve Caddy CA cert publicly for executor bootstrap (TOFU)
+    handle /.well-known/caddy-ca.crt {
+        root * /var/www
+        file_server
+    }
 
     header {
         Strict-Transport-Security "max-age=31536000"
@@ -393,6 +405,11 @@ if [ -f "$CADDY_ROOT_CA" ]; then
     chmod 644 /usr/local/share/ca-certificates/caddy-local-ca.crt
     update-ca-certificates > /dev/null 2>&1
     info "Caddy root CA installed to system trust store"
+    # Serve CA cert publicly for executor bootstrap (TOFU)
+    mkdir -p /var/www/.well-known
+    cp "$CADDY_ROOT_CA" /var/www/.well-known/caddy-ca.crt
+    chmod 644 /var/www/.well-known/caddy-ca.crt
+    info "Caddy CA served at /.well-known/caddy-ca.crt"
 else
     warn "Caddy CA not found — TLS may not be trusted"
 fi
