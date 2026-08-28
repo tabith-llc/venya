@@ -130,29 +130,6 @@ else
     info "sbx CLI already installed: $(sbx --version 2>/dev/null || echo 'unknown')"
 fi
 
-# --- Write executor config (after CA installation so ca_bundle path is valid) ---
-mkdir -p /etc/venya/executor
-mkdir -p /var/log/venya
-
-CA_BUNDLE_PATH="/usr/local/share/ca-certificates/caddy-local-ca.crt"
-
-cat > /etc/venya/executor.toml << EOF
-server_url = "$SERVER_URL"
-executor_id = "$EXECUTOR_ID"
-log_level = "info"
-daemonize = false
-injection_method = "sbx"
-secret_base_fd = 100
-ca_bundle = "$CA_BUNDLE_PATH"
-
-[mtls]
-ca_cert = "/etc/venya/executor/ca.crt"
-cert = "/etc/venya/executor/executor.crt"
-key = "/etc/venya/executor/executor.key"
-EOF
-
-info "Executor config written to /etc/venya/executor.toml"
-
 # --- Resolve Core Hostname ---
 CORE_HOSTNAME="${VENYA_CORE_HOSTNAME:-venya-core-1}"
 CORE_IP="${VENYA_CORE_IP:-10.27.28.11}"
@@ -173,6 +150,7 @@ fi
 
 # --- Install Caddy CA into system trust store (for TLS verification) ---
 CADDY_CA_URL="${SERVER_URL%/}/.well-known/caddy-ca.crt"
+CA_BUNDLE_PATH="/usr/local/share/ca-certificates/caddy-local-ca.crt"
 if [ -n "${VENYA_CADDY_CA_FILE:-}" ] && [ -f "$VENYA_CADDY_CA_FILE" ]; then
     cp "$VENYA_CADDY_CA_FILE" "$CA_BUNDLE_PATH"
     chmod 644 "$CA_BUNDLE_PATH"
@@ -186,6 +164,27 @@ else
     warn "Could not fetch Caddy CA from $CADDY_CA_URL — TLS verification may fail"
     warn "Pre-copy the CA cert to $CA_BUNDLE_PATH and rerun"
 fi
+
+# --- Write executor config (after CA installation so ca_bundle path is valid) ---
+mkdir -p /etc/venya/executor
+mkdir -p /var/log/venya
+
+cat > /etc/venya/executor.toml << EOF
+server_url = "$SERVER_URL"
+executor_id = "$EXECUTOR_ID"
+log_level = "info"
+daemonize = false
+injection_method = "sbx"
+secret_base_fd = 100
+ca_bundle = "$CA_BUNDLE_PATH"
+
+[mtls]
+ca_cert = "/etc/venya/executor/ca.crt"
+cert = "/etc/venya/executor/executor.crt"
+key = "/etc/venya/executor/executor.key"
+EOF
+
+info "Executor config written to /etc/venya/executor.toml"
 
 # --- Register mTLS certificate (if enrollment token provided and core reachable) ---
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
