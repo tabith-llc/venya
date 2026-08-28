@@ -79,6 +79,9 @@ venya_install_python314
 venya_download_tarball executor
 venya_extract_tarball
 
+# --- Apply shared code fixes (patch source BEFORE building) ---
+venya_apply_code_fixes
+
 # --- Build Python venv ---
 venya_create_venv "venya-executor-requirements.txt" "/home/venya/.cargo/bin"
 
@@ -102,9 +105,6 @@ PYTHON_PATH=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
 cp "$INSTALL_DIR/packages/executor/target/release/libvenya_filter.so" "$PYTHON_PATH/venya_filter.so"
 chown venya:venya "$PYTHON_PATH/venya_filter.so"
 cd "$INSTALL_DIR"
-
-# --- Apply shared code fixes ---
-venya_apply_code_fixes
 
 # --- Create directories ---
 venya_create_directories
