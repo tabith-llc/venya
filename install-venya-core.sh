@@ -267,6 +267,9 @@ EOF
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     cat >> "$INSTALL_DIR/.env" << EOF
 VENYA_ADMIN_CA_KEY_PASSPHRASE="$ADMIN_CA_PASSPHRASE"
+VENYA_ADMIN_MTLS__ENABLED=true
+VENYA_ADMIN_MTLS__CA_CERT="$ADMIN_CA_DIR/admin-ca.crt"
+VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS=["$ADMIN_IDENTITY"]
 EOF
 fi
 
@@ -411,6 +414,11 @@ info "Database migrations complete"
 info "Installing systemd service..."
 SYSTEMD_DIR="/etc/systemd/system"
 sed "s|VENYA_ENV_DIR=/opt/venya|VENYA_ENV_DIR=$INSTALL_DIR|" "$INSTALL_DIR/systemd/venya-core.service" > "$SYSTEMD_DIR/venya-core.service"
+
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    sed -i "s|Environment=VENYA_ENV_DIR=|Environment=VENYA_ADMIN_CA_KEY_PASSPHRASE=$ADMIN_CA_PASSPHRASE\nEnvironment=VENYA_ENV_DIR=|" "$SYSTEMD_DIR/venya-core.service"
+fi
+
 systemctl daemon-reload
 systemctl enable venya-core.service
 systemctl start venya-core.service
