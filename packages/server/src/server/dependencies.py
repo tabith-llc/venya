@@ -145,6 +145,11 @@ async def get_current_user(
     Raises:
         HTTPException: If token is invalid or expired.
     """
+    # If middleware already authenticated (mTLS admin/executor), use it
+    auth_user = getattr(request.state, "auth_user", None)
+    if auth_user is not None:
+        return auth_user
+
     if credentials is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
