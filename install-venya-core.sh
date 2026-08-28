@@ -95,11 +95,11 @@ venya_install_python314
 venya_download_tarball core
 venya_extract_tarball
 
+# --- Apply shared code fixes (patch source BEFORE building) ---
+venya_apply_code_fixes
+
 # --- Build Python venv ---
 venya_create_venv "venya-core-requirements.txt"
-
-# --- Apply shared code fixes ---
-venya_apply_code_fixes
 
 # --- Create directories ---
 venya_create_directories
