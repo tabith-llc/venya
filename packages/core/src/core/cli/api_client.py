@@ -416,12 +416,7 @@ class APIClient:
         try:
             timeout = int(os.environ.get("VENYA_EXECUTION_TIMEOUT", "30"))
             if tls_verify and ca_bundle:
-                import ssl as ssl_mod
-
-                ssl_ctx = ssl_mod.create_default_context()
-                if Path(ca_bundle).exists():
-                    ssl_ctx.load_verify_locations(ca_bundle)
-                verify_param: object = ssl_ctx
+                verify_param = str(ca_bundle)
             else:
                 verify_param = tls_verify
             with httpx2.Client(verify=verify_param, timeout=timeout) as client:
