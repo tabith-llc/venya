@@ -78,10 +78,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     # Add middleware
     from .middleware import auth as auth_middleware
     from .middleware import metrics as metrics_middleware
-    from .middleware import rate_limit, rate_limit_headers, security_headers
+    from .middleware import rate_limit, rate_limit_headers
 
     app.add_middleware(metrics_middleware.MetricsMiddleware)
-    app.add_middleware(security_headers.SecurityHeadersMiddleware, cors_origins=config.cors.origins)
     app.add_middleware(rate_limit_headers.RateLimitHeaderMiddleware)
     app.add_middleware(rate_limit.RateLimitMiddleware, config=config.rate_limit)
     app.add_middleware(auth_middleware.SessionMiddleware)
