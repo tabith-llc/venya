@@ -130,9 +130,11 @@ else
     info "sbx CLI already installed: $(sbx --version 2>/dev/null || echo 'unknown')"
 fi
 
-# --- Write executor config ---
+# --- Write executor config (after CA installation so ca_bundle path is valid) ---
 mkdir -p /etc/venya/executor
 mkdir -p /var/log/venya
+
+CA_BUNDLE_PATH="/usr/local/share/ca-certificates/caddy-local-ca.crt"
 
 cat > /etc/venya/executor.toml << EOF
 server_url = "$SERVER_URL"
@@ -141,6 +143,7 @@ log_level = "info"
 daemonize = false
 injection_method = "sbx"
 secret_base_fd = 100
+ca_bundle = "$CA_BUNDLE_PATH"
 
 [mtls]
 ca_cert = "/etc/venya/executor/ca.crt"
@@ -171,18 +174,17 @@ fi
 # --- Install Caddy CA into system trust store (for TLS verification) ---
 CADDY_CA_URL="${SERVER_URL%/}/.well-known/caddy-ca.crt"
 if [ -n "${VENYA_CADDY_CA_FILE:-}" ] && [ -f "$VENYA_CADDY_CA_FILE" ]; then
-    cp "$VENYA_CADDY_CA_FILE" /usr/local/share/ca-certificates/caddy-local-ca.crt
-    chmod 644 /usr/local/share/ca-certificates/caddy-local-ca.crt
+    cp "$VENYA_CADDY_CA_FILE" "$CA_BUNDLE_PATH"
+    chmod 644 "$CA_BUNDLE_PATH"
     update-ca-certificates > /dev/null 2>&1
     info "Caddy CA installed from $VENYA_CADDY_CA_FILE"
-elif curl -sf --insecure "$CADDY_CA_URL" -o /tmp/caddy-ca.crt 2>/dev/null; then
-    cp /tmp/caddy-ca.crt /usr/local/share/ca-certificates/caddy-local-ca.crt
-    chmod 644 /usr/local/share/ca-certificates/caddy-local-ca.crt
+elif curl -sf --insecure "$CADDY_CA_URL" -o "$CA_BUNDLE_PATH" 2>/dev/null; then
+    chmod 644 "$CA_BUNDLE_PATH"
     update-ca-certificates > /dev/null 2>&1
     info "Caddy CA installed to system trust store from $CADDY_CA_URL"
 else
     warn "Could not fetch Caddy CA from $CADDY_CA_URL — TLS verification may fail"
-    warn "Pre-copy the CA cert to /usr/local/share/ca-certificates/caddy-local-ca.crt and rerun"
+    warn "Pre-copy the CA cert to $CA_BUNDLE_PATH and rerun"
 fi
 
 # --- Register mTLS certificate (if enrollment token provided and core reachable) ---
