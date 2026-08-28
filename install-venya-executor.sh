@@ -85,6 +85,9 @@ venya_apply_code_fixes
 # --- Build Python venv ---
 venya_create_venv "venya-executor-requirements.txt" "/home/venya/.cargo/bin"
 
+# --- Verify deployed code ---
+venya_verify_deployment
+
 # --- Build Rust extension (executor-specific) ---
 info "Building Rust filter extension..."
 VENYA_CARGO="/home/venya/.cargo/bin/cargo"
