@@ -119,7 +119,7 @@ class TestAPIClientRegisterExecutor:
             MockClient.return_value.post.side_effect = network_error
 
             try:
-                with pytest.raises(APIClientError, match="Registration failed"):
+                with pytest.raises(APIClientError, match="Connection failed"):
                     client.register_executor("test-1", "CSR_PEM")
                 MockClient.assert_called_once_with(verify=True, timeout=30.0)
             finally:
