@@ -173,34 +173,17 @@ async def init_core(
                     ),
                 )
 
-            # Resume mode: admin exists but no enrolled members yet
-            # Find the pending user and generate a new challenge
+            # A pending enrollment exists — reject, force reset
             pending_user = db.query(User).join(RoleMember).filter(RoleMember.role_id == admin_role.id).first()
 
-            if pending_user is None:
-                # Admin role exists but no role members — stale state from failed init
+            if pending_user is not None:
                 raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Admin role exists but no pending enrollment found. Use --installation-reset to start over.",
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"A pending enrollment exists for '{pending_user.user_id}'. "
+                        "Use --installation-reset to clear it and start over."
+                    ),
                 )
-
-            fido2_manager = getattr(request.app.state, "fido2_manager", None)
-            if fido2_manager is None:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="FIDO2 manager not initialized",
-                )
-
-            challenge_id, options = fido2_manager.start_registration(
-                user_id=pending_user.user_id,
-                username=pending_user.user_id,
-            )
-
-            return InitResponse(
-                challenge_id=challenge_id,
-                options=challenge_to_browser_options(challenge_id, options),
-                user_id=pending_user.user_id,
-            )
 
         # Fresh init: create admin role, CA, and pending user
         config = getattr(request.app.state, "config", None)
