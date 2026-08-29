@@ -253,13 +253,9 @@ class TestInfrastructure:
         """Phase 3: Install executor on venya-exec-1."""
         assert EXEC_SHA, "EXEC_SHA not set — run test_phase1_build_tarballs first"
 
-        # First, get an enrollment token via DB (for automated testing)
-        # In production, this would use FIDO2-authenticated CLI
-        result = _ssh(
-            CORE,
-            "sudo -u postgres psql -d venya -c \"UPDATE users SET status='active', auth_mode='mTLS' WHERE user_id='exec-1';\"",
-        )
-        assert result.returncode == 0
+        # Generate a valid enrollment token for automated testing
+        token = _generate_executor_enrollment_token("exec-1")
+        assert token, "Failed to generate executor enrollment token"
 
         result = _ssh(
             EXEC,
@@ -268,6 +264,7 @@ class TestInfrastructure:
             f"VENYA_EXECUTOR_ID=exec-1 "
             f"VENYA_SERVER_URL=https://venya-core-1 "
             f"VENYA_TARBALL_SHA256={EXEC_SHA} "
+            f"VENYA_EXECUTOR_ENROLLMENT_TOKEN={token} "
             f"bash -s 2>&1",
             timeout=300,
         )
@@ -282,10 +279,89 @@ class TestInfrastructure:
 
     def test_phase3_executor_registered(self):
         """Phase 3: Verify executor is registered on core."""
+        # Check that the enrollment token was consumed (indicates successful registration)
         result = _ssh(
             CORE,
-            "sudo -u postgres psql -d venya -t -A -c \"SELECT user_id, status FROM users WHERE user_id='exec-1';\"",
+            "sudo -u postgres psql -d venya -t -A -c \"SELECT state FROM executor_enrollment_tokens WHERE executor_id='exec-1' ORDER BY created_at DESC LIMIT 1;\"",
         )
         assert result.returncode == 0
-        assert "exec-1" in result.stdout
-        assert "active" in result.stdout
+        assert "consumed" in result.stdout
+
+
+def _generate_executor_enrollment_token(executor_id):
+    """Generate a valid executor enrollment token for automated testing.
+
+    Uses the server's pepper to compute a valid token_hash, then inserts
+    it into the executor_enrollment_tokens table. Returns the plaintext token.
+
+    This is test-only code — it does not modify production code.
+    """
+
+    plaintext = os.urandom(32).hex()
+
+    # Generate token_hash on the server using the server's pepper
+    _GEN_SCRIPT = """
+import sys, hmac, hashlib
+from sqlalchemy import create_engine, text
+
+pepper = ''
+try:
+    from server.config import ServerConfig
+    pepper = ServerConfig().recovery_code_pepper
+except Exception:
+    pass
+
+if not pepper:
+    sys.exit(1)
+
+executor_id = sys.argv[1]
+plaintext = sys.argv[2]
+token_hash = hmac.new(pepper.encode(), plaintext.encode(), hashlib.sha256).hexdigest()
+
+engine = create_engine('postgresql://venya:venya808@localhost/venya')
+with engine.begin() as conn:
+    conn.execute(text('''
+        INSERT INTO executor_enrollment_tokens (executor_id, token_hash, state, created_at, expires_at, created_by)
+        VALUES (:eid, :th, 'created', NOW(), NOW() + INTERVAL '15 minutes', 'e2e-test')
+        ON CONFLICT (token_hash) DO NOTHING
+    '''), {'eid': executor_id, 'th': token_hash})
+print(plaintext)
+"""
+
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write(_GEN_SCRIPT)
+        script_path = f.name
+
+    try:
+        subprocess.run(
+            ["scp", script_path, "bot@venya-core-1:/tmp/gen_exec_token.py"],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+
+        result = subprocess.run(
+            [
+                "ssh",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "bot@venya-core-1",
+                (
+                    "echo '' | sudo -S /opt/venya/.venv/bin/python3.14 "
+                    f"/tmp/gen_exec_token.py {executor_id} {plaintext}"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            return None
+
+        return result.stdout.strip()
+    finally:
+        os.unlink(script_path)
