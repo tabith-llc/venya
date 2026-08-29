@@ -322,7 +322,7 @@ async def init_complete(
                 detail=f"Registration failed: {e!s}",
             ) from e
 
-        # Find the pending user via the admin role membership
+        # Find the pending user matching the submitted user_id
         from core.iam.models import Role, RoleMember
 
         admin_role = db.query(Role).filter(Role.name == "admin").first()
@@ -337,6 +337,7 @@ async def init_complete(
             .join(RoleMember, User.user_id == RoleMember.user_id)
             .filter(RoleMember.role_id == admin_role.id)
             .filter(User.enrolled_at.is_(None))
+            .filter(User.user_id == req.user_id)
             .first()
         )
         if user is None:
