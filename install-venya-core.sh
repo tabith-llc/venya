@@ -286,7 +286,7 @@ info ".env written to $INSTALL_DIR/.env"
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     cat > /etc/venya/Caddyfile << EOF
 {
-    auto_https disable_certs_install
+    auto_https disable_certs
 }
 
 $CORE_HOSTNAME {
@@ -335,7 +335,7 @@ EOF
 else
     cat > /etc/venya/Caddyfile << EOF
 {
-    auto_https disable_certs_install
+    auto_https disable_certs
 }
 
 $CORE_HOSTNAME {
