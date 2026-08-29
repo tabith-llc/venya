@@ -285,6 +285,10 @@ info ".env written to $INSTALL_DIR/.env"
 # --- Write Caddyfile (core-specific) ---
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     cat > /etc/venya/Caddyfile << EOF
+{
+    auto_https disable_certs_install
+}
+
 $CORE_HOSTNAME {
     tls $TLS_MODE {
         client_auth {
@@ -330,6 +334,10 @@ EOF
     info "Caddyfile written (TLS mode: $TLS_MODE, admin mTLS: enabled)"
 else
     cat > /etc/venya/Caddyfile << EOF
+{
+    auto_https disable_certs_install
+}
+
 $CORE_HOSTNAME {
     reverse_proxy 127.0.0.1:8080 {
         header_up X-Real-IP {remote_host}
