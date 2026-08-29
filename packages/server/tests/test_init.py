@@ -269,9 +269,11 @@ class TestInitComplete:
         fido2.start_registration("alice", "alice")
 
         # Mock query returns None (no pending user found because user is already enrolled)
-        # The code does: db.query(User).join(RoleMember).filter(...).filter(...).first()
+        # The code does: db.query(User).join(RoleMember).filter(...).filter(...).filter(...).first()
         db = MagicMock()
-        db.query.return_value.join.return_value.filter.return_value.filter.return_value.first.return_value = None
+        db.query.return_value.join.return_value.filter.return_value.filter.return_value.filter.return_value.first.return_value = (
+            None
+        )
 
         backend = MagicMock()
         backend.get_session.return_value = db
