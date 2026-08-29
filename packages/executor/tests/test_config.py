@@ -247,7 +247,7 @@ class TestExecutorConfigDefaults:
 
     def test_default_pid_file(self):
         cfg = ExecutorConfig()
-        assert cfg.pid_file == "/var/run/venya-executor.pid"
+        assert cfg.pid_file == "/var/lib/venya/executor/venya-executor.pid"
 
     def test_default_mtls_config(self):
         cfg = ExecutorConfig()

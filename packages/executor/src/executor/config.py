@@ -265,7 +265,7 @@ class ExecutorConfig(BaseSettings):
 
     # Daemon mode
     daemonize: bool = Field(default=False, description="Run as daemon (fork to background)")
-    pid_file: str = Field(default="/var/run/venya-executor.pid", description="PID file path")
+    pid_file: str = Field(default="/var/lib/venya/executor/venya-executor.pid", description="PID file path")
 
     @classmethod
     def from_file(cls, path: str | Path) -> ExecutorConfig:
