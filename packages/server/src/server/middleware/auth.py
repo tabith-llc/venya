@@ -2,7 +2,7 @@
 
 Validates bearer tokens against active sessions and attaches
 user info to request state. Supports mTLS-based admin endpoint
-authentication via Caddy-layer client certificate verification.
+authentication via Nginx-layer client certificate verification.
 """
 
 import logging
@@ -123,7 +123,6 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/",  # login page (public)
             "/enroll",  # user enrollment page (public)
             "/enroll-admin",  # admin enrollment page (public)
-
         }
     )
 
@@ -161,7 +160,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         1. Check X-Client-Verified sentinel header
         2. Extract identity from X-Client-Subject DN, check against known_admin_ids
 
-        Caddy verifies the cert chain and expiration at the TLS layer
+        Nginx verifies the cert chain and expiration at the TLS layer
         (verify_if_given/require_and_verify). This middleware checks identity.
 
         Args:
@@ -180,7 +179,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         # Step 1: Check X-Client-Verified sentinel header
         verified = request.headers.get("x-client-verified")
-        if verified != "true":
+        if verified != "SUCCESS":
             logger.warning("Admin route %s: missing or invalid X-Client-Verified header", path)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,

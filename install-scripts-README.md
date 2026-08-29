@@ -10,12 +10,12 @@ Installs the Venya Core server on a fresh VM. Includes:
 
 - **venya** service account (nologin + locked; no password)
 - System packages: `curl`, `sudo`
-- **Caddy** reverse proxy (installed first for TLS)
+- **Nginx** reverse proxy (installed first for TLS)
 - **PostgreSQL** (user, database, trust auth for localhost)
 - Python virtual environment + core/server packages
 - Code fixes (database_url, imports, timezone handling)
-- Configuration: `server.toml`, `.env`, `Caddyfile`
-- Caddy CA trust installation
+- Configuration: `server.toml`, `.env`, Nginx site config
+- Nginx CA trust installation
 - Database migrations
 - `venya-core.service` systemd unit
 
@@ -33,8 +33,8 @@ curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo bash
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL venya user password |
 | `VENYA_DB_PASSPHRASE` | `venya_test_passphrase_2024` | Server encryption passphrase |
 | `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-core-install.tar.gz` | Tarball URL |
-| `CORE_HOSTNAME` | `$(hostname)` | Hostname for TLS/Caddy (auto-detected by default) |
-| `TLS_MODE` | `internal` | Caddy TLS mode (`internal`, `manual`, `email`) |
+| `CORE_HOSTNAME` | `$(hostname)` | Hostname for TLS/Nginx (auto-detected by default) |
+| `TLS_MODE` | `internal` | Nginx TLS mode (internal = self-signed, manual = provide certs) |
 | `VENYA_ADMIN_MTLS_ENABLED` | `true` | Enforce admin mTLS (admin client cert required) |
 | `VENYA_ADMIN_IDENTITY` | (empty) | Admin CN identity for the admin CA |
 | `VENYA_ADMIN_CA_PASSPHRASE` | (empty) | Passphrase protecting the admin CA key |
@@ -114,7 +114,7 @@ pkill -f 'python3 -m http.server 8080'
 | `sudo` | Yes | Yes | — |
 | `build-essential` | No | Yes | — |
 | `Rust / cargo` | No | Yes | — |
-| `Caddy` | Yes | No | — |
+| `Nginx` | Yes | No | — |
 | `PostgreSQL` | Yes | No | — |
 | `sbx CLI` | No | Yes | — |
 | Debug packages | — | — | Yes |
