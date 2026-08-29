@@ -220,22 +220,12 @@ class TestInfrastructure:
 
     def test_phase2_admin_mtls_positive(self):
         """Phase 2: Positive admin mTLS test."""
-        result = subprocess.run(
-            [
-                "curl",
-                "-sk",
-                "--cacert",
-                "/var/lib/venya/admin-ca/admin-ca.crt",
-                "--cert",
-                "/etc/venya/admin/admin.crt",
-                "--key",
-                "/etc/venya/admin/admin.key",
-                "https://venya-core-1/api/v1/admin/users",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
+        result = _ssh(
+            CORE,
+            "sudo curl -sk --cacert /var/lib/venya/admin-ca/admin-ca.crt "
+            "--cert /etc/venya/admin/admin.crt "
+            "--key /etc/venya/admin/admin.key "
+            "https://localhost/api/v1/admin/users",
         )
         assert result.returncode == 0
         assert "200" in result.stdout or '"users"' in result.stdout
