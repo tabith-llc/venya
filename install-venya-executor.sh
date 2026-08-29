@@ -269,6 +269,11 @@ enrollment_token = "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}"
 tls_verify = true
 EOF
     info "Bootstrap enrollment token configured"
+    # Clear enrollment token from config — daemon runs with ReadOnlyPaths=/etc/venya
+    # and cannot write to clear it at startup. Root clears it here after registration.
+    sed -i '/^\[bootstrap\]/,/^$/d' /etc/venya/executor.toml
+    sed -i '/^enrollment_token = /d' /etc/venya/executor.toml
+    sed -i '/^tls_verify = /d' /etc/venya/executor.toml
 fi
 
 # --- Harden executor credentials (executor-specific) ---

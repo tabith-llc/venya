@@ -295,6 +295,8 @@ if not ca_key_path.exists():
         x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, 'Venya Certificate Authority'),
         x509.NameAttribute(NameOID.COMMON_NAME, 'Venya Root CA'),
     ])
+    ski = x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key())
+    aki = x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ski)
     builder = (x509.CertificateBuilder()
         .subject_name(subject).issuer_name(issuer)
         .public_key(ca_key.public_key())
@@ -302,7 +304,9 @@ if not ca_key_path.exists():
         .not_valid_before(now)
         .not_valid_after(now + timedelta(days=3650))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .add_extension(x509.KeyUsage(digital_signature=False, key_encipherment=False, content_commitment=False, data_encipherment=False, key_agreement=False, key_cert_sign=True, crl_sign=True, encipher_only=False, decipher_only=False), critical=True))
+        .add_extension(x509.KeyUsage(digital_signature=False, key_encipherment=False, content_commitment=False, data_encipherment=False, key_agreement=False, key_cert_sign=True, crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
+        .add_extension(ski, critical=False)
+        .add_extension(aki, critical=False))
     ca_cert = builder.sign(ca_key, hashes.SHA256())
     ca_cert_path.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
     ca_cert_path.chmod(0o644)
@@ -360,6 +364,11 @@ else
     ADMIN_CA_PATH=""
 fi
 
+# Create CA bundle: Venya Root CA + Admin CA.
+# Nginx needs both to verify admin client certs (Admin CA) and executor certs (Root CA).
+cat /var/lib/venya/ca/ca.crt /etc/nginx/ssl/client-ca.crt > /etc/nginx/ssl/client-ca-bundle.crt 2>/dev/null || true
+chmod 644 /etc/nginx/ssl/client-ca-bundle.crt 2>/dev/null || true
+
 cat > /etc/nginx/sites-available/venya << EOF
 server {
     listen 443 ssl;
@@ -367,7 +376,7 @@ server {
 
     ssl_certificate /etc/venya/tls/server.crt;
     ssl_certificate_key /etc/venya/tls/server.key;
-    ssl_client_certificate $ADMIN_CA_PATH;
+    ssl_client_certificate /etc/nginx/ssl/client-ca-bundle.crt;
     ssl_verify_client optional;
 
     location /.well-known/venya-ca.crt {
