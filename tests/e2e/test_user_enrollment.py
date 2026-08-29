@@ -9,10 +9,12 @@ Tests the full browser-based user enrollment:
 """
 
 import os
-import time
+import random
 
 import pytest
 import requests
+
+USER_NAMES = ["bob", "bart", "billy", "ben", "blake"]
 
 
 @pytest.mark.e2e
@@ -62,7 +64,7 @@ class TestUserEnrollment:
                 "display_name": user_id,
                 "roles": ["user"],
             },
-            verify=False,
+            verify=True,
             timeout=10,
         )
         if resp.status_code == 201:
@@ -143,11 +145,12 @@ print(plaintext)
                 [
                     "ssh",
                     "bot@venya-core-1",
-                    "echo '' | sudo -S /opt/venya/.venv/bin/python3.14 " f"/tmp/gen_token.py {user_id} {plaintext}",
+                    ("echo '' | sudo -S /opt/venya/.venv/bin/python3.14 " f"/tmp/gen_token.py {user_id} {plaintext}"),
                 ],
                 capture_output=True,
                 text=True,
                 timeout=30,
+                check=False,
             )
 
             if result.returncode != 0:
@@ -175,7 +178,7 @@ print(plaintext)
 
     def test_user_enrollment_full_flow(self, browser_context, server_url, admin_cookies):
         """Complete user enrollment: token -> page -> WebAuthn -> user activated."""
-        unique_id = f"e2e{int(time.time())}"
+        unique_id = random.choice(USER_NAMES)
 
         token = self._generate_enrollment_token(unique_id, server_url, admin_cookies)
 
