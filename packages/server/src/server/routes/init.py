@@ -105,7 +105,7 @@ async def init_reset(
         db.query(EnrollmentToken).delete()
         db.query(RoleMember).delete()
         db.query(User).filter(User.user_id != "system").delete()
-        db.query(Role).filter(Role.name == "admin").delete()
+        db.query(Role).filter(Role.name.in_(["admin", "user"])).delete()
         db.commit()
 
         logger.info("Core reset to pre-initialization state")
