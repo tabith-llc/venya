@@ -177,7 +177,7 @@ sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/
 
 # --- Server binds to localhost only — Caddy terminates TLS ---
 BIND_ADDRESS="127.0.0.1"
-info "Server will bind to: $BIND_ADDRESS (Caddy handles TLS)"
+info "Server will bind to: $BIND_ADDRESS (Nginx handles TLS)"
 
 # --- Write server.toml (core-specific) ---
 mkdir -p /etc/venya
@@ -264,6 +264,21 @@ info ".env written to $INSTALL_DIR/.env"
 
 # --- Write Nginx config (core-specific) ---
 mkdir -p /etc/venya/tls
+mkdir -p /etc/nginx/ssl
+
+# Copy Admin CA to Nginx-readable location (www-data can't traverse /var/lib/venya/ca)
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    cp /var/lib/venya/ca/admin-ca/admin-ca.crt /etc/nginx/ssl/client-ca.crt
+    chmod 644 /etc/nginx/ssl/client-ca.crt
+    ADMIN_CA_PATH="/etc/nginx/ssl/client-ca.crt"
+else
+    rm -f /etc/nginx/ssl/client-ca.crt
+    ADMIN_CA_PATH=""
+fi
+
+# Copy Venya CA to servable location
+cp /var/lib/venya/ca/ca.crt /var/www/.well-known/venya-ca.crt
+chmod 644 /var/www/.well-known/venya-ca.crt
 
 cat > /etc/nginx/sites-available/venya << EOF
 server {
@@ -272,20 +287,20 @@ server {
 
     ssl_certificate /etc/venya/tls/server.crt;
     ssl_certificate_key /etc/venya/tls/server.key;
-    ssl_client_certificate /etc/venya/ca/admin-ca.crt;
+    ssl_client_certificate $ADMIN_CA_PATH;
     ssl_verify_client optional;
 
     location /.well-known/venya-ca.crt {
-        alias /etc/venya/ca/venya-ca.crt;
+        alias /var/www/.well-known/venya-ca.crt;
         default_type application/x-x509-ca-cert;
     }
 
     location /api/v1/health {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:8080;
     }
 
     location / {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:8080;
         proxy_set_header X-Client-Verified \$ssl_client_verify;
         proxy_set_header X-Client-Subject \$ssl_client_s_dn;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -340,53 +355,82 @@ echo ""
 echo "==============================================================="
 echo ""
 
-# --- Sign server cert with Venya CA and start Nginx ---
-info "Signing server TLS certificate with Venya CA..."
+# --- Generate Venya CA (Python) and sign server cert (openssl CLI) ---
+info "Generating Venya CA and signing server TLS certificate..."
+mkdir -p /etc/venya/tls
+chown venya:venya /etc/venya/tls
+
+# Generate CA with Python (CAManager works for generation)
 sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" \
     python -c "
+import os
 from pathlib import Path
-from server.ca import CAManager
-from server.config import CASecurityConfig
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import NameOID
 from datetime import UTC, datetime, timedelta
 
-cm = CAManager(Path('/var/lib/venya/ca'), CASecurityConfig())
-ca_cert, ca_key = cm.load_ca()
+ca_dir = Path('/var/lib/venya/ca')
+ca_dir.mkdir(parents=True, exist_ok=True)
+os.chmod(str(ca_dir), 0o700)
 
-# Generate server key
-server_key = ec.generate_private_key(ec.SECP256R1())
-key_path = Path('/etc/venya/tls/server.key')
-cert_path = Path('/etc/venya/tls/server.crt')
-key_pem = server_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
-key_path.write_bytes(key_pem)
-key_path.chmod(0o600)
+ca_key_path = ca_dir / 'ca.key'
+ca_cert_path = ca_dir / 'ca.crt'
 
-# Sign server cert with Venya CA
-now = datetime.now(UTC)
-subject = x509.Name([
-    x509.NameAttribute(NameOID.ORGANIZATION_NAME, 'Venya'),
-    x509.NameAttribute(NameOID.COMMON_NAME, '$CORE_HOSTNAME'),
-])
-builder = (x509.CertificateBuilder()
-    .subject_name(subject).issuer_name(ca_cert.subject)
-    .public_key(server_key.public_key())
-    .serial_number(x509.random_serial_number())
-    .not_valid_before(now)
-    .not_valid_after(now + timedelta(days=365))
-    .add_extension(x509.SubjectAlternativeName([x509.DNSName('$CORE_HOSTNAME')]), critical=False))
-server_cert = builder.sign(ca_cert, ca_key, hashes.SHA256())
-cert_path.write_bytes(server_cert.public_bytes(serialization.Encoding.PEM))
-cert_path.chmod(0o644)
-print('Server cert signed and written')
+if not ca_key_path.exists():
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_key_path.write_bytes(ca_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    ca_key_path.chmod(0o600)
+    now = datetime.now(UTC)
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, 'Venya'),
+        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, 'Venya Certificate Authority'),
+        x509.NameAttribute(NameOID.COMMON_NAME, 'Venya Root CA'),
+    ])
+    builder = (x509.CertificateBuilder()
+        .subject_name(subject).issuer_name(issuer)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.KeyUsage(digital_signature=False, key_encipherment=False, content_commitment=False, data_encipherment=False, key_agreement=False, key_cert_sign=True, crl_sign=True, encipher_only=False, decipher_only=False), critical=True))
+    ca_cert = builder.sign(ca_key, hashes.SHA256())
+    ca_cert_path.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
+    ca_cert_path.chmod(0o644)
+    print('CA generated')
+else:
+    print('CA already exists')
 "
 
+# Sign server cert with openssl CLI (cryptography 50.0.1 Rust backend bug:
+# builder.sign() rejects valid ECPrivateKey from _rust.openssl.ec module)
+openssl ecparam -genkey -name prime256v1 -noout -out /etc/venya/tls/server.key
+chown venya:venya /etc/venya/tls/server.key
+chmod 600 /etc/venya/tls/server.key
+
+openssl req -new -key /etc/venya/tls/server.key -out /tmp/server.csr \
+    -subj "/O=Venya/CN=$CORE_HOSTNAME"
+
+openssl x509 -req -in /tmp/server.csr \
+    -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
+    -CAcreateserial -out /etc/venya/tls/server.crt -days 365 \
+    -extfile <(echo "subjectAltName=DNS:$CORE_HOSTNAME")
+
+chown venya:venya /etc/venya/tls/server.crt
+chmod 644 /etc/venya/tls/server.crt
+rm -f /tmp/server.csr
+
+info "Server TLS certificate signed with Venya CA"
+
 # Install Venya CA into system trust store
-cp /var/lib/venya/ca/ca.crt /usr/local/share/ca-certificates/venya-local-ca.crt
-chmod 644 /usr/local/share/ca-certificates/venya-local-ca.crt
+# Clean stale symlinks/files from previous installs
+rm -f /etc/ssl/certs/venya-*.pem
+rm -f /etc/ssl/certs/$(openssl x509 -in /var/lib/venya/ca/ca.crt -noout -subject_hash 2>/dev/null).*
+rm -f /usr/local/share/ca-certificates/venya-*.crt /usr/local/share/ca-certificates/venya-*.der
+cp /var/lib/venya/ca/ca.crt /usr/local/share/ca-certificates/venya-root-ca.crt
+chmod 644 /usr/local/share/ca-certificates/venya-root-ca.crt
 update-ca-certificates > /dev/null 2>&1
 info "Venya CA installed to system trust store"
 
