@@ -48,6 +48,22 @@ def e2e_test_setup(server_url):
     Uses direct SQL to clear all test data. This works even when the
     API refuses reset due to existing credentials.
     """
+    # Clean stale known_hosts entries before any SSH connections
+    subprocess.run(
+        ["ssh-keygen", "-f", "/home/dust/.ssh/known_hosts", "-R", "venya-core-1"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    subprocess.run(
+        ["ssh-keygen", "-f", "/home/dust/.ssh/known_hosts", "-R", "10.27.28.11"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
     reset_sql = (
         "DELETE FROM webauthn_credentials; "
         "DELETE FROM sessions; "
