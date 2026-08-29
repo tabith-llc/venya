@@ -408,7 +408,6 @@ sudo cp /etc/venya/Caddyfile /etc/caddy/Caddyfile
 # --- Start Caddy and install CA trust (core-specific) ---
 info "Starting Caddy..."
 systemctl start caddy > /dev/null 2>&1 || true
-sleep 2  # Let Caddy bind sockets
 
 # Caddy generates its internal PKI CA lazily — on the first TLS handshake,
 # not at startup. We must trigger a TLS request to force CA generation,
@@ -416,18 +415,28 @@ sleep 2  # Let Caddy bind sockets
 info "Triggering Caddy internal CA generation..."
 CADDY_ROOT_CA="${VENYA_CADDY_ROOT_CA:-/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt}"
 
-# The --insecure is correct here: we are triggering CA creation, not verifying trust.
-# This is the same TOFU principle as the executor CA fetch.
-curl -sf --insecure "https://localhost/api/v1/health" > /dev/null 2>&1 || true
+# Use the configured hostname (already in /etc/hosts), not localhost.
+# Caddy matches requests against site blocks by hostname — localhost won't
+# match the venya-core-1 site block and may not trigger PKI initialization.
+CA_TRIGGERED=false
+for i in $(seq 1 15); do
+    if curl -sf --insecure "https://${CORE_HOSTNAME}/api/v1/health" > /dev/null 2>&1; then
+        CA_TRIGGERED=true
+        info "Caddy responded after ${i}s"
+        break
+    fi
+    sleep 1
+done
 
-# Wait for the CA file to appear (generation is near-instant after handshake)
-for i in $(seq 1 10); do
+# Now wait for the CA file to appear (near-instant after successful handshake)
+for i in $(seq 1 5); do
     if [ -f "$CADDY_ROOT_CA" ]; then
         info "Caddy CA ready after ${i}s"
         break
     fi
-    if [ "$i" -eq 10 ]; then
-        warn "Caddy CA not found after 10s — TLS may not be trusted"
+    if [ "$i" -eq 5 ]; then
+        warn "Caddy CA not found after 5s — TLS may not be trusted"
+        warn "CA trigger curl result: ${CA_TRIGGERED}"
     else
         sleep 1
     fi
