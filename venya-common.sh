@@ -430,33 +430,35 @@ venya_verify_install() {
 # --- 17. Verify deployed code ---
 
 venya_verify_deployment() {
-    info "Verifying deployed code..."
-    local site_packages
-    site_packages=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
+    local tarball_type="${1:-}"
+    local python_bin="$INSTALL_DIR/.venv/bin/python3.14"
 
-    if [ -z "$site_packages" ]; then
-        error "Cannot find site-packages directory"
+    info "Verifying deployed code..."
+
+    if [ ! -x "$python_bin" ]; then
+        error "Cannot find Python executable at $python_bin"
         exit 1
     fi
 
     local errors=0
 
-    # Check that core package is deployed
-    if [ ! -d "$site_packages/core" ]; then
-        error "core package not found in site-packages"
+    # Check that core package is deployed (always required)
+    if ! sudo -H -u venya "$python_bin" -c "import core" 2>/dev/null; then
+        error "core package not importable"
         errors=$((errors + 1))
     fi
 
-    # Check that server package is deployed (core install only)
-    if [ -d "$INSTALL_DIR/packages/server" ]; then
-        if [ ! -d "$site_packages/server" ]; then
-            error "server package not found in site-packages"
+    # Check server package if this was a core install
+    if [ "$tarball_type" = "core" ]; then
+        if ! sudo -H -u venya "$python_bin" -c "import server" 2>/dev/null; then
+            error "server package not importable"
             errors=$((errors + 1))
         fi
 
         # Verify the deployed auth.py matches the source auth.py
         local source_auth="$INSTALL_DIR/packages/server/src/server/middleware/auth.py"
-        local deployed_auth="$site_packages/server/middleware/auth.py"
+        local deployed_auth
+        deployed_auth=$(sudo -H -u venya "$python_bin" -c "import server; import os; print(os.path.dirname(server.__file__))" 2>/dev/null)/middleware/auth.py
         if [ -f "$source_auth" ] && [ -f "$deployed_auth" ]; then
             if ! diff -q "$source_auth" "$deployed_auth" >/dev/null 2>&1; then
                 error "DEPLOYMENT MISMATCH: auth.py in site-packages differs from source"
@@ -467,10 +469,10 @@ venya_verify_deployment() {
         fi
     fi
 
-    # Check that executor package is deployed (executor install only)
-    if [ -d "$INSTALL_DIR/packages/executor" ]; then
-        if [ ! -d "$site_packages/executor" ]; then
-            error "executor package not found in site-packages"
+    # Check executor package if this was an executor install
+    if [ "$tarball_type" = "executor" ]; then
+        if ! sudo -H -u venya "$python_bin" -c "import executor" 2>/dev/null; then
+            error "executor package not importable"
             errors=$((errors + 1))
         fi
     fi

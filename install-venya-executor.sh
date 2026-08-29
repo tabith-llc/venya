@@ -86,7 +86,7 @@ venya_apply_code_fixes
 venya_create_venv "venya-executor-requirements.txt" "/home/venya/.cargo/bin"
 
 # --- Verify deployed code ---
-venya_verify_deployment
+venya_verify_deployment executor
 
 # --- Build Rust extension (executor-specific) ---
 info "Building Rust filter extension..."

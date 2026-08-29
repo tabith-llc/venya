@@ -102,7 +102,7 @@ venya_apply_code_fixes
 venya_create_venv "venya-core-requirements.txt"
 
 # --- Verify deployed code ---
-venya_verify_deployment
+venya_verify_deployment core
 
 # --- Create directories ---
 venya_create_directories
@@ -400,9 +400,32 @@ sudo cp /etc/venya/Caddyfile /etc/caddy/Caddyfile
 # --- Start Caddy and install CA trust (core-specific) ---
 info "Starting Caddy..."
 systemctl start caddy > /dev/null 2>&1 || true
+sleep 2  # Let Caddy bind sockets
+
+# Caddy generates its internal PKI CA lazily — on the first TLS handshake,
+# not at startup. We must trigger a TLS request to force CA generation,
+# then wait for the file to appear before copying it to the servable path.
+info "Triggering Caddy internal CA generation..."
+CADDY_ROOT_CA="${VENYA_CADDY_ROOT_CA:-/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt}"
+
+# The --insecure is correct here: we are triggering CA creation, not verifying trust.
+# This is the same TOFU principle as the executor CA fetch.
+curl -sf --insecure "https://localhost/api/v1/health" > /dev/null 2>&1 || true
+
+# Wait for the CA file to appear (generation is near-instant after handshake)
+for i in $(seq 1 10); do
+    if [ -f "$CADDY_ROOT_CA" ]; then
+        info "Caddy CA ready after ${i}s"
+        break
+    fi
+    if [ "$i" -eq 10 ]; then
+        warn "Caddy CA not found after 10s — TLS may not be trusted"
+    else
+        sleep 1
+    fi
+done
 
 info "Installing Caddy internal CA..."
-CADDY_ROOT_CA="${VENYA_CADDY_ROOT_CA:-/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt}"
 if [ -f "$CADDY_ROOT_CA" ]; then
     cp "$CADDY_ROOT_CA" /usr/local/share/ca-certificates/caddy-local-ca.crt
     chmod 644 /usr/local/share/ca-certificates/caddy-local-ca.crt
@@ -414,7 +437,7 @@ if [ -f "$CADDY_ROOT_CA" ]; then
     chmod 644 /var/www/.well-known/caddy-ca.crt
     info "Caddy CA served at /.well-known/caddy-ca.crt"
 else
-    warn "Caddy CA not found — TLS may not be trusted"
+    error "Caddy CA not available — executor bootstrap will fail"
 fi
 systemctl restart caddy > /dev/null 2>&1
 info "Caddy enabled and started"
