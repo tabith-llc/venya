@@ -148,8 +148,8 @@ class TestInitCore:
         assert resp.status_code == 409
         assert "already initialized" in resp.json()["detail"]
 
-    def test_init_resume_mode(self):
-        """Init on interrupted enrollment returns fresh challenge."""
+    def test_init_pending_enrollment_rejected(self):
+        """Init with pending enrollment returns 409, forces reset."""
         admin_role = _make_role()
         pending_user = _make_user("alice", enrolled_at=None)
 
@@ -185,10 +185,9 @@ class TestInitCore:
             "/api/v1/init",
             json={"user_id": "alice"},
         )
-        assert resp.status_code == 201
+        assert resp.status_code == 409
         data = resp.json()
-        assert data["user_id"] == "alice"
-        assert "challenge_id" in data
+        assert "pending enrollment exists" in data["detail"].lower()
 
 
 class TestInitComplete:
