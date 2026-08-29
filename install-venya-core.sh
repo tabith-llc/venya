@@ -262,99 +262,6 @@ chown venya:venya "$INSTALL_DIR/.env"
 
 info ".env written to $INSTALL_DIR/.env"
 
-# --- Write Nginx config (core-specific) ---
-mkdir -p /etc/venya/tls
-mkdir -p /etc/nginx/ssl
-
-# Copy Admin CA to Nginx-readable location (www-data can't traverse /var/lib/venya/ca)
-if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
-    cp /var/lib/venya/ca/admin-ca/admin-ca.crt /etc/nginx/ssl/client-ca.crt
-    chmod 644 /etc/nginx/ssl/client-ca.crt
-    ADMIN_CA_PATH="/etc/nginx/ssl/client-ca.crt"
-else
-    rm -f /etc/nginx/ssl/client-ca.crt
-    ADMIN_CA_PATH=""
-fi
-
-# Copy Venya CA to servable location
-cp /var/lib/venya/ca/ca.crt /var/www/.well-known/venya-ca.crt
-chmod 644 /var/www/.well-known/venya-ca.crt
-
-cat > /etc/nginx/sites-available/venya << EOF
-server {
-    listen 443 ssl;
-    server_name $CORE_HOSTNAME;
-
-    ssl_certificate /etc/venya/tls/server.crt;
-    ssl_certificate_key /etc/venya/tls/server.key;
-    ssl_client_certificate $ADMIN_CA_PATH;
-    ssl_verify_client optional;
-
-    location /.well-known/venya-ca.crt {
-        alias /var/www/.well-known/venya-ca.crt;
-        default_type application/x-x509-ca-cert;
-    }
-
-    location /api/v1/health {
-        proxy_pass http://127.0.0.1:8080;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header X-Client-Verified \$ssl_client_verify;
-        proxy_set_header X-Client-Subject \$ssl_client_s_dn;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
-}
-EOF
-
-# Enable site, disable default
-ln -sf /etc/nginx/sites-available/venya /etc/nginx/sites-enabled/venya
-rm -f /etc/nginx/sites-enabled/default
-
-info "Nginx config written (TLS mode: $TLS_MODE, admin mTLS: $([ "$ADMIN_MTLS_ENABLED" = "true" ] && echo enabled || echo disabled))"
-
-# --- Admin mTLS bootstrap instructions ---
-if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
-    echo ""
-    echo "==============================================================="
-    echo "  ADMIN mTLS IS ENABLED"
-    echo "==============================================================="
-    echo "  Your admin certificate is at:"
-    echo "    $ADMIN_CERT_DIR/admin.crt"
-    echo "    $ADMIN_CERT_DIR/admin.key"
-    echo ""
-    echo "  Copy these to your workstation:"
-    echo "    scp root@${CORE_HOSTNAME}:$ADMIN_CERT_DIR/admin.crt ~/venya-admin.crt"
-    echo "    scp root@${CORE_HOSTNAME}:$ADMIN_CERT_DIR/admin.key ~/venya-admin.key"
-    echo ""
-    echo "  Admin CA passphrase saved to: $INSTALL_DIR/.env"
-    echo "  Read it with: cat $INSTALL_DIR/.env"
-    echo ""
-    echo "  Until you do, admin endpoints will return 403."
-    echo "  To disable: set VENYA_ADMIN_MTLS_ENABLED=false and reinstall."
-    echo "==============================================================="
-    echo ""
-fi
-
-# --- Executor enrollment token instructions ---
-echo ""
-echo "==============================================================="
-echo "  EXECUTOR ENROLLMENT"
-echo "==============================================================="
-echo ""
-echo "To register an executor, run on this core server:"
-echo ""
-echo "  sudo -u venya PATH='$INSTALL_DIR/.venv/bin:\$PATH' \\"
-echo "    $INSTALL_DIR/.venv/bin/venya admin executor-enroll <executor-id>"
-echo ""
-echo "Then pass the printed token to the executor operator."
-echo "The token is consumed on first use and cannot be reused."
-echo ""
-echo "==============================================================="
-echo ""
-
 # --- Generate Venya CA (Python) and sign server cert (openssl CLI) ---
 info "Generating Venya CA and signing server TLS certificate..."
 mkdir -p /etc/venya/tls
@@ -439,6 +346,94 @@ mkdir -p /var/www/.well-known
 cp /var/lib/venya/ca/ca.crt /var/www/.well-known/venya-ca.crt
 chmod 644 /var/www/.well-known/venya-ca.crt
 info "CA cert served at /.well-known/venya-ca.crt"
+
+# --- Write Nginx config (core-specific) ---
+mkdir -p /etc/nginx/ssl
+
+# Copy Admin CA to Nginx-readable location (www-data can't traverse /var/lib/venya/ca)
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    cp /var/lib/venya/ca/admin-ca/admin-ca.crt /etc/nginx/ssl/client-ca.crt
+    chmod 644 /etc/nginx/ssl/client-ca.crt
+    ADMIN_CA_PATH="/etc/nginx/ssl/client-ca.crt"
+else
+    rm -f /etc/nginx/ssl/client-ca.crt
+    ADMIN_CA_PATH=""
+fi
+
+cat > /etc/nginx/sites-available/venya << EOF
+server {
+    listen 443 ssl;
+    server_name $CORE_HOSTNAME;
+
+    ssl_certificate /etc/venya/tls/server.crt;
+    ssl_certificate_key /etc/venya/tls/server.key;
+    ssl_client_certificate $ADMIN_CA_PATH;
+    ssl_verify_client optional;
+
+    location /.well-known/venya-ca.crt {
+        alias /var/www/.well-known/venya-ca.crt;
+        default_type application/x-x509-ca-cert;
+    }
+
+    location /api/v1/health {
+        proxy_pass http://127.0.0.1:8080;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header X-Client-Verified \$ssl_client_verify;
+        proxy_set_header X-Client-Subject \$ssl_client_s_dn;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+EOF
+
+# Enable site, disable default
+ln -sf /etc/nginx/sites-available/venya /etc/nginx/sites-enabled/venya
+rm -f /etc/nginx/sites-enabled/default
+
+info "Nginx config written (TLS mode: $TLS_MODE, admin mTLS: $([ "$ADMIN_MTLS_ENABLED" = "true" ] && echo enabled || echo disabled))"
+
+# --- Admin mTLS bootstrap instructions ---
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    echo ""
+    echo "==============================================================="
+    echo "  ADMIN mTLS IS ENABLED"
+    echo "==============================================================="
+    echo "  Your admin certificate is at:"
+    echo "    $ADMIN_CERT_DIR/admin.crt"
+    echo "    $ADMIN_CERT_DIR/admin.key"
+    echo ""
+    echo "  Copy these to your workstation:"
+    echo "    scp root@${CORE_HOSTNAME}:$ADMIN_CERT_DIR/admin.crt ~/venya-admin.crt"
+    echo "    scp root@${CORE_HOSTNAME}:$ADMIN_CERT_DIR/admin.key ~/venya-admin.key"
+    echo ""
+    echo "  Admin CA passphrase saved to: $INSTALL_DIR/.env"
+    echo "  Read it with: cat $INSTALL_DIR/.env"
+    echo ""
+    echo "  Until you do, admin endpoints will return 403."
+    echo "  To disable: set VENYA_ADMIN_MTLS_ENABLED=false and reinstall."
+    echo "==============================================================="
+    echo ""
+fi
+
+# --- Executor enrollment token instructions ---
+echo ""
+echo "==============================================================="
+echo "  EXECUTOR ENROLLMENT"
+echo "==============================================================="
+echo ""
+echo "To register an executor, run on this core server:"
+echo ""
+echo "  sudo -u venya PATH='$INSTALL_DIR/.venv/bin:\$PATH' \\"
+echo "    $INSTALL_DIR/.venv/bin/venya admin executor-enroll <executor-id>"
+echo ""
+echo "Then pass the printed token to the executor operator."
+echo "The token is consumed on first use and cannot be reused."
+echo ""
+echo "==============================================================="
+echo ""
 
 # Start Nginx
 info "Starting Nginx..."
