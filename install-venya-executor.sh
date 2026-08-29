@@ -216,22 +216,37 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
             warn "Core health check failed — proceeding with registration anyway"
         fi
 
-        # Run registration
+        # Run registration — do NOT use || true, failures must abort install
         REG_OUTPUT=$("$INSTALL_DIR/.venv/bin/venya" exec register \
             --executor-id "$EXECUTOR_ID" \
             --core-url "$SERVER_URL" \
             --output-dir /etc/venya/executor \
             --enrollment-token "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" \
-            2>&1) || true
+            2>&1)
+        REG_EXIT=$?
         echo "$REG_OUTPUT"
 
-        # Check if certs were created
-        if [ -f /etc/venya/executor/executor.crt ] && [ -f /etc/venya/executor/executor.key ]; then
-            info "mTLS certificates generated successfully"
-        else
-            warn "Certificate registration completed but cert files not found"
-            warn "Check output above for errors"
+        if [ "$REG_EXIT" -ne 0 ]; then
+            error "Executor registration failed (exit $REG_EXIT)"
+            error "Output: $REG_OUTPUT"
+            error "Check that VENYA_EXECUTOR_ENROLLMENT_TOKEN is valid and core is reachable"
+            exit 1
         fi
+
+        # Verify certs were actually written (catches silent partial failures)
+        # Exit code 0 from venya exec register does not guarantee cert files were written
+        # A bug, permission issue, or partial network failure could cause CLI to exit 0
+        # without writing certs. Using -s (exists and non-empty) catches empty files.
+        CERT_DIR="/etc/venya/executor"
+        for cert_file in "$CERT_DIR/executor.crt" "$CERT_DIR/executor.key"; do
+            if [ ! -s "$cert_file" ]; then
+                error "Registration reported success but $cert_file is missing or empty"
+                error "This indicates a bug in venya exec register or a permission issue"
+                exit 1
+            fi
+        done
+
+        info "Executor registered and mTLS certificates verified"
     else
         warn "Caddy CA not installed — skipping cert registration"
         echo ""
