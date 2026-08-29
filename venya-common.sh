@@ -470,9 +470,17 @@ venya_verify_deployment() {
     fi
 
     # Check executor package if this was an executor install
+    # Note: executor has a Rust extension (venya_filter) that is not built at
+    # verification time — the Rust build happens after this step in the installer.
+    # So we check for package files in site-packages instead of trying to import.
     if [ "$tarball_type" = "executor" ]; then
-        if ! sudo -H -u venya "$python_bin" -c "import executor" 2>/dev/null; then
-            error "executor package not importable"
+        local site_packages
+        site_packages=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
+        if [ -z "$site_packages" ]; then
+            error "Cannot find site-packages directory"
+            errors=$((errors + 1))
+        elif [ ! -d "$site_packages/executor" ]; then
+            error "executor package not found in site-packages"
             errors=$((errors + 1))
         fi
     fi
