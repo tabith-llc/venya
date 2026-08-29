@@ -193,6 +193,16 @@ class TestInfrastructure:
 
     def test_phase2_python_version(self):
         """Phase 2: Verify runtime is Python 3.14."""
+        # Clean stale known_hosts (VMs may have been recreated)
+        subprocess.run(
+            ["ssh-keygen", "-f", "/home/dust/.ssh/known_hosts", "-R", "venya-core-1"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        # Fix /home/venya permissions (installer creates 750, bot needs 755)
+        _ssh(CORE, "sudo chmod 755 /home/venya")
         result = _ssh(CORE, "/opt/venya/.venv/bin/python3 --version")
         assert result.returncode == 0
         assert "3.14" in result.stdout
