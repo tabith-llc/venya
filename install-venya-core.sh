@@ -5,9 +5,9 @@ set -euo pipefail
 # Venya Core Installer
 #
 # Installs Venya Core on a fresh VM:
-#   - venya user, system packages, Caddy, PostgreSQL
+#   - venya user, system packages, Nginx, PostgreSQL
 #   - Python venv, server + core packages
-#   - server.toml, .env, Caddyfile
+#   - server.toml, .env, Nginx site config
 #   - venya-core.service
 #
 # Environment variables:
@@ -16,8 +16,8 @@ set -euo pipefail
 #   VENYA_DB_PASSWORD   - PostgreSQL venya user password (prompts if unset)
 #   VENYA_DB_PASSPHRASE - Server passphrase (default: venya_test_passphrase_2024)
 #   VENYA_TARBALL       - URL of the tarball to install (auto-detected if on same host)
-#   CORE_HOSTNAME      - Hostname for TLS/Caddy (default: localhost)
-#   TLS_MODE            - Caddy TLS mode (default: internal)
+#   CORE_HOSTNAME      - Hostname for TLS/Nginx (default: localhost)
+#   TLS_MODE            - Nginx TLS mode (default: internal)
 ###############################################################################
 
 # --- Defaults ---
@@ -62,27 +62,13 @@ venya_create_user
 # --- Install system packages ---
 venya_install_system_pkgs curl sudo
 
-# --- Install Caddy (core-specific) ---
-info "Installing Caddy reverse proxy..."
-if ! command -v caddy &>/dev/null; then
-    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl > /dev/null 2>&1
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-    # Detect OS for Cloudsmith repo URL — config.deb.txt accepts ?distro=&codename= params
-    _DISTRO="$(. /etc/os-release && echo "${ID:-debian}")"
-    _CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
-    if [ -z "$_CODENAME" ]; then
-        _CODENAME="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-}")"
-    fi
-    if [ -n "$_CODENAME" ]; then
-        curl -1sLf "https://dl.cloudsmith.io/public/caddy/stable/config.deb.txt?distro=$_DISTRO&codename=$_CODENAME&component=main" | tee /etc/apt/sources.list.d/caddy-stable.list
-    else
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/config.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-    fi
-    apt-get update -qq > /dev/null 2>&1
-    apt-get install -y -qq caddy > /dev/null 2>&1
-    info "Caddy installed: $(caddy version)"
+# --- Install Nginx (core-specific) ---
+info "Installing Nginx reverse proxy..."
+if ! command -v nginx &>/dev/null; then
+    apt-get install -y -qq nginx > /dev/null 2>&1
+    info "Nginx installed: $(nginx -v 2>&1)"
 else
-    info "Caddy already installed: $(caddy version)"
+    info "Nginx already installed: $(nginx -v 2>&1)"
 fi
 
 # --- Install uv for venya user ---
@@ -161,12 +147,6 @@ print('Admin cert generated for $ADMIN_IDENTITY')
 "
 
     info "Admin CA and first admin cert generated for $ADMIN_IDENTITY"
-
-    # Copy admin CA cert to caddy-readable location for trust_pool
-    mkdir -p /etc/caddy/certs
-    cp "$ADMIN_CA_DIR/admin-ca.crt" /etc/caddy/certs/admin-ca.crt
-    chmod 644 /etc/caddy/certs/admin-ca.crt
-    chown caddy:caddy /etc/caddy/certs/admin-ca.crt
 
 fi
 
@@ -282,85 +262,43 @@ chown venya:venya "$INSTALL_DIR/.env"
 
 info ".env written to $INSTALL_DIR/.env"
 
-# --- Write Caddyfile (core-specific) ---
-if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
-    cat > /etc/venya/Caddyfile << EOF
-{
-    auto_https disable_certs
-}
+# --- Write Nginx config (core-specific) ---
+mkdir -p /etc/venya/tls
 
-$CORE_HOSTNAME {
-    tls $TLS_MODE {
-        client_auth {
-            mode verify_if_given
-            trust_pool file /etc/caddy/certs/admin-ca.crt
-        }
+cat > /etc/nginx/sites-available/venya << EOF
+server {
+    listen 443 ssl;
+    server_name $CORE_HOSTNAME;
+
+    ssl_certificate /etc/venya/tls/server.crt;
+    ssl_certificate_key /etc/venya/tls/server.key;
+    ssl_client_certificate /etc/venya/ca/admin-ca.crt;
+    ssl_verify_client optional;
+
+    location /.well-known/venya-ca.crt {
+        alias /etc/venya/ca/venya-ca.crt;
+        default_type application/x-x509-ca-cert;
     }
 
-    @admin path /api/v1/admin/*
-    handle @admin {
-        @verified expression {tls_client_subject} != null
-        handle @verified {
-            reverse_proxy 127.0.0.1:8080 {
-                header_up X-Client-Verified "true"
-                header_up X-Client-Subject {tls_client_subject}
-            }
-        }
-        handle {
-            respond "Admin access requires valid client certificate" 403
-        }
+    location /api/v1/health {
+        proxy_pass http://127.0.0.1:8000;
     }
 
-    # Serve Caddy CA cert publicly for executor bootstrap (TOFU)
-    handle /.well-known/caddy-ca.crt {
-        root * /var/www
-        file_server
-    }
-
-    handle {
-        reverse_proxy 127.0.0.1:8080 {
-            header_up X-Real-IP {remote_host}
-            header_up X-Forwarded-For {remote_host}
-        }
-    }
-
-    header {
-        Strict-Transport-Security "max-age=31536000"
-        X-Content-Type-Options nosniff
-        X-Frame-Options DENY
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header X-Client-Verified \$ssl_client_verify;
+        proxy_set_header X-Client-Subject \$ssl_client_s_dn;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
     }
 }
 EOF
-    info "Caddyfile written (TLS mode: $TLS_MODE, admin mTLS: enabled)"
-else
-    cat > /etc/venya/Caddyfile << EOF
-{
-    auto_https disable_certs
-}
 
-$CORE_HOSTNAME {
-    reverse_proxy 127.0.0.1:8080 {
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-    }
+# Enable site, disable default
+ln -sf /etc/nginx/sites-available/venya /etc/nginx/sites-enabled/venya
+rm -f /etc/nginx/sites-enabled/default
 
-    tls $TLS_MODE
-
-    # Serve Caddy CA cert publicly for executor bootstrap (TOFU)
-    handle /.well-known/caddy-ca.crt {
-        root * /var/www
-        file_server
-    }
-
-    header {
-        Strict-Transport-Security "max-age=31536000"
-        X-Content-Type-Options nosniff
-        X-Frame-Options DENY
-    }
-}
-EOF
-    info "Caddyfile written (TLS mode: $TLS_MODE, admin mTLS: disabled)"
-fi
+info "Nginx config written (TLS mode: $TLS_MODE, admin mTLS: $([ "$ADMIN_MTLS_ENABLED" = "true" ] && echo enabled || echo disabled))"
 
 # --- Admin mTLS bootstrap instructions ---
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
@@ -402,62 +340,67 @@ echo ""
 echo "==============================================================="
 echo ""
 
-# Copy Caddyfile to Caddy's default location
-sudo cp /etc/venya/Caddyfile /etc/caddy/Caddyfile
+# --- Sign server cert with Venya CA and start Nginx ---
+info "Signing server TLS certificate with Venya CA..."
+sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" \
+    python -c "
+from pathlib import Path
+from server.ca import CAManager
+from server.config import CASecurityConfig
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
+from cryptography.x509.oid import NameOID
+from datetime import UTC, datetime, timedelta
 
-# --- Start Caddy and install CA trust (core-specific) ---
-info "Starting Caddy..."
-systemctl start caddy > /dev/null 2>&1 || true
+cm = CAManager(Path('/var/lib/venya/ca'), CASecurityConfig())
+ca_cert, ca_key = cm.load_ca()
 
-# Caddy generates its internal PKI CA lazily — on the first TLS handshake,
-# not at startup. We must trigger a TLS request to force CA generation,
-# then wait for the file to appear before copying it to the servable path.
-info "Triggering Caddy internal CA generation..."
-CADDY_ROOT_CA="${VENYA_CADDY_ROOT_CA:-/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt}"
+# Generate server key
+server_key = ec.generate_private_key(ec.SECP256R1())
+key_path = Path('/etc/venya/tls/server.key')
+cert_path = Path('/etc/venya/tls/server.crt')
+key_pem = server_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+key_path.write_bytes(key_pem)
+key_path.chmod(0o600)
 
-# Use the configured hostname (already in /etc/hosts), not localhost.
-# Caddy matches requests against site blocks by hostname — localhost won't
-# match the venya-core-1 site block and may not trigger PKI initialization.
-CA_TRIGGERED=false
-for i in $(seq 1 15); do
-    if curl -sf --insecure "https://${CORE_HOSTNAME}/api/v1/health" > /dev/null 2>&1; then
-        CA_TRIGGERED=true
-        info "Caddy responded after ${i}s"
-        break
-    fi
-    sleep 1
-done
+# Sign server cert with Venya CA
+now = datetime.now(UTC)
+subject = x509.Name([
+    x509.NameAttribute(NameOID.ORGANIZATION_NAME, 'Venya'),
+    x509.NameAttribute(NameOID.COMMON_NAME, '$CORE_HOSTNAME'),
+])
+builder = (x509.CertificateBuilder()
+    .subject_name(subject).issuer_name(ca_cert.subject)
+    .public_key(server_key.public_key())
+    .serial_number(x509.random_serial_number())
+    .not_valid_before(now)
+    .not_valid_after(now + timedelta(days=365))
+    .add_extension(x509.SubjectAlternativeName([x509.DNSName('$CORE_HOSTNAME')]), critical=False))
+server_cert = builder.sign(ca_cert, ca_key, hashes.SHA256())
+cert_path.write_bytes(server_cert.public_bytes(serialization.Encoding.PEM))
+cert_path.chmod(0o644)
+print('Server cert signed and written')
+"
 
-# Now wait for the CA file to appear (near-instant after successful handshake)
-for i in $(seq 1 5); do
-    if [ -f "$CADDY_ROOT_CA" ]; then
-        info "Caddy CA ready after ${i}s"
-        break
-    fi
-    if [ "$i" -eq 5 ]; then
-        warn "Caddy CA not found after 5s — TLS may not be trusted"
-        warn "CA trigger curl result: ${CA_TRIGGERED}"
-    else
-        sleep 1
-    fi
-done
+# Install Venya CA into system trust store
+cp /var/lib/venya/ca/ca.crt /usr/local/share/ca-certificates/venya-local-ca.crt
+chmod 644 /usr/local/share/ca-certificates/venya-local-ca.crt
+update-ca-certificates > /dev/null 2>&1
+info "Venya CA installed to system trust store"
 
-info "Installing Caddy internal CA..."
-if [ -f "$CADDY_ROOT_CA" ]; then
-    cp "$CADDY_ROOT_CA" /usr/local/share/ca-certificates/caddy-local-ca.crt
-    chmod 644 /usr/local/share/ca-certificates/caddy-local-ca.crt
-    update-ca-certificates > /dev/null 2>&1
-    info "Caddy root CA installed to system trust store"
-    # Serve CA cert publicly for executor bootstrap (TOFU)
-    mkdir -p /var/www/.well-known
-    cp "$CADDY_ROOT_CA" /var/www/.well-known/caddy-ca.crt
-    chmod 644 /var/www/.well-known/caddy-ca.crt
-    info "Caddy CA served at /.well-known/caddy-ca.crt"
-else
-    error "Caddy CA not available — executor bootstrap will fail"
-fi
-systemctl restart caddy > /dev/null 2>&1
-info "Caddy enabled and started"
+# Copy CA cert to servable path for executor bootstrap
+mkdir -p /var/www/.well-known
+cp /var/lib/venya/ca/ca.crt /var/www/.well-known/venya-ca.crt
+chmod 644 /var/www/.well-known/venya-ca.crt
+info "CA cert served at /.well-known/venya-ca.crt"
+
+# Start Nginx
+info "Starting Nginx..."
+systemctl start nginx > /dev/null 2>&1 || true
+systemctl enable nginx > /dev/null 2>&1
+info "Nginx enabled and started"
 
 # --- Run database migrations (core-specific) ---
 info "Running database migrations..."
@@ -489,7 +432,7 @@ venya_service_retry venya-core
 # --- Verification ---
 venya_verify_install \
     /etc/venya/server.toml \
-    /etc/venya/Caddyfile \
+    /etc/nginx/sites-available/venya \
     /etc/systemd/system/venya-core.service
 
 # --- Summary ---
@@ -501,8 +444,8 @@ echo ""
 echo "Manage the core server:"
 echo "  systemctl start|stop|restart|status venya-core"
 echo ""
-echo "Caddy reverse proxy:"
-echo "  Config: /etc/venya/Caddyfile"
+echo "Nginx reverse proxy:"
+echo "  Config: /etc/nginx/sites-available/venya"
 echo "  TLS mode: $TLS_MODE"
 echo "  Access: https://$CORE_HOSTNAME"
 echo ""

@@ -505,7 +505,7 @@ class TestAdminMTLSMiddleware:
         # Send X-Client-Verified but NOT X-Client-Subject
         resp = client.get(
             "/api/v1/admin/test",
-            headers={"X-Client-Verified": "true"},
+            headers={"X-Client-Verified": "SUCCESS"},
         )
         assert resp.status_code == 403
         assert "client certificate" in resp.json()["detail"].lower()
@@ -541,7 +541,7 @@ class TestAdminMTLSMiddleware:
             "/api/v1/admin/test",
             headers={
                 "X-Client-Subject": subject_dn,
-                "X-Client-Verified": "true",
+                "X-Client-Verified": "SUCCESS",
             },
         )
         # mTLS passes → middleware sets auth_user → route handler returns 200
@@ -549,7 +549,7 @@ class TestAdminMTLSMiddleware:
         assert resp.json()["user"]["caller"] == "admin"
 
     def test_expired_cert_rejected(self, admin_ca_dir, admin_ca_security):
-        """Expired cert is rejected at TLS layer by Caddy; server no longer checks expiration.
+        """Expired cert is rejected at TLS layer by Nginx; server no longer checks expiration.
         This test verifies that a known identity with valid headers passes."""
         os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
@@ -566,7 +566,7 @@ class TestAdminMTLSMiddleware:
             "/api/v1/admin/test",
             headers={
                 "X-Client-Subject": subject_dn,
-                "X-Client-Verified": "true",
+                "X-Client-Verified": "SUCCESS",
             },
         )
         # mTLS passes → middleware sets auth_user → route handler returns 200
@@ -594,7 +594,7 @@ class TestAdminMTLSMiddleware:
             "/api/v1/admin/test",
             headers={
                 "X-Client-Subject": subject_dn,
-                "X-Client-Verified": "true",
+                "X-Client-Verified": "SUCCESS",
             },
         )
         assert resp.status_code == 403
@@ -650,7 +650,7 @@ class TestAdminMTLSMiddleware:
             "/api/v1/admin/test",
             headers={
                 "X-Client-Subject": subject_dn,
-                "X-Client-Verified": "true",
+                "X-Client-Verified": "SUCCESS",
             },
         )
         # Should pass because CN = "dust@montana" matches known_admin_ids
@@ -673,7 +673,7 @@ class TestAdminMTLSMiddleware:
             "/api/v1/admin/test",
             headers={
                 "X-Client-Subject": subject_dn,
-                "X-Client-Verified": "true",
+                "X-Client-Verified": "SUCCESS",
             },
         )
         assert resp.status_code == 403
@@ -1098,7 +1098,7 @@ class TestAdminMTLSConcurrency:
                 "/api/v1/admin/test",
                 headers={
                     "X-Client-Subject": subject_dn,
-                    "X-Client-Verified": "true",
+                    "X-Client-Verified": "SUCCESS",
                 },
             )
             return resp.status_code
@@ -1143,7 +1143,7 @@ class TestAdminCARotation:
             "/api/v1/admin/test",
             headers={
                 "X-Client-Subject": "CN=dust@montana,OU=Admin,O=Venya",
-                "X-Client-Verified": "true",
+                "X-Client-Verified": "SUCCESS",
             },
         )
         # mTLS passes → middleware sets auth_user → route handler returns 200
@@ -1162,7 +1162,7 @@ class TestAdminCARotation:
             "/api/v1/admin/test",
             headers={
                 "X-Client-Subject": "CN=unknown@attacker.com,OU=Admin,O=Venya",
-                "X-Client-Verified": "true",
+                "X-Client-Verified": "SUCCESS",
             },
         )
         assert resp.status_code == 403

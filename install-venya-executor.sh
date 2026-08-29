@@ -19,7 +19,7 @@ set -euo pipefail
 #   VENYA_SERVER_URL               - Core server URL (required)
 #   VENYA_CORE_HOSTNAME    - Core hostname for /etc/hosts resolution (default: venya-core-1)
 #   VENYA_CORE_IP          - Core IP for /etc/hosts resolution (default: 10.27.28.11)
-#   VENYA_CADDY_CA_FILE    - Path to pre-copied Caddy CA cert (offline/air-gapped deployments)
+#   VENYA_VENYA_CA_FILE    - Path to pre-copied Venya CA cert (offline/air-gapped deployments)
 #   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
 ###############################################################################
 
@@ -151,25 +151,25 @@ else
     fi
 fi
 
-# --- Install Caddy CA into system trust store (for TLS verification) ---
+# --- Install Venya CA into system trust store (for TLS verification) ---
 # TOFU bootstrap: --insecure is the only insecure connection. This fetches a
 # public root CA cert — explicitly sanctioned by the Production Mandate.
-CADDY_CA_URL="${SERVER_URL%/}/.well-known/caddy-ca.crt"
-CA_BUNDLE_PATH="/usr/local/share/ca-certificates/caddy-local-ca.crt"
+VENYA_CA_URL="${SERVER_URL%/}/.well-known/venya-ca.crt"
+CA_BUNDLE_PATH="/usr/local/share/ca-certificates/venya-local-ca.crt"
 CA_INSTALLED=false
-if [ -n "${VENYA_CADDY_CA_FILE:-}" ] && [ -f "$VENYA_CADDY_CA_FILE" ]; then
-    cp "$VENYA_CADDY_CA_FILE" "$CA_BUNDLE_PATH"
+if [ -n "${VENYA_VENYA_CA_FILE:-}" ] && [ -f "$VENYA_VENYA_CA_FILE" ]; then
+    cp "$VENYA_VENYA_CA_FILE" "$CA_BUNDLE_PATH"
     chmod 644 "$CA_BUNDLE_PATH"
     update-ca-certificates > /dev/null 2>&1
     CA_INSTALLED=true
-    info "Caddy CA installed from $VENYA_CADDY_CA_FILE"
+    info "Venya CA installed from $VENYA_VENYA_CA_FILE"
 else
     for i in $(seq 1 5); do
-        if curl -sf --insecure "$CADDY_CA_URL" -o "$CA_BUNDLE_PATH" 2>/dev/null; then
+        if curl -sf --insecure "$VENYA_CA_URL" -o "$CA_BUNDLE_PATH" 2>/dev/null; then
             chmod 644 "$CA_BUNDLE_PATH"
             update-ca-certificates > /dev/null 2>&1
             CA_INSTALLED=true
-            info "Caddy CA installed to system trust store from $CADDY_CA_URL"
+            info "Venya CA installed to system trust store from $VENYA_CA_URL"
             break
         fi
         if [ "$i" -lt 5 ]; then
@@ -178,7 +178,7 @@ else
         fi
     done
     if [ "$CA_INSTALLED" = false ]; then
-        warn "Could not fetch Caddy CA from $CADDY_CA_URL after 5 attempts — TLS verification may fail"
+        warn "Could not fetch Venya CA from $VENYA_CA_URL after 5 attempts — TLS verification may fail"
         warn "Pre-copy the CA cert to $CA_BUNDLE_PATH and rerun"
     fi
 fi
@@ -248,7 +248,7 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
 
         info "Executor registered and mTLS certificates verified"
     else
-        warn "Caddy CA not installed — skipping cert registration"
+        warn "Venya CA not installed — skipping cert registration"
         echo ""
         echo "  Run this after core is reachable:"
         echo "    $INSTALL_DIR/.venv/bin/venya exec register \\"

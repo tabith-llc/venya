@@ -690,17 +690,12 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
             token_path.write_text(token)
 
             core_ca_path = output_path / "core-server-ca.crt"
-            caddy_root_ca = Path("/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt")
-            if caddy_root_ca.exists():
-                core_ca_path.write_bytes(caddy_root_ca.read_bytes())
+            venya_ca_path = Path("/var/lib/venya/ca/ca.crt")
+            if venya_ca_path.exists():
+                core_ca_path.write_bytes(venya_ca_path.read_bytes())
                 core_ca_written = True
             else:
-                venya_ca_path = Path("/var/lib/venya/certs/core-server-ca.crt")
-                if venya_ca_path.exists():
-                    core_ca_path.write_bytes(venya_ca_path.read_bytes())
-                    core_ca_written = True
-                else:
-                    core_ca_written = False
+                core_ca_written = False
 
             admin_ca_path = output_path / "admin-ca.crt"
             admin_ca_dir = Path("/var/lib/venya/ca/admin-ca")
