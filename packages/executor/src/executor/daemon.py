@@ -145,11 +145,24 @@ class CertificateManager:
                 response = client.post(url, json=payload)
             response.raise_for_status()
         except httpx2.ConnectError as e:
-            if tls_verify:
+            # Log full traceback in debug mode for deep diagnostics
+            if os.environ.get("VENYA_DEBUG"):
+                import traceback
+
+                logger.error("Full exception chain:\n%s", traceback.format_exc())
+
+            # Determine if this is a TLS failure by inspecting the exception chain
+            # httpx2 wraps ssl.SSLError as ConnectError — check the message for TLS keywords
+            err_str = str(e).lower()
+            if any(t in err_str for t in ("ssl", "certificate", "tls", "verif")):
                 raise RuntimeError(
-                    "Registration failed. Verify server CA is trusted. " "In development, export VENYA_TLS_VERIFY=false"
+                    f"Registration failed: TLS verification error — {e}. "
+                    "Verify server CA is trusted. In development, export VENYA_TLS_VERIFY=false."
                 ) from e
-            raise
+            raise RuntimeError(
+                f"Registration failed: cannot reach server — {e}. "
+                "Check: DNS resolution, network connectivity, and core service status."
+            ) from e
 
         data = response.json()
 
