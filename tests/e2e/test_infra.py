@@ -199,7 +199,7 @@ class TestInfrastructure:
 
     def test_phase2_admin_mtls_assets(self):
         """Phase 2: Verify admin mTLS assets exist."""
-        result = _ssh(CORE, "ls -la /etc/venya/admin/admin.crt /etc/venya/admin/admin.key")
+        result = _ssh(CORE, "sudo ls -la /etc/venya/admin/admin.crt /etc/venya/admin/admin.key")
         assert result.returncode == 0
 
     def test_phase2_admin_mtls_positive(self):
