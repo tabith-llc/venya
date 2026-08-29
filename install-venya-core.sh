@@ -446,8 +446,8 @@ echo ""
 
 # Start Nginx
 info "Starting Nginx..."
-systemctl start nginx > /dev/null 2>&1 || true
 systemctl enable nginx > /dev/null 2>&1
+systemctl restart nginx > /dev/null 2>&1 || true
 info "Nginx enabled and started"
 
 # --- Run database migrations (core-specific) ---
