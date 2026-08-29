@@ -194,6 +194,18 @@ class AdminEnrollExecutorResponse(BaseModel):
     expires_at: str
 
 
+class AdminExecutorInfo(BaseModel):
+    executor_id: str
+    serial_number: str
+    fingerprint: str
+    not_before: datetime
+    not_after: datetime
+
+
+class AdminExecutorListResponse(BaseModel):
+    executors: list[AdminExecutorInfo]
+
+
 # --- Helper functions ---
 
 
@@ -934,6 +946,51 @@ async def admin_key_rotation_job_rollback(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+
+
+@router.get(
+    "/admin/executors",
+    response_model=AdminExecutorListResponse,
+)
+async def admin_list_executors(
+    _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminExecutorListResponse:
+    """List all registered executors with their current certificates (admin only).
+
+    Returns the latest non-revoked certificate for each executor.
+    Executors are deduplicated by executor_id — only the most recent
+    active cert per executor is returned.
+    """
+    from core.iam.models import ExecutorCert, ExecutorCertRevocation
+
+    revoked_serials = {r.serial_number for r in db.query(ExecutorCertRevocation.serial_number).all()}
+
+    certs = (
+        db.query(ExecutorCert)
+        .filter(~ExecutorCert.serial_number.in_(revoked_serials))
+        .order_by(ExecutorCert.created_at.desc())
+        .all()
+    )
+
+    # Deduplicate: keep latest cert per executor_id
+    latest: dict[str, ExecutorCert] = {}
+    for cert in certs:
+        if cert.executor_id not in latest:
+            latest[cert.executor_id] = cert
+
+    result = [
+        {
+            "executor_id": c.executor_id,
+            "serial_number": c.serial_number,
+            "fingerprint": c.fingerprint,
+            "not_before": c.not_before,
+            "not_after": c.not_after,
+        }
+        for c in latest.values()
+    ]
+
+    return AdminExecutorListResponse(executors=result)
 
 
 @router.post(
