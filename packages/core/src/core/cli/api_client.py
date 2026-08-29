@@ -433,9 +433,13 @@ class APIClient:
                 error_msg = str(e)
             raise APIClientError(error_msg)
         except httpx2.ConnectError as e:
-            if tls_verify:
+            # Determine if this is a TLS failure by inspecting the exception message
+            # httpx2 wraps ssl.SSLError as ConnectError — check the message for TLS keywords
+            err_str = str(e).lower()
+            if any(t in err_str for t in ("ssl", "certificate", "tls", "verif")):
                 raise APIClientError(
-                    "Registration failed. Verify server CA is trusted. " "In development, export VENYA_TLS_VERIFY=false"
+                    f"Registration failed: TLS verification error — {e}. "
+                    "Verify server CA is trusted. In development, export VENYA_TLS_VERIFY=false."
                 ) from e
             raise APIClientError(f"Connection failed: {e}")
         except httpx2.RequestError as e:
