@@ -13,6 +13,7 @@ Runs from montana (10.27.27.35). Requires SSH access to wyoming (hypervisor).
 
 import os
 import subprocess
+import time
 
 # SSH to wyoming (hypervisor)
 WYOMING = "opencode@wyoming"
@@ -175,13 +176,18 @@ class TestInfrastructure:
 
     def test_phase2_core_health(self):
         """Phase 2: Verify core health."""
-        result = subprocess.run(
-            ["curl", "-sk", "https://venya-core-1/api/v1/health"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
+        # Retry loop — Nginx may return 502 before backend is ready
+        for attempt in range(6):
+            result = subprocess.run(
+                ["curl", "-sk", "https://venya-core-1/api/v1/health"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0 and ('"status":"ok"' in result.stdout or '"status": "ok"' in result.stdout):
+                break
+            time.sleep(5)
         assert result.returncode == 0
         assert '"status":"ok"' in result.stdout or '"status": "ok"' in result.stdout
 
