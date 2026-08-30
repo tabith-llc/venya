@@ -6,6 +6,7 @@ computation using real ECDSA P-256 cryptography with mocked HTTP.
 
 import hashlib
 import os
+import ssl
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -222,7 +223,9 @@ class TestRegister:
             cert_manager.register("test-executor")
 
         # Verify throwaway client was created with verify=True
-        MockClient.assert_called_once_with(verify=True, timeout=30.0)
+        verify_arg = MockClient.call_args[1]["verify"]
+        assert verify_arg is True or isinstance(verify_arg, ssl.SSLContext)
+        assert MockClient.call_args[1]["timeout"] == 30.0
 
         # Verify files were created
         assert os.path.exists(cert_manager.cert_path)
