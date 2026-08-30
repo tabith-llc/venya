@@ -2,14 +2,15 @@
 
 from .bundles import SecretBundle
 from .executor import CommandResult, Executor
-from .strategies import InjectionResult, InjectionStrategy, MemfdStrategy, create_strategy
+from .strategies import InjectionResult, InjectionStrategy, create_strategy
+from .strategies.sbx_strategy import SbxStrategy
 
 __all__ = [
     "CommandResult",
     "Executor",
     "InjectionResult",
     "InjectionStrategy",
-    "MemfdStrategy",
+    "SbxStrategy",
     "SecretBundle",
     "create_strategy",
 ]

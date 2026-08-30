@@ -1,7 +1,6 @@
 """Tests for Executor pipeline: execute(), _prepare_injections(), _capture_output(), _cleanup_injections()."""
 
 import base64
-import fcntl
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -56,11 +55,42 @@ def _make_secret(secret_id: str, value: bytes, wrapped: bool = True) -> dict:
 class TestExecute:
     """Tests for Executor.execute() full pipeline."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_sbx(self):
+        """Mock _run_command_sbx to return a basic CommandResult."""
+        import os
+
+        def mock_sbx_run(self, command, injections, env_override, cwd):
+            import subprocess as _real_subprocess
+
+            try:
+                env = os.environ.copy()
+                if env_override:
+                    env.update(env_override)
+                result = _real_subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                    env=env,
+                    cwd=cwd,
+                )
+                return CommandResult(
+                    command=command,
+                    exit_code=result.returncode,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                )
+            except Exception:
+                return CommandResult(command=command, exit_code=1, stdout=b"", stderr=b"mock error")
+
+        with patch.object(Executor, "_run_command_sbx", mock_sbx_run):
+            yield
+
     def test_execute_valid_command_succeeds(self, executor: Executor):
         """Valid command executes and returns result."""
-        with patch("executor.executor.scan_open_fds", return_value={0, 1, 2}):
-            with patch("executor.executor.set_cloexec"):
-                result = executor.execute("/usr/bin/echo hello", [_make_secret("s1", b"secret-value")])
+        result = executor.execute("/usr/bin/echo hello", [_make_secret("s1", b"secret-value")])
 
         assert isinstance(result, CommandResult)
         assert result.exit_code == 0
@@ -88,26 +118,13 @@ class TestExecute:
         """revoke_tokens is called after execution."""
         executor.http_client = mock_http_client
 
-        # Mock Stage 2 to return proper response
-        stage2_response = MagicMock()
-        stage2_response.json.return_value = {
-            "stdout": base64.b64encode(b"test\n").decode(),
-            "stderr": base64.b64encode(b"").decode(),
-            "masked_count": 0,
-            "masked_hashes": [],
-        }
-        stage2_response.raise_for_status.return_value = None
-        mock_http_client.post.return_value = stage2_response
-
         secrets = [_make_secret("db-pass", b"password123")]
 
-        with patch("executor.executor.scan_open_fds", return_value={0, 1, 2}):
-            with patch("executor.executor.set_cloexec"):
-                executor.execute("/usr/bin/echo test", secrets)
+        executor.execute("/usr/bin/echo test", secrets)
 
-        # Should be called twice: Stage 2 filter + revoke_tokens
-        assert mock_http_client.post.call_count == 2
-        revoke_call = mock_http_client.post.call_args_list[1]
+        # revoke_tokens is called once after execution
+        assert mock_http_client.post.call_count == 1
+        revoke_call = mock_http_client.post.call_args_list[0]
         assert "/api/v1/sessions/test-session-123/secrets/revoke" in revoke_call[0][0]
         assert "db-pass" in revoke_call[1]["json"]["secret_ids"]
 
@@ -119,22 +136,18 @@ class TestExecute:
             _make_secret("s3", b"three"),
         ]
 
-        with patch("executor.executor.scan_open_fds", return_value={0, 1, 2}):
-            with patch("executor.executor.set_cloexec"):
-                result = executor.execute("/usr/bin/echo done", secrets)
+        result = executor.execute("/usr/bin/echo done", secrets)
 
         assert result.exit_code == 0
         assert result.output_truncated is False
 
     def test_execute_with_env_override(self, executor: Executor):
         """Environment override is applied."""
-        with patch("executor.executor.scan_open_fds", return_value={0, 1, 2}):
-            with patch("executor.executor.set_cloexec"):
-                result = executor.execute(
-                    "/usr/bin/printenv MY_VAR",
-                    [],
-                    env_override={"MY_VAR": "custom_value"},
-                )
+        result = executor.execute(
+            "/usr/bin/printenv MY_VAR",
+            [],
+            env_override={"MY_VAR": "custom_value"},
+        )
 
         assert b"custom_value" in result.stdout
 
@@ -144,9 +157,7 @@ class TestExecute:
         work_dir.mkdir()
         (work_dir / "test.txt").write_text("hello from work dir")
 
-        with patch("executor.executor.scan_open_fds", return_value={0, 1, 2}):
-            with patch("executor.executor.set_cloexec"):
-                result = executor.execute("/usr/bin/cat test.txt", [], cwd=str(work_dir))
+        result = executor.execute("/usr/bin/cat test.txt", [], cwd=str(work_dir))
 
         assert b"hello from work dir" in result.stdout
 
@@ -232,7 +243,7 @@ class TestPrepareInjections:
 
         assert len(injections) == 1
         assert executor._injection_result is not None
-        assert executor._injection_result.extra_fds  # memfd strategy creates FDs
+        assert len(executor._injection_result.secret_mounts) == 1  # sbx strategy creates mounts
 
 
 # ---------------------------------------------------------------------------
@@ -311,27 +322,6 @@ class TestCaptureOutput:
 class TestCleanupInjections:
     """Tests for Executor._cleanup_injections() with strategy-based cleanup."""
 
-    def test_cleanup_closes_memfd(self, executor: Executor):
-        """Strategy cleanup closes memfd FDs."""
-        secrets = [_make_secret("s1", b"secret")]
-        executor._prepare_injections(secrets)
-
-        fds_before = list(executor._injection_result.extra_fds)
-        assert len(fds_before) == 1
-        fd = fds_before[0]
-
-        # FD should be open before cleanup
-        fcntl.fcntl(fd, fcntl.F_GETFD)
-
-        executor._cleanup_injections()
-
-        # FD should be closed after cleanup
-        with pytest.raises(OSError):
-            fcntl.fcntl(fd, fcntl.F_GETFD)
-
-        # Injection result should be cleared
-        assert executor._injection_result is None
-
     def test_cleanup_zeros_secret_value(self, executor: Executor):
         """Zeros secret value in memory."""
         original = b"super-secret-password"
@@ -368,7 +358,7 @@ class TestCleanupInjections:
         executor._cleanup_injections()
 
     def test_cleanup_multiple_secrets(self, executor: Executor):
-        """Cleans up all FDs for multiple secrets."""
+        """Cleans up all mounts for multiple secrets."""
         secrets = [
             _make_secret("s1", b"one"),
             _make_secret("s2", b"two"),
@@ -376,14 +366,12 @@ class TestCleanupInjections:
         ]
         executor._prepare_injections(secrets)
 
-        fds_before = list(executor._injection_result.extra_fds)
-        assert len(fds_before) == 3
+        assert len(executor._injection_result.secret_mounts) == 3
 
         executor._cleanup_injections()
 
-        for fd in fds_before:
-            with pytest.raises(OSError):
-                fcntl.fcntl(fd, fcntl.F_GETFD)
+        # Injection result should be cleared
+        assert executor._injection_result is None
 
 
 # ---------------------------------------------------------------------------

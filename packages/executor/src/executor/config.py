@@ -246,18 +246,24 @@ class ExecutorConfig(BaseSettings):
     # Reaper
     reaper: ReaperConfig = Field(default_factory=ReaperConfig)
 
-    # Secret injection (Linux-only)
-    injection_method: str = Field(
-        default="memfd",
-        description="Secret injection strategy (currently memfd only)",
-    )
+    # Secret injection (sbx only)
     secret_base_fd: int = Field(
         default=100,
-        description="Base FD number for injected secrets",
+        description="Base FD number for injected secrets (unused for sbx)",
     )
     secret_tmpfs_dir: str = Field(
         default="/tmp/venya_secrets",  # nosec B108 — tmpfs-backed, not persistent disk
         description="Directory on tmpfs for temporary secret storage",
+    )
+
+    # Egress allowlist
+    egress_allowlist_path: str = Field(
+        default="/etc/venya/egress-allowlist.txt",
+        description="Path to egress allowlist file (one CIDR/host per line)",
+    )
+    dns_resolver: str = Field(
+        default="10.27.28.1",
+        description="DNS resolver IP always allowed for egress",
     )
 
     # Logging

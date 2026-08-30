@@ -36,7 +36,7 @@ from .audit import AuditLogger
 from .command_validator import DEFAULT_DANGEROUS_PATTERNS, CommandValidator
 from .config import ExecutorConfig
 from .executor import Executor
-from .strategies.factory import create_strategy
+from .strategies.sbx_strategy import SbxStrategy
 
 logger = logging.getLogger("venya.executor.daemon")
 
@@ -747,7 +747,7 @@ class ExecutorDaemon:
         Returns:
             Configured Executor instance with HTTP client for server API calls.
         """
-        strategy = create_strategy(self.config.injection_method, self.config.secret_base_fd)
+        strategy = SbxStrategy()
         audit_logger = AuditLogger(self.config.audit, session_id)
         return Executor(
             command_validator=self.command_validator,

@@ -18,6 +18,7 @@ import shutil
 import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx commands
 import tempfile
 from collections.abc import Callable
+from pathlib import Path
 
 from .base import InjectionResult, InjectionStrategy, SecretMount
 
@@ -224,33 +225,53 @@ class SbxStrategy(InjectionStrategy):
 
             logger.debug("Copied secret %s into sandbox: %s", mount.secret_id, container_path)
 
-    def apply_network_policy(self, allowed_hosts: list[dict[str, object]]) -> None:
-        """Apply network allow rules to the sandbox.
+    def apply_network_policy(self, sandbox_name: str) -> None:
+        """Apply egress allowlist to sandbox.
 
-        Default policy is deny-all. Only explicitly allowed hosts/domains
-        can be reached via HTTP/HTTPS.
+        Reads /etc/venya/egress-allowlist.txt and allows each entry
+        via sbx policy allow network <host>. DNS resolver is always allowed.
+
+        Missing/empty allowlist -> only DNS resolver allowed (fail-closed).
 
         Args:
-            allowed_hosts: List of {host, port} dicts. Port is ignored
-                since sbx policies work at the domain level.
+            sandbox_name: Name of the sandbox to apply policies to.
         """
-        if not self._sandbox_name:
-            raise RuntimeError("Sandbox not created yet")
+        from ..egress_filter import EgressFilter
 
-        for host_info in allowed_hosts:
-            host = str(host_info["host"])
-            # sbx policy works at domain/IP level, not port-specific
-            result = subprocess.run(  # nosec
-                ["sbx", "policy", "allow", "network", host],
+        # Use default config values if no config available
+        egress_path = "/etc/venya/egress-allowlist.txt"
+        dns_resolver = "10.27.28.1"
+
+        egress = EgressFilter(
+            allowlist_path=Path(egress_path),
+            dns_resolver=dns_resolver,
+        )
+
+        for host in egress.get_allowed_hosts():
+            result = subprocess.run(  # nosec B603 B607
+                [
+                    "sudo",
+                    "sbx",
+                    "policy",
+                    "allow",
+                    "network",
+                    host,
+                    "--name",
+                    sandbox_name,
+                ],
                 capture_output=True,
                 text=True,
-                timeout=10,
                 check=False,
             )
-            if result.returncode == 0:
-                logger.info("Network ALLOW: %s", host)
+            if result.returncode != 0:
+                logger.error(
+                    "Failed to allow network %s for sandbox %s: %s",
+                    host,
+                    sandbox_name,
+                    result.stderr,
+                )
             else:
-                logger.warning("Failed to add allow rule for %s: %s", host, result.stderr)
+                logger.debug("Allowed network %s for sandbox %s", host, sandbox_name)
 
     def execute_command(self, command: str) -> subprocess.CompletedProcess:
         """Execute a command inside the sandbox.
