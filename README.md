@@ -30,17 +30,17 @@ Every approach either exposes credentials or blocks AI adoption. Venya is the fo
 Human: "Install apache2 on web-server-3"
           │
           ▼
-┌─────────────────┐     ┌─────────────────┐     ┌──────────────────┐
-│   AI Agent       │────▶│  Venya Server    │────▶│  Executor Daemon │
-│  (Claude Code)   │     │                   │     │  (on web-server-3)│
-│                  │     │  1. Wraps secret  │     │                   │
-│  Never sees      │     │     with sentinel │     │  2. Unwraps in    │
-│  the password     │     │     markers       │     │     sandbox       │
-│                  │     │                   │     │                   │
-│  Sees: exit code │◀────│  3. Relays via     │◀────│  4. Filters output│
-│  + filtered      │     │     mTLS           │     │     (Rust filter)  │
-│  output          │     │                   │     │                   │
-└─────────────────┘     └─────────────────┘     └──────────────────┘
+┌──────────────────┐     ┌───────────────────┐     ┌────────────────────┐
+│   AI Agent       │────▶│  Venya Server     │────▶│  Executor Daemon   │
+│  (Claude Code)   │     │                   │     │  (on web-server-3) │
+│                  │     │  1. Wraps secret  │     │                    │
+│  Never sees      │     │     with sentinel │     │  2. Unwraps in     │
+│  the password    │     │     markers       │     │     sandbox        │
+│                  │     │                   │     │                    │
+│  Sees: exit code │◀────│  3. Relays via    │◀────│  4. Filters output │
+│  + filtered      │     │     mTLS          │     │     (Rust filter)  │
+│  output          │     │                   │     │                    │
+└──────────────────┘     └───────────────────┘     └────────────────────┘
 ```
 
 1. **The human asks the AI to do something** — e.g., "Install apache2 on web-server-3"
@@ -144,22 +144,22 @@ Production deployment guide: **[Installation Guide](docs/installation.md)** *(co
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                         Venya Architecture                        │
+│                         Venya Architecture                       │
 │                                                                  │
-│  ┌──────────┐    ┌──────────────┐    ┌───────────────────────┐  │
-│  │ AI Agent │    │ Venya Server │    │ Executor Daemon       │  │
-│  │ (Claude, │───▶│ (Core)       │───▶│ (on target host)      │  │
+│  ┌──────────┐    ┌───────────────┐    ┌───────────────────────┐  │
+│  │ AI Agent │    │ Venya Server  │    │ Executor Daemon       │  │
+│  │ (Claude, │───▶│ (Core)        │───▶│ (on target host)      │  │
 │  │ Cursor)  │    │               │    │                       │  │
 │  │          │    │ • Secret store│    │ • sbx sandbox         │  │
 │  │ MCP stdio│    │ • FIDO2 auth  │    │ • Secret injection    │  │
 │  │ transport│    │ • Audit log   │    │ • Rust output filter  │  │
 │  │          │    │ • mTLS relay  │    │ • Egress allowlist    │  │
-│  └──────────┘    └──────────────┘    └───────────────────────┘  │
-│                         │                                         │
-│                    ┌────┴────┐                                    │
-│                    │PostgreSQL│                                   │
-│                    │(encrypted)│                                   │
-│                    └─────────┘                                    │
+│  └──────────┘    └───────────────┘    └───────────────────────┘  │
+│                         │                                        │
+│                    ┌────┴──────┐                                 │
+│                    │PostgreSQL │                                 │
+│                    │(encrypted)│                                 │
+│                    └───────────┘                                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
