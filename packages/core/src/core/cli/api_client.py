@@ -360,6 +360,16 @@ class APIClient:
         """Send a DELETE request."""
         return self._request("DELETE", path, params=params, extra_headers=extra_headers)
 
+    def patch(
+        self,
+        path: str,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Send a PATCH request."""
+        return self._request("PATCH", path, json_data=json, params=params, extra_headers=extra_headers)
+
     def register_executor(
         self,
         executor_id: str,
