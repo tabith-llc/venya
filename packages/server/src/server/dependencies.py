@@ -177,21 +177,23 @@ def require_role(permission: str):
     """Dependency factory that requires a specific permission tier.
 
     Args:
-        permission: Required permission — "read" or "read-write".
+        permission: Required permission — "none", "read", or "read-write".
+            "none" accepts any authenticated caller without role checks.
+            "read" passes with any role membership;
+            "read-write" requires at least one read-write role. Executors
+            (mTLS) always pass.
 
     Returns:
         Dependency that allows the request only when the authenticated
         user holds at least one role whose permission tier meets the
-        required level. "read" passes with any role membership;
-        "read-write" requires at least one read-write role. Executors
-        (mTLS) always pass.
+        required level.
 
     Raises:
-        ValueError: If permission is not "read" or "read-write".
+        ValueError: If permission is not "none", "read", or "read-write".
             Raised at factory call time (app startup), not per request.
     """
-    if permission not in ("read", "read-write"):
-        raise ValueError(f"Invalid permission: {permission}. Must be 'read' or 'read-write'")
+    if permission not in ("none", "read", "read-write"):
+        raise ValueError(f"Invalid permission: {permission}. Must be 'none', 'read', or 'read-write'")
 
     async def _checker(
         user_info: dict = Depends(get_current_user),
@@ -200,6 +202,11 @@ def require_role(permission: str):
         # Executor (mTLS) has full access.
         # Their user_info carries no user_id, so a role lookup is impossible.
         if user_info.get("caller") == "executor":
+            return user_info
+
+        # "none" — any authenticated caller passes without role checks.
+        # Used temporarily for heartbeat endpoint (hardened to mTLS identity in Phase 3).
+        if permission == "none":
             return user_info
 
         db = backend.get_session()

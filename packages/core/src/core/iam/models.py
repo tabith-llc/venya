@@ -346,6 +346,23 @@ class ExecutorCertRevocation(Base):
     reason = Column(Text, nullable=True)
 
 
+class Executor(Base):
+    """Registered executor status tracking.
+
+    Tracks executor online/offline status, hostname, and enrollment state.
+    Created automatically during executor registration.
+    """
+
+    __tablename__ = "executors"
+
+    id = Column(String, primary_key=True)
+    hostname = Column(String, nullable=False, comment="Executor network address for mTLS relay")
+    enrolled_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    last_heartbeat = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String, nullable=False, default="pending", server_default="pending")
+
+
 class ElevationToken(Base):
     """Elevation tokens for sensitive operations (secret unmasking)."""
 
