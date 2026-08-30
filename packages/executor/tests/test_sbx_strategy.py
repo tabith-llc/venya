@@ -1,6 +1,7 @@
 """Tests for Docker Sandboxes (sbx) injection strategy."""
 
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -174,17 +175,21 @@ class TestSbxStrategyCopySecrets:
 
 
 class TestSbxStrategyNetworkPolicy:
-    def test_apply_network_policy_adds_allow_rules(self):
+    def test_apply_network_policy_adds_allow_rules(self, tmp_path: Path):
         strategy = SbxStrategy()
         strategy._sandbox_name = "venya-test123"
-        allowed_hosts = [
-            {"host": "10.10.10.50", "port": 22},
-            {"host": "10.10.10.100", "port": 5432},
-        ]
+        allowlist = tmp_path / "egress-allowlist.txt"
+        allowlist.write_text("10.10.10.50\n10.10.10.100\n")
+
+        mock_egress = MagicMock()
+        mock_egress.get_allowed_hosts.return_value = ["10.10.10.50", "10.10.10.100", "10.27.28.1"]
+
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr="")
-            strategy.apply_network_policy(allowed_hosts)
-            assert mock_run.call_count == 2
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            with patch("executor.egress_filter.EgressFilter", return_value=mock_egress):
+                strategy.apply_network_policy("venya-test123")
+            # 2 allowlist entries + 1 DNS resolver
+            assert mock_run.call_count == 3
             # Check that policy allow commands were called
             calls = [c[0][0] for c in mock_run.call_args_list]
             for call in calls:
@@ -192,11 +197,35 @@ class TestSbxStrategyNetworkPolicy:
                 assert "allow" in call
                 assert "network" in call
 
-    def test_apply_network_policy_raises_without_sandbox(self):
+    def test_apply_network_policy_dns_always_allowed(self, tmp_path: Path):
         strategy = SbxStrategy()
-        strategy._sandbox_name = None
-        with pytest.raises(RuntimeError, match="Sandbox not created yet"):
-            strategy.apply_network_policy([{"host": "example.com", "port": 443}])
+        strategy._sandbox_name = "venya-test123"
+
+        mock_egress = MagicMock()
+        mock_egress.get_allowed_hosts.return_value = ["10.27.28.1"]
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            with patch("executor.egress_filter.EgressFilter", return_value=mock_egress):
+                strategy.apply_network_policy("venya-test123")
+            # Only DNS resolver should be allowed
+            assert mock_run.call_count == 1
+            call_args = mock_run.call_args[0][0]
+            assert "10.27.28.1" in call_args
+
+    def test_apply_network_policy_missing_allowlist(self):
+        strategy = SbxStrategy()
+        strategy._sandbox_name = "venya-test123"
+
+        mock_egress = MagicMock()
+        mock_egress.get_allowed_hosts.return_value = ["10.27.28.1"]
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+            with patch("executor.egress_filter.EgressFilter", return_value=mock_egress):
+                strategy.apply_network_policy("venya-test123")
+            # Only DNS resolver should be allowed
+            assert mock_run.call_count == 1
 
 
 class TestSbxStrategyExecuteCommand:

@@ -2,7 +2,6 @@
 
 from .base import InjectionResult, InjectionStrategy, SecretMount
 from .factory import create_strategy
-from .memfd_strategy import MemfdStrategy
 from .sbx_strategy import SbxStrategy
 
-__all__ = ["InjectionResult", "InjectionStrategy", "MemfdStrategy", "SbxStrategy", "SecretMount", "create_strategy"]
+__all__ = ["InjectionResult", "InjectionStrategy", "SbxStrategy", "SecretMount", "create_strategy"]

@@ -19,6 +19,7 @@ from server.ca import CAManager
 
 from executor.config import CertificateRotationConfig, ExecutorConfig, MtlsConfig
 from executor.daemon import CertificateManager
+from executor.strategies.sbx_strategy import SECRET_TMPFS_BASE
 
 # ---------------------------------------------------------------------------
 # CA and certificate helpers
@@ -321,3 +322,27 @@ class MockUser:
     def __init__(self, user_id: str, auth_mode: str = "mtls"):
         self.user_id = user_id
         self.auth_mode = auth_mode
+
+
+# ---------------------------------------------------------------------------
+# tmpfs fixture for sbx strategy tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _setup_tmpfs(tmp_path: Path):
+    """Ensure SECRET_TMPFS_BASE directory exists for sbx strategy tests.
+
+    Creates a temp directory and patches SECRET_TMPFS_BASE to point to it.
+    This is autouse so all tests get the patch without needing explicit fixture.
+    """
+    original = SECRET_TMPFS_BASE
+    tmpfs_parent = tmp_path / "shm"
+    tmpfs_parent.mkdir(exist_ok=True)
+    import executor.strategies.sbx_strategy as sbx_module
+
+    sbx_module.SECRET_TMPFS_BASE = str(tmpfs_parent)
+    try:
+        yield
+    finally:
+        sbx_module.SECRET_TMPFS_BASE = original

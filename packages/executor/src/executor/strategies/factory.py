@@ -1,32 +1,22 @@
 """Factory for creating injection strategies.
 
-Registry-based strategy selection driven by configuration.
+SbxStrategy is the sole execution strategy.
 """
 
 from .base import InjectionStrategy
-from .memfd_strategy import MemfdStrategy
 from .sbx_strategy import SbxStrategy
-
-STRATEGY_REGISTRY: dict[str, type[InjectionStrategy]] = {
-    "memfd": MemfdStrategy,
-    "sbx": SbxStrategy,
-}
 
 
 def create_strategy(method: str, secret_base_fd: int = 100) -> InjectionStrategy:
-    """Create an injection strategy by name.
+    """Create an injection strategy.
+
+    Only sbx is supported. The method parameter is ignored.
 
     Args:
-        method: Strategy name ("memfd" or "sbx").
-        secret_base_fd: Base FD number for injected secrets (memfd only).
+        method: Strategy name (ignored — sbx is the only strategy).
+        secret_base_fd: Base FD number for injected secrets (unused for sbx).
 
     Returns:
-        An initialized InjectionStrategy instance.
-
-    Raises:
-        ValueError: If the strategy name is unknown.
+        An initialized SbxStrategy instance.
     """
-    cls = STRATEGY_REGISTRY.get(method)
-    if cls is None:
-        raise ValueError(f"Unknown injection strategy: {method!r}. " f"Available: {list(STRATEGY_REGISTRY.keys())}")
-    return cls(secret_base_fd=secret_base_fd)
+    return SbxStrategy(secret_base_fd=secret_base_fd)

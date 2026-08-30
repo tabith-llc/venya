@@ -34,7 +34,7 @@ from .injector import (
     verify_fd_whitelist,
 )
 from .strategies.base import InjectionResult, InjectionStrategy
-from .strategies.memfd_strategy import MemfdStrategy
+from .strategies.sbx_strategy import SbxStrategy
 
 logger = logging.getLogger("venya.executor")
 
@@ -98,12 +98,8 @@ def _validate_command_structure(command: str) -> list[str]:
 class Executor:
     """Main executor — orchestrates command execution pipeline.
 
-    Supports two execution modes:
-    - memfd: Direct subprocess with FD-passed secrets (existing behavior)
-    - sbx: Docker Sandboxes microVM with tmpfs-mounted secrets
-           and policy-based network access
-
-    The mode is determined by the injection strategy's name().
+    Uses Docker Sandboxes (sbx) microVM with tmpfs-mounted secrets
+    and policy-based network access.
 
     NOTE: Executor processes commands sequentially. The _injection_result
     field is per-execution state that assumes one active command at a time.
@@ -111,7 +107,7 @@ class Executor:
 
     command_validator: CommandValidator
     session_id: str
-    injection_strategy: InjectionStrategy = field(default_factory=MemfdStrategy)
+    injection_strategy: InjectionStrategy = field(default_factory=SbxStrategy)
     allowed_fds: set[int] = field(default_factory=lambda: {0, 1, 2})
     audit_logger: AuditLogger | None = None
     _sentinel_registry: SentinelRegistry | None = None
@@ -137,7 +133,6 @@ class Executor:
         secrets: list[dict[str, Any]],
         env_override: dict[str, str] | None = None,
         cwd: str | None = None,
-        allowed_hosts: list[dict[str, Any]] | None = None,
     ) -> CommandResult:
         """Execute a command with secret injection and output filtering.
 
@@ -146,7 +141,6 @@ class Executor:
             secrets: List of secret dicts with 'secret_id', 'value', 'wrapped_value'.
             env_override: Environment variables to set (not for secrets).
             cwd: Working directory for the command.
-            allowed_hosts: List of {host, port} dicts for network allow rules.
 
         Returns:
             CommandResult with exit code, filtered output, and audit data.
@@ -174,16 +168,10 @@ class Executor:
                     "fd_count": len(injections),
                     "secret_ids": [s.secret_id for s in injections],
                 }
-                if allowed_hosts:
-                    audit_data["allowed_hosts"] = allowed_hosts
                 self.audit_logger.emit("credential_injected", **audit_data)
 
-            # Step 3: Execute with injected secrets
-            # Branch based on strategy type
-            if self.injection_strategy.name() == "sbx":
-                result = self._run_command_sbx(command, injections, env_override, cwd, allowed_hosts)
-            else:
-                result = self._run_command_direct(command, injections, env_override, cwd)
+            # Step 3: Execute with injected secrets (sbx only)
+            result = self._run_command_sbx(command, injections, env_override, cwd)
 
             # Audit: command_executed
             if self.audit_logger:
@@ -427,13 +415,11 @@ class Executor:
         injections: list[SecretBundle],
         env_override: dict[str, str] | None,
         cwd: str | None,
-        allowed_hosts: list[dict[str, Any]] | None = None,
     ) -> CommandResult:
         """Run command inside a Docker Sandbox (microVM).
 
         Key security properties:
-        - When allowed_hosts is None/empty: deny-by-default network policy
-        - When allowed_hosts is provided: sbx policy allow rules
+        - Network egress controlled by allowlist file via sbx policy
         - Secrets are copied into sandbox via sbx cp (tmpfs-backed)
         - Sandbox provides hypervisor isolation (separate kernel)
         - stdout/stderr captured from sbx exec output
@@ -443,13 +429,10 @@ class Executor:
             injections: Secret bundles (for filtering reference).
             env_override: Environment variables to set.
             cwd: Working directory (sandbox uses its workspace).
-            allowed_hosts: List of {host, port} dicts for network allow rules.
 
         Returns:
             CommandResult with filtered output.
         """
-        from .strategies.sbx_strategy import SbxStrategy
-
         if not isinstance(self.injection_strategy, SbxStrategy):
             raise TypeError(f"SBX strategy required but got: {type(self.injection_strategy).__name__}")
 
@@ -466,11 +449,8 @@ class Executor:
         if self._injection_result:
             strategy.copy_secrets_into_sandbox(self._injection_result.secret_mounts)
 
-        # Apply network policy if allowed_hosts provided
-        if allowed_hosts:
-            strategy.apply_network_policy(allowed_hosts)
-        else:
-            logger.info("No allowed_hosts — deny-by-default network policy")
+        # Apply network policy from allowlist file
+        strategy.apply_network_policy(sandbox_name)
 
         try:
             # Execute command inside sandbox
