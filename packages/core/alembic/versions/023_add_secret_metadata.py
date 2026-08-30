@@ -4,8 +4,9 @@ Revision ID: 023
 Revises: 022
 Create Date: 2026-08-29
 """
-from alembic import op
+
 import sqlalchemy as sa
+from alembic import op
 
 revision = "023"
 down_revision = "022"
@@ -21,9 +22,7 @@ def upgrade() -> None:
     )
 
     # GIN index for JSONB querying — makes metadata->>'executor' = 'web-server-3' fast
-    op.execute(
-        "CREATE INDEX ix_secrets_metadata ON secrets USING gin (metadata)"
-    )
+    op.execute("CREATE INDEX ix_secrets_metadata ON secrets USING gin (metadata)")
 
 
 def downgrade() -> None:
