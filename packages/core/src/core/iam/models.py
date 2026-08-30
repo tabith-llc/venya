@@ -15,6 +15,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    JSON,
     LargeBinary,
     String,
     Text,
@@ -98,6 +99,7 @@ class Secret(Base):
         nullable=False,
     )
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+    meta = Column("metadata", JSON, nullable=True, server_default="{}", comment="Structured metadata for discovery (executor, purpose, username, description)")
 
     # Relationships
     creator = relationship("User", back_populates="created_secrets")

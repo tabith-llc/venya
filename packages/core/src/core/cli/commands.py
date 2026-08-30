@@ -119,6 +119,8 @@ def run_command(args: Any) -> int:
             return cmd_list(client, args)
         elif command == "delete":
             return cmd_delete(client, args)
+        elif command == "update-metadata":
+            return cmd_update_metadata(client, args)
         elif command == "audit":
             return cmd_audit(client, args)
         elif command == "admin":
@@ -233,14 +235,25 @@ def cmd_store(client: APIClient, args: Any) -> int:
         return 1
 
     try:
+        payload = {
+            "key": args.key,
+            "value": value,
+            "roles": args.roles,
+            "force": getattr(args, "force", False),
+        }
+
+        # Parse metadata key=value pairs
+        metadata = getattr(args, "metadata", None)
+        if metadata:
+            meta_dict = {}
+            for item in metadata:
+                k, _, v = item.partition("=")
+                meta_dict[k] = v
+            payload["metadata"] = meta_dict
+
         client.post(
             "/api/v1/secrets",
-            json={
-                "key": args.key,
-                "value": value,
-                "roles": args.roles,
-                "force": getattr(args, "force", False),
-            },
+            json=payload,
         )
         print(f"Secret '{args.key}' stored successfully.")
         return 0
@@ -278,6 +291,12 @@ def cmd_list(client: APIClient, args: Any) -> int:
         params = {}
         if getattr(args, "prefix", None):
             params["prefix"] = args.prefix
+        if getattr(args, "executor", None):
+            params["executor"] = args.executor
+        if getattr(args, "purpose", None):
+            params["purpose"] = args.purpose
+        if getattr(args, "username", None):
+            params["username"] = args.username
 
         result = client.get("/api/v1/secrets", params=params)
         secrets = result.get("secrets", [])
@@ -287,7 +306,19 @@ def cmd_list(client: APIClient, args: Any) -> int:
             return 0
 
         for secret in secrets:
-            print(f"  {secret['key']}")
+            line = f"  {secret['key']}"
+            meta = secret.get("metadata")
+            if meta:
+                parts = []
+                if meta.get("executor"):
+                    parts.append(f"executor={meta['executor']}")
+                if meta.get("purpose"):
+                    parts.append(f"purpose={meta['purpose']}")
+                if meta.get("username"):
+                    parts.append(f"username={meta['username']}")
+                if parts:
+                    line += f"  [{', '.join(parts)}]"
+            print(line)
         return 0
     except APIClientError as e:
         print(f"Failed to list secrets: {e}", file=sys.stderr)
@@ -308,6 +339,25 @@ def cmd_delete(client: APIClient, args: Any) -> int:
         return 1
     except Exception as e:
         print(f"Failed to delete secret: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_update_metadata(client: APIClient, args: Any) -> int:
+    """Update metadata for a secret."""
+    try:
+        meta_dict = {}
+        for item in args.metadata:
+            k, _, v = item.partition("=")
+            meta_dict[k] = v
+
+        client.patch(f"/api/v1/secrets/{args.key}/metadata", json={"metadata": meta_dict})
+        print(f"Metadata updated for secret '{args.key}'.")
+        return 0
+    except APIClientError as e:
+        print(f"Failed to update metadata: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Failed to update metadata: {e}", file=sys.stderr)
         return 1
 
 
