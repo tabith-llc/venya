@@ -40,6 +40,7 @@ def _run_as_user(username: str, cmd: list[str]) -> subprocess.CompletedProcess:
     )
 
 
+@pytest.mark.integration
 class TestCoLocationIsolation:
     """Verify cross-user isolation when running on same host."""
 

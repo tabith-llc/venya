@@ -334,6 +334,7 @@ class TestSecureMemoryIsolation:
         assert not hasattr(cli, "SecureBuffer"), "SecureBuffer should not be accessible from core.cli"
 
 
+@pytest.mark.integration
 class TestRuntimeCapabilityIsolation:
     """Verify CAP_IPC_LOCK is granted ONLY to core, not executor.
 
