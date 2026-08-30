@@ -8,8 +8,12 @@ import hashlib
 import hmac
 import json
 import logging
-from datetime import UTC, datetime
+import ssl
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import uuid4
 
+import httpx2
 from core.iam.models import AuditEvent, ExecutorCert, ExecutorEnrollmentToken, User
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -130,6 +134,60 @@ class ExecutorsListResponse(BaseModel):
     """Response for executor list."""
 
     executors: list[ExecutorInfo]
+
+
+# --- Execution session models ---
+
+
+class SessionSecretBundle(BaseModel):
+    """A wrapped secret bundle for an execution session."""
+
+    secret_id: str = Field(..., description="Secret ID (matches secrets.id)")
+    wrapped_value: str = Field(
+        ...,
+        description="Sentinel-wrapped value: [VENYA:{hash}]base64_data[/VENYA]",
+    )
+
+
+class SessionCreateRequest(BaseModel):
+    """Request body for creating an execution session."""
+
+    executor_id: str = Field(
+        ...,
+        description="Target executor ID",
+        pattern=EXECUTOR_ID_PATTERN,
+        min_length=2,
+        max_length=64,
+    )
+    secrets: list[SessionSecretBundle] = Field(
+        default_factory=list,
+        description="Wrapped secret bundles from GET /secrets/{key}/executor",
+    )
+
+
+class SessionCreateResponse(BaseModel):
+    """Response for execution session creation."""
+
+    session_id: str
+    executor_id: str
+    created_at: str
+    expires_at: str
+
+
+class ExecuteRequest(BaseModel):
+    """Request body for executing a command on an executor."""
+
+    session_id: str = Field(..., description="Execution session ID")
+    command: str = Field(..., description="Shell command to execute")
+
+
+class ExecuteResponse(BaseModel):
+    """Response from command execution."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+    masked_count: int = Field(default=0, description="Number of [REDACTED:...] markers in output")
 
 
 # --- Helpers ---
@@ -638,3 +696,174 @@ async def executor_heartbeat(
     db.commit()
 
     return Response(status_code=200)
+
+
+@router.post(
+    "/executors/sessions",
+    response_model=SessionCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_execution_session(
+    req: SessionCreateRequest,
+    db: Session = Depends(get_db),
+    auth_user: dict = Depends(require_role("read-write")),
+) -> SessionCreateResponse:
+    """Create an execution session with secret bundles.
+
+    Called by CLI/MCP before executing a command. Wraps secrets and stores
+    them for the executor to consume via the execution relay.
+    """
+    from core.iam.models import ExecutionSession, Executor, SessionSecret
+
+    # Verify executor exists and is reachable
+    executor = db.query(Executor).filter(Executor.id == req.executor_id).first()
+    if executor is None:
+        raise HTTPException(status_code=404, detail="Executor not found")
+
+    # Create session with 10-minute TTL
+    now = datetime.now(UTC)
+    session = ExecutionSession(
+        id=str(uuid4()),
+        user_id=auth_user["user_id"],
+        executor_id=req.executor_id,
+        command="",  # Will be set on execute
+        created_at=now,
+        expires_at=now + timedelta(minutes=10),
+    )
+    db.add(session)
+
+    # Store wrapped secrets
+    for secret_bundle in req.secrets:
+        session_secret = SessionSecret(
+            session_id=session.id,
+            secret_id=secret_bundle.secret_id,
+            wrapped_value=secret_bundle.wrapped_value,
+        )
+        db.add(session_secret)
+
+    # AUDIT EVENT: Session created
+    audit_event = AuditEvent(
+        event_type="execution_session_created",
+        user_id=auth_user["user_id"],
+        fields={
+            "session_id": session.id,
+            "executor_id": req.executor_id,
+            "secret_count": len(req.secrets),
+        },
+        timestamp=now,
+    )
+    db.add(audit_event)
+
+    db.commit()
+
+    return SessionCreateResponse(
+        session_id=session.id,
+        executor_id=session.executor_id,
+        created_at=session.created_at.isoformat(),
+        expires_at=session.expires_at.isoformat(),
+    )
+
+
+@router.post(
+    "/executors/{id}/execute",
+    response_model=ExecuteResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def execute_command_on_executor(
+    id: str,
+    req: ExecuteRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    auth_user: dict = Depends(require_role("read-write")),
+) -> ExecuteResponse:
+    """Relay command to executor over mTLS.
+
+    1. Verify session exists and is not expired
+    2. Load wrapped secrets from session
+    3. POST to executor's /execute endpoint (mTLS)
+    4. Buffer response, mask output, return
+    """
+    from core.iam.models import ExecutionSession, Executor, SessionSecret
+
+    # Lookup session
+    session = db.query(ExecutionSession).filter(ExecutionSession.id == req.session_id).first()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Check expiration
+    if datetime.now(UTC) > session.expires_at:
+        raise HTTPException(status_code=400, detail="Session expired")
+
+    # Verify session ownership
+    if session.user_id != auth_user["user_id"]:
+        raise HTTPException(status_code=403, detail="Session does not belong to user")
+
+    # Load executor hostname (required for mTLS relay, non-nullable)
+    executor = db.query(Executor).filter(Executor.id == id).first()
+    if executor is None:
+        raise HTTPException(status_code=404, detail="Executor not found")
+
+    # Load wrapped secrets from session
+    secrets = db.query(SessionSecret).filter(SessionSecret.session_id == session.id).all()
+
+    # Build request payload
+    payload = {
+        "session_id": session.id,
+        "command": req.command,
+        "secrets": [{"secret_id": s.secret_id, "wrapped_value": s.wrapped_value} for s in secrets],
+    }
+
+    # Construct executor URL from hostname
+    executor_url = f"https://{executor.hostname}:8443/execute"
+
+    # Set up mTLS client
+    config = getattr(request.app.state, "config", None)
+    ca_cert_path = str(Path(config.ca_dir) / "ca.crt") if config else None
+    mtls_cert = config.mtls_cert if config else None
+    mtls_key = config.mtls_key if config else None
+
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.load_verify_locations(ca_cert_path)
+    if mtls_cert and mtls_key:
+        ssl_ctx.load_cert_chain(mtls_cert, mtls_key)
+
+    # Call executor with mTLS
+    try:
+        async with httpx2.AsyncClient(verify=ssl_ctx, timeout=300) as client:
+            response = await client.post(executor_url, json=payload)
+            response.raise_for_status()
+            result = response.json()
+    except httpx2.ConnectError:
+        raise HTTPException(status_code=503, detail="Executor unreachable (connection refused)")
+    except httpx2.TimeoutException:
+        raise HTTPException(status_code=503, detail="Executor timed out")
+    except httpx2.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+    except ssl.SSLError:
+        raise HTTPException(status_code=503, detail="mTLS verification failed")
+
+    # AUDIT EVENT: Command executed
+    now = datetime.now(UTC)
+    audit_event = AuditEvent(
+        event_type="command_executed",
+        user_id=auth_user["user_id"],
+        fields={
+            "session_id": session.id,
+            "executor_id": id,
+            "command": req.command,
+            "exit_code": result["exit_code"],
+            "masked_count": result.get("masked_count", 0),
+        },
+        timestamp=now,
+    )
+    db.add(audit_event)
+
+    # Mark session as completed
+    session.command = req.command
+    session.completed_at = now
+    session.exit_code = result["exit_code"]
+    session.stdout = result["stdout"]
+    session.stderr = result["stderr"]
+    db.commit()
+
+    return ExecuteResponse(**result)
