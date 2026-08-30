@@ -112,6 +112,9 @@ cd "$INSTALL_DIR"
 # --- Create directories ---
 venya_create_directories
 
+# --- Write egress allowlist ---
+venya_write_egress_allowlist
+
 # --- Harden log dir (executor-specific) ---
 # NOTE: /etc/venya/executor.toml + /etc/venya/executor creds are hardened AFTER they are
 # written (see "Harden executor credentials" block near the end). Hardening them here was

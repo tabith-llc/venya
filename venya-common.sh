@@ -357,6 +357,30 @@ venya_create_directories() {
     chmod 700 /var/lib/venya/ca
 }
 
+# --- 14b. Write egress allowlist ---
+
+venya_write_egress_allowlist() {
+    EGRESS_ALLOWLIST="/etc/venya/egress-allowlist.txt"
+    mkdir -p /etc/venya
+
+    if [ ! -f "$EGRESS_ALLOWLIST" ]; then
+        cat > "$EGRESS_ALLOWLIST" << 'EOF'
+# Venya Egress Allowlist
+# One entry per line: IP, CIDR, or hostname
+# Lines starting with # are comments. Blank lines ignored.
+# Missing or empty file = fail-closed (all egress blocked except DNS)
+#
+# Default: allow venya-net private subnet
+10.27.28.0/24
+EOF
+        chmod 644 "$EGRESS_ALLOWLIST"
+        info "Default egress allowlist written to $EGRESS_ALLOWLIST"
+        info "Allowing: 10.27.28.0/24 (venya-net) + DNS to 10.27.28.1"
+    else
+        info "Egress allowlist already exists at $EGRESS_ALLOWLIST — not overwriting"
+    fi
+}
+
 # --- 15. Service start retry loop ---
 
 venya_service_retry() {
