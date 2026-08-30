@@ -77,6 +77,13 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite even if roles differ",
     )
+    store_parser.add_argument(
+        "--metadata",
+        "-m",
+        action="append",
+        default=None,
+        help="Metadata key=value pair (can be specified multiple times)",
+    )
 
     # get
     get_parser = subparsers.add_parser("get", help="Retrieve a secret")
@@ -90,10 +97,36 @@ def create_parser() -> argparse.ArgumentParser:
     # list
     list_parser = subparsers.add_parser("list", help="List secrets")
     list_parser.add_argument("prefix", nargs="?", help="Optional key prefix filter")
+    list_parser.add_argument(
+        "--executor",
+        default=None,
+        help="Filter by executor metadata field",
+    )
+    list_parser.add_argument(
+        "--purpose",
+        default=None,
+        help="Filter by purpose metadata field",
+    )
+    list_parser.add_argument(
+        "--username",
+        default=None,
+        help="Filter by username metadata field",
+    )
 
     # delete
     delete_parser = subparsers.add_parser("delete", help="Delete a secret")
     delete_parser.add_argument("key", help="Secret key to delete")
+
+    # update-metadata
+    update_meta_parser = subparsers.add_parser("update-metadata", help="Update metadata for a secret")
+    update_meta_parser.add_argument("key", help="Secret key to update")
+    update_meta_parser.add_argument(
+        "--metadata",
+        "-m",
+        action="append",
+        required=True,
+        help="Metadata key=value pair (can be specified multiple times)",
+    )
 
     # audit
     audit_parser = subparsers.add_parser("audit", help="Query audit log")

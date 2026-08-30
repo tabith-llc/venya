@@ -24,12 +24,54 @@ class SecretCreateRequest(BaseModel):
     value: str = Field(..., description="Secret value (plaintext)")
     roles: list[str] = Field(..., description="Role names to scope the secret to")
     key_version_id: str = Field(..., description="Key version ID for encryption")
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Structured metadata for discovery (executor, purpose, username, description)",
+    )
 
 
 class SecretCreateResponse(BaseModel):
     id: int
     key: str
     role_names: list[str]
+    metadata: dict[str, Any] | None = None
+
+
+class SecretMetadata(BaseModel):
+    """Structured metadata for a secret. All fields optional.
+
+    Common fields are documented for LLM discovery. Additional
+    fields are accepted for operator-specific context.
+    """
+
+    executor: str | None = Field(
+        default=None,
+        description="Executor ID this secret is intended for",
+        examples=["web-server-3"],
+    )
+    purpose: str | None = Field(
+        default=None,
+        description="What this secret is used for",
+        examples=["ssh_login", "api_key", "db_connection", "sudo_password"],
+    )
+    username: str | None = Field(
+        default=None,
+        description="Associated username for this credential",
+        examples=["bot", "deploy", "postgres"],
+    )
+    description: str | None = Field(
+        default=None,
+        description="Human-readable context",
+        examples=["Bot account SSH password for web-server-3"],
+    )
+
+    model_config = {"extra": "allow"}
+
+
+class SecretUpdateRequest(BaseModel):
+    value: str | None = None
+    roles: list[str] | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class SecretGetResponse(BaseModel):
@@ -162,10 +204,25 @@ async def secrets_create(
             detail=str(e),
         )
 
+    # Store metadata in the database
+    backend = getattr(request.app.state, "backend", None)
+    if backend is not None and req.metadata:
+        db = backend.get_session()
+        try:
+            from core.iam.models import Secret
+
+            db.query(Secret).filter(Secret.id == record.id).update({"meta": req.metadata})
+            db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+
     return SecretCreateResponse(
         id=int(record.id),
         key=req.key,
         role_names=req.roles,
+        metadata=req.metadata,
     )
 
 
@@ -332,26 +389,63 @@ async def secrets_get_executor(
 async def secrets_list(
     request: Request,
     prefix: str | None = None,
+    executor: str | None = None,
+    purpose: str | None = None,
+    username: str | None = None,
     user_info: dict = Depends(require_role("read")),
 ) -> SecretListResponse:
-    """List secrets, optionally filtered by key prefix.
+    """List secrets, optionally filtered by key prefix or metadata.
 
-    Only shows secrets the authenticated user has read access to.
+    Metadata filters:
+      ?executor=web-server-3    -> secrets tagged for that executor
+      ?purpose=ssh_login         -> secrets used for SSH login
+      ?username=bot              -> secrets associated with username 'bot'
+
+    Combinable: ?executor=web-server-3&purpose=ssh_login
+
+    No filter params -> returns all secrets (unchanged from current behavior).
     """
-    core = getattr(request.app.state, "core", None)
-    if core is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Core not initialized",
+    backend = getattr(request.app.state, "backend", None)
+    has_metadata_filter = executor is not None or purpose is not None or username is not None
+
+    if has_metadata_filter and backend is not None:
+        # Use database query for metadata filtering (does not require core)
+        from core.iam.models import Secret
+
+        db = backend.get_session()
+        try:
+            query = db.query(Secret)
+
+            if executor:
+                query = query.filter(Secret.meta["executor"].as_string() == executor)
+            if purpose:
+                query = query.filter(Secret.meta["purpose"].as_string() == purpose)
+            if username:
+                query = query.filter(Secret.meta["username"].as_string() == username)
+
+            if prefix:
+                query = query.filter(Secret.key.like(f"{prefix}%"))
+
+            records = query.all()
+        finally:
+            db.close()
+    else:
+        # Use core.list for non-metadata filtering (requires core)
+        core = getattr(request.app.state, "core", None)
+        if core is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Core not initialized",
+            )
+
+        records = core.list(
+            prefix=prefix,
+            user_id=user_info.get("user_id"),
         )
 
-    records = core.list(
-        prefix=prefix,
-        user_id=user_info.get("user_id"),
-    )
-
-    secrets = [
-        {
+    secrets = []
+    for r in records:
+        secret_dict = {
             "id": int(r.id),
             "key": r.key,
             "key_version_id": r.key_version_id,
@@ -359,8 +453,9 @@ async def secrets_list(
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "role_names": r.role_names,
         }
-        for r in records
-    ]
+        if hasattr(r, "meta") and r.meta is not None:
+            secret_dict["metadata"] = r.meta
+        secrets.append(secret_dict)
 
     return SecretListResponse(secrets=secrets)
 
@@ -399,6 +494,72 @@ async def secrets_delete(
         )
 
     return SecretDeleteResponse(deleted=deleted, key=key)
+
+
+@router.patch(
+    "/secrets/{key}/metadata",
+    response_model=SecretCreateResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def update_secret_metadata(
+    key: str,
+    req: SecretUpdateRequest,
+    request: Request,
+    user_info: dict = Depends(require_role("read-write")),
+) -> SecretCreateResponse:
+    """Update only the metadata for a secret. Does not touch the value.
+
+    Merge semantics: existing fields are preserved, new fields overwrite/add.
+    """
+    if not req.metadata:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Metadata field is required",
+        )
+
+    core = getattr(request.app.state, "core", None)
+    if core is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Core not initialized",
+        )
+
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Backend not initialized",
+        )
+
+    db = backend.get_session()
+    try:
+        from core.iam.models import Secret
+
+        secret = db.query(Secret).filter(Secret.key == key).first()
+        if secret is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
+
+        # Merge: existing fields preserved, new fields overwrite
+        existing_meta = secret.meta or {}
+        merged_meta = {**existing_meta, **req.metadata}
+
+        secret.meta = merged_meta
+        db.commit()
+
+        return SecretCreateResponse(
+            id=int(secret.id),
+            key=secret.key,
+            role_names=[r.role.name for r in secret.roles] if secret.roles else [],
+            metadata=merged_meta,
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    finally:
+        db.close()
 
 
 @router.post(
