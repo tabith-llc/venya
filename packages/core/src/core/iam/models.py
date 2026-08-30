@@ -1,12 +1,14 @@
 """SQLAlchemy ORM models for the core database.
 
-17 tables covering IAM, secrets, sessions, key rotation, rate limiting,
-command policies, executor certificates, elevation tokens, and WebAuthn credentials.
+19 tables covering IAM, secrets, sessions, key rotation, rate limiting,
+command policies, executor certificates, elevation tokens, WebAuthn credentials,
+and execution relay.
 
 Schema is created via Alembic migrations on install. Models are the ORM interface.
 """
 
 import json
+import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
@@ -361,6 +363,61 @@ class Executor(Base):
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     last_heartbeat = Column(DateTime(timezone=True), nullable=True)
     status = Column(String, nullable=False, default="pending", server_default="pending")
+
+
+class ExecutionSession(Base):
+    """Execution session for command relay.
+
+    Tracks a single command execution request from a user through
+    the server to an executor. 10-minute TTL via expires_at.
+    Separate from auth sessions (Session model) — collision would be catastrophic.
+    """
+
+    __tablename__ = "execution_sessions"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    executor_id = Column(String, nullable=False)
+    command = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    exit_code = Column(Integer, nullable=True)
+    stdout = Column(Text, nullable=True)
+    stderr = Column(Text, nullable=True)
+
+    # Relationships
+    user = relationship("User", backref="execution_sessions")
+    secrets = relationship("SessionSecret", back_populates="session")
+
+
+class SessionSecret(Base):
+    """Wrapped secret bundles for an execution session.
+
+    Stores sentinel-wrapped secret values that the executor
+    injects into the sandbox during command execution.
+    """
+
+    __tablename__ = "execution_session_secrets"
+
+    session_id = Column(
+        String,
+        ForeignKey("execution_sessions.id"),
+        primary_key=True,
+    )
+    secret_id = Column(
+        Integer,
+        ForeignKey("secrets.id"),
+        primary_key=True,
+    )
+    wrapped_value = Column(Text, nullable=False)
+
+    # Relationships
+    session = relationship("ExecutionSession", back_populates="secrets")
 
 
 class ElevationToken(Base):
