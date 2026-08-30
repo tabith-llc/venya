@@ -158,7 +158,7 @@ class TestRequireRoleFactory:
 
     def test_invalid_permission_raises_value_error(self):
         """require_role("execute") raises ValueError at factory call time."""
-        with pytest.raises(ValueError, match="Must be 'read' or 'read-write'"):
+        with pytest.raises(ValueError, match="Must be 'none', 'read', or 'read-write'"):
             require_role("execute")
 
     def test_empty_permission_raises_value_error(self):

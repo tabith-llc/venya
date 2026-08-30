@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from .. import metrics
 from ..ca import CAManager
-from ..dependencies import get_db
+from ..dependencies import get_db, require_role
 from ..rate_limit import rate_limit_registration
 from ..utils.executor_id import EXECUTOR_ID_PATTERN
 from ..utils.time import effective_expiry_check_time, is_expired
@@ -111,6 +111,25 @@ class HeartbeatResponse(BaseModel):
 
     revoked: bool = Field(default=False, description="Whether this executor has been revoked")
     new_cert_required: bool = Field(default=False, description="Whether a certificate rotation is needed")
+
+
+class ExecutorInfo(BaseModel):
+    """Executor status information."""
+
+    id: str
+    hostname: str
+    online: bool
+    last_heartbeat: datetime | None
+    enrolled_at: datetime | None
+    status: str
+
+    model_config = {"from_attributes": True}
+
+
+class ExecutorsListResponse(BaseModel):
+    """Response for executor list."""
+
+    executors: list[ExecutorInfo]
 
 
 # --- Helpers ---
@@ -540,3 +559,82 @@ async def heartbeat(
         revoked=revoked,
         new_cert_required=new_cert_required,
     )
+
+
+@router.get(
+    "/executors",
+    response_model=ExecutorsListResponse,
+)
+async def list_executors(
+    db: Session = Depends(get_db),
+    auth_user: dict = Depends(require_role("read")),
+) -> ExecutorsListResponse:
+    """List registered executors and their availability.
+
+    For operators and LLMs to discover available execution targets.
+    Does not expose enrollment tokens, CA details, or admin metadata.
+
+    Online status: true if heartbeat within the last 60 seconds.
+    """
+    from core.iam.models import Executor
+
+    executors = db.query(Executor).all()
+
+    result = []
+    now = datetime.now(UTC)
+
+    for exec_rec in executors:
+        is_online = False
+        if exec_rec.last_heartbeat:
+            delta = now - exec_rec.last_heartbeat
+            is_online = delta.total_seconds() < 60
+
+        if exec_rec.revoked_at:
+            status = "revoked"
+        elif exec_rec.enrolled_at:
+            status = "active"
+        else:
+            status = "inactive"
+
+        result.append(
+            ExecutorInfo(
+                id=exec_rec.id,
+                hostname=exec_rec.hostname,
+                online=is_online,
+                last_heartbeat=exec_rec.last_heartbeat,
+                enrolled_at=exec_rec.enrolled_at,
+                status=status,
+            )
+        )
+
+    return ExecutorsListResponse(executors=result)
+
+
+@router.post(
+    "/executors/{id}/heartbeat",
+    status_code=status.HTTP_200_OK,
+)
+async def executor_heartbeat(
+    id: str,
+    db: Session = Depends(get_db),
+    auth_user: dict = Depends(require_role("none")),
+) -> Response:
+    """Called by executor daemon to report liveness.
+
+    Temporarily accepts any authenticated caller (auth_user required but not validated
+    against executor identity). For alpha only — harden to mTLS identity check in Phase 3
+    when executor daemon integration is complete.
+
+    State mutation is minimal: updates last_heartbeat timestamp only.
+    """
+    from core.iam.models import Executor
+
+    executor = db.query(Executor).filter(Executor.id == id).first()
+    if executor is None:
+        raise HTTPException(status_code=404, detail="Executor not found")
+
+    executor.last_heartbeat = datetime.now(UTC)
+    executor.status = "active"
+    db.commit()
+
+    return Response(status_code=200)
