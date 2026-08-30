@@ -564,3 +564,264 @@ class TestRevokeSessionSecrets:
 
         assert resp.status_code == 503
         assert "No active key version" in resp.json()["detail"]
+
+
+class TestSecretsMetadata:
+    """Tests for secret metadata feature."""
+
+    def test_post_secret_with_metadata(self):
+        """POST /secrets should store and return metadata."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_query = MagicMock()
+        mock_session.query.return_value = mock_query
+        backend.get_session.return_value = mock_session
+        app = _create_test_app(core=core, backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": {"executor": "web-server-3", "purpose": "ssh_login"},
+            },
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["key"] == "db-password"
+        assert data["metadata"] == {"executor": "web-server-3", "purpose": "ssh_login"}
+
+    def test_post_secret_without_metadata(self):
+        """POST /secrets without metadata should return None."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        backend.get_session.return_value = mock_session
+        app = _create_test_app(core=core, backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+            },
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["key"] == "db-password"
+        assert data["metadata"] is None
+
+    def test_filter_by_executor(self):
+        """GET /secrets?executor= should filter by executor metadata."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret1 = MagicMock()
+        mock_secret1.id = 1
+        mock_secret1.key = "secret-1"
+        mock_secret1.key_version_id = "v1"
+        mock_secret1.created_by = "user1"
+        mock_secret1.created_at = None
+        mock_secret1.role_names = ["dev"]
+        mock_secret1.meta = {"executor": "web-server-3"}
+        mock_secret2 = MagicMock()
+        mock_secret2.id = 2
+        mock_secret2.key = "secret-2"
+        mock_secret2.key_version_id = "v1"
+        mock_secret2.created_by = "user1"
+        mock_secret2.created_at = None
+        mock_secret2.role_names = ["dev"]
+        mock_secret2.meta = {"executor": "other-server"}
+        mock_query = MagicMock()
+        mock_filtered = MagicMock()
+        mock_filtered.all.return_value = [mock_secret1]
+        mock_query.filter.return_value = mock_filtered
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["key"] == "secret-1"
+        assert data["secrets"][0]["metadata"] == {"executor": "web-server-3"}
+
+    def test_filter_by_purpose(self):
+        """GET /secrets?purpose= should filter by purpose metadata."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "api-key"
+        mock_secret.key_version_id = "v1"
+        mock_secret.created_by = "user1"
+        mock_secret.created_at = None
+        mock_secret.role_names = ["dev"]
+        mock_secret.meta = {"purpose": "api_key"}
+        mock_query = MagicMock()
+        mock_filtered = MagicMock()
+        mock_filtered.all.return_value = [mock_secret]
+        mock_query.filter.return_value = mock_filtered
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"purpose": "api_key"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["key"] == "api-key"
+
+    def test_filter_combined_executor_and_purpose(self):
+        """GET /secrets?executor=&purpose= should AND-combine filters."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "ssh-key"
+        mock_secret.key_version_id = "v1"
+        mock_secret.created_by = "user1"
+        mock_secret.created_at = None
+        mock_secret.role_names = ["dev"]
+        mock_secret.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        mock_query = MagicMock()
+        mock_filtered = MagicMock()
+        mock_filtered.all.return_value = [mock_secret]
+        mock_filtered.filter.return_value = mock_filtered  # chain filter calls
+        mock_query.filter.return_value = mock_filtered
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets",
+            params={"executor": "web-server-3", "purpose": "ssh_login"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["key"] == "ssh-key"
+
+    def test_patch_metadata_merge(self):
+        """PATCH /secrets/{key}/metadata should merge with existing metadata."""
+        core = MagicMock()
+        core.get.return_value = "\u2022" * 8
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "db-password"
+        mock_secret.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        mock_secret.roles = []
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_secret
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"username": "bot"}},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["metadata"]["executor"] == "web-server-3"
+        assert data["metadata"]["purpose"] == "ssh_login"
+        assert data["metadata"]["username"] == "bot"
+
+    def test_patch_metadata_overwrites(self):
+        """PATCH /secrets/{key}/metadata should overwrite existing fields."""
+        core = MagicMock()
+        core.get.return_value = "\u2022" * 8
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "db-password"
+        mock_secret.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        mock_secret.roles = []
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_secret
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"purpose": "api_key"}},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["metadata"]["executor"] == "web-server-3"
+        assert data["metadata"]["purpose"] == "api_key"
+
+    def test_patch_metadata_not_found(self):
+        """PATCH /secrets/{key}/metadata should return 404 for missing secret."""
+        core = MagicMock()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = None
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/missing-key/metadata",
+            json={"metadata": {"executor": "web-server-3"}},
+        )
+
+        assert resp.status_code == 404
+
+    def test_list_secrets_returns_metadata(self):
+        """GET /secrets should include metadata in response."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 42
+        mock_secret.key = "test-key"
+        mock_secret.key_version_id = "v1"
+        mock_secret.created_by = "user1"
+        mock_secret.created_at = None
+        mock_secret.role_names = ["dev"]
+        mock_secret.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        mock_query = MagicMock()
+        mock_filtered = MagicMock()
+        mock_filtered.all.return_value = [mock_secret]
+        mock_query.filter.return_value = mock_filtered
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["metadata"]["executor"] == "web-server-3"
+        assert data["secrets"][0]["metadata"]["purpose"] == "ssh_login"
