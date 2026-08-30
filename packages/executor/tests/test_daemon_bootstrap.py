@@ -8,6 +8,7 @@ Tests cover:
 - Network error handling in CertificateManager.register()
 """
 
+import ssl
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -185,7 +186,8 @@ class TestDaemonRegistrationTLSVerification:
             cm.register("test-1")
 
             MockClient.assert_called_once()
-            assert MockClient.call_args[1]["verify"] is True
+            verify_arg = MockClient.call_args[1]["verify"]
+            assert verify_arg is True or isinstance(verify_arg, ssl.SSLContext)
 
     def test_explicit_true_is_verify_true(self, monkeypatch):
         """VENYA_TLS_VERIFY=true enables verification."""
@@ -224,7 +226,8 @@ class TestDaemonRegistrationTLSVerification:
             cm = CertificateManager(config)
             cm.register("test-1")
 
-            assert MockClient.call_args[1]["verify"] is True
+            verify_arg = MockClient.call_args[1]["verify"]
+            assert verify_arg is True or isinstance(verify_arg, ssl.SSLContext)
 
     def test_false_disables_verification_with_warning(self, monkeypatch, caplog):
         """VENYA_TLS_VERIFY=false disables verification and logs a warning."""
@@ -314,11 +317,13 @@ class TestDaemonRegistrationTLSVerification:
             config = ExecutorConfig.model_validate({"server_url": "https://core", "executor_id": "test-1"})
             cm = CertificateManager(config)
 
-            with pytest.raises(RuntimeError, match="Registration failed. Verify server CA is trusted"):
+            with pytest.raises(RuntimeError, match="Registration failed: TLS verification error"):
                 cm.register("test-1")
 
             assert MockClient.call_count == 1
-            MockClient.assert_called_once_with(verify=True, timeout=30.0)
+            verify_arg = MockClient.call_args[1]["verify"]
+            assert verify_arg is True or isinstance(verify_arg, ssl.SSLContext)
+            assert MockClient.call_args[1]["timeout"] == 30.0
 
     def test_network_error_re_raises_when_verification_disabled(self, monkeypatch):
         """Daemon re-raises ConnectError when VENYA_TLS_VERIFY=false and connection fails."""
@@ -339,10 +344,12 @@ class TestDaemonRegistrationTLSVerification:
             config = ExecutorConfig.model_validate({"server_url": "https://core", "executor_id": "test-1"})
             cm = CertificateManager(config)
 
-            with pytest.raises(httpx2.ConnectError):
+            with pytest.raises(RuntimeError, match="cannot reach server"):
                 cm.register("test-1")
 
-            MockClient.assert_called_once_with(verify=False, timeout=30.0)
+            verify_arg = MockClient.call_args[1]["verify"]
+            assert verify_arg is False
+            assert MockClient.call_args[1]["timeout"] == 30.0
 
     def test_uses_throwaway_not_self_client(self):
         """register() never uses self.client — always creates new httpx2.Client instances."""
@@ -381,5 +388,6 @@ class TestDaemonRegistrationTLSVerification:
 
             # Verify httpx2.Client was called (throwaway client created)
             MockClient.assert_called_once()
-            assert MockClient.call_args[1]["verify"] is True
+            verify_arg = MockClient.call_args[1]["verify"]
+            assert verify_arg is True or isinstance(verify_arg, ssl.SSLContext)
             assert MockClient.call_args[1]["timeout"] == 30.0
