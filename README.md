@@ -208,7 +208,7 @@ Full FAQ: [docs/faq.md](docs/faq.md) *(coming soon)*
 
 ## About
 
-**Venya** is a product of [Tabith LLC](https://tabith.com/), built by infrastructure engineers with decades of experience managing systems at scale — from Unix administration of dozens of servers to platforms handling thousands.
+**Venya** is a product of [Tabith LLC](https://tabith.com/), built by IT engineers with decades of experience managing systems at scale — from Unix administration of dozens of servers to coding for platforms handling billions of dollars in revenue.
 
 We built Venya because we lived the problem. We managed the infrastructure. We held the credentials. We watched teams struggle with the tension between automation and security. We didn't find a solution, so we built one.
 
@@ -220,11 +220,10 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 
 | Document | Description |
 |----------|-------------|
-| [Alpha Demo Guide](docs/alpha-demo.md) | 5-minute end-to-end demo |
+| [Alpha Demo Guide](docs/alpha-demo.md) | 5-minute end-to-end demo *(coming soon)* |
 | [Installation Guide](docs/installation.md) | Full deployment instructions *(coming soon)* |
 | [Architecture](docs/architecture.md) | Technical deep dive *(coming soon)* |
 | [FAQ](docs/faq.md) | Frequently asked questions *(coming soon)* |
-| [Alpha Plan](alpha-plan.md) | Implementation roadmap (internal) |
 
 ---
 
