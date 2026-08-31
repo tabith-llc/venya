@@ -14,7 +14,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import httpx2
-from core.iam.models import AuditEvent, ExecutorCert, ExecutorEnrollmentToken, User
+from core.iam.models import AuditEvent, Executor, ExecutorCert, ExecutorEnrollmentToken, User
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -79,6 +79,15 @@ class ExecutorRegisterRequest(BaseModel):
     )
     csr_pem: str = Field(..., description="PEM-encoded Certificate Signing Request", max_length=2048)
     enrollment_token: str | None = None
+    hostname: str | None = Field(
+        default=None,
+        max_length=253,
+        description=(
+            "Executor's network address, used by the Phase 3 mTLS relay to reach it. "
+            "Optional: when omitted, the server records the caller's forwarded address. "
+            "Registration is ownership-gated, so only a token holder can set this."
+        ),
+    )
 
 
 class ExecutorRegisterResponse(BaseModel):
@@ -191,6 +200,27 @@ class ExecuteResponse(BaseModel):
 
 
 # --- Helpers ---
+
+# Sentinel stored when no hostname can be resolved (e.g. no client address and
+# none supplied). Keeps the non-nullable column populated and flags the gap.
+UNRESOLVED_HOST = "unknown"
+
+
+def resolve_executor_hostname(request: Request, req: ExecutorRegisterRequest) -> str:
+    """Resolve the hostname to store for a registering executor.
+
+    Preference order:
+    1. Client-supplied ``hostname`` (explicit, best — identifies the host).
+    2. Caller's forwarded address (``request.client.host``). Behind nginx
+       (uvicorn ``--proxy-headers``) this is the real executor address.
+    3. Explicit sentinel — the column is non-nullable, never NULL.
+    """
+    host = (req.hostname or "").strip()
+    if host:
+        return host
+    if request.client is not None and request.client.host:
+        return request.client.host
+    return UNRESOLVED_HOST
 
 
 def _get_ca_manager(request: Request) -> CAManager:
@@ -428,6 +458,26 @@ async def register_executor(
     )
     db.add(audit_event)
 
+    # Upsert the Executor status row so GET /api/v1/executors has data.
+    # Hostname: client-supplied > forwarded caller address > sentinel (non-null).
+    now_ts = datetime.now(UTC)
+    effective_host = resolve_executor_hostname(request, req)
+    existing_executor = db.query(Executor).filter(Executor.id == resolved_executor_id).first()
+    if existing_executor is not None:
+        existing_executor.hostname = effective_host
+        if existing_executor.enrolled_at is None:
+            existing_executor.enrolled_at = now_ts
+        existing_executor.status = "active"
+    else:
+        db.add(
+            Executor(
+                id=resolved_executor_id,
+                hostname=effective_host,
+                enrolled_at=now_ts,
+                status="active",
+            )
+        )
+
     try:
         db.commit()
         metrics.EXECUTOR_REGISTERED.labels(result="success").inc()
@@ -580,7 +630,10 @@ async def heartbeat(
     Executors POST to this endpoint every 30s to signal liveness.
     The server responds with revocation status and cert rotation hint.
 
-    This is a public endpoint — no authentication required.
+    Public endpoint — no authentication required. It only liveness-stamps the
+    executor (drives the advisory "online" flag on GET /api/v1/executors). That
+    status is informational, not access-enforcing: real availability is checked
+    at mTLS relay time, and revocation (a real control) rides the cert list.
     """
     from core.iam.models import ExecutorCert, ExecutorCertRevocation
 
@@ -602,8 +655,6 @@ async def heartbeat(
             )
 
             # Check if cert needs rotation (within 3 days of expiry)
-            from datetime import datetime, timedelta
-
             now = datetime.now(UTC)
             expiry_threshold = now + timedelta(days=3)
             not_after = current_cert.not_after
@@ -611,6 +662,15 @@ async def heartbeat(
                 not_after = not_after.replace(tzinfo=UTC)
             if not_after < expiry_threshold:
                 new_cert_required = True
+
+    # Liveness timestamp for GET /api/v1/executors — only when the executor row
+    # already exists (registration creates it; heartbeats never create rows).
+    if executor_id:
+        executor_row = db.query(Executor).filter(Executor.id == executor_id).first()
+        if executor_row is not None:
+            executor_row.last_heartbeat = datetime.now(UTC)
+            executor_row.status = "active"
+            db.commit()
 
     metrics.EXECUTOR_HEARTBEAT_TOTAL.inc()
     return HeartbeatResponse(

@@ -1,6 +1,7 @@
 """Server-side tests for executor registration, revocation, heartbeat, and CA manager."""
 
 import hashlib
+import types
 from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
@@ -271,12 +272,66 @@ def _make_mock_db(executor_certs=None, revocations=None):
 
 
 # ---------------------------------------------------------------------------
+# Hostname resolution helper
+# ---------------------------------------------------------------------------
+
+
+class TestResolveExecutorHostname:
+    """Pure-function tests for the non-null hostname contract (S1)."""
+
+    def _request(self, client_host):
+        if client_host is None:
+            return types.SimpleNamespace(client=None)
+        return types.SimpleNamespace(client=types.SimpleNamespace(host=client_host))
+
+    def test_client_supplied_wins(self):
+        req = types.SimpleNamespace(hostname="exec-1.internal")
+        assert executors_routes.resolve_executor_hostname(self._request("127.0.0.1"), req) == "exec-1.internal"
+
+    def test_client_supplied_is_stripped(self):
+        req = types.SimpleNamespace(hostname="  exec-1.internal  ")
+        assert executors_routes.resolve_executor_hostname(self._request("127.0.0.1"), req) == "exec-1.internal"
+
+    def test_falls_back_to_forwarded_address(self):
+        req = types.SimpleNamespace(hostname=None)
+        assert executors_routes.resolve_executor_hostname(self._request("10.27.28.14"), req) == "10.27.28.14"
+
+    def test_blank_supplied_falls_back_to_forwarded(self):
+        req = types.SimpleNamespace(hostname="   ")
+        assert executors_routes.resolve_executor_hostname(self._request("10.27.28.14"), req) == "10.27.28.14"
+
+    def test_none_client_returns_sentinel(self):
+        from server.routes.executors import UNRESOLVED_HOST
+
+        req = types.SimpleNamespace(hostname=None)
+        r = executors_routes.resolve_executor_hostname(self._request(None), req)
+        assert r == UNRESOLVED_HOST
+        # The contract the column depends on: never NULL.
+        assert r != ""
+        assert r is not None
+
+
+# ---------------------------------------------------------------------------
 # Executor registration endpoint tests
 # ---------------------------------------------------------------------------
 
 
 class TestExecutorRegistration:
     """Tests for POST /executors/register."""
+
+    def _make_db_with_executor(self, db, existing):
+        """Wrap db.query so Executor lookups return ``existing`` (else None)."""
+        orig = db.query.side_effect
+
+        def q(model):
+            if model.__name__ == "Executor":
+                m = MagicMock()
+                m.all = list
+                m.filter = lambda *a, **k: MagicMock(first=lambda: existing)
+                return m
+            return orig(model) if callable(orig) else MagicMock()
+
+        db.query.side_effect = q
 
     def _create_app(self, ca_manager, db):
         app = FastAPI()
@@ -341,6 +396,76 @@ class TestExecutorRegistration:
         assert resp.status_code == 201
         data = resp.json()
         assert data["executor_id"] == "new-exec"
+
+    def test_register_stores_supplied_hostname(self, ca_manager, executor_csr, executor_keypair):
+        from core.iam.models import Executor
+
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={"executor_id": "web-server-3", "csr_pem": csr_pem, "hostname": "web-server-3.internal"},
+        )
+        assert resp.status_code == 201
+        added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], Executor)]
+        assert len(added) == 1
+        rec = added[0]
+        assert rec.id == "web-server-3"
+        assert rec.hostname == "web-server-3.internal"
+        assert rec.status == "active"
+        assert rec.enrolled_at is not None
+
+    def test_register_defaults_hostname_to_forwarded_address(self, ca_manager, executor_csr, executor_keypair):
+        """No hostname supplied -> store the caller's forwarded (XFF) address.
+
+        Emulates production (nginx -> 127.0.0.1:8080, trusted) by adding
+        uvicorn's own trusted-proxy middleware, so request.client.host is the
+        real executor address sent in X-Forwarded-For, not the loopback peer.
+        """
+        from core.iam.models import Executor
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="127.0.0.1, testclient")
+        client = TestClient(app, base_url="http://127.0.0.1:8080")
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={"executor_id": "web-server-3", "csr_pem": csr_pem},  # no hostname
+            headers={"X-Forwarded-For": "10.27.28.14"},
+        )
+        assert resp.status_code == 201
+        added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], Executor)]
+        assert len(added) == 1
+        # The forwarded address is stored, not the loopback proxy peer.
+        assert added[0].hostname == "10.27.28.14"
+        assert added[0].hostname not in ("127.0.0.1", "testclient")
+
+    def test_register_upsert_updates_existing_hostname(self, ca_manager, executor_csr, executor_keypair):
+        from datetime import datetime
+
+        from core.iam.models import Executor
+
+        existing = Executor(id="web-server-3", hostname="old-host", status="active")
+        existing.enrolled_at = datetime(2026, 1, 1, tzinfo=UTC)
+        db = _make_mock_db()
+        self._make_db_with_executor(db, existing)
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={"executor_id": "web-server-3", "csr_pem": csr_pem, "hostname": "web-server-3.internal"},
+        )
+        assert resp.status_code == 201
+        # Re-registration updates the existing row in place, does not add a new one.
+        added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], Executor)]
+        assert added == []
+        assert existing.hostname == "web-server-3.internal"
+        assert existing.status == "active"
 
 
 # ---------------------------------------------------------------------------
@@ -501,3 +626,49 @@ class TestHeartbeat:
         assert resp.status_code == 200
         data = resp.json()
         assert data["new_cert_required"] is False
+
+    def test_heartbeat_updates_last_heartbeat_when_executor_exists(self, ca_manager):
+        """F3: the public heartbeat stamps last_heartbeat (drives 'online')."""
+        from datetime import datetime
+
+        from core.iam.models import Executor
+
+        before = datetime.now(UTC)
+        row = Executor(id="test-exec", hostname="test-exec.internal", status="active")
+        row.last_heartbeat = None
+
+        db = _make_mock_db()
+        orig = db.query.side_effect
+
+        def q(model):
+            if model.__name__ == "Executor":
+                m = MagicMock()
+                m.all = list
+                m.filter = lambda *a, **k: MagicMock(first=lambda: row)
+                return m
+            return orig(model) if callable(orig) else MagicMock()
+
+        db.query.side_effect = q
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "test-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 200
+        assert row.last_heartbeat is not None
+        assert row.last_heartbeat >= before
+        assert row.status == "active"
+        db.commit.assert_called()
+
+    def test_heartbeat_no_row_is_noop(self, ca_manager):
+        """F3: no Executor row -> no last_heartbeat write, no commit, still 200."""
+        db = _make_mock_db()  # _make_mock_db yields None for Executor lookups
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "ghost-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 200
+        db.commit.assert_not_called()
