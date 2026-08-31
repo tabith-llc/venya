@@ -554,12 +554,6 @@ async def update_secret_metadata(
             role_names=[r.role.name for r in secret.roles] if secret.roles else [],
             metadata=merged_meta,
         )
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     finally:
         db.close()
 
