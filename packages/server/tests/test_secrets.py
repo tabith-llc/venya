@@ -633,6 +633,7 @@ class TestSecretsMetadata:
         mock_secret1.created_at = None
         mock_secret1.role_names = ["dev"]
         mock_secret1.meta = {"executor": "web-server-3"}
+        mock_secret1.roles = []
         mock_secret2 = MagicMock()
         mock_secret2.id = 2
         mock_secret2.key = "secret-2"
@@ -641,6 +642,7 @@ class TestSecretsMetadata:
         mock_secret2.created_at = None
         mock_secret2.role_names = ["dev"]
         mock_secret2.meta = {"executor": "other-server"}
+        mock_secret2.roles = []
         mock_query = MagicMock()
         mock_filtered = MagicMock()
         mock_filtered.all.return_value = [mock_secret1]
@@ -671,6 +673,7 @@ class TestSecretsMetadata:
         mock_secret.created_at = None
         mock_secret.role_names = ["dev"]
         mock_secret.meta = {"purpose": "api_key"}
+        mock_secret.roles = []
         mock_query = MagicMock()
         mock_filtered = MagicMock()
         mock_filtered.all.return_value = [mock_secret]
@@ -700,6 +703,7 @@ class TestSecretsMetadata:
         mock_secret.created_at = None
         mock_secret.role_names = ["dev"]
         mock_secret.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        mock_secret.roles = []
         mock_query = MagicMock()
         mock_filtered = MagicMock()
         mock_filtered.all.return_value = [mock_secret]
@@ -809,6 +813,7 @@ class TestSecretsMetadata:
         mock_secret.created_at = None
         mock_secret.role_names = ["dev"]
         mock_secret.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        mock_secret.roles = []
         mock_query = MagicMock()
         mock_filtered = MagicMock()
         mock_filtered.all.return_value = [mock_secret]
