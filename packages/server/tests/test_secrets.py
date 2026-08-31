@@ -845,6 +845,32 @@ class TestSecretsMetadata:
 
         assert resp.status_code == 404
 
+    def test_patch_metadata_db_error_returns_500(self):
+        """PATCH triggering a DB failure → 500, not 'Secret not found'."""
+        core = MagicMock()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "db-password"
+        mock_secret.meta = {"executor": "web-server-3"}
+        mock_secret.roles = []
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_secret
+        mock_session.query.return_value = mock_query
+        mock_session.commit.side_effect = Exception("constraint violation")
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"username": "bot"}},
+        )
+
+        assert resp.status_code == 500
+        assert "Secret not found" not in resp.text
+
     def test_list_secrets_returns_metadata(self):
         """GET /secrets should include metadata in response."""
         core = _make_mock_core()
