@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import logging
+import types
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -426,7 +427,20 @@ async def secrets_list(
             if prefix:
                 query = query.filter(Secret.key.like(f"{prefix}%"))
 
-            records = query.all()
+            orm_records = query.all()
+            records = []
+            for r in orm_records:
+                records.append(
+                    types.SimpleNamespace(
+                        id=r.id,
+                        key=r.key,
+                        key_version_id=r.key_version_id,
+                        created_by=r.created_by,
+                        created_at=r.created_at,
+                        role_names=[sr.role.name for sr in r.roles] if r.roles else [],
+                        meta=r.meta,
+                    )
+                )
         finally:
             db.close()
     else:
