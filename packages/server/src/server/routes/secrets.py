@@ -192,12 +192,21 @@ async def secrets_create(
         )
 
     try:
+        if req.metadata and hasattr(req.metadata, "model_dump"):
+            meta = req.metadata.model_dump(exclude_none=True)
+        elif req.metadata:
+            meta = req.metadata
+        else:
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
         record = core.put(
             key=req.key,
             value=req.value.encode("utf-8"),
             user_id=user_info["user_id"],
             role_names=req.roles,
             key_version_id=req.key_version_id,
+            meta=meta,
         )
     except Exception as e:
         raise HTTPException(
@@ -205,25 +214,11 @@ async def secrets_create(
             detail=str(e),
         )
 
-    # Store metadata in the database
-    backend = getattr(request.app.state, "backend", None)
-    if backend is not None and req.metadata:
-        db = backend.get_session()
-        try:
-            from core.iam.models import Secret
-
-            db.query(Secret).filter(Secret.id == record.id).update({"meta": req.metadata})
-            db.commit()
-        except Exception:
-            db.rollback()
-        finally:
-            db.close()
-
     return SecretCreateResponse(
         id=int(record.id),
         key=req.key,
         role_names=req.roles,
-        metadata=req.metadata,
+        metadata=meta if meta else None,
     )
 
 
