@@ -311,7 +311,6 @@ class TestSecretsList:
 
         core.list.assert_called_once_with(
             prefix=None,
-            user_id="test-user",
         )
 
     def test_list_with_prefix(self):
@@ -325,7 +324,6 @@ class TestSecretsList:
 
         core.list.assert_called_once_with(
             prefix="db-",
-            user_id="test-user",
         )
 
     def test_list_empty(self):
@@ -830,3 +828,42 @@ class TestSecretsMetadata:
         assert len(data["secrets"]) == 1
         assert data["secrets"][0]["metadata"]["executor"] == "web-server-3"
         assert data["secrets"][0]["metadata"]["purpose"] == "ssh_login"
+
+    def test_cross_user_list_with_metadata_filter(self):
+        """Cross-user isolation: metadata-filter path returns same results as no-filter.
+
+        The authorization model is role-gated, not user-scoped. Any user with
+        ``read`` permission sees all secrets matching the filter, regardless of
+        which user created them. This is intentional for the alpha LLM discovery
+        flow (operator stores a secret, LLM lists by executor to find it).
+
+        This test pins the current semantics so a future change to user-scoping
+        fails loudly instead of silently.
+        """
+        core = _make_mock_core()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "admin-credentials"
+        mock_secret.key_version_id = "v1"
+        mock_secret.created_by = "admin-user"
+        mock_secret.created_at = None
+        mock_secret.role_names = ["admin"]
+        mock_secret.meta = {"executor": "web-server-3"}
+        mock_secret.roles = []
+        mock_query = MagicMock()
+        mock_filtered = MagicMock()
+        mock_filtered.all.return_value = [mock_secret]
+        mock_query.filter.return_value = mock_filtered
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["key"] == "admin-credentials"

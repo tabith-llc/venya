@@ -7,6 +7,7 @@ Create Date: 2026-08-29
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision = "023"
 down_revision = "022"
@@ -18,7 +19,7 @@ def upgrade() -> None:
     # Add nullable JSONB column with empty dict default
     op.add_column(
         "secrets",
-        sa.Column("metadata", sa.JSON(), nullable=True, server_default="{}"),
+        sa.Column("metadata", postgresql.JSONB(), nullable=True, server_default="{}"),
     )
 
     # GIN index for JSONB querying — makes metadata->>'executor' = 'web-server-3' fast

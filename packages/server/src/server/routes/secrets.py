@@ -454,7 +454,6 @@ async def secrets_list(
 
         records = core.list(
             prefix=prefix,
-            user_id=user_info.get("user_id"),
         )
 
     secrets = []
