@@ -211,7 +211,7 @@ async def secrets_create(
         id=int(record.id),
         key=req.key,
         role_names=req.roles,
-        metadata=meta if meta else None,
+        metadata=meta if meta else {},
     )
 
 
@@ -454,8 +454,7 @@ async def secrets_list(
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "role_names": r.role_names,
         }
-        if hasattr(r, "meta") and r.meta is not None:
-            secret_dict["metadata"] = r.meta
+        secret_dict["metadata"] = r.meta if r.meta is not None else {}
         secrets.append(secret_dict)
 
     return SecretListResponse(secrets=secrets)
