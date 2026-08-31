@@ -117,6 +117,7 @@ class TestSecretsCreate:
             user_id="test-user",
             role_names=["dev"],
             key_version_id="v1",
+            meta={},
         )
 
     def test_create_unauthenticated(self):

@@ -154,6 +154,7 @@ class Core:
         user_id: str,
         role_names: list[str],
         key_version_id: str,
+        meta: dict | None = None,
     ) -> SecretRecord:
         """Store a secret.
 
@@ -163,6 +164,7 @@ class Core:
             user_id: ID of the user storing the secret.
             role_names: Role names to scope the secret to.
             key_version_id: Key version to use for encryption.
+            meta: Structured metadata for discovery (executor, purpose, etc.).
 
         Returns:
             The created secret record.
@@ -191,6 +193,7 @@ class Core:
                 key_version_id=key_version_id,
                 created_by=user_id,
                 created_at=datetime.now(UTC),
+                meta=meta or {},
             )
             session.add(secret)
             session.flush()
