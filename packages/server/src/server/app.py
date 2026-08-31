@@ -305,6 +305,13 @@ def main() -> None:
         "host": config.host,
         "port": config.port,
         "log_level": "debug" if config.debug else "info",
+        # Trust X-Forwarded-* from the configured proxies so that, behind nginx,
+        # request.client.host resolves to the real caller address (not the
+        # 127.0.0.1 loopback peer). nginx forwards X-Forwarded-For on every
+        # proxied request; the immediate peer is 127.0.0.1, which is in the
+        # trusted list by default.
+        "proxy_headers": True,
+        "forwarded_allow_ips": config.trusted_proxies,
     }
 
     if config.ssl_cert and config.ssl_key:

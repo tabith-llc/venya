@@ -182,6 +182,23 @@ class TestListExecutors:
         data = resp.json()
         assert data["executors"][0]["hostname"] == "10.27.28.14"
 
+    def test_list_executors_forbidden_without_roles(self):
+        """Authenticated user with no roles -> 403 on GET /executors."""
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app, backend = _create_test_app()
+            mock_session = MagicMock()
+            mock_query = MagicMock()
+            mock_query.all.return_value = []
+            mock_session.query.return_value = mock_query
+            backend.get_session.return_value = mock_session
+
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/executors")
+
+        assert resp.status_code == 403
+
 
 class TestExecutorHeartbeat:
     """Tests for POST /api/v1/executors/{id}/heartbeat endpoint."""
@@ -267,3 +284,32 @@ class TestExecutorHeartbeat:
         resp = client.post("/api/v1/executors/web-server-3/heartbeat")
 
         assert resp.status_code == 200
+
+
+class TestExecutorModelContract:
+    """Pins the Executor model<->column contract.
+
+    DB-agnostic substitute for the plan's Postgres-only migration tests:
+    reflects the table object (no live schema), asserts the column set, the
+    non-nullable hostname (S1 contract), and the timezone-aware timestamps.
+    """
+
+    def test_columns_hostname_non_null_and_tz_datetimes(self):
+        import sqlalchemy as sa
+        from core.iam.models import Executor
+
+        cols = {c.name: c for c in Executor.__table__.columns}
+        assert set(cols) == {"id", "hostname", "enrolled_at", "revoked_at", "last_heartbeat", "status"}
+
+        # hostname maps to the exact DB column name the migration writes.
+        assert "hostname" in cols
+        assert cols["hostname"].nullable is False
+
+        # All three timestamp columns are timezone-aware (timestamptz).
+        for name in ("enrolled_at", "revoked_at", "last_heartbeat"):
+            assert isinstance(cols[name].type, sa.DateTime)
+            assert cols[name].type.timezone is True
+
+        # status is non-nullable with the pending default.
+        assert cols["status"].nullable is False
+        assert cols["status"].default.arg == "pending"
