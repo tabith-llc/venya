@@ -25,7 +25,7 @@ class SecretCreateRequest(BaseModel):
     value: str = Field(..., description="Secret value (plaintext)")
     roles: list[str] = Field(..., description="Role names to scope the secret to")
     key_version_id: str = Field(..., description="Key version ID for encryption")
-    metadata: dict[str, Any] | None = Field(
+    metadata: SecretMetadata | None = Field(
         default=None,
         description="Structured metadata for discovery (executor, purpose, username, description)",
     )
@@ -72,7 +72,7 @@ class SecretMetadata(BaseModel):
 class SecretUpdateRequest(BaseModel):
     value: str | None = None
     roles: list[str] | None = None
-    metadata: dict[str, Any] | None = None
+    metadata: SecretMetadata | None = None
 
 
 class SecretGetResponse(BaseModel):
@@ -192,14 +192,7 @@ async def secrets_create(
         )
 
     try:
-        if req.metadata and hasattr(req.metadata, "model_dump"):
-            meta = req.metadata.model_dump(exclude_none=True)
-        elif req.metadata:
-            meta = req.metadata
-        else:
-            meta = {}
-        if not isinstance(meta, dict):
-            meta = {}
+        meta = req.metadata.model_dump(exclude_none=True) if req.metadata else {}
         record = core.put(
             key=req.key,
             value=req.value.encode("utf-8"),
@@ -549,7 +542,8 @@ async def update_secret_metadata(
 
         # Merge: existing fields preserved, new fields overwrite
         existing_meta = secret.meta or {}
-        merged_meta = {**existing_meta, **req.metadata}
+        new_meta = req.metadata.model_dump(exclude_none=True) if req.metadata else {}
+        merged_meta = {**existing_meta, **new_meta}
 
         secret.meta = merged_meta
         db.commit()

@@ -619,6 +619,52 @@ class TestSecretsMetadata:
         assert data["key"] == "db-password"
         assert data["metadata"] is None
 
+    def test_create_metadata_with_custom_fields(self):
+        """Create with standard + custom metadata fields. extra='allow' survives."""
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": {
+                    "executor": "web-server-3",
+                    "custom_port": 5432,
+                    "environment": "prod",
+                },
+            },
+        )
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["metadata"]["executor"] == "web-server-3"
+        assert data["metadata"]["custom_port"] == 5432
+        assert data["metadata"]["environment"] == "prod"
+
+    def test_create_metadata_invalid_type_returns_422(self):
+        """Create with non-string executor → 422, not a silent store."""
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": {"executor": 123},
+            },
+        )
+
+        assert resp.status_code == 422
+
     def test_filter_by_executor(self):
         """GET /secrets?executor= should filter by executor metadata."""
         core = _make_mock_core()
