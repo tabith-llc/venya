@@ -617,7 +617,7 @@ class TestSecretsMetadata:
         assert resp.status_code == 201
         data = resp.json()
         assert data["key"] == "db-password"
-        assert data["metadata"] is None
+        assert data["metadata"] == {}
 
     def test_create_metadata_with_custom_fields(self):
         """Create with standard + custom metadata fields. extra='allow' survives."""
@@ -940,3 +940,34 @@ class TestSecretsMetadata:
         data = resp.json()
         assert len(data["secrets"]) == 1
         assert data["secrets"][0]["key"] == "admin-credentials"
+
+    def test_list_null_meta_returns_empty_object(self):
+        """List where stored meta is NULL → {}, not missing key or null."""
+        core = _make_mock_core()
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "legacy-secret"
+        mock_secret.key_version_id = "v1"
+        mock_secret.created_by = "user1"
+        mock_secret.created_at = None
+        mock_secret.role_names = ["dev"]
+        mock_secret.meta = None  # NULL from DB (legacy row)
+        mock_secret.roles = []
+        mock_query = MagicMock()
+        mock_filtered = MagicMock()
+        mock_filtered.all.return_value = [mock_secret]
+        mock_query.filter.return_value = mock_filtered
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        assert "metadata" in data["secrets"][0]
+        assert data["secrets"][0]["metadata"] == {}
