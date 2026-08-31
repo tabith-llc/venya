@@ -271,14 +271,12 @@ class Core:
     def list(
         self,
         prefix: str | None = None,
-        user_id: str | None = None,
         role_names: list[str] | None = None,
     ) -> list[SecretRecord]:
         """List secrets, optionally filtered by prefix.
 
         Args:
             prefix: Optional key prefix to filter by.
-            user_id: ID of the requesting user.
             role_names: Role names to filter secrets by.
 
         Returns:

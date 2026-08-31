@@ -23,6 +23,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, relationship, validates
 
 
@@ -103,7 +104,7 @@ class Secret(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
     meta = Column(
         "metadata",
-        JSON,
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
         nullable=True,
         server_default="{}",
         comment="Structured metadata for discovery (executor, purpose, username, description)",
