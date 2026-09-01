@@ -36,6 +36,7 @@ from .audit import AuditLogger
 from .command_validator import DEFAULT_DANGEROUS_PATTERNS, CommandValidator
 from .config import ExecutorConfig
 from .executor import Executor
+from .relay_listener import RelayListener
 from .strategies.sbx_strategy import SbxStrategy
 
 logger = logging.getLogger("venya.executor.daemon")
@@ -686,6 +687,11 @@ class ExecutorDaemon:
             tmpfs_dir=config.secret_tmpfs_dir,
         )
 
+        # Relay listener (B0) — wired to the existing execution engine. The
+        # factory is the bound create_executor; it reads self.client at call
+        # time, so it is safe to stash here before the client exists.
+        self.relay = RelayListener(config, self.create_executor, config.relay_client_ids)
+
         # Signal handling
         self._shutdown_event = threading.Event()
 
@@ -786,6 +792,9 @@ class ExecutorDaemon:
 
         # Start reaper loop
         self.reaper.start()
+
+        # Start the mTLS relay listener (certs already on disk after registration)
+        self.relay.start()
 
         # Mark as running
         self.state.running = True
@@ -891,6 +900,7 @@ class ExecutorDaemon:
         for cleanup in (
             self._stop_http_pool,
             self.reaper.stop,
+            self.relay.stop,
             self._remove_pidfile,
             self._close_client,
         ):

@@ -228,6 +228,21 @@ class ExecutorConfig(BaseSettings):
     # mTLS
     mtls: MtlsConfig = Field(default_factory=MtlsConfig)
 
+    # Relay (core -> executor mTLS listener on :8443). Fail-closed: an empty
+    # list means the listener never binds and /execute is unreachable (the
+    # daemon logs the refusal at ERROR on start, so it is loud, not silent).
+    # Set to the CN(s) of the core's relay *client* certificate — the peer the
+    # listener authenticates. No installer step writes it yet; pairing this
+    # allowlist with a core-presented client cert is the C1 trust-chain
+    # prerequisite.
+    relay_client_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Common Names of core client certificates authorized to call the relay "
+            "/execute endpoint. The listener is fail-closed when this is empty."
+        ),
+    )
+
     # Certificate rotation
     cert_rotation: CertificateRotationConfig = Field(default_factory=CertificateRotationConfig)
 
