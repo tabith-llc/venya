@@ -90,14 +90,6 @@ class SecretDeleteResponse(BaseModel):
     key: str
 
 
-class SentinelWrappedResponse(BaseModel):
-    """Sentinel-wrapped secret for executor injection."""
-
-    secret_id: str
-    wrapped_value: str  # [VENYA:{hash}]base64_data[/VENYA]
-    detection_hashes: list[str]  # SHA-256 hex digests in multiple encodings
-
-
 class RevokeSecretsRequest(BaseModel):
     """Request body for secret credential revocation."""
 
@@ -141,30 +133,6 @@ def wrap_with_sentinel(secret_id: str, secret_value: bytes) -> str:
     hash_prefix = hashlib.sha256(secret_id.encode()).hexdigest()[:8]
     encoded = base64.b64encode(secret_value).decode("ascii")
     return f"[VENYA:{hash_prefix}]{encoded}[/VENYA]"
-
-
-def compute_detection_hashes(value: bytes) -> list[str]:
-    """Compute SHA-256 hashes for secret value in multiple encodings.
-
-    Returns list of hex digests for: raw, base64, hex, trimmed.
-
-    Args:
-        value: The secret value bytes.
-
-    Returns:
-        List of SHA-256 hex digest strings.
-    """
-    import base64 as b64
-    import hashlib
-
-    hashes = []
-    hashes.append(hashlib.sha256(value).hexdigest())  # raw bytes
-    hashes.append(hashlib.sha256(b64.b64encode(value)).hexdigest())  # base64 encoding
-    hashes.append(hashlib.sha256(value.hex().encode()).hexdigest())  # hex encoding
-    trimmed = value.strip()
-    if trimmed != value:
-        hashes.append(hashlib.sha256(trimmed).hexdigest())  # whitespace-stripped
-    return hashes
 
 
 # --- Endpoints ---
@@ -322,53 +290,6 @@ async def secrets_get(
         )
 
     return SecretGetResponse(key=key, value=value, masked=caller == "human" and not unmask)
-
-
-@router.get(
-    "/secrets/{key}/executor",
-    response_model=SentinelWrappedResponse,
-)
-async def secrets_get_executor(
-    key: str,
-    request: Request,
-    user_info: dict = Depends(require_role("read")),
-) -> SentinelWrappedResponse:
-    """Retrieve a secret for executor injection.
-
-    Returns sentinel-wrapped plaintext with detection hashes.
-    This endpoint is for executor (mTLS) use only.
-    """
-    # Verify caller is executor (mTLS)
-    if user_info.get("caller") != "executor":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Executor mTLS authentication required",
-        )
-
-    core = getattr(request.app.state, "core", None)
-    if core is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Core not initialized",
-        )
-
-    try:
-        plaintext = core.get(
-            secret_key=key,
-            caller="executor",
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
-        )
-
-    secret_value = plaintext.encode("utf-8")
-    return SentinelWrappedResponse(
-        secret_id=key,
-        wrapped_value=wrap_with_sentinel(key, secret_value),
-        detection_hashes=compute_detection_hashes(secret_value),
-    )
 
 
 @router.get(

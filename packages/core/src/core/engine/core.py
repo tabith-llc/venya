@@ -134,7 +134,7 @@ class Core:
 
             # For executor: always plaintext
             if caller == Caller.EXECUTOR:
-                plaintext = self._decrypt_secret(secret)
+                plaintext = self.decrypt_secret(secret)
                 return plaintext
 
             # For human: masked by default
@@ -142,7 +142,7 @@ class Core:
                 return "\u2022" * 8  # ••••••••
 
             # Human with unmask: requires re-auth (enforced at server level)
-            plaintext = self._decrypt_secret(secret)
+            plaintext = self.decrypt_secret(secret)
             return plaintext
         finally:
             session.close()
@@ -350,7 +350,7 @@ class Core:
 
         return encrypt_secret(self.kek, value)
 
-    def _decrypt_secret(self, secret: Secret) -> str:
+    def decrypt_secret(self, secret: Secret) -> str:
         """Decrypt and return a secret value from a Secret ORM object."""
         if self.kek is None:
             raise CoreError("KEK not configured")

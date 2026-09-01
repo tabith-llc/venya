@@ -65,7 +65,7 @@ class TestCoreGet:
         backend.get_session.return_value = session
         core.backend = backend
 
-        with patch.object(core, "_decrypt_secret", return_value="plaintext-value"):
+        with patch.object(core, "decrypt_secret", return_value="plaintext-value"):
             result = core.get("test-key", caller="human", unmask=True, user_id="user1")
             assert result == "plaintext-value"
 
@@ -82,7 +82,7 @@ class TestCoreGet:
         backend.get_session.return_value = session
         core.backend = backend
 
-        with patch.object(core, "_decrypt_secret", return_value="plaintext-value"):
+        with patch.object(core, "decrypt_secret", return_value="plaintext-value"):
             result = core.get("test-key", caller="executor", user_id="user1")
             assert result == "plaintext-value"
 

@@ -1117,40 +1117,18 @@ def cmd_run(client: APIClient, args: Any) -> int:
 
     executor_id = getattr(args, "executor_id", None) or "default"
 
-    # Step 1: Get secrets for this command
-    secret_keys = getattr(args, "secrets", None)
-    secret_bundles = []
-
-    if secret_keys:
-        print(f"Fetching {len(secret_keys)} secret(s) for executor...")
-        errors = []
-        for key in secret_keys:
-            try:
-                result = client.get(f"/api/v1/secrets/{key}/executor")
-                secret_bundles.append(
-                    {
-                        "secret_id": result["secret_id"],
-                        "value": result["wrapped_value"],
-                    }
-                )
-                print(f"  Secret '{key}' ready.")
-            except APIClientError as e:
-                errors.append(f"  Secret '{key}': {e}")
-        if errors:
-            print(f"Failed to fetch {len(errors)} secret(s):", file=sys.stderr)
-            for err in errors:
-                print(err, file=sys.stderr)
-            return 1
-    else:
+    # Step 1: Collect secret keys (server resolves and wraps them)
+    secret_keys = getattr(args, "secrets", None) or []
+    if not secret_keys:
         print("No secrets specified. Command will run without injected credentials.")
 
-    # Step 2: Create executor session
+    # Step 2: Create executor session (keys only; server-side wrapping)
     try:
         session_result = client.post(
             "/api/v1/executors/sessions",
             json={
                 "executor_id": executor_id,
-                "secrets": secret_bundles,
+                "secret_keys": secret_keys,
             },
         )
         session_id = session_result["session_id"]
@@ -1167,7 +1145,6 @@ def cmd_run(client: APIClient, args: Any) -> int:
             json={
                 "session_id": session_id,
                 "command": command,
-                "secrets": secret_bundles,
             },
         )
         exit_code = exec_result.get("exit_code", 0)
