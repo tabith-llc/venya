@@ -238,61 +238,6 @@ class TestSecretsGet:
         assert resp.status_code == 404
 
 
-class TestSecretsGetExecutor:
-    """Tests for executor secret retrieval endpoint."""
-
-    def test_executor_returns_sentinel_wrapped(self):
-        """GET /secrets/{key}/executor should return sentinel-wrapped value."""
-        core = MagicMock()
-        core.get.return_value = "my-api-key"
-        app = _create_test_app(core=core)
-        # Override to return executor user_info
-        app.dependency_overrides[get_current_user] = lambda: {
-            "caller": "executor",
-            "executor_id": "exec-1",
-        }
-        client = TestClient(app, raise_server_exceptions=False)
-
-        resp = client.get("/api/v1/secrets/api-key/executor")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["secret_id"] == "api-key"
-        assert data["wrapped_value"].startswith("[VENYA:")
-        assert data["wrapped_value"].endswith("[/VENYA]")
-        assert len(data["detection_hashes"]) >= 1
-
-        core.get.assert_called_once_with(
-            secret_key="api-key",
-            caller="executor",
-        )
-
-    def test_executor_denied_for_human_user(self):
-        """GET /secrets/{key}/executor should deny non-executor callers."""
-        core = MagicMock()
-        core.get.return_value = "my-api-key"
-        app = _create_test_app(core=core)
-        # Default TEST_USER is human
-        client = TestClient(app, raise_server_exceptions=False)
-
-        resp = client.get("/api/v1/secrets/api-key/executor")
-        assert resp.status_code == 403
-        assert resp.json()["detail"] == "Executor mTLS authentication required"
-
-    def test_executor_not_found(self):
-        """GET /secrets/{key}/executor should return 404 for missing secret."""
-        core = MagicMock()
-        core.get.side_effect = Exception("Secret not found: missing-key")
-        app = _create_test_app(core=core)
-        app.dependency_overrides[get_current_user] = lambda: {
-            "caller": "executor",
-            "executor_id": "exec-1",
-        }
-        client = TestClient(app, raise_server_exceptions=False)
-
-        resp = client.get("/api/v1/secrets/missing-key/executor")
-        assert resp.status_code == 404
-
-
 class TestSecretsList:
     """Tests for secrets listing endpoint."""
 

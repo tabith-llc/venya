@@ -30,6 +30,7 @@ from ..dependencies import get_db, require_role
 from ..rate_limit import rate_limit_registration
 from ..utils.executor_id import EXECUTOR_ID_PATTERN
 from ..utils.time import effective_expiry_check_time, is_expired
+from .secrets import wrap_with_sentinel
 
 logger = logging.getLogger("venya.server")
 
@@ -148,16 +149,6 @@ class ExecutorsListResponse(BaseModel):
 # --- Execution session models ---
 
 
-class SessionSecretBundle(BaseModel):
-    """A wrapped secret bundle for an execution session."""
-
-    secret_id: str = Field(..., description="Secret ID (matches secrets.id)")
-    wrapped_value: str = Field(
-        ...,
-        description="Sentinel-wrapped value: [VENYA:{hash}]base64_data[/VENYA]",
-    )
-
-
 class SessionCreateRequest(BaseModel):
     """Request body for creating an execution session."""
 
@@ -168,9 +159,9 @@ class SessionCreateRequest(BaseModel):
         min_length=2,
         max_length=64,
     )
-    secrets: list[SessionSecretBundle] = Field(
+    secret_keys: list[str] = Field(
         default_factory=list,
-        description="Wrapped secret bundles from GET /secrets/{key}/executor",
+        description="Secret keys to resolve, wrap, and inject (server-side)",
     )
 
 
@@ -765,17 +756,26 @@ async def executor_heartbeat(
 )
 async def create_execution_session(
     req: SessionCreateRequest,
+    request: Request,
     db: Session = Depends(get_db),
     auth_user: dict = Depends(require_role("read-write")),
 ) -> SessionCreateResponse:
-    """Create an execution session with secret bundles.
+    """Create an execution session from secret keys.
 
-    Called by CLI/MCP before executing a command. Wraps secrets and stores
-    them for the executor to consume via the execution relay.
+    Called by CLI/MCP before executing a command. The server resolves each
+    key, decrypts, and sentinel-wraps the value server-side; clients never
+    send or receive wrapped values.
     """
-    from core.iam.models import ExecutionSession, Executor, SessionSecret
+    from core.iam.models import ExecutionSession, Executor, Secret, SessionSecret
 
-    # Verify executor exists and is reachable
+    core = getattr(request.app.state, "core", None)
+    if core is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Core not initialized",
+        )
+
+    # Verify executor exists
     executor = db.query(Executor).filter(Executor.id == req.executor_id).first()
     if executor is None:
         raise HTTPException(status_code=404, detail="Executor not found")
@@ -792,14 +792,42 @@ async def create_execution_session(
     )
     db.add(session)
 
-    # Store wrapped secrets
-    for secret_bundle in req.secrets:
-        session_secret = SessionSecret(
-            session_id=session.id,
-            secret_id=secret_bundle.secret_id,
-            wrapped_value=secret_bundle.wrapped_value,
+    # Resolve, wrap, and store secrets server-side (single transaction)
+    mismatched_keys: list[str] = []
+    for key in req.secret_keys:
+        secret = db.query(Secret).filter(Secret.key == key).order_by(Secret.id).first()
+        if secret is None:
+            raise HTTPException(status_code=404, detail=f"Secret '{key}' not found")
+
+        # metadata.executor is an organizational hint; mismatch warns, does not block
+        declared = (secret.meta or {}).get("executor")
+        if declared and declared != req.executor_id:
+            mismatched_keys.append(key)
+            logger.warning(
+                "Session %s: secret '%s' metadata.executor=%s != executor_id=%s (user=%s)",
+                session.id,
+                key,
+                declared,
+                req.executor_id,
+                auth_user["user_id"],
+            )
+
+        try:
+            plaintext = core.decrypt_secret(secret)
+        except Exception:
+            logger.exception("Failed to decrypt secret '%s' for session %s", key, session.id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Secret decryption unavailable",
+            )
+
+        db.add(
+            SessionSecret(
+                session_id=session.id,
+                secret_id=secret.id,
+                wrapped_value=wrap_with_sentinel(key, plaintext.encode("utf-8")),
+            )
         )
-        db.add(session_secret)
 
     # AUDIT EVENT: Session created
     audit_event = AuditEvent(
@@ -808,7 +836,8 @@ async def create_execution_session(
         fields={
             "session_id": session.id,
             "executor_id": req.executor_id,
-            "secret_count": len(req.secrets),
+            "secret_keys": req.secret_keys,
+            "metadata_mismatch": mismatched_keys,
         },
         timestamp=now,
     )
@@ -857,6 +886,10 @@ async def execute_command_on_executor(
     # Verify session ownership
     if session.user_id != auth_user["user_id"]:
         raise HTTPException(status_code=403, detail="Session does not belong to user")
+
+    # Verify session is bound to this executor
+    if session.executor_id != id:
+        raise HTTPException(status_code=403, detail="Session was created for a different executor")
 
     # Load executor hostname (required for mTLS relay, non-nullable)
     executor = db.query(Executor).filter(Executor.id == id).first()

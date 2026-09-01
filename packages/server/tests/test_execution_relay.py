@@ -40,6 +40,10 @@ def _create_test_app(backend=None):
     mock_config.mtls_key = None
     app.state.config = mock_config
 
+    # Server-side secret resolution/wrapping
+    app.state.core = MagicMock()
+    app.state.core.decrypt_secret.return_value = "s3cret-value"
+
     app.include_router(executors_routes.router, prefix="/api/v1")
 
     app.dependency_overrides[get_current_user] = lambda: TEST_USER
@@ -47,7 +51,36 @@ def _create_test_app(backend=None):
     return app, backend
 
 
+def _mock_secret_rows(*rows):
+    """Build mock Secret ORM rows (id, key, meta)."""
+    secrets = []
+    for i, (key, meta) in enumerate(rows, start=1):
+        s = MagicMock()
+        s.id = i
+        s.key = key
+        s.meta = meta
+        secrets.append(s)
+    return secrets
+
+
 # --- Session creation tests ---
+
+
+def _mock_db_for_session(executor, secrets_first_side_effect):
+    """Mock db session serving Executor + per-key Secret queries."""
+    mock_session = MagicMock()
+    executor_q = MagicMock()
+    executor_q.filter.return_value.first.return_value = executor
+    secret_q = MagicMock()
+    secret_q.filter.return_value.order_by.return_value.first.side_effect = secrets_first_side_effect
+
+    def query_side_effect(model):
+        if model.__name__ == "Executor":
+            return executor_q
+        return secret_q
+
+    mock_session.query.side_effect = query_side_effect
+    return mock_session
 
 
 class TestCreateExecutionSession:
@@ -68,7 +101,7 @@ class TestCreateExecutionSession:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/executors/sessions",
-            json={"executor_id": "exec-1", "secrets": []},
+            json={"executor_id": "exec-1"},
         )
 
         assert resp.status_code == 201
@@ -81,83 +114,127 @@ class TestCreateExecutionSession:
     def test_create_session_404_unknown_executor(self):
         """Session creation returns 404 for unknown executor."""
         app, backend = _create_test_app()
-        mock_session = MagicMock()
-        mock_query = MagicMock()
-        mock_filtered = MagicMock()
-        mock_filtered.first.return_value = None
-        mock_query.filter.return_value = mock_filtered
-        mock_session.query.return_value = mock_query
-        backend.get_session.return_value = mock_session
+        mock_db = _mock_db_for_session(None, [])
+        backend.get_session.return_value = mock_db
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/executors/sessions",
-            json={"executor_id": "nonexistent", "secrets": []},
+            json={"executor_id": "nonexistent"},
         )
 
         assert resp.status_code == 404
 
-    def test_audit_event_session_created(self):
-        """Verify execution_session_created audit event is created."""
+    def test_create_session_503_core_not_initialized(self):
+        """Session creation returns 503 when core is not initialized."""
+        app, _ = _create_test_app()
+        app.state.core = None
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/executors/sessions",
+            json={"executor_id": "exec-1"},
+        )
+        assert resp.status_code == 503
+
+    def test_create_session_404_unknown_key(self):
+        """Session creation returns 404 for an unknown secret key."""
         app, backend = _create_test_app()
-        mock_session = MagicMock()
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
-        mock_query = MagicMock()
-        mock_query.first.return_value = mock_executor
-        mock_session.query.return_value = mock_query
-        backend.get_session.return_value = mock_session
+        mock_db = _mock_db_for_session(mock_executor, [None])
+        backend.get_session.return_value = mock_db
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/executors/sessions",
-            json={"executor_id": "exec-1", "secrets": []},
+            json={"executor_id": "exec-1", "secret_keys": ["missing-key"]},
+        )
+
+        assert resp.status_code == 404
+
+    def test_create_session_stores_wrapped_secrets(self):
+        """Keys are resolved and wrapped server-side into SessionSecret rows."""
+        from server.routes.secrets import wrap_with_sentinel
+
+        app, backend = _create_test_app()
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "10.27.28.14"
+        secrets = _mock_secret_rows(("db-password", None), ("api-key", None))
+        mock_db = _mock_db_for_session(mock_executor, list(secrets))
+        backend.get_session.return_value = mock_db
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/executors/sessions",
+            json={"executor_id": "exec-1", "secret_keys": ["db-password", "api-key"]},
         )
 
         assert resp.status_code == 201
 
-        # Check that AuditEvent was added to the session
-        add_calls = [c for c in mock_session.add.call_args_list]
-        assert len(add_calls) >= 2  # session + audit event (secrets may add more)
+        added = [c[0][0] for c in mock_db.add.call_args_list if c[0]]
+        session_secrets = [s for s in added if getattr(s, "wrapped_value", None) is not None]
+        assert len(session_secrets) == 2
+        assert [s.secret_id for s in session_secrets] == [1, 2]
+        assert [s.wrapped_value for s in session_secrets] == [
+            wrap_with_sentinel("db-password", b"s3cret-value"),
+            wrap_with_sentinel("api-key", b"s3cret-value"),
+        ]
+
+    def test_audit_event_contains_secret_keys(self):
+        """A3: audit event records session, executor, and the secret keys."""
+        app, backend = _create_test_app()
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "10.27.28.14"
+        secrets = _mock_secret_rows(("db-password", None))
+        mock_db = _mock_db_for_session(mock_executor, list(secrets))
+        backend.get_session.return_value = mock_db
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/executors/sessions",
+            json={"executor_id": "exec-1", "secret_keys": ["db-password"]},
+        )
+
+        assert resp.status_code == 201
+
         audit_event = None
-        for call in add_calls:
+        for call in mock_db.add.call_args_list:
             event = call[0][0] if call[0] else None
             if event and hasattr(event, "event_type") and event.event_type == "execution_session_created":
                 audit_event = event
                 break
-        assert audit_event is not None, "execution_session_created audit event not found"
-        assert audit_event.user_id == "test-user"
-        assert audit_event.fields is not None
 
-    def test_audit_event_contains_session_fields(self):
-        """Audit event contains session_id, executor_id, secret_count."""
+        assert audit_event is not None
+        assert audit_event.user_id == "test-user"
+        fields = eval(audit_event.fields) if isinstance(audit_event.fields, str) else audit_event.fields
+        assert "session_id" in fields
+        assert fields["executor_id"] == "exec-1"
+        assert fields["secret_keys"] == ["db-password"]
+        assert fields["metadata_mismatch"] == []
+
+    def test_metadata_mismatch_warns_not_blocks(self):
+        """A4: metadata.executor mismatch is recorded in audit, session proceeds."""
         app, backend = _create_test_app()
-        mock_session = MagicMock()
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
-        mock_query = MagicMock()
-        mock_query.first.return_value = mock_executor
-        mock_session.query.return_value = mock_query
-        backend.get_session.return_value = mock_session
+        secrets = _mock_secret_rows(("db-password", {"executor": "other-exec"}))
+        mock_db = _mock_db_for_session(mock_executor, list(secrets))
+        backend.get_session.return_value = mock_db
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/executors/sessions",
-            json={
-                "executor_id": "exec-1",
-                "secrets": [
-                    {"secret_id": "sec-1", "wrapped_value": "[VENYA:abcd]data[/VENYA]"},
-                ],
-            },
+            json={"executor_id": "exec-1", "secret_keys": ["db-password"]},
         )
 
         assert resp.status_code == 201
 
-        # Find the audit event
         audit_event = None
-        for call in mock_session.add.call_args_list:
+        for call in mock_db.add.call_args_list:
             event = call[0][0] if call[0] else None
             if event and hasattr(event, "event_type") and event.event_type == "execution_session_created":
                 audit_event = event
@@ -165,58 +242,18 @@ class TestCreateExecutionSession:
 
         assert audit_event is not None
         fields = eval(audit_event.fields) if isinstance(audit_event.fields, str) else audit_event.fields
-        assert "session_id" in fields
-        assert fields["executor_id"] == "exec-1"
-        assert fields["secret_count"] == 1
-
-    def test_session_secrets_stored(self):
-        """Wrapped secrets are stored in execution_session_secrets table."""
-        app, backend = _create_test_app()
-        mock_session = MagicMock()
-        mock_executor = MagicMock()
-        mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
-        mock_query = MagicMock()
-        mock_query.first.return_value = mock_executor
-        mock_session.query.return_value = mock_query
-        backend.get_session.return_value = mock_session
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/executors/sessions",
-            json={
-                "executor_id": "exec-1",
-                "secrets": [
-                    {"secret_id": "sec-1", "wrapped_value": "[VENYA:abcd]Zm9v[/VENYA]"},
-                    {"secret_id": "sec-2", "wrapped_value": "[VENYA:efgh]YmFy[/VENYA]"},
-                ],
-            },
-        )
-
-        assert resp.status_code == 201
-
-        # Check SessionSecret was added
-        secret_add_calls = [
-            c for c in mock_session.add.call_args_list if c[0] and len(c[0]) > 0 and hasattr(c[0][0], "wrapped_value")
-        ]
-        assert len(secret_add_calls) == 2
+        assert fields["metadata_mismatch"] == ["db-password"]
 
     def test_session_10_minute_ttl(self):
         """Session expires_at is created_at + 10 minutes."""
         app, backend = _create_test_app()
-        mock_session = MagicMock()
-        mock_executor = MagicMock()
-        mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
-        mock_query = MagicMock()
-        mock_query.first.return_value = mock_executor
-        mock_session.query.return_value = mock_query
-        backend.get_session.return_value = mock_session
+        mock_db = _mock_db_for_session(MagicMock(id="exec-1", hostname="10.27.28.14"), [])
+        backend.get_session.return_value = mock_db
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/executors/sessions",
-            json={"executor_id": "exec-1", "secrets": []},
+            json={"executor_id": "exec-1"},
         )
 
         assert resp.status_code == 201
@@ -299,6 +336,32 @@ class TestExecuteCommandOnExecutor:
         )
 
         assert resp.status_code == 403
+
+    def test_execute_session_executor_mismatch(self):
+        """A2: execute returns 403 when the session was created for another executor."""
+        app, backend = _create_test_app()
+        mock_session = MagicMock()
+        mock_execution_session = MagicMock()
+        mock_execution_session.id = "sess-1"
+        mock_execution_session.user_id = "test-user"
+        mock_execution_session.executor_id = "exec-2"
+        mock_execution_session.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+
+        mock_query = MagicMock()
+        mock_filtered = MagicMock()
+        mock_filtered.first.return_value = mock_execution_session
+        mock_query.filter.return_value = mock_filtered
+        mock_session.query.return_value = mock_query
+        backend.get_session.return_value = mock_session
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/executors/exec-1/execute",
+            json={"session_id": "sess-1", "command": "echo hello"},
+        )
+
+        assert resp.status_code == 403
+        assert "different executor" in resp.json()["detail"]
 
     def test_execute_audit_event_command_executed(self):
         """Verify command_executed audit event is created."""
