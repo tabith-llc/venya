@@ -141,7 +141,7 @@ class SbxStrategy(InjectionStrategy):
             sandbox_name: Unique name for the sandbox.
             workspace: Workspace directory to mount into the sandbox.
         """
-        cmd = ["sbx", "create", "--name", sandbox_name]
+        cmd = ["sbx", "create", "--name", sandbox_name, "shell"]
         if workspace:
             cmd.append(workspace)
 
