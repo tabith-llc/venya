@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -934,6 +934,13 @@ async def execute_command_on_executor(
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
     except ssl.SSLError:
         raise HTTPException(status_code=503, detail="mTLS verification failed")
+
+    # Validate executor response shape before any field access
+    try:
+        result = ExecuteResponse(**result).model_dump()
+    except ValidationError as e:
+        logger.warning("Invalid executor response for session %s: %s", session.id, e)
+        raise HTTPException(status_code=502, detail="Invalid response from executor")
 
     # AUDIT EVENT: Command executed
     now = datetime.now(UTC)
