@@ -33,7 +33,12 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from .audit import AuditLogger
-from .command_validator import DEFAULT_DANGEROUS_PATTERNS, CommandValidator
+from .command_validator import (
+    DEFAULT_DANGEROUS_PATTERNS,
+    DEFAULT_TRUSTED_PATHS,
+    CommandPolicy,
+    CommandValidator,
+)
 from .config import ExecutorConfig
 from .executor import Executor
 from .relay_listener import RelayListener
@@ -643,6 +648,26 @@ class ReaperLoop:
                 logger.exception("Failed to revoke orphaned secret tokens")
 
 
+def build_command_policy(cv: Any) -> CommandPolicy:
+    """Build a CommandPolicy from the executor config's command_validator section.
+
+    Presets and their trusted_paths behavior:
+      - balanced: DEFAULT_TRUSTED_PATHS (operator cannot override; no config field)
+      - strict: empty (uses allowed_commands allowlist instead)
+      - permissive: empty (no path check; dangerous patterns still apply)
+    """
+    trusted = frozenset(DEFAULT_TRUSTED_PATHS) if cv.preset == "balanced" else frozenset()
+    return CommandPolicy(
+        preset=cv.preset,
+        allowed_commands=frozenset(cv.allowed_commands) if cv.allowed_commands else frozenset(),
+        trusted_paths=trusted,
+        dangerous_patterns=(
+            frozenset(cv.dangerous_patterns) if cv.dangerous_patterns else frozenset(DEFAULT_DANGEROUS_PATTERNS)
+        ),
+        match_word_boundaries=cv.match_word_boundaries,
+    )
+
+
 class ExecutorDaemon:
     """Main executor daemon.
 
@@ -665,16 +690,9 @@ class ExecutorDaemon:
 
         # Command validator
         cv = self.config.command_validator
-        from .command_validator import CommandPolicy
 
         self.command_validator = CommandValidator(
-            policy=CommandPolicy(
-                preset=cv.preset,
-                allowed_commands=frozenset(cv.allowed_commands) if cv.allowed_commands else frozenset(),
-                trusted_paths=frozenset(),
-                dangerous_patterns=frozenset(DEFAULT_DANGEROUS_PATTERNS),
-                match_word_boundaries=cv.match_word_boundaries,
-            ),
+            policy=build_command_policy(cv),
         )
 
         # Certificate manager — client created after registration
