@@ -931,14 +931,19 @@ async def execute_command_on_executor(
             response = await client.post(executor_url, json=payload)
             response.raise_for_status()
             result = response.json()
-    except httpx2.ConnectError:
+    except httpx2.ConnectError as e:
+        # Walk cause chain (httpx may wrap SSLError one or more levels deep)
+        _c, _d = (e.__cause__ or e.__context__), 0
+        while _c and _d < 5 and not isinstance(_c, ssl.SSLError):
+            _c, _d = (_c.__cause__ or _c.__context__), _d + 1
+        if _c and isinstance(_c, ssl.SSLError):
+            logger.warning("mTLS verification failed: %s", _c)
+            raise HTTPException(status_code=503, detail="mTLS verification failed")
         raise HTTPException(status_code=503, detail="Executor unreachable (connection refused)")
     except httpx2.TimeoutException:
         raise HTTPException(status_code=503, detail="Executor timed out")
     except httpx2.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
-    except ssl.SSLError:
-        raise HTTPException(status_code=503, detail="mTLS verification failed")
 
     # Validate executor response shape before any field access
     try:
