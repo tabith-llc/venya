@@ -705,3 +705,99 @@ class TestMalformedExecutorResponse:
         assert body["stdout"] == "hello\n"
         assert body["masked_count"] == 1
         assert "rogue_field" not in body
+
+
+# --- TLS misconfiguration tests (M2) ---
+
+
+class TestTlsMisconfiguration:
+    """TLS setup failures (missing/corrupt certs) must return 503, not 500."""
+
+    def _setup(self, backend=None):
+        app, backend = _create_test_app(backend)
+        mock_db = MagicMock()
+
+        mock_exec_session = MagicMock()
+        mock_exec_session.id = "sess-1"
+        mock_exec_session.user_id = "test-user"
+        mock_exec_session.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        mock_exec_session.executor_id = "exec-1"
+
+        mock_session_query = MagicMock()
+        mock_session_filtered = MagicMock()
+        mock_session_filtered.first.return_value = mock_exec_session
+        mock_session_query.filter.return_value = mock_session_filtered
+
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "10.27.28.14"
+
+        mock_executor_query = MagicMock()
+        mock_executor_filtered = MagicMock()
+        mock_executor_filtered.first.return_value = mock_executor
+        mock_executor_query.filter.return_value = mock_executor_filtered
+
+        mock_secrets_query = MagicMock()
+        mock_secrets_query.all.return_value = []
+
+        def query_side_effect(model):
+            if model.__name__ == "ExecutionSession":
+                return mock_session_query
+            elif model.__name__ == "Executor":
+                return mock_executor_query
+            elif model.__name__ == "SessionSecret":
+                return mock_secrets_query
+            return mock_session_query
+
+        mock_db.query.side_effect = query_side_effect
+        mock_db.add = MagicMock()
+        mock_db.commit = MagicMock()
+        backend.get_session.return_value = mock_db
+
+        return app, backend
+
+    def test_ca_cert_missing_returns_503(self):
+        """load_verify_locations raises FileNotFoundError → 503."""
+        app, _backend = self._setup()
+        mock_ssl_ctx = MagicMock()
+        mock_ssl_ctx.load_verify_locations.side_effect = FileNotFoundError("ca.crt not found")
+
+        with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/executors/exec-1/execute",
+                json={"session_id": "sess-1", "command": "echo hello"},
+            )
+        assert resp.status_code == 503
+
+    def test_none_ca_path_returns_503(self):
+        """load_verify_locations(None) raises TypeError → 503 (config missing)."""
+        app, _backend = self._setup()
+        mock_ssl_ctx = MagicMock()
+        mock_ssl_ctx.load_verify_locations.side_effect = TypeError("load_verify_locations expects a path, not None")
+
+        with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/executors/exec-1/execute",
+                json={"session_id": "sess-1", "command": "echo hello"},
+            )
+        assert resp.status_code == 503
+
+    def test_mtls_cert_missing_returns_503(self):
+        """load_cert_chain raises FileNotFoundError → 503 (mtls cert/key missing)."""
+        app, _backend = self._setup()
+        # Override config to have mtls cert/key set (so the branch is taken)
+        app.state.config.mtls_cert = "/etc/venya/relay/relay-client.crt"
+        app.state.config.mtls_key = "/etc/venya/relay/relay-client.key"
+
+        mock_ssl_ctx = MagicMock()
+        mock_ssl_ctx.load_cert_chain.side_effect = FileNotFoundError("relay-client.crt not found")
+
+        with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/executors/exec-1/execute",
+                json={"session_id": "sess-1", "command": "echo hello"},
+            )
+        assert resp.status_code == 503
