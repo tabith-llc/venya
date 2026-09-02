@@ -92,7 +92,7 @@ class SbxStrategy(InjectionStrategy):
         cleanup_funcs: list[Callable[[], None]] = []
 
         for bundle in secrets:
-            secret_path = os.path.join(self._session_dir, bundle.secret_id)
+            secret_path = os.path.join(self._session_dir, str(bundle.secret_id))
 
             # Write secret to tmpfs file
             fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT, 0o400)
