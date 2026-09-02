@@ -582,3 +582,126 @@ class TestExecutorReachability:
             )
 
             assert resp.status_code == 500  # Generic error for unexpected exceptions
+
+
+# --- Malformed executor response tests (M1) ---
+
+
+class TestMalformedExecutorResponse:
+    """Malformed executor responses (200 + bad body) must return 502, not 500."""
+
+    def _setup_db(self, backend, response_body: dict):
+        app, backend = _create_test_app()
+        mock_db = MagicMock()
+
+        mock_exec_session = MagicMock()
+        mock_exec_session.id = "sess-1"
+        mock_exec_session.user_id = "test-user"
+        mock_exec_session.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        mock_exec_session.executor_id = "exec-1"
+        mock_exec_session.command = ""
+        mock_exec_session.completed_at = None
+        mock_exec_session.exit_code = None
+        mock_exec_session.stdout = None
+        mock_exec_session.stderr = None
+
+        mock_session_query = MagicMock()
+        mock_session_filtered = MagicMock()
+        mock_session_filtered.first.return_value = mock_exec_session
+        mock_session_query.filter.return_value = mock_session_filtered
+
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "10.27.28.14"
+
+        mock_executor_query = MagicMock()
+        mock_executor_filtered = MagicMock()
+        mock_executor_filtered.first.return_value = mock_executor
+        mock_executor_query.filter.return_value = mock_executor_filtered
+
+        mock_secrets_query = MagicMock()
+        mock_secrets_query.all.return_value = []
+
+        def query_side_effect(model):
+            if model.__name__ == "ExecutionSession":
+                return mock_session_query
+            elif model.__name__ == "Executor":
+                return mock_executor_query
+            elif model.__name__ == "SessionSecret":
+                return mock_secrets_query
+            return mock_session_query
+
+        mock_db.query.side_effect = query_side_effect
+        mock_db.add = MagicMock()
+        mock_db.commit = MagicMock()
+        backend.get_session.return_value = mock_db
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = response_body
+        mock_response.raise_for_status = MagicMock()
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mock_ssl_ctx = MagicMock()
+
+        return app, backend, mock_client, mock_ssl_ctx
+
+    def test_missing_stderr_returns_502(self):
+        """200 response missing 'stderr' key → 502."""
+        app, _backend, mock_client, mock_ssl_ctx = self._setup_db(
+            MagicMock(),
+            {"exit_code": 0, "stdout": "ok\n"},  # missing stderr
+        )
+        with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
+            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+                client = TestClient(app, raise_server_exceptions=False)
+                resp = client.post(
+                    "/api/v1/executors/exec-1/execute",
+                    json={"session_id": "sess-1", "command": "echo hello"},
+                )
+        assert resp.status_code == 502
+
+    def test_wrong_type_exit_code_returns_502(self):
+        """200 response with non-integer exit_code → 502."""
+        app, _backend, mock_client, mock_ssl_ctx = self._setup_db(
+            MagicMock(),
+            {"exit_code": "zero", "stdout": "ok\n", "stderr": ""},
+        )
+        with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
+            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+                client = TestClient(app, raise_server_exceptions=False)
+                resp = client.post(
+                    "/api/v1/executors/exec-1/execute",
+                    json={"session_id": "sess-1", "command": "echo hello"},
+                )
+        assert resp.status_code == 502
+
+    def test_extra_keys_dropped_valid_fields_preserved(self):
+        """200 response with extra keys → 502 is NOT returned; valid fields preserved, junk dropped."""
+        app, _backend, mock_client, mock_ssl_ctx = self._setup_db(
+            MagicMock(),
+            {
+                "exit_code": 0,
+                "stdout": "hello\n",
+                "stderr": "",
+                "masked_count": 1,
+                "rogue_field": "should not appear",
+            },
+        )
+        with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
+            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+                client = TestClient(app, raise_server_exceptions=False)
+                resp = client.post(
+                    "/api/v1/executors/exec-1/execute",
+                    json={"session_id": "sess-1", "command": "echo hello"},
+                )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["exit_code"] == 0
+        assert body["stdout"] == "hello\n"
+        assert body["masked_count"] == 1
+        assert "rogue_field" not in body
