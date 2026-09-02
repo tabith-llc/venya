@@ -382,7 +382,7 @@ class ExecutionSession(Base):
         ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
-    executor_id = Column(String, nullable=False)
+    executor_id = Column(String, ForeignKey("executors.id"), nullable=False)
     command = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
