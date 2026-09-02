@@ -915,10 +915,15 @@ async def execute_command_on_executor(
     mtls_cert = config.mtls_cert if config else None
     mtls_key = config.mtls_key if config else None
 
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.load_verify_locations(ca_cert_path)
-    if mtls_cert and mtls_key:
-        ssl_ctx.load_cert_chain(mtls_cert, mtls_key)
+    # OSError also catches ssl.SSLError (corrupt cert contents) — keep broad deliberately
+    try:
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.load_verify_locations(ca_cert_path)
+        if mtls_cert and mtls_key:
+            ssl_ctx.load_cert_chain(mtls_cert, mtls_key)
+    except (OSError, TypeError) as e:
+        logger.warning("TLS misconfiguration: %s", e)
+        raise HTTPException(status_code=503, detail="Server TLS misconfiguration")
 
     # Call executor with mTLS
     try:
