@@ -3,9 +3,11 @@
 Covers session creation, command relay, audit events, and session validation.
 """
 
+import ssl
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx2
 import pytest
 from fastapi import FastAPI
 from server.dependencies import get_current_user
@@ -582,6 +584,120 @@ class TestExecutorReachability:
             )
 
             assert resp.status_code == 500  # Generic error for unexpected exceptions
+
+    def test_connect_error_with_ssl_cause_returns_mtls_message(self):
+        """ConnectError with SSLError in cause chain → 503 'mTLS verification failed'."""
+
+        app, backend = _create_test_app()
+        mock_db = MagicMock()
+
+        mock_exec_session = MagicMock()
+        mock_exec_session.id = "sess-1"
+        mock_exec_session.user_id = "test-user"
+        mock_exec_session.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        mock_exec_session.executor_id = "exec-1"
+
+        mock_session_query = MagicMock()
+        mock_session_filtered = MagicMock()
+        mock_session_filtered.first.return_value = mock_exec_session
+        mock_session_query.filter.return_value = mock_session_filtered
+
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "10.27.28.14"
+
+        mock_executor_query = MagicMock()
+        mock_executor_filtered = MagicMock()
+        mock_executor_filtered.first.return_value = mock_executor
+        mock_executor_query.filter.return_value = mock_executor_filtered
+
+        mock_secrets_query = MagicMock()
+        mock_secrets_query.all.return_value = []
+
+        def query_side_effect(model):
+            if model.__name__ == "ExecutionSession":
+                return mock_session_query
+            elif model.__name__ == "Executor":
+                return mock_executor_query
+            elif model.__name__ == "SessionSecret":
+                return mock_secrets_query
+            return mock_session_query
+
+        mock_db.query.side_effect = query_side_effect
+        backend.get_session.return_value = mock_db
+
+        ssl_err = ssl.SSLError(1, "certificate verify failed")
+        connect_err = httpx2.ConnectError("verify failed")
+        connect_err.__cause__ = ssl_err
+
+        mock_ssl_ctx = MagicMock()
+        with patch("server.routes.executors.httpx2.AsyncClient") as mock_client_cls:
+            mock_client_cls.side_effect = connect_err
+            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+                client = TestClient(app, raise_server_exceptions=False)
+                resp = client.post(
+                    "/api/v1/executors/exec-1/execute",
+                    json={"session_id": "sess-1", "command": "echo hello"},
+                )
+
+        assert resp.status_code == 503
+        assert "mTLS verification failed" in resp.json()["detail"]
+
+    def test_connect_error_without_ssl_cause_returns_unreachable(self):
+        """ConnectError with no SSL cause → 503 'unreachable' (not mTLS message)."""
+
+        app, backend = _create_test_app()
+        mock_db = MagicMock()
+
+        mock_exec_session = MagicMock()
+        mock_exec_session.id = "sess-1"
+        mock_exec_session.user_id = "test-user"
+        mock_exec_session.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        mock_exec_session.executor_id = "exec-1"
+
+        mock_session_query = MagicMock()
+        mock_session_filtered = MagicMock()
+        mock_session_filtered.first.return_value = mock_exec_session
+        mock_session_query.filter.return_value = mock_session_filtered
+
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "10.27.28.14"
+
+        mock_executor_query = MagicMock()
+        mock_executor_filtered = MagicMock()
+        mock_executor_filtered.first.return_value = mock_executor
+        mock_executor_query.filter.return_value = mock_executor_filtered
+
+        mock_secrets_query = MagicMock()
+        mock_secrets_query.all.return_value = []
+
+        def query_side_effect(model):
+            if model.__name__ == "ExecutionSession":
+                return mock_session_query
+            elif model.__name__ == "Executor":
+                return mock_executor_query
+            elif model.__name__ == "SessionSecret":
+                return mock_secrets_query
+            return mock_session_query
+
+        mock_db.query.side_effect = query_side_effect
+        backend.get_session.return_value = mock_db
+
+        connect_err = httpx2.ConnectError("connection refused")
+
+        mock_ssl_ctx = MagicMock()
+        with patch("server.routes.executors.httpx2.AsyncClient") as mock_client_cls:
+            mock_client_cls.side_effect = connect_err
+            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+                client = TestClient(app, raise_server_exceptions=False)
+                resp = client.post(
+                    "/api/v1/executors/exec-1/execute",
+                    json={"session_id": "sess-1", "command": "echo hello"},
+                )
+
+        assert resp.status_code == 503
+        assert "mTLS" not in resp.json()["detail"]
 
 
 # --- Malformed executor response tests (M1) ---
