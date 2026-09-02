@@ -37,6 +37,11 @@ class CAExistsError(RuntimeError):
 CA_VALIDITY_DAYS = 3650  # 10 years
 EXECUTOR_VALIDITY_DAYS = 30  # 30 days
 
+# EKU for executor leaf certs. Dual-purpose: the leaf serves as a TLS client
+# (registration/heartbeat toward core) AND a TLS server (relay listener :8443).
+# This is the single source of truth — do not inline the OIDs elsewhere.
+EXECUTOR_LEAF_EKU = [ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]
+
 
 def _load_passphrase(env_var: str) -> bytes | None:
     """Load passphrase from environment variable.
@@ -305,11 +310,7 @@ class CAManager:
                 critical=True,
             )
             .add_extension(
-                x509.ExtendedKeyUsage(
-                    [
-                        ExtendedKeyUsageOID.CLIENT_AUTH,
-                    ]
-                ),
+                x509.ExtendedKeyUsage(EXECUTOR_LEAF_EKU),
                 critical=False,
             )
             .add_extension(
