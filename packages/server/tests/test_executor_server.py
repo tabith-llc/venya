@@ -169,6 +169,23 @@ class TestCAManager:
         assert ExtendedKeyUsageOID.SERVER_AUTH in eku.value
         assert ExtendedKeyUsageOID.CLIENT_AUTH in eku.value
 
+    def test_sign_csr_has_aki_and_ski(self, ca_manager, executor_keypair):
+        """Executor leaf must carry AKI and SKI (e2e-discovered: Python ssl
+        rejects cert chains where the intermediate/leaf lacks AKI with
+        Missing Authority Key Identifier)."""
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "aki-check")]))
+            .sign(executor_keypair, hashes.SHA256())
+        )
+        cert = ca_manager.sign_csr(csr, "aki-check")
+        # AKI points to the CA
+        aki = cert.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier)
+        assert aki.value.key_identifier is not None
+        # SKI is the leaf's own key hash
+        ski = cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
+        assert ski.value.digest is not None
+
     def test_compute_fingerprint_matches_der_hash(self, ca_manager, signed_cert):
         fp = ca_manager.compute_fingerprint(signed_cert)
         der = signed_cert.public_bytes(serialization.Encoding.DER)
