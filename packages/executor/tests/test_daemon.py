@@ -27,6 +27,7 @@ from executor.daemon import (
     _extract_executor_id_from_cert,
     _generate_ecdsa_p256_keypair,
     _verify_ca_signature,
+    build_command_policy,
     validate_executor_certificate,
 )
 
@@ -1095,3 +1096,32 @@ class TestValidateExecutorCertificate:
                 _extract_executor_id_from_cert(str(tmp_cert))
         finally:
             tmp_cert.unlink()
+
+
+class TestBuildCommandPolicy:
+    """Regression: daemon's policy construction must populate trusted_paths for balanced mode."""
+
+    def _make_cv(self, preset: str, **kwargs):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(preset=preset, **kwargs)
+
+    def test_balanced_gets_default_trusted_paths(self):
+        from executor.command_validator import DEFAULT_TRUSTED_PATHS
+
+        cv = self._make_cv("balanced", allowed_commands=None, dangerous_patterns=None, match_word_boundaries=True)
+        policy = build_command_policy(cv)
+        assert policy.trusted_paths == frozenset(DEFAULT_TRUSTED_PATHS)
+
+    def test_strict_has_empty_trusted_paths(self):
+        cv = self._make_cv(
+            "strict", allowed_commands=["/usr/bin/ls"], dangerous_patterns=None, match_word_boundaries=True
+        )
+        policy = build_command_policy(cv)
+        assert policy.trusted_paths == frozenset()
+        assert policy.allowed_commands == frozenset({"/usr/bin/ls"})
+
+    def test_permissive_has_empty_trusted_paths(self):
+        cv = self._make_cv("permissive", allowed_commands=None, dangerous_patterns=None, match_word_boundaries=True)
+        policy = build_command_policy(cv)
+        assert policy.trusted_paths == frozenset()
