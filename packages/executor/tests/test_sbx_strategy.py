@@ -100,7 +100,7 @@ class TestSbxStrategyCreateSandbox:
             strategy.create_sandbox("venya-test123", "/workspace")
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]
-            assert call_args == ["sbx", "create", "--name", "venya-test123", "/workspace"]
+            assert call_args == ["sbx", "create", "--name", "venya-test123", "shell", "/workspace"]
             assert strategy._sandbox_name == "venya-test123"
 
     def test_create_sandbox_raises_on_failure(self):
@@ -116,7 +116,7 @@ class TestSbxStrategyCreateSandbox:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123")
             call_args = mock_run.call_args[0][0]
-            assert call_args == ["sbx", "create", "--name", "venya-test123"]
+            assert call_args == ["sbx", "create", "--name", "venya-test123", "shell"]
 
 
 class TestSbxStrategyCopySecrets:
