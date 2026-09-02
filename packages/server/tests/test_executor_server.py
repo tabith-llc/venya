@@ -148,6 +148,27 @@ class TestCAManager:
         cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
         assert cn[0].value == "correct-executor-id"
 
+    def test_sign_csr_dual_eku(self, ca_manager, executor_keypair):
+        """Executor leaf must carry both serverAuth and clientAuth EKU.
+
+        The relay listener (B0.1) presents the executor leaf as a TLS server
+        cert, while the executor also uses it as a TLS client for
+        registration/heartbeat. A clientAuth-only leaf causes
+        num=26 (unsuitable certificate purpose) on the core's outbound relay
+        context (e2e-discovered, 2026-09-02).
+        """
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+
+        csr = (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ektor")]))
+            .sign(executor_keypair, hashes.SHA256())
+        )
+        cert = ca_manager.sign_csr(csr, "ektor")
+        eku = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+        assert ExtendedKeyUsageOID.SERVER_AUTH in eku.value
+        assert ExtendedKeyUsageOID.CLIENT_AUTH in eku.value
+
     def test_compute_fingerprint_matches_der_hash(self, ca_manager, signed_cert):
         fp = ca_manager.compute_fingerprint(signed_cert)
         der = signed_cert.public_bytes(serialization.Encoding.DER)
