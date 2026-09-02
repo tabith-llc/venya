@@ -292,6 +292,14 @@ class CAManager:
             .not_valid_before(now)
             .not_valid_after(now + timedelta(days=EXECUTOR_VALIDITY_DAYS))
             .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(csr.public_key()),
+                critical=False,
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_cert.public_key()),
+                critical=False,
+            )
+            .add_extension(
                 x509.BasicConstraints(ca=False, path_length=None),
                 critical=True,
             )
