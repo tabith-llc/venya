@@ -179,6 +179,21 @@ class TestPrepareInjections:
         assert injections[0].secret_id == "s1"
         assert injections[0].value == b"secret-value"
 
+    def test_prepare_normalizes_int_secret_id(self, executor: Executor):
+        """DB secret PKs are Integer and arrive via the relay payload as JSON
+        ints; the engine contract is str (SecretBundle, Stage-1 Rust filter,
+        revoke). Before normalization an int id raised
+        TypeError: 'int' object cannot be converted to 'PyString' in the
+        filter (physical e2e, 2026-09-03)."""
+        value = b"secret-value-12345"
+        wrapped = wrap_with_sentinel("1", value)
+        secrets = [{"secret_id": 1, "value": value, "wrapped_value": wrapped}]
+
+        injections = executor._prepare_injections(secrets)
+
+        assert injections[0].secret_id == "1"
+        assert isinstance(injections[0].secret_id, str)
+
     def test_prepare_strips_sentinel(self, executor: Executor):
         """Sentinel is stripped to get plaintext."""
         wrapped = wrap_with_sentinel("s1", b"my-secret")

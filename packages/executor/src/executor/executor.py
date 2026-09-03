@@ -206,7 +206,13 @@ class Executor:
         self._bundles = []
 
         for secret in secrets:
-            secret_id = secret["secret_id"]
+            # DB secret PKs are Integer and arrive via the relay payload as
+            # JSON ints; the engine contract is str everywhere downstream
+            # (SecretBundle, Stage-1 Rust filter, revoke) — normalize at the
+            # API boundary. An int leaking through raised
+            # TypeError: 'int' object cannot be converted to 'PyString' in
+            # the filter (seen in physical e2e 2026-09-03).
+            secret_id = str(secret["secret_id"])
             wrapped_value = secret.get("wrapped_value", b"")
 
             # Strip sentinel to get plaintext
