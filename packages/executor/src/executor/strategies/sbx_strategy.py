@@ -30,8 +30,10 @@ SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec
 # tmpfs base for per-run sandboxes' host workspace — never touches disk
 WORKSPACE_TMPFS_BASE = "/dev/shm/venya-workspaces"  # nosec
 
-# Where secrets appear inside the sandbox
-CONTAINER_SECRET_DIR = "/run/venya/secrets"  # nosec
+# Where secrets appear inside the sandbox. The shell agent runs as non-root
+# (uid 1000) and /run is root-owned, so the dir must live under the image's
+# 1777 /run/secrets.
+CONTAINER_SECRET_DIR = "/run/secrets/venya"  # nosec
 
 # How long to wait for sandbox commands
 SBX_TIMEOUT = 3600  # 1 hour
@@ -110,7 +112,7 @@ class SbxStrategy(InjectionStrategy):
             /dev/shm/venya-secrets/{session_uuid}/{secret_id}
 
         And will be copied into the sandbox at:
-            /run/venya/secrets/{secret_id}
+            /run/secrets/venya/{secret_id}
 
         The sandbox is NOT created here — that happens in the executor.
 
@@ -222,14 +224,23 @@ class SbxStrategy(InjectionStrategy):
         if not self._sandbox_name:
             raise RuntimeError("Sandbox not created yet")
 
-        # Create secrets directory inside sandbox
-        subprocess.run(  # nosec
+        # Create secrets directory inside sandbox. Fail-closed: a swallowed
+        # mkdir failure surfaces later as an opaque sbx cp tar error.
+        mkdir_result = subprocess.run(  # nosec
             ["sbx", "exec", self._sandbox_name, "mkdir", "-p", CONTAINER_SECRET_DIR],
             capture_output=True,
             text=True,
             timeout=10,
             check=False,
         )
+        if mkdir_result.returncode != 0:
+            logger.error(
+                "mkdir %s in sandbox %s failed: %s",
+                CONTAINER_SECRET_DIR,
+                self._sandbox_name,
+                mkdir_result.stderr,
+            )
+            raise RuntimeError(f"Failed to create secrets directory {CONTAINER_SECRET_DIR} in sandbox")
 
         copied_paths: list[str] = []
         for mount in mounts:
