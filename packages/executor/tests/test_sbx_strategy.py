@@ -231,34 +231,46 @@ class TestSweepWorkspaceBase:
 
 
 class TestSbxStrategyCopySecrets:
-    def test_copy_secrets_creates_dir_and_copies(self):
+    def test_copy_secrets_creates_dir_and_copies(self, tmp_path):
         strategy = SbxStrategy()
         strategy._sandbox_name = "venya-test123"
+        secret_file = tmp_path / "secret"
+        secret_file.write_bytes(b"supersecret")
         mounts = [
-            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/secrets/venya/pass"),
+            MagicMock(secret_id="pass", path=str(secret_file), container_path="/run/secrets/venya/pass"),
         ]
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            mock_run.return_value = MagicMock(returncode=0, stderr=b"")
             strategy.copy_secrets_into_sandbox(mounts)
-            assert mock_run.call_count == 3  # mkdir + cp + chmod
+            # mkdir + tee(inject) + chmod = 3 calls
+            assert mock_run.call_count == 3
+            # the inject call pipes the raw secret over stdin to tee
+            tee_call = mock_run.call_args_list[1]
+            assert "tee" in tee_call.args[0]
+            assert "-i" in tee_call.args[0]
+            assert "/run/secrets/venya/pass" in tee_call.args[0]
+            assert tee_call.kwargs["input"] == b"supersecret"
 
-    def test_copy_secrets_raises_on_failure(self):
+    def test_copy_secrets_raises_on_failure(self, tmp_path):
         strategy = SbxStrategy()
         strategy._sandbox_name = "venya-test123"
+        secret_file = tmp_path / "secret"
+        secret_file.write_bytes(b"supersecret")
         mounts = [
-            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/secrets/venya/pass"),
+            MagicMock(secret_id="pass", path=str(secret_file), container_path="/run/secrets/venya/pass"),
         ]
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                MagicMock(returncode=0, stderr=""),  # mkdir
-                MagicMock(returncode=1, stderr="copy failed"),  # cp
+                MagicMock(returncode=0, stderr=b""),  # mkdir
+                MagicMock(returncode=1, stderr=b"copy failed"),  # tee inject
+                MagicMock(returncode=0, stderr=b""),  # rollback rm -f
             ]
             with pytest.raises(RuntimeError, match="Failed to copy secret"):
                 strategy.copy_secrets_into_sandbox(mounts)
 
     def test_copy_secrets_raises_on_mkdir_failure(self):
-        """Fail-closed: a failed mkdir must raise before any sbx cp is
-        attempted (a swallowed mkdir once surfaced as an opaque tar error)."""
+        """Fail-closed: a failed mkdir must raise before the secret is
+        injected (a swallowed mkdir once surfaced as an opaque tar error)."""
         strategy = SbxStrategy()
         strategy._sandbox_name = "venya-test123"
         mounts = [
@@ -268,22 +280,24 @@ class TestSbxStrategyCopySecrets:
             mock_run.return_value = MagicMock(returncode=1, stderr="Permission denied")
             with pytest.raises(RuntimeError, match="Failed to create secrets directory"):
                 strategy.copy_secrets_into_sandbox(mounts)
-            assert mock_run.call_count == 1  # mkdir only — no cp/chmod attempted
+            assert mock_run.call_count == 1  # mkdir only — no inject/chmod attempted
 
-    def test_copy_secrets_raises_on_chmod_failure(self):
+    def test_copy_secrets_raises_on_chmod_failure(self, tmp_path):
         """L-65: a failed chmod 400 must fail closed, not leave the secret at
-        default perms. mkdir + cp succeed, chmod fails -> raise + rollback."""
+        default perms. mkdir + inject succeed, chmod fails -> raise + rollback."""
         strategy = SbxStrategy()
         strategy._sandbox_name = "venya-test123"
+        secret_file = tmp_path / "secret"
+        secret_file.write_bytes(b"supersecret")
         mounts = [
-            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/secrets/venya/pass"),
+            MagicMock(secret_id="pass", path=str(secret_file), container_path="/run/secrets/venya/pass"),
         ]
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
-                MagicMock(returncode=0, stderr=""),  # mkdir
-                MagicMock(returncode=0, stderr=""),  # cp
-                MagicMock(returncode=1, stderr="chmod failed"),  # chmod
-                MagicMock(returncode=0, stderr=""),  # rollback rm -f
+                MagicMock(returncode=0, stderr=b""),  # mkdir
+                MagicMock(returncode=0, stderr=b""),  # tee inject
+                MagicMock(returncode=1, stderr=b"chmod failed"),  # chmod
+                MagicMock(returncode=0, stderr=b""),  # rollback rm -f
             ]
             with pytest.raises(RuntimeError, match="Failed to set read-only permissions"):
                 strategy.copy_secrets_into_sandbox(mounts)
@@ -291,6 +305,25 @@ class TestSbxStrategyCopySecrets:
             # rollback rm -f ran for the already-copied path
             rollback_calls = [c for c in mock_run.call_args_list if "rm" in c.args[0]]
             assert rollback_calls, "expected a rollback rm -f after chmod failure"
+
+    def test_inject_secret_is_passed_via_stdin_not_argv(self, tmp_path):
+        """Security: the secret travels over stdin (tee input), never argv —
+        argv would surface in the sandbox process listings."""
+        strategy = SbxStrategy()
+        strategy._sandbox_name = "venya-test123"
+        secret_bytes = b"super-secret-value-12345"
+        secret_file = tmp_path / "secret"
+        secret_file.write_bytes(secret_bytes)
+        mounts = [
+            MagicMock(secret_id="pass", path=str(secret_file), container_path="/run/secrets/venya/pass"),
+        ]
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr=b"")
+            strategy.copy_secrets_into_sandbox(mounts)
+            tee_calls = [c for c in mock_run.call_args_list if "tee" in c.args[0]]
+            assert len(tee_calls) == 1
+            assert tee_calls[0].kwargs["input"] == secret_bytes
+            assert all(secret_bytes.decode() not in a for a in tee_calls[0].args[0])
 
     def test_copy_secrets_raises_without_sandbox(self):
         strategy = SbxStrategy()

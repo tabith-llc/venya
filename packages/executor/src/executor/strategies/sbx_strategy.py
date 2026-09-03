@@ -3,9 +3,10 @@
 Uses Docker's sbx CLI to create microVM sandboxes with
 hypervisor-level isolation and built-in network policies.
 
-Secrets are written to host tmpfs (/dev/shm) and copied into
-the sandbox via `sbx cp`. Network access is restricted via
-`sbx policy allow/deny` rules.
+Secrets are written to host tmpfs (/dev/shm) and injected into
+the sandbox over stdin (`sbx exec -i ... tee`) so the in-sandbox
+file is owned by the secret-reading user. Network access is
+restricted via `sbx policy allow/deny` rules.
 
 For HTTP-based API keys, `sbx secret set` can be used to have
 the proxy inject credentials into HTTP headers — the raw value
@@ -76,13 +77,14 @@ class SbxStrategy(InjectionStrategy):
 
     Creates a Docker Sandbox (microVM with separate kernel) for
     each command execution. Secrets are written to host tmpfs and
-    copied into the sandbox via `sbx cp`. Network access is
-    controlled via `sbx policy` rules (deny-by-default).
+    injected into the sandbox over stdin (`sbx exec -i ... tee`).
+    Network access is controlled via `sbx policy` rules
+    (deny-by-default).
 
     Key properties:
     - Hypervisor isolation (separate kernel per sandbox)
     - Network: SOCKS5 proxy with policy-based allow/deny
-    - Secrets: tmpfs on host -> sbx cp into sandbox (RAM-backed)
+    - Secrets: tmpfs on host -> stdin-tee into sandbox (RAM-backed)
     - Cleanup: sandbox destroyed, tmpfs deleted, secrets zeroed
     """
 
@@ -225,7 +227,7 @@ class SbxStrategy(InjectionStrategy):
             raise RuntimeError("Sandbox not created yet")
 
         # Create secrets directory inside sandbox. Fail-closed: a swallowed
-        # mkdir failure surfaces later as an opaque sbx cp tar error.
+        # mkdir failure surfaces later as an opaque tee execution error.
         mkdir_result = subprocess.run(  # nosec
             ["sbx", "exec", self._sandbox_name, "mkdir", "-p", CONTAINER_SECRET_DIR],
             capture_output=True,
@@ -245,16 +247,28 @@ class SbxStrategy(InjectionStrategy):
         copied_paths: list[str] = []
         for mount in mounts:
             container_path = mount.container_path
+
+            # Pipe the secret over stdin to `tee`: the file is created as the
+            # sandbox exec user (uid 1000) and so stays readable by the command
+            # that runs as uid 1000. `sbx cp` would tar-preserve the host uid
+            # (the daemon user), leaving a 0400 file the uid-1000 runner cannot
+            # open. stdin (not argv) keeps the secret out of process listings.
+            with open(mount.path, "rb") as fh:
+                secret_bytes = fh.read()
             result = subprocess.run(  # nosec
-                ["sbx", "cp", mount.path, f"{self._sandbox_name}:{container_path}"],
+                ["sbx", "exec", "-i", self._sandbox_name, "tee", container_path],
+                input=secret_bytes,
                 capture_output=True,
-                text=True,
                 timeout=10,
                 check=False,
             )
             if result.returncode != 0:
-                logger.error("sbx cp failed for %s: %s", mount.secret_id, result.stderr)
-                for copied in copied_paths:
+                logger.error(
+                    "inject secret %s into sandbox failed: %s",
+                    mount.secret_id,
+                    (result.stderr or b"").decode(errors="replace"),
+                )
+                for copied in copied_paths + [container_path]:
                     subprocess.run(  # nosec
                         ["sbx", "exec", self._sandbox_name, "rm", "-f", copied],
                         capture_output=True,
