@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from executor.bundles import SecretBundle
-from executor.strategies.sbx_strategy import SbxStrategy
+from executor.strategies.sbx_strategy import SBX_CREATE_TIMEOUT, SbxStrategy
 
 
 class TestSbxStrategyName:
@@ -117,6 +117,23 @@ class TestSbxStrategyCreateSandbox:
             strategy.create_sandbox("venya-test123")
             call_args = mock_run.call_args[0][0]
             assert call_args == ["sbx", "create", "--name", "venya-test123", "shell"]
+
+    def test_create_sandbox_uses_configured_timeout(self):
+        strategy = SbxStrategy()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy.create_sandbox("venya-test123", "/workspace")
+            used = mock_run.call_args.kwargs["timeout"]
+            expected = int(os.environ.get("VENYA_SBX_CREATE_TIMEOUT", SBX_CREATE_TIMEOUT))
+            assert used == expected
+
+    def test_create_sandbox_timeout_env_override(self, monkeypatch):
+        strategy = SbxStrategy()
+        monkeypatch.setenv("VENYA_SBX_CREATE_TIMEOUT", "777")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy.create_sandbox("venya-test123", "/workspace")
+            assert mock_run.call_args.kwargs["timeout"] == 777
 
 
 class TestSbxStrategyCopySecrets:
