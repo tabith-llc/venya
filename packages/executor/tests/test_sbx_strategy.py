@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from executor.bundles import SecretBundle
-from executor.strategies.sbx_strategy import SBX_CREATE_TIMEOUT, SbxStrategy
+from executor.strategies.sbx_strategy import SBX_CREATE_TIMEOUT, SbxStrategy, sweep_workspace_base
 
 
 class TestSbxStrategyName:
@@ -52,6 +52,15 @@ class TestSbxStrategyPrepare:
         assert os.path.isdir(strategy._session_dir)
         assert str(tmpfs_dir) in strategy._session_dir
 
+    def test_prepare_creates_missing_base(self, strategy, secrets, monkeypatch, tmp_path):
+        """Fresh installs have no /dev/shm/venya-secrets — prepare() must
+        self-provision it instead of raising FileNotFoundError."""
+        base = tmp_path / "not-yet-created"
+        monkeypatch.setattr("executor.strategies.sbx_strategy.SECRET_TMPFS_BASE", str(base))
+        strategy.prepare(secrets)
+        assert base.is_dir()
+        assert os.path.isdir(strategy._session_dir)
+
     def test_prepare_writes_secret_files(self, strategy, secrets, tmpfs_dir):
         result = strategy.prepare(secrets)
         for mount in result.secret_mounts:
@@ -93,6 +102,13 @@ class TestSbxStrategyPrepare:
 
 
 class TestSbxStrategyCreateSandbox:
+    @pytest.fixture
+    def ws_base(self, monkeypatch, tmp_path):
+        """Point WORKSPACE_TMPFS_BASE at tmp_path (hermetic; not real /dev/shm)."""
+        base = tmp_path / "wsbase"
+        monkeypatch.setattr("executor.strategies.sbx_strategy.WORKSPACE_TMPFS_BASE", str(base))
+        return base
+
     def test_create_sandbox_calls_sbx_create(self):
         strategy = SbxStrategy()
         with patch("subprocess.run") as mock_run:
@@ -103,20 +119,38 @@ class TestSbxStrategyCreateSandbox:
             assert call_args == ["sbx", "create", "--name", "venya-test123", "shell", "/workspace"]
             assert strategy._sandbox_name == "venya-test123"
 
-    def test_create_sandbox_raises_on_failure(self):
+    def test_create_sandbox_raises_on_failure(self, ws_base):
         strategy = SbxStrategy()
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="image not found")
             with pytest.raises(RuntimeError, match="Failed to create sandbox"):
                 strategy.create_sandbox("venya-test123")
 
-    def test_create_sandbox_without_workspace(self):
+    def test_create_sandbox_without_workspace_creates_existing_tmpfs_dir(self, ws_base):
+        """No workspace -> strategy creates a per-run dir and always passes it
+        as the last argv element (omission was the bug: sbx create prompts on a
+        missing path and fails with "user cancelled operation" under non-TTY)."""
         strategy = SbxStrategy()
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123")
             call_args = mock_run.call_args[0][0]
-            assert call_args == ["sbx", "create", "--name", "venya-test123", "shell"]
+            assert call_args[:5] == ["sbx", "create", "--name", "venya-test123", "shell"]
+            workspace = call_args[len(call_args) - 1]
+            assert os.path.isdir(workspace)
+            assert workspace.startswith(str(ws_base) + os.sep)
+            assert os.path.basename(workspace).startswith("ws_")
+            assert strategy._workspace_dir == workspace
+
+    def test_create_sandbox_failure_cleans_created_workspace(self, ws_base):
+        strategy = SbxStrategy()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stderr="boom")
+            with pytest.raises(RuntimeError, match="Failed to create sandbox"):
+                strategy.create_sandbox("venya-test123")
+        assert strategy._workspace_dir is None
+        remaining = [p.name for p in ws_base.iterdir()] if ws_base.exists() else []
+        assert not any(name.startswith("ws_") for name in remaining)
 
     def test_create_sandbox_uses_configured_timeout(self):
         strategy = SbxStrategy()
@@ -134,6 +168,66 @@ class TestSbxStrategyCreateSandbox:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", "/workspace")
             assert mock_run.call_args.kwargs["timeout"] == 777
+
+
+class TestSbxStrategyRemoveSandboxWorkspace:
+    @pytest.fixture
+    def ws_base(self, monkeypatch, tmp_path):
+        base = tmp_path / "wsbase"
+        monkeypatch.setattr("executor.strategies.sbx_strategy.WORKSPACE_TMPFS_BASE", str(base))
+        return base
+
+    def test_remove_sandbox_deletes_created_workspace_and_keeps_base(self, ws_base):
+        strategy = SbxStrategy()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy.create_sandbox("venya-test123")
+            workspace = strategy._workspace_dir
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy.remove_sandbox()
+        assert not os.path.exists(workspace)
+        assert os.path.isdir(ws_base)  # base survives rmtree — next session needs it
+        assert strategy._workspace_dir is None
+
+    def test_remove_sandbox_keeps_caller_workspace(self, tmp_path):
+        caller_ws = tmp_path / "caller-owned"
+        caller_ws.mkdir()
+        strategy = SbxStrategy()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy.create_sandbox("venya-test123", str(caller_ws))
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy.remove_sandbox()
+        assert os.path.isdir(caller_ws)  # ownership: only what the strategy created
+        assert strategy._workspace_dir is None
+
+    def test_remove_sandbox_no_sandbox_no_workspace_is_noop(self, ws_base):
+        strategy = SbxStrategy()
+        with patch("subprocess.run") as mock_run:
+            strategy.remove_sandbox()
+            mock_run.assert_not_called()
+
+
+class TestSweepWorkspaceBase:
+    def test_sweep_removes_only_ws_dirs(self, tmp_path):
+        base = tmp_path / "base"
+        (base / "ws_dead").mkdir(parents=True)
+        (base / "ws_stale").mkdir(parents=True)
+        (base / "session_survives").mkdir()
+        (base / "ws_file").write_text("not a dir")
+        swept = sweep_workspace_base(str(base))
+        assert swept == 2
+        assert not (base / "ws_dead").exists()
+        assert not (base / "ws_stale").exists()
+        assert (base / "session_survives").exists()
+        assert (base / "ws_file").exists()
+
+    def test_sweep_creates_missing_base(self, tmp_path):
+        base = tmp_path / "missing"
+        assert sweep_workspace_base(str(base)) == 0
+        assert base.is_dir()
 
 
 class TestSbxStrategyCopySecrets:

@@ -27,6 +27,9 @@ logger = logging.getLogger("venya.executor.strategies.sbx")
 # tmpfs base on host — secrets never touch disk
 SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec
 
+# tmpfs base for per-run sandboxes' host workspace — never touches disk
+WORKSPACE_TMPFS_BASE = "/dev/shm/venya-workspaces"  # nosec
+
 # Where secrets appear inside the sandbox
 CONTAINER_SECRET_DIR = "/run/venya/secrets"  # nosec
 
@@ -42,6 +45,28 @@ SBX_TIMEOUT = 3600  # 1 hour
 # Override per-network: `VENYA_SBX_CREATE_TIMEOUT` (seconds). Durable fix (pre-pull the
 # template at enrollment) is tracked in `venya-dev/tickets/sbx-cold-start-prepull.md`.
 SBX_CREATE_TIMEOUT = 240
+
+
+def sweep_workspace_base(base: str = WORKSPACE_TMPFS_BASE) -> int:
+    """Delete orphaned ws_* workspace directories from dead daemon runs.
+
+    /dev/shm survives daemon kills and reboots but sandboxes never do, so at
+    daemon start every ws_* directory in the base is by definition an orphan.
+    Unconditional sweep is safe: nothing but this package creates ws_* dirs
+    there (alpha deployment: one executor daemon per host). Best-effort —
+    failures are logged, not raised.
+    """
+    swept = 0
+    try:
+        os.makedirs(base, mode=0o700, exist_ok=True)
+        for entry in os.listdir(base):
+            path = os.path.join(base, entry)
+            if entry.startswith("ws_") and os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+                swept += 1
+    except OSError:
+        logger.exception("Failed to sweep workspace base: %s", base)
+    return swept
 
 
 class SbxStrategy(InjectionStrategy):
@@ -63,6 +88,7 @@ class SbxStrategy(InjectionStrategy):
         self.secret_base_fd = secret_base_fd
         self._session_dir: str | None = None
         self._sandbox_name: str | None = None
+        self._workspace_dir: str | None = None
 
     def name(self) -> str:
         return "sbx"
@@ -94,7 +120,9 @@ class SbxStrategy(InjectionStrategy):
         Returns:
             InjectionResult with secret mounts and cleanup functions.
         """
-        # Create unique session directory on tmpfs
+        # Create unique session directory on tmpfs (base is self-provisioned —
+        # a fresh install has no /dev/shm/venya-secrets)
+        os.makedirs(SECRET_TMPFS_BASE, mode=0o700, exist_ok=True)
         self._session_dir = tempfile.mkdtemp(prefix="session_", dir=SECRET_TMPFS_BASE)
         os.chmod(self._session_dir, 0o700)
 
@@ -149,12 +177,24 @@ class SbxStrategy(InjectionStrategy):
 
         Args:
             sandbox_name: Unique name for the sandbox.
-            workspace: Workspace directory to mount into the sandbox.
+            workspace: Host directory to mount as the sandbox workspace.
+                When None, a per-run directory is created under
+                WORKSPACE_TMPFS_BASE and tracked in self._workspace_dir so
+                remove_sandbox deletes it. Ownership rule: the strategy
+                deletes only what it created — a caller-supplied workspace
+                is always passed through untouched and never deleted.
         """
-        cmd = ["sbx", "create", "--name", sandbox_name, "shell"]
-        if workspace:
-            cmd.append(workspace)
+        created_workspace = False
+        if workspace is None:
+            # Existing path is mandatory: sbx create prompts interactively
+            # ("create it? (y/N)") for a missing workspace, which reads EOF
+            # in a non-TTY subprocess and fails with "user cancelled operation".
+            os.makedirs(WORKSPACE_TMPFS_BASE, mode=0o700, exist_ok=True)
+            workspace = tempfile.mkdtemp(prefix="ws_", dir=WORKSPACE_TMPFS_BASE)
+            self._workspace_dir = workspace
+            created_workspace = True
 
+        cmd = ["sbx", "create", "--name", sandbox_name, "shell", workspace]
         create_timeout = int(os.environ.get("VENYA_SBX_CREATE_TIMEOUT", SBX_CREATE_TIMEOUT))
         result = subprocess.run(  # nosec
             cmd,
@@ -165,6 +205,9 @@ class SbxStrategy(InjectionStrategy):
         )
         if result.returncode != 0:
             logger.error("sbx create failed: %s", result.stderr)
+            if created_workspace:
+                shutil.rmtree(workspace, ignore_errors=True)
+                self._workspace_dir = None
             raise RuntimeError(f"Failed to create sandbox: {result.stderr}")
 
         self._sandbox_name = sandbox_name
@@ -305,21 +348,29 @@ class SbxStrategy(InjectionStrategy):
         return result
 
     def remove_sandbox(self) -> None:
-        """Remove the sandbox and all its contents."""
-        if not self._sandbox_name:
-            return
+        """Remove the sandbox and all its contents.
 
-        result = subprocess.run(  # nosec
-            ["sbx", "rm", "--force", self._sandbox_name],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode == 0:
-            logger.debug("Removed sandbox: %s", self._sandbox_name)
-        else:
-            logger.warning("Failed to remove sandbox %s: %s", self._sandbox_name, result.stderr)
+        Also deletes the per-run workspace this strategy created (ownership
+        rule: only what it created). A caller-supplied workspace is left
+        in place — the base directory itself always survives.
+        """
+        if self._sandbox_name:
+            result = subprocess.run(  # nosec
+                ["sbx", "rm", "--force", self._sandbox_name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if result.returncode == 0:
+                logger.debug("Removed sandbox: %s", self._sandbox_name)
+            else:
+                logger.warning("Failed to remove sandbox %s: %s", self._sandbox_name, result.stderr)
+
+        if self._workspace_dir:
+            shutil.rmtree(self._workspace_dir, ignore_errors=True)
+            logger.debug("Removed per-run workspace: %s", self._workspace_dir)
+            self._workspace_dir = None
 
     def store_http_secret(self, secret_id: str, value: str) -> None:
         """Store an HTTP API key in sbx's proxy for header injection.

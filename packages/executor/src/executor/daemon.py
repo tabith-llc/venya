@@ -42,7 +42,7 @@ from .command_validator import (
 from .config import ExecutorConfig
 from .executor import Executor
 from .relay_listener import RelayListener
-from .strategies.sbx_strategy import SbxStrategy
+from .strategies.sbx_strategy import SbxStrategy, sweep_workspace_base
 
 logger = logging.getLogger("venya.executor.daemon")
 
@@ -785,6 +785,12 @@ class ExecutorDaemon:
     def start(self) -> None:
         """Start the executor daemon."""
         logger.info("Starting executor daemon: %s", self.config.executor_id)
+
+        # /dev/shm survives daemon kills and reboots but sandboxes never do:
+        # any ws_* directory present now is an orphan from a dead run. Sweep
+        # once, at process start, before any execution can create new ones.
+        swept = sweep_workspace_base()
+        logger.info("Swept %d orphaned workspace dir(s) from previous run(s)", swept)
 
         # Register with server (creates cert/key if not present)
         # register() uses throwaway httpx2.Client instances internally —
