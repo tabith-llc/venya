@@ -440,10 +440,11 @@ class Executor:
         session_uuid = uuid.uuid4().hex[:12]
         sandbox_name = f"venya-{self.session_id}-{session_uuid}"
 
-        # Create the sandbox
-        workspace = cwd or "/workspace"
+        # Create the sandbox. When cwd is None the strategy creates a
+        # per-run tmpfs workspace (a missing path makes sbx create prompt
+        # and fail with "user cancelled operation" in a non-TTY subprocess).
         logger.info("Creating Docker Sandbox: %s", sandbox_name)
-        strategy.create_sandbox(sandbox_name, workspace)
+        strategy.create_sandbox(sandbox_name, cwd)
 
         # Copy secrets into sandbox
         if self._injection_result:
