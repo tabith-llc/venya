@@ -33,6 +33,16 @@ CONTAINER_SECRET_DIR = "/run/venya/secrets"  # nosec
 # How long to wait for sandbox commands
 SBX_TIMEOUT = 3600  # 1 hour
 
+# How long to wait for the agent-template pull + microVM create (`sbx create`).
+# Measured (2026-09-02, fast uplink): cold *first-ever* pull of the multi-GB
+# `shell-docker` template = 65s; warm (cached) create = ~5.5s. Held **inside** the
+# core's relay read budget (executors.py `httpx2.AsyncClient(timeout=300)`) so a slow
+# pull times out on the executor with a precise local error before the core's connection
+# timeout fires and leaves a doomed create running orphaned in the executor daemon.
+# Override per-network: `VENYA_SBX_CREATE_TIMEOUT` (seconds). Durable fix (pre-pull the
+# template at enrollment) is tracked in `venya-dev/tickets/sbx-cold-start-prepull.md`.
+SBX_CREATE_TIMEOUT = 240
+
 
 class SbxStrategy(InjectionStrategy):
     """Docker Sandboxes strategy using microVM isolation.
@@ -145,11 +155,12 @@ class SbxStrategy(InjectionStrategy):
         if workspace:
             cmd.append(workspace)
 
+        create_timeout = int(os.environ.get("VENYA_SBX_CREATE_TIMEOUT", SBX_CREATE_TIMEOUT))
         result = subprocess.run(  # nosec
             cmd,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=create_timeout,
             check=False,
         )
         if result.returncode != 0:
