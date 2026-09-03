@@ -76,7 +76,7 @@ class TestSbxStrategyPrepare:
         result = strategy.prepare(secrets)
         assert len(result.secret_mounts) == 2
         for mount in result.secret_mounts:
-            assert mount.container_path.startswith("/run/venya/secrets/")
+            assert mount.container_path.startswith("/run/secrets/venya/")
             assert mount.secret_id in mount.path
 
     def test_prepare_empty_secrets(self, strategy, tmpfs_dir):
@@ -235,7 +235,7 @@ class TestSbxStrategyCopySecrets:
         strategy = SbxStrategy()
         strategy._sandbox_name = "venya-test123"
         mounts = [
-            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/venya/secrets/pass"),
+            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/secrets/venya/pass"),
         ]
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -246,7 +246,7 @@ class TestSbxStrategyCopySecrets:
         strategy = SbxStrategy()
         strategy._sandbox_name = "venya-test123"
         mounts = [
-            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/venya/secrets/pass"),
+            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/secrets/venya/pass"),
         ]
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
@@ -256,13 +256,27 @@ class TestSbxStrategyCopySecrets:
             with pytest.raises(RuntimeError, match="Failed to copy secret"):
                 strategy.copy_secrets_into_sandbox(mounts)
 
+    def test_copy_secrets_raises_on_mkdir_failure(self):
+        """Fail-closed: a failed mkdir must raise before any sbx cp is
+        attempted (a swallowed mkdir once surfaced as an opaque tar error)."""
+        strategy = SbxStrategy()
+        strategy._sandbox_name = "venya-test123"
+        mounts = [
+            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/secrets/venya/pass"),
+        ]
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stderr="Permission denied")
+            with pytest.raises(RuntimeError, match="Failed to create secrets directory"):
+                strategy.copy_secrets_into_sandbox(mounts)
+            assert mock_run.call_count == 1  # mkdir only — no cp/chmod attempted
+
     def test_copy_secrets_raises_on_chmod_failure(self):
         """L-65: a failed chmod 400 must fail closed, not leave the secret at
         default perms. mkdir + cp succeed, chmod fails -> raise + rollback."""
         strategy = SbxStrategy()
         strategy._sandbox_name = "venya-test123"
         mounts = [
-            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/venya/secrets/pass"),
+            MagicMock(secret_id="pass", path="/tmp/secret", container_path="/run/secrets/venya/pass"),
         ]
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
