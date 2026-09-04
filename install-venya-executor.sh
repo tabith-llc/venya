@@ -85,44 +85,76 @@ venya_apply_code_fixes
 # --- Build Python venv ---
 venya_create_venv "venya-executor-requirements.txt" "/home/venya/.cargo/bin"
 
-# --- Build Rust extension (executor-specific) via setuptools-rust ---
+# --- Build Rust extension (executor-specific) ---
+# Mechanism: direct `cargo build --release` with PYO3_PYTHON set to the venv's Python,
+# then copy the .so into site-packages with the CPython extension tag.
+#
+# The packaging backend (`uv pip install .` → setuptools-rust) was chosen to set
+# PYO3_PYTHON by construction and produce a correctly-tagged .so. Empirical evidence
+# shows setuptools-rust silently skips the Rust extension in this environment:
+# `build_wheel` emits `executor-0.1.0-py3-none-any.whl` with no .so. Verified by
+# capturing the uv build log — no build_ext, no rust compilation output.
+#
+# Mechanism revised to cargo + tagged copy. The goal and verification assertions
+# are unchanged: correct interpreter target, correctly-tagged .so, hard verifier.
+# See Bug B tracker for full evidence chain.
+
 # PYO3_PYTHON is set explicitly to the venv's Python. Without it, pyo3-build-config
 # falls back to /usr/bin/python3 (3.12.3 on Ubuntu 24.04), producing an extension
 # compiled against the wrong CPython version. (Root cause of Bug B — SEGV at
 # filter.py:87 when the 3.12-targeted .so was loaded on 3.14.7.)
-# The bare `cargo build --release` + hand-copy step that preceded this method
-# is removed: it produced untagged .so files that bypassed CPython's
-# interpreter-version tag load guard.
-info "Building Rust filter extension (setuptools-rust)..."
+
+info "Building Rust filter extension (cargo + tagged copy)..."
 SITE_PACKAGES=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
 VENV_PYTHON="$INSTALL_DIR/.venv/bin/python3.14"
 RUST_LOG="/var/log/venya/rust-build.log"
 mkdir -p "$(dirname "$RUST_LOG")"
+
+# Derive the CPython extension suffix from the interpreter that will load it.
+# EXT_SUFFIX is the exact suffix CPython expects — can't get it wrong.
+TAG=$("$VENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')
+DEST="$SITE_PACKAGES/venya_filter${TAG}"
 
 # Remove any incorrect bare-named .so left by a previous (pre-fix) install
 sudo -u venya rm -f "$SITE_PACKAGES/venya_filter.so" 2>/dev/null
 
 sudo -H -u venya env \
     HOME=/home/venya \
-    PATH="$INSTALL_DIR/.venv/bin:/home/venya/.local/bin:/home/venya/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    UV_NO_PROGRESS=1 \
-    UV_NO_CACHE=1 \
+    PATH="/home/venya/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     PYO3_PYTHON="$VENV_PYTHON" \
-    bash -c 'cd "$1/packages/executor" && exec "$2" pip install . --no-deps' \
-        "$INSTALL_DIR" \
-        /home/venya/.local/bin/uv > "$RUST_LOG" 2>&1
-if [ $? -ne 0 ]; then
+    RUST_LOG="$RUST_LOG" \
+    DEST="$DEST" \
+    bash -c 'cd "$1/packages/executor" && cargo build --release >"$RUST_LOG" 2>&1 && cp target/release/libvenya_filter.so "$DEST"' \
+        _ "$INSTALL_DIR"
+BUILD_RC=$?
+if [ $BUILD_RC -ne 0 ]; then
     error "Rust build failed. See $RUST_LOG"
     cat "$RUST_LOG"
     exit 1
 fi
 
-TAGGED_SO=$(find "$SITE_PACKAGES" -name 'venya_filter.cpython-314-*.so' 2>/dev/null | head -1)
-if [ -z "$TAGGED_SO" ]; then
-    error "venya_filter.cpython-314-*.so not found in site-packages after build"
+# Verify the tagged .so exists
+if [ ! -f "$DEST" ]; then
+    error "venya_filter${TAG} not found in site-packages after build"
     exit 1
 fi
-info "Rust filter extension built: $(basename "$TAGGED_SO")"
+
+# Build-id verification — catches partial copies
+SRC_BUILD_ID=$(readelf -n target/release/libvenya_filter.so 2>/dev/null | grep "Build ID" | awk '{print $3}')
+DEST_BUILD_ID=$(readelf -n "$DEST" 2>/dev/null | grep "Build ID" | awk '{print $3}')
+if [ "$SRC_BUILD_ID" != "$DEST_BUILD_ID" ]; then
+    error "Build-id mismatch: source=$SRC_BUILD_ID dest=$DEST_BUILD_ID"
+    exit 1
+fi
+
+# Post-install assertion: import resolves to the tagged path
+IMPORT_CHECK=$("$VENV_PYTHON" -c "import venya_filter; print(venya_filter.__file__)" 2>&1)
+if ! echo "$IMPORT_CHECK" | grep -q "venya_filter${TAG}"; then
+    error "venya_filter import resolves to unexpected path: $IMPORT_CHECK"
+    exit 1
+fi
+info "Rust filter extension built: $(basename "$DEST")"
+info "venya_filter import verified: $IMPORT_CHECK"
 cd "$INSTALL_DIR"
 
 # --- Verify deployed code (after Rust build, so the .so tag check is effective) ---
