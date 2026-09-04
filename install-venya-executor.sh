@@ -109,6 +109,7 @@ SITE_PACKAGES=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -
 VENV_PYTHON="$INSTALL_DIR/.venv/bin/python3.14"
 RUST_LOG="/var/log/venya/rust-build.log"
 mkdir -p "$(dirname "$RUST_LOG")"
+chown venya:venya "$(dirname "$RUST_LOG")"
 
 # Derive the CPython extension suffix from the interpreter that will load it.
 # EXT_SUFFIX is the exact suffix CPython expects — can't get it wrong.
@@ -140,7 +141,7 @@ if [ ! -f "$DEST" ]; then
 fi
 
 # Build-id verification — catches partial copies
-SRC_BUILD_ID=$(readelf -n target/release/libvenya_filter.so 2>/dev/null | grep "Build ID" | awk '{print $3}')
+SRC_BUILD_ID=$(readelf -n "$INSTALL_DIR/packages/executor/target/release/libvenya_filter.so" 2>/dev/null | grep "Build ID" | awk '{print $3}')
 DEST_BUILD_ID=$(readelf -n "$DEST" 2>/dev/null | grep "Build ID" | awk '{print $3}')
 if [ "$SRC_BUILD_ID" != "$DEST_BUILD_ID" ]; then
     error "Build-id mismatch: source=$SRC_BUILD_ID dest=$DEST_BUILD_ID"
@@ -314,6 +315,134 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     fi
 fi
 
+# --- Mutual mTLS: create executor CA and core client cert ---
+# The executor needs its own CA to sign the core's client certificate.
+# The core presents this client cert when connecting to the executor's
+# relay listener. The executor verifies the cert's CN against
+# relay_client_ids.
+
+info "Setting up executor CA and core client certificate..."
+
+# Get CA passphrase — required for encrypted CA key storage
+if [ -z "${VENYA_EXECUTOR_CA_PASSPHRASE:-}" ]; then
+    echo ""
+    echo "==============================================================="
+    echo "  EXECUTOR CA PASSPHRASE REQUIRED"
+    echo "==============================================================="
+    echo ""
+    echo "  The executor CA key will be stored ENCRYPTED."
+    echo "  This passphrase is required to decrypt the CA key at runtime."
+    echo "  Store it securely — it cannot be recovered if lost."
+    echo ""
+    read -rsp "  CA Passphrase: " CA_PASSPHRASE
+    echo ""
+    read -rsp "  Confirm CA Passphrase: " CA_PASSPHRASE_CONFIRM
+    echo ""
+    if [ "$CA_PASSPHRASE" != "$CA_PASSPHRASE_CONFIRM" ]; then
+        error "Passphrases do not match"
+        exit 1
+    fi
+    if [ -z "$CA_PASSPHRASE" ]; then
+        error "Passphrase cannot be empty"
+        exit 1
+    fi
+else
+    CA_PASSPHRASE="$VENYA_EXECUTOR_CA_PASSPHRASE"
+fi
+
+CA_DIR="/var/lib/venya/executor-ca"
+CA_CERT="$CA_DIR/ca.crt"
+CA_KEY="$CA_DIR/ca.key"
+CORE_CLIENT_CERT="/etc/venya/executor/core-client.crt"
+CORE_CLIENT_KEY="/etc/venya/executor/core-client.key"
+
+mkdir -p "$CA_DIR"
+chown venya:venya "$CA_DIR"
+chmod 700 "$CA_DIR"
+
+# Generate executor CA key (encrypted) and self-signed cert
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 \
+    -aes-256-cbc -pass "pass:$CA_PASSPHRASE" \
+    -out "$CA_KEY" 2>/dev/null
+
+openssl req -new -x509 -key "$CA_KEY" -passin "pass:$CA_PASSPHRASE" \
+    -days 365 -sha256 \
+    -subj "/O=Venya/OU=Executor CA/CN=venya-executor-ca" \
+    -out "$CA_CERT" 2>/dev/null
+
+chown venya:venya "$CA_KEY" "$CA_CERT"
+chmod 600 "$CA_KEY"
+chmod 644 "$CA_CERT"
+
+info "Executor CA created at $CA_DIR"
+
+# Generate core client cert signed by executor CA
+CORE_CLIENT_CN="venya-core-${CORE_HOSTNAME:-venya-core-1}"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 \
+    -out "$CORE_CLIENT_KEY" 2>/dev/null
+
+openssl req -new -key "$CORE_CLIENT_KEY" \
+    -subj "/O=Venya/OU=Core/CN=${CORE_CLIENT_CN}" \
+    -out /tmp/core-client.csr 2>/dev/null
+
+openssl x509 -req -in /tmp/core-client.csr \
+    -CA "$CA_CERT" -CAkey "$CA_KEY" -passin "pass:$CA_PASSPHRASE" \
+    -CAcreateserial -days 365 -sha256 \
+    -out "$CORE_CLIENT_CERT" 2>/dev/null
+
+rm -f /tmp/core-client.csr
+
+chown venya:venya "$CORE_CLIENT_KEY" "$CORE_CLIENT_CERT"
+chmod 600 "$CORE_CLIENT_KEY"
+chmod 644 "$CORE_CLIENT_CERT"
+
+info "Core client cert created: CN=${CORE_CLIENT_CN}"
+
+# Copy core client cert to core server
+info "Installing core client certificate on $CORE_HOSTNAME..."
+CORE_CA_DIR="/etc/venya/executor-client"
+CORE_SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 bot@${CORE_HOSTNAME:-venya-core-1}"
+
+$CORE_SSH "sudo mkdir -p $CORE_CA_DIR && sudo chown venya:venya $CORE_CA_DIR" 2>/dev/null || true
+
+scp -o BatchMode=yes -o ConnectTimeout=10 \
+    "$CORE_CLIENT_CERT" \
+    "$CORE_CLIENT_KEY" \
+    "$CA_CERT" \
+    bot@${CORE_HOSTNAME:-venya-core-1}:"$CORE_CA_DIR/" 2>/dev/null || {
+    warn "Could not copy client cert to core — relay will not work until manually configured"
+    warn "  Copy these files to $CORE_CA_DIR on $CORE_HOSTNAME:"
+    warn "    core-client.crt  core-client.key  ca.crt"
+}
+
+# Configure executor config with CA and relay_client_ids
+# Read the core client cert CN for relay_client_ids
+CORE_CLIENT_CN_FINAL=$(openssl x509 -in "$CORE_CLIENT_CERT" -noout -subject 2>/dev/null | sed 's/.*CN = //' | tr -d ' ')
+
+# Update executor.toml with relay_client_ids
+cat > /etc/venya/executor.toml << EOF
+server_url = "$SERVER_URL"
+executor_id = "$EXECUTOR_ID"
+log_level = "info"
+daemonize = false
+injection_method = "sbx"
+secret_base_fd = 100
+ca_bundle = "$CA_BUNDLE_PATH"
+
+[mtls]
+ca_cert = "/etc/venya/executor/ca.crt"
+cert = "/etc/venya/executor/executor.crt"
+key = "/etc/venya/executor/executor.key"
+
+relay_client_ids = ["$CORE_CLIENT_CN_FINAL"]
+EOF
+
+chown venya:venya /etc/venya/executor.toml
+chmod 600 /etc/venya/executor.toml
+
+info "Executor config updated with relay_client_ids=$CORE_CLIENT_CN_FINAL"
+info "Core client cert installed at $CORE_CA_DIR on $CORE_HOSTNAME"
+
 # --- Write bootstrap config (enrollment token for heartbeat) ---
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     cat >> /etc/venya/executor.toml << EOF
@@ -346,6 +475,11 @@ info "Executor credentials hardened (venya:venya, dir 700, key 600, cert 644)"
 info "Installing systemd service..."
 SYSTEMD_DIR="/etc/systemd/system"
 cp "$INSTALL_DIR/systemd/venya-executor.service" "$SYSTEMD_DIR/"
+
+# Add CA passphrase to service env (for daemon to decrypt CA key if needed)
+sed -i "/^Restart=always/a Environment=VENYA_EXECUTOR_CA_PASSPHRASE=$CA_PASSPHRASE" \
+    "$SYSTEMD_DIR/venya-executor.service"
+
 cp "$INSTALL_DIR/systemd/tmp-venya_secrets.mount" "$SYSTEMD_DIR/"
 cp "$INSTALL_DIR/systemd/venya-executor.seccomp" "$SYSTEMD_DIR/"
 systemctl daemon-reload
