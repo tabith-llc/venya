@@ -494,9 +494,6 @@ venya_verify_deployment() {
     fi
 
     # Check executor package if this was an executor install
-    # Note: executor has a Rust extension (venya_filter) that is not built at
-    # verification time — the Rust build happens after this step in the installer.
-    # So we check for package files in site-packages instead of trying to import.
     if [ "$tarball_type" = "executor" ]; then
         local site_packages
         site_packages=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
@@ -506,6 +503,23 @@ venya_verify_deployment() {
         elif [ ! -d "$site_packages/executor" ]; then
             error "executor package not found in site-packages"
             errors=$((errors + 1))
+        else
+            # Assert the Rust extension was built for the correct Python version.
+            # A missing cpython-314 tag (or a bare venya_filter.so) means the
+            # extension was compiled against the wrong interpreter. (Bug B root cause.)
+            local tagged_so bare_so
+            tagged_so=$(find "$site_packages" -name 'venya_filter.cpython-314-*.so' 2>/dev/null | head -1)
+            bare_so=$(find "$site_packages" -name 'venya_filter.so' -not -name '*.cpython-*' 2>/dev/null | head -1)
+            if [ -n "$bare_so" ]; then
+                error "DEPLOYMENT MISMATCH: bare-named venya_filter.so in site-packages (wrong-interpreter build)"
+                error "  File: $bare_so"
+                error "  Expected: venya_filter.cpython-314-x86_64-linux-gnu.so"
+                errors=$((errors + 1))
+            elif [ -z "$tagged_so" ]; then
+                error "DEPLOYMENT MISMATCH: venya_filter.cpython-314-*.so not found in site-packages"
+                error "  Rust extension was not built for the venv's Python 3.14"
+                errors=$((errors + 1))
+            fi
         fi
     fi
 

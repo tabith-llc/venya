@@ -85,29 +85,48 @@ venya_apply_code_fixes
 # --- Build Python venv ---
 venya_create_venv "venya-executor-requirements.txt" "/home/venya/.cargo/bin"
 
-# --- Verify deployed code ---
-venya_verify_deployment executor
-
-# --- Build Rust extension (executor-specific) ---
-info "Building Rust filter extension..."
-VENYA_CARGO="/home/venya/.cargo/bin/cargo"
+# --- Build Rust extension (executor-specific) via setuptools-rust ---
+# PYO3_PYTHON is set explicitly to the venv's Python. Without it, pyo3-build-config
+# falls back to /usr/bin/python3 (3.12.3 on Ubuntu 24.04), producing an extension
+# compiled against the wrong CPython version. (Root cause of Bug B — SEGV at
+# filter.py:87 when the 3.12-targeted .so was loaded on 3.14.7.)
+# The bare `cargo build --release` + hand-copy step that preceded this method
+# is removed: it produced untagged .so files that bypassed CPython's
+# interpreter-version tag load guard.
+info "Building Rust filter extension (setuptools-rust)..."
+SITE_PACKAGES=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
+VENV_PYTHON="$INSTALL_DIR/.venv/bin/python3.14"
 RUST_LOG="/var/log/venya/rust-build.log"
 mkdir -p "$(dirname "$RUST_LOG")"
-sudo -u venya env PATH="/home/venya/.local/bin:/home/venya/.cargo/bin:$PATH" bash -c "cd $INSTALL_DIR/packages/executor && $VENYA_CARGO build --release" > "$RUST_LOG" 2>&1
+
+# Remove any incorrect bare-named .so left by a previous (pre-fix) install
+sudo -u venya rm -f "$SITE_PACKAGES/venya_filter.so" 2>/dev/null
+
+sudo -H -u venya env \
+    HOME=/home/venya \
+    PATH="$INSTALL_DIR/.venv/bin:/home/venya/.local/bin:/home/venya/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    UV_NO_PROGRESS=1 \
+    UV_NO_CACHE=1 \
+    PYO3_PYTHON="$VENV_PYTHON" \
+    bash -c 'cd "$1/packages/executor" && exec "$2" pip install . --no-deps' \
+        "$INSTALL_DIR" \
+        /home/venya/.local/bin/uv > "$RUST_LOG" 2>&1
 if [ $? -ne 0 ]; then
     error "Rust build failed. See $RUST_LOG"
     cat "$RUST_LOG"
     exit 1
 fi
-if [ ! -f "$INSTALL_DIR/packages/executor/target/release/libvenya_filter.so" ]; then
-    error "Rust build completed but libvenya_filter.so not found"
+
+TAGGED_SO=$(find "$SITE_PACKAGES" -name 'venya_filter.cpython-314-*.so' 2>/dev/null | head -1)
+if [ -z "$TAGGED_SO" ]; then
+    error "venya_filter.cpython-314-*.so not found in site-packages after build"
     exit 1
 fi
-info "Rust build complete"
-PYTHON_PATH=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
-cp "$INSTALL_DIR/packages/executor/target/release/libvenya_filter.so" "$PYTHON_PATH/venya_filter.so"
-chown venya:venya "$PYTHON_PATH/venya_filter.so"
+info "Rust filter extension built: $(basename "$TAGGED_SO")"
 cd "$INSTALL_DIR"
+
+# --- Verify deployed code (after Rust build, so the .so tag check is effective) ---
+venya_verify_deployment executor
 
 # --- Create directories ---
 venya_create_directories
