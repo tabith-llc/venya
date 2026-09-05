@@ -188,6 +188,12 @@ else
     info "sbx CLI already installed: $(sbx --version 2>/dev/null || echo 'unknown')"
 fi
 
+# Ensure sbx state directory exists with correct ownership (runs every install;
+# sbx daemon fails as venya if root-owned from a prior degraded install)
+mkdir -p /home/venya/.local/share/sandboxes
+chown venya:venya /home/venya/.local/share/sandboxes
+chmod 700 /home/venya/.local/share/sandboxes
+
 # --- Resolve Core Hostname ---
 # CORE_HOSTNAME is the relay CN-derivation base: the core signs its
 # relay-client cert with CN="${CORE_HOSTNAME}-relay". Formula: explicit
