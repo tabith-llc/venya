@@ -150,8 +150,12 @@ class VenyaClient:
         path: str,
         json_body: dict | None = None,
         params: dict | None = None,
-    ) -> dict | list:
-        """Make an authenticated request with automatic refresh on 401."""
+    ) -> dict:
+        """Make an authenticated request with automatic refresh on 401.
+
+        Every Venya endpoint returns a JSON object (envelope), never a bare
+        array, so this is always a dict.
+        """
         url = f"{self.config.server_url}{path}"
 
         resp = await self._http.request(method, url, json=json_body, params=params, headers=self._headers())
