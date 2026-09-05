@@ -175,6 +175,50 @@ async def filter_session_output(
                 continue
             hash_hex = hashlib.sha256(plaintext).hexdigest()
             session_secrets[hash_hex] = plaintext
+    else:
+        # Non-auth-session path: session_id is not an integer auth-session ID.
+        # This catches UUID execution sessions AND integer IDs that failed lookup.
+        # We look up bound secrets through the SessionSecret join table.
+        from core.engine.encryption import DecryptionError
+        from core.engine.encryption import decrypt_secret as _decrypt_secret_impl
+        from core.iam.models import SessionSecret
+
+        bindings = db.query(SessionSecret).filter(SessionSecret.session_id == session_id).all()
+
+        if not bindings:
+            logger.warning(
+                "Session %s has no secret bindings — masking will be a no-op",
+                session_id,
+            )
+        else:
+            for binding in bindings:
+                secret = db.query(Secret).filter(Secret.id == binding.secret_id).first()
+                if secret is None:
+                    logger.warning(
+                        "Secret %s bound to session %s not found in DB — skipping",
+                        binding.secret_id,
+                        session_id,
+                    )
+                    continue
+                kek = backend.config.kek
+                if kek is None:
+                    logger.warning(
+                        "No KEK configured, cannot decrypt secret %s for session %s",
+                        binding.secret_id,
+                        session_id,
+                    )
+                    continue
+                try:
+                    plaintext = _decrypt_secret_impl(kek, secret.wrapped_dek, secret.nonce, secret.encrypted_value)
+                except DecryptionError:
+                    logger.warning(
+                        "Failed to decrypt secret %s for session %s",
+                        binding.secret_id,
+                        session_id,
+                    )
+                    continue
+                hash_hex = hashlib.sha256(plaintext).hexdigest()
+                session_secrets[hash_hex] = plaintext
 
     # Decode base64 input
     try:

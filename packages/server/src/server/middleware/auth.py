@@ -300,7 +300,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         """
         import re
 
-        return bool(re.match(r"^/api/v1/sessions/[^/]+/secrets/revoke$", path))
+        return bool(re.match(r"^/api/v1/sessions/[^/]+/(secrets/revoke|filter)$", path))
 
     async def _validate_token(self, request: Request, token: str) -> dict | None:
         """Validate a bearer token and return user info.
