@@ -228,8 +228,10 @@ class TestCredentialAdd:
 
         with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
             with patch("fido2.hid.list_devices", return_value=["fake_device"]):
-                with patch("fido2.client.WebAuthnClient") as mock_webauthn:
-                    mock_webauthn.return_value.make_credential.return_value = mock_credential
+                with patch("fido2.client.Fido2Client") as mock_fido2:
+                    mock_instance = MagicMock()
+                    mock_fido2.return_value = mock_instance
+                    mock_instance.make_credential.return_value = mock_credential
                     args = MagicMock()
                     args.label = "YubiKey 2"
                     args.json = False
@@ -280,8 +282,10 @@ class TestCredentialAdd:
 
         with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
             with patch("fido2.hid.list_devices", return_value=["fake_device"]):
-                with patch("fido2.client.WebAuthnClient") as mock_webauthn:
-                    mock_webauthn.return_value.make_credential.return_value = mock_credential
+                with patch("fido2.client.Fido2Client") as mock_fido2:
+                    mock_instance = MagicMock()
+                    mock_fido2.return_value = mock_instance
+                    mock_instance.make_credential.return_value = mock_credential
 
                     args = MagicMock()
                     args.label = "YubiKey 2"

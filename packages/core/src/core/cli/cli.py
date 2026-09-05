@@ -98,6 +98,11 @@ def create_parser() -> argparse.ArgumentParser:
     list_parser = subparsers.add_parser("list", help="List secrets")
     list_parser.add_argument("prefix", nargs="?", help="Optional key prefix filter")
     list_parser.add_argument(
+        "--user-id",
+        default=None,
+        help="User ID for authentication (required if no token stored)",
+    )
+    list_parser.add_argument(
         "--executor",
         default=None,
         help="Filter by executor metadata field",
