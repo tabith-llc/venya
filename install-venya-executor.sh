@@ -189,20 +189,31 @@ else
 fi
 
 # --- Resolve Core Hostname ---
-CORE_HOSTNAME="${VENYA_CORE_HOSTNAME:-venya-core-1}"
+# CORE_HOSTNAME is the relay CN-derivation base: the core signs its
+# relay-client cert with CN="${CORE_HOSTNAME}-relay". Formula: explicit
+# VENYA_CORE_HOSTNAME wins; otherwise the host component of VENYA_SERVER_URL
+# (scheme/port/path stripped) — so the value tracks the URL the operator
+# actually used instead of a hardcoded default that can silently diverge
+# (a diverged CN surfaces as relay 403 with nothing in the install output).
+CORE_HOSTNAME="${VENYA_CORE_HOSTNAME:-$(printf '%s' "$SERVER_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#/.*$##; s#:.*$##')}"
 CORE_IP="${VENYA_CORE_IP:-10.27.28.11}"
 
-# Ensure the core hostname is resolvable in /etc/hosts
-if ! grep -q " ${CORE_HOSTNAME}$" /etc/hosts 2>/dev/null; then
-    info "Adding ${CORE_HOSTNAME} (${CORE_IP}) to /etc/hosts"
-    echo "${CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+# Ensure the core hostname is resolvable in /etc/hosts (skip IP hosts: an IP
+# needs no resolution, and writing an IP "name" with CORE_IP would misroute)
+if [[ "$CORE_HOSTNAME" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+    info "VENYA_SERVER_URL host is an IP — no /etc/hosts entry needed"
 else
-    # Verify the IP matches if strictness is desired
-    EXISTING_IP=$(grep " ${CORE_HOSTNAME}$" /etc/hosts | awk '{print $1}')
-    if [ "$EXISTING_IP" != "$CORE_IP" ]; then
-        warn "Found ${CORE_HOSTNAME} in /etc/hosts with IP ${EXISTING_IP}, expected ${CORE_IP}. Updating."
-        sed -i "/ ${CORE_HOSTNAME}$/d" /etc/hosts
+    if ! grep -q " ${CORE_HOSTNAME}$" /etc/hosts 2>/dev/null; then
+        info "Adding ${CORE_HOSTNAME} (${CORE_IP}) to /etc/hosts"
         echo "${CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+    else
+        # Verify the IP matches if strictness is desired
+        EXISTING_IP=$(grep " ${CORE_HOSTNAME}$" /etc/hosts | awk '{print $1}')
+        if [ "$EXISTING_IP" != "$CORE_IP" ]; then
+            warn "Found ${CORE_HOSTNAME} in /etc/hosts with IP ${EXISTING_IP}, expected ${CORE_IP}. Updating."
+            sed -i "/ ${CORE_HOSTNAME}$/d" /etc/hosts
+            echo "${CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+        fi
     fi
 fi
 
@@ -250,6 +261,11 @@ daemonize = false
 injection_method = "sbx"
 secret_base_fd = 100
 ca_bundle = "$CA_BUNDLE_PATH"
+
+# Relay CN allowlist — MUST stay top-level (not under [mtls]). Value mirrors
+# the core's relay-client cert CN (core installer). `venya exec register`
+# writes only cert files, so this line survives registration.
+relay_client_ids = ["${CORE_HOSTNAME}-relay"]
 
 [mtls]
 ca_cert = "/etc/venya/executor/ca.crt"
@@ -315,134 +331,6 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     fi
 fi
 
-# --- Mutual mTLS: create executor CA and core client cert ---
-# The executor needs its own CA to sign the core's client certificate.
-# The core presents this client cert when connecting to the executor's
-# relay listener. The executor verifies the cert's CN against
-# relay_client_ids.
-
-info "Setting up executor CA and core client certificate..."
-
-# Get CA passphrase — required for encrypted CA key storage
-if [ -z "${VENYA_EXECUTOR_CA_PASSPHRASE:-}" ]; then
-    echo ""
-    echo "==============================================================="
-    echo "  EXECUTOR CA PASSPHRASE REQUIRED"
-    echo "==============================================================="
-    echo ""
-    echo "  The executor CA key will be stored ENCRYPTED."
-    echo "  This passphrase is required to decrypt the CA key at runtime."
-    echo "  Store it securely — it cannot be recovered if lost."
-    echo ""
-    read -rsp "  CA Passphrase: " CA_PASSPHRASE
-    echo ""
-    read -rsp "  Confirm CA Passphrase: " CA_PASSPHRASE_CONFIRM
-    echo ""
-    if [ "$CA_PASSPHRASE" != "$CA_PASSPHRASE_CONFIRM" ]; then
-        error "Passphrases do not match"
-        exit 1
-    fi
-    if [ -z "$CA_PASSPHRASE" ]; then
-        error "Passphrase cannot be empty"
-        exit 1
-    fi
-else
-    CA_PASSPHRASE="$VENYA_EXECUTOR_CA_PASSPHRASE"
-fi
-
-CA_DIR="/var/lib/venya/executor-ca"
-CA_CERT="$CA_DIR/ca.crt"
-CA_KEY="$CA_DIR/ca.key"
-CORE_CLIENT_CERT="/etc/venya/executor/core-client.crt"
-CORE_CLIENT_KEY="/etc/venya/executor/core-client.key"
-
-mkdir -p "$CA_DIR"
-chown venya:venya "$CA_DIR"
-chmod 700 "$CA_DIR"
-
-# Generate executor CA key (encrypted) and self-signed cert
-openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 \
-    -aes-256-cbc -pass "pass:$CA_PASSPHRASE" \
-    -out "$CA_KEY" 2>/dev/null
-
-openssl req -new -x509 -key "$CA_KEY" -passin "pass:$CA_PASSPHRASE" \
-    -days 365 -sha256 \
-    -subj "/O=Venya/OU=Executor CA/CN=venya-executor-ca" \
-    -out "$CA_CERT" 2>/dev/null
-
-chown venya:venya "$CA_KEY" "$CA_CERT"
-chmod 600 "$CA_KEY"
-chmod 644 "$CA_CERT"
-
-info "Executor CA created at $CA_DIR"
-
-# Generate core client cert signed by executor CA
-CORE_CLIENT_CN="venya-core-${CORE_HOSTNAME:-venya-core-1}"
-openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 \
-    -out "$CORE_CLIENT_KEY" 2>/dev/null
-
-openssl req -new -key "$CORE_CLIENT_KEY" \
-    -subj "/O=Venya/OU=Core/CN=${CORE_CLIENT_CN}" \
-    -out /tmp/core-client.csr 2>/dev/null
-
-openssl x509 -req -in /tmp/core-client.csr \
-    -CA "$CA_CERT" -CAkey "$CA_KEY" -passin "pass:$CA_PASSPHRASE" \
-    -CAcreateserial -days 365 -sha256 \
-    -out "$CORE_CLIENT_CERT" 2>/dev/null
-
-rm -f /tmp/core-client.csr
-
-chown venya:venya "$CORE_CLIENT_KEY" "$CORE_CLIENT_CERT"
-chmod 600 "$CORE_CLIENT_KEY"
-chmod 644 "$CORE_CLIENT_CERT"
-
-info "Core client cert created: CN=${CORE_CLIENT_CN}"
-
-# Copy core client cert to core server
-info "Installing core client certificate on $CORE_HOSTNAME..."
-CORE_CA_DIR="/etc/venya/executor-client"
-CORE_SSH="ssh -o BatchMode=yes -o ConnectTimeout=10 bot@${CORE_HOSTNAME:-venya-core-1}"
-
-$CORE_SSH "sudo mkdir -p $CORE_CA_DIR && sudo chown venya:venya $CORE_CA_DIR" 2>/dev/null || true
-
-scp -o BatchMode=yes -o ConnectTimeout=10 \
-    "$CORE_CLIENT_CERT" \
-    "$CORE_CLIENT_KEY" \
-    "$CA_CERT" \
-    bot@${CORE_HOSTNAME:-venya-core-1}:"$CORE_CA_DIR/" 2>/dev/null || {
-    warn "Could not copy client cert to core — relay will not work until manually configured"
-    warn "  Copy these files to $CORE_CA_DIR on $CORE_HOSTNAME:"
-    warn "    core-client.crt  core-client.key  ca.crt"
-}
-
-# Configure executor config with CA and relay_client_ids
-# Read the core client cert CN for relay_client_ids
-CORE_CLIENT_CN_FINAL=$(openssl x509 -in "$CORE_CLIENT_CERT" -noout -subject 2>/dev/null | sed 's/.*CN = //' | tr -d ' ')
-
-# Update executor.toml with relay_client_ids
-cat > /etc/venya/executor.toml << EOF
-server_url = "$SERVER_URL"
-executor_id = "$EXECUTOR_ID"
-log_level = "info"
-daemonize = false
-injection_method = "sbx"
-secret_base_fd = 100
-ca_bundle = "$CA_BUNDLE_PATH"
-
-[mtls]
-ca_cert = "/etc/venya/executor/ca.crt"
-cert = "/etc/venya/executor/executor.crt"
-key = "/etc/venya/executor/executor.key"
-
-relay_client_ids = ["$CORE_CLIENT_CN_FINAL"]
-EOF
-
-chown venya:venya /etc/venya/executor.toml
-chmod 600 /etc/venya/executor.toml
-
-info "Executor config updated with relay_client_ids=$CORE_CLIENT_CN_FINAL"
-info "Core client cert installed at $CORE_CA_DIR on $CORE_HOSTNAME"
-
 # --- Write bootstrap config (enrollment token for heartbeat) ---
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     cat >> /etc/venya/executor.toml << EOF
@@ -475,11 +363,6 @@ info "Executor credentials hardened (venya:venya, dir 700, key 600, cert 644)"
 info "Installing systemd service..."
 SYSTEMD_DIR="/etc/systemd/system"
 cp "$INSTALL_DIR/systemd/venya-executor.service" "$SYSTEMD_DIR/"
-
-# Add CA passphrase to service env (for daemon to decrypt CA key if needed)
-sed -i "/^Restart=always/a Environment=VENYA_EXECUTOR_CA_PASSPHRASE=$CA_PASSPHRASE" \
-    "$SYSTEMD_DIR/venya-executor.service"
-
 cp "$INSTALL_DIR/systemd/tmp-venya_secrets.mount" "$SYSTEMD_DIR/"
 cp "$INSTALL_DIR/systemd/venya-executor.seccomp" "$SYSTEMD_DIR/"
 systemctl daemon-reload
@@ -506,4 +389,22 @@ echo "  systemctl start|stop|restart|status venya-executor"
 echo ""
 echo "Next steps:"
 echo "  1. Run 'newgrp kvm' or re-login to activate KVM group (needed for Docker sandbox/KVM access)"
+echo ""
+echo "==============================================================="
+echo "  RELAY WIRING (CN match contract)"
+echo "==============================================================="
+echo ""
+echo "  relay_client_ids = [\"${CORE_HOSTNAME}-relay\"]"
+echo ""
+echo "  CORE_HOSTNAME was derived from VENYA_SERVER_URL (host component,"
+echo "  scheme/port/path stripped) unless VENYA_CORE_HOSTNAME was set."
+echo "  The core's relay-client cert (auto-signed at core install) must"
+echo "  carry the SAME CN, or relay calls are rejected at handshake (403)."
+echo "  Verify on the core:"
+echo "    openssl x509 -in /etc/venya/relay/relay-client.crt -noout -subject"
+echo ""
+echo "  Fail-closed: an empty allowlist prevents the relay listener from"
+echo "  binding at all (ERROR at daemon start). A mismatch means closed,"
+echo "  never open."
+echo "==============================================================="
 echo ""

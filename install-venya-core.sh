@@ -185,6 +185,8 @@ mkdir -p /etc/venya
 cat > /etc/venya/server.toml << EOF
 host = "127.0.0.1"
 port = 8080
+ca_dir = "/var/lib/venya/ca"
+recovery_code_pepper = "$RECOVERY_PEPPER"
 
 [db]
 database_url = "postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya"
@@ -208,14 +210,12 @@ max_attempts = 5
 window_seconds = 300.0
 ip_rate_limit = 100
 
-ca_dir = "/var/lib/venya/ca"
-cors_origins = ["https://$CORE_HOSTNAME"]
+[cors]
+origins = ["https://$CORE_HOSTNAME"]
 
 [audit]
 audit_remote_url = null
 audit_local_retention_days = 90
-
-recovery_code_pepper = "$RECOVERY_PEPPER"
 EOF
 
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
@@ -335,6 +335,77 @@ rm -f /tmp/server.csr
 
 info "Server TLS certificate signed with Venya CA"
 
+# --- Relay client cert: self-provisioned from the Venya CA ---
+# The core presents this client cert when calling the executor relay listener.
+# CN="${CORE_HOSTNAME}-relay" is the canonical relay identity; the executor
+# installer derives the same value for relay_client_ids.
+# CA premise (guarded, not asserted): the CA above is generated UNENCRYPTED
+# (NoEncryption() in the CA block), so openssl signs without -passin. If the
+# CA is missing, fail the install here — not at the physical e2e.
+if [ ! -f /var/lib/venya/ca/ca.crt ] || [ ! -f /var/lib/venya/ca/ca.key ]; then
+    error "Venya CA missing at /var/lib/venya/ca (ca.crt/ca.key) — cannot sign relay client cert"
+    exit 1
+fi
+
+RELAY_DIR="/etc/venya/relay"
+mkdir -p "$RELAY_DIR"
+chown venya:venya "$RELAY_DIR"
+chmod 700 "$RELAY_DIR"
+
+openssl ecparam -genkey -name prime256v1 -noout -out "$RELAY_DIR/relay-client.key"
+chown venya:venya "$RELAY_DIR/relay-client.key"
+chmod 600 "$RELAY_DIR/relay-client.key"
+
+openssl req -new -key "$RELAY_DIR/relay-client.key" \
+    -out /tmp/relay-client.csr \
+    -subj "/O=Venya/CN=${CORE_HOSTNAME}-relay"
+
+# SKI + AKI are non-optional: Python 3.14 ssl rejects a chain without an
+# Authority Key Identifier (33bc4b4); a lenient s_client smoke masks the
+# absence. EKU is clientAuth-only: the core relay cert never serves a server
+# role (the executor leaf is dual-purpose by design — do not "unify").
+openssl x509 -req -in /tmp/relay-client.csr \
+    -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
+    -CAcreateserial -out "$RELAY_DIR/relay-client.crt" -days 365 \
+    -extfile <(printf 'extendedKeyUsage=clientAuth\nsubjectAltName=DNS:%s-relay\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n' "${CORE_HOSTNAME}")
+
+chown venya:venya "$RELAY_DIR/relay-client.crt"
+chmod 644 "$RELAY_DIR/relay-client.crt"
+rm -f /tmp/relay-client.csr
+
+# Self-check: fail the install loudly on a half-wired relay cert.
+if ! openssl verify -CAfile /var/lib/venya/ca/ca.crt "$RELAY_DIR/relay-client.crt" >/dev/null 2>&1; then
+    error "Relay client cert failed verification against the Venya CA"
+    exit 1
+fi
+ACTUAL_RELAY_CN=$(openssl x509 -in "$RELAY_DIR/relay-client.crt" -noout -subject -nameopt multiline | sed -n 's/^ *commonName *= *//p')
+if [ "$ACTUAL_RELAY_CN" != "${CORE_HOSTNAME}-relay" ]; then
+    error "Relay client cert CN mismatch: expected '${CORE_HOSTNAME}-relay', got '${ACTUAL_RELAY_CN}'"
+    exit 1
+fi
+
+# Purpose self-check: assert the asymmetric-EKU contract (client Yes / server
+# No) at install time. `openssl verify` does NOT check EKU, so without this an
+# EKU/SAN defect would surface only at the deploy stop-check, not at install.
+PURPOSE_OUT=$(openssl x509 -in "$RELAY_DIR/relay-client.crt" -noout -purpose 2>/dev/null)
+if ! printf '%s\n' "$PURPOSE_OUT" | grep -qE '^[[:space:]]*SSL client[[:space:]]+: Yes'; then
+    error "Relay client cert purpose self-check failed: expected 'SSL client : Yes'"
+    exit 1
+fi
+if ! printf '%s\n' "$PURPOSE_OUT" | grep -qE '^[[:space:]]*SSL server[[:space:]]+: No'; then
+    error "Relay client cert purpose self-check failed: expected 'SSL server : No'"
+    exit 1
+fi
+
+info "Relay client certificate signed and verified: CN=${CORE_HOSTNAME}-relay (client Yes / server No)"
+
+# Functional wiring: the server reads .env at runtime (server.toml is never
+# read). The appended values are non-secret paths only.
+cat >> "$INSTALL_DIR/.env" << EOF
+VENYA_MTLS_CERT=$RELAY_DIR/relay-client.crt
+VENYA_MTLS_KEY=$RELAY_DIR/relay-client.key
+EOF
+
 # Install Venya CA into system trust store
 # Clean stale symlinks/files from previous installs
 rm -f /etc/ssl/certs/venya-*.pem
@@ -441,6 +512,11 @@ echo ""
 echo "Then pass the printed token to the executor operator."
 echo "The token is consumed on first use and cannot be reused."
 echo ""
+echo "  Relay: the core relay-client cert was auto-provisioned at install"
+echo "  (/etc/venya/relay/relay-client.crt, CN=${CORE_HOSTNAME}-relay)."
+echo "  Point the executor installer at this hostname:"
+echo "    VENYA_SERVER_URL=https://${CORE_HOSTNAME}"
+echo ""
 echo "==============================================================="
 echo ""
 
@@ -500,4 +576,8 @@ echo ""
 echo "Next steps:"
 echo "  1. Verify health: curl -sk https://$CORE_HOSTNAME/api/v1/health"
 echo "  2. Enroll admin: open https://$CORE_HOSTNAME/enroll-admin in browser"
+echo "  3. Mint an executor enrollment token (command above) with the admin"
+echo "     credential."
+echo "  4. Install the executor with VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token>."
+echo "     Registration happens inside that install; the token is single-use."
 echo ""
