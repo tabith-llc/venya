@@ -32,7 +32,6 @@ class TestFilterSessionOutput:
     def test_filter_no_secrets(self):
         """POST /sessions/{id}/filter should return output unmodified when no secrets."""
         session = SimpleNamespace(id=123, user_id="user1")
-        secret = SimpleNamespace(id=1, key="mysecretkey", created_by="user1")
 
         class MockQuery:
             def filter(self, *args, **kwargs):
@@ -41,11 +40,21 @@ class TestFilterSessionOutput:
             def first(self):
                 return session
 
+        class EmptyMockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
             def all(self):
-                return [secret]
+                return []
 
         db = MagicMock()
-        db.query.return_value = MockQuery()
+
+        def query_side_effect(model):
+            if model.__name__ == "Secret":
+                return EmptyMockQuery()
+            return MockQuery()
+
+        db.query.side_effect = query_side_effect
 
         backend = MagicMock()
         backend.get_session.return_value = db
@@ -54,10 +63,12 @@ class TestFilterSessionOutput:
         client = TestClient(app, raise_server_exceptions=False)
         import base64
 
+        # Use an integer session_id so the auth-session path is taken
+        # (the test mocks SessionModel lookup; Secret query returns empty)
         stdout = base64.b64encode(b"hello world").decode()
         stderr = base64.b64encode(b"error msg").decode()
         resp = client.post(
-            "/api/v1/sessions/sess-123/filter",
+            "/api/v1/sessions/123/filter",
             json={"stdout": stdout, "stderr": stderr},
         )
         assert resp.status_code == 200
@@ -308,3 +319,102 @@ class TestFilterSessionOutput:
         data = resp.json()
         assert data["stdout"] == stdout
         assert data["masked_count"] == 0
+
+    def test_filter_execution_session_uuid_masks_output(self):
+        """POST /sessions/{uuid}/filter should mask via SessionSecret bindings."""
+        import base64
+        from unittest.mock import patch
+
+        binding = SimpleNamespace(secret_id=1)
+
+        secret = SimpleNamespace(
+            id=1,
+            key="mysecret",
+            encrypted_value=b"encrypted_data",
+            nonce=b"nonce12345678901",
+            wrapped_dek=b"wrapped_dk12345678",
+        )
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def all(self):
+                return [binding]
+
+        class SecretMockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                return secret
+
+        db = MagicMock()
+
+        def query_side_effect(model):
+            if model.__name__ == "Secret":
+                return SecretMockQuery()
+            return MockQuery()
+
+        db.query.side_effect = query_side_effect
+
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        backend.config.kek = b"A" * 32
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        stdout = base64.b64encode(b"output with secret AKIAIOSFODNN7EXAMPLE here").decode()
+        stderr = base64.b64encode(b"clean").decode()
+
+        plaintext = b"AKIAIOSFODNN7EXAMPLE"
+
+        with patch("core.engine.encryption.decrypt_secret") as mock_decrypt:
+            mock_decrypt.return_value = plaintext
+
+            resp = client.post(
+                "/api/v1/sessions/550e8400-e29b-41d4-a716-446655440000/filter",
+                json={"stdout": stdout, "stderr": stderr},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        # Output should be masked since the execution-session lookup found bindings
+        assert data["masked_count"] > 0
+        decoded_stdout = base64.b64decode(data["stdout"]).decode()
+        assert "[REDACTED:" in decoded_stdout
+
+    def test_filter_execution_session_zero_bindings_logs_warning(self, caplog):
+        """POST /sessions/{uuid}/filter with no bindings returns output unmodified."""
+        import base64
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def all(self):
+                return []
+
+        db = MagicMock()
+        db.query.return_value = MockQuery()
+
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        stdout = base64.b64encode(b"hello world").decode()
+        stderr = base64.b64encode(b"error msg").decode()
+
+        resp = client.post(
+            "/api/v1/sessions/550e8400-e29b-41d4-a716-446655440000/filter",
+            json={"stdout": stdout, "stderr": stderr},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["stdout"] == stdout
+        assert data["stderr"] == stderr
+        assert "no secret bindings" in caplog.text
