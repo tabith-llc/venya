@@ -1367,14 +1367,14 @@ def _elevate(client: APIClient) -> str:
                             "another way. Set a PIN on the key (e.g. yubikey-manager), "
                             "then try again."
                         ) from e
-                    raise e
+                    raise
                 if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
                     if attempt < max_pin_retries - 1:
                         continue
                     raise APIClientError(f"PIN incorrect after {max_pin_retries} attempts") from e
                 if e.code == CtapError.ERR.PIN_BLOCKED:
                     raise APIClientError("Security key PIN is blocked.") from e
-                raise e
+                raise
     except OSError as e:
         err_str = str(e).lower()
         if "fido" in err_str or "device" in err_str or "usb" in err_str or "no such" in err_str:
@@ -1460,7 +1460,7 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
         exclude_credentials = []
         for cred in options.get("excludeCredentials", []):
             if "id" in cred:
-                    cred_id = _b64_decode_id(cred["id"])
+                cred_id = _b64_decode_id(cred["id"])
                 exclude_credentials.append(
                     PublicKeyCredentialDescriptor(
                         type=cred.get("type", "public-key"),

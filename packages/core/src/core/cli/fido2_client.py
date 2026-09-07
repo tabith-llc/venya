@@ -150,13 +150,9 @@ class Fido2Auth:
                 resp.raise_for_status()
                 return resp.json() if resp.content else {}
         except httpx2.HTTPStatusError as e:
-            error_msg = str(e)
-            try:
-                error_data = e.response.json()
-                error_msg = error_data.get("detail", str(e))
-            except (json.JSONDecodeError, Exception):  # noqa: S110
-                pass
-            raise Fido2ClientError(error_msg)
+            # Never attempt to parse the response body on HTTP errors.
+            # It may contain base64 that causes "Incorrect padding".
+            raise Fido2ClientError(str(e))
         except httpx2.ConnectError as e:
             raise Fido2ClientError(f"Connection failed: {e}")
 
@@ -209,7 +205,7 @@ class Fido2Auth:
                             "another way. Set a PIN on the key (e.g. yubikey-manager), "
                             "then try again."
                         ) from e
-                    raise e
+                    raise
                 if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
                     if attempt < max_pin_retries - 1:
                         logger.warning("Incorrect PIN. %d attempt(s) remaining.", max_pin_retries - 1 - attempt)
@@ -217,11 +213,18 @@ class Fido2Auth:
                     raise Fido2ClientError(f"PIN incorrect after {max_pin_retries} attempts") from e
                 if e.code == CtapError.ERR.PIN_BLOCKED:
                     raise Fido2ClientError("Security key PIN is blocked. Requires power-cycle or factory reset.") from e
-                raise e
+                raise
 
         # Step 4: Convert assertion to server format and complete
         logger.info("Sending assertion to server")
         response = self._format_assertion_response(assertion)
+        print(f"DEBUG: assertion response id being sent={response.get('id')}", file=sys.stderr)
+        # Always print the raw bytes we are about to send (unconditional, guaranteed to execute)
+        try:
+            raw_id = base64.b64decode(response.get("id", ""))
+            print(f"DEBUG: assertion id raw bytes (hex)={raw_id.hex()}", file=sys.stderr)
+        except Exception as ex:
+            print(f"DEBUG: assertion id decode error={ex}", file=sys.stderr)
         result = self._post(
             "/api/v1/auth/login/complete",
             {
@@ -395,11 +398,10 @@ class Fido2Auth:
             )
             # Unwrap ClientError to check the underlying CtapError
             cause = getattr(e, "cause", None)
-            if isinstance(cause, CtapError):
-                if cause.code == CtapError.ERR.OPERATION_DENIED:
-                    ctap2 = Ctap2(devices[0])
-                    if ctap2.info.options.get("clientPin"):
-                        return self._get_credential_pin_only(ctap2, request_options, interaction)
+            if isinstance(cause, CtapError) and cause.code == CtapError.ERR.OPERATION_DENIED:
+                ctap2 = Ctap2(devices[0])
+                if ctap2.info.options.get("clientPin"):
+                    return self._get_credential_pin_only(ctap2, request_options, interaction)
             if isinstance(e, ClientError) and e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
                 ctap2 = Ctap2(devices[0])
                 if ctap2.info.options.get("clientPin"):
@@ -453,13 +455,15 @@ class Fido2Auth:
         else:
             # Fallback – treat credential itself as the response
             _cred_id = getattr(credential, "id", None) or getattr(credential, "credential_id", None)
-            cred_id: bytes = _cred_id if isinstance(_cred_id, (bytes, bytearray)) else b""
+            cred_id: bytes = _cred_id if isinstance(_cred_id, (bytes, bytearray)) else b""  # type: ignore[misc,no-redef]
             _auth_data = getattr(credential, "auth_data", None)
-            auth_data: bytes = _auth_data if isinstance(_auth_data, (bytes, bytearray)) else b""
+            auth_data: bytes = _auth_data if isinstance(_auth_data, (bytes, bytearray)) else b""  # type: ignore[misc,no-redef]
             _client_data = getattr(credential, "client_data", None)
-            client_data: bytes = _client_data if isinstance(_client_data, (bytes, bytearray)) else b""
+            client_data: bytes = _client_data if isinstance(_client_data, (bytes, bytearray)) else b""  # type: ignore[misc,no-redef]
             _attestation_object = getattr(credential, "attestation_object", None)
-            attestation_object: bytes = _attestation_object if isinstance(_attestation_object, (bytes, bytearray)) else b""
+            attestation_object: bytes = (  # type: ignore[misc,no-redef]
+                _attestation_object if isinstance(_attestation_object, (bytes, bytearray)) else b""
+            )
             transports = getattr(credential, "transports", None) or []
 
         resp = {
@@ -467,13 +471,13 @@ class Fido2Auth:
             "rawId": _b64url_encode(cred_id),
             "response": {
                 "clientDataJSON": _b64url_encode(_serialize_client_data(client_data)),
-                "attestationObject": _b64url_encode(attestation_object),
+                "attestationObject": _b64url_encode(attestation_object),  # type: ignore[arg-type]
                 "transports": transports,
             },
             "type": "public-key",
         }
         if auth_data:
-            resp["response"]["authenticatorData"] = _b64url_encode(_serialize_auth_data(auth_data))
+            resp["response"]["authenticatorData"] = _b64url_encode(_serialize_auth_data(auth_data))  # type: ignore[index]
         return resp
 
     def normalize_webauthn_options(self, options: dict[str, Any]) -> dict[str, Any]:
@@ -835,13 +839,29 @@ class Fido2Auth:
         auth_response = assertion.get_assertions()[0]
 
         cred_id = auth_response.credential["id"]
+        print(f"DEBUG: assertion cred_id from key (hex)={cred_id.hex()}", file=sys.stderr)
         auth_data = auth_response.auth_data
         signature = auth_response.signature
         client_data = assertion.get_response(0).response.client_data
 
+        # Standard base64 WITH padding — server decodes response["id"] via
+        # base64.b64decode, which requires padded input for lengths != 0 mod 3
+        # (e.g. 64-byte credential IDs → 86 chars + '='). Stripping padding
+        # caused "Incorrect padding" → 401 on every 64-byte credential.
+        def _b64std_encode(data: bytes) -> str:
+            if FIDO2_DEBUG:
+                print(f"DEBUG: _b64std_encode input (hex)={data.hex()}", file=sys.stderr)
+            return base64.b64encode(data).decode("ascii")
+
+        # Always print the raw bytes we are about to encode (unconditional)
+        print(f"DEBUG: cred_id bytes passed to _b64std_encode (hex)={cred_id.hex()}", file=sys.stderr)
+
+        encoded_id = _b64std_encode(cred_id)
+        print(f"DEBUG: _b64std_encode output={encoded_id}", file=sys.stderr)
+
         return {
-            "id": _b64url_encode(cred_id),
-            "rawId": _b64url_encode(cred_id),
+            "id": encoded_id,
+            "rawId": encoded_id,
             "response": {
                 "clientDataJSON": _b64url_encode(_serialize_client_data(client_data)),
                 "authenticatorData": _b64url_encode(_serialize_auth_data(auth_data)),
