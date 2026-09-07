@@ -23,7 +23,7 @@ def b64_decode_id(data: str) -> bytes:
     # Try standard base64 first (exact match to what the server emits today)
     try:
         return base64.b64decode(data, validate=True)
-    except Exception:
+    except Exception:  # nosec B110  # noqa: S110
         pass
 
     # Fall back to base64url (used by browsers and many WebAuthn libraries)
