@@ -41,6 +41,10 @@ class Config:
     """
 
     def __init__(self, config_file: Path | None = None) -> None:
+        if config_file is None:
+            env = os.environ.get("VENYA_CONFIG")
+            if env:
+                config_file = Path(env)
         self.config_file = config_file or DEFAULT_CONFIG_FILE
         self._data: dict[str, Any] = {}
         self._load()
@@ -140,11 +144,32 @@ class APIClient:
             self.config.server_url = server_url
         if access_token:
             self.config.access_token = access_token
-        self._http = httpx2.Client(
-            base_url=self.config.server_url,
-            timeout=httpx2.Timeout(30.0),
-            follow_redirects=True,
-        )
+
+        cert_path = os.environ.get("VENYA_ADMIN_CERT")
+        key_path = os.environ.get("VENYA_ADMIN_KEY")
+        if cert_path and not key_path:
+            raise APIClientError(
+                "VENYA_ADMIN_CERT is set but VENYA_ADMIN_KEY is not. Both are required for admin mTLS."
+            )
+        if key_path and not cert_path:
+            raise APIClientError(
+                "VENYA_ADMIN_KEY is set but VENYA_ADMIN_CERT is not. Both are required for admin mTLS."
+            )
+
+        http_kwargs: dict[str, Any] = {
+            "base_url": self.config.server_url,
+            "timeout": httpx2.Timeout(30.0),
+            "follow_redirects": True,
+        }
+        if cert_path and key_path:
+            for p, var in ((cert_path, "VENYA_ADMIN_CERT"), (key_path, "VENYA_ADMIN_KEY")):
+                if not os.path.isfile(p):
+                    raise APIClientError(
+                        f"{var} points at {p!r}, which does not exist. "
+                        "Copy the admin cert/key from the core (see installer banner) and retry."
+                    )
+            http_kwargs["cert"] = (cert_path, key_path)
+        self._http = httpx2.Client(**http_kwargs)
 
     def _get_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         """Get request headers including auth token."""
