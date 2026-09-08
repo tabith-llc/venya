@@ -93,7 +93,7 @@ def run_command(args: Any) -> int:
 
     # Authenticate if no token is available (init, recovery, config, and exec are public)
     command = args.command
-    if command not in ("init", "recovery", "config", "exec") and not client.config.access_token:
+    if command not in ("init", "enroll", "login", "recovery", "config", "exec") and not client.config.access_token:
         user_id = getattr(args, "user_id", None)
         try:
             print("Authenticating with security key...")
@@ -131,6 +131,8 @@ def run_command(args: Any) -> int:
             return cmd_credential(client, args)
         elif command == "enroll":
             return cmd_enroll(client, args)
+        elif command == "login":
+            return cmd_login(client, args)
         elif command == "recovery":
             return cmd_recovery(client, args)
         elif command == "run":
@@ -1589,86 +1591,58 @@ def cmd_credential_remove(client: APIClient, args: Any) -> int:
 
 
 def cmd_enroll(client: APIClient, args: Any) -> int:
-    """Enrollment operations (headless, uses enrollment token)."""
-    enroll_command = getattr(args, "enroll_command", None)
-    if enroll_command is None:
-        print("Error: enroll subcommand required (start, complete)", file=sys.stderr)
-        return 1
+    """Single-command enrollment: start → FIDO2 attestation → complete → store token."""
+    from .fido2_client import (
+        Fido2Auth,
+        Fido2ClientError,
+        Fido2NotFoundError,
+        Fido2TimeoutError,
+        Fido2UserInteractionRequiredError,
+    )
 
-    if enroll_command == "start":
-        return cmd_enroll_start(client, args)
-    elif enroll_command == "complete":
-        return cmd_enroll_complete(client, args)
-    else:
-        print(f"Unknown enroll command: {enroll_command}", file=sys.stderr)
-        return 1
-
-
-def cmd_enroll_start(client: APIClient, args: Any) -> int:
-    """Start enrollment: validate token, get WebAuthn challenge."""
+    token = args.token
+    label = getattr(args, "label", None)
     try:
-        token = args.token
-
-        result = client.post(
-            "/api/v1/enroll/browser/start",
-            json={"enrollment_token": token},
-        )
-
-        if getattr(args, "json", False):
-            print(json.dumps(result, indent=2))
-            return 0
-
-        print("Enrollment challenge ready.")
-        print(f"  Challenge ID: {result.get('challenge_id', '')}")
-        print("  Next step: Run 'venya enroll complete' with the WebAuthn attestation response.")
-        return 0
-    except APIClientError as e:
-        print(f"Enrollment start failed: {e}", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"Enrollment start failed: {e}", file=sys.stderr)
-        return 1
-
-
-def cmd_enroll_complete(client: APIClient, args: Any) -> int:
-    """Complete enrollment: submit WebAuthn attestation."""
-    try:
-        token = args.token
-        challenge_id = args.challenge_id
-        response = json.loads(args.response)
-        label = getattr(args, "label", None)
-
-        payload = {
-            "enrollment_token": token,
-            "challenge_id": challenge_id,
-            "response": response,
-        }
+        fido2 = Fido2Auth(client.config.server_url)
+        print("Starting enrollment...")
+        print("Please insert/touch your security key when prompted.\n")
+        start = client.post("/api/v1/enroll/browser/start", json={"enrollment_token": token})
+        request_options = fido2._build_registration_options(start["options"])
+        credential = fido2._get_credential(request_options, timeout=60.0)
+        response = fido2._format_credential_response(credential)
+        payload = {"enrollment_token": token, "challenge_id": start["challenge_id"], "response": response}
         if label:
             payload["label"] = label
-
-        result = client.post(
-            "/api/v1/enroll/browser/complete",
-            json=payload,
-        )
-
-        if getattr(args, "json", False):
-            print(json.dumps(result, indent=2))
-            return 0
-
-        print("Enrollment completed successfully.")
-        print("  Status: ok")
-        print(f"  User ID: {result.get('user_id', '')}")
-        print(f"  Credential ID: {result.get('credential_id', '')}")
-        print("  Next step: Run 'venya run' to authenticate with your new key.")
+        result = client.post("/api/v1/enroll/browser/complete", json=payload)
+        session_token = result.get("session_token", "")
+        if not session_token:
+            print("Enrollment completed but server returned no session token.", file=sys.stderr)
+            return 1
+        client.config.access_token = session_token
+        print(f"Enrollment complete. Authenticated as {result.get('user_id', '')}.")
         return 0
-    except APIClientError as e:
-        print(f"Enrollment complete failed: {e}", file=sys.stderr)
+    except (Fido2NotFoundError, Fido2TimeoutError, Fido2UserInteractionRequiredError, Fido2ClientError) as e:
+        print(f"Enrollment failed: {e}", file=sys.stderr)
         return 1
-    except json.JSONDecodeError as e:
-        print(f"Invalid response JSON: {e}", file=sys.stderr)
+    except APIClientError as e:
+        print(f"Enrollment failed: {e}", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Enrollment complete failed: {e}", file=sys.stderr)
+        print(f"Enrollment failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_login(client: APIClient, args: Any) -> int:
+    """Authenticate with a security key and store the session token."""
+    try:
+        result = client.authenticate(user_id=args.user_id)
+        print(f"Authenticated as {result['user_id']}.")
+        return 0
+    except APIClientAuthenticationError as e:
+        print(f"Login failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Login failed: {e}", file=sys.stderr)
         return 1
 
 
