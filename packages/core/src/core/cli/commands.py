@@ -1610,9 +1610,12 @@ def cmd_enroll(client: APIClient, args: Any) -> int:
         request_options = fido2._build_registration_options(start["options"])
         credential = fido2._get_credential(request_options, timeout=60.0)
         response = fido2._format_credential_response(credential)
-        payload = {"enrollment_token": token, "challenge_id": start["challenge_id"], "response": response}
-        if label:
-            payload["label"] = label
+        payload = {
+            "enrollment_token": token,
+            "challenge_id": start["challenge_id"],
+            "response": response,
+            "label": label or "CLI",
+        }
         result = client.post("/api/v1/enroll/browser/complete", json=payload)
         session_token = result.get("session_token", "")
         if not session_token:
