@@ -218,13 +218,13 @@ class Fido2Auth:
         # Step 4: Convert assertion to server format and complete
         logger.info("Sending assertion to server")
         response = self._format_assertion_response(assertion)
-        print(f"DEBUG: assertion response id being sent={response.get('id')}", file=sys.stderr)
-        # Always print the raw bytes we are about to send (unconditional, guaranteed to execute)
-        try:
-            raw_id = base64.b64decode(response.get("id", ""))
-            print(f"DEBUG: assertion id raw bytes (hex)={raw_id.hex()}", file=sys.stderr)
-        except Exception as ex:
-            print(f"DEBUG: assertion id decode error={ex}", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print(f"DEBUG: assertion response id being sent={response.get('id')}", file=sys.stderr)
+            try:
+                raw_id = base64.b64decode(response.get("id", ""))
+                print(f"DEBUG: assertion id raw bytes (hex)={raw_id.hex()}", file=sys.stderr)
+            except Exception as ex:
+                print(f"DEBUG: assertion id decode error={ex}", file=sys.stderr)
         result = self._post(
             "/api/v1/auth/login/complete",
             {
@@ -662,17 +662,21 @@ class Fido2Auth:
             raise Fido2ClientError("No PIN entered; a clientPin-only key requires the key PIN to assert.")
 
         client_pin = ClientPin(ctap2, pin_protocol)
-        print("DEBUG: obtaining PIN token...", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print("DEBUG: obtaining PIN token...", file=sys.stderr)
         try:
             token = client_pin.get_pin_token(pin, ClientPin.PERMISSION.GET_ASSERTION, rp_id)
         except CtapError as e:
-            print(f"DEBUG: PIN token FAILED: {e}", file=sys.stderr)
+            if FIDO2_DEBUG:
+                print(f"DEBUG: PIN token FAILED: {e}", file=sys.stderr)
             raise Fido2ClientError(f"PIN token failed: {e}") from e
-        print("DEBUG: PIN token OK, building client data...", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print("DEBUG: PIN token OK, building client data...", file=sys.stderr)
 
         # Construct client data for the hash used in pinUvAuthParam
         origin = f"https://{rp_id}"
-        print(f"DEBUG: client_data origin={origin}", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print(f"DEBUG: client_data origin={origin}", file=sys.stderr)
         client_data, _ = DefaultClientDataCollector(origin, verify_rp_id).collect_client_data(public_key)
 
         pin_uv_param = pin_protocol.authenticate(token, client_data.hash)
@@ -680,13 +684,14 @@ class Fido2Auth:
 
         allow_list = [{"type": c.type, "id": c.id} for c in (public_key.allow_credentials or [])] or None
 
-        if allow_list:
-            cred_ids = [c["id"].hex() for c in allow_list]
-            print(f"DEBUG: allow_list ids (hex): {cred_ids}", file=sys.stderr)
-        print(
-            f"DEBUG: calling get_assertion (allow_list={len(allow_list) if allow_list else 0} creds, rp_id={rp_id})",
-            file=sys.stderr,
-        )
+        if FIDO2_DEBUG:
+            if allow_list:
+                cred_ids = [c["id"].hex() for c in allow_list]
+                print(f"DEBUG: allow_list ids (hex): {cred_ids}", file=sys.stderr)
+            print(
+                f"DEBUG: calling get_assertion (allow_list={len(allow_list) if allow_list else 0} creds, rp_id={rp_id})",
+                file=sys.stderr,
+            )
         try:
             response = ctap2.get_assertion(
                 rp_id,
@@ -697,7 +702,8 @@ class Fido2Auth:
                 on_keepalive=lambda status: interaction.prompt_up(),
             )
         except CtapError as e:
-            print(f"DEBUG: get_assertion FAILED: {e}", file=sys.stderr)
+            if FIDO2_DEBUG:
+                print(f"DEBUG: get_assertion FAILED: {e}", file=sys.stderr)
             if e.code == CtapError.ERR.OPERATION_DENIED:
                 raise Fido2ClientError(
                     "Security key denied the operation (0x27). "
@@ -707,7 +713,8 @@ class Fido2Auth:
                     "Re-enroll the key or verify the stored RP ID for this user."
                 ) from e
             raise Fido2ClientError(f"get_assertion failed: {e}") from e
-        print("DEBUG: assertion OK", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print("DEBUG: assertion OK", file=sys.stderr)
         return AssertionSelection(client_data, [response])
 
     def _get_credential_pin_only(
@@ -751,17 +758,21 @@ class Fido2Auth:
             raise Fido2ClientError("No PIN entered; a clientPin-only key requires the key PIN to register.")
 
         client_pin = ClientPin(ctap2, pin_protocol)
-        print("DEBUG: obtaining PIN token (MAKE_CREDENTIAL)...", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print("DEBUG: obtaining PIN token (MAKE_CREDENTIAL)...", file=sys.stderr)
         try:
             token = client_pin.get_pin_token(pin, ClientPin.PERMISSION.MAKE_CREDENTIAL, rp_id)
         except CtapError as e:
-            print(f"DEBUG: PIN token FAILED: {e}", file=sys.stderr)
+            if FIDO2_DEBUG:
+                print(f"DEBUG: PIN token FAILED: {e}", file=sys.stderr)
             raise Fido2ClientError(f"PIN token failed: {e}") from e
-        print("DEBUG: PIN token OK, building client data...", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print("DEBUG: PIN token OK, building client data...", file=sys.stderr)
 
         # Construct client data for the hash used in pinUvAuthParam
         origin = f"https://{rp_id}"
-        print(f"DEBUG: client_data origin={origin}", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print(f"DEBUG: client_data origin={origin}", file=sys.stderr)
 
         client_data, _ = DefaultClientDataCollector(origin, verify_rp_id).collect_client_data(
             request_options.public_key
@@ -796,7 +807,8 @@ class Fido2Auth:
                 print(f"DEBUG: make_credential FAILED: {e}", file=sys.stderr)
             raise Fido2ClientError(f"make_credential failed: {e}") from e
 
-        print("DEBUG: make_credential OK", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print("DEBUG: make_credential OK", file=sys.stderr)
         # Wrap the raw AttestationResponse so it looks like the high-level
         # CredentialSelection.auth_response that _format_credential_response expects.
         auth_response = type(
@@ -839,7 +851,8 @@ class Fido2Auth:
         auth_response = assertion.get_assertions()[0]
 
         cred_id = auth_response.credential["id"]
-        print(f"DEBUG: assertion cred_id from key (hex)={cred_id.hex()}", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print(f"DEBUG: assertion cred_id from key (hex)={cred_id.hex()}", file=sys.stderr)
         auth_data = auth_response.auth_data
         signature = auth_response.signature
         client_data = assertion.get_response(0).response.client_data
@@ -853,11 +866,12 @@ class Fido2Auth:
                 print(f"DEBUG: _b64std_encode input (hex)={data.hex()}", file=sys.stderr)
             return base64.b64encode(data).decode("ascii")
 
-        # Always print the raw bytes we are about to encode (unconditional)
-        print(f"DEBUG: cred_id bytes passed to _b64std_encode (hex)={cred_id.hex()}", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print(f"DEBUG: cred_id bytes passed to _b64std_encode (hex)={cred_id.hex()}", file=sys.stderr)
 
         encoded_id = _b64std_encode(cred_id)
-        print(f"DEBUG: _b64std_encode output={encoded_id}", file=sys.stderr)
+        if FIDO2_DEBUG:
+            print(f"DEBUG: _b64std_encode output={encoded_id}", file=sys.stderr)
 
         return {
             "id": encoded_id,
