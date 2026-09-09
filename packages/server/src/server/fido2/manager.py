@@ -5,12 +5,29 @@ The detailed crypto handling is deferred to integration testing.
 """
 
 import base64
+import hashlib
+import json
+import logging
 import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from core.utils.entropy import get_secure_token
+
+logger = logging.getLogger(__name__)
+
+
+def _b64_decode(s: str) -> bytes:
+    """Decode base64 or base64url, padded or not. Alphabets are
+    distinguished by charset: '-_' never appears in standard,
+    '+/' never in urlsafe. Never silently discard characters."""
+    if not s:
+        return b""
+    padded = s + "=" * (-len(s) % 4)
+    if "-" in s or "_" in s:
+        return base64.b64decode(padded.translate(str.maketrans("-_", "+/")), validate=True)
+    return base64.b64decode(padded, validate=True)
 
 
 @dataclass
@@ -190,39 +207,47 @@ class Fido2Manager:
         if stored is None:
             raise ValueError("Challenge not found or expired")
 
-        # Extract credential_id from response (base64url-encoded in browser)
-        raw_id_b64 = response.get("id", "")
-        if isinstance(raw_id_b64, str):
-            credential_id = base64.b64decode(raw_id_b64)
-        else:
-            credential_id = raw_id_b64
+        credential_id = _b64_decode(response.get("id", ""))
+        if not credential_id:
+            raise ValueError("Missing credential ID in response")
 
-        # Extract attestationObject from nested browser response structure
-        attestation_object = None
+        # Extract attestationObject — try browser shape first, then CLI shape
         resp = response.get("response", {})
+        attestation_object_b64 = None
         if isinstance(resp, dict):
-            attestation_object = resp.get("authenticatorAttestationResponse", {}).get("attestationObject")
-        if attestation_object is None:
-            auth_data_bytes = b""
-        elif isinstance(attestation_object, str):
-            # Could be base64 or base64url — try standard base64 first, then base64url
-            try:
-                auth_data_bytes = base64.b64decode(attestation_object)
-            except Exception:
-                auth_data_bytes = base64.urlsafe_b64decode(attestation_object + "=" * (4 - len(attestation_object) % 4))
-        else:
-            auth_data_bytes = attestation_object
+            # Browser: response.authenticatorAttestationResponse.attestationObject
+            aar = resp.get("authenticatorAttestationResponse")
+            if isinstance(aar, dict):
+                attestation_object_b64 = aar.get("attestationObject")
+            # CLI: response.attestationObject
+            if attestation_object_b64 is None:
+                attestation_object_b64 = resp.get("attestationObject")
 
-        public_key = auth_data_bytes
-        # Sign count is bytes 30-33 of authenticator data (right-aligned 32-bit)
-        sign_count = 0
-        if len(auth_data_bytes) >= 37:
-            sign_count = int.from_bytes(auth_data_bytes[30:34], "big")
+        if not attestation_object_b64:
+            raise ValueError("Missing attestationObject in response")
+
+        attestation_bytes = _b64_decode(attestation_object_b64)
+
+        from fido2 import cbor as fido2_cbor
+        from fido2.webauthn import AttestationObject
+
+        try:
+            ao = AttestationObject(attestation_bytes)
+        except Exception as e:
+            raise ValueError(f"Failed to parse attestation object: {e}") from e
+
+        auth_data = ao.auth_data
+        if auth_data.credential_data is None:
+            raise ValueError("No attested credential data in attestation")
+
+        cose_key = auth_data.credential_data.public_key
+        public_key_bytes = fido2_cbor.encode(dict(cose_key))
+        sign_count = auth_data.counter
 
         cred = StoredCredential(
             user_id=stored.data["user_id"],
             credential_id=credential_id,
-            public_key=public_key,
+            public_key=public_key_bytes,
             sign_count=sign_count,
         )
 
@@ -242,6 +267,7 @@ class Fido2Manager:
             Tuple of (challenge_id, options_dict).
         """
         challenge_id = get_secure_token(16)
+        raw_challenge = secrets.token_bytes(32)
 
         allow_credentials = None
         if user_id:
@@ -260,11 +286,15 @@ class Fido2Manager:
             user_id or "",
             {
                 "target_user_id": user_id,
+                "raw_challenge": raw_challenge,
+                # Server hint is "discouraged"; CLI client enforces REQUIRED itself.
+                # Intentionally decoupled — do not "fix" one to match the other.
+                "user_verification": "discouraged",
             },
         )
 
         options: dict[str, Any] = {
-            "challenge": base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+            "challenge": base64.b64encode(raw_challenge).decode("ascii"),
             "rpId": self.rp_id,
             "timeout": 60000,
             "userVerification": "discouraged",
@@ -292,15 +322,15 @@ class Fido2Manager:
         Raises:
             ValueError: If authentication fails.
         """
+        # Pop-on-read: challenge is consumed on any use (success or failure).
+        # This prevents replay and oracle probing.
         stored = self.store.get_challenge(challenge_id)
         if stored is None:
             raise ValueError("Challenge not found or expired")
 
-        raw_id_b64 = response.get("id", "")
-        if isinstance(raw_id_b64, str):
-            raw_id = base64.b64decode(raw_id_b64)
-        else:
-            raw_id = raw_id_b64
+        raw_id = _b64_decode(response.get("id", ""))
+        if not raw_id:
+            raise ValueError("Missing credential ID in response")
 
         # Find matching credential
         credential = None
@@ -318,6 +348,104 @@ class Fido2Manager:
 
         if credential is None:
             raise ValueError("Credential not found")
+
+        # Extract assertion components
+        resp = response.get("response", {})
+        if not isinstance(resp, dict):
+            # ValueError is the 401 contract for all callers; TypeError would 500
+            raise ValueError("Malformed assertion response")  # noqa: TRY004
+
+        client_data_json_b64 = resp.get("clientDataJSON", "")
+        auth_data_b64 = resp.get("authenticatorData", "")
+        signature_b64 = resp.get("signature", "")
+
+        if not all([client_data_json_b64, auth_data_b64, signature_b64]):
+            raise ValueError("Missing assertion components (clientDataJSON, authenticatorData, or signature)")
+
+        client_data_json_bytes = _b64_decode(client_data_json_b64)
+        auth_data_bytes = _b64_decode(auth_data_b64)
+        signature = _b64_decode(signature_b64)
+
+        # Challenge binding: clientDataJSON.challenge must match the issued challenge
+        try:
+            client_data = json.loads(client_data_json_bytes)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise ValueError("Malformed clientDataJSON") from e
+
+        challenge_b64url = client_data.get("challenge", "")
+        challenge_bytes = _b64_decode(challenge_b64url)
+        stored_challenge = stored.data.get("raw_challenge", b"")
+        if challenge_bytes != stored_challenge:
+            raise ValueError("Challenge mismatch: assertion does not answer the issued challenge")
+
+        # Parse authenticator data
+        from fido2.webauthn import AuthenticatorData
+
+        try:
+            auth_data = AuthenticatorData(auth_data_bytes)
+        except Exception as e:
+            raise ValueError(f"Failed to parse authenticator data: {e}") from e
+
+        # rpIdHash check
+        expected_rp_id_hash = hashlib.sha256(self.rp_id.encode()).digest()
+        if auth_data.rp_id_hash != expected_rp_id_hash:
+            raise ValueError("RP ID hash mismatch: authenticator registered under different RP ID")
+
+        # UP flag (user presence) — always required
+        if not auth_data.is_user_present():
+            raise ValueError("User presence flag not set")
+
+        # UV flag — only enforced when the challenge negotiated "required"
+        uv_required = stored.data.get("user_verification") == "required"
+        if uv_required and not auth_data.is_user_verified():
+            raise ValueError("User verification flag not set (required for this challenge)")
+
+        # Signature verification: ECDSA/RSASSA over authData || SHA-256(clientDataJSON)
+        from fido2 import cbor as fido2_cbor
+        from fido2.webauthn import CoseKey
+
+        try:
+            cose_key = CoseKey.parse(fido2_cbor.decode(credential.public_key))
+        except Exception as e:
+            raise ValueError(f"Failed to parse stored public key: {e}") from e
+
+        client_data_hash = hashlib.sha256(client_data_json_bytes).digest()
+        message = auth_data_bytes + client_data_hash
+
+        try:
+            cose_key.verify(message, signature)
+        except Exception as e:
+            raise ValueError("Signature verification failed") from e
+
+        # Counter check (clone detection) — only active for keys that report non-zero counters
+        if credential.sign_count > 0 and auth_data.counter < credential.sign_count:
+            raise ValueError("Signature counter regression: possible credential clone")
+
+        # Update sign count in memory
+        credential.sign_count = auth_data.counter
+
+        # Persist to DB
+        if self.backend is not None:
+            from datetime import UTC, datetime
+
+            from core.iam.models import WebAuthnCredential
+
+            try:
+                db = self.backend.get_session()
+                try:
+                    db_cred = (
+                        db.query(WebAuthnCredential)
+                        .filter(WebAuthnCredential.credential_id == credential.credential_id)
+                        .first()
+                    )
+                    if db_cred:
+                        db_cred.sign_count = auth_data.counter
+                        db_cred.last_used_at = datetime.now(UTC)
+                        db.commit()
+                finally:
+                    db.close()
+            except Exception:  # nosec B110
+                logger.exception("sign_count persist failed; login succeeded, counter update lost")
 
         return {
             "user_id": credential.user_id,
