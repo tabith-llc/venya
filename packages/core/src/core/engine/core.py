@@ -29,6 +29,7 @@ class SecretRecord:
     created_by: str
     created_at: datetime
     role_names: list[str] = field(default_factory=list)
+    meta: dict | None = None
 
 
 class CoreError(Exception):
@@ -327,6 +328,7 @@ class Core:
                         created_by=secret.created_by,
                         created_at=secret.created_at,
                         role_names=roles_by_secret.get(secret.id, []),
+                        meta=secret.meta,
                     )
                 )
 

@@ -86,6 +86,64 @@ def _make_mock_core():
     return core
 
 
+def _build_orm_backed_app(tmp_path):
+    """Build a test app with a REAL Core + Backend over SQLite (zero mocks).
+
+    Exercises the exact path the unit mocks hid: core.list() returns real
+    SecretRecord objects into the shared response loop. A MagicMock record
+    auto-generates .meta and masks the AttributeError a real record raised.
+
+    Backend._create_engine is bypassed: it issues PostgreSQL-only SET pragmas
+    that break SQLite. The real engine + session factory are injected instead.
+    """
+    from core.engine.backend import Backend, BackendConfig
+    from core.engine.encryption import KEK_SIZE, encrypt_secret
+    from core.iam.models import Base, Role, Secret, SecretRole, User
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    db_path = tmp_path / "list_meta.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+
+    kek = b"k" * KEK_SIZE
+    s = SessionLocal()
+    wrapped_dek, nonce, ciphertext = encrypt_secret(kek, b"top-secret")
+    user = User(user_id="user1")
+    role = Role(name="dev", permissions="read-write")
+    s.add_all([user, role])
+    s.flush()
+    secret = Secret(
+        key="db-password",
+        encrypted_value=ciphertext,
+        nonce=nonce,
+        wrapped_dek=wrapped_dek,
+        key_version_id="v1",
+        created_by="user1",
+        meta={"executor": "web-server-3", "purpose": "ssh_login"},
+    )
+    s.add(secret)
+    s.flush()
+    s.add(SecretRole(secret_id=secret.id, role_id=role.id))
+    s.commit()
+    s.close()
+
+    backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+    backend._engine = engine
+    backend._session_factory = SessionLocal
+    core = backend.get_core()
+
+    # Build the app directly: the shared _create_test_app patch-mocks
+    # backend.get_session, which a real Backend must not have replaced.
+    app = FastAPI()
+    app.state.core = core
+    app.state.backend = backend
+    app.include_router(secrets_routes.router, prefix="/api/v1")
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+    return app, engine
+
+
 class TestSecretsCreate:
     """Tests for secret creation endpoint."""
 
@@ -282,6 +340,28 @@ class TestSecretsList:
         resp = client.get("/api/v1/secrets")
         assert resp.status_code == 200
         assert resp.json()["secrets"] == []
+
+    def test_list_no_filter_returns_metadata_orm_backed(self, tmp_path):
+        """Bare GET /secrets (no filters) returns metadata via the real core.list path.
+
+        Regression: SecretRecord had no .meta field, so the shared response
+        loop's `r.meta if r.meta is not None else {}` raised AttributeError ->
+        HTTP 500 on the bare-list path. Unit tests used a MagicMock record
+        (which auto-generates .meta) and masked the bug; the physical 4d run
+        caught it.
+        """
+        app, engine = _build_orm_backed_app(tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["secrets"]) == 1
+        secret = data["secrets"][0]
+        assert secret["key"] == "db-password"
+        assert secret["metadata"] == {"executor": "web-server-3", "purpose": "ssh_login"}
+        engine.dispose()
 
 
 class TestSecretsDelete:
