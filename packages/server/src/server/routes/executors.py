@@ -84,9 +84,9 @@ class ExecutorRegisterRequest(BaseModel):
         default=None,
         max_length=253,
         description=(
-            "Executor's network address, used by the Phase 3 mTLS relay to reach it. "
-            "Optional: when omitted, the server records the caller's forwarded address. "
-            "Registration is ownership-gated, so only a token holder can set this."
+            "Accepted for backward compatibility but NOT used for the stored dial address. "
+            "The server always records executor_id as the hostname, because the mTLS dial "
+            "verifies the peer cert (whose SAN is forced to executor_id) against that address."
         ),
     )
 
@@ -191,27 +191,6 @@ class ExecuteResponse(BaseModel):
 
 
 # --- Helpers ---
-
-# Sentinel stored when no hostname can be resolved (e.g. no client address and
-# none supplied). Keeps the non-nullable column populated and flags the gap.
-UNRESOLVED_HOST = "unknown"
-
-
-def resolve_executor_hostname(request: Request, req: ExecutorRegisterRequest) -> str:
-    """Resolve the hostname to store for a registering executor.
-
-    Preference order:
-    1. Client-supplied ``hostname`` (explicit, best — identifies the host).
-    2. Caller's forwarded address (``request.client.host``). Behind nginx
-       (uvicorn ``--proxy-headers``) this is the real executor address.
-    3. Explicit sentinel — the column is non-nullable, never NULL.
-    """
-    host = (req.hostname or "").strip()
-    if host:
-        return host
-    if request.client is not None and request.client.host:
-        return request.client.host
-    return UNRESOLVED_HOST
 
 
 def _get_ca_manager(request: Request) -> CAManager:
@@ -450,12 +429,13 @@ async def register_executor(
     db.add(audit_event)
 
     # Upsert the Executor status row so GET /api/v1/executors has data.
-    # Hostname: client-supplied > forwarded caller address > sentinel (non-null).
+    # Hostname = cert identity (executor_id): the mTLS dial verifies the peer cert
+    # (SAN forced to executor_id) against this address, so they must match.
+    # req.hostname is NOT the stored dial address.
     now_ts = datetime.now(UTC)
-    effective_host = resolve_executor_hostname(request, req)
     existing_executor = db.query(Executor).filter(Executor.id == resolved_executor_id).first()
     if existing_executor is not None:
-        existing_executor.hostname = effective_host
+        existing_executor.hostname = resolved_executor_id
         if existing_executor.enrolled_at is None:
             existing_executor.enrolled_at = now_ts
         existing_executor.status = "active"
@@ -463,7 +443,7 @@ async def register_executor(
         db.add(
             Executor(
                 id=resolved_executor_id,
-                hostname=effective_host,
+                hostname=resolved_executor_id,
                 enrolled_at=now_ts,
                 status="active",
             )

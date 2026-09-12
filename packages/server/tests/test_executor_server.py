@@ -1,7 +1,6 @@
 """Server-side tests for executor registration, revocation, heartbeat, and CA manager."""
 
 import hashlib
-import types
 from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
@@ -310,46 +309,6 @@ def _make_mock_db(executor_certs=None, revocations=None):
 
 
 # ---------------------------------------------------------------------------
-# Hostname resolution helper
-# ---------------------------------------------------------------------------
-
-
-class TestResolveExecutorHostname:
-    """Pure-function tests for the non-null hostname contract (S1)."""
-
-    def _request(self, client_host):
-        if client_host is None:
-            return types.SimpleNamespace(client=None)
-        return types.SimpleNamespace(client=types.SimpleNamespace(host=client_host))
-
-    def test_client_supplied_wins(self):
-        req = types.SimpleNamespace(hostname="exec-1.internal")
-        assert executors_routes.resolve_executor_hostname(self._request("127.0.0.1"), req) == "exec-1.internal"
-
-    def test_client_supplied_is_stripped(self):
-        req = types.SimpleNamespace(hostname="  exec-1.internal  ")
-        assert executors_routes.resolve_executor_hostname(self._request("127.0.0.1"), req) == "exec-1.internal"
-
-    def test_falls_back_to_forwarded_address(self):
-        req = types.SimpleNamespace(hostname=None)
-        assert executors_routes.resolve_executor_hostname(self._request("10.27.28.14"), req) == "10.27.28.14"
-
-    def test_blank_supplied_falls_back_to_forwarded(self):
-        req = types.SimpleNamespace(hostname="   ")
-        assert executors_routes.resolve_executor_hostname(self._request("10.27.28.14"), req) == "10.27.28.14"
-
-    def test_none_client_returns_sentinel(self):
-        from server.routes.executors import UNRESOLVED_HOST
-
-        req = types.SimpleNamespace(hostname=None)
-        r = executors_routes.resolve_executor_hostname(self._request(None), req)
-        assert r == UNRESOLVED_HOST
-        # The contract the column depends on: never NULL.
-        assert r != ""
-        assert r is not None
-
-
-# ---------------------------------------------------------------------------
 # Executor registration endpoint tests
 # ---------------------------------------------------------------------------
 
@@ -435,7 +394,8 @@ class TestExecutorRegistration:
         data = resp.json()
         assert data["executor_id"] == "new-exec"
 
-    def test_register_stores_supplied_hostname(self, ca_manager, executor_csr, executor_keypair):
+    def test_register_new_row_stores_executor_id_as_hostname(self, ca_manager, executor_csr, executor_keypair):
+        """New-row upsert stores executor_id as hostname, ignoring any supplied value."""
         from core.iam.models import Executor
 
         db = _make_mock_db()
@@ -451,16 +411,15 @@ class TestExecutorRegistration:
         assert len(added) == 1
         rec = added[0]
         assert rec.id == "web-server-3"
-        assert rec.hostname == "web-server-3.internal"
+        assert rec.hostname == "web-server-3"  # executor_id, NOT the supplied hostname
         assert rec.status == "active"
         assert rec.enrolled_at is not None
 
-    def test_register_defaults_hostname_to_forwarded_address(self, ca_manager, executor_csr, executor_keypair):
-        """No hostname supplied -> store the caller's forwarded (XFF) address.
+    def test_register_new_row_ignores_forwarded_address(self, ca_manager, executor_csr, executor_keypair):
+        """No/any hostname -> store executor_id, never the caller's forwarded address.
 
-        Emulates production (nginx -> 127.0.0.1:8080, trusted) by adding
-        uvicorn's own trusted-proxy middleware, so request.client.host is the
-        real executor address sent in X-Forwarded-For, not the loopback peer.
+        The fallback-to-forwarded-IP was the exact cause of the mTLS 503 (the cert SAN
+        is executor_id, so dialing an IP address fails verification). It must not happen.
         """
         from core.iam.models import Executor
         from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
@@ -478,16 +437,17 @@ class TestExecutorRegistration:
         assert resp.status_code == 201
         added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], Executor)]
         assert len(added) == 1
-        # The forwarded address is stored, not the loopback proxy peer.
-        assert added[0].hostname == "10.27.28.14"
-        assert added[0].hostname not in ("127.0.0.1", "testclient")
+        # executor_id is the dial address; the forwarded IP is never stored.
+        assert added[0].hostname == "web-server-3"
+        assert added[0].hostname != "10.27.28.14"
 
-    def test_register_upsert_updates_existing_hostname(self, ca_manager, executor_csr, executor_keypair):
+    def test_register_upsert_sets_existing_hostname_to_executor_id(self, ca_manager, executor_csr, executor_keypair):
+        """Existing-row upsert rewrites hostname to executor_id (idempotent on rotation)."""
         from datetime import datetime
 
         from core.iam.models import Executor
 
-        existing = Executor(id="web-server-3", hostname="old-host", status="active")
+        existing = Executor(id="web-server-3", hostname="10.27.28.14", status="active")
         existing.enrolled_at = datetime(2026, 1, 1, tzinfo=UTC)
         db = _make_mock_db()
         self._make_db_with_executor(db, existing)
@@ -502,7 +462,21 @@ class TestExecutorRegistration:
         # Re-registration updates the existing row in place, does not add a new one.
         added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], Executor)]
         assert added == []
-        assert existing.hostname == "web-server-3.internal"
+        assert existing.hostname == "web-server-3"  # rewritten to executor_id
+        assert existing.status == "active"
+
+    def test_heartbeat_does_not_modify_hostname(self, ca_manager):
+        """Heartbeat must only liveness-stamp; it must not rewrite the dial address."""
+        from core.iam.models import Executor
+
+        existing = Executor(id="web-server-3", hostname="venya-exec-1", status="active")
+        db = _make_mock_db()
+        self._make_db_with_executor(db, existing)
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        resp = client.post("/api/v1/heartbeat", json={"executor_id": "web-server-3"})
+        assert resp.status_code == 200
+        assert existing.hostname == "venya-exec-1"  # unchanged by heartbeat
         assert existing.status == "active"
 
 
