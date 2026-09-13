@@ -104,9 +104,9 @@ class TestSbxStrategyPrepare:
 class TestSbxStrategyCreateSandbox:
     @pytest.fixture
     def ws_base(self, monkeypatch, tmp_path):
-        """Point WORKSPACE_TMPFS_BASE at tmp_path (hermetic; not real /dev/shm)."""
+        """Point WORKSPACE_BASE at tmp_path (hermetic; not real /dev/shm)."""
         base = tmp_path / "wsbase"
-        monkeypatch.setattr("executor.strategies.sbx_strategy.WORKSPACE_TMPFS_BASE", str(base))
+        monkeypatch.setattr("executor.strategies.sbx_strategy.WORKSPACE_BASE", str(base))
         return base
 
     def test_create_sandbox_calls_sbx_create(self):
@@ -174,7 +174,7 @@ class TestSbxStrategyRemoveSandboxWorkspace:
     @pytest.fixture
     def ws_base(self, monkeypatch, tmp_path):
         base = tmp_path / "wsbase"
-        monkeypatch.setattr("executor.strategies.sbx_strategy.WORKSPACE_TMPFS_BASE", str(base))
+        monkeypatch.setattr("executor.strategies.sbx_strategy.WORKSPACE_BASE", str(base))
         return base
 
     def test_remove_sandbox_deletes_created_workspace_and_keeps_base(self, ws_base):
