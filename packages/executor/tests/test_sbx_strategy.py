@@ -348,12 +348,43 @@ class TestSbxStrategyNetworkPolicy:
                 strategy.apply_network_policy("venya-test123")
             # 2 allowlist entries + 1 DNS resolver
             assert mock_run.call_count == 3
-            # Check that policy allow commands were called
+            # Pin the exact argv: no sudo (daemon-user context), --sandbox
+            # scoping (sbx 0.38 rejects --name).
             calls = [c[0][0] for c in mock_run.call_args_list]
-            for call in calls:
-                assert "policy" in call
-                assert "allow" in call
-                assert "network" in call
+            expected = [
+                ["sbx", "policy", "allow", "network", host, "--sandbox", "venya-test123"]
+                for host in ["10.10.10.50", "10.10.10.100", "10.27.28.1"]
+            ]
+            assert calls == expected
+
+    def test_apply_network_policy_raises_on_registration_failure(self, tmp_path: Path):
+        """A registration failure must raise, not log-and-continue: a
+        swallowed failure leaves the sandbox under deny-all and the command
+        dies later with an opaque network error (F11)."""
+        strategy = SbxStrategy()
+        strategy._sandbox_name = "venya-test123"
+
+        mock_egress = MagicMock()
+        mock_egress.get_allowed_hosts.return_value = ["10.27.28.22"]
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stderr="unknown flag: --name", stdout="")
+            with patch("executor.egress_filter.EgressFilter", return_value=mock_egress):
+                with pytest.raises(RuntimeError, match="Failed to register egress allow 10.27.28.22"):
+                    strategy.apply_network_policy("venya-test123")
+
+    def test_apply_network_policy_rejects_empty_host(self, tmp_path: Path):
+        strategy = SbxStrategy()
+        strategy._sandbox_name = "venya-test123"
+
+        mock_egress = MagicMock()
+        mock_egress.get_allowed_hosts.return_value = [""]
+
+        with patch("subprocess.run") as mock_run:
+            with patch("executor.egress_filter.EgressFilter", return_value=mock_egress):
+                with pytest.raises(RuntimeError, match="empty entry"):
+                    strategy.apply_network_policy("venya-test123")
+            mock_run.assert_not_called()
 
     def test_apply_network_policy_dns_always_allowed(self, tmp_path: Path):
         strategy = SbxStrategy()

@@ -228,24 +228,32 @@ class SbxStrategy(InjectionStrategy):
         if not host_sshpass:
             logger.debug("sshpass not found on host; skipping sandbox copy")
             return
-        with open(host_sshpass, "rb") as fh:
-            binary = fh.read()
         result = subprocess.run(  # nosec
-            ["sbx", "exec", "-i", sandbox_name, "tee", "/usr/local/bin/sshpass"],
-            input=binary,
+            ["sbx", "cp", host_sshpass, f"{sandbox_name}:/usr/bin/sshpass"],
             capture_output=True,
+            text=True,
             timeout=10,
             check=False,
         )
         if result.returncode != 0:
-            logger.warning("Failed to copy sshpass into sandbox: %s", result.stderr)
-            return
-        subprocess.run(  # nosec
-            ["sbx", "exec", sandbox_name, "chmod", "+x", "/usr/local/bin/sshpass"],
-            capture_output=True,
-            timeout=5,
-            check=False,
-        )
+            logger.warning("sbx cp sshpass failed: %s; falling back to /tmp", result.stderr)
+            with open(host_sshpass, "rb") as fh:
+                binary = fh.read()
+            subprocess.run(  # nosec
+                # nosec B108: /tmp here is inside the sandbox's own
+                # isolated microVM filesystem, not a shared host tmp.
+                ["sbx", "exec", "-i", sandbox_name, "tee", "/tmp/sshpass"],  # nosec B108
+                input=binary,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            subprocess.run(  # nosec
+                ["sbx", "exec", sandbox_name, "chmod", "+x", "/tmp/sshpass"],  # nosec B108
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
 
     def copy_secrets_into_sandbox(self, mounts: list[SecretMount]) -> None:
         """Copy secrets from host tmpfs into the sandbox.
@@ -356,18 +364,29 @@ class SbxStrategy(InjectionStrategy):
             dns_resolver=dns_resolver,
         )
 
+        # Run as the daemon user, never via sudo: the sbx daemon and
+        # `sbx login` credentials live under the daemon user, and the
+        # root context is unauthenticated ("Not authenticated to Docker").
+        # --sandbox (not --name) scopes the rule to this sandbox.
+        # ponytail: one scoped rule per run is never explicitly removed;
+        # if the daemon does not GC rules for dead sandboxes, sweep with
+        # `sbx policy rm` when `sbx policy ls` grows unbounded.
         for host in egress.get_allowed_hosts():
+            if not host:
+                raise RuntimeError(
+                    f"Egress allowlist contains an empty entry; " f"refusing to apply policy for sandbox {sandbox_name}"
+                )
+            cmd = [
+                "sbx",
+                "policy",
+                "allow",
+                "network",
+                host,
+                "--sandbox",
+                sandbox_name,
+            ]
             result = subprocess.run(  # nosec B603 B607
-                [
-                    "sudo",
-                    "sbx",
-                    "policy",
-                    "allow",
-                    "network",
-                    host,
-                    "--name",
-                    sandbox_name,
-                ],
+                cmd,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -379,8 +398,14 @@ class SbxStrategy(InjectionStrategy):
                     sandbox_name,
                     result.stderr,
                 )
-            else:
-                logger.debug("Allowed network %s for sandbox %s", host, sandbox_name)
+                # Fail loud: a swallowed registration failure leaves the
+                # sandbox under deny-all and the command dies later with an
+                # opaque network error (e.g. SSH kex closed by remote).
+                raise RuntimeError(
+                    f"Failed to register egress allow {host} for sandbox "
+                    f"{sandbox_name} (cmd: {' '.join(cmd)}): {result.stderr.strip()}"
+                )
+            logger.debug("Allowed network %s for sandbox %s", host, sandbox_name)
 
     def execute_command(self, command: str) -> subprocess.CompletedProcess:
         """Execute a command inside the sandbox.
