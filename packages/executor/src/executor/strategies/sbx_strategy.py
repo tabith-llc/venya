@@ -220,6 +220,32 @@ class SbxStrategy(InjectionStrategy):
 
         self._sandbox_name = sandbox_name
         logger.info("Created Docker Sandbox: %s", sandbox_name)
+        self._copy_sshpass(sandbox_name)
+
+    def _copy_sshpass(self, sandbox_name: str) -> None:
+        """Copy sshpass binary into the sandbox (no-op if not on host)."""
+        host_sshpass = shutil.which("sshpass")
+        if not host_sshpass:
+            logger.debug("sshpass not found on host; skipping sandbox copy")
+            return
+        with open(host_sshpass, "rb") as fh:
+            binary = fh.read()
+        result = subprocess.run(  # nosec
+            ["sbx", "exec", "-i", sandbox_name, "tee", "/usr/local/bin/sshpass"],
+            input=binary,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning("Failed to copy sshpass into sandbox: %s", result.stderr)
+            return
+        subprocess.run(  # nosec
+            ["sbx", "exec", sandbox_name, "chmod", "+x", "/usr/local/bin/sshpass"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
 
     def copy_secrets_into_sandbox(self, mounts: list[SecretMount]) -> None:
         """Copy secrets from host tmpfs into the sandbox.

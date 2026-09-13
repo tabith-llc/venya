@@ -111,7 +111,7 @@ class TestSbxStrategyCreateSandbox:
 
     def test_create_sandbox_calls_sbx_create(self):
         strategy = SbxStrategy()
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", "/workspace")
             mock_run.assert_called_once()
@@ -131,10 +131,10 @@ class TestSbxStrategyCreateSandbox:
         as the last argv element (omission was the bug: sbx create prompts on a
         missing path and fails with "user cancelled operation" under non-TTY)."""
         strategy = SbxStrategy()
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123")
-            call_args = mock_run.call_args[0][0]
+            call_args = mock_run.call_args_list[0][0][0]
             assert call_args[:5] == ["sbx", "create", "--name", "venya-test123", "shell"]
             workspace = call_args[len(call_args) - 1]
             assert os.path.isdir(workspace)
@@ -154,20 +154,20 @@ class TestSbxStrategyCreateSandbox:
 
     def test_create_sandbox_uses_configured_timeout(self):
         strategy = SbxStrategy()
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", "/workspace")
-            used = mock_run.call_args.kwargs["timeout"]
+            used = mock_run.call_args_list[0].kwargs["timeout"]
             expected = int(os.environ.get("VENYA_SBX_CREATE_TIMEOUT", SBX_CREATE_TIMEOUT))
             assert used == expected
 
     def test_create_sandbox_timeout_env_override(self, monkeypatch):
         strategy = SbxStrategy()
         monkeypatch.setenv("VENYA_SBX_CREATE_TIMEOUT", "777")
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", "/workspace")
-            assert mock_run.call_args.kwargs["timeout"] == 777
+            assert mock_run.call_args_list[0].kwargs["timeout"] == 777
 
 
 class TestSbxStrategyRemoveSandboxWorkspace:
