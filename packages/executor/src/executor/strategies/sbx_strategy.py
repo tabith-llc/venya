@@ -28,8 +28,11 @@ logger = logging.getLogger("venya.executor.strategies.sbx")
 # tmpfs base on host — secrets never touch disk
 SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec
 
-# tmpfs base for per-run sandboxes' host workspace — never touches disk
-WORKSPACE_TMPFS_BASE = "/dev/shm/venya-workspaces"  # nosec
+# Disk-backed base for per-run sandboxes' host workspace. Must NOT be tmpfs
+# (/dev/shm): sbx bind-mounts the workspace into the microVM via virtio-fs,
+# which cannot share a tmpfs path ("workspace ... was not mounted into the
+# sandbox"). Ephemeral, non-secret, deleted per-run and swept on daemon start.
+WORKSPACE_BASE = str(Path.home() / ".venya-workspaces")  # nosec
 
 # Where secrets appear inside the sandbox. The shell agent runs as non-root
 # (uid 1000) and /run is root-owned, so the dir must live under the image's
@@ -50,11 +53,12 @@ SBX_TIMEOUT = 3600  # 1 hour
 SBX_CREATE_TIMEOUT = 240
 
 
-def sweep_workspace_base(base: str = WORKSPACE_TMPFS_BASE) -> int:
+def sweep_workspace_base(base: str = WORKSPACE_BASE) -> int:
     """Delete orphaned ws_* workspace directories from dead daemon runs.
 
-    /dev/shm survives daemon kills and reboots but sandboxes never do, so at
-    daemon start every ws_* directory in the base is by definition an orphan.
+    The host workspace base survives daemon kills and reboots but sandboxes
+    never do, so at daemon start every ws_* directory in the base is by
+    definition an orphan.
     Unconditional sweep is safe: nothing but this package creates ws_* dirs
     there (alpha deployment: one executor daemon per host). Best-effort —
     failures are logged, not raised.
@@ -183,7 +187,7 @@ class SbxStrategy(InjectionStrategy):
             sandbox_name: Unique name for the sandbox.
             workspace: Host directory to mount as the sandbox workspace.
                 When None, a per-run directory is created under
-                WORKSPACE_TMPFS_BASE and tracked in self._workspace_dir so
+                WORKSPACE_BASE and tracked in self._workspace_dir so
                 remove_sandbox deletes it. Ownership rule: the strategy
                 deletes only what it created — a caller-supplied workspace
                 is always passed through untouched and never deleted.
@@ -193,8 +197,8 @@ class SbxStrategy(InjectionStrategy):
             # Existing path is mandatory: sbx create prompts interactively
             # ("create it? (y/N)") for a missing workspace, which reads EOF
             # in a non-TTY subprocess and fails with "user cancelled operation".
-            os.makedirs(WORKSPACE_TMPFS_BASE, mode=0o700, exist_ok=True)
-            workspace = tempfile.mkdtemp(prefix="ws_", dir=WORKSPACE_TMPFS_BASE)
+            os.makedirs(WORKSPACE_BASE, mode=0o700, exist_ok=True)
+            workspace = tempfile.mkdtemp(prefix="ws_", dir=WORKSPACE_BASE)
             self._workspace_dir = workspace
             created_workspace = True
 

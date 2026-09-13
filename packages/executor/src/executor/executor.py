@@ -447,8 +447,9 @@ class Executor:
         sandbox_name = f"venya-{self.session_id}-{session_uuid}"
 
         # Create the sandbox. When cwd is None the strategy creates a
-        # per-run tmpfs workspace (a missing path makes sbx create prompt
-        # and fail with "user cancelled operation" in a non-TTY subprocess).
+        # per-run disk-backed workspace (a missing path makes sbx create
+        # prompt and fail with "user cancelled operation" in a non-TTY
+        # subprocess).
         logger.info("Creating Docker Sandbox: %s", sandbox_name)
         strategy.create_sandbox(sandbox_name, cwd)
 
