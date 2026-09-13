@@ -127,10 +127,11 @@ def _get_session_from_cookie(
         from core.iam.role_manager import RoleManager
         from core.iam.session_manager import SessionConfig, SessionManager
 
+        sc = request.app.state.config.session
         session_config = SessionConfig(
-            session_timeout=timedelta(minutes=15),
-            access_token_ttl=timedelta(minutes=5),
-            max_session_duration=timedelta(hours=4),
+            session_timeout=timedelta(seconds=sc.session_timeout),
+            access_token_ttl=timedelta(seconds=sc.access_token_ttl),
+            max_session_duration=timedelta(seconds=sc.max_session_duration),
         )
         manager = SessionManager(db, session_config)
 
@@ -245,10 +246,11 @@ async def browser_login_assert(
         from core.iam.role_manager import RoleManager
         from core.iam.session_manager import SessionConfig, SessionManager
 
+        sc = request.app.state.config.session
         session_config = SessionConfig(
-            session_timeout=timedelta(minutes=15),
-            access_token_ttl=timedelta(minutes=5),
-            max_session_duration=timedelta(hours=4),
+            session_timeout=timedelta(seconds=sc.session_timeout),
+            access_token_ttl=timedelta(seconds=sc.access_token_ttl),
+            max_session_duration=timedelta(seconds=sc.max_session_duration),
         )
         sm = SessionManager(db, session_config)
         rm = RoleManager(db)
@@ -305,10 +307,11 @@ async def browser_refresh(
 
     from core.iam.session_manager import SessionConfig, SessionManager
 
+    sc = request.app.state.config.session
     session_config = SessionConfig(
-        session_timeout=timedelta(minutes=15),
-        access_token_ttl=timedelta(minutes=5),
-        max_session_duration=timedelta(hours=4),
+        session_timeout=timedelta(seconds=sc.session_timeout),
+        access_token_ttl=timedelta(seconds=sc.access_token_ttl),
+        max_session_duration=timedelta(seconds=sc.max_session_duration),
     )
     manager = SessionManager(db, session_config)
 
@@ -357,10 +360,11 @@ async def browser_logout(
     try:
         from core.iam.session_manager import SessionConfig, SessionManager
 
+        sc = request.app.state.config.session
         session_config = SessionConfig(
-            session_timeout=timedelta(minutes=15),
-            access_token_ttl=timedelta(minutes=5),
-            max_session_duration=timedelta(hours=4),
+            session_timeout=timedelta(seconds=sc.session_timeout),
+            access_token_ttl=timedelta(seconds=sc.access_token_ttl),
+            max_session_duration=timedelta(seconds=sc.max_session_duration),
         )
         manager = SessionManager(db, session_config)
 
