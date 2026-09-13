@@ -324,10 +324,11 @@ class SessionMiddleware(BaseHTTPMiddleware):
             from core.iam.session_manager import SessionConfig as CoreSessionConfig
             from core.iam.session_manager import SessionManager
 
+            sc = request.app.state.config.session
             config = CoreSessionConfig(
-                session_timeout=timedelta(minutes=15),
-                access_token_ttl=timedelta(minutes=5),
-                max_session_duration=timedelta(hours=4),
+                session_timeout=timedelta(seconds=sc.session_timeout),
+                access_token_ttl=timedelta(seconds=sc.access_token_ttl),
+                max_session_duration=timedelta(seconds=sc.max_session_duration),
             )
             manager = SessionManager(db, config)
 

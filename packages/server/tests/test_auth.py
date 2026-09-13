@@ -19,6 +19,14 @@ def _create_test_app(fido2_manager=None, backend=None):
     app.state.fido2_manager = fido2_manager
     if backend is not None:
         app.state.backend = backend
+    app.state.config = SimpleNamespace(
+        session=SimpleNamespace(
+            session_timeout=900,
+            access_token_ttl=300,
+            max_session_duration=14400,
+        ),
+        admin_mtls=SimpleNamespace(enabled=False),
+    )
     app.include_router(auth_routes.router, prefix="/api/v1")
 
     class AuthMiddleware(BaseHTTPMiddleware):
