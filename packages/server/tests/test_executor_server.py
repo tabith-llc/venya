@@ -355,6 +355,25 @@ class TestExecutorRegistration:
         assert len(data["serial_number"]) == 16
         assert "not_after" in data
 
+    def test_register_unresolvable_id_returns_400(self, ca_manager, executor_csr, executor_keypair, monkeypatch):
+        """Unresolvable executor_id rejected at install time (dial-address contract)."""
+        monkeypatch.setattr("server.routes.executors._dial_hostname_resolvable", lambda host: False)
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        client = TestClient(app)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = client.post(
+            "/api/v1/executors/register",
+            json={"executor_id": "no-such-exec", "csr_pem": csr_pem},
+        )
+        assert resp.status_code == 400
+        assert "does not resolve" in resp.json()["detail"]
+
+    def test_dial_hostname_resolvable_real(self, _executor_ids_resolvable):
+        """Real resolver: positive (localhost) + paired negative (.invalid NXDOMAIN)."""
+        assert _executor_ids_resolvable("localhost") is True
+        assert _executor_ids_resolvable("no-such-host.invalid") is False
+
     def test_register_invalid_csr_returns_400(self, ca_manager):
         db = _make_mock_db()
         app = self._create_app(ca_manager, db)
