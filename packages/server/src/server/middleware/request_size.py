@@ -63,6 +63,7 @@ class RequestSizeLimitMiddleware:
             limit = self.max_body_bytes
 
             exceeded = False
+            wire_started = False
 
             async def sized_receive():
                 nonlocal received_bytes, exceeded
@@ -77,14 +78,33 @@ class RequestSizeLimitMiddleware:
                         raise RequestTooLargeError()
                 return message
 
+            async def gated_send(message):
+                # Once the limit trips, suppress the app's own response (e.g. the
+                # 500 an inner error middleware emits while unwinding) so the 413
+                # below is the single ASGI response. Sending a second
+                # http.response.start is a protocol violation.
+                nonlocal wire_started
+                if exceeded:
+                    return
+                if message["type"] == "http.response.start":
+                    wire_started = True
+                await send(message)
+
             try:
-                await self.app(scope, sized_receive, send)
+                await self.app(scope, sized_receive, gated_send)
             except RequestTooLargeError:
-                await self._send_response(
-                    send,
-                    413,
-                    b'{"detail":"Request body exceeds size limit"}',
-                )
+                if not wire_started:
+                    await self._send_response(
+                        send,
+                        413,
+                        b'{"detail":"Request body exceeds size limit"}',
+                    )
+                else:
+                    logger.warning(
+                        "Request body exceeded %d bytes after response start; "
+                        "cannot substitute 413, stream terminated",
+                        limit,
+                    )
 
     @staticmethod
     async def _send_response(send, status, body):
