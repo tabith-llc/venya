@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from mcp.types import TextContent
 from venya_mcp.client import SessionExpiredError, VenyaAPIError, VenyaClient
-from venya_mcp.server import call_tool
+from venya_mcp.server import build_client, call_tool
 
 
 def _make_mock_client() -> MagicMock:
@@ -166,7 +167,7 @@ async def test_get_audit_formats() -> None:
 
 
 async def test_session_expired_error() -> None:
-    """SessionExpiredError → re-auth message, not traceback."""
+    """SessionExpiredError propagates — SDK converts handler exceptions to isError=True."""
     mock = _make_mock_client()
     mock.run_command = AsyncMock(
         side_effect=SessionExpiredError(
@@ -176,35 +177,89 @@ async def test_session_expired_error() -> None:
         )
     )
     with patch("venya_mcp.server.get_client", return_value=mock):
-        result = await call_tool(
-            "run_command",
-            {
-                "executor_id": "web-3",
-                "command": "ls",
-                "secret_keys": ["key"],
-            },
-        )
-    assert "Authentication required" in result[0].text
-    assert "Venya session expired" in result[0].text
-    assert "venya" in result[0].text.lower()
+        with pytest.raises(SessionExpiredError) as excinfo:
+            await call_tool(
+                "run_command",
+                {
+                    "executor_id": "web-3",
+                    "command": "ls",
+                    "secret_keys": ["key"],
+                },
+            )
+    assert "Venya session expired" in str(excinfo.value)
+    assert "venya" in str(excinfo.value).lower()
 
 
 async def test_api_error() -> None:
-    """VenyaAPIError → 'Venya API error: ...' text."""
+    """VenyaAPIError propagates with exactly one 'Venya API error' prefix."""
     mock = _make_mock_client()
     mock.run_command = AsyncMock(side_effect=VenyaAPIError(503, "Service unavailable"))
     with patch("venya_mcp.server.get_client", return_value=mock):
-        result = await call_tool(
-            "run_command",
-            {
-                "executor_id": "web-3",
-                "command": "ls",
-                "secret_keys": [],
-            },
-        )
-    assert "Venya API error" in result[0].text
-    assert "503" in result[0].text
-    assert "Service unavailable" in result[0].text
+        with pytest.raises(VenyaAPIError) as excinfo:
+            await call_tool(
+                "run_command",
+                {
+                    "executor_id": "web-3",
+                    "command": "ls",
+                    "secret_keys": [],
+                },
+            )
+    text = str(excinfo.value)
+    assert text.count("Venya API error") == 1
+    assert "503" in text
+    assert "Service unavailable" in text
+
+
+async def test_unexpected_error_raises_runtime() -> None:
+    """Generic exceptions surface as RuntimeError naming the tool (isError path)."""
+    mock = _make_mock_client()
+    mock.run_command = AsyncMock(side_effect=ValueError("boom"))
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        with pytest.raises(RuntimeError, match=r"Unexpected error in tool run_command: boom"):
+            await call_tool(
+                "run_command",
+                {
+                    "executor_id": "web-3",
+                    "command": "ls",
+                    "secret_keys": [],
+                },
+            )
+
+
+def test_build_client_wires_bootstrap_ca(tmp_path, monkeypatch) -> None:
+    """build_client passes the _bootstrap_tls_verify() result as verify (F3 wiring)."""
+    ca = tmp_path / "ca-bundle.crt"
+    ca.write_text("fake-ca")
+    monkeypatch.setenv("VENYA_CA_CERT", str(ca))
+    captured: dict = {}
+
+    class SpyClient:
+        def __init__(self, config, verify=True):
+            captured["verify"] = verify
+
+    monkeypatch.setattr("venya_mcp.server.VenyaClient", SpyClient)
+    build_client(MagicMock())
+    assert captured["verify"] == str(ca)
+
+
+def test_build_client_missing_ca_raises(monkeypatch) -> None:
+    """No VENYA_CA_CERT at startup → actionable RuntimeError (paired negative)."""
+    monkeypatch.delenv("VENYA_CA_CERT", raising=False)
+    monkeypatch.delenv("VENYA_TLS_VERIFY", raising=False)
+    with pytest.raises(RuntimeError, match="VENYA_CA_CERT"):
+        build_client(MagicMock())
+
+
+def test_console_entry_point_is_sync() -> None:
+    """venya-mcp entry point must be a sync callable (F6: async main regression guard)."""
+    import inspect
+    from importlib import metadata
+
+    eps = list(metadata.entry_points(group="console_scripts", name="venya-mcp"))
+    assert eps, "venya-mcp console script entry point not found in installed metadata"
+    fn = eps[0].load()
+    assert callable(fn)
+    assert not inspect.iscoroutinefunction(fn)
 
 
 async def test_unknown_tool() -> None:

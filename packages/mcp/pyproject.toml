@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-venya-mcp = "venya_mcp.server:main"
+venya-mcp = "venya_mcp.server:run"
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-asyncio", "pytest-cov"]
