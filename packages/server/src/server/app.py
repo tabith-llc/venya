@@ -7,9 +7,27 @@ import time
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import ServerConfig
+from .config import CASecurityConfig, ServerConfig
 
 logger = logging.getLogger("venya.server")
+
+
+def _admin_ca_security(config: ServerConfig) -> CASecurityConfig:
+    """Build the CA security config for the *admin* CA manager.
+
+    The admin CA key passphrase is delivered under the admin var
+    (``config.admin_mtls.ca_key_passphrase_env``, default
+    ``VENYA_ADMIN_CA_KEY_PASSPHRASE``) — the same var the startup enforcement
+    in ``main()`` checks and the installer writes. It is NOT the executor CA
+    var (``config.ca_security.key_passphrase_env``, default
+    ``VENYA_CA_KEY_PASSPHRASE``).
+
+    Wiring the admin manager to ``config.ca_security`` makes it look for the
+    executor var, never find the admin passphrase, and silently write the
+    admin CA key UNENCRYPTED at rest. Keep this as the single source of truth
+    for the admin manager's security config so the wiring stays testable.
+    """
+    return CASecurityConfig(key_passphrase_env=config.admin_mtls.ca_key_passphrase_env)
 
 
 def create_app(config: ServerConfig | None = None) -> FastAPI:
@@ -206,7 +224,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     from .ca import AdminCAManager
 
     admin_ca_dir = Path(config.ca_dir) / "admin-ca"
-    admin_ca_manager = AdminCAManager(admin_ca_dir, config.ca_security)
+    admin_ca_manager = AdminCAManager(admin_ca_dir, _admin_ca_security(config))
     if config.admin_mtls.enabled and not admin_ca_manager.has_ca:
         raise RuntimeError("admin_mtls.enabled but admin CA not found at admin-ca/. " "Run: venya admin init-admin-ca")
     app.state.admin_ca_manager = admin_ca_manager  # type: ignore[attr-defined]
