@@ -121,3 +121,23 @@ class TestRequestSizeLimit:
                 },
             )
             assert resp.status_code == 413
+
+    def test_chunked_body_under_limit(self):
+        """Chunked stream under the limit passes through (paired positive)."""
+        app = _create_app(max_body_bytes=1000)
+        client = TestClient(app, raise_server_exceptions=False, follow_redirects=False)
+
+        with client as session:
+            chunked_body = b"x" * 50
+            chunked_payload = f"{len(chunked_body):x}\r\n".encode() + chunked_body + b"\r\n0\r\n\r\n"
+            resp = session.post(
+                "/echo",
+                content=chunked_payload,
+                headers={
+                    "Transfer-Encoding": "chunked",
+                    "Content-Type": "application/octet-stream",
+                },
+            )
+            assert resp.status_code == 200
+            # The ASGI test transport delivers the raw framed bytes as the body
+            assert resp.json()["received"] == len(chunked_payload)
