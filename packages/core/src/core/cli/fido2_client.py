@@ -213,7 +213,9 @@ class Fido2Auth:
                     raise Fido2ClientError(f"PIN incorrect after {max_pin_retries} attempts") from e
                 if e.code == CtapError.ERR.PIN_BLOCKED:
                     raise Fido2ClientError("Security key PIN is blocked. Requires power-cycle or factory reset.") from e
-                raise
+                # `raise e`, not bare `raise`: e may be the REBOUND unwrapped CtapError;
+                # a bare raise re-raises the original ClientError wrapper instead.
+                raise e  # noqa: TRY201 — rebinding makes bare raise semantically wrong
 
         # Step 4: Convert assertion to server format and complete
         logger.info("Sending assertion to server")
