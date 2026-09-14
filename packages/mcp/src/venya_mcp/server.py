@@ -14,7 +14,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from .client import SessionExpiredError, VenyaAPIError, VenyaClient
+from .client import SessionExpiredError, VenyaAPIError, VenyaClient, _bootstrap_tls_verify
 from .config import MCPConfig
 
 logger = logging.getLogger("venya.mcp.server")
@@ -27,6 +27,11 @@ def get_client() -> VenyaClient:
     if _client is None:
         raise RuntimeError("Venya client not initialized")
     return _client
+
+
+def build_client(config: MCPConfig) -> VenyaClient:
+    """VenyaClient with the startup TLS trust decision (VENYA_CA_CERT) applied."""
+    return VenyaClient(config, verify=_bootstrap_tls_verify())
 
 
 @app.list_tools()
@@ -235,18 +240,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
-    except SessionExpiredError as e:
-        return [
-            TextContent(
-                type="text",
-                text=f"Authentication required: Venya session expired and could not be renewed.\n\n{e}",
-            )
-        ]
-    except VenyaAPIError as e:
-        return [TextContent(type="text", text=f"Venya API error: {e}")]
+    except (SessionExpiredError, VenyaAPIError):
+        # Propagate: the low-level Server converts handler exceptions into
+        # isError=True results. Returning error text would look like success.
+        raise
     except Exception as e:
         logger.exception("Unexpected error in tool %s", name)
-        return [TextContent(type="text", text=f"Unexpected error: {e}")]
+        raise RuntimeError(f"Unexpected error in tool {name}: {e}") from e
 
 
 async def main() -> None:
@@ -258,7 +258,7 @@ async def main() -> None:
     )
 
     config = MCPConfig()
-    _client = VenyaClient(config)
+    _client = build_client(config)
 
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -267,5 +267,10 @@ async def main() -> None:
         await _client.close()
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Sync console-script entry point — async main() must be awaited."""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()
