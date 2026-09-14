@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import socket
 import ssl
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -207,6 +208,20 @@ def _get_ca_manager(request: Request) -> CAManager:
 # --- Endpoints ---
 
 
+def _dial_hostname_resolvable(hostname: str) -> bool:
+    """True if hostname resolves locally.
+
+    executor_id is the relay dial address (the client cert SAN is forced to
+    it), so an unresolvable id produces an executor that registers and
+    heartbeats but can never be called. Check at registration, not first use.
+    """
+    try:
+        socket.getaddrinfo(hostname, None)
+        return True
+    except socket.gaierror:
+        return False
+
+
 @router.post(
     "/executors/register",
     response_model=ExecutorRegisterResponse,
@@ -246,6 +261,19 @@ async def register_executor(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+
+    # executor_id is the relay dial hostname + cert SAN — reject undialable ids
+    # before any CA/DB work (fail at install time, not at first run_command)
+    if not _dial_hostname_resolvable(req.executor_id):
+        metrics.EXECUTOR_REGISTERED.labels(result="unresolvable_id").inc()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"executor_id '{req.executor_id}' does not resolve. The executor_id is used "
+                "as the relay dial hostname and certificate SAN — it must be resolvable "
+                "from every core (DNS or /etc/hosts), e.g. the executor's real hostname."
+            ),
         )
 
     # --- Token validation (optional bootstrap auth) ---
@@ -912,13 +940,19 @@ async def execute_command_on_executor(
             response.raise_for_status()
             result = response.json()
     except httpx2.ConnectError as e:
-        # Walk cause chain (httpx may wrap SSLError one or more levels deep)
+        # Walk cause chain (httpx may wrap SSLError/gaierror one or more levels deep)
         _c, _d = (e.__cause__ or e.__context__), 0
-        while _c and _d < 5 and not isinstance(_c, ssl.SSLError):
+        while _c and _d < 5 and not isinstance(_c, (ssl.SSLError, socket.gaierror)):
             _c, _d = (_c.__cause__ or _c.__context__), _d + 1
         if _c and isinstance(_c, ssl.SSLError):
             logger.warning("mTLS verification failed: %s", _c)
             raise HTTPException(status_code=503, detail="mTLS verification failed")
+        if _c and isinstance(_c, socket.gaierror):
+            logger.warning("Executor hostname does not resolve: %s", executor.hostname)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Executor hostname does not resolve: {executor.hostname}",
+            )
         raise HTTPException(status_code=503, detail="Executor unreachable (connection refused)")
     except httpx2.TimeoutException:
         raise HTTPException(status_code=503, detail="Executor timed out")

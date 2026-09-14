@@ -201,6 +201,7 @@ class TestCounterIncrements:
             "success",
             "invalid_csr",
             "weak_key",
+            "unresolvable_id",
             "token_invalid",
             "token_expired",
             "token_consumed",
