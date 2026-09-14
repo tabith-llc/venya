@@ -3,6 +3,7 @@
 Verifies that Fido2Client is instantiated correctly with fido2 2.x API.
 """
 
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 from core.cli.fido2_client import Fido2Auth, Fido2NotFoundError
@@ -402,7 +403,7 @@ class TestFormatAssertionResponse:
         auth_data = AuthenticatorData.create(rp_id_hash, 0x01, 1)
 
         class FakeAssertion:
-            credential = {"id": b"cred-id", "type": "public-key"}
+            credential: ClassVar[dict] = {"id": b"cred-id", "type": "public-key"}
             signature = b"signature-bytes"
             user = None
 
@@ -413,7 +414,7 @@ class TestFormatAssertionResponse:
         result = auth._format_assertion_response(sel)
 
         assert result["type"] == "public-key"
-        assert result["id"] == "Y3JlZC1pZA"  # b64url("cred-id")
+        assert result["id"] == "Y3JlZC1pZA=="  # padded standard base64 — server b64decode rejects unpadded (f71d4c5)
         assert "rawId" in result
         assert "signature" in result["response"]
         assert "clientDataJSON" in result["response"]
