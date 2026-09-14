@@ -148,6 +148,11 @@ tls_verify = false
 class TestDaemonRegistrationTLSVerification:
     """Tests for TLS verification in CertificateManager.register() with throwaway clients."""
 
+    @pytest.fixture(autouse=True)
+    def _writable_cert_dirs(self, monkeypatch):
+        """These tests mock Path/IO wholesale; stub the register() writability pre-check."""
+        monkeypatch.setattr("executor.daemon.os.access", lambda *a, **k: True)
+
     def test_default_is_verify_true(self, monkeypatch):
         """When VENYA_TLS_VERIFY is not set, verification is enabled."""
         monkeypatch.delenv("VENYA_TLS_VERIFY", raising=False)
