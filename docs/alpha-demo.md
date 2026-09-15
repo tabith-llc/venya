@@ -104,8 +104,20 @@ invoke (`sshpass` etc.).
 
 - `422` on step 1: check the JSON body carries `key_version_id` (required).
 - `503` on step 3: builtins/relative paths in the command — use absolute
-  paths.
+  paths. Do NOT pass a `--` separator to `venya run`; it is captured
+  literally into the command string (known quirk, ticketed) and can trip
+  the command validator.
+- **First run times out** ("read operation timed out") on a freshly
+  installed executor: the first sandbox create pulls the agent template
+  (~60 s+) and can exceed the client read timeout while the command
+  completes server-side. Check the executor journal
+  (`journalctl -u venya-executor`) and the target's state, then rerun —
+  warm runs are seconds-scale.
+- `503` with `Not authenticated to Docker` / `global network policy has not
+  been initialized` in the executor journal: executor sandbox setup
+  incomplete — see [installation.md](installation.md) troubleshooting.
 - `401` anywhere: access tokens live 5 minutes; re-run `venya login`
-  (touch the key). Sessions hard-cap at 4 hours.
+  (touch the key). Sessions hard-cap at 4 hours and idle out after 15
+  minutes — an MCP session dies the same way; re-login and retry.
 - Relay `403` during extended demo: core/executor hostname disagreement —
   see the troubleshooting section of [installation.md](installation.md).

@@ -112,10 +112,27 @@ curl -fsSL http://<tarball-host>/install-venya-executor.sh | sudo \
   bash -s
 ```
 
+**Docker account credentials are required.** The sbx sandbox runtime pulls
+its agent template from Docker: the installer prompts for a Docker username
+and API key/access token (interactive runs), or takes
+`VENYA_DOCKER_USERNAME` + `VENYA_DOCKER_API_KEY` (piped/non-interactive
+runs). The token is handled **stdin-only** — never in process arguments,
+never written by the installer (sbx keeps it in its own credential store
+under the service account's home). Without credentials the installer
+**fails closed**; `VENYA_SKIP_DOCKER_LOGIN=yes` forces a degraded install
+(executor runs, but every sandbox execution fails 503 until
+`sudo -H -u venya sbx login` is done by hand).
+
+The installer also starts `venya-sandboxd.service` (the sbx daemon,
+persistent across reboots, ordered before `venya-executor.service`) and
+initializes the sbx global network policy to **deny-all** (per-sandbox
+allow rules come from the egress allowlist at execution time).
+
 Hostname resolution: the installer uses the provisioned `/etc/hosts` entry
 for the core if present, else DNS. If the core hostname resolves neither way,
 the installer **fails closed** and tells you to set `VENYA_CORE_IP=<ip>` —
-it never guesses an IP (a wrong guess silently misroutes mTLS).
+it never guesses an IP (a wrong guess silently misroutes mTLS). An explicit
+`VENYA_CORE_IP` always wins over an existing hosts entry.
 
 What it creates: `venya` service account; Rust toolchain + the compiled
 redaction filter (`venya_filter.*.so`); Python venv (executor+core+cli);
@@ -212,6 +229,22 @@ procedure exists but is not yet packaged.
 
 - `502` from nginx immediately after core install: give the backend a few
   seconds to bind; re-probe `api/v1/health`.
+- **First** `run_command`/`venya run` after an executor install times out
+  client-side: the first sandbox create pulls the agent template (~60 s+).
+  The command usually still completes server-side — check the executor
+  journal (`journalctl -u venya-executor`) and the target's actual state
+  before retrying; the warm rerun is seconds-scale.
+- `503` with `Not authenticated to Docker` in the executor journal: sbx
+  login missing/expired — rerun the installer with Docker credentials or
+  `sudo -H -u venya sbx login` on the executor.
+- `503` with `global network policy has not been initialized`: run
+  `sudo -H -u venya sbx policy init deny-all` on the executor (the
+  installer does this automatically since the 2026-09 fix).
+- `503` on otherwise-valid commands: the executor's trusted-path validation
+  requires absolute binary paths (`/bin/echo`, `/usr/bin/ssh`) — shell
+  builtins and bare command names are rejected by design. Also do not pass a
+  `--` separator to `venya run`: the CLI captures it literally into the
+  command string (known quirk, ticketed).
 - `Host key verification failed` / TLS failures between components: the CA
   must be provisioned, never verification disabled. Re-fetch
   `/.well-known/venya-ca.crt` after any core reinstall (every install mints
