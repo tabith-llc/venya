@@ -236,6 +236,8 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [Installation Guide](docs/installation.md) | Full deployment instructions *(coming soon)* |
 | [Architecture](docs/architecture.md) | Technical deep dive *(coming soon)* |
 | [FAQ](docs/faq.md) | Frequently asked questions *(coming soon)* |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting policy + safe harbor |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (incl. license terms for contributions) |
 
 ---
 
@@ -243,7 +245,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 
 Venya is licensed under the Business Source License (BSL) 1.1, Copyright © 2026 Tabith LLC. Free to use, modify, and build on (including in production) below the **US $10M** total-revenue threshold and for non-competing use; a commercial license is required above it or for competing hosted/embedded offerings. Each version converts to **MPL 2.0** at its Change Date (2031-01-01) or fourth anniversary of first public distribution, whichever comes first.
 
-See [LICENSE](LICENSE) for the full terms.
+See [LICENSE](LICENSE) for the full terms. Contributions are accepted under the same license — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
