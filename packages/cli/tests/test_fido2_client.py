@@ -8,16 +8,16 @@ from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
-from core.cli.fido2_client import Fido2Auth, Fido2ClientError, Fido2NotFoundError
+from venya_cli.fido2_client import Fido2Auth, Fido2ClientError, Fido2NotFoundError
 
 
 class TestFido2ClientInstantiation:
     """Test that Fido2Client is used correctly (fido2 2.x API)."""
 
-    @patch("core.cli.fido2_client.httpx2")
-    @patch("core.cli.fido2_client.list_devices")
-    @patch("core.cli.fido2_client.Fido2Client")
-    @patch("core.cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.httpx2")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
     def test_get_credential_uses_fido2_client(
         self,
         mock_collector_cls,
@@ -52,11 +52,11 @@ class TestFido2ClientInstantiation:
         assert call_args[0][0] == "fake_device"  # device
         assert call_args[0][1] is mock_collector  # collector
 
-    @patch("core.cli.fido2_client.httpx2")
-    @patch("core.cli.fido2_client.list_devices")
-    @patch("core.cli.fido2_client.Fido2Client")
-    @patch("core.cli.fido2_client.DefaultClientDataCollector")
-    @patch("core.cli.fido2_client.Ctap2")
+    @patch("venya_cli.fido2_client.httpx2")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.Ctap2")
     def test_get_assertion_uses_fido2_client_for_uv_key(
         self,
         mock_ctap2_cls,
@@ -94,7 +94,7 @@ class TestFido2ClientInstantiation:
         mock_ctap2_cls.assert_called_once()
         mock_ctap2_cls.assert_called_with("fake_device")
 
-    @patch("core.cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.list_devices")
     def test_no_devices_raises_fido2_not_found(self, mock_list_devices):
         """_get_credential raises Fido2NotFoundError when no devices."""
         mock_list_devices.return_value = []
@@ -143,8 +143,8 @@ class TestAuthenticateErrorHandling:
     @patch.object(Fido2Auth, "_post")
     def test_configuration_unsupported_produces_actionable_message(self, mock_post, mock_get):
         """ClientError(CONFIGURATION_UNSUPPORTED) → Fido2ClientError with 'set a PIN' message."""
-        from core.cli.fido2_client import Fido2ClientError
         from fido2.client import ClientError
+        from venya_cli.fido2_client import Fido2ClientError
 
         mock_post.side_effect = [
             {
@@ -171,9 +171,9 @@ class TestAuthenticateErrorHandling:
     @patch.object(Fido2Auth, "_post")
     def test_wrapped_pin_invalid_retries_three_times_then_fails(self, mock_post, mock_get):
         """ClientError wrapping CtapError(PIN_INVALID) → unwrap → retry fires 3× → 'PIN incorrect after 3'."""
-        from core.cli.fido2_client import Fido2ClientError
         from fido2.client import ClientError
         from fido2.ctap import CtapError
+        from venya_cli.fido2_client import Fido2ClientError
 
         mock_post.side_effect = [
             {
@@ -266,13 +266,13 @@ class TestAuthenticateErrorHandling:
 class TestPinOnlyKeyDispatch:
     """Test that clientPin-only keys use direct Ctap2.get_assertion."""
 
-    @patch("core.cli.fido2_client.httpx2")
-    @patch("core.cli.fido2_client.list_devices")
-    @patch("core.cli.fido2_client.Fido2Client")
-    @patch("core.cli.fido2_client.DefaultClientDataCollector")
-    @patch("core.cli.fido2_client.Ctap2")
-    @patch("core.cli.fido2_client.ClientPin")
-    @patch("core.cli.fido2_client.CliInteraction")
+    @patch("venya_cli.fido2_client.httpx2")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.Ctap2")
+    @patch("venya_cli.fido2_client.ClientPin")
+    @patch("venya_cli.fido2_client.CliInteraction")
     def test_pin_only_key_uses_direct_ctap2_assertion(
         self,
         mock_interaction_cls,
@@ -340,7 +340,7 @@ class TestPinOnlyKeyDispatch:
 
         assert isinstance(result, AssertionSelection)
 
-    @patch("core.cli.fido2_client.httpx2")
+    @patch("venya_cli.fido2_client.httpx2")
     @patch.object(Fido2Auth, "_get_assertion")
     @patch.object(Fido2Auth, "_post")
     def test_wrapped_pin_invalid_retries_three_times_through_new_path(
@@ -354,9 +354,9 @@ class TestPinOnlyKeyDispatch:
         The retry loop in authenticate() catches CtapError from the new
         direct path (Ctap2.get_assertion raises raw CtapError).
         """
-        from core.cli.fido2_client import Fido2ClientError
         from fido2.client import ClientError
         from fido2.ctap import CtapError
+        from venya_cli.fido2_client import Fido2ClientError
 
         mock_post.side_effect = [
             {

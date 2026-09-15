@@ -56,14 +56,14 @@ class TestParseExecutorCert:
 
     def test_parse_returns_none_for_missing_file(self):
         """Returns None when cert file doesn't exist."""
-        from core.cli.commands import _parse_executor_cert
+        from venya_cli.commands import _parse_executor_cert
 
         result = _parse_executor_cert("/nonexistent/path/cert.pem")
         assert result is None
 
     def test_parse_returns_none_for_invalid_file(self, tmp_path):
         """Returns None when cert file is not a valid certificate."""
-        from core.cli.commands import _parse_executor_cert
+        from venya_cli.commands import _parse_executor_cert
 
         cert_path = tmp_path / "not-a-cert.pem"
         cert_path.write_text("this is not a certificate")
@@ -73,7 +73,7 @@ class TestParseExecutorCert:
 
     def test_parse_returns_metadata_for_valid_cert(self, tmp_path):
         """Returns dict with metadata for a valid certificate."""
-        from core.cli.commands import _parse_executor_cert
+        from venya_cli.commands import _parse_executor_cert
 
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "parse-test", validity_days=30)
@@ -100,7 +100,7 @@ class TestParseExecutorCert:
 
     def test_parse_returns_negative_days_for_expired_cert(self, tmp_path):
         """Returns negative days_remaining for an expired certificate."""
-        from core.cli.commands import _parse_executor_cert
+        from venya_cli.commands import _parse_executor_cert
 
         private_key = _generate_test_keypair()
         now = datetime.now(UTC)
@@ -138,7 +138,7 @@ class TestGetServerUrl:
 
     def test_core_url_arg_takes_precedence(self):
         """--core-url arg is returned immediately."""
-        from core.cli.commands import _get_server_url
+        from venya_cli.commands import _get_server_url
 
         args = MagicMock()
         args.core_url = "https://my-core.example.com"
@@ -149,13 +149,13 @@ class TestGetServerUrl:
 
     def test_config_json_used_when_non_default(self, tmp_path):
         """Config.json server_url is used when not localhost:8000."""
-        from core.cli.commands import _get_server_url
+        from venya_cli.commands import _get_server_url
 
         args = MagicMock()
         args.core_url = None
         args.config_path = "/nonexistent/executor.toml"
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "https://from-config.example.com"
             MockConfig.return_value = mock_config
@@ -165,13 +165,13 @@ class TestGetServerUrl:
 
     def test_config_json_skipped_when_localhost(self, tmp_path):
         """Config.json with localhost:8000 is skipped, falls through to executor.toml."""
-        from core.cli.commands import _get_server_url
+        from venya_cli.commands import _get_server_url
 
         args = MagicMock()
         args.core_url = None
         args.config_path = "/nonexistent/executor.toml"
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "http://localhost:8000"
             MockConfig.return_value = mock_config
@@ -181,7 +181,7 @@ class TestGetServerUrl:
 
     def test_executor_toml_used_as_fallback(self, tmp_path):
         """Executor TOML is used when Config.json has localhost."""
-        from core.cli.commands import _get_server_url
+        from venya_cli.commands import _get_server_url
 
         toml_path = tmp_path / "executor.toml"
         toml_path.write_text('server_url = "https://from-toml.example.com"')
@@ -190,7 +190,7 @@ class TestGetServerUrl:
         args.core_url = None
         args.config_path = str(toml_path)
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "http://localhost:8000"
             MockConfig.return_value = mock_config
@@ -200,13 +200,13 @@ class TestGetServerUrl:
 
     def test_returns_unknown_when_no_config(self):
         """Returns 'unknown' when no config sources available."""
-        from core.cli.commands import _get_server_url
+        from venya_cli.commands import _get_server_url
 
         args = MagicMock()
         args.core_url = None
         args.config_path = "/nonexistent/executor.toml"
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "http://localhost:8000"
             MockConfig.return_value = mock_config
@@ -225,7 +225,7 @@ class TestExecutorStatus:
 
     def test_status_ok(self, tmp_path, capsys):
         """Status returns 0 when cert is valid with >7 days remaining."""
-        from core.cli.commands import executor_status
+        from venya_cli.commands import executor_status
 
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "status-ok", validity_days=30)
@@ -237,7 +237,7 @@ class TestExecutorStatus:
         args.core_url = None
         args.config_path = None
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "http://localhost:8000"
             MockConfig.return_value = mock_config
@@ -254,7 +254,7 @@ class TestExecutorStatus:
 
     def test_status_warning(self, tmp_path, capsys):
         """Status returns 0 (not 1) when cert expires in <7 days."""
-        from core.cli.commands import executor_status
+        from venya_cli.commands import executor_status
 
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "status-warn", validity_days=3)
@@ -266,7 +266,7 @@ class TestExecutorStatus:
         args.core_url = None
         args.config_path = None
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "http://localhost:8000"
             MockConfig.return_value = mock_config
@@ -280,7 +280,7 @@ class TestExecutorStatus:
 
     def test_status_expired(self, tmp_path, capsys):
         """Status returns 1 when cert is expired."""
-        from core.cli.commands import executor_status
+        from venya_cli.commands import executor_status
 
         private_key = _generate_test_keypair()
         now = datetime.now(UTC)
@@ -308,7 +308,7 @@ class TestExecutorStatus:
         args.core_url = None
         args.config_path = None
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "http://localhost:8000"
             MockConfig.return_value = mock_config
@@ -321,14 +321,14 @@ class TestExecutorStatus:
 
     def test_status_not_registered(self, tmp_path, capsys):
         """Status returns 1 when cert file doesn't exist."""
-        from core.cli.commands import executor_status
+        from venya_cli.commands import executor_status
 
         args = MagicMock()
         args.cert_path = str(tmp_path / "nonexistent.pem")
         args.core_url = None
         args.config_path = None
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "http://localhost:8000"
             MockConfig.return_value = mock_config
@@ -342,7 +342,7 @@ class TestExecutorStatus:
 
     def test_status_includes_serial(self, tmp_path, capsys):
         """Status prints the certificate serial number."""
-        from core.cli.commands import executor_status
+        from venya_cli.commands import executor_status
 
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "serial-test", validity_days=30)
@@ -354,7 +354,7 @@ class TestExecutorStatus:
         args.core_url = None
         args.config_path = None
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "http://localhost:8000"
             MockConfig.return_value = mock_config
@@ -372,7 +372,7 @@ class TestExecutorStatus:
 
     def test_status_uses_core_url_arg(self, tmp_path, capsys):
         """Status uses --core-url arg for server URL display."""
-        from core.cli.commands import executor_status
+        from venya_cli.commands import executor_status
 
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "url-test", validity_days=30)

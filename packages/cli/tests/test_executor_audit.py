@@ -114,7 +114,7 @@ class TestExecutorAudit:
         args.offset = 0
         args.json = False
 
-        from core.cli.commands import executor_audit
+        from venya_cli.commands import executor_audit
 
         result = executor_audit(mock_client, args)
 
@@ -158,7 +158,7 @@ class TestExecutorAudit:
         args.offset = 0
         args.json = True
 
-        from core.cli.commands import executor_audit
+        from venya_cli.commands import executor_audit
 
         result = executor_audit(mock_client, args)
 
@@ -181,7 +181,7 @@ class TestExecutorAudit:
         args.offset = 0
         args.json = False
 
-        from core.cli.commands import executor_audit
+        from venya_cli.commands import executor_audit
 
         result = executor_audit(mock_client, args)
 
@@ -193,7 +193,7 @@ class TestExecutorAudit:
 
     def test_audit_auth_failure(self, tmp_path, capsys):
         """Authentication failure returns exit 1 with helpful message."""
-        from core.cli.api_client import APIClientAuthenticationError
+        from venya_cli.api_client import APIClientAuthenticationError
 
         mock_client = MagicMock()
         mock_client.get.side_effect = APIClientAuthenticationError("Invalid token")
@@ -207,7 +207,7 @@ class TestExecutorAudit:
         args.offset = 0
         args.json = False
 
-        from core.cli.commands import executor_audit
+        from venya_cli.commands import executor_audit
 
         result = executor_audit(mock_client, args)
 
@@ -219,7 +219,7 @@ class TestExecutorAudit:
 
     def test_audit_network_error(self, tmp_path, capsys):
         """Network error returns exit 1."""
-        from core.cli.api_client import APIClientError
+        from venya_cli.api_client import APIClientError
 
         mock_client = MagicMock()
         mock_client.get.side_effect = APIClientError("Connection refused")
@@ -233,7 +233,7 @@ class TestExecutorAudit:
         args.offset = 0
         args.json = False
 
-        from core.cli.commands import executor_audit
+        from venya_cli.commands import executor_audit
 
         result = executor_audit(mock_client, args)
 
@@ -271,7 +271,7 @@ class TestExecutorAudit:
         args.offset = 0
         args.json = False
 
-        from core.cli.commands import executor_audit
+        from venya_cli.commands import executor_audit
 
         result = executor_audit(mock_client, args)
 
@@ -295,7 +295,7 @@ class TestExecutorAudit:
         args.offset = 0
         args.json = False
 
-        from core.cli.commands import executor_audit
+        from venya_cli.commands import executor_audit
 
         result = executor_audit(None, args)
 

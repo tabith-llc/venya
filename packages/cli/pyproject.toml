@@ -1,0 +1,30 @@
+[project]
+name = "venya-cli"
+version = "0.1.0"
+description = "Venya workstation CLI — admin, enrollment, and execution client"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "cryptography>=50.0.0",
+    "fido2>=2.0.0",
+    "httpx2>=0.27.0",
+]
+
+[project.scripts]
+venya = "venya_cli.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio", "pytest-cov"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/venya_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

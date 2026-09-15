@@ -131,8 +131,8 @@ class TestHeartbeatSuccess:
             response_data={"revoked": False, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -156,8 +156,8 @@ class TestHeartbeatSuccess:
             response_data={"revoked": False, "new_cert_required": True},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -180,8 +180,8 @@ class TestHeartbeatSuccess:
             response_data={"revoked": False, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -217,8 +217,8 @@ class TestHeartbeatRevoked:
             response_data={"revoked": True, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -241,8 +241,8 @@ class TestHeartbeatRevoked:
             response_data={"revoked": True, "new_cert_required": True},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -263,7 +263,7 @@ class TestHeartbeatMissingFiles:
 
     def test_heartbeat_missing_cert(self, tmp_path, capsys):
         """Heartbeat exits 1 when cert file doesn't exist."""
-        from core.cli.commands import executor_heartbeat
+        from venya_cli.commands import executor_heartbeat
 
         args = MagicMock()
         args.cert_path = str(tmp_path / "nonexistent.pem")
@@ -285,7 +285,7 @@ class TestHeartbeatMissingFiles:
         key_path = tmp_path / "executor.key"
         key_path.unlink()  # Remove it
 
-        from core.cli.commands import executor_heartbeat
+        from venya_cli.commands import executor_heartbeat
 
         args = MagicMock()
         args.cert_path = str(cert_path)
@@ -322,8 +322,8 @@ class TestHeartbeatNetworkErrors:
             post_error=httpx2.ConnectError("Connection refused"),
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -347,8 +347,8 @@ class TestHeartbeatNetworkErrors:
             post_error=httpx2.TimeoutException("Request timed out"),
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -371,8 +371,8 @@ class TestHeartbeatNetworkErrors:
             response_data={"detail": "Internal server error"},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -392,7 +392,7 @@ class TestHeartbeatInvalidCert:
 
     def test_heartbeat_invalid_cert_file(self, tmp_path, capsys):
         """Heartbeat exits 1 when cert file is not a valid certificate."""
-        from core.cli.commands import executor_heartbeat
+        from venya_cli.commands import executor_heartbeat
 
         # Write invalid PEM content
         cert_path = tmp_path / "executor.crt"
@@ -427,14 +427,14 @@ class TestHeartbeatServerUrl:
         """Heartbeat exits 1 when server URL is unknown."""
         cert_path, _key_path, _ = _setup_cert_files(tmp_path)
 
-        from core.cli.commands import executor_heartbeat
+        from venya_cli.commands import executor_heartbeat
 
         args = MagicMock()
         args.cert_path = str(cert_path)
         args.key_path = str(_key_path)
         args.core_url = None
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "http://localhost:8000"
             MockConfig.return_value = mock_config
@@ -472,8 +472,8 @@ class TestHeartbeatMtls:
             response_data={"revoked": False, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -505,8 +505,8 @@ class TestHeartbeatKeyPath:
             response_data={"revoked": False, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -543,8 +543,8 @@ class TestHeartbeatKeyPath:
             response_data={"revoked": False, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -588,8 +588,8 @@ class TestHeartbeatCustomCertPath:
             response_data={"revoked": False, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as MockClient:
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -621,8 +621,8 @@ class TestHeartbeatOutput:
             response_data={"revoked": False, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -650,8 +650,8 @@ class TestHeartbeatOutput:
             response_data={"revoked": True, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
@@ -674,8 +674,8 @@ class TestHeartbeatOutput:
             response_data={"revoked": False, "new_cert_required": False},
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_heartbeat
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
 
             result = executor_heartbeat(args)
 
