@@ -123,11 +123,11 @@ Venya is currently in **alpha** — early access for teams who want to shape the
 
 ### Quick Start (5-Minute Demo)
 
-See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)** *(coming soon)*
+See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)**
 
 ### Full Installation
 
-Production deployment guide: **[Installation Guide](docs/installation.md)** *(coming soon)*
+Production deployment guide: **[Installation Guide](docs/installation.md)**
 
 ### Prerequisites
 
@@ -175,7 +175,7 @@ Production deployment guide: **[Installation Guide](docs/installation.md)** *(co
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Technical deep dive:** [Architecture Documentation](docs/architecture.md) *(coming soon)*
+**Technical deep dive:** [Architecture Documentation](docs/architecture.md)
 
 ---
 
@@ -214,7 +214,7 @@ Three layers of defense:
 
 Vault and CyberArk store secrets and hand plaintext to whoever has a valid token. If an AI agent has a Vault token, it can read every secret in plaintext and exfiltrate it. Venya's zero-knowledge injection model means the agent never receives plaintext — it only sees the result of the command that used the credential. The secret traverses the system inside cryptographic sentinel wrappers and is only unwrapped inside the sandboxed execution environment.
 
-Full FAQ: [docs/faq.md](docs/faq.md) *(coming soon)*
+Full FAQ: [docs/faq.md](docs/faq.md)
 
 ---
 
@@ -232,10 +232,10 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 
 | Document | Description |
 |----------|-------------|
-| [Alpha Demo Guide](docs/alpha-demo.md) | 5-minute end-to-end demo *(coming soon)* |
-| [Installation Guide](docs/installation.md) | Full deployment instructions *(coming soon)* |
-| [Architecture](docs/architecture.md) | Technical deep dive *(coming soon)* |
-| [FAQ](docs/faq.md) | Frequently asked questions *(coming soon)* |
+| [Alpha Demo Guide](docs/alpha-demo.md) | 5-minute end-to-end demo |
+| [Installation Guide](docs/installation.md) | Full deployment instructions |
+| [Architecture](docs/architecture.md) | Technical deep dive |
+| [FAQ](docs/faq.md) | Frequently asked questions |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy + safe harbor |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (incl. license terms for contributions) |
 
