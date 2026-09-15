@@ -11,14 +11,18 @@ set -euo pipefail
 ###############################################################################
 # Venya Workstation CLI Installer
 #
-# Installs the `venya` CLI for the CURRENT (non-root) operator user:
+# Installs the Venya workstation client bundle for the CURRENT (non-root)
+# operator user:
 #   - uv (if missing) into ~/.local/bin
-#   - venya-cli via `uv tool install` (isolated venv, shim in ~/.local/bin)
+#   - venya-cli via `uv tool install` (isolated venv, `venya` shim)
+#   - venya-mcp via `uv tool install` (isolated venv, `venya-mcp` shim;
+#     set VENYA_INSTALL_MCP=no to skip)
 #
-# No sudo required. Refuses to run as root — the tool is per-user.
+# No sudo required. Refuses to run as root — the tools are per-user.
 #
 # Environment variables:
 #   VENYA_SKIP_PROMPT     - Set to "yes" to skip the confirmation prompt
+#   VENYA_INSTALL_MCP     - Set to "no" to install only the CLI (default: both)
 #   VENYA_TARBALL         - URL of the venya-cli tarball
 #                           (default: http://10.27.27.35:8080/venya-cli-install.tar.gz)
 #   VENYA_TARBALL_SHA256  - REQUIRED. sha256 of the tarball; aborts without it.
@@ -66,7 +70,7 @@ venya_install_uv
 # --- Download + verify (hard-fails without VENYA_TARBALL_SHA256) ---
 venya_download_tarball cli
 
-# --- Extract (minimal tarball: packages/cli only) ---
+# --- Extract (workstation bundle: packages/cli + packages/mcp) ---
 EXTRACT_DIR="$(mktemp -d)"
 tar xzf "$TARBALL_FILE" -C "$EXTRACT_DIR"
 rm -f "$TARBALL_FILE"
@@ -77,9 +81,20 @@ if [ ! -f "$EXTRACT_DIR/packages/cli/pyproject.toml" ]; then
     exit 1
 fi
 
-# --- Install via uv tool (isolated venv + ~/.local/bin shim) ---
+# --- Install via uv tool (isolated venvs + ~/.local/bin shims) ---
 info "Installing venya-cli via uv tool..."
 uv tool install --force --python 3.14 "$EXTRACT_DIR/packages/cli" > /dev/null
+
+INSTALL_MCP="${VENYA_INSTALL_MCP:-yes}"
+if [ "$INSTALL_MCP" != "no" ]; then
+    if [ ! -f "$EXTRACT_DIR/packages/mcp/pyproject.toml" ]; then
+        error "Tarball layout unexpected: packages/mcp/pyproject.toml not found (VENYA_INSTALL_MCP != no)."
+        rm -rf "$EXTRACT_DIR"
+        exit 1
+    fi
+    info "Installing venya-mcp via uv tool..."
+    uv tool install --force --python 3.14 "$EXTRACT_DIR/packages/mcp" > /dev/null
+fi
 rm -rf "$EXTRACT_DIR"
 
 # --- Verify ---
@@ -90,6 +105,19 @@ if ! command -v venya > /dev/null 2>&1; then
 fi
 venya --help > /dev/null
 info "venya CLI installed: $(command -v venya)"
+if [ "$INSTALL_MCP" != "no" ]; then
+    if ! command -v venya-mcp > /dev/null 2>&1; then
+        error "venya-mcp shim not found on PATH after install."
+        exit 1
+    fi
+    # No --help probe: venya-mcp is a stdio server (would block). Import check instead.
+    MCP_PY="$(dirname "$(readlink -f "$(command -v venya-mcp)")")/python"
+    if [ -x "$MCP_PY" ] && ! "$MCP_PY" -c "import venya_mcp.server" 2> /dev/null; then
+        error "venya-mcp installed but its server module fails to import."
+        exit 1
+    fi
+    info "venya-mcp installed: $(command -v venya-mcp)"
+fi
 
 # --- FIDO2 non-root access check (actionable, never silently requires root) ---
 HIDRAW_RW=0
@@ -116,4 +144,10 @@ echo "Day-one commands:"
 echo "  venya config set-server https://<core-host>"
 echo "  curl -sk https://<core-host>/.well-known/venya-ca.crt -o ~/.config/venya-ca.crt"
 echo "  SSL_CERT_FILE=~/.config/venya-ca.crt venya login <user-id>"
+if [ "$INSTALL_MCP" != "no" ]; then
+    echo ""
+    echo "MCP (LLM clients) — point the client at the venya-mcp shim and provide:"
+    echo "  VENYA_CONFIG=<path>/config.json  (server_url + access_token from venya login)"
+    echo "  VENYA_CA_CERT=~/.config/venya-ca.crt  (required at startup)"
+fi
 echo ""
