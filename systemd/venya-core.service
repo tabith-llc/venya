@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=venya
 Group=venya
-ExecStart=/opt/venya/.venv/bin/venya-server --config /etc/venya/server.toml
+ExecStart=/opt/venya/.venv/bin/venya-server
 Environment=VENYA_ENV_DIR=/opt/venya
 # Admin CA key passphrase (os.environ-visible; the only thing ca.py reads).
 # Leading '-' = optional: absent when admin mTLS is disabled, so the unit still
