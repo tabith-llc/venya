@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from ..iam.models import Role, Secret, SecretRole
+from ..iam.models import Role, Secret, SecretRole, SessionSecret
 from .backend import Backend
 from .encryption import decrypt_secret as _decrypt_secret_impl
 from .rate_limiter import RateLimiter
@@ -261,6 +261,12 @@ class Core:
 
             # Delete secret roles first (foreign key constraint)
             session.query(SecretRole).filter(SecretRole.secret_id == secret.id).delete()
+
+            # Delete ephemeral execution-session links (foreign key
+            # constraint). Expired sessions must not block secret
+            # deletion/rotation (secret-delete-fk-500); audit history
+            # references secret ids as data and stays intact.
+            session.query(SessionSecret).filter(SessionSecret.secret_id == secret.id).delete()
 
             # Delete the secret
             session.delete(secret)
