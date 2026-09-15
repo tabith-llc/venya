@@ -7,7 +7,7 @@ set -euo pipefail
 # Installs Venya Core on a fresh VM:
 #   - venya user, system packages, Nginx, PostgreSQL
 #   - Python venv, server + core packages
-#   - server.toml, .env, Nginx site config
+#   - .env, Nginx site config
 #   - venya-core.service
 #
 # Environment variables:
@@ -55,6 +55,11 @@ venya_determine_install_dir /opt/venya
 venya_check_existing
 
 info "Installing Venya Core to $INSTALL_DIR"
+
+# Remove the inert server.toml from any prior install. Runs only after the
+# reinstall gate (venya_check_existing), so an aborted install leaves it in place.
+# The server reads /opt/venya/.env, never this file (core-server-toml-inert).
+rm -f /etc/venya/server.toml
 
 # --- Create venya service account (no password, nologin, locked) ---
 venya_create_user
@@ -215,61 +220,10 @@ sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/
 BIND_ADDRESS="127.0.0.1"
 info "Server will bind to: $BIND_ADDRESS (Nginx handles TLS)"
 
-# --- Write server.toml (core-specific) ---
+# /etc/venya holds runtime files (venya-core.env, tls/). The server reads config
+# from /opt/venya/.env only — server.toml was never read at runtime and is no longer
+# written (core-server-toml-inert).
 mkdir -p /etc/venya
-
-cat > /etc/venya/server.toml << EOF
-host = "127.0.0.1"
-port = 8080
-ca_dir = "/var/lib/venya/ca"
-recovery_code_pepper = "$RECOVERY_PEPPER"
-
-[db]
-database_url = "postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya"
-passphrase = "$DB_PASSPHRASE"
-wal_mode = true
-
-[fido2]
-rp_id = "$CORE_HOSTNAME"
-rp_name = "Venya Core"
-origins = ["https://$CORE_HOSTNAME"]
-enrollment_token_ttl = 15
-unmask_auto_hide_timeout = 30
-
-[session]
-session_timeout = 900
-access_token_ttl = 300
-max_session_duration = 14400
-
-[rate_limit]
-max_attempts = 5
-window_seconds = 300.0
-ip_rate_limit = 100
-
-[cors]
-origins = ["https://$CORE_HOSTNAME"]
-
-[audit]
-audit_remote_url = null
-audit_local_retention_days = 90
-EOF
-
-if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
-    cat >> /etc/venya/server.toml << EOF
-
-[admin_mtls]
-enabled = true
-ca_cert = "$ADMIN_CA_DIR/admin-ca.crt"
-known_admin_ids = ["$ADMIN_IDENTITY"]
-EOF
-    info "Admin mTLS section appended to server.toml"
-fi
-
-# server.toml holds the DB password + encryption passphrase — root-only, venya-owned.
-chmod 600 /etc/venya/server.toml
-chown venya:venya /etc/venya/server.toml
-
-info "Server config written to /etc/venya/server.toml"
 
 # --- Write .env (core-specific) ---
 cat > "$INSTALL_DIR/.env" << EOF
@@ -449,8 +403,8 @@ fi
 
 info "Relay client certificate signed and verified: CN=${CORE_HOSTNAME}-relay (client Yes / server No)"
 
-# Functional wiring: the server reads .env at runtime (server.toml is never
-# read). The appended values are non-secret paths only.
+# Functional wiring: the server reads .env at runtime. The appended values are
+# non-secret paths only.
 cat >> "$INSTALL_DIR/.env" << EOF
 VENYA_MTLS_CERT=$RELAY_DIR/relay-client.crt
 VENYA_MTLS_KEY=$RELAY_DIR/relay-client.key
@@ -608,7 +562,6 @@ venya_service_retry venya-core
 
 # --- Verification ---
 venya_verify_install \
-    /etc/venya/server.toml \
     /etc/nginx/sites-available/venya \
     /etc/systemd/system/venya-core.service
 
