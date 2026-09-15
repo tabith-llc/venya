@@ -92,7 +92,22 @@ class RequestSizeLimitMiddleware:
 
             try:
                 await self.app(scope, sized_receive, gated_send)
-            except RequestTooLargeError:
+            # except* (PEP 654): inner BaseHTTPMiddleware layers wrap the
+            # raise in anyio TaskGroup ExceptionGroups (nested per layer);
+            # plain `except` never matches the wrapped form.
+            except* RequestTooLargeError:
+                logger.warning(
+                    "Request body exceeded %d bytes (propagated to size middleware)",
+                    limit,
+                )
+            # The 413 is emitted from the `exceeded` flag, not the exception:
+            # on pydantic body-model routes FastAPI converts any body-read
+            # error into a handled HTTPException(400) ("There was an error
+            # parsing the body", fastapi/routing.py), so nothing propagates
+            # here — the gate suppresses the 400 and the stack returns with
+            # zero sends (client saw uvicorn's fallback 500). The flag is
+            # invariant under whatever inner layers do to the exception.
+            if exceeded:
                 if not wire_started:
                     await self._send_response(
                         send,
