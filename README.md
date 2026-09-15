@@ -93,9 +93,9 @@ Venya speaks the Model Context Protocol — the open standard for connecting AI 
 |-----------|-------------------|
 | AI never sees plaintext credentials | Server-side wrapping + executor-side unwrapping + Rust output filter |
 | Sessions require human authorization | FIDO2 hardware key binding (WebAuthn) |
-| Sessions are time-limited | 4-hour hard cap, 10-minute execution session TTL |
+| Sessions are time-limited | 4-hour hard cap, 15-minute idle window, 5-minute access tokens |
 | Executor identity is verified | Mutual TLS with certificate chain validation |
-| Compromised executors are blocked | Certificate revocation propagates within 60 seconds |
+| Compromised executors are blocked | Revoked certs rejected at the executor's next revocation poll |
 | Data exfiltration is prevented | sbx sandbox with deny-by-default egress allowlisting |
 | Every action is traceable | Append-only audit log with user, executor, command, timestamp |
 | Secrets are encrypted at rest | AES-256 with KEK-wrapped DEK (envelope encryption) |
@@ -123,7 +123,7 @@ Venya is currently in **alpha** — early access for teams who want to shape the
 
 ### Quick Start (5-Minute Demo)
 
-See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)**
+See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)** *(coming soon)*
 
 ### Full Installation
 
@@ -131,12 +131,24 @@ Production deployment guide: **[Installation Guide](docs/installation.md)** *(co
 
 ### Prerequisites
 
-- Linux (Ubuntu 22.04+ recommended)
-- PostgreSQL 14+
-- Python 3.12+
+- Linux — Ubuntu 24.04 LTS (tested target; installers assume it)
+- PostgreSQL — installed automatically by the core installer (16 on Ubuntu 24.04)
+- Python 3.14 — pinned (`>=3.14,<3.15`); provisioned automatically via uv
 - FIDO2 security key (YubiKey, SoloKeys, etc.)
-- Docker with sbx support (for executor sandboxes)
+- Docker Sandboxes (sbx) — installed automatically by the executor installer
 - MCP-compatible AI client (Claude Code, Cursor)
+
+### Components
+
+| Package | Purpose |
+|---------|---------|
+| `packages/core` | Shared library — IAM models, encryption engine, migrations |
+| `packages/server` | FastAPI core server — REST API, FIDO2 ceremonies, secrets, audit |
+| `packages/executor` | Remote daemon — sandboxed execution, secret injection, redaction |
+| `packages/cli` | Workstation CLI (`venya`) — admin, enrollment, execution client |
+| `packages/mcp` | MCP server (`venya-mcp`) — exposes Venya tools to LLM clients |
+| Rust filter extension | Output redaction (`[REDACTED:...]` markers) before return |
+| Installer / uninstaller scripts | `install-venya-{core,executor,cli}.sh` + matching `uninstall-venya-*.sh` (see `install-scripts-README.md`) |
 
 ---
 
@@ -181,9 +193,9 @@ Production deployment guide: **[Installation Guide](docs/installation.md)** *(co
 
 **Is Venya open source?**
 
-Venya is licensed under the Business Source License (BSL) 1.1. The source code is visible and usable for internal purposes. Offering Venya as a hosted or managed service that competes with Tabith LLC is restricted during the license term.
+Venya is licensed under the Business Source License (BSL) 1.1 — source-available, not OSI open source. You may use, modify, and create derivative works (including for production), provided your organization's total consolidated revenue is below **US $10 million** per year and you do not offer Venya to third parties on a hosted or embedded basis in order to compete with Tabith LLC's commercial offerings. At or above the revenue threshold — or for competing hosted/embedded offerings — a commercial license is required: **info@tabith.com**.
 
-Four years after each release, that version automatically converts to Apache License 2.0 — meaning older versions become fully open source over time.
+Each version converts to **MPL 2.0** on its Change Date (2031-01-01) or the fourth anniversary of that version's first public distribution, whichever comes first — older versions become open source over time.
 
 This is the same licensing model used by HashiCorp (Vault, Terraform).
 
@@ -229,11 +241,9 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 
 ## License
 
-Venya is licensed under the Business Source License (BSL) 1.1, Copyright © Tabith LLC. The source code is visible and usable for internal purposes. Offering Venya as a hosted or managed service that competes with Tabith LLC is restricted during the license term.
+Venya is licensed under the Business Source License (BSL) 1.1, Copyright © 2026 Tabith LLC. Free to use, modify, and build on (including in production) below the **US $10M** total-revenue threshold and for non-competing use; a commercial license is required above it or for competing hosted/embedded offerings. Each version converts to **MPL 2.0** at its Change Date (2031-01-01) or fourth anniversary of first public distribution, whichever comes first.
 
-Four years after each release, that version automatically converts to Apache License 2.0.
-
-See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE) for the full terms.
 
 ---
 
