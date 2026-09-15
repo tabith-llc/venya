@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx2
-from core.cli.api_client import APIClient
-from core.cli.fido2_client import Fido2ClientError
+from venya_cli.api_client import APIClient
+from venya_cli.fido2_client import Fido2ClientError
 
 
 def _make_mock_response(status_code=200, json_data=None):
@@ -82,7 +82,7 @@ class TestEnrollSingleCommand:
         args.json = False
         client.config.server_url = "https://venya-core-1"
 
-        with patch("core.cli.fido2_client.Fido2Auth") as mock_fido2_cls:
+        with patch("venya_cli.fido2_client.Fido2Auth") as mock_fido2_cls:
             mock_fido2 = MagicMock()
             mock_fido2_cls.return_value = mock_fido2
             mock_fido2._build_registration_options.return_value = "REQ_OPTIONS"
@@ -94,7 +94,7 @@ class TestEnrollSingleCommand:
                 "type": "public-key",
             }
 
-            result = __import__("core.cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
+            result = __import__("venya_cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
 
         assert result == 0
         assert client.config.access_token == "sess-token-xyz"
@@ -144,14 +144,14 @@ class TestEnrollSingleCommand:
         args.json = False
         client.config.server_url = "https://venya-core-1"
 
-        with patch("core.cli.fido2_client.Fido2Auth") as mock_fido2_cls:
+        with patch("venya_cli.fido2_client.Fido2Auth") as mock_fido2_cls:
             mock_fido2 = MagicMock()
             mock_fido2_cls.return_value = mock_fido2
             mock_fido2._build_registration_options.return_value = "REQ_OPTIONS"
             mock_fido2._get_credential.return_value = "CRED"
             mock_fido2._format_credential_response.return_value = {"id": "dGVzdA==", "response": {}}
 
-            result = __import__("core.cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
+            result = __import__("venya_cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
 
         assert result == 1
         assert client.config.access_token is None
@@ -168,12 +168,12 @@ class TestEnrollSingleCommand:
         args.json = False
         client.config.server_url = "https://venya-core-1"
 
-        with patch("core.cli.fido2_client.Fido2Auth") as mock_fido2_cls:
+        with patch("venya_cli.fido2_client.Fido2Auth") as mock_fido2_cls:
             mock_fido2 = MagicMock()
             mock_fido2_cls.return_value = mock_fido2
             mock_fido2._build_registration_options.side_effect = Fido2ClientError("key error")
 
-            result = __import__("core.cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
+            result = __import__("venya_cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
 
         assert result == 1
         client.close()
@@ -191,7 +191,7 @@ class TestEnrollSingleCommand:
         args.label = None
         args.json = False
 
-        result = __import__("core.cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
+        result = __import__("venya_cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
 
         assert result == 1
         client.close()
@@ -208,7 +208,7 @@ class TestLoginSingleCommand:
 
     def test_login_success(self):
         """Login calls client.authenticate, token stored, returns 0."""
-        from core.cli.fido2_client import Fido2Auth
+        from venya_cli.fido2_client import Fido2Auth
 
         client, config_file = _make_client()
         args = MagicMock()
@@ -223,7 +223,7 @@ class TestLoginSingleCommand:
                 "credential_id": "cred-123",
             }
 
-            result = __import__("core.cli.commands", fromlist=["cmd_login"]).cmd_login(client, args)
+            result = __import__("venya_cli.commands", fromlist=["cmd_login"]).cmd_login(client, args)
 
         assert result == 0
         assert client.config.access_token == "sess-token-abc"
@@ -234,8 +234,8 @@ class TestLoginSingleCommand:
 
     def test_login_auth_failure_returns_1(self):
         """FIDO2 auth failure → exit 1."""
-        from core.cli.api_client import APIClientAuthenticationError
-        from core.cli.fido2_client import Fido2Auth
+        from venya_cli.api_client import APIClientAuthenticationError
+        from venya_cli.fido2_client import Fido2Auth
 
         client, config_file = _make_client()
         args = MagicMock()
@@ -245,7 +245,7 @@ class TestLoginSingleCommand:
         with patch.object(Fido2Auth, "authenticate") as mock_auth:
             mock_auth.side_effect = APIClientAuthenticationError("key not found")
 
-            result = __import__("core.cli.commands", fromlist=["cmd_login"]).cmd_login(client, args)
+            result = __import__("venya_cli.commands", fromlist=["cmd_login"]).cmd_login(client, args)
 
         assert result == 1
 

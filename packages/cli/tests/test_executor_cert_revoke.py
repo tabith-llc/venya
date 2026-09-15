@@ -89,7 +89,7 @@ class TestExecutorCertRevoke:
         args.executor_id = "jump-1"
         args.cert_path = str(tmp_path / "executor.crt")
 
-        from core.cli.commands import executor_cert_revoke
+        from venya_cli.commands import executor_cert_revoke
 
         result = executor_cert_revoke(args, client=mock_client)
 
@@ -112,7 +112,7 @@ class TestExecutorCertRevoke:
         args.executor_id = None
         args.cert_path = str(cert_path)
 
-        from core.cli.commands import executor_cert_revoke
+        from venya_cli.commands import executor_cert_revoke
 
         result = executor_cert_revoke(args, client=mock_client)
 
@@ -125,7 +125,7 @@ class TestExecutorCertRevoke:
 
     def test_revoke_auth_failure(self, tmp_path, capsys):
         """Authentication failure returns exit 1 with helpful message."""
-        from core.cli.api_client import APIClientAuthenticationError
+        from venya_cli.api_client import APIClientAuthenticationError
 
         mock_client = MagicMock()
         mock_client.post.side_effect = APIClientAuthenticationError("Invalid token")
@@ -134,7 +134,7 @@ class TestExecutorCertRevoke:
         args.executor_id = "jump-1"
         args.cert_path = str(tmp_path / "executor.crt")
 
-        from core.cli.commands import executor_cert_revoke
+        from venya_cli.commands import executor_cert_revoke
 
         result = executor_cert_revoke(args, client=mock_client)
 
@@ -146,7 +146,7 @@ class TestExecutorCertRevoke:
 
     def test_revoke_not_found(self, tmp_path, capsys):
         """Executor not found (404) returns exit 1."""
-        from core.cli.api_client import APIClientError
+        from venya_cli.api_client import APIClientError
 
         mock_client = MagicMock()
         mock_client.post.side_effect = APIClientError("Executor not found: unknown-exec")
@@ -155,7 +155,7 @@ class TestExecutorCertRevoke:
         args.executor_id = "unknown-exec"
         args.cert_path = str(tmp_path / "executor.crt")
 
-        from core.cli.commands import executor_cert_revoke
+        from venya_cli.commands import executor_cert_revoke
 
         result = executor_cert_revoke(args, client=mock_client)
 
@@ -167,7 +167,7 @@ class TestExecutorCertRevoke:
 
     def test_revoke_network_error(self, tmp_path, capsys):
         """Network error returns exit 1."""
-        from core.cli.api_client import APIClientError
+        from venya_cli.api_client import APIClientError
 
         mock_client = MagicMock()
         mock_client.post.side_effect = APIClientError("Connection refused")
@@ -176,7 +176,7 @@ class TestExecutorCertRevoke:
         args.executor_id = "jump-1"
         args.cert_path = str(tmp_path / "executor.crt")
 
-        from core.cli.commands import executor_cert_revoke
+        from venya_cli.commands import executor_cert_revoke
 
         result = executor_cert_revoke(args, client=mock_client)
 
@@ -191,7 +191,7 @@ class TestExecutorCertRevoke:
         args.executor_id = None
         args.cert_path = str(tmp_path / "nonexistent.pem")
 
-        from core.cli.commands import executor_cert_revoke
+        from venya_cli.commands import executor_cert_revoke
 
         result = executor_cert_revoke(args, client=None)
 
@@ -209,12 +209,12 @@ class TestExecutorCertRevoke:
         args.executor_id = None
         args.cert_path = str(cert_path)
 
-        with patch("core.cli.commands.APIClient") as MockAPIClient:
+        with patch("venya_cli.commands.APIClient") as MockAPIClient:
             mock_instance = MagicMock()
             mock_instance.post.return_value = {"revoked": True, "executor_id": "auto-exec"}
             MockAPIClient.return_value = mock_instance
 
-            from core.cli.commands import executor_cert_revoke
+            from venya_cli.commands import executor_cert_revoke
 
             result = executor_cert_revoke(args, client=None)
 
@@ -239,9 +239,9 @@ class TestAdminRevokeExecutorDelegation:
         args = MagicMock()
         args.executor_id = "admin-exec"
 
-        with patch("core.cli.commands.executor_cert_revoke") as mock_revoke:
+        with patch("venya_cli.commands.executor_cert_revoke") as mock_revoke:
             mock_revoke.return_value = 0
-            from core.cli.commands import cmd_admin_revoke_executor
+            from venya_cli.commands import cmd_admin_revoke_executor
 
             result = cmd_admin_revoke_executor(mock_client, args)
 
@@ -260,9 +260,9 @@ class TestAdminRevokeExecutorDelegation:
         args = MagicMock()
         args.executor_id = "bad-exec"
 
-        with patch("core.cli.commands.executor_cert_revoke") as mock_revoke:
+        with patch("venya_cli.commands.executor_cert_revoke") as mock_revoke:
             mock_revoke.return_value = 1
-            from core.cli.commands import cmd_admin_revoke_executor
+            from venya_cli.commands import cmd_admin_revoke_executor
 
             result = cmd_admin_revoke_executor(mock_client, args)
 

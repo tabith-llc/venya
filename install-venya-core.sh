@@ -537,7 +537,7 @@ info "Running database migrations..."
 # DB URL via stdin (here-doc): keeps $VENYA_DB_PASSWORD off every process's /proc/*/cmdline.
 sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" bash -c '
   set -a; read -r VENYA_DB_URL
-  cd "$1" && python -c "from core.cli.commands import _run_migrations; _run_migrations()"
+  cd "$1" && python -c "from core.migrations import _run_migrations; _run_migrations()"
 ' _ "$INSTALL_DIR" <<VENYA_EOT
 postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya
 VENYA_EOT
