@@ -201,6 +201,35 @@ The response carries a 15-minute single-use enrollment token; the user runs
 `VENYA_CA_CERT` is required at startup (fail-closed TLS; the internal CA is
 not in the system trust store).
 
+### opencode
+
+Project-level config (`opencode.json` in your working directory) or global
+(`~/.config/opencode/opencode.json`). Note the different shape — opencode
+does not use the `mcpServers` convention:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "venya": {
+      "type": "local",
+      "command": ["/home/you/.local/bin/venya-mcp"],
+      "enabled": true,
+      "environment": {
+        "VENYA_CONFIG": "/home/you/.config/venya/config.json",
+        "VENYA_CA_CERT": "/home/you/.config/venya-ca.crt"
+      }
+    }
+  }
+}
+```
+
+Restart opencode after config changes (config loads once at startup). The
+tools are model-invoked, not slash commands: ask "list the venya secrets",
+don't type `/list_secrets`. On 401/expired: `venya login <user-id>` (key
+touch) and retry — the MCP server reads the refreshed token from the same
+`VENYA_CONFIG` file.
+
 ## Uninstalling
 
 One uninstaller per artifact, served from the same origin:
