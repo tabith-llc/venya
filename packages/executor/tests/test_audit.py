@@ -206,6 +206,33 @@ class TestForward:
             assert log._forward_once() is False
         assert len(read_spool(spool_dir)) == 1
 
+    def test_forward_verifies_with_ca_cert_path(self, spool_dir: Path, success_mock: MagicMock):
+        """Positive: valid config forwards with verify=<ca_cert_path>."""
+        ca = spool_dir / "ca.crt"
+        ca.write_text("dummy")
+        log = AuditLogger(
+            make_config(spool_dir, remote_url="https://sink.invalid/audit", ca_cert_path=str(ca)),
+            session_id="s1",
+        )
+        self._stop_forwarder(log)
+        log.emit("credential_injected", strategy="memfd")
+        try:
+            with patch("executor.audit.httpx2.Client", return_value=success_mock) as cls:
+                assert log._forward_once() is True
+            assert cls.call_args.kwargs["verify"] == str(ca)
+        finally:
+            log.shutdown()
+
+    def test_bypassed_validator_never_disables_verify(self, spool_dir: Path, success_mock: MagicMock):
+        """Negative guard: direct mutation bypasses pydantic validation —
+        the call site must fall back to True (system trust), never False
+        (regression guard for verify=False fallback)."""
+        log = self._logger_prepped(spool_dir)
+        log.emit("credential_injected", strategy="memfd")
+        with patch("executor.audit.httpx2.Client", return_value=success_mock) as cls:
+            assert log._forward_once() is True
+        assert cls.call_args.kwargs["verify"] is True
+
     def test_forward_noop_without_remote_url(self, spool_dir: Path):
         log = AuditLogger(make_config(spool_dir), session_id="s1")
         log.emit("credential_injected", strategy="memfd")
@@ -295,10 +322,13 @@ class TestForwarderThread:
     def test_background_forward_drains_spool(self, spool_dir: Path, success_mock: MagicMock):
         import time
 
+        ca = spool_dir / "ca.crt"
+        ca.write_text("dummy")
         log = AuditLogger(
             make_config(
                 spool_dir,
-                remote_url="http://127.0.0.1:1/audit",
+                remote_url="https://127.0.0.1:1/audit",
+                ca_cert_path=str(ca),
                 retry_base_delay=0.05,
                 retry_max_delay=0.1,
             ),

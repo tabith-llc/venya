@@ -6,7 +6,7 @@ Environment variables are prefixed with VENYA_EXECUTOR_.
 
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -99,11 +99,11 @@ class AuditForwarderConfig(BaseModel):
 
     remote_url: str | None = Field(
         default=None,
-        description="Remote syslog URL (tls://host:port)",
+        description="Remote audit sink URL (https://host:port)",
     )
     ca_cert_path: str | None = Field(
         default=None,
-        description="Path to CA certificate for TLS verification",
+        description="Path to CA certificate for TLS verification (required when remote_url is set)",
     )
     max_buffer_size: int = Field(
         default=10_000,
@@ -139,6 +139,31 @@ class AuditForwarderConfig(BaseModel):
         default=90,
         description="Local audit log retention days",
     )
+
+    @model_validator(mode="after")
+    def _require_verified_https_remote(self) -> AuditForwarderConfig:
+        """Fail closed at config load (daemon startup): a remote audit sink
+        must be https:// with an existing CA cert path. The audit stream must
+        never degrade to unverified TLS or plaintext (Production Environment
+        Mandate). Same precedent as relay_client_ids and the MCP CA gate."""
+        if not self.remote_url:
+            return self
+        if not self.remote_url.startswith("https://"):
+            raise ValueError(
+                f"audit.remote_url must use the https:// scheme, got {self.remote_url!r} — "
+                "refusing to forward the audit stream unencrypted"
+            )
+        if not self.ca_cert_path:
+            raise ValueError(
+                "audit.remote_url requires audit.ca_cert_path — "
+                "refusing to forward the audit stream over unverified TLS"
+            )
+        if not Path(self.ca_cert_path).expanduser().exists():
+            raise ValueError(
+                f"audit.ca_cert_path does not exist: {self.ca_cert_path} — "
+                "refusing to start with a broken audit forwarder configuration"
+            )
+        return self
 
 
 class NetworkConfig(BaseModel):
