@@ -27,7 +27,10 @@ set -euo pipefail
 #                                    be resolvable from every core (e.g. via /etc/hosts or DNS).
 #   VENYA_SERVER_URL               - Core server URL (required)
 #   VENYA_CORE_HOSTNAME    - Core hostname for /etc/hosts resolution (default: venya-core-1)
-#   VENYA_CORE_IP          - Core IP for /etc/hosts resolution (default: 10.27.28.11)
+#   VENYA_CORE_IP          - Core IP for /etc/hosts resolution (no default —
+#                            required only when the core hostname resolves
+#                            neither via /etc/hosts nor DNS; explicit value
+#                            always wins over an existing hosts entry)
 #   VENYA_VENYA_CA_FILE    - Path to pre-copied Venya CA cert (offline/air-gapped deployments)
 #   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
 ###############################################################################
@@ -211,24 +214,41 @@ chmod 700 /home/venya/.local/share/sandboxes
 # actually used instead of a hardcoded default that can silently diverge
 # (a diverged CN surfaces as relay 403 with nothing in the install output).
 CORE_HOSTNAME="${VENYA_CORE_HOSTNAME:-$(printf '%s' "$SERVER_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#/.*$##; s#:.*$##')}"
-CORE_IP="${VENYA_CORE_IP:-10.27.28.11}"
 
 # Ensure the core hostname is resolvable in /etc/hosts (skip IP hosts: an IP
-# needs no resolution, and writing an IP "name" with CORE_IP would misroute)
+# needs no resolution, and writing an IP "name" would misroute).
+# Resolution precedence (fail-closed — no hardcoded default IP; guessing one
+# silently misroutes TLS to the wrong core, see ticket
+# executor-installer-core-ip-misroute):
+#   1. Explicit VENYA_CORE_IP wins: add/update the /etc/hosts entry to it.
+#   2. No explicit IP + existing /etc/hosts entry: KEEP the provisioned entry
+#      (provisioning owns /etc/hosts; the old code overwrote a correct entry
+#      with a hardcoded default — the 2026-09-15 exec-3 clobber variant).
+#   3. No explicit IP + no entry: accept DNS resolution if it works.
+#   4. Nothing resolves: abort with an actionable error (set VENYA_CORE_IP).
 if [[ "$CORE_HOSTNAME" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
     info "VENYA_SERVER_URL host is an IP — no /etc/hosts entry needed"
 else
-    if ! grep -q " ${CORE_HOSTNAME}$" /etc/hosts 2>/dev/null; then
-        info "Adding ${CORE_HOSTNAME} (${CORE_IP}) to /etc/hosts"
-        echo "${CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
-    else
-        # Verify the IP matches if strictness is desired
-        EXISTING_IP=$(grep " ${CORE_HOSTNAME}$" /etc/hosts | awk '{print $1}')
-        if [ "$EXISTING_IP" != "$CORE_IP" ]; then
-            warn "Found ${CORE_HOSTNAME} in /etc/hosts with IP ${EXISTING_IP}, expected ${CORE_IP}. Updating."
+    EXISTING_IP=$( (grep " ${CORE_HOSTNAME}$" /etc/hosts 2>/dev/null || true) | awk '{print $1}' | head -1)
+    if [ -n "${VENYA_CORE_IP:-}" ]; then
+        if [ -n "$EXISTING_IP" ] && [ "$EXISTING_IP" != "$VENYA_CORE_IP" ]; then
+            warn "Found ${CORE_HOSTNAME} in /etc/hosts with IP ${EXISTING_IP}; explicit VENYA_CORE_IP=${VENYA_CORE_IP} wins. Updating."
             sed -i "/ ${CORE_HOSTNAME}$/d" /etc/hosts
-            echo "${CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+            echo "${VENYA_CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+        elif [ -z "$EXISTING_IP" ]; then
+            info "Adding ${CORE_HOSTNAME} (${VENYA_CORE_IP}) to /etc/hosts"
+            echo "${VENYA_CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+        else
+            info "/etc/hosts entry for ${CORE_HOSTNAME} matches VENYA_CORE_IP (${VENYA_CORE_IP})"
         fi
+    elif [ -n "$EXISTING_IP" ]; then
+        info "Using provisioned /etc/hosts entry: ${CORE_HOSTNAME} -> ${EXISTING_IP} (set VENYA_CORE_IP to override)"
+    elif RESOLVED_IP=$(getent hosts "$CORE_HOSTNAME" 2>/dev/null | awk '{print $1}' | head -1) && [ -n "$RESOLVED_IP" ]; then
+        info "Resolved ${CORE_HOSTNAME} -> ${RESOLVED_IP} via name service (no /etc/hosts entry needed)"
+    else
+        error "Cannot resolve ${CORE_HOSTNAME}: no /etc/hosts entry, no DNS resolution, and VENYA_CORE_IP not set."
+        error "Set VENYA_CORE_IP=<core-ip> (or fix provisioning). Refusing to guess a default IP — a wrong guess silently misroutes mTLS/CA fetches to another host."
+        exit 1
     fi
 fi
 
