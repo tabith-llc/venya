@@ -9,7 +9,7 @@ Licensed Work:        Venya, all packages contained in this repository
                       (core, server, executor, cli, mcp, rust filter
                       extension, installer scripts, and associated
                       documentation).
-                      The Licensed Work is (c) 2026 the Licensor.
+                      The Licensed Work is (c) 2026 Tabith LLC.
 
 Additional Use Grant: You may use, reproduce, modify, and create derivative
                       works of the Licensed Work, provided that (a) Your
@@ -42,8 +42,7 @@ Work, please contact info@tabith.com.
 
 --------------------------------------------------------------------------
 
-License text copyright © 2024 MariaDB plc, All Rights Reserved. “Business
-Source License” is a trademark of MariaDB plc.  Terms
+Terms
 
 The Licensor hereby grants you the right to copy, modify, create derivative
 works, redistribute, and make non-production use of the Licensed Work. The
@@ -53,8 +52,8 @@ production use.
 Effective on the Change Date, or the fourth anniversary of the first
 publicly available distribution of a specific version of the Licensed Work
 under this License, whichever comes first, the Licensor hereby grants you
-rights under the terms of the Change License, and the rights granted in
-the paragraph above terminate.
+rights under the terms of the Change License, and the rights granted in the
+paragraph above terminate.
 
 If your use of the Licensed Work does not comply with the requirements
 currently in effect as described in this License, you must purchase a
@@ -84,7 +83,9 @@ OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND TITLE. MariaDB hereby
 grants you permission to use this License’s text to license your works,
 and to refer to it using the trademark “Business Source License”, as long
-as you comply with the Covenants of Licensor below.  Covenants of Licensor
+as you comply with the Covenants of Licensor below.
+
+Covenants of Licensor
 
 In consideration of the right to use this License’s text and the
 “Business Source License” name and trademark, Licensor covenants to
@@ -96,10 +97,14 @@ or a license that is compatible with GPL Version 2.0 or a later version,
 where “compatible” means that software provided under the Change License
 can be included in a program with software provided under GPL Version 2.0
 or a later version. Licensor may specify additional Change Licenses without
-limitation.  To either: (a) specify an additional grant of rights to use
-that does not impose any additional restriction on the right granted in this
-License, as the Additional Use Grant; or (b) insert the text “None” to
-specify a Change Date. Not to modify this License in any other way.  Notice
+limitation.
+
+To either: (a) specify an additional grant of rights to use that does not
+impose any additional restriction on the right granted in this License, as
+the Additional Use Grant; or (b) insert the text “None” to specify a Change
+Date. Not to modify this License in any other way.
+
+Notice
 
 The Business Source License (this document, or the “License”) is not
 an Open Source license. However, the Licensed Work will eventually be made
@@ -109,4 +114,5 @@ For more information on the use of the Business Source License for
 MariaDB products, please visit the MariaDB Business Source License FAQ
 (https://mariadb.com/bsl-faq-mariadb/). For more information on the use
 of the Business Source License generally, please visit the Adopting and
-Developing Business Source License FAQ (https://mariadb.com/bsl-faq/).
+Developing Business Source License FAQ
+(https://mariadb.com/bsl-faq-adopting/).
