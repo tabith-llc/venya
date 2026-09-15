@@ -43,7 +43,7 @@ from fido2.webauthn import (
 
 from .webauthn import b64_decode_id as _b64_decode_id
 
-logger = logging.getLogger("core.cli.fido2")
+logger = logging.getLogger("venya_cli.fido2")
 
 # Enable detailed FIDO2 debug output with VENYA_FIDO2_DEBUG=1
 FIDO2_DEBUG = os.environ.get("VENYA_FIDO2_DEBUG") == "1"

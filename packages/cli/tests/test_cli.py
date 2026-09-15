@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
-from core.cli.api_client import APIClient, APIClientAuthenticationError, APIClientError, Config
+from venya_cli.api_client import APIClient, APIClientAuthenticationError, APIClientError, Config
 
 # ---------------------------------------------------------------------------
 # Config tests

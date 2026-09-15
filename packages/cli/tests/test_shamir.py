@@ -3,7 +3,7 @@
 import os
 
 import pytest
-from core.shamir import combine, split
+from venya_cli.shamir import combine, split
 
 
 class TestShamirSplitCombine:
@@ -146,7 +146,7 @@ class TestShamirGF256:
 
     def test_gf256_add_is_xor(self):
         """GF(256) addition is XOR."""
-        from core.shamir import _gf256_add
+        from venya_cli.shamir import _gf256_add
 
         assert _gf256_add(0, 0) == 0
         assert _gf256_add(1, 1) == 0
@@ -156,7 +156,7 @@ class TestShamirGF256:
 
     def test_gf256_mul_identity(self):
         """Multiplying by 1 returns the same value."""
-        from core.shamir import _gf256_mul
+        from venya_cli.shamir import _gf256_mul
 
         for i in range(256):
             assert _gf256_mul(i, 1) == i
@@ -164,7 +164,7 @@ class TestShamirGF256:
 
     def test_gf256_mul_zero(self):
         """Multiplying by 0 returns 0."""
-        from core.shamir import _gf256_mul
+        from venya_cli.shamir import _gf256_mul
 
         for i in range(256):
             assert _gf256_mul(i, 0) == 0
@@ -172,7 +172,7 @@ class TestShamirGF256:
 
     def test_gf256_mul_commutative(self):
         """GF(256) multiplication is commutative."""
-        from core.shamir import _gf256_mul
+        from venya_cli.shamir import _gf256_mul
 
         for _ in range(100):
             a = os.urandom(1)[0]
@@ -181,7 +181,7 @@ class TestShamirGF256:
 
     def test_gf256_mul_associative(self):
         """GF(256) multiplication is associative."""
-        from core.shamir import _gf256_mul
+        from venya_cli.shamir import _gf256_mul
 
         for _ in range(100):
             a = os.urandom(1)[0]
@@ -192,7 +192,7 @@ class TestShamirGF256:
 
     def test_gf256_inv(self):
         """Inverse of a * a^(-1) should be 1."""
-        from core.shamir import _gf256_inv, _gf256_mul
+        from venya_cli.shamir import _gf256_inv, _gf256_mul
 
         for i in range(1, 256):
             inv = _gf256_inv(i)
@@ -200,7 +200,7 @@ class TestShamirGF256:
 
     def test_gf256_inv_zero_raises(self):
         """Inverse of zero should raise."""
-        from core.shamir import _gf256_inv
+        from venya_cli.shamir import _gf256_inv
 
         with pytest.raises(ValueError, match="Cannot invert zero"):
             _gf256_inv(0)

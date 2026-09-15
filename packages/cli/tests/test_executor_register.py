@@ -17,11 +17,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from core.cli.api_client import APIClient, APIClientError
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+from venya_cli.api_client import APIClient, APIClientError
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -107,7 +107,7 @@ class TestCLIParsing:
 
     def test_run_command_exists(self):
         """The 'run' command is available as a top-level command."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["run", "ls", "-la"])
@@ -116,7 +116,7 @@ class TestCLIParsing:
 
     def test_run_command_with_secrets(self):
         """The 'run' command accepts --secret flags."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(
@@ -135,7 +135,7 @@ class TestCLIParsing:
 
     def test_run_command_with_executor_id(self):
         """The 'run' command accepts --executor-id."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(
@@ -150,7 +150,7 @@ class TestCLIParsing:
 
     def test_exec_command_exists(self):
         """The 'exec' command group is available."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec", "register"])
@@ -159,7 +159,7 @@ class TestCLIParsing:
 
     def test_exec_register_defaults(self):
         """exec register has correct default values."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec", "register"])
@@ -170,7 +170,7 @@ class TestCLIParsing:
 
     def test_exec_register_custom_params(self):
         """exec register accepts custom --executor-id, --core-url, --output-dir."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(
@@ -191,7 +191,7 @@ class TestCLIParsing:
 
     def test_exec_cert_status(self):
         """exec cert status is available."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec", "cert", "status"])
@@ -201,7 +201,7 @@ class TestCLIParsing:
 
     def test_exec_cert_status_custom_path(self):
         """exec cert status accepts --cert-path."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(
@@ -217,7 +217,7 @@ class TestCLIParsing:
 
     def test_exec_cert_renew(self):
         """exec cert renew is available."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec", "cert", "renew"])
@@ -226,7 +226,7 @@ class TestCLIParsing:
 
     def test_exec_cert_revoke(self):
         """exec cert revoke is available."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec", "cert", "revoke"])
@@ -235,7 +235,7 @@ class TestCLIParsing:
 
     def test_exec_heartbeat(self):
         """exec heartbeat is available."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec", "heartbeat"])
@@ -243,7 +243,7 @@ class TestCLIParsing:
 
     def test_exec_audit(self):
         """exec audit is available."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec", "audit"])
@@ -251,7 +251,7 @@ class TestCLIParsing:
 
     def test_exec_status(self):
         """exec status is available."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec", "status"])
@@ -259,7 +259,7 @@ class TestCLIParsing:
 
     def test_exec_without_subcommand(self):
         """exec without subcommand prints error."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec"])
@@ -268,7 +268,7 @@ class TestCLIParsing:
 
     def test_no_command_returns_nonzero(self):
         """No command returns exit code 1."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args([])
@@ -352,7 +352,7 @@ class TestExecutorRegister:
 
     def test_register_success(self, tmp_path):
         """Successful registration saves cert and key files."""
-        from core.cli.commands import executor_register
+        from venya_cli.commands import executor_register
 
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "venya-exec", validity_days=30)
@@ -382,7 +382,7 @@ class TestExecutorRegister:
             },
         )
 
-        with patch("core.cli.api_client.httpx2.Client") as MockClient:
+        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
@@ -404,7 +404,7 @@ class TestExecutorRegister:
 
     def test_register_no_core_url(self, tmp_path):
         """Registration fails without core URL when config has no URL."""
-        from core.cli.commands import executor_register
+        from venya_cli.commands import executor_register
 
         config_file = Path(tempfile.mktemp(suffix=".json"))
         config_file.write_text("{}")
@@ -424,7 +424,7 @@ class TestExecutorRegister:
 
     def test_register_api_failure(self, tmp_path):
         """Registration fails gracefully when API returns error."""
-        from core.cli.commands import executor_register
+        from venya_cli.commands import executor_register
 
         config_file = Path(tempfile.mktemp(suffix=".json"))
         config_file.write_text('{"server_url": "https://core.example.com"}')
@@ -445,7 +445,7 @@ class TestExecutorRegister:
 
     def test_register_no_cert_in_response(self, tmp_path):
         """Registration fails when API returns no certificate."""
-        from core.cli.commands import executor_register
+        from venya_cli.commands import executor_register
 
         config_file = Path(tempfile.mktemp(suffix=".json"))
         config_file.write_text('{"server_url": "https://core.example.com"}')
@@ -473,7 +473,7 @@ class TestExecutorRegister:
 
     def test_register_creates_output_dir(self, tmp_path):
         """Registration creates output directory if it doesn't exist."""
-        from core.cli.commands import executor_register
+        from venya_cli.commands import executor_register
 
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "venya-exec", validity_days=30)
@@ -500,7 +500,7 @@ class TestExecutorRegister:
             },
         )
 
-        with patch("core.cli.api_client.httpx2.Client") as MockClient:
+        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
@@ -514,7 +514,7 @@ class TestExecutorRegister:
 
     def test_register_uses_config_server_url(self, tmp_path):
         """Registration uses server_url from config when --core-url is not provided."""
-        from core.cli.commands import executor_register
+        from venya_cli.commands import executor_register
 
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "venya-exec", validity_days=30)
@@ -542,7 +542,7 @@ class TestExecutorRegister:
             },
         )
 
-        with patch("core.cli.api_client.httpx2.Client") as MockClient:
+        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
@@ -566,7 +566,7 @@ class TestExecutorCertStatus:
 
     def test_cert_status_ok(self, tmp_path):
         """Cert status returns 0 when cert has >7 days remaining."""
-        from core.cli.commands import executor_cert_status
+        from venya_cli.commands import executor_cert_status
 
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "status-test", validity_days=30)
@@ -581,7 +581,7 @@ class TestExecutorCertStatus:
 
     def test_cert_status_expired(self, tmp_path):
         """Cert status returns 1 when cert is expired."""
-        from core.cli.commands import executor_cert_status
+        from venya_cli.commands import executor_cert_status
 
         private_key = _generate_test_keypair()
         # Create a cert that expired 5 days ago
@@ -613,7 +613,7 @@ class TestExecutorCertStatus:
 
     def test_cert_status_expiring_soon(self, tmp_path):
         """Cert status returns 0 when cert expires in <7 days (warning, still valid)."""
-        from core.cli.commands import executor_cert_status
+        from venya_cli.commands import executor_cert_status
 
         private_key = _generate_test_keypair()
         cert = _generate_test_cert(private_key, "expiring-test", validity_days=3)
@@ -628,7 +628,7 @@ class TestExecutorCertStatus:
 
     def test_cert_status_missing_file(self, tmp_path):
         """Cert status returns 1 when cert file doesn't exist."""
-        from core.cli.commands import executor_cert_status
+        from venya_cli.commands import executor_cert_status
 
         args = MagicMock()
         args.cert_path = str(tmp_path / "nonexistent.pem")
@@ -638,7 +638,7 @@ class TestExecutorCertStatus:
 
     def test_cert_status_reads_cn(self, tmp_path, capsys):
         """Cert status prints the CN from the certificate."""
-        from core.cli.commands import executor_cert_status
+        from venya_cli.commands import executor_cert_status
 
         private_key = _generate_test_keypair()
         cn_value = "my-special-executor"
@@ -668,13 +668,13 @@ class TestPlaceholderSubcommands:
         """cert renew dispatches to executor_cert_renew."""
         from unittest.mock import patch
 
-        from core.cli.commands import executor_cert
+        from venya_cli.commands import executor_cert
 
         client, _config_file = _make_mock_client()
         try:
             args = MagicMock()
             args.cert_command = "renew"
-            with patch("core.cli.commands.executor_cert_renew", return_value=0) as mock_renew:
+            with patch("venya_cli.commands.executor_cert_renew", return_value=0) as mock_renew:
                 result = executor_cert(client, args)
                 assert result == 0
                 mock_renew.assert_called_once()
@@ -683,7 +683,7 @@ class TestPlaceholderSubcommands:
 
     def test_cert_revoke_placeholder(self):
         """cert revoke is implemented — see test_executor_cert_revoke.py."""
-        from core.cli.commands import executor_cert
+        from venya_cli.commands import executor_cert
 
         client, _config_file = _make_mock_client()
         try:
@@ -700,7 +700,7 @@ class TestPlaceholderSubcommands:
 
     def test_audit_placeholder(self):
         """audit prints 'Not yet implemented'."""
-        from core.cli.commands import executor_audit
+        from venya_cli.commands import executor_audit
 
         client, _config_file = _make_mock_client()
         try:
@@ -712,14 +712,14 @@ class TestPlaceholderSubcommands:
 
     def test_status_placeholder(self, tmp_path):
         """status returns 1 when not registered (no cert file)."""
-        from core.cli.commands import executor_status
+        from venya_cli.commands import executor_status
 
         args = MagicMock()
         args.cert_path = str(tmp_path / "nonexistent.pem")
         args.core_url = None
         args.config_path = None
 
-        with patch("core.cli.api_client.Config") as MockConfig:
+        with patch("venya_cli.api_client.Config") as MockConfig:
             mock_config = MagicMock()
             mock_config.server_url = "http://localhost:8000"
             MockConfig.return_value = mock_config
@@ -729,7 +729,7 @@ class TestPlaceholderSubcommands:
 
     def test_exec_group_no_subcommand(self):
         """exec without subcommand returns 1."""
-        from core.cli.commands import cmd_exec_group
+        from venya_cli.commands import cmd_exec_group
 
         client, _config_file = _make_mock_client()
         try:
@@ -742,7 +742,7 @@ class TestPlaceholderSubcommands:
 
     def test_exec_group_unknown_subcommand(self):
         """exec with unknown subcommand returns 1."""
-        from core.cli.commands import cmd_exec_group
+        from venya_cli.commands import cmd_exec_group
 
         client, _config_file = _make_mock_client()
         try:
@@ -755,7 +755,7 @@ class TestPlaceholderSubcommands:
 
     def test_exec_cert_no_subcommand(self):
         """exec cert without subcommand returns 1."""
-        from core.cli.commands import executor_cert
+        from venya_cli.commands import executor_cert
 
         client, _config_file = _make_mock_client()
         try:

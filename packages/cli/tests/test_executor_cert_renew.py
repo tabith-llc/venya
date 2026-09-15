@@ -142,8 +142,8 @@ class TestRenewSuccess:
 
         mock_client = _make_mock_httpx_client()
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_cert_renew
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_cert_renew
 
             result = executor_cert_renew(args)
 
@@ -194,8 +194,8 @@ class TestRenewSuccess:
 
         mock_client = _make_mock_httpx_client()
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_cert_renew
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_cert_renew
 
             result = executor_cert_renew(args)
 
@@ -223,7 +223,7 @@ class TestRenewErrors:
         args.cert_path = str(nonexistent)
         args.key_path = None
 
-        from core.cli.commands import executor_cert_renew
+        from venya_cli.commands import executor_cert_renew
 
         result = executor_cert_renew(args)
 
@@ -246,7 +246,7 @@ class TestRenewErrors:
         args.key_path = str(cert_path.with_suffix(".key"))
         args.core_url = "https://venya-core"
 
-        from core.cli.commands import executor_cert_renew
+        from venya_cli.commands import executor_cert_renew
 
         result = executor_cert_renew(args)
 
@@ -268,8 +268,8 @@ class TestRenewErrors:
             post_response=mock_resp,
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_cert_renew
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_cert_renew
 
             result = executor_cert_renew(args)
 
@@ -291,8 +291,8 @@ class TestRenewErrors:
             post_response=mock_resp,
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_cert_renew
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_cert_renew
 
             result = executor_cert_renew(args)
 
@@ -317,8 +317,8 @@ class TestRenewErrors:
             post_response=mock_resp,
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_cert_renew
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_cert_renew
 
             result = executor_cert_renew(args)
 
@@ -341,8 +341,8 @@ class TestRenewErrors:
             post_error=httpx2.ConnectError("Connection refused"),
         )
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_cert_renew
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_cert_renew
 
             result = executor_cert_renew(args)
 
@@ -361,7 +361,7 @@ class TestRenewErrors:
         args.cert_path = str(cert_path)
         args.key_path = str(key_path)
 
-        from core.cli.commands import executor_cert_renew
+        from venya_cli.commands import executor_cert_renew
 
         result = executor_cert_renew(args)
 
@@ -400,9 +400,9 @@ class TestRenewAtomicWrite:
                 raise OSError("Disk full")
             return original_write_bytes(self, data)
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
             with patch.object(Path, "write_bytes", failing_write_bytes):
-                from core.cli.commands import executor_cert_renew
+                from venya_cli.commands import executor_cert_renew
 
                 result = executor_cert_renew(args)
 
@@ -427,8 +427,8 @@ class TestRenewAtomicWrite:
 
         mock_client = _make_mock_httpx_client()
 
-        with patch("core.cli.commands.httpx2.Client", return_value=mock_client):
-            from core.cli.commands import executor_cert_renew
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_cert_renew
 
             result = executor_cert_renew(args)
 

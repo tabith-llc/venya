@@ -69,6 +69,27 @@ curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
 | `VENYA_SERVER_URL` | `https://venya-core` | Core server URL |
 | `VENYA_EXECUTOR_ENROLLMENT_TOKEN` | (empty) | Bootstrap enrollment token — enables mTLS cert registration and heartbeat bootstrap at install time |
 
+### `install-venya-cli.sh`
+
+Installs the Venya workstation CLI (`venya`) for the current operator user. **No sudo** — refuses to run as root. Includes:
+
+- **uv** (if missing, into `~/.local/bin`)
+- `venya-cli` via `uv tool install` (isolated venv, `venya` shim in `~/.local/bin`)
+- FIDO2 `/dev/hidraw*` access check with actionable udev/plugdev instructions
+
+**Usage (on the operator workstation):**
+```bash
+curl -fsSL http://10.27.27.35:8080/install-venya-cli.sh | VENYA_TARBALL_SHA256=<cli-sha256> bash
+```
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompt |
+| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-cli-install.tar.gz` | Tarball URL (minimal: `packages/cli` only) |
+| `VENYA_TARBALL_SHA256` | (required) | SHA-256 of the CLI tarball; aborts without it |
+
 ### `install-debug-tools.sh`
 
 Installs development/debugging packages not needed for runtime. Only needed for troubleshooting.
@@ -80,6 +101,26 @@ Installs development/debugging packages not needed for runtime. Only needed for 
 curl -fsSL http://10.27.27.35:8080/install-debug-tools.sh | sudo bash
 ```
 
+### Uninstallers
+
+Each artifact has a matching uninstaller (served from the same origin):
+
+| Script | Runs as | Removes | Keeps |
+|---|---|---|---|
+| `uninstall-venya-core.sh` | root (on core VM) | service+unit, nginx site, /opt/venya, /etc/venya, /var/lib/venya (CA keys), well-known CA, trust entries, PostgreSQL db+role, venya user | nginx/postgresql OS packages |
+| `uninstall-venya-executor.sh` | root (on executor VM) | service+mount+seccomp units, /opt/venya, /etc/venya (mTLS key), /var/lib/venya, trust entries, venya user (Rust/uv/sbx state) | sbx/docker packages, /etc/hosts (provisioning-owned); revoke the cert on the core separately |
+| `uninstall-venya-cli.sh` | operator user (no sudo) | uv tool `venya-cli` + shim; optionally `~/.config/venya` (`VENYA_PURGE_CONFIG=yes`) | uv itself |
+
+**Usage:**
+```bash
+# Core VM / Executor VM
+curl -fsSL http://10.27.27.35:8080/uninstall-venya-core.sh | sudo VENYA_SKIP_PROMPT=yes bash
+curl -fsSL http://10.27.27.35:8080/uninstall-venya-executor.sh | sudo VENYA_SKIP_PROMPT=yes bash
+
+# Operator workstation (no sudo)
+curl -fsSL http://10.27.27.35:8080/uninstall-venya-cli.sh | VENYA_SKIP_PROMPT=yes VENYA_PURGE_CONFIG=yes bash
+```
+
 ## Deployment
 
 ### Build and serve
@@ -89,7 +130,7 @@ cd /media/dust/dust-ext1/projects/venya-installer
 ./create-tarball-and-serve.sh
 ```
 
-This creates two tarballs (`venya-core-install.tar.gz` and `venya-executor-install.tar.gz`), copies the install scripts **and the shared `venya-common.sh` library** to the serving directory, and starts an HTTP server on port 8080.
+This creates three tarballs (`venya-core-install.tar.gz`, `venya-executor-install.tar.gz`, and the minimal `venya-cli-install.tar.gz` — `packages/cli` only), copies the install scripts **and the shared `venya-common.sh` library** to the serving directory, and starts an HTTP server on port 8080.
 
 The piped install one-liners below work because the install scripts self-fetch `venya-common.sh` from the same origin as `VENYA_TARBALL` when it is not next to the script (no-`$0` case, i.e. `curl | sudo bash`).
 
@@ -101,6 +142,9 @@ curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo bash
 
 # Executor VM
 curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
+
+# Operator workstation (no sudo)
+curl -fsSL http://10.27.27.35:8080/install-venya-cli.sh | VENYA_TARBALL_SHA256=<cli-sha256> bash
 
 # Stop the server
 pkill -f 'python3 -m http.server 8080'

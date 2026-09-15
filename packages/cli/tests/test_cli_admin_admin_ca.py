@@ -9,14 +9,14 @@ import os
 from pathlib import Path
 
 import pytest
-from core.cli.commands import (
-    cmd_admin_generate_admin_cert,
-    cmd_admin_init_admin_ca,
-)
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID, NameOID
+from venya_cli.commands import (
+    cmd_admin_generate_admin_cert,
+    cmd_admin_init_admin_ca,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures

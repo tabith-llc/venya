@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx2
 
-logger = logging.getLogger("core.cli.api_client")
+logger = logging.getLogger("venya_cli.api_client")
 
 # Default config file location
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "venya"
@@ -424,7 +424,7 @@ class APIClient:
             APIClientError: On network failure or registration error.
         """
         # Validate executor_id format before sending to server
-        from core.utils.executor_id import validate_executor_id
+        from .executor_id import validate_executor_id
 
         try:
             executor_id = validate_executor_id(executor_id)
