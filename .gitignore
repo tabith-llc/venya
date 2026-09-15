@@ -51,3 +51,6 @@ DEVELOPER_NOTE.md
 
 # mypy
 .mypy_cache/
+
+# Rust build artifacts
+target/
