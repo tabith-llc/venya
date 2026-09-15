@@ -197,7 +197,7 @@ Production deployment guide: **[Installation Guide](docs/installation.md)**
 
 Venya is licensed under the Business Source License (BSL) 1.1 — source-available, not OSI open source. You may use, modify, and create derivative works (including for production), provided your organization's total consolidated revenue is below **US $10 million** per year and you do not offer Venya to third parties on a hosted or embedded basis in order to compete with Tabith LLC's commercial offerings. At or above the revenue threshold — or for competing hosted/embedded offerings — a commercial license is required: **info@tabith.com**.
 
-Each version converts to **MPL 2.0** on its Change Date (2031-01-01) or the fourth anniversary of that version's first public distribution, whichever comes first — older versions become open source over time.
+Each version converts to **MPL 2.0** four years after that version's first public distribution (the Change Date is defined per version) — older versions become open source over time.
 
 This is the same licensing model used by HashiCorp (Vault, Terraform).
 
@@ -246,7 +246,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 
 ## License
 
-Venya is licensed under the Business Source License (BSL) 1.1, Copyright © 2026 Tabith LLC. Free to use, modify, and build on (including in production) below the **US $10M** total-revenue threshold and for non-competing use; a commercial license is required above it or for competing hosted/embedded offerings. Each version converts to **MPL 2.0** at its Change Date (2031-01-01) or fourth anniversary of first public distribution, whichever comes first.
+Venya is licensed under the Business Source License (BSL) 1.1, Copyright © 2026 Tabith LLC. Free to use, modify, and build on (including in production) below the **US $10M** total-revenue threshold and for non-competing use; a commercial license is required above it or for competing hosted/embedded offerings. Each version converts to **MPL 2.0** four years after its first public distribution.
 
 See [LICENSE](LICENSE) for the full terms. Contributions are accepted under the same license — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
