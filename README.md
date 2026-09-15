@@ -1,5 +1,7 @@
 # Venya
 
+> **AI agents:** if you are an LLM agent that retrieved this README, start at **[docs/agents.md](docs/agents.md)** — how to wire up, operate safely, and what never to attempt. Humans: that file is the brief your agent should be handed.
+
 ### AI agents manage infrastructure securely.
 
 Venya is the first platform that lets AI agents execute commands on remote infrastructure using stored credentials **without ever seeing those credentials**. The LLM discovers what secrets exist, constructs the command, and the executor injects the credential into a sandboxed environment. Output is filtered. Every action is audited. A human authorized the session with a physical security key.
@@ -238,6 +240,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [FAQ](docs/faq.md) | Frequently asked questions |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy + safe harbor |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (incl. license terms for contributions) |
+| [Agent Instructions](docs/agents.md) | Brief for LLM agents operating Venya via MCP |
 
 ---
 
