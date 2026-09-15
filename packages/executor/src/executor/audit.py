@@ -215,7 +215,10 @@ class AuditLogger:
             payload = "".join(lines)
             compressed = zstd.compress(payload.encode(), level=3)
             client = httpx2.Client(
-                verify=self._config.ca_cert_path if self._config.ca_cert_path else False,
+                # Fail closed: config validation guarantees ca_cert_path when
+                # remote_url is set; if validation is bypassed (direct
+                # mutation), fall back to the system trust store — never False.
+                verify=self._config.ca_cert_path if self._config.ca_cert_path else True,
                 timeout=self._config.request_timeout_seconds,
             )
             with client:

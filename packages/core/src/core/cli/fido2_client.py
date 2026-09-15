@@ -150,9 +150,24 @@ class Fido2Auth:
                 resp.raise_for_status()
                 return resp.json() if resp.content else {}
         except httpx2.HTTPStatusError as e:
-            # Never attempt to parse the response body on HTTP errors.
-            # It may contain base64 that causes "Incorrect padding".
-            raise Fido2ClientError(str(e))
+            # Carry the server's JSON `detail` so callers can pattern-match
+            # actionable messages (cmd_init 409 handling; wording contract:
+            # server routes/init.py "already initialized" / "pending
+            # enrollment"). f71d4c5 removed this parsing on a wrong
+            # hypothesis: "Incorrect padding" originated in _b64std_encode,
+            # and json.loads cannot raise it. Guarded — any parse failure
+            # falls back to the httpx status text.
+            error_msg = str(e)
+            try:
+                error_data = e.response.json()
+                detail = error_data.get("detail") if isinstance(error_data, dict) else None
+                if isinstance(detail, str):
+                    error_msg = detail
+                elif detail is not None:
+                    error_msg = f"{error_msg} (detail: {detail})"
+            except Exception:  # noqa: S110  # nosec B110 — deliberate: parse failure keeps raw status text
+                pass
+            raise Fido2ClientError(error_msg)
         except httpx2.ConnectError as e:
             raise Fido2ClientError(f"Connection failed: {e}")
 

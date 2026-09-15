@@ -182,8 +182,7 @@ class CertificateManager:
             err_str = str(e).lower()
             if any(t in err_str for t in ("ssl", "certificate", "tls", "verif")):
                 raise RuntimeError(
-                    f"Registration failed: TLS verification error — {e}. "
-                    "Verify server CA is trusted. In development, export VENYA_TLS_VERIFY=false."
+                    f"Registration failed: TLS verification error — {e}. " "Verify server CA is trusted."
                 ) from e
             raise RuntimeError(
                 f"Registration failed: cannot reach server — {e}. "
