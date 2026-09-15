@@ -1,13 +1,13 @@
-"""Tests for CLI enroll start and complete commands."""
+"""Tests for CLI enroll single-command and login commands."""
 
 import json
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx2
 from core.cli.api_client import APIClient
-from core.cli.commands import cmd_enroll_complete, cmd_enroll_start
+from core.cli.fido2_client import Fido2ClientError
 
 
 def _make_mock_response(status_code=200, json_data=None):
@@ -36,18 +36,19 @@ def _make_client(mock_http=None):
 
 
 # ---------------------------------------------------------------------------
-# cmd_enroll_start tests
+# cmd_enroll single-command tests
 # ---------------------------------------------------------------------------
 
 
-class TestEnrollStart:
-    """Tests for venya enroll start command."""
+class TestEnrollSingleCommand:
+    """Tests for venya enroll <token> single-command."""
 
-    def test_enroll_start_success(self):
-        """Enroll start succeeds and prints challenge_id."""
+    def test_enroll_success(self):
+        """Enroll drives start→FIDO2→complete, stores session_token."""
         client, config_file = _make_client()
         mock_http = MagicMock()
-        mock_response = _make_mock_response(
+
+        start_resp = _make_mock_response(
             status_code=200,
             json_data={
                 "challenge_id": "enroll_chal_123",
@@ -60,32 +61,63 @@ class TestEnrollStart:
                 },
             },
         )
-        mock_response.raise_for_status.return_value = None
-        mock_http.request.return_value = mock_response
+        start_resp.raise_for_status.return_value = None
+
+        complete_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "status": "ok",
+                "user_id": "jsmith",
+                "session_token": "sess-token-xyz",
+            },
+        )
+        complete_resp.raise_for_status.return_value = None
+
+        mock_http.request.side_effect = [start_resp, complete_resp]
         client._http = mock_http
 
         args = MagicMock()
         args.token = "tok_enroll_abc"
+        args.label = "YubiKey"
         args.json = False
+        client.config.server_url = "https://venya-core-1"
 
-        result = cmd_enroll_start(client, args)
+        with patch("core.cli.fido2_client.Fido2Auth") as mock_fido2_cls:
+            mock_fido2 = MagicMock()
+            mock_fido2_cls.return_value = mock_fido2
+            mock_fido2._build_registration_options.return_value = "REQ_OPTIONS"
+            mock_fido2._get_credential.return_value = "CRED"
+            mock_fido2._format_credential_response.return_value = {
+                "id": "dGVzdA==",
+                "rawId": "dGVzdA==",
+                "response": {"clientDataJSON": "Y2xpZW50IGRhdGE=", "attestationObject": "YXR0ZXN0YXRpb24="},
+                "type": "public-key",
+            }
+
+            result = __import__("core.cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
+
         assert result == 0
+        assert client.config.access_token == "sess-token-xyz"
 
-        call_args = mock_http.request.call_args
-        assert call_args[0][0] == "POST"
-        assert call_args[0][1] == "/api/v1/enroll/browser/start"
-        assert call_args[1]["json"] == {"enrollment_token": "tok_enroll_abc"}
+        # Verify two POSTs hit correct endpoints
+        calls = mock_http.request.call_args_list
+        assert calls[0][0][0] == "POST"
+        assert "/api/v1/enroll/browser/start" in calls[0][0][1]
+        assert calls[1][0][0] == "POST"
+        assert "/api/v1/enroll/browser/complete" in calls[1][0][1]
+
         client.close()
         config_file.unlink()
 
-    def test_enroll_start_json_output(self):
-        """Enroll start with --json outputs raw JSON."""
+    def test_enroll_no_session_token_returns_1(self):
+        """Server returns no session_token → exit 1, token not stored."""
         client, config_file = _make_client()
         mock_http = MagicMock()
-        mock_response = _make_mock_response(
+
+        start_resp = _make_mock_response(
             status_code=200,
             json_data={
-                "challenge_id": "enroll_chal_456",
+                "challenge_id": "enroll_chal_123",
                 "options": {
                     "challenge": "dGVzdC1jaGFsbGVuZ2U=",
                     "rp": {"name": "Venya"},
@@ -95,100 +127,60 @@ class TestEnrollStart:
                 },
             },
         )
-        mock_response.raise_for_status.return_value = None
-        mock_http.request.return_value = mock_response
+        start_resp.raise_for_status.return_value = None
+
+        complete_resp = _make_mock_response(
+            status_code=200,
+            json_data={"status": "ok", "user_id": "jsmith"},
+        )
+        complete_resp.raise_for_status.return_value = None
+
+        mock_http.request.side_effect = [start_resp, complete_resp]
         client._http = mock_http
 
         args = MagicMock()
-        args.token = "tok_enroll_xyz"
-        args.json = True
+        args.token = "tok_enroll"
+        args.label = None
+        args.json = False
+        client.config.server_url = "https://venya-core-1"
 
-        import io
-        from contextlib import redirect_stdout
+        with patch("core.cli.fido2_client.Fido2Auth") as mock_fido2_cls:
+            mock_fido2 = MagicMock()
+            mock_fido2_cls.return_value = mock_fido2
+            mock_fido2._build_registration_options.return_value = "REQ_OPTIONS"
+            mock_fido2._get_credential.return_value = "CRED"
+            mock_fido2._format_credential_response.return_value = {"id": "dGVzdA==", "response": {}}
 
-        f = io.StringIO()
-        with redirect_stdout(f):
-            result = cmd_enroll_start(client, args)
+            result = __import__("core.cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
 
-        assert result == 0
-        output = f.getvalue()
-        parsed = json.loads(output.strip())
-        assert parsed["challenge_id"] == "enroll_chal_456"
-        assert "options" in parsed
+        assert result == 1
+        assert client.config.access_token is None
+
         client.close()
         config_file.unlink()
 
-    def test_enroll_start_400_invalid_token(self):
-        """Enroll start with invalid token returns 400."""
+    def test_enroll_fido2_error_returns_1(self):
+        """FIDO2 key error → exit 1."""
         client, config_file = _make_client()
-        mock_http = MagicMock()
-        mock_response = _make_mock_response(
-            status_code=400,
-            json_data={"detail": "Enrollment token is invalid"},
-        )
-        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
-            "bad request", request=MagicMock(), response=mock_response
-        )
-        mock_http.request.return_value = mock_response
-        client._http = mock_http
-
         args = MagicMock()
-        args.token = "invalid_token"
+        args.token = "tok_enroll"
+        args.label = None
         args.json = False
+        client.config.server_url = "https://venya-core-1"
 
-        result = cmd_enroll_start(client, args)
+        with patch("core.cli.fido2_client.Fido2Auth") as mock_fido2_cls:
+            mock_fido2 = MagicMock()
+            mock_fido2_cls.return_value = mock_fido2
+            mock_fido2._build_registration_options.side_effect = Fido2ClientError("key error")
+
+            result = __import__("core.cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
+
         assert result == 1
         client.close()
         config_file.unlink()
 
-    def test_enroll_start_400_token_expired(self):
-        """Enroll start with expired token returns 400."""
-        client, config_file = _make_client()
-        mock_http = MagicMock()
-        mock_response = _make_mock_response(
-            status_code=400,
-            json_data={"detail": "Enrollment token has expired"},
-        )
-        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
-            "bad request", request=MagicMock(), response=mock_response
-        )
-        mock_http.request.return_value = mock_response
-        client._http = mock_http
-
-        args = MagicMock()
-        args.token = "expired_token"
-        args.json = False
-
-        result = cmd_enroll_start(client, args)
-        assert result == 1
-        client.close()
-        config_file.unlink()
-
-    def test_enroll_start_400_token_consumed(self):
-        """Enroll start with consumed token returns 400."""
-        client, config_file = _make_client()
-        mock_http = MagicMock()
-        mock_response = _make_mock_response(
-            status_code=400,
-            json_data={"detail": "Enrollment token already consumed"},
-        )
-        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
-            "bad request", request=MagicMock(), response=mock_response
-        )
-        mock_http.request.return_value = mock_response
-        client._http = mock_http
-
-        args = MagicMock()
-        args.token = "consumed_token"
-        args.json = False
-
-        result = cmd_enroll_start(client, args)
-        assert result == 1
-        client.close()
-        config_file.unlink()
-
-    def test_enroll_start_network_error(self):
-        """Enroll start with network error returns 1."""
+    def test_enroll_network_error_returns_1(self):
+        """Network error on start → exit 1."""
         client, config_file = _make_client()
         mock_http = MagicMock()
         mock_http.request.side_effect = httpx2.ConnectError("Connection refused")
@@ -196,249 +188,66 @@ class TestEnrollStart:
 
         args = MagicMock()
         args.token = "tok_enroll"
+        args.label = None
         args.json = False
 
-        result = cmd_enroll_start(client, args)
+        result = __import__("core.cli.commands", fromlist=["cmd_enroll"]).cmd_enroll(client, args)
+
         assert result == 1
         client.close()
         config_file.unlink()
 
 
 # ---------------------------------------------------------------------------
-# cmd_enroll_complete tests
+# cmd_login tests
 # ---------------------------------------------------------------------------
 
 
-class TestEnrollComplete:
-    """Tests for venya enroll complete command."""
+class TestLoginSingleCommand:
+    """Tests for venya login <user_id> single-command."""
 
-    def test_enroll_complete_success(self):
-        """Enroll complete succeeds and prints status, user_id, credential_id."""
+    def test_login_success(self):
+        """Login calls client.authenticate, token stored, returns 0."""
+        from core.cli.fido2_client import Fido2Auth
+
         client, config_file = _make_client()
-        mock_http = MagicMock()
-        mock_response = _make_mock_response(
-            status_code=200,
-            json_data={
-                "status": "ok",
-                "user_id": "jsmith",
-                "credential_id": "cred_enrolled_789",
-            },
-        )
-        mock_response.raise_for_status.return_value = None
-        mock_http.request.return_value = mock_response
-        client._http = mock_http
-
         args = MagicMock()
-        args.token = "tok_enroll_abc"
-        args.challenge_id = "enroll_chal_123"
-        args.response = json.dumps(
-            {
-                "id": "cred_id",
-                "rawId": "cmVkX2lk",
-                "response": {
-                    "clientDataJSON": "Y2xpZW50IGRhdGE=",
-                    "authenticatorData": "YXV0aCBkYXRh",
-                    "attestationObject": "YXR0ZXN0YXRpb24=",
-                },
-                "type": "public-key",
-                "clientExtensionResults": {},
-            }
-        )
-        args.label = "YubiKey"
+        args.user_id = "jsmith"
         args.json = False
+        client.config.server_url = "https://venya-core-1"
 
-        result = cmd_enroll_complete(client, args)
-        assert result == 0
-
-        call_args = mock_http.request.call_args
-        assert call_args[0][0] == "POST"
-        assert call_args[0][1] == "/api/v1/enroll/browser/complete"
-        payload = call_args[1]["json"]
-        assert payload["enrollment_token"] == "tok_enroll_abc"
-        assert payload["challenge_id"] == "enroll_chal_123"
-        assert payload["label"] == "YubiKey"
-        client.close()
-        config_file.unlink()
-
-    def test_enroll_complete_json_output(self):
-        """Enroll complete with --json outputs raw JSON."""
-        client, config_file = _make_client()
-        mock_http = MagicMock()
-        mock_response = _make_mock_response(
-            status_code=200,
-            json_data={
-                "status": "ok",
+        with patch.object(Fido2Auth, "authenticate") as mock_auth:
+            mock_auth.return_value = {
                 "user_id": "jsmith",
-                "credential_id": "cred_enrolled_789",
-            },
-        )
-        mock_response.raise_for_status.return_value = None
-        mock_http.request.return_value = mock_response
-        client._http = mock_http
-
-        args = MagicMock()
-        args.token = "tok_enroll_abc"
-        args.challenge_id = "enroll_chal_123"
-        args.response = json.dumps(
-            {
-                "id": "cred_id",
-                "rawId": "cmVkX2lk",
-                "response": {
-                    "clientDataJSON": "Y2xpZW50IGRhdGE=",
-                    "authenticatorData": "YXV0aCBkYXRh",
-                    "attestationObject": "YXR0ZXN0YXRpb24=",
-                },
-                "type": "public-key",
-                "clientExtensionResults": {},
+                "session_token": "sess-token-abc",
+                "credential_id": "cred-123",
             }
-        )
-        args.label = None
-        args.json = True
 
-        import io
-        from contextlib import redirect_stdout
-
-        f = io.StringIO()
-        with redirect_stdout(f):
-            result = cmd_enroll_complete(client, args)
+            result = __import__("core.cli.commands", fromlist=["cmd_login"]).cmd_login(client, args)
 
         assert result == 0
-        output = f.getvalue()
-        parsed = json.loads(output.strip())
-        assert parsed["status"] == "ok"
-        assert parsed["user_id"] == "jsmith"
-        assert parsed["credential_id"] == "cred_enrolled_789"
+        assert client.config.access_token == "sess-token-abc"
+        mock_auth.assert_called_once_with(user_id="jsmith", timeout=60.0)
+
         client.close()
         config_file.unlink()
 
-    def test_enroll_complete_without_label(self):
-        """Enroll complete without optional label omits it from payload."""
-        client, config_file = _make_client()
-        mock_http = MagicMock()
-        mock_response = _make_mock_response(
-            status_code=200,
-            json_data={
-                "status": "ok",
-                "user_id": "jsmith",
-                "credential_id": "cred_enrolled_789",
-            },
-        )
-        mock_response.raise_for_status.return_value = None
-        mock_http.request.return_value = mock_response
-        client._http = mock_http
+    def test_login_auth_failure_returns_1(self):
+        """FIDO2 auth failure → exit 1."""
+        from core.cli.api_client import APIClientAuthenticationError
+        from core.cli.fido2_client import Fido2Auth
 
+        client, config_file = _make_client()
         args = MagicMock()
-        args.token = "tok_enroll_abc"
-        args.challenge_id = "enroll_chal_123"
-        args.response = json.dumps(
-            {
-                "id": "cred_id",
-                "rawId": "cmVkX2lk",
-                "response": {
-                    "clientDataJSON": "Y2xpZW50IGRhdGE=",
-                    "authenticatorData": "YXV0aCBkYXRh",
-                    "attestationObject": "YXR0ZXN0YXRpb24=",
-                },
-                "type": "public-key",
-                "clientExtensionResults": {},
-            }
-        )
-        args.label = None
+        args.user_id = "baduser"
         args.json = False
 
-        result = cmd_enroll_complete(client, args)
-        assert result == 0
+        with patch.object(Fido2Auth, "authenticate") as mock_auth:
+            mock_auth.side_effect = APIClientAuthenticationError("key not found")
 
-        call_args = mock_http.request.call_args
-        payload = call_args[1]["json"]
-        assert "label" not in payload
-        client.close()
-        config_file.unlink()
+            result = __import__("core.cli.commands", fromlist=["cmd_login"]).cmd_login(client, args)
 
-    def test_enroll_complete_400_invalid_token(self):
-        """Enroll complete with invalid token returns 400."""
-        client, config_file = _make_client()
-        mock_http = MagicMock()
-        mock_response = _make_mock_response(
-            status_code=400,
-            json_data={"detail": "Enrollment token is invalid"},
-        )
-        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
-            "bad request", request=MagicMock(), response=mock_response
-        )
-        mock_http.request.return_value = mock_response
-        client._http = mock_http
-
-        args = MagicMock()
-        args.token = "invalid_token"
-        args.challenge_id = "enroll_chal_123"
-        args.response = json.dumps({"id": "cred_id", "response": {}})
-        args.label = None
-        args.json = False
-
-        result = cmd_enroll_complete(client, args)
         assert result == 1
-        client.close()
-        config_file.unlink()
 
-    def test_enroll_complete_400_bad_challenge(self):
-        """Enroll complete with bad challenge/response returns 400."""
-        client, config_file = _make_client()
-        mock_http = MagicMock()
-        mock_response = _make_mock_response(
-            status_code=400,
-            json_data={"detail": "Invalid WebAuthn challenge or response"},
-        )
-        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
-            "bad request", request=MagicMock(), response=mock_response
-        )
-        mock_http.request.return_value = mock_response
-        client._http = mock_http
-
-        args = MagicMock()
-        args.token = "tok_enroll"
-        args.challenge_id = "bad_chal"
-        args.response = json.dumps({"id": "cred_id", "response": {}})
-        args.label = None
-        args.json = False
-
-        result = cmd_enroll_complete(client, args)
-        assert result == 1
-        client.close()
-        config_file.unlink()
-
-    def test_enroll_complete_invalid_json_response(self):
-        """Enroll complete with invalid JSON response returns 1."""
-        client, config_file = _make_client()
-        MagicMock()
-
-        args = MagicMock()
-        args.token = "tok_enroll"
-        args.challenge_id = "enroll_chal_123"
-        args.response = "not valid json {{{"
-        args.label = None
-        args.json = False
-
-        result = cmd_enroll_complete(client, args)
-        assert result == 1
-        client.close()
-        config_file.unlink()
-
-    def test_enroll_complete_network_error(self):
-        """Enroll complete with network error returns 1."""
-        client, config_file = _make_client()
-        mock_http = MagicMock()
-        mock_http.request.side_effect = httpx2.ConnectError("Connection refused")
-        client._http = mock_http
-
-        args = MagicMock()
-        args.token = "tok_enroll"
-        args.challenge_id = "enroll_chal_123"
-        args.response = json.dumps({"id": "cred_id", "response": {}})
-        args.label = None
-        args.json = False
-
-        result = cmd_enroll_complete(client, args)
-        assert result == 1
         client.close()
         config_file.unlink()

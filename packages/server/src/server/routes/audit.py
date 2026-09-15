@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..dependencies import get_db, require_admin
+from ..dependencies import get_db, require_role
 
 router = APIRouter()
 
@@ -46,21 +46,34 @@ async def audit_list(
     end_date: str | None = Query(None, description="End date (ISO 8601)"),
     days: int | None = Query(None, description="Last N days"),
     hours: int | None = Query(None, description="Last N hours"),
+    event_type: str | None = Query(None, description="Filter by event type"),
     executor_id: str | None = Query(None, description="Filter by executor ID"),
     limit: int = Query(100, ge=1, le=1000, description="Max results"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
-    _: dict = Depends(require_admin),
+    auth_user: dict = Depends(require_role("read")),
     db: Session = Depends(get_db),
 ) -> AuditListResponse:
     """Query audit log.
 
-    Requires admin permission.
+    Admin users see all events. Non-admin users see only their own events
+    (filtered by user_id). Non-human callers (no user_id) receive an empty
+    result to prevent event leakage.
     """
     from datetime import datetime, timedelta
 
     from core.iam.models import AuditEvent
 
     query = db.query(AuditEvent)
+
+    # Non-human callers (no user_id, e.g. mTLS executors) get empty result.
+    user_id = auth_user.get("user_id")
+    if user_id is None:
+        return AuditListResponse(events=[], total=0, limit=limit, offset=offset)
+
+    # Non-admin: filter to own events only
+    is_admin = _is_admin(db, user_id)
+    if not is_admin:
+        query = query.filter(AuditEvent.user_id == user_id)
 
     # Apply filters
     if user is not None:
@@ -103,6 +116,9 @@ async def audit_list(
 
         query = query.filter(cast(AuditEvent.fields, JSON).op("->>")("executor_id") == executor_id)
 
+    if event_type is not None:
+        query = query.filter(AuditEvent.event_type == event_type)
+
     # Get total count
     total = query.count()
 
@@ -125,4 +141,17 @@ async def audit_list(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+def _is_admin(db: Session, user_id: str) -> bool:
+    """True if the user holds a role granting admin visibility."""
+    from core.iam.models import Role, RoleMember
+
+    admin_role = db.query(Role).filter(Role.name == "admin").first()
+    if admin_role is None:
+        return False
+    return (
+        db.query(RoleMember).filter(RoleMember.user_id == user_id).filter(RoleMember.role_id == admin_role.id).first()
+        is not None
     )

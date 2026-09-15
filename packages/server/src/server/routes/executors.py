@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import socket
 import ssl
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -84,9 +85,9 @@ class ExecutorRegisterRequest(BaseModel):
         default=None,
         max_length=253,
         description=(
-            "Executor's network address, used by the Phase 3 mTLS relay to reach it. "
-            "Optional: when omitted, the server records the caller's forwarded address. "
-            "Registration is ownership-gated, so only a token holder can set this."
+            "Accepted for backward compatibility but NOT used for the stored dial address. "
+            "The server always records executor_id as the hostname, because the mTLS dial "
+            "verifies the peer cert (whose SAN is forced to executor_id) against that address."
         ),
     )
 
@@ -192,27 +193,6 @@ class ExecuteResponse(BaseModel):
 
 # --- Helpers ---
 
-# Sentinel stored when no hostname can be resolved (e.g. no client address and
-# none supplied). Keeps the non-nullable column populated and flags the gap.
-UNRESOLVED_HOST = "unknown"
-
-
-def resolve_executor_hostname(request: Request, req: ExecutorRegisterRequest) -> str:
-    """Resolve the hostname to store for a registering executor.
-
-    Preference order:
-    1. Client-supplied ``hostname`` (explicit, best — identifies the host).
-    2. Caller's forwarded address (``request.client.host``). Behind nginx
-       (uvicorn ``--proxy-headers``) this is the real executor address.
-    3. Explicit sentinel — the column is non-nullable, never NULL.
-    """
-    host = (req.hostname or "").strip()
-    if host:
-        return host
-    if request.client is not None and request.client.host:
-        return request.client.host
-    return UNRESOLVED_HOST
-
 
 def _get_ca_manager(request: Request) -> CAManager:
     """Get the CA manager from app state."""
@@ -226,6 +206,20 @@ def _get_ca_manager(request: Request) -> CAManager:
 
 
 # --- Endpoints ---
+
+
+def _dial_hostname_resolvable(hostname: str) -> bool:
+    """True if hostname resolves locally.
+
+    executor_id is the relay dial address (the client cert SAN is forced to
+    it), so an unresolvable id produces an executor that registers and
+    heartbeats but can never be called. Check at registration, not first use.
+    """
+    try:
+        socket.getaddrinfo(hostname, None)
+        return True
+    except socket.gaierror:
+        return False
 
 
 @router.post(
@@ -267,6 +261,19 @@ async def register_executor(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+
+    # executor_id is the relay dial hostname + cert SAN — reject undialable ids
+    # before any CA/DB work (fail at install time, not at first run_command)
+    if not _dial_hostname_resolvable(req.executor_id):
+        metrics.EXECUTOR_REGISTERED.labels(result="unresolvable_id").inc()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"executor_id '{req.executor_id}' does not resolve. The executor_id is used "
+                "as the relay dial hostname and certificate SAN — it must be resolvable "
+                "from every core (DNS or /etc/hosts), e.g. the executor's real hostname."
+            ),
         )
 
     # --- Token validation (optional bootstrap auth) ---
@@ -450,12 +457,13 @@ async def register_executor(
     db.add(audit_event)
 
     # Upsert the Executor status row so GET /api/v1/executors has data.
-    # Hostname: client-supplied > forwarded caller address > sentinel (non-null).
+    # Hostname = cert identity (executor_id): the mTLS dial verifies the peer cert
+    # (SAN forced to executor_id) against this address, so they must match.
+    # req.hostname is NOT the stored dial address.
     now_ts = datetime.now(UTC)
-    effective_host = resolve_executor_hostname(request, req)
     existing_executor = db.query(Executor).filter(Executor.id == resolved_executor_id).first()
     if existing_executor is not None:
-        existing_executor.hostname = effective_host
+        existing_executor.hostname = resolved_executor_id
         if existing_executor.enrolled_at is None:
             existing_executor.enrolled_at = now_ts
         existing_executor.status = "active"
@@ -463,7 +471,7 @@ async def register_executor(
         db.add(
             Executor(
                 id=resolved_executor_id,
-                hostname=effective_host,
+                hostname=resolved_executor_id,
                 enrolled_at=now_ts,
                 status="active",
             )
@@ -932,13 +940,19 @@ async def execute_command_on_executor(
             response.raise_for_status()
             result = response.json()
     except httpx2.ConnectError as e:
-        # Walk cause chain (httpx may wrap SSLError one or more levels deep)
+        # Walk cause chain (httpx may wrap SSLError/gaierror one or more levels deep)
         _c, _d = (e.__cause__ or e.__context__), 0
-        while _c and _d < 5 and not isinstance(_c, ssl.SSLError):
+        while _c and _d < 5 and not isinstance(_c, (ssl.SSLError, socket.gaierror)):
             _c, _d = (_c.__cause__ or _c.__context__), _d + 1
         if _c and isinstance(_c, ssl.SSLError):
             logger.warning("mTLS verification failed: %s", _c)
             raise HTTPException(status_code=503, detail="mTLS verification failed")
+        if _c and isinstance(_c, socket.gaierror):
+            logger.warning("Executor hostname does not resolve: %s", executor.hostname)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Executor hostname does not resolve: {executor.hostname}",
+            )
         raise HTTPException(status_code=503, detail="Executor unreachable (connection refused)")
     except httpx2.TimeoutException:
         raise HTTPException(status_code=503, detail="Executor timed out")

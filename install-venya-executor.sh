@@ -15,7 +15,9 @@ set -euo pipefail
 #   VENYA_INSTALL_DIR   - Install location (default: /opt/venya)
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
 #   VENYA_TARBALL       - URL of the tarball to install (auto-detected if on same host)
-#   VENYA_EXECUTOR_ID              - Executor ID (default: jump-1)
+#   VENYA_EXECUTOR_ID              - Executor ID (default: venya-exec-1). CONTRACT: the ID
+#                                    is the relay dial hostname + client-cert SAN — it MUST
+#                                    be resolvable from every core (e.g. via /etc/hosts or DNS).
 #   VENYA_SERVER_URL               - Core server URL (required)
 #   VENYA_CORE_HOSTNAME    - Core hostname for /etc/hosts resolution (default: venya-core-1)
 #   VENYA_CORE_IP          - Core IP for /etc/hosts resolution (default: 10.27.28.11)
@@ -25,7 +27,7 @@ set -euo pipefail
 
 # --- Defaults ---
 TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-executor-install.tar.gz}"
-EXECUTOR_ID="${VENYA_EXECUTOR_ID:-jump-1}"
+EXECUTOR_ID="${VENYA_EXECUTOR_ID:-venya-exec-1}"
 
 # --- Source common library ---
 # Direct execution: the library sits next to the script. Piped execution

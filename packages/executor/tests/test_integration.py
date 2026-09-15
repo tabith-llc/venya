@@ -121,9 +121,12 @@ class TestMTLSHandshake:
     """End-to-end mTLS certificate registration flow."""
 
     def test_full_registration_flow(
-        self, ca_manager, executor_key, executor_csr, cert_files, tls_client, executor_config
+        self, ca_manager, executor_key, executor_csr, cert_files, tls_client, executor_config, monkeypatch
     ):
         """Executor registers with server, receives signed cert, validates CA."""
+        # Synthetic test id — bypass the server's dial-address resolvability check
+        # (enforcement itself is covered in packages/server tests)
+        monkeypatch.setattr("server.routes.executors._dial_hostname_resolvable", lambda host: True)
         _cert_path, _key_path = cert_files
 
         # Create a fresh httpx test client pointing at our test server

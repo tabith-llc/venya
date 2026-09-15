@@ -40,16 +40,24 @@ def admin_ca_dir(tmp_path):
 @pytest.fixture
 def admin_ca_security():
     """Create CASecurityConfig with admin passphrase env var."""
-    return CASecurityConfig(key_passphrase_env="VENYA_CA_KEY_PASSPHRASE")
+    return CASecurityConfig(key_passphrase_env="VENYA_ADMIN_CA_KEY_PASSPHRASE")
 
 
 @pytest.fixture(autouse=True)
 def clear_passphrase_env():
-    """Ensure passphrase env vars are unset before each test."""
-    old = os.environ.pop("VENYA_CA_KEY_PASSPHRASE", None)
+    """Ensure both CA passphrase env vars are unset before/after each test.
+
+    Clears the admin var (VENYA_ADMIN_CA_KEY_PASSPHRASE) and the executor var
+    (VENYA_CA_KEY_PASSPHRASE) so the split-brain regression test can set both
+    to distinct values without cross-test leakage.
+    """
+    old_admin = os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
+    old_exec = os.environ.pop("VENYA_CA_KEY_PASSPHRASE", None)
     yield
-    if old is not None:
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = old
+    if old_admin is not None:
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = old_admin
+    if old_exec is not None:
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = old_exec
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +89,7 @@ class TestAdminCAInitialize:
 
     def test_admin_ca_key_encrypted_with_passphrase(self, admin_ca_dir, admin_ca_security):
         """Admin CA key should be encrypted when passphrase is set."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase_123"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase_123"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -123,7 +131,7 @@ class TestAdminCALoad:
 
     def test_admin_ca_load_requires_passphrase(self, admin_ca_dir, admin_ca_security):
         """AdminCAManager._load_ca_key() should load with correct passphrase."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "correct_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "correct_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -133,24 +141,24 @@ class TestAdminCALoad:
 
     def test_admin_ca_load_fails_without_passphrase(self, admin_ca_dir, admin_ca_security):
         """AdminCAManager._load_ca_key() should raise when passphrase not set."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "init_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "init_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
         # Remove passphrase - key is encrypted, so loading should fail
-        os.environ.pop("VENYA_CA_KEY_PASSPHRASE", None)
+        os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
 
         with pytest.raises(RuntimeError, match="not set"):
             manager._load_ca_key()
 
     def test_admin_ca_load_wrong_passphrase(self, admin_ca_dir, admin_ca_security):
         """AdminCAManager._load_ca_key() should raise on wrong passphrase."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "correct_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "correct_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
         # Set wrong passphrase
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "wrong_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "wrong_passphrase"
 
         with pytest.raises(RuntimeError, match="Failed to decrypt"):
             manager._load_ca_key()
@@ -166,7 +174,7 @@ class TestAdminSignCert:
 
     def test_admin_ca_sign_cert(self, admin_ca_dir, admin_ca_security):
         """AdminCAManager.sign_admin_cert() should produce valid signed cert."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -179,7 +187,7 @@ class TestAdminSignCert:
 
     def test_admin_cert_has_correct_cn(self, admin_ca_dir, admin_ca_security):
         """Signed admin cert should have CN = admin_identity."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -191,7 +199,7 @@ class TestAdminSignCert:
 
     def test_admin_cert_has_correct_san(self, admin_ca_dir, admin_ca_security):
         """Signed admin cert should have RFC822Name SAN for email-style identity."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -203,7 +211,7 @@ class TestAdminSignCert:
 
     def test_admin_cert_email_identity_uses_rfc822_san(self, admin_ca_dir, admin_ca_security):
         """Email-style identity (with @) should use RFC822Name SAN."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -217,7 +225,7 @@ class TestAdminSignCert:
 
     def test_admin_cert_hostname_identity_uses_dns_san(self, admin_ca_dir, admin_ca_security):
         """Hostname-style identity (no @) should use DNSName SAN."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -231,7 +239,7 @@ class TestAdminSignCert:
 
     def test_admin_cert_has_client_auth_eku(self, admin_ca_dir, admin_ca_security):
         """Signed admin cert should have ExtendedKeyUsage = clientAuth."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -242,7 +250,7 @@ class TestAdminSignCert:
 
     def test_admin_cert_is_not_ca(self, admin_ca_dir, admin_ca_security):
         """Signed admin cert should have BasicConstraints CA=False."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -253,7 +261,7 @@ class TestAdminSignCert:
 
     def test_admin_cert_validity_90_days(self, admin_ca_dir, admin_ca_security):
         """Signed admin cert should have ~90 day validity."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -264,7 +272,7 @@ class TestAdminSignCert:
 
     def test_admin_cert_signed_by_admin_ca(self, admin_ca_dir, admin_ca_security):
         """Signed admin cert should verify against admin CA cert."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -282,7 +290,7 @@ class TestAdminSignCert:
 
     def test_admin_key_is_ecdsa_p256(self, admin_ca_dir, admin_ca_security):
         """Admin cert key should be ECDSA P-256."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -336,7 +344,7 @@ class TestExtractIdentity:
 
     def test_extract_identity_prefers_rfc822_over_dns(self, admin_ca_dir, admin_ca_security):
         """RFC822Name SAN should take precedence over DNSName SAN."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -386,7 +394,7 @@ class TestExtractIdentity:
 
     def test_extract_identity_falls_back_to_cn(self, admin_ca_dir, admin_ca_security):
         """Should fall back to CN when no SAN present."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -495,7 +503,7 @@ class TestAdminMTLSMiddleware:
 
     def test_header_injection_rejected(self, admin_ca_dir, admin_ca_security):
         """Missing X-Client-Subject on admin route should be rejected."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -512,7 +520,7 @@ class TestAdminMTLSMiddleware:
 
     def test_missing_cert_on_admin_route(self, admin_ca_dir, admin_ca_security):
         """No client cert on admin route should return 403."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -525,7 +533,7 @@ class TestAdminMTLSMiddleware:
 
     def test_valid_cert_passes(self, admin_ca_dir, admin_ca_security):
         """Valid cert + known identity should pass mTLS and continue to bearer auth."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -551,7 +559,7 @@ class TestAdminMTLSMiddleware:
     def test_expired_cert_rejected(self, admin_ca_dir, admin_ca_security):
         """Expired cert is rejected at TLS layer by Nginx; server no longer checks expiration.
         This test verifies that a known identity with valid headers passes."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -574,7 +582,7 @@ class TestAdminMTLSMiddleware:
 
     def test_unknown_identity_rejected(self, admin_ca_dir, admin_ca_security):
         """Valid cert but unknown identity should be rejected."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -602,7 +610,7 @@ class TestAdminMTLSMiddleware:
 
     def test_san_preferred_over_cn(self, admin_ca_dir, admin_ca_security):
         """SAN DNS should take precedence over CN for identity."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -658,7 +666,7 @@ class TestAdminMTLSMiddleware:
 
     def test_revoked_cert_rejected(self, admin_ca_dir, admin_ca_security):
         """Server no longer checks revocation; this test verifies unknown identity rejection."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -681,7 +689,7 @@ class TestAdminMTLSMiddleware:
 
     def test_non_admin_route_unaffected(self, admin_ca_dir, admin_ca_security):
         """Non-admin routes should not require mTLS even when enabled."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -693,7 +701,7 @@ class TestAdminMTLSMiddleware:
 
     def test_admin_mtls_disabled_allows_admin_routes(self, admin_ca_dir, admin_ca_security):
         """When admin_mtls is disabled, admin routes should work with bearer token only."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -707,7 +715,7 @@ class TestAdminMTLSMiddleware:
 
     def test_wrong_verified_value_rejected(self, admin_ca_dir, admin_ca_security):
         """X-Client-Verified with wrong value should be rejected."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -818,12 +826,16 @@ class TestStartupEnforcement:
         if config.admin_mtls.enabled and not os.environ.get(passphrase_env):
             pytest.fail("Should not raise when passphrase is set")
 
-    def test_admin_ca_missing_at_lifespan(self, admin_ca_dir, admin_ca_security):
-        """admin_mtls.enabled + missing admin CA should raise in lifespan."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+    def test_admin_ca_missing_at_lifespan(self, admin_ca_dir):
+        """admin_mtls.enabled + missing admin CA should raise in lifespan.
 
+        Builds the manager via app.py's _admin_ca_security helper so the test
+        exercises the real wiring (admin var), not a re-implementation that
+        could drift from app.py.
+        """
         from pathlib import Path as PPath
 
+        from server.app import _admin_ca_security
         from server.ca import AdminCAManager
 
         # Use a non-existent admin CA directory
@@ -839,7 +851,7 @@ class TestStartupEnforcement:
             recovery_code_pepper="test-pepper",
         )
 
-        admin_ca_manager = AdminCAManager(PPath(admin_ca_missing), config.ca_security)
+        admin_ca_manager = AdminCAManager(PPath(admin_ca_missing), _admin_ca_security(config))
         with pytest.raises(RuntimeError, match="admin CA not found"):
             if config.admin_mtls.enabled and not admin_ca_manager.has_ca:
                 raise RuntimeError(
@@ -848,10 +860,11 @@ class TestStartupEnforcement:
 
     def test_admin_ca_present_at_lifespan(self, admin_ca_dir, admin_ca_security):
         """admin_mtls.enabled + existing admin CA should pass in lifespan."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
 
         from pathlib import Path as PPath
 
+        from server.app import _admin_ca_security
         from server.ca import AdminCAManager
 
         manager = AdminCAManager(PPath(admin_ca_dir), admin_ca_security)
@@ -867,10 +880,136 @@ class TestStartupEnforcement:
             recovery_code_pepper="test-pepper",
         )
 
-        admin_ca_manager = AdminCAManager(PPath(admin_ca_dir), config.ca_security)
+        admin_ca_manager = AdminCAManager(PPath(admin_ca_dir), _admin_ca_security(config))
         # Should not raise — CA exists
         if config.admin_mtls.enabled and not admin_ca_manager.has_ca:
             pytest.fail("Should not raise when admin CA exists")
+
+
+class TestAdminCAWiring:
+    """Regression for the admin-CA passphrase var split-brain.
+
+    Bug (found G3-auth 2026-09-14, ticket core-ca-keys-unencrypted-at-rest):
+    app.py built AdminCAManager with ``config.ca_security``, whose
+    ``key_passphrase_env`` defaults to the EXECUTOR var
+    ``VENYA_CA_KEY_PASSPHRASE``, while the installer and the startup
+    enforcement (app.py main()) deliver/check ``VENYA_ADMIN_CA_KEY_PASSPHRASE``.
+    The admin manager therefore never saw the passphrase and wrote the admin CA
+    key UNENCRYPTED at rest on every fresh install. ``_admin_ca_security`` is
+    now the single source of truth for the admin manager's security config;
+    these tests pin it by contract and functionally (distinct var values).
+    """
+
+    def test_admin_ca_security_uses_admin_var(self):
+        """_admin_ca_security must select the admin var, not the executor var."""
+        from server.app import _admin_ca_security
+
+        config = ServerConfig(
+            admin_mtls=AdminMTLSConfig(enabled=True),
+            recovery_code_pepper="test-pepper",
+        )
+        sec = _admin_ca_security(config)
+        assert sec.key_passphrase_env == config.admin_mtls.ca_key_passphrase_env
+        assert sec.key_passphrase_env == "VENYA_ADMIN_CA_KEY_PASSPHRASE"
+        # The whole bug: it must NOT be the executor CA default.
+        assert sec.key_passphrase_env != config.ca_security.key_passphrase_env
+
+    def test_admin_ca_security_honors_configured_var(self):
+        """An operator override of admin_mtls.ca_key_passphrase_env is respected."""
+        from server.app import _admin_ca_security
+
+        config = ServerConfig(
+            admin_mtls=AdminMTLSConfig(enabled=True, ca_key_passphrase_env="CUSTOM_ADMIN_VAR"),
+            recovery_code_pepper="test-pepper",
+        )
+        assert _admin_ca_security(config).key_passphrase_env == "CUSTOM_ADMIN_VAR"
+
+    def test_admin_ca_encrypts_when_admin_var_set(self, admin_ca_dir):
+        """Positive: admin var set (executor var unset) -> key encrypted at rest.
+
+        This is the production condition: the installer delivers
+        VENYA_ADMIN_CA_KEY_PASSPHRASE and never sets VENYA_CA_KEY_PASSPHRASE.
+        Pre-fix the manager read the executor var (unset) -> plaintext key.
+        """
+        from pathlib import Path as PPath
+
+        from server.app import _admin_ca_security
+        from server.ca import AdminCAManager
+
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "admin_pp"
+        # executor var deliberately UNSET (autouse fixture cleared it)
+
+        config = ServerConfig(
+            ca_dir=str(Path(admin_ca_dir)),
+            admin_mtls=AdminMTLSConfig(enabled=True),
+            recovery_code_pepper="test-pepper",
+        )
+        manager = AdminCAManager(PPath(admin_ca_dir), _admin_ca_security(config))
+        manager.initialize()
+
+        key_data = PPath(admin_ca_dir, "admin-ca.key").read_bytes()
+        assert b"ENCRYPTED" in key_data, "admin CA key must be encrypted at rest"
+        # Decrypts with the admin passphrase the manager read.
+        assert manager._load_ca_key() is not None
+
+    def test_admin_ca_ignores_executor_var(self, admin_ca_dir, caplog):
+        """Negative (sharp regression): executor var set, admin var unset -> plaintext.
+
+        Proves the admin manager reads the ADMIN var, not the executor var.
+        Pre-fix (manager wired to config.ca_security = VENYA_CA_KEY_PASSPHRASE)
+        this encrypted the key from the executor var and the test FAILS.
+        Post-fix the admin var is absent -> plaintext + warning naming it.
+        """
+        import logging
+        from pathlib import Path as PPath
+
+        from server.app import _admin_ca_security
+        from server.ca import AdminCAManager
+
+        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "executor_pp"
+        # admin var deliberately UNSET
+
+        config = ServerConfig(
+            ca_dir=str(Path(admin_ca_dir)),
+            admin_mtls=AdminMTLSConfig(enabled=True),
+            recovery_code_pepper="test-pepper",
+        )
+        manager = AdminCAManager(PPath(admin_ca_dir), _admin_ca_security(config))
+        with caplog.at_level(logging.WARNING, logger="venya.ca"):
+            manager.initialize()
+
+        key_data = PPath(admin_ca_dir, "admin-ca.key").read_bytes()
+        assert b"ENCRYPTED" not in key_data, "admin CA must NOT key off the executor var"
+        assert any(
+            "VENYA_ADMIN_CA_KEY_PASSPHRASE" in r.getMessage() and "UNENCRYPTED" in r.getMessage()
+            for r in caplog.records
+        ), "warning must name the admin var the manager actually reads"
+
+    def test_admin_ca_unencrypted_warning_names_admin_var(self, admin_ca_dir, caplog):
+        """Negative: no passphrase -> loud warning naming the ADMIN var, key still written."""
+        import logging
+        from pathlib import Path as PPath
+
+        from server.app import _admin_ca_security
+        from server.ca import AdminCAManager
+
+        # Autouse fixture cleared both vars -> passphrase is None.
+        config = ServerConfig(
+            ca_dir=str(Path(admin_ca_dir)),
+            admin_mtls=AdminMTLSConfig(enabled=True),
+            recovery_code_pepper="test-pepper",
+        )
+        manager = AdminCAManager(PPath(admin_ca_dir), _admin_ca_security(config))
+        with caplog.at_level(logging.WARNING, logger="venya.ca"):
+            manager.initialize()
+
+        key_data = PPath(admin_ca_dir, "admin-ca.key").read_bytes()
+        assert b"ENCRYPTED" not in key_data  # plaintext, but...
+        assert b"BEGIN PRIVATE KEY" in key_data  # ...still written: no silent failure
+        assert any(
+            "VENYA_ADMIN_CA_KEY_PASSPHRASE" in r.getMessage() and "UNENCRYPTED" in r.getMessage()
+            for r in caplog.records
+        ), "warning must name the admin var the manager actually reads"
 
 
 # ---------------------------------------------------------------------------
@@ -1080,7 +1219,7 @@ class TestAdminMTLSConcurrency:
         """10 simultaneous requests with same cert should all pass mTLS (no race conditions)."""
         import concurrent.futures
 
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -1132,7 +1271,7 @@ class TestAdminCARotation:
 
     def test_known_identity_passes(self, admin_ca_dir, admin_ca_security):
         """Known identity in X-Client-Subject should pass mTLS."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -1151,7 +1290,7 @@ class TestAdminCARotation:
 
     def test_unknown_identity_rejected(self, admin_ca_dir, admin_ca_security):
         """Unknown identity in X-Client-Subject should be rejected."""
-        os.environ["VENYA_CA_KEY_PASSPHRASE"] = "test_passphrase"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 

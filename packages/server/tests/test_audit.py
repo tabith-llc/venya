@@ -2,16 +2,40 @@
 
 from datetime import UTC
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi import FastAPI
-from server.dependencies import require_admin
+from server.dependencies import get_current_user
 from server.routes import audit as audit_routes
 from starlette.testclient import TestClient
 
+# Store the original _is_admin so we can restore it after monkeypatch.
+_ORIGINAL_IS_ADMIN = audit_routes._is_admin
 
-def _create_test_app(backend=None, override_guard=True):
-    """Create a minimal test app with audit route."""
+
+@pytest.fixture(autouse=True)
+def _restore_is_admin():
+    """Restore the real _is_admin after each test, so the module-level
+    monkeypatch in _create_test_app / _make_app_with_user does not leak
+    into TestIsAdminHelper's direct unit tests of the real function."""
+    yield
+    audit_routes._is_admin = _ORIGINAL_IS_ADMIN
+
+
+def _create_test_app(
+    backend=None,
+    override_guard=True,
+    user_id="admin",
+    is_admin=True,
+):
+    """Create a minimal test app with audit route.
+
+    Overrides get_current_user (the inner dependency of require_role) so
+    the endpoint receives a known auth_user dict.  Monkeypatches _is_admin
+    so the caller's visibility is controllable.
+    """
+    from core.iam.role_manager import RoleManager
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
 
@@ -20,10 +44,14 @@ def _create_test_app(backend=None, override_guard=True):
         app.state.backend = backend
     app.include_router(audit_routes.router, prefix="/api/v1")
     if override_guard:
-        app.dependency_overrides[require_admin] = lambda: {
-            "user_id": "admin",
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": user_id,
             "roles": [42],
         }
+        audit_routes._is_admin = lambda db, uid: is_admin
+        # require_role("read") calls RoleManager.get_user_permissions which
+        # hits the mock db → empty list → empty dict → 403. Patch it away.
+        patch.object(RoleManager, "get_user_permissions", return_value={1: "read"}).start()
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -514,15 +542,405 @@ class TestAuditList:
 
 
 class TestAuditGuard:
-    """Guard enforcement on GET /audit (admin only)."""
+    """Guard enforcement on GET /audit (require_role("read"))."""
 
     def test_no_auth_user_rejected(self):
-        """Without require_admin override (no auth_user set), GET /audit is 401."""
+        """Without auth override (no auth_user set), GET /audit is 401."""
         backend = MagicMock()
         backend.get_session.return_value = MagicMock()
-        # override_guard=False leaves require_admin live; no middleware sets auth_user
+        # override_guard=False leaves require_role("read") live; no middleware sets auth_user
         app = _create_test_app(backend=backend, override_guard=False)
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/audit")
         assert resp.status_code == 401
+
+
+class TestAuditNonAdmin:
+    """Non-admin self-filtering on GET /audit."""
+
+    def _make_app_with_user(self, user_id: str, is_admin: bool, backend=None):
+        """Create test app with a specific user and admin status."""
+        from server.dependencies import get_current_user
+        from starlette.middleware.base import BaseHTTPMiddleware
+
+        app = FastAPI()
+        if backend is not None:
+            app.state.backend = backend
+        else:
+            # Provide a minimal mock backend so get_backend doesn't 503.
+            mock_backend = MagicMock()
+            mock_backend.get_session.return_value = MagicMock()
+            app.state.backend = mock_backend
+        app.include_router(audit_routes.router, prefix="/api/v1")
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": user_id, "roles": [42]}
+        audit_routes._is_admin = lambda db, uid: is_admin
+
+        class AuthMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request, call_next):
+                return await call_next(request)
+
+        app.add_middleware(AuthMiddleware)
+        return app
+
+    def test_non_admin_sees_own_events_only(self):
+        """Non-admin user sees only events with their user_id."""
+        import json
+        from datetime import datetime
+
+        admin_event = SimpleNamespace(
+            id=1,
+            event_type="command_executed",
+            user_id="admin",
+            fields=json.dumps({"executor_id": "exec-1"}),
+            timestamp=datetime.now(UTC),
+        )
+        alice_event = SimpleNamespace(
+            id=2,
+            event_type="command_executed",
+            user_id="alice",
+            fields=json.dumps({"executor_id": "exec-2"}),
+            timestamp=datetime.now(UTC),
+        )
+
+        class MockQuery:
+            def __init__(self, events):
+                self._events = events
+                self._filters = []
+
+            def filter(self, *args, **kwargs):
+                self._filters.append(args)
+                return self
+
+            def count(self):
+                return len(self.all())
+
+            def order_by(self, *args, **kwargs):
+                return self
+
+            def offset(self, *args, **kwargs):
+                return self
+
+            def limit(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                result = self._events
+                for args in self._filters:
+                    if len(args) >= 1:
+                        expr = args[0]
+                        if hasattr(expr, "left") and hasattr(expr, "right"):
+                            col = expr.left
+                            val = expr.right.value if hasattr(expr.right, "value") else expr.right
+                            if hasattr(col, "name") and col.name == "user_id":
+                                result = [e for e in result if e.user_id == val]
+                return result[0] if result else None
+
+            def all(self):
+                result = self._events
+                for args in self._filters:
+                    if len(args) >= 1:
+                        expr = args[0]
+                        if hasattr(expr, "left") and hasattr(expr, "right"):
+                            col = expr.left
+                            val = expr.right.value if hasattr(expr.right, "value") else expr.right
+                            if hasattr(col, "name") and col.name == "user_id":
+                                result = [e for e in result if e.user_id == val]
+                return result
+
+        db = MagicMock()
+        db.query.return_value = MockQuery([admin_event, alice_event])
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = self._make_app_with_user("alice", is_admin=False, backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["events"][0]["user_id"] == "alice"
+
+    def test_admin_sees_all_events(self):
+        """Admin user sees events for all users."""
+        import json
+        from datetime import datetime
+
+        admin_event = SimpleNamespace(
+            id=1,
+            event_type="command_executed",
+            user_id="admin",
+            fields=json.dumps({"executor_id": "exec-1"}),
+            timestamp=datetime.now(UTC),
+        )
+        alice_event = SimpleNamespace(
+            id=2,
+            event_type="command_executed",
+            user_id="alice",
+            fields=json.dumps({"executor_id": "exec-2"}),
+            timestamp=datetime.now(UTC),
+        )
+
+        class MockQuery:
+            def __init__(self, events):
+                self._events = events
+                self._filters = []
+
+            def filter(self, *args, **kwargs):
+                self._filters.append(args)
+                return self
+
+            def count(self):
+                return len(self.all())
+
+            def order_by(self, *args, **kwargs):
+                return self
+
+            def offset(self, *args, **kwargs):
+                return self
+
+            def limit(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                result = self._events
+                for args in self._filters:
+                    if len(args) >= 1:
+                        expr = args[0]
+                        if hasattr(expr, "left") and hasattr(expr, "right"):
+                            col = expr.left
+                            val = expr.right.value if hasattr(expr.right, "value") else expr.right
+                            if hasattr(col, "name") and col.name == "user_id":
+                                result = [e for e in result if e.user_id == val]
+                return result[0] if result else None
+
+            def all(self):
+                result = self._events
+                for args in self._filters:
+                    if len(args) >= 1:
+                        expr = args[0]
+                        if hasattr(expr, "left") and hasattr(expr, "right"):
+                            col = expr.left
+                            val = expr.right.value if hasattr(expr.right, "value") else expr.right
+                            if hasattr(col, "name") and col.name == "user_id":
+                                result = [e for e in result if e.user_id == val]
+                return result
+
+        db = MagicMock()
+        db.query.return_value = MockQuery([admin_event, alice_event])
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = self._make_app_with_user("admin", is_admin=True, backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+
+    def test_hours_filter(self):
+        """hours param filters events outside the window."""
+        import json
+        from datetime import datetime, timedelta
+
+        recent = SimpleNamespace(
+            id=1,
+            event_type="command_executed",
+            user_id="alice",
+            fields=json.dumps({"executor_id": "exec-1"}),
+            timestamp=datetime.now(UTC) - timedelta(hours=1),
+        )
+        old = SimpleNamespace(
+            id=2,
+            event_type="command_executed",
+            user_id="alice",
+            fields=json.dumps({"executor_id": "exec-2"}),
+            timestamp=datetime.now(UTC) - timedelta(hours=48),
+        )
+
+        class MockQuery:
+            def __init__(self, events):
+                self._events = events
+                self._filters = []
+
+            def filter(self, *args, **kwargs):
+                self._filters.append(args)
+                return self
+
+            def count(self):
+                return len(self.all())
+
+            def order_by(self, *args, **kwargs):
+                return self
+
+            def offset(self, *args, **kwargs):
+                return self
+
+            def limit(self, *args, **kwargs):
+                return self
+
+            def all(self):
+                result = self._events
+                for args in self._filters:
+                    if len(args) >= 1:
+                        expr = args[0]
+                        if hasattr(expr, "left") and hasattr(expr, "right"):
+                            col = expr.left
+                            val = expr.right.value if hasattr(expr.right, "value") else expr.right
+                            if hasattr(col, "name") and col.name == "timestamp":
+                                result = [e for e in result if e.timestamp >= val]
+                return result
+
+        db = MagicMock()
+        db.query.return_value = MockQuery([recent, old])
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = self._make_app_with_user("alice", is_admin=True, backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit", params={"hours": 24})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["events"][0]["user_id"] == "alice"
+
+    def test_event_type_filter(self):
+        """event_type param filters to matching events."""
+        import json
+        from datetime import datetime
+
+        cmd_event = SimpleNamespace(
+            id=1,
+            event_type="command_executed",
+            user_id="alice",
+            fields=json.dumps({"executor_id": "exec-1"}),
+            timestamp=datetime.now(UTC),
+        )
+        session_event = SimpleNamespace(
+            id=2,
+            event_type="execution_session_created",
+            user_id="alice",
+            fields=json.dumps({"executor_id": "exec-2"}),
+            timestamp=datetime.now(UTC),
+        )
+
+        class MockQuery:
+            def __init__(self, events):
+                self._events = events
+                self._filters = []
+
+            def filter(self, *args, **kwargs):
+                self._filters.append(args)
+                return self
+
+            def count(self):
+                return len(self.all())
+
+            def order_by(self, *args, **kwargs):
+                return self
+
+            def offset(self, *args, **kwargs):
+                return self
+
+            def limit(self, *args, **kwargs):
+                return self
+
+            def all(self):
+                result = self._events
+                for args in self._filters:
+                    if len(args) >= 1:
+                        expr = args[0]
+                        if hasattr(expr, "left") and hasattr(expr, "right"):
+                            col = expr.left
+                            val = expr.right.value if hasattr(expr.right, "value") else expr.right
+                            if hasattr(col, "name") and col.name == "event_type":
+                                result = [e for e in result if e.event_type == val]
+                return result
+
+        db = MagicMock()
+        db.query.return_value = MockQuery([cmd_event, session_event])
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = self._make_app_with_user("alice", is_admin=True, backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit", params={"event_type": "command_executed"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["events"][0]["event_type"] == "command_executed"
+
+
+class TestIsAdminHelper:
+    """Direct unit tests for _is_admin helper."""
+
+    def test_admin_member_returns_true(self):
+        """User who is a member of the admin role → True."""
+        mock_admin_role = SimpleNamespace(id=1)
+        mock_member = SimpleNamespace()
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                return mock_member
+
+        class RoleQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                return mock_admin_role
+
+        db = MagicMock()
+
+        def query_side_effect(model):
+            if model.__name__ == "Role":
+                return RoleQuery()
+            return MockQuery()
+
+        db.query.side_effect = query_side_effect
+        assert audit_routes._is_admin(db, "alice") is True
+
+    def test_role_less_user_returns_false(self):
+        """User with no role memberships → False."""
+        mock_admin_role = SimpleNamespace(id=1)
+
+        class RoleQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                return mock_admin_role
+
+        class MemberQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                return None
+
+        db = MagicMock()
+
+        def query_side_effect(model):
+            if model.__name__ == "Role":
+                return RoleQuery()
+            return MemberQuery()
+
+        db.query.side_effect = query_side_effect
+        assert audit_routes._is_admin(db, "bob") is False
+
+    def test_missing_admin_role_returns_false(self):
+        """No admin role in the system → False."""
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                return None
+
+        db = MagicMock()
+        db.query.return_value = MockQuery()
+        assert audit_routes._is_admin(db, "alice") is False

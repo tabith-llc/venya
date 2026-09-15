@@ -5,7 +5,7 @@ repos:
       - id: bandit
         always_run: true
         pass_filenames: false
-        args: ["-r", "packages/", "-x", "packages/executor/tests/,packages/server/tests/,packages/core/tests/,packages/executor/.venv"]
+        args: ["-r", "packages/", "-x", "packages/executor/tests/,packages/server/tests/,packages/core/tests/,packages/mcp/tests/,packages/executor/.venv"]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.4
@@ -41,8 +41,8 @@ repos:
         files: "^packages/.*pyproject\\.toml$"
 
       - id: mypy
-        name: mypy (3 packages, src only)
-        entry: uvx mypy@2.3.1 --no-error-summary packages/core/src packages/server/src packages/executor/src
+        name: mypy (4 packages, src only)
+        entry: uvx mypy@2.3.1 --no-error-summary packages/core/src packages/server/src packages/executor/src packages/mcp/src
         language: system
         pass_filenames: false
         files: "^packages/.*/src/"

@@ -100,9 +100,24 @@ ADMIN_CERT_DIR="/etc/venya/admin"
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     info "Configuring admin mTLS..."
 
-    # Generate passphrase if not provided
+    # Passphrase acquisition: prompt when interactive, strong random when
+    # piped/unattended. Either way validated non-empty — an empty passphrase
+    # would silently yield an UNENCRYPTED admin CA key. Nobody needs to
+    # memorize a CA key passphrase, so unattended keeps the strong random
+    # default; typing is for delivery hygiene, not for replacing randomness.
     if [ -z "$ADMIN_CA_PASSPHRASE" ]; then
-        ADMIN_CA_PASSPHRASE=$(openssl rand -base64 32)
+        if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+            while :; do
+                echo -n "Admin CA key passphrase: "
+                IFS= read -rs ADMIN_CA_PASSPHRASE
+                echo ""
+                [ -n "$ADMIN_CA_PASSPHRASE" ] && break
+                warn "Passphrase cannot be empty."
+            done
+        else
+            ADMIN_CA_PASSPHRASE=$(openssl rand -base64 32)
+            info "Unattended install: generated a random admin CA passphrase."
+        fi
     fi
 
     # Derive default identity
@@ -118,33 +133,45 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     chmod 700 "$ADMIN_CERT_DIR"
     chown venya:venya "$ADMIN_CERT_DIR"
 
-    # Generate admin CA
-    export VENYA_ADMIN_CA_KEY_PASSPHRASE="$ADMIN_CA_PASSPHRASE"
-    sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" \
-        python -c "
+    # Generate admin CA. The passphrase crosses the sudo boundary on STDIN —
+    # never via export (sudo's env_reset strips it) and never on argv (visible
+    # in /proc/*/cmdline). The child reads it into VENYA_ADMIN_CA_KEY_PASSPHRASE
+    # and the manager is wired to that exact var name (matches app.py runtime +
+    # the startup enforcement). Path passed as a positional so nothing
+    # interpolates inside the single-quoted child script.
+    sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" bash -c '
+        IFS= read -r VENYA_ADMIN_CA_KEY_PASSPHRASE
+        export VENYA_ADMIN_CA_KEY_PASSPHRASE
+        exec python -c "
 from pathlib import Path
 from server.ca import AdminCAManager
 from server.config import CASecurityConfig
-cm = AdminCAManager(Path('$ADMIN_CA_DIR'), CASecurityConfig())
+cm = AdminCAManager(Path(\"$1\"), CASecurityConfig(key_passphrase_env=\"VENYA_ADMIN_CA_KEY_PASSPHRASE\"))
 if not cm.has_ca:
     cm.initialize()
-print('Admin CA initialized')
+print(\"Admin CA initialized\")
 "
+    ' _ "$ADMIN_CA_DIR" <<<"$ADMIN_CA_PASSPHRASE"
 
-    # Generate first admin cert
-    sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" \
-        python -c "
+    # Generate first admin cert. sign_admin_cert loads the CA key — now
+    # encrypted — so this block needs the passphrase on stdin too (identical
+    # carry). $1=ca_dir $2=cert_dir $3=identity, all positional.
+    sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" bash -c '
+        IFS= read -r VENYA_ADMIN_CA_KEY_PASSPHRASE
+        export VENYA_ADMIN_CA_KEY_PASSPHRASE
+        exec python -c "
 from pathlib import Path
 from server.ca import AdminCAManager
 from server.config import CASecurityConfig
-cm = AdminCAManager(Path('$ADMIN_CA_DIR'), CASecurityConfig())
-cert, key_pem, cert_pem = cm.sign_admin_cert('$ADMIN_IDENTITY')
-Path('$ADMIN_CERT_DIR/admin.crt').write_bytes(cert_pem)
-Path('$ADMIN_CERT_DIR/admin.key').write_bytes(key_pem)
-Path('$ADMIN_CERT_DIR/admin.crt').chmod(0o644)
-Path('$ADMIN_CERT_DIR/admin.key').chmod(0o600)
-print('Admin cert generated for $ADMIN_IDENTITY')
+cm = AdminCAManager(Path(\"$1\"), CASecurityConfig(key_passphrase_env=\"VENYA_ADMIN_CA_KEY_PASSPHRASE\"))
+cert, key_pem, cert_pem = cm.sign_admin_cert(\"$3\")
+Path(\"$2/admin.crt\").write_bytes(cert_pem)
+Path(\"$2/admin.key\").write_bytes(key_pem)
+Path(\"$2/admin.crt\").chmod(0o644)
+Path(\"$2/admin.key\").chmod(0o600)
+print(\"Admin cert generated for $3\")
 "
+    ' _ "$ADMIN_CA_DIR" "$ADMIN_CERT_DIR" "$ADMIN_IDENTITY" <<<"$ADMIN_CA_PASSPHRASE"
 
     info "Admin CA and first admin cert generated for $ADMIN_IDENTITY"
 
@@ -155,9 +182,18 @@ info "Installing PostgreSQL..."
 apt-get install -y -qq postgresql > /dev/null 2>&1
 
 if [ -z "$VENYA_DB_PASSWORD" ]; then
-    echo -n "Enter PostgreSQL password for venya user: "
-    read -rs VENYA_DB_PASSWORD
-    echo ""
+    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+        while :; do
+            echo -n "Enter PostgreSQL password for venya user: "
+            IFS= read -rs VENYA_DB_PASSWORD
+            echo ""
+            [ -n "$VENYA_DB_PASSWORD" ] && break
+            warn "Password cannot be empty."
+        done
+    else
+        error "VENYA_DB_PASSWORD is required for unattended install (stdin is not a TTY)."
+        exit 1
+    fi
 fi
 
 info "Setting up PostgreSQL..."
@@ -248,12 +284,26 @@ VENYA_RECOVERY_CODE_PEPPER=$RECOVERY_PEPPER
 EOF
 
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    # NOTE: the passphrase is NOT written here. pydantic reads .env into the
+    # settings object, not into os.environ — and ca.py/app.py read os.environ.
+    # The passphrase reaches the daemon via the 0640 EnvironmentFile below.
     cat >> "$INSTALL_DIR/.env" << EOF
-VENYA_ADMIN_CA_KEY_PASSPHRASE="$ADMIN_CA_PASSPHRASE"
 VENYA_ADMIN_MTLS__ENABLED=true
 VENYA_ADMIN_MTLS__CA_CERT="$ADMIN_CA_DIR/admin-ca.crt"
 VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS=["$ADMIN_IDENTITY"]
 EOF
+
+    # Runtime passphrase delivery: a 0640 root:venya EnvironmentFile that
+    # systemd (PID1, as root) reads into the service's os.environ — the only
+    # thing ca.py reads. Replaces the old inline Environment= injection into
+    # the 0644 unit (which leaked the secret to every local user). Value is
+    # unquoted base64: systemd strips quotes but unquoted avoids any
+    # version-dependent ambiguity, and base64 has no systemd-special chars.
+    cat > /etc/venya/venya-core.env << EOF
+VENYA_ADMIN_CA_KEY_PASSPHRASE=$ADMIN_CA_PASSPHRASE
+EOF
+    chown root:venya /etc/venya/venya-core.env
+    chmod 0640 /etc/venya/venya-core.env
 fi
 
 # .env holds the DB password + passphrase — always root/venya-only, even without mTLS.
@@ -489,8 +539,10 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     echo "    scp root@${CORE_HOSTNAME}:$ADMIN_CERT_DIR/admin.crt ~/venya-admin.crt"
     echo "    scp root@${CORE_HOSTNAME}:$ADMIN_CERT_DIR/admin.key ~/venya-admin.key"
     echo ""
-    echo "  Admin CA passphrase saved to: $INSTALL_DIR/.env"
-    echo "  Read it with: cat $INSTALL_DIR/.env"
+    echo "  Admin CA passphrase stored in: /etc/venya/venya-core.env (0640 root:venya)."
+    echo "  The venya-core service loads it via EnvironmentFile; it is NOT in .env"
+    echo "  or the unit file. On an unattended install it was randomly generated."
+    echo "  Read it (root) with: sudo cat /etc/venya/venya-core.env"
     echo ""
     echo "  Until you do, admin endpoints will return 403."
     echo "  To disable: set VENYA_ADMIN_MTLS_ENABLED=false and reinstall."
@@ -542,9 +594,10 @@ info "Installing systemd service..."
 SYSTEMD_DIR="/etc/systemd/system"
 sed "s|VENYA_ENV_DIR=/opt/venya|VENYA_ENV_DIR=$INSTALL_DIR|" "$INSTALL_DIR/systemd/venya-core.service" > "$SYSTEMD_DIR/venya-core.service"
 
-if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
-    sed -i "s|Environment=VENYA_ENV_DIR=|Environment=VENYA_ADMIN_CA_KEY_PASSPHRASE=$ADMIN_CA_PASSPHRASE\nEnvironment=VENYA_ENV_DIR=|" "$SYSTEMD_DIR/venya-core.service"
-fi
+# NOTE: no passphrase is injected into the unit here. The unit template carries
+# EnvironmentFile=-/etc/venya/venya-core.env (0640 root:venya, written above),
+# so the secret never lands in this 0644 root:root unit. The leading '-' makes
+# it optional: admin-mTLS-disabled installs (no env file) still start cleanly.
 
 systemctl daemon-reload
 systemctl enable venya-core.service

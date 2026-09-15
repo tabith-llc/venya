@@ -47,6 +47,8 @@ class BrowserEnrollCompleteRequest(BaseModel):
 
 class BrowserEnrollCompleteResponse(BaseModel):
     status: str
+    session_token: str = ""
+    user_id: str = ""
 
 
 # --- Helpers ---
@@ -278,7 +280,11 @@ async def browser_enroll_complete(
         db.commit()
 
         # Set session cookie
-        response = JSONResponse(content=BrowserEnrollCompleteResponse(status="ok").model_dump())
+        response = JSONResponse(
+            content=BrowserEnrollCompleteResponse(
+                status="ok", session_token=access_token.token, user_id=user.user_id
+            ).model_dump()
+        )
         _set_session_cookie(response, access_token.token)
 
         logger.info(
