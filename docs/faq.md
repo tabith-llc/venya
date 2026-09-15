@@ -124,8 +124,8 @@ harbor for good-faith research. Do not file public issues.
 It is *source available* under BUSL 1.1 — deliberately not OSI open source
 during the commercial window. Free to use, modify, and run in production
 below US $10M consolidated revenue and for non-competing use; each version
-converts to MPL 2.0 at its Change Date (2031-01-01) or fourth anniversary,
-whichever comes first. Full terms: [LICENSE](../LICENSE).
+converts to MPL 2.0 four years after its first public distribution (the
+Change Date is defined per version). Full terms: [LICENSE](../LICENSE).
 
 **Can I contribute?**
 Yes — [CONTRIBUTING.md](../CONTRIBUTING.md). Contributions are licensed
