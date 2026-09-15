@@ -55,12 +55,19 @@ def _load_passphrase(env_var: str) -> bytes | None:
     return None
 
 
-def _serialize_key_encrypted(key: ec.EllipticCurvePrivateKey, passphrase: bytes | None) -> bytes:
+def _serialize_key_encrypted(
+    key: ec.EllipticCurvePrivateKey,
+    passphrase: bytes | None,
+    passphrase_env: str,
+) -> bytes:
     """Serialize a private key, optionally encrypting with a passphrase.
 
     Args:
         key: The private key to serialize.
         passphrase: Optional passphrase for encryption.
+        passphrase_env: Name of the env var that should carry the passphrase.
+            Used only to make the "unencrypted" warning actionable — it names
+            the var the caller actually reads (admin vs executor CA differ).
 
     Returns:
         PEM-encoded key bytes (encrypted if passphrase provided).
@@ -74,7 +81,7 @@ def _serialize_key_encrypted(key: ec.EllipticCurvePrivateKey, passphrase: bytes 
     else:
         logger.warning(
             "CA key will be stored UNENCRYPTED — set %s in production",
-            os.environ.get("CA_SECURITY__KEY_PASSPHRASE_ENV", "VENYA_CA_KEY_PASSPHRASE"),
+            passphrase_env,
         )
         return key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -157,7 +164,7 @@ class CAManager:
         passphrase = _load_passphrase(self._key_passphrase_env)
 
         # Store private key (encrypted if passphrase provided)
-        key_pem = _serialize_key_encrypted(private_key, passphrase)
+        key_pem = _serialize_key_encrypted(private_key, passphrase, self._key_passphrase_env)
         self.ca_key_path.write_bytes(key_pem)
         os.chmod(str(self.ca_key_path), 0o600)
 
@@ -618,7 +625,7 @@ class AdminCAManager:
         passphrase = _load_passphrase(self._key_passphrase_env)
 
         # Store private key (encrypted if passphrase provided)
-        key_pem = _serialize_key_encrypted(private_key, passphrase)
+        key_pem = _serialize_key_encrypted(private_key, passphrase, self._key_passphrase_env)
         self.ca_key_path.write_bytes(key_pem)
         os.chmod(str(self.ca_key_path), 0o600)
 

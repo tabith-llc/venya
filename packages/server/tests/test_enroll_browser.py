@@ -188,6 +188,7 @@ class TestBrowserEnrollComplete:
 
         mock_filter = MagicMock()
         mock_filter.first.return_value = mock_user
+        mock_filter.filter.return_value.first.return_value = mock_user
         db = MagicMock()
         db.query.return_value = mock_filter
 

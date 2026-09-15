@@ -8,6 +8,11 @@ User=venya
 Group=venya
 ExecStart=/opt/venya/.venv/bin/venya-server --config /etc/venya/server.toml
 Environment=VENYA_ENV_DIR=/opt/venya
+# Admin CA key passphrase (os.environ-visible; the only thing ca.py reads).
+# Leading '-' = optional: absent when admin mTLS is disabled, so the unit still
+# starts. When enabled, the installer writes this file 0640 root:venya. Never
+# inline in this 0644 unit (that leaks the secret to every local user).
+EnvironmentFile=-/etc/venya/venya-core.env
 Restart=always
 
 # Capability isolation: mlock requires CAP_IPC_LOCK

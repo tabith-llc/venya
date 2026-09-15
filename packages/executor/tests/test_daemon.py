@@ -295,6 +295,31 @@ class TestRegisterErrors:
             with pytest.raises(httpx2.HTTPStatusError):
                 cert_manager.register("test-executor")
 
+    def test_register_readonly_cert_dir_fails_fast(self, config: ExecutorConfig, tmp_ca_dir: Path):
+        """Unwritable cert dir → actionable RuntimeError BEFORE any HTTP call (F1)."""
+        cm = CertificateManager(config)
+        tmp_ca_dir.chmod(0o500)
+        try:
+            with patch("executor.daemon.httpx2.Client") as MockClient:
+                with pytest.raises(RuntimeError, match="VENYA_EXECUTOR_ENROLLMENT_TOKEN"):
+                    cm.register("test-executor")
+                MockClient.assert_not_called()
+        finally:
+            tmp_ca_dir.chmod(0o700)
+
+    def test_register_write_failure_raises_actionable(self, cert_manager: CertificateManager):
+        """OSError during cert save → actionable RuntimeError (paired: pre-check passed, write failed)."""
+        ca_key, ca_cert = _make_ca_pair()
+        executor_cert = _make_executor_cert(ca_key, ca_cert, "test-executor")
+        mock_response = _make_mock_response(executor_cert, ca_cert, executor_cert.serial_number)
+
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
+            with patch.object(Path, "write_bytes", side_effect=OSError(30, "Read-only file system")):
+                with pytest.raises(RuntimeError, match="could not be saved locally"):
+                    cert_manager.register("test-executor")
+
     def test_register_invalid_ca_signature(self, config: ExecutorConfig):
         """Registration raises CertificateValidationError when cert is not signed by CA."""
         # Create a cert signed by a DIFFERENT CA

@@ -20,7 +20,8 @@ def create_parser() -> argparse.ArgumentParser:
         venya exec <subcommand>                 # Executor lifecycle operations
         venya config <subcommand>               # Manage CLI configuration
         venya credential <subcommand>           # Manage credentials
-        venya enroll <subcommand>               # Headless enrollment
+         venya enroll <token>                    # Enroll with enrollment token + security key
+         venya login <user_id>                   # Authenticate with security key
     """
     parser = argparse.ArgumentParser(
         prog="venya",
@@ -97,6 +98,11 @@ def create_parser() -> argparse.ArgumentParser:
     # list
     list_parser = subparsers.add_parser("list", help="List secrets")
     list_parser.add_argument("prefix", nargs="?", help="Optional key prefix filter")
+    list_parser.add_argument(
+        "--user-id",
+        default=None,
+        help="User ID for authentication (required if no token stored)",
+    )
     list_parser.add_argument(
         "--executor",
         default=None,
@@ -664,32 +670,15 @@ def create_parser() -> argparse.ArgumentParser:
     cred_remove.add_argument("credential_id", help="Credential ID to remove")
 
     # enroll
-    enroll_parser = subparsers.add_parser("enroll", help="Headless enrollment using an enrollment token")
-    enroll_sub = enroll_parser.add_subparsers(dest="enroll_command")
+    enroll_parser = subparsers.add_parser("enroll", help="Enroll with a security key using an enrollment token")
+    enroll_parser.add_argument("token", help="Enrollment token")
+    enroll_parser.add_argument("--label", help="Label for the new credential")
+    enroll_parser.add_argument("--json", action="store_true")
 
-    # enroll start
-    enroll_start = enroll_sub.add_parser("start", help="Start enrollment: get WebAuthn challenge from token")
-    enroll_start.add_argument("token", help="Enrollment token")
-    enroll_start.add_argument(
-        "--json",
-        action="store_true",
-        help="Output in JSON format",
-    )
-
-    # enroll complete
-    enroll_complete = enroll_sub.add_parser("complete", help="Complete enrollment: submit WebAuthn attestation")
-    enroll_complete.add_argument("token", help="Enrollment token")
-    enroll_complete.add_argument("challenge_id", help="Challenge ID from enroll start")
-    enroll_complete.add_argument("response", help="WebAuthn attestation response (JSON)")
-    enroll_complete.add_argument(
-        "--label",
-        help="Label for the new credential",
-    )
-    enroll_complete.add_argument(
-        "--json",
-        action="store_true",
-        help="Output in JSON format",
-    )
+    # login
+    login_parser = subparsers.add_parser("login", help="Authenticate with a security key")
+    login_parser.add_argument("user_id", help="User ID to authenticate as")
+    login_parser.add_argument("--json", action="store_true")
 
     return parser
 

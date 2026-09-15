@@ -28,8 +28,11 @@ logger = logging.getLogger("venya.executor.strategies.sbx")
 # tmpfs base on host — secrets never touch disk
 SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec
 
-# tmpfs base for per-run sandboxes' host workspace — never touches disk
-WORKSPACE_TMPFS_BASE = "/dev/shm/venya-workspaces"  # nosec
+# Disk-backed base for per-run sandboxes' host workspace. Must NOT be tmpfs
+# (/dev/shm): sbx bind-mounts the workspace into the microVM via virtio-fs,
+# which cannot share a tmpfs path ("workspace ... was not mounted into the
+# sandbox"). Ephemeral, non-secret, deleted per-run and swept on daemon start.
+WORKSPACE_BASE = str(Path.home() / ".venya-workspaces")  # nosec
 
 # Where secrets appear inside the sandbox. The shell agent runs as non-root
 # (uid 1000) and /run is root-owned, so the dir must live under the image's
@@ -50,11 +53,12 @@ SBX_TIMEOUT = 3600  # 1 hour
 SBX_CREATE_TIMEOUT = 240
 
 
-def sweep_workspace_base(base: str = WORKSPACE_TMPFS_BASE) -> int:
+def sweep_workspace_base(base: str = WORKSPACE_BASE) -> int:
     """Delete orphaned ws_* workspace directories from dead daemon runs.
 
-    /dev/shm survives daemon kills and reboots but sandboxes never do, so at
-    daemon start every ws_* directory in the base is by definition an orphan.
+    The host workspace base survives daemon kills and reboots but sandboxes
+    never do, so at daemon start every ws_* directory in the base is by
+    definition an orphan.
     Unconditional sweep is safe: nothing but this package creates ws_* dirs
     there (alpha deployment: one executor daemon per host). Best-effort —
     failures are logged, not raised.
@@ -183,7 +187,7 @@ class SbxStrategy(InjectionStrategy):
             sandbox_name: Unique name for the sandbox.
             workspace: Host directory to mount as the sandbox workspace.
                 When None, a per-run directory is created under
-                WORKSPACE_TMPFS_BASE and tracked in self._workspace_dir so
+                WORKSPACE_BASE and tracked in self._workspace_dir so
                 remove_sandbox deletes it. Ownership rule: the strategy
                 deletes only what it created — a caller-supplied workspace
                 is always passed through untouched and never deleted.
@@ -193,8 +197,8 @@ class SbxStrategy(InjectionStrategy):
             # Existing path is mandatory: sbx create prompts interactively
             # ("create it? (y/N)") for a missing workspace, which reads EOF
             # in a non-TTY subprocess and fails with "user cancelled operation".
-            os.makedirs(WORKSPACE_TMPFS_BASE, mode=0o700, exist_ok=True)
-            workspace = tempfile.mkdtemp(prefix="ws_", dir=WORKSPACE_TMPFS_BASE)
+            os.makedirs(WORKSPACE_BASE, mode=0o700, exist_ok=True)
+            workspace = tempfile.mkdtemp(prefix="ws_", dir=WORKSPACE_BASE)
             self._workspace_dir = workspace
             created_workspace = True
 
@@ -216,6 +220,40 @@ class SbxStrategy(InjectionStrategy):
 
         self._sandbox_name = sandbox_name
         logger.info("Created Docker Sandbox: %s", sandbox_name)
+        self._copy_sshpass(sandbox_name)
+
+    def _copy_sshpass(self, sandbox_name: str) -> None:
+        """Copy sshpass binary into the sandbox (no-op if not on host)."""
+        host_sshpass = shutil.which("sshpass")
+        if not host_sshpass:
+            logger.debug("sshpass not found on host; skipping sandbox copy")
+            return
+        result = subprocess.run(  # nosec
+            ["sbx", "cp", host_sshpass, f"{sandbox_name}:/usr/bin/sshpass"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning("sbx cp sshpass failed: %s; falling back to /tmp", result.stderr)
+            with open(host_sshpass, "rb") as fh:
+                binary = fh.read()
+            subprocess.run(  # nosec
+                # nosec B108: /tmp here is inside the sandbox's own
+                # isolated microVM filesystem, not a shared host tmp.
+                ["sbx", "exec", "-i", sandbox_name, "tee", "/tmp/sshpass"],  # nosec B108
+                input=binary,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            subprocess.run(  # nosec
+                ["sbx", "exec", sandbox_name, "chmod", "+x", "/tmp/sshpass"],  # nosec B108
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
 
     def copy_secrets_into_sandbox(self, mounts: list[SecretMount]) -> None:
         """Copy secrets from host tmpfs into the sandbox.
@@ -326,18 +364,29 @@ class SbxStrategy(InjectionStrategy):
             dns_resolver=dns_resolver,
         )
 
+        # Run as the daemon user, never via sudo: the sbx daemon and
+        # `sbx login` credentials live under the daemon user, and the
+        # root context is unauthenticated ("Not authenticated to Docker").
+        # --sandbox (not --name) scopes the rule to this sandbox.
+        # ponytail: one scoped rule per run is never explicitly removed;
+        # if the daemon does not GC rules for dead sandboxes, sweep with
+        # `sbx policy rm` when `sbx policy ls` grows unbounded.
         for host in egress.get_allowed_hosts():
+            if not host:
+                raise RuntimeError(
+                    f"Egress allowlist contains an empty entry; " f"refusing to apply policy for sandbox {sandbox_name}"
+                )
+            cmd = [
+                "sbx",
+                "policy",
+                "allow",
+                "network",
+                host,
+                "--sandbox",
+                sandbox_name,
+            ]
             result = subprocess.run(  # nosec B603 B607
-                [
-                    "sudo",
-                    "sbx",
-                    "policy",
-                    "allow",
-                    "network",
-                    host,
-                    "--name",
-                    sandbox_name,
-                ],
+                cmd,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -349,8 +398,14 @@ class SbxStrategy(InjectionStrategy):
                     sandbox_name,
                     result.stderr,
                 )
-            else:
-                logger.debug("Allowed network %s for sandbox %s", host, sandbox_name)
+                # Fail loud: a swallowed registration failure leaves the
+                # sandbox under deny-all and the command dies later with an
+                # opaque network error (e.g. SSH kex closed by remote).
+                raise RuntimeError(
+                    f"Failed to register egress allow {host} for sandbox "
+                    f"{sandbox_name} (cmd: {' '.join(cmd)}): {result.stderr.strip()}"
+                )
+            logger.debug("Allowed network %s for sandbox %s", host, sandbox_name)
 
     def execute_command(self, command: str) -> subprocess.CompletedProcess:
         """Execute a command inside the sandbox.

@@ -93,7 +93,7 @@ def run_command(args: Any) -> int:
 
     # Authenticate if no token is available (init, recovery, config, and exec are public)
     command = args.command
-    if command not in ("init", "recovery", "config", "exec") and not client.config.access_token:
+    if command not in ("init", "enroll", "login", "recovery", "config", "exec") and not client.config.access_token:
         user_id = getattr(args, "user_id", None)
         try:
             print("Authenticating with security key...")
@@ -131,6 +131,8 @@ def run_command(args: Any) -> int:
             return cmd_credential(client, args)
         elif command == "enroll":
             return cmd_enroll(client, args)
+        elif command == "login":
+            return cmd_login(client, args)
         elif command == "recovery":
             return cmd_recovery(client, args)
         elif command == "run":
@@ -207,7 +209,9 @@ def cmd_init(client: APIClient, args: Any) -> int:
             print("RECOVERY CODE — Print and store securely!")
             print("This code is printed only once and never stored.")
             print("=" * 50)
-            _print_sensitive(recovery_code, getattr(args, "show_sensitive", False))
+            # Recovery code is always shown in full — it is only printed once
+            # and is the sole disaster-recovery mechanism if all admin keys are lost.
+            print(f"  {recovery_code}")
             print("=" * 50)
         return 0
     except Fido2NotFoundError as e:
@@ -1294,7 +1298,6 @@ def _elevate(client: APIClient) -> str:
     from .fido2_client import (
         Fido2Auth,
         Fido2ClientError,
-        Fido2NotFoundError,
     )
 
     fido2 = Fido2Auth(client.config.server_url)
@@ -1315,51 +1318,65 @@ def _elevate(client: APIClient) -> str:
         UserVerificationRequirement,
     )
 
-    from .fido2_client import _b64url_decode
+    from .fido2_client import Fido2Auth
+    from .webauthn import b64_decode_id
 
-    challenge = _b64url_decode(options["challenge"])
+    # Use the production normalizer (single source of truth for server JSON shape)
+    fido2 = Fido2Auth(client.config.server_url)
+    norm = fido2.normalize_webauthn_options(options)
+    challenge = b64_decode_id(norm["challenge"])
+
     allow_credentials = []
-    for cred in options.get("allow_credentials", []):
-        cred_id = _b64url_decode(cred["id"])
+    for cred in norm.get("allow_credentials", []) or []:
         allow_credentials.append(
             PublicKeyCredentialDescriptor(
                 type=cred.get("type", "public-key"),
-                id=cred_id,
+                id=cred["id"],  # already decoded by normalizer
                 transports=cred.get("transports"),
             )
         )
 
-    uv_map = {
-        "discouraged": UserVerificationRequirement.DISCOURAGED,
-        "preferred": UserVerificationRequirement.PREFERRED,
-        "required": UserVerificationRequirement.REQUIRED,
-    }
-    user_verification = uv_map.get(
-        options.get("user_verification", "preferred"),
-        UserVerificationRequirement.PREFERRED,
-    )
-
     public_key = PublicKeyCredentialRequestOptions(
         challenge=challenge,
-        timeout=options.get("timeout"),
-        rp_id=options.get("rp_id"),
+        timeout=norm.get("timeout"),
+        rp_id=norm.get("rp_id"),
         allow_credentials=allow_credentials or None,
-        user_verification=user_verification,
+        user_verification=UserVerificationRequirement.REQUIRED,
     )
 
     request_options = CredentialRequestOptions(public_key=public_key)
 
-    # Step 3: Perform WebAuthn assertion
-    from fido2.client import WebAuthnClient
-    from fido2.hid import list_devices
+    # Step 3: Perform WebAuthn assertion (retry on wrong PIN).
+    # UV/PIN dispatch is in Fido2Auth._get_assertion (see full comment there):
+    # clientPin-only keys are asserted via Ctap2.get_assertion directly.
+    from fido2.client import ClientError, CtapError
 
     try:
-        devices = list_devices()
-        if not devices:
-            raise Fido2NotFoundError("No FIDO2 device found")
-        rp_id = public_key.rp_id or "localhost"
-        webauthn_client = WebAuthnClient(rp_id)
-        assertion = webauthn_client.get_assertion(request_options.public_key)
+        max_pin_retries = 3
+        for attempt in range(max_pin_retries):
+            try:
+                assertion = fido2._get_assertion(request_options, timeout=60.0)
+                break
+            except (ClientError, CtapError) as e:
+                # fido2 may surface a CTAP error wrapped in ClientError (original in
+                # e.cause); unwrap so the PIN retry below still applies.
+                if isinstance(e, ClientError) and isinstance(e.cause, CtapError):
+                    e = e.cause
+                if isinstance(e, ClientError):
+                    if e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
+                        raise APIClientError(
+                            "Security key has no PIN set and cannot verify the user "
+                            "another way. Set a PIN on the key (e.g. yubikey-manager), "
+                            "then try again."
+                        ) from e
+                    raise
+                if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
+                    if attempt < max_pin_retries - 1:
+                        continue
+                    raise APIClientError(f"PIN incorrect after {max_pin_retries} attempts") from e
+                if e.code == CtapError.ERR.PIN_BLOCKED:
+                    raise APIClientError("Security key PIN is blocked.") from e
+                raise
     except OSError as e:
         err_str = str(e).lower()
         if "fido" in err_str or "device" in err_str or "usb" in err_str or "no such" in err_str:
@@ -1373,27 +1390,9 @@ def _elevate(client: APIClient) -> str:
             raise APIClientError("Please touch your security key") from e
         raise APIClientError(f"FIDO2 error: {e}") from e
 
-    # Step 4: Format assertion
-    from .fido2_client import _b64url_encode, _serialize_auth_data, _serialize_client_data
-
-    auth_response = assertion.assertions[0]
-    cred_id = auth_response.credential["id"]
-    auth_data = auth_response.auth_data
-    signature = auth_response.signature
-    client_data = assertion.client_data
-
-    response = {
-        "id": _b64url_encode(cred_id),
-        "rawId": _b64url_encode(cred_id),
-        "response": {
-            "clientDataJSON": _b64url_encode(_serialize_client_data(client_data)),
-            "authenticatorData": _b64url_encode(_serialize_auth_data(auth_data)),
-            "signature": _b64url_encode(signature),
-            "userHandle": None,
-        },
-        "type": "public-key",
-        "clientExtensionResults": {},
-    }
+    # Step 4: Format assertion (deduped — also fixes latent bug where the
+    # inline formatter used non-existent AssertionSelection.assertions/.client_data).
+    response = fido2._format_assertion_response(assertion)
 
     # Step 5: Submit assertion to get elevation token
     try:
@@ -1432,22 +1431,24 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
         print("Please touch your security key to register the credential...")
 
         # Step 3: Perform WebAuthn registration
-        from fido2.client import WebAuthnClient
+        from fido2.client import DefaultClientDataCollector, Fido2Client, verify_rp_id
+        from fido2.ctap import CtapError
         from fido2.hid import list_devices
         from fido2.webauthn import (
             PublicKeyCredentialDescriptor,
         )
 
         from .fido2_client import (
+            CliInteraction,
             Fido2NotFoundError,
-            _b64url_decode,
+            _b64_decode_id,
             _b64url_encode,
             _serialize_auth_data,
             _serialize_client_data,
         )
 
-        challenge = _b64url_decode(options["challenge"])
-        user_id = _b64url_decode(options["user"]["id"])
+        challenge = _b64_decode_id(options["challenge"])
+        user_id = _b64_decode_id(options["user"]["id"])
 
         pub_key_cred_params = []
         for param in options.get("pubKeyCredParams", []):
@@ -1461,7 +1462,7 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
         exclude_credentials = []
         for cred in options.get("excludeCredentials", []):
             if "id" in cred:
-                cred_id = _b64url_decode(cred["id"])
+                cred_id = _b64_decode_id(cred["id"])
                 exclude_credentials.append(
                     PublicKeyCredentialDescriptor(
                         type=cred.get("type", "public-key"),
@@ -1485,11 +1486,25 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
         }
 
         try:
-            devices = list_devices()
+            devices = list(list_devices())
             if not devices:
                 raise Fido2NotFoundError("No FIDO2 device found")
-            webauthn_client = WebAuthnClient()
-            credential = webauthn_client.make_credential(public_key)
+            collector = DefaultClientDataCollector("https://localhost", verify_rp_id)
+            interaction = CliInteraction()
+            webauthn_client = Fido2Client(devices[0], collector, user_interaction=interaction)
+            max_pin_retries = 3
+            for attempt in range(max_pin_retries):
+                try:
+                    credential = webauthn_client.make_credential(public_key)
+                    break
+                except CtapError as e:
+                    if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
+                        if attempt < max_pin_retries - 1:
+                            continue
+                        raise APIClientError(f"PIN incorrect after {max_pin_retries} attempts") from e
+                    if e.code == CtapError.ERR.PIN_BLOCKED:
+                        raise APIClientError("Security key PIN is blocked.") from e
+                    raise
         except OSError as e:
             err_str = str(e).lower()
             if "fido" in err_str or "device" in err_str or "usb" in err_str or "no such" in err_str:
@@ -1576,86 +1591,61 @@ def cmd_credential_remove(client: APIClient, args: Any) -> int:
 
 
 def cmd_enroll(client: APIClient, args: Any) -> int:
-    """Enrollment operations (headless, uses enrollment token)."""
-    enroll_command = getattr(args, "enroll_command", None)
-    if enroll_command is None:
-        print("Error: enroll subcommand required (start, complete)", file=sys.stderr)
-        return 1
+    """Single-command enrollment: start → FIDO2 attestation → complete → store token."""
+    from .fido2_client import (
+        Fido2Auth,
+        Fido2ClientError,
+        Fido2NotFoundError,
+        Fido2TimeoutError,
+        Fido2UserInteractionRequiredError,
+    )
 
-    if enroll_command == "start":
-        return cmd_enroll_start(client, args)
-    elif enroll_command == "complete":
-        return cmd_enroll_complete(client, args)
-    else:
-        print(f"Unknown enroll command: {enroll_command}", file=sys.stderr)
-        return 1
-
-
-def cmd_enroll_start(client: APIClient, args: Any) -> int:
-    """Start enrollment: validate token, get WebAuthn challenge."""
+    token = args.token
+    label = getattr(args, "label", None)
     try:
-        token = args.token
-
-        result = client.post(
-            "/api/v1/enroll/browser/start",
-            json={"enrollment_token": token},
-        )
-
-        if getattr(args, "json", False):
-            print(json.dumps(result, indent=2))
-            return 0
-
-        print("Enrollment challenge ready.")
-        print(f"  Challenge ID: {result.get('challenge_id', '')}")
-        print("  Next step: Run 'venya enroll complete' with the WebAuthn attestation response.")
-        return 0
-    except APIClientError as e:
-        print(f"Enrollment start failed: {e}", file=sys.stderr)
-        return 1
-    except Exception as e:
-        print(f"Enrollment start failed: {e}", file=sys.stderr)
-        return 1
-
-
-def cmd_enroll_complete(client: APIClient, args: Any) -> int:
-    """Complete enrollment: submit WebAuthn attestation."""
-    try:
-        token = args.token
-        challenge_id = args.challenge_id
-        response = json.loads(args.response)
-        label = getattr(args, "label", None)
-
+        fido2 = Fido2Auth(client.config.server_url)
+        print("Starting enrollment...")
+        print("Please insert/touch your security key when prompted.\n")
+        start = client.post("/api/v1/enroll/browser/start", json={"enrollment_token": token})
+        request_options = fido2._build_registration_options(start["options"])
+        credential = fido2._get_credential(request_options, timeout=60.0)
+        response = fido2._format_credential_response(credential)
         payload = {
             "enrollment_token": token,
-            "challenge_id": challenge_id,
+            "challenge_id": start["challenge_id"],
             "response": response,
+            "label": label or "CLI",
         }
-        if label:
-            payload["label"] = label
-
-        result = client.post(
-            "/api/v1/enroll/browser/complete",
-            json=payload,
-        )
-
-        if getattr(args, "json", False):
-            print(json.dumps(result, indent=2))
-            return 0
-
-        print("Enrollment completed successfully.")
-        print("  Status: ok")
-        print(f"  User ID: {result.get('user_id', '')}")
-        print(f"  Credential ID: {result.get('credential_id', '')}")
-        print("  Next step: Run 'venya run' to authenticate with your new key.")
+        result = client.post("/api/v1/enroll/browser/complete", json=payload)
+        session_token = result.get("session_token", "")
+        if not session_token:
+            print("Enrollment completed but server returned no session token.", file=sys.stderr)
+            return 1
+        client.config.access_token = session_token
+        print(f"Enrollment complete. Authenticated as {result.get('user_id', '')}.")
         return 0
-    except APIClientError as e:
-        print(f"Enrollment complete failed: {e}", file=sys.stderr)
+    except (Fido2NotFoundError, Fido2TimeoutError, Fido2UserInteractionRequiredError, Fido2ClientError) as e:
+        print(f"Enrollment failed: {e}", file=sys.stderr)
         return 1
-    except json.JSONDecodeError as e:
-        print(f"Invalid response JSON: {e}", file=sys.stderr)
+    except APIClientError as e:
+        print(f"Enrollment failed: {e}", file=sys.stderr)
         return 1
     except Exception as e:
-        print(f"Enrollment complete failed: {e}", file=sys.stderr)
+        print(f"Enrollment failed: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_login(client: APIClient, args: Any) -> int:
+    """Authenticate with a security key and store the session token."""
+    try:
+        result = client.authenticate(user_id=args.user_id)
+        print(f"Authenticated as {result['user_id']}.")
+        return 0
+    except APIClientAuthenticationError as e:
+        print(f"Login failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Login failed: {e}", file=sys.stderr)
         return 1
 
 

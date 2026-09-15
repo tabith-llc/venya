@@ -104,14 +104,14 @@ class TestSbxStrategyPrepare:
 class TestSbxStrategyCreateSandbox:
     @pytest.fixture
     def ws_base(self, monkeypatch, tmp_path):
-        """Point WORKSPACE_TMPFS_BASE at tmp_path (hermetic; not real /dev/shm)."""
+        """Point WORKSPACE_BASE at tmp_path (hermetic; not real /dev/shm)."""
         base = tmp_path / "wsbase"
-        monkeypatch.setattr("executor.strategies.sbx_strategy.WORKSPACE_TMPFS_BASE", str(base))
+        monkeypatch.setattr("executor.strategies.sbx_strategy.WORKSPACE_BASE", str(base))
         return base
 
     def test_create_sandbox_calls_sbx_create(self):
         strategy = SbxStrategy()
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", "/workspace")
             mock_run.assert_called_once()
@@ -131,10 +131,10 @@ class TestSbxStrategyCreateSandbox:
         as the last argv element (omission was the bug: sbx create prompts on a
         missing path and fails with "user cancelled operation" under non-TTY)."""
         strategy = SbxStrategy()
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123")
-            call_args = mock_run.call_args[0][0]
+            call_args = mock_run.call_args_list[0][0][0]
             assert call_args[:5] == ["sbx", "create", "--name", "venya-test123", "shell"]
             workspace = call_args[len(call_args) - 1]
             assert os.path.isdir(workspace)
@@ -154,27 +154,27 @@ class TestSbxStrategyCreateSandbox:
 
     def test_create_sandbox_uses_configured_timeout(self):
         strategy = SbxStrategy()
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", "/workspace")
-            used = mock_run.call_args.kwargs["timeout"]
+            used = mock_run.call_args_list[0].kwargs["timeout"]
             expected = int(os.environ.get("VENYA_SBX_CREATE_TIMEOUT", SBX_CREATE_TIMEOUT))
             assert used == expected
 
     def test_create_sandbox_timeout_env_override(self, monkeypatch):
         strategy = SbxStrategy()
         monkeypatch.setenv("VENYA_SBX_CREATE_TIMEOUT", "777")
-        with patch("subprocess.run") as mock_run:
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", "/workspace")
-            assert mock_run.call_args.kwargs["timeout"] == 777
+            assert mock_run.call_args_list[0].kwargs["timeout"] == 777
 
 
 class TestSbxStrategyRemoveSandboxWorkspace:
     @pytest.fixture
     def ws_base(self, monkeypatch, tmp_path):
         base = tmp_path / "wsbase"
-        monkeypatch.setattr("executor.strategies.sbx_strategy.WORKSPACE_TMPFS_BASE", str(base))
+        monkeypatch.setattr("executor.strategies.sbx_strategy.WORKSPACE_BASE", str(base))
         return base
 
     def test_remove_sandbox_deletes_created_workspace_and_keeps_base(self, ws_base):
@@ -348,12 +348,43 @@ class TestSbxStrategyNetworkPolicy:
                 strategy.apply_network_policy("venya-test123")
             # 2 allowlist entries + 1 DNS resolver
             assert mock_run.call_count == 3
-            # Check that policy allow commands were called
+            # Pin the exact argv: no sudo (daemon-user context), --sandbox
+            # scoping (sbx 0.38 rejects --name).
             calls = [c[0][0] for c in mock_run.call_args_list]
-            for call in calls:
-                assert "policy" in call
-                assert "allow" in call
-                assert "network" in call
+            expected = [
+                ["sbx", "policy", "allow", "network", host, "--sandbox", "venya-test123"]
+                for host in ["10.10.10.50", "10.10.10.100", "10.27.28.1"]
+            ]
+            assert calls == expected
+
+    def test_apply_network_policy_raises_on_registration_failure(self, tmp_path: Path):
+        """A registration failure must raise, not log-and-continue: a
+        swallowed failure leaves the sandbox under deny-all and the command
+        dies later with an opaque network error (F11)."""
+        strategy = SbxStrategy()
+        strategy._sandbox_name = "venya-test123"
+
+        mock_egress = MagicMock()
+        mock_egress.get_allowed_hosts.return_value = ["10.27.28.22"]
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stderr="unknown flag: --name", stdout="")
+            with patch("executor.egress_filter.EgressFilter", return_value=mock_egress):
+                with pytest.raises(RuntimeError, match="Failed to register egress allow 10.27.28.22"):
+                    strategy.apply_network_policy("venya-test123")
+
+    def test_apply_network_policy_rejects_empty_host(self, tmp_path: Path):
+        strategy = SbxStrategy()
+        strategy._sandbox_name = "venya-test123"
+
+        mock_egress = MagicMock()
+        mock_egress.get_allowed_hosts.return_value = [""]
+
+        with patch("subprocess.run") as mock_run:
+            with patch("executor.egress_filter.EgressFilter", return_value=mock_egress):
+                with pytest.raises(RuntimeError, match="empty entry"):
+                    strategy.apply_network_policy("venya-test123")
+            mock_run.assert_not_called()
 
     def test_apply_network_policy_dns_always_allowed(self, tmp_path: Path):
         strategy = SbxStrategy()

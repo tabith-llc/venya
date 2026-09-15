@@ -109,6 +109,26 @@ class CertificateManager:
             self._load_metadata()
             return
 
+        # Fail before the HTTP call if a cert directory is not writable (e.g.
+        # ReadOnlyPaths=/etc/venya with install-time registration skipped):
+        # registering remotely and then failing the local write burns the
+        # enrollment token and crash-loops the daemon on EROFS.
+        for cert_dir in {
+            Path(self.ca_cert_path).parent,
+            Path(self.cert_path).parent,
+            Path(self.key_path).parent,
+        }:
+            if not os.access(cert_dir, os.W_OK):
+                msg = (
+                    f"Cannot write mTLS certificates: {cert_dir} is not writable "
+                    "(read-only mount or permissions). The executor cannot register at "
+                    "runtime. Reinstall with a non-empty VENYA_EXECUTOR_ENROLLMENT_TOKEN "
+                    "so registration completes at install time, or make the certificate "
+                    "directory writable by the daemon user."
+                )
+                logger.error(msg)
+                raise RuntimeError(msg)
+
         logger.info("Registering executor: %s", executor_id)
 
         # Generate ECDSA P-256 keypair
@@ -180,21 +200,30 @@ class CertificateManager:
         # Validate certificate before saving
         validate_executor_certificate(cert_pem, ca_cert_pem, executor_id)
 
-        # Save CA certificate
-        Path(self.ca_cert_path).write_bytes(ca_cert_pem)
-        logger.info("Saved CA certificate to %s", self.ca_cert_path)
+        # Save CA certificate, signed certificate, and private key
+        try:
+            Path(self.ca_cert_path).write_bytes(ca_cert_pem)
+            logger.info("Saved CA certificate to %s", self.ca_cert_path)
 
-        # Save signed certificate and private key
-        Path(self.cert_path).write_bytes(cert_pem)
-        os.chmod(self.cert_path, 0o644)
+            Path(self.cert_path).write_bytes(cert_pem)
+            os.chmod(self.cert_path, 0o644)
 
-        key_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-        Path(self.key_path).write_bytes(key_pem)
-        os.chmod(self.key_path, 0o600)
+            key_pem = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            Path(self.key_path).write_bytes(key_pem)
+            os.chmod(self.key_path, 0o600)
+        except OSError as e:
+            msg = (
+                f"mTLS certificate write failed: {e}. The server accepted the "
+                "registration but certificates could not be saved locally. Fix the "
+                "read-only mount or permissions on the certificate directory, mint a "
+                "fresh enrollment token, and reinstall."
+            )
+            logger.error(msg)
+            raise RuntimeError(msg) from e
 
         logger.info(
             "Registration complete: serial=%s, expires=%s",

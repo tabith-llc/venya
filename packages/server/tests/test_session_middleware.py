@@ -19,6 +19,14 @@ def _create_test_app():
         pass
 
     app.add_middleware(AuthMiddleware)
+    app.state.config = SimpleNamespace(
+        session=SimpleNamespace(
+            session_timeout=900,
+            access_token_ttl=300,
+            max_session_duration=14400,
+        ),
+        admin_mtls=SimpleNamespace(enabled=False),
+    )
 
     @app.get("/api/v1/protected")
     def protected_endpoint(request: Request):

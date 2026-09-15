@@ -5,6 +5,7 @@ Policy is configurable at initialization and changeable by an admin.
 """
 
 import os
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from typing import Any
@@ -62,6 +63,33 @@ DEFAULT_TRUSTED_PATHS: tuple[str, ...] = (
 # Strict mode allowlist (empty by default — admin must populate)
 STRICT_DEFAULT_COMMANDS: tuple[str, ...] = ()
 
+# SSH options that consume the next token as their value.
+SSH_OPTS_WITH_VALUE: frozenset[str] = frozenset(
+    {
+        "-B",
+        "-b",
+        "-c",
+        "-D",
+        "-E",
+        "-F",
+        "-I",
+        "-i",
+        "-J",
+        "-L",
+        "-l",
+        "-m",
+        "-O",
+        "-o",
+        "-P",
+        "-p",
+        "-R",
+        "-S",
+        "-W",
+        "-e",
+        "-s",
+    }
+)
+
 
 def _load_default_policy() -> CommandPolicy:
     """Load the default command policy (balanced preset)."""
@@ -96,13 +124,18 @@ class CommandValidator:
         # Strip --no-network flag from command for validation
         command = self._strip_flag(command, "--no-network")
 
+        # Host-scoped validation: for ssh/sshpass remote-exec commands,
+        # only the local (jump-host) portion is scanned for dangerous patterns.
+        split = self._split_local_remote(command)
+        local_part = split[0] if split else command
+
         # Check dangerous patterns first (applies to all presets)
-        matched, reason = self._matches_dangerous_pattern(command)
+        matched, reason = self._matches_dangerous_pattern(local_part)
         if matched:
             return False, reason
 
         # Check custom patterns
-        matched, reason = self._matches_custom_pattern(command)
+        matched, reason = self._matches_custom_pattern(local_part)
         if matched:
             return False, reason
 
@@ -131,6 +164,59 @@ class CommandValidator:
         # Remove the flag and any trailing whitespace
         pattern = rf"\s*{re.escape(flag)}\s*"
         return re.sub(pattern, " ", command).strip()
+
+    def _split_local_remote(self, command: str) -> tuple[str, str] | None:
+        """Split an ssh/sshpass command into (local_part, remote_part).
+
+        Returns None if the command is not an ssh/sshpass remote-exec command.
+        The local part contains everything that runs on the jump host.
+        The remote part contains the command that runs on the target host.
+
+        D3: local_part is a token-rejoin, not an original string slice.
+        Equivalent under word-boundary matching (production default).
+        """
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return None  # D2: fail-closed, flat matcher applies
+
+        if not tokens:
+            return None
+
+        first = os.path.basename(tokens[0])
+        if first == "ssh":
+            ssh_idx: int = 0
+        elif first == "sshpass":
+            found: int | None = None
+            for i in range(1, len(tokens)):
+                if os.path.basename(tokens[i]) == "ssh":
+                    found = i
+                    break
+            if found is None:
+                return None
+            ssh_idx = found
+        else:
+            return None  # D1: gate on first token
+
+        # Find destination (first non-option arg to ssh)
+        dest_idx = None
+        i = ssh_idx + 1
+        while i < len(tokens):
+            token = tokens[i]
+            if token in SSH_OPTS_WITH_VALUE:
+                i += 2  # skip flag + value
+            elif token.startswith("-"):
+                i += 1  # boolean flag, --, or concatenated form
+            else:
+                dest_idx = i
+                break
+
+        if dest_idx is None:
+            return None
+
+        local_part = " ".join(tokens[: dest_idx + 1])
+        remote_part = " ".join(tokens[dest_idx + 1 :])
+        return local_part, remote_part
 
     def _parse_allow_hosts(self, command: str) -> list[dict[str, Any]]:
         """Parse --allow-host flags from the command string.

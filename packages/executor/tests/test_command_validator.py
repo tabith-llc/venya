@@ -625,3 +625,97 @@ class TestWordBoundaryMatching:
 
         cfg = CommandValidatorConfig(dangerous_patterns=["custom-danger"])
         assert cfg.dangerous_patterns == ["custom-danger"]
+
+
+# ---------------------------------------------------------------------------
+# Host-scoped validation (ssh/sshpass remote-exec)
+# ---------------------------------------------------------------------------
+
+
+class TestHostScopedValidation:
+    """Tests for host-scoped dangerous-pattern validation.
+
+    For ssh/sshpass remote-exec commands, only the local (jump-host)
+    portion is scanned for dangerous patterns. The remote command
+    (which runs on the target host) is exempt.
+    """
+
+    @pytest.fixture
+    def validator(self):
+        return CommandValidator(policy=make_balanced_policy())
+
+    def test_sshpass_ssh_remote_sudo_allowed(self, validator):
+        """#8b command: sudo is remote (target), not local (jump host)."""
+        cmd = (
+            "sshpass -f /run/secrets/venya/2 ssh "
+            "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+            "tier1@10.27.28.22 sudo apt-get install -y apache2"
+        )
+        valid, _reason = validator.validate(cmd)
+        assert valid is True
+
+    def test_ssh_remote_sudo_allowed(self, validator):
+        """sudo in the remote command portion is allowed."""
+        valid, _reason = validator.validate("ssh user@host sudo cat /etc/shadow")
+        assert valid is True
+
+    def test_local_sudo_still_blocked(self, validator):
+        """sudo before ssh (jump-host) is still blocked."""
+        valid, reason = validator.validate("sudo ssh user@host echo hi")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_ssh_no_remote_command(self, validator):
+        """ssh with no remote command (interactive) passes if no local dangerous."""
+        valid, _reason = validator.validate("ssh user@host")
+        assert valid is True
+
+    def test_non_ssh_command_unchanged(self, validator):
+        """Non-ssh commands are not affected by host-scoping."""
+        valid, reason = validator.validate("rm -rf /")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_ssh_as_argument_not_parsed(self, validator):
+        """D1: 'ssh' as argument to another command triggers flat matcher."""
+        valid, reason = validator.validate("echo ssh user@host sudo rm -rf /")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_ssh_combined_flags(self, validator):
+        """Combined short flags (-46A) are skipped correctly."""
+        valid, _reason = validator.validate("ssh -46A user@host sudo reboot")
+        assert valid is True
+
+    def test_ssh_double_dash_end_of_options(self, validator):
+        """-- end-of-options marker is handled."""
+        valid, _reason = validator.validate("ssh -- user@host sudo reboot")
+        assert valid is True
+
+    def test_sshpass_unmatched_quote_fails_closed(self, validator):
+        """D2: unmatched quote → shlex ValueError → flat matcher → blocked."""
+        valid, reason = validator.validate('ssh user@host "sudo rm -rf /')
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_sshpass_e_flag_no_value(self, validator):
+        """sshpass -e (no value) followed by ssh is parsed correctly."""
+        valid, _reason = validator.validate("sshpass -e ssh user@host sudo systemctl restart nginx")
+        assert valid is True
+
+    def test_scp_still_blocked(self, validator):
+        """scp is not ssh; flat matcher catches it."""
+        valid, reason = validator.validate("scp /etc/shadow user@host:/tmp/")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_ssh_remote_rm_rf_allowed(self, validator):
+        """rm -rf in the remote command is exempt (runs on target)."""
+        valid, _reason = validator.validate("ssh user@host rm -rf /tmp/data")
+        assert valid is True
+
+    def test_ssh_local_rm_rf_blocked(self, validator):
+        """rm -rf as a jump-host command (before ssh) is blocked."""
+        valid, reason = validator.validate("rm -rf /tmp/data && ssh user@host echo hi")
+        assert valid is False
+        assert "Dangerous pattern" in reason
