@@ -6,7 +6,9 @@ Verifies that Fido2Client is instantiated correctly with fido2 2.x API.
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
-from core.cli.fido2_client import Fido2Auth, Fido2NotFoundError
+import httpx2
+import pytest
+from core.cli.fido2_client import Fido2Auth, Fido2ClientError, Fido2NotFoundError
 
 
 class TestFido2ClientInstantiation:
@@ -420,3 +422,64 @@ class TestFormatAssertionResponse:
         assert "clientDataJSON" in result["response"]
         assert "authenticatorData" in result["response"]
         assert result["clientExtensionResults"] == {}
+
+
+class TestPostErrorDetailPropagation:
+    """_post must carry the server's JSON `detail` into Fido2ClientError.
+
+    Regression (F2 physical, cli-409): cmd_init pattern-matches
+    'already initialized' / 'pending enrollment' against the error text,
+    but _post dropped the response body — f71d4c5 removed the parsing on
+    a wrong hypothesis ("Incorrect padding" originated in _b64std_encode;
+    json.loads cannot raise it). Earlier unit tests fed pattern-bearing
+    strings directly to the matcher and stayed green while the parse layer
+    between exception and matcher was dead. These tests construct real
+    httpx2 Responses and let the real raise_for_status()/handler run.
+    """
+
+    @staticmethod
+    def _response(status: int, body: bytes, content_type: str):
+        request = httpx2.Request("POST", "https://venya-core-2/api/v1/init")
+        return httpx2.Response(status, content=body, headers={"content-type": content_type}, request=request)
+
+    def _post_and_catch(self, resp):
+        with patch("httpx2.Client.post", return_value=resp):
+            auth = Fido2Auth(server_url="https://venya-core-2")
+            with pytest.raises(Fido2ClientError) as ei:
+                auth._post("/api/v1/init", {})
+        return str(ei.value)
+
+    def test_409_already_initialized_detail_reaches_message(self):
+        resp = self._response(
+            409,
+            b'{"detail":"Core already initialized with admin \'admin1\'. Cannot re-initialize."}',
+            "application/json",
+        )
+        msg = self._post_and_catch(resp)
+        # cmd_init matcher contract (server wording: routes/init.py:171)
+        assert "already initialized" in msg.lower()
+        assert "developer.mozilla.org" not in msg
+
+    def test_409_pending_enrollment_detail_reaches_message(self):
+        resp = self._response(
+            409,
+            b'{"detail":"A pending enrollment exists for \'admin1\'. Reset required."}',
+            "application/json",
+        )
+        msg = self._post_and_catch(resp)
+        # cmd_init matcher contract (server wording: routes/init.py:183)
+        assert "pending enrollment" in msg.lower()
+
+    def test_non_json_error_body_falls_back_to_status_text(self):
+        resp = self._response(500, b"<html>Internal Server Error</html>", "text/html")
+        msg = self._post_and_catch(resp)
+        assert "500" in msg  # httpx status text fallback, no crash
+
+    def test_non_string_detail_does_not_crash(self):
+        resp = self._response(
+            422,
+            b'{"detail":[{"loc":["body","user_id"],"msg":"field required"}]}',
+            "application/json",
+        )
+        msg = self._post_and_catch(resp)
+        assert msg  # non-empty, Fido2ClientError (not TypeError/AttributeError)
