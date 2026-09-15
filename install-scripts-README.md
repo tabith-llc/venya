@@ -71,10 +71,11 @@ curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
 
 ### `install-venya-cli.sh`
 
-Installs the Venya workstation CLI (`venya`) for the current operator user. **No sudo** — refuses to run as root. Includes:
+Installs the Venya workstation client bundle for the current operator user. **No sudo** — refuses to run as root. Includes:
 
 - **uv** (if missing, into `~/.local/bin`)
 - `venya-cli` via `uv tool install` (isolated venv, `venya` shim in `~/.local/bin`)
+- `venya-mcp` via `uv tool install` (isolated venv, `venya-mcp` shim; `VENYA_INSTALL_MCP=no` skips)
 - FIDO2 `/dev/hidraw*` access check with actionable udev/plugdev instructions
 
 **Usage (on the operator workstation):**
@@ -87,7 +88,8 @@ curl -fsSL http://10.27.27.35:8080/install-venya-cli.sh | VENYA_TARBALL_SHA256=<
 | Variable | Default | Description |
 |---|---|---|
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompt |
-| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-cli-install.tar.gz` | Tarball URL (minimal: `packages/cli` only) |
+| `VENYA_INSTALL_MCP` | `yes` | Set to `no` to install only the CLI (skip `venya-mcp`) |
+| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-cli-install.tar.gz` | Tarball URL (workstation bundle: `packages/cli` + `packages/mcp`) |
 | `VENYA_TARBALL_SHA256` | (required) | SHA-256 of the CLI tarball; aborts without it |
 
 ### `install-debug-tools.sh`
@@ -109,7 +111,7 @@ Each artifact has a matching uninstaller (served from the same origin):
 |---|---|---|---|
 | `uninstall-venya-core.sh` | root (on core VM) | service+unit, nginx site, /opt/venya, /etc/venya, /var/lib/venya (CA keys), well-known CA, trust entries, PostgreSQL db+role, venya user | nginx/postgresql OS packages |
 | `uninstall-venya-executor.sh` | root (on executor VM) | service+mount+seccomp units, /opt/venya, /etc/venya (mTLS key), /var/lib/venya, trust entries, venya user (Rust/uv/sbx state) | sbx/docker packages, /etc/hosts (provisioning-owned); revoke the cert on the core separately |
-| `uninstall-venya-cli.sh` | operator user (no sudo) | uv tool `venya-cli` + shim; optionally `~/.config/venya` (`VENYA_PURGE_CONFIG=yes`) | uv itself |
+| `uninstall-venya-cli.sh` | operator user (no sudo) | uv tools `venya-cli` + `venya-mcp` and shims; optionally `~/.config/venya` (`VENYA_PURGE_CONFIG=yes`) | uv itself |
 
 **Usage:**
 ```bash

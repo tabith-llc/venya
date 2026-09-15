@@ -12,7 +12,7 @@ set -euo pipefail
 # Venya Workstation CLI Uninstaller
 #
 # Removes what install-venya-cli.sh created for the CURRENT user:
-#   - the venya-cli uv tool (venya shim in ~/.local/bin)
+#   - the venya-cli and venya-mcp uv tools (shims in ~/.local/bin)
 #   - optionally ~/.config/venya (config + stored access token)
 #
 # No sudo. Refuses to run as root — the tool is per-user.
@@ -62,10 +62,12 @@ if [ -z "$PURGE" ]; then
 fi
 
 if command -v uv > /dev/null 2>&1; then
-    uv tool uninstall venya-cli > /dev/null 2>&1 || warn "uv tool uninstall reported nothing to remove."
+    uv tool uninstall venya-cli > /dev/null 2>&1 || warn "uv tool uninstall reported nothing to remove (venya-cli)."
+    uv tool uninstall venya-mcp > /dev/null 2>&1 || true
 else
-    warn "uv not found — removing shim/venv manually."
+    warn "uv not found — removing shims/venvs manually."
     rm -rf "$HOME/.local/share/uv/tools/venya-cli" "$HOME/.local/bin/venya"
+    rm -rf "$HOME/.local/share/uv/tools/venya-mcp" "$HOME/.local/bin/venya-mcp"
 fi
 
 if [ "$PURGE" = "yes" ]; then
@@ -75,6 +77,10 @@ fi
 
 if command -v venya > /dev/null 2>&1; then
     error "venya still resolves at $(command -v venya) — inspect manually."
+    exit 1
+fi
+if command -v venya-mcp > /dev/null 2>&1; then
+    error "venya-mcp still resolves at $(command -v venya-mcp) — inspect manually."
     exit 1
 fi
 
