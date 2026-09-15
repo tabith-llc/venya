@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx2
-from core.cli.api_client import APIClient, APIClientError
-from core.cli.commands import cmd_credential_add, cmd_credential_list, cmd_credential_remove
+from venya_cli.api_client import APIClient, APIClientError
+from venya_cli.commands import cmd_credential_add, cmd_credential_list, cmd_credential_remove
 
 
 def _make_mock_response(status_code=200, json_data=None):
@@ -226,7 +226,7 @@ class TestCredentialAdd:
 
         mock_credential = self._make_mock_credential()
 
-        with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
             with patch("fido2.hid.list_devices", return_value=["fake_device"]):
                 with patch("fido2.client.Fido2Client") as mock_fido2:
                     mock_instance = MagicMock()
@@ -280,7 +280,7 @@ class TestCredentialAdd:
 
         mock_credential = self._make_mock_credential()
 
-        with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
             with patch("fido2.hid.list_devices", return_value=["fake_device"]):
                 with patch("fido2.client.Fido2Client") as mock_fido2:
                     mock_instance = MagicMock()
@@ -314,7 +314,7 @@ class TestCredentialAdd:
         client, config_file = _make_client()
         MagicMock()
 
-        with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
             with patch("fido2.hid.list_devices", return_value=[]):
                 args = MagicMock()
                 args.label = "YubiKey 2"
@@ -340,7 +340,7 @@ class TestCredentialAdd:
         mock_http.request.return_value = start_resp
         client._http = mock_http
 
-        with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
             args = MagicMock()
             args.label = "YubiKey 2"
             args.json = False
@@ -371,7 +371,7 @@ class TestCredentialRemove:
         mock_http.request.return_value = mock_response
         client._http = mock_http
 
-        with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
             args = MagicMock()
             args.credential_id = "cred_001"
             args.json = False
@@ -399,7 +399,7 @@ class TestCredentialRemove:
         mock_http.request.return_value = mock_response
         client._http = mock_http
 
-        with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
             args = MagicMock()
             args.credential_id = "cred_nonexistent"
             args.json = False
@@ -423,7 +423,7 @@ class TestCredentialRemove:
         mock_http.request.return_value = mock_response
         client._http = mock_http
 
-        with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
             args = MagicMock()
             args.credential_id = "cred_last"
             args.json = False
@@ -438,7 +438,7 @@ class TestCredentialRemove:
         client, config_file = _make_client()
         MagicMock()
 
-        with patch("core.cli.commands._elevate", side_effect=APIClientError("Elevation failed")):
+        with patch("venya_cli.commands._elevate", side_effect=APIClientError("Elevation failed")):
             args = MagicMock()
             args.credential_id = "cred_001"
             args.json = False
@@ -455,7 +455,7 @@ class TestCredentialRemove:
         mock_http.request.side_effect = httpx2.ConnectError("Connection refused")
         client._http = mock_http
 
-        with patch("core.cli.commands._elevate", return_value="elev_token_xyz"):
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
             args = MagicMock()
             args.credential_id = "cred_001"
             args.json = False

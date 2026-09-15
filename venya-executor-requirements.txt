@@ -2,3 +2,4 @@
 # Executor + Core packages (includes credential injection, mTLS)
 ./packages/core
 ./packages/executor
+./packages/cli

@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
-from core.cli.api_client import APIClient, APIClientError
+from venya_cli.api_client import APIClient, APIClientError
 
 
 class TestAPIClientRegisterExecutor:
@@ -40,7 +40,7 @@ class TestAPIClientRegisterExecutor:
         mock_response.content = b'{"test": true}'
         mock_response.raise_for_status.return_value = None
 
-        with patch("core.cli.api_client.httpx2.Client") as MockClient:
+        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
@@ -68,7 +68,7 @@ class TestAPIClientRegisterExecutor:
         mock_response.content = b"{}"
         mock_response.raise_for_status.return_value = None
 
-        with patch("core.cli.api_client.httpx2.Client") as MockClient:
+        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
@@ -96,7 +96,7 @@ class TestAPIClientRegisterExecutor:
         mock_response.content = b"{}"
         mock_response.raise_for_status.return_value = None
 
-        with patch("core.cli.api_client.httpx2.Client") as MockClient:
+        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
@@ -114,7 +114,7 @@ class TestAPIClientRegisterExecutor:
 
         network_error = httpx2.ConnectError("Connection refused")
 
-        with patch("core.cli.api_client.httpx2.Client") as MockClient:
+        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.side_effect = network_error
 
@@ -138,7 +138,7 @@ class TestAPIClientRegisterExecutor:
             "Bad Request", request=MagicMock(), response=error_response
         )
 
-        with patch("core.cli.api_client.httpx2.Client") as MockClient:
+        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = error_response
 
@@ -158,7 +158,7 @@ class TestAPIClientRegisterExecutor:
         mock_response.content = b""
         mock_response.raise_for_status.return_value = None
 
-        with patch("core.cli.api_client.httpx2.Client") as MockClient:
+        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
@@ -175,7 +175,7 @@ class TestCLIParsing:
 
     def test_admin_executor_enroll(self):
         """admin executor-enroll subcommand is available."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["admin", "executor-enroll", "jump-1"])
@@ -184,7 +184,7 @@ class TestCLIParsing:
 
     def test_exec_register_with_enrollment_token(self):
         """exec register accepts --enrollment-token argument."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(
@@ -203,7 +203,7 @@ class TestCLIParsing:
 
     def test_exec_register_without_enrollment_token(self):
         """exec register works without --enrollment-token."""
-        from core.cli.cli import create_parser
+        from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec", "register"])

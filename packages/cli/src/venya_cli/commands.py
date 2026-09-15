@@ -34,51 +34,6 @@ def _print_sensitive(value: str | None, show: bool) -> None:
         print(f"  {_SENSITIVE_REDACTED}")
 
 
-def _run_migrations(_db_path: str | None = None, _db_key: str | None = None) -> None:
-    """Run Alembic migrations programmatically.
-
-    This is called by `venya init` to ensure the database schema is up to date
-    before bootstrapping. Users never need to run `alembic` directly.
-
-    Args:
-        _db_path: [deprecated] Path to the database file. PostgreSQL is used exclusively.
-        _db_key: [deprecated] Database encryption key. PostgreSQL is used exclusively.
-
-    Raises:
-        RuntimeError: If VENYA_DB_URL is not set or migrations fail.
-    """
-    from alembic import command
-    from alembic.config import Config
-
-    venya_db_url = os.environ.get("VENYA_DB_URL", "")
-    if not venya_db_url:
-        raise RuntimeError(
-            "VENYA_DB_URL not set. Set it before running 'venya init'.\n"
-            "Example:\n"
-            "  VENYA_DB_URL=postgresql://user:pass@host/db venya init"
-        )
-
-    # Find alembic.ini relative to the core package root
-    # __file__ = .../src/venya/cli/commands.py
-    # parent x4 = .../packages/core/
-    _pkg_root = Path(__file__).resolve().parent.parent.parent.parent
-    _alembic_ini = _pkg_root / "alembic.ini"
-    if not _alembic_ini.exists():
-        raise RuntimeError(f"alembic.ini not found at {_alembic_ini}")
-
-    alembic_cfg = Config(str(_alembic_ini))
-
-    # Resolve script_location relative to the alembic.ini directory
-    # (Alembic doesn't do this automatically when run programmatically)
-    ini_dir = _alembic_ini.parent
-    current_script = alembic_cfg.get_main_option("script_location")
-    if current_script and not Path(current_script).is_absolute():
-        alembic_cfg.set_main_option("script_location", str(ini_dir / current_script))
-    print("Running database migrations...")
-    command.upgrade(alembic_cfg, "head")
-    print("Database migrations complete.")
-
-
 def run_command(args: Any) -> int:
     """Run a CLI command.
 
@@ -151,12 +106,14 @@ def run_command(args: Any) -> int:
 def cmd_init(client: APIClient, args: Any) -> int:
     """Bootstrap the core with mandatory FIDO2 enrollment.
 
-    Two-step flow:
-    1. Run migrations
-    2. Call POST /api/v1/init → get FIDO2 challenge
-    3. Perform WebAuthn registration with security key
-    4. Call POST /api/v1/init/complete → get recovery code
-    5. Print recovery code
+    Flow:
+    1. Call POST /api/v1/init → get FIDO2 challenge
+    2. Perform WebAuthn registration with security key
+    3. Call POST /api/v1/init/complete → get recovery code
+    4. Print recovery code
+
+    Migrations are not run here: the core installer migrates the database
+    at install time, and a live server implies a migrated schema.
 
     If --installation-reset is set, resets core to pre-initialization state first.
     """
@@ -181,16 +138,12 @@ def cmd_init(client: APIClient, args: Any) -> int:
             print(f"Reset failed: {e}", file=sys.stderr)
             return 1
 
-    # Run migrations unless skipped
-    if not getattr(args, "skip_migrations", False):
-        try:
-            _run_migrations(getattr(args, "db_path", None), getattr(args, "db_key", None))
-        except RuntimeError as e:
-            print(f"Migration failed: {e}", file=sys.stderr)
-            return 1
-        except Exception as e:
-            print(f"Migration failed: {e}", file=sys.stderr)
-            return 1
+    if getattr(args, "skip_migrations", False):
+        print(
+            "warning: --skip-migrations is a no-op and will be removed; "
+            "migrations run on the server at install time.",
+            file=sys.stderr,
+        )
 
     try:
         fido2 = Fido2Auth(client.config.server_url)
@@ -1728,7 +1681,7 @@ def executor_register(client: APIClient, args: Any) -> int:
 
     # Validate executor_id format before any operations
     try:
-        from core.utils.executor_id import validate_executor_id
+        from .executor_id import validate_executor_id
 
         executor_id = validate_executor_id(executor_id)
     except ValueError as e:
@@ -1916,7 +1869,7 @@ def _get_server_url(args: Any) -> str:
         return args.core_url
 
     try:
-        from core.cli.api_client import Config as CLIConfig
+        from .api_client import Config as CLIConfig
 
         config = CLIConfig()
         url = config.server_url
@@ -2532,7 +2485,7 @@ def cmd_admin_split_ca_key(args: Any) -> int:
     """
     from pathlib import Path
 
-    from core.shamir import split
+    from .shamir import split
 
     ca_dir = _resolve_ca_dir(args)
     ca_key_path = Path(ca_dir) / "ca.key"
@@ -2576,7 +2529,7 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
     """
     from pathlib import Path
 
-    from core.shamir import combine
+    from .shamir import combine
 
     ca_dir = _resolve_ca_dir(args)
     ca_key_path = Path(ca_dir) / "ca.key"

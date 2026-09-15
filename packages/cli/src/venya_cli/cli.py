@@ -45,17 +45,9 @@ def create_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init", help="Bootstrap the core")
     init_parser.add_argument("user_id", help="User ID for first admin")
     init_parser.add_argument(
-        "--db-path",
-        help="[deprecated] PostgreSQL is used exclusively. Set VENYA_DB_URL instead.",
-    )
-    init_parser.add_argument(
-        "--db-key",
-        help="[deprecated] PostgreSQL is used exclusively. Set VENYA_DB_URL instead.",
-    )
-    init_parser.add_argument(
         "--skip-migrations",
         action="store_true",
-        help="Skip running database migrations",
+        help=argparse.SUPPRESS,  # deprecated no-op; migrations run server-side at install
     )
     init_parser.add_argument(
         "--installation-reset",

@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx2
-from core.cli.api_client import APIClient
-from core.cli.commands import cmd_admin_re_enroll
+from venya_cli.api_client import APIClient
+from venya_cli.commands import cmd_admin_re_enroll
 
 
 def _make_mock_response(status_code=200, json_data=None):

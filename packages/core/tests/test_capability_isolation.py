@@ -8,7 +8,6 @@ is assumed compromised.
 """
 
 import importlib
-import sys
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -74,27 +73,15 @@ class TestCapabilityIsolation:
             patch.stopall()
 
     def test_cli_does_not_import_secure_memory(self):
-        """CLI should never import secure_memory (runs on untrusted jump host)."""
-        # Save modules we need to keep (secure_memory is used by other tests)
-        keep = {k: sys.modules[k] for k in sys.modules if "core.engine.secure_memory" in k}
+        """CLI should never import secure_memory (runs on untrusted jump host).
 
-        # Clear cached venya imports (except secure_memory which other tests depend on)
-        modules_to_remove = [k for k in sys.modules if k.startswith("venya") and "core.engine.secure_memory" not in k]
-        for mod in modules_to_remove:
-            del sys.modules[mod]
+        The CLI moved to the venya-cli package; the equivalent check lives in
+        packages/cli/tests/test_capability_isolation.py. Verified here that the
+        core package does not re-expose a cli surface.
+        """
+        import core
 
-        # Import CLI
-
-        # Check that secure_memory is not in any imported module's namespace
-        cli_module_names = [name for name, obj in sys.modules.items() if name and name.startswith("core.cli")]
-        for name in cli_module_names:
-            mod = sys.modules[name]
-            imported = [attr for attr in dir(mod) if not attr.startswith("_")]
-            assert "secure_memory" not in imported, f"secure_memory should not be imported in {name}"
-
-        # Restore saved imports for other tests
-        for k, mod in keep.items():
-            sys.modules[k] = mod
+        assert not hasattr(core, "cli"), "core should no longer expose a cli submodule"
 
 
 class TestSecureMemoryIsolation:
@@ -224,28 +211,6 @@ class TestSecureMemoryIsolation:
         assert "SecureBuffer" not in content, "IAM enrollment manager should not use SecureBuffer"
         assert "secure_mlock" not in content, "IAM enrollment manager should not call secure_mlock"
 
-    def test_cli_commands_do_not_use_secure_memory(self):
-        """CLI commands should not import secure_memory."""
-        from core.cli import commands
-
-        source = commands.__file__
-        with open(source) as f:
-            content = f.read()
-        assert "secure_memory" not in content, "CLI commands should not import secure_memory"
-        assert "SecureBuffer" not in content, "CLI commands should not use SecureBuffer"
-        assert "secure_mlock" not in content, "CLI commands should not call secure_mlock"
-
-    def test_cli_api_client_does_not_use_secure_memory(self):
-        """CLI api client should not import secure_memory."""
-        from core.cli import api_client
-
-        source = api_client.__file__
-        with open(source) as f:
-            content = f.read()
-        assert "secure_memory" not in content, "CLI api client should not import secure_memory"
-        assert "SecureBuffer" not in content, "CLI api client should not use SecureBuffer"
-        assert "secure_mlock" not in content, "CLI api client should not call secure_mlock"
-
     def test_core_factory_does_not_enable_mlock_by_default(self):
         """CoreFactory should not enable mlock by default."""
         from unittest.mock import MagicMock, patch
@@ -325,13 +290,6 @@ class TestSecureMemoryIsolation:
 
         assert not hasattr(core.iam, "secure_mlock"), "secure_mlock should not be accessible from core.iam"
         assert not hasattr(core.iam, "SecureBuffer"), "SecureBuffer should not be accessible from core.iam"
-
-    def test_secure_memory_not_in_cli_module_exports(self):
-        """secure_memory symbols should not be accessible from core.cli."""
-        from core.cli import cli
-
-        assert not hasattr(cli, "secure_mlock"), "secure_mlock should not be accessible from core.cli"
-        assert not hasattr(cli, "SecureBuffer"), "SecureBuffer should not be accessible from core.cli"
 
 
 @pytest.mark.integration
