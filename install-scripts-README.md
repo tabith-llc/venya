@@ -68,6 +68,9 @@ curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
 | `VENYA_EXECUTOR_ID` | `venya-exec-1` | Executor identifier — CONTRACT: used as the relay dial hostname + client-cert SAN; must be resolvable from every core |
 | `VENYA_SERVER_URL` | `https://venya-core` | Core server URL |
 | `VENYA_EXECUTOR_ENROLLMENT_TOKEN` | (empty) | Bootstrap enrollment token — enables mTLS cert registration and heartbeat bootstrap at install time |
+| `VENYA_DOCKER_USERNAME` | (prompt if TTY) | Docker account for sbx agent-template pulls |
+| `VENYA_DOCKER_API_KEY` | (prompt if TTY) | Docker access token — stdin-only handling, never argv/disk; required unless already authenticated |
+| `VENYA_SKIP_DOCKER_LOGIN` | (empty) | `yes` = degraded install (executor runs; sandbox executes fail 503 until `sudo -H -u venya sbx login`) |
 
 ### `install-venya-cli.sh`
 

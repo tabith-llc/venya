@@ -33,6 +33,11 @@ set -euo pipefail
 #                            always wins over an existing hosts entry)
 #   VENYA_VENYA_CA_FILE    - Path to pre-copied Venya CA cert (offline/air-gapped deployments)
 #   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
+#   VENYA_DOCKER_USERNAME  - Docker account for sbx agent-template pulls (prompted if TTY)
+#   VENYA_DOCKER_API_KEY   - Docker access token — handled stdin-only, never argv/disk
+#                            (required unless already authenticated or skipped)
+#   VENYA_SKIP_DOCKER_LOGIN - "yes" = degraded install: executor runs, but sandbox
+#                            execution fails 503 until `sudo -H -u venya sbx login`
 ###############################################################################
 
 # --- Defaults ---
@@ -205,6 +210,91 @@ fi
 mkdir -p /home/venya/.local/share/sandboxes
 chown venya:venya /home/venya/.local/share/sandboxes
 chmod 700 /home/venya/.local/share/sandboxes
+
+# --- Docker auth (sbx template pulls) + sandboxd daemon ---
+# sbx runs microVMs via KVM but pulls its agent template from Docker and
+# requires a per-user sandboxd daemon. Without auth the executor installs
+# fine but every sandbox create fails 503 ("Not authenticated to Docker").
+# The API key travels stdin-only (never argv, never written by this script;
+# sbx stores it in its own credential store under /home/venya).
+if [ "${VENYA_SKIP_DOCKER_LOGIN:-}" = "yes" ]; then
+    warn "VENYA_SKIP_DOCKER_LOGIN=yes — skipping Docker auth."
+    warn "Sandbox execution will fail (503) until: sudo -H -u venya sbx login"
+elif sudo -H -u venya sbx ls < /dev/null > /dev/null 2>&1; then
+    info "sbx already authenticated (sbx ls OK)"
+else
+    DOCKER_USER="${VENYA_DOCKER_USERNAME:-}"
+    DOCKER_KEY="${VENYA_DOCKER_API_KEY:-}"
+    if { [ -z "$DOCKER_USER" ] || [ -z "$DOCKER_KEY" ]; } && [ -t 0 ]; then
+        [ -z "$DOCKER_USER" ] && read -r -p "Docker username (sbx template pulls): " DOCKER_USER
+        if [ -z "$DOCKER_KEY" ]; then
+            read -r -s -p "Docker API key / access token (input hidden): " DOCKER_KEY
+            echo
+        fi
+    fi
+    if [ -n "$DOCKER_USER" ] && [ -n "$DOCKER_KEY" ]; then
+        info "Authenticating sbx to Docker as '${DOCKER_USER}' (token via stdin)..."
+        if printf '%s' "$DOCKER_KEY" | sudo -H -u venya sbx login --username "$DOCKER_USER" --password-stdin > /dev/null 2>&1; then
+            info "Docker auth OK"
+        else
+            error "sbx login failed for '${DOCKER_USER}'. Check the API key/token."
+            error "Re-run the installer with corrected VENYA_DOCKER_USERNAME/VENYA_DOCKER_API_KEY."
+            exit 1
+        fi
+    else
+        error "Docker credentials are required for sandbox execution."
+        error "Set VENYA_DOCKER_USERNAME + VENYA_DOCKER_API_KEY (token; stdin-only handling),"
+        error "or run this installer interactively to be prompted."
+        error "Degraded install (executor runs, sandbox executes fail 503): VENYA_SKIP_DOCKER_LOGIN=yes"
+        exit 1
+    fi
+fi
+
+# --- sandboxd daemon (system-managed, persists across reboots) ---
+cat > /etc/systemd/system/venya-sandboxd.service <<'SANDBOXD_UNIT'
+[Unit]
+Description=Venya sbx sandboxd (Docker Sandboxes daemon, user venya)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=5
+User=venya
+Environment=HOME=/home/venya
+ExecStart=/usr/bin/sbx daemon start
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
+SANDBOXD_UNIT
+# Executor ordering drop-in (does not touch the vendored unit template)
+mkdir -p /etc/systemd/system/venya-executor.service.d
+cat > /etc/systemd/system/venya-executor.service.d/10-sandboxd.conf <<'DROPIN'
+[Unit]
+Wants=venya-sandboxd.service
+After=venya-sandboxd.service
+DROPIN
+systemctl daemon-reload
+systemctl enable venya-sandboxd.service > /dev/null 2>&1
+systemctl restart venya-sandboxd.service
+sleep 2
+if systemctl is-active --quiet venya-sandboxd.service && sudo -H -u venya sbx daemon status < /dev/null > /dev/null 2>&1; then
+    info "sandboxd running (venya-sandboxd.service, enabled)"
+else
+    warn "sandboxd not healthy yet — check: journalctl -u venya-sandboxd; sudo -H -u venya sbx diagnose"
+fi
+
+# --- sbx global network policy (required before any sandbox create) ---
+# deny-all baseline; per-sandbox allow rules are applied from the egress
+# allowlist at execution time. Without this, every sbx create fails with
+# "global network policy has not been initialized".
+if sudo -H -u venya sbx policy init deny-all < /dev/null > /dev/null 2>&1; then
+    info "sbx global network policy initialized (deny-all)"
+else
+    warn "sbx policy init deny-all failed or policy already initialized — verify manually if sandbox creates fail"
+fi
 
 # --- Resolve Core Hostname ---
 # CORE_HOSTNAME is the relay CN-derivation base: the core signs its
