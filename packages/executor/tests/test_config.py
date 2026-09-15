@@ -410,15 +410,21 @@ secret_ttl_seconds = 60
     def test_save_serializes_nested_configs(self, tmp_path: Path):
         self._skip_if_no_tomli_w()
         config_file = tmp_path / "config.toml"
+        ca_file = tmp_path / "audit-ca.crt"
+        ca_file.write_text("dummy-ca")
         cfg = ExecutorConfig(
             cert_rotation=CertificateRotationConfig(rotation_days=7, rotate_before_days=1),
-            audit=AuditForwarderConfig(remote_url="tls://syslog.example.com:6514", max_buffer_size=5000),
+            audit=AuditForwarderConfig(
+                remote_url="https://sink.example.com:6514",
+                ca_cert_path=str(ca_file),
+                max_buffer_size=5000,
+            ),
         )
         cfg.save_file(config_file)
 
         reloaded = ExecutorConfig.from_file(config_file)
         assert reloaded.cert_rotation.rotation_days == 7
-        assert reloaded.audit.remote_url == "tls://syslog.example.com:6514"
+        assert reloaded.audit.remote_url == "https://sink.example.com:6514"
         assert reloaded.audit.max_buffer_size == 5000
 
 
@@ -437,3 +443,57 @@ class TestExecutorConfigModelDump:
         monkeypatch.setenv("VENYA_EXECUTOR_UNKNOWN_FIELD", "should_be_ignored")
         cfg = ExecutorConfig()
         assert not hasattr(cfg, "unknown_field")
+
+
+class TestAuditForwarderValidation:
+    """Fail-closed startup validation of the audit forwarder (truth table).
+
+    Negative cases assert the daemon cannot even construct its config —
+    a misconfigured audit sink must stop startup, not degrade silently
+    (ticket executor-audit-forwarder-verify-false-fallback).
+    """
+
+    def test_unset_remote_url_ok(self):
+        cfg = AuditForwarderConfig()
+        assert cfg.remote_url is None
+        assert cfg.ca_cert_path is None
+
+    def test_https_with_existing_ca_ok(self, tmp_path: Path):
+        ca = tmp_path / "ca.crt"
+        ca.write_text("dummy")
+        cfg = AuditForwarderConfig(remote_url="https://sink:6514/audit", ca_cert_path=str(ca))
+        assert cfg.ca_cert_path == str(ca)
+
+    def test_https_without_ca_rejected(self):
+        with pytest.raises(ValidationError, match="ca_cert_path"):
+            AuditForwarderConfig(remote_url="https://sink:6514/audit")
+
+    def test_https_with_absent_ca_file_rejected(self, tmp_path: Path):
+        with pytest.raises(ValidationError, match="does not exist"):
+            AuditForwarderConfig(remote_url="https://sink:6514/audit", ca_cert_path=str(tmp_path / "nope.crt"))
+
+    def test_http_with_ca_rejected(self, tmp_path: Path):
+        ca = tmp_path / "ca.crt"
+        ca.write_text("dummy")
+        with pytest.raises(ValidationError, match="https"):
+            AuditForwarderConfig(remote_url="http://sink/audit", ca_cert_path=str(ca))
+
+    def test_tls_scheme_rejected(self, tmp_path: Path):
+        ca = tmp_path / "ca.crt"
+        ca.write_text("dummy")
+        with pytest.raises(ValidationError, match="https"):
+            AuditForwarderConfig(remote_url="tls://sink:6514", ca_cert_path=str(ca))
+
+    def test_from_file_rejects_misconfig(self, tmp_path: Path):
+        """Startup negative through the real TOML load path."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text('[audit]\nremote_url = "https://sink:6514/audit"\n')
+        with pytest.raises(ValidationError, match="ca_cert_path"):
+            ExecutorConfig.from_file(config_file)
+
+    def test_env_rejects_misconfig(self, monkeypatch):
+        """Startup negative through the real env load path."""
+        monkeypatch.setenv("VENYA_EXECUTOR_AUDIT__REMOTE_URL", "https://sink:6514/audit")
+        monkeypatch.delenv("VENYA_EXECUTOR_AUDIT__CA_CERT_PATH", raising=False)
+        with pytest.raises(ValidationError, match="ca_cert_path"):
+            ExecutorConfig()

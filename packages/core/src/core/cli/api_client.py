@@ -475,8 +475,7 @@ class APIClient:
             err_str = str(e).lower()
             if any(t in err_str for t in ("ssl", "certificate", "tls", "verif")):
                 raise APIClientError(
-                    f"Registration failed: TLS verification error — {e}. "
-                    "Verify server CA is trusted. In development, export VENYA_TLS_VERIFY=false."
+                    f"Registration failed: TLS verification error — {e}. " "Verify server CA is trusted."
                 ) from e
             raise APIClientError(f"Connection failed: {e}")
         except httpx2.RequestError as e:
