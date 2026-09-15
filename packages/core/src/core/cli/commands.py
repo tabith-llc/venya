@@ -224,6 +224,18 @@ def cmd_init(client: APIClient, args: Any) -> int:
         print(f"FIDO2 registration failed: {e}", file=sys.stderr)
         return 1
     except Fido2ClientError as e:
+        error_text = str(e)
+        if "already initialized" in error_text.lower():
+            print(f"FIDO2 registration failed: {error_text}", file=sys.stderr)
+            return 1
+        elif "pending enrollment" in error_text.lower():
+            print(f"FIDO2 registration failed: {error_text}", file=sys.stderr)
+            print(
+                "A pending enrollment already exists. Use --installation-reset to clear it:",
+                file=sys.stderr,
+            )
+            print(f"  venya init {args.user_id} --installation-reset", file=sys.stderr)
+            return 1
         print(f"FIDO2 registration failed: {e}", file=sys.stderr)
         return 1
     except Exception as e:

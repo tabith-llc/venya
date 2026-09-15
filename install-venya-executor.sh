@@ -271,7 +271,7 @@ secret_base_fd = 100
 ca_bundle = "$CA_BUNDLE_PATH"
 
 # Relay CN allowlist — MUST stay top-level (not under [mtls]). Value mirrors
-# the core's relay-client cert CN (core installer). `venya exec register`
+# the core's relay-client cert CN (core installer). 'venya exec register'
 # writes only cert files, so this line survives registration.
 relay_client_ids = ["${CORE_HOSTNAME}-relay"]
 
