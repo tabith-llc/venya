@@ -53,9 +53,12 @@ fi
 info "Stopping venya-executor..."
 systemctl disable --now venya-executor > /dev/null 2>&1 || true
 systemctl stop tmp-venya_secrets.mount > /dev/null 2>&1 || true
+systemctl disable --now venya-sandboxd > /dev/null 2>&1 || true
 rm -f /etc/systemd/system/venya-executor.service \
       /etc/systemd/system/tmp-venya_secrets.mount \
-      /etc/systemd/system/venya-executor.seccomp
+      /etc/systemd/system/venya-executor.seccomp \
+      /etc/systemd/system/venya-sandboxd.service
+rm -rf /etc/systemd/system/venya-executor.service.d
 systemctl daemon-reload
 
 info "Removing CA trust entries..."
