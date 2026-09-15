@@ -241,6 +241,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy + safe harbor |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (incl. license terms for contributions) |
 | [Agent Instructions](docs/agents.md) | Brief for LLM agents operating Venya via MCP |
+| [Third-Party Notices](THIRD-PARTY-NOTICES.md) | Third-party components and licenses (incl. required proprietary Docker sbx) |
 
 ---
 
@@ -248,7 +249,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 
 Venya is licensed under the Business Source License (BSL) 1.1, Copyright © 2026 Tabith LLC. Free to use, modify, and build on (including in production) below the **US $10M** total-revenue threshold and for non-competing use; a commercial license is required above it or for competing hosted/embedded offerings. Each version converts to **MPL 2.0** four years after its first public distribution.
 
-See [LICENSE](LICENSE) for the full terms. Contributions are accepted under the same license — see [CONTRIBUTING.md](CONTRIBUTING.md).
+See [LICENSE](LICENSE) for the full terms. Contributions are accepted under the same license — see [CONTRIBUTING.md](CONTRIBUTING.md). Third-party components Venya depends on — including the required, proprietary Docker Sandboxes (sbx) runtime, governed by the Docker Subscription Service Agreement — are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ---
 
