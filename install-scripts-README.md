@@ -101,6 +101,26 @@ Installs development/debugging packages not needed for runtime. Only needed for 
 curl -fsSL http://10.27.27.35:8080/install-debug-tools.sh | sudo bash
 ```
 
+### Uninstallers
+
+Each artifact has a matching uninstaller (served from the same origin):
+
+| Script | Runs as | Removes | Keeps |
+|---|---|---|---|
+| `uninstall-venya-core.sh` | root (on core VM) | service+unit, nginx site, /opt/venya, /etc/venya, /var/lib/venya (CA keys), well-known CA, trust entries, PostgreSQL db+role, venya user | nginx/postgresql OS packages |
+| `uninstall-venya-executor.sh` | root (on executor VM) | service+mount+seccomp units, /opt/venya, /etc/venya (mTLS key), /var/lib/venya, trust entries, venya user (Rust/uv/sbx state) | sbx/docker packages, /etc/hosts (provisioning-owned); revoke the cert on the core separately |
+| `uninstall-venya-cli.sh` | operator user (no sudo) | uv tool `venya-cli` + shim; optionally `~/.config/venya` (`VENYA_PURGE_CONFIG=yes`) | uv itself |
+
+**Usage:**
+```bash
+# Core VM / Executor VM
+curl -fsSL http://10.27.27.35:8080/uninstall-venya-core.sh | sudo VENYA_SKIP_PROMPT=yes bash
+curl -fsSL http://10.27.27.35:8080/uninstall-venya-executor.sh | sudo VENYA_SKIP_PROMPT=yes bash
+
+# Operator workstation (no sudo)
+curl -fsSL http://10.27.27.35:8080/uninstall-venya-cli.sh | VENYA_SKIP_PROMPT=yes VENYA_PURGE_CONFIG=yes bash
+```
+
 ## Deployment
 
 ### Build and serve
