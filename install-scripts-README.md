@@ -14,7 +14,7 @@ Installs the Venya Core server on a fresh VM. Includes:
 - **PostgreSQL** (user, database, trust auth for localhost)
 - Python virtual environment + core/server packages
 - Code fixes (database_url, imports, timezone handling)
-- Configuration: `server.toml`, `.env`, Nginx site config
+- Configuration: `.env`, Nginx site config
 - Nginx CA trust installation
 - Database migrations
 - `venya-core.service` systemd unit
