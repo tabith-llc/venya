@@ -135,7 +135,7 @@ Production deployment guide: **[Installation Guide](docs/installation.md)**
 - PostgreSQL — installed automatically by the core installer (16 on Ubuntu 24.04)
 - Python 3.14 — pinned (`>=3.14,<3.15`); provisioned automatically via uv
 - FIDO2 security key (YubiKey, SoloKeys, etc.)
-- Docker Sandboxes (sbx) — installed automatically by the executor installer
+- Docker Sandboxes (sbx) — installed automatically by the executor installer; a Docker account username + API key/access token is required at install time (agent-template pulls; stdin-only handling)
 - MCP-compatible AI client (Claude Code, Cursor)
 
 ### Components
