@@ -4,7 +4,7 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Break-glass recovery endpoint (alias for /admin/recovery)."""
+"""Break-glass recovery endpoint."""
 
 import hashlib
 import logging
@@ -42,10 +42,11 @@ async def recovery(
     request: Request,
     db: Session = Depends(get_db),
 ) -> RecoveryResponse:
-    """Break-glass recovery (alias for /admin/recovery).
+    """Break-glass recovery.
 
-    Validates recovery code + WebAuthn assertion from enrolled device.
-    This endpoint provides a shorter path for CLI use.
+    Validates the one-shot recovery code (sha256(pepper + code)) against the
+    admin's stored hash, mints a new admin, and burns the code (single-use).
+    This is the CLI break-glass path for lockout recovery.
     """
     from datetime import datetime
 
