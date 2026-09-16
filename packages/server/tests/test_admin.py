@@ -478,15 +478,18 @@ class TestAdminSetCommandPolicy:
         assert resp.json()["preset"] == "permissive"
 
 
-class TestAdminRecovery:
-    """Tests for admin recovery endpoint."""
+class TestAdminRecoveryRemoved:
+    """The /admin/recovery route is deleted — it minted admins with no code validation.
 
-    def test_recovery_new_admin(self):
-        """POST /admin/recovery should create new admin user."""
-        db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = None
+    Recovery authority lives solely in POST /api/v1/recovery (validate + burn).
+    These tests assert the dead admin-minting surface stays dead: the path
+    404s and is absent from the OpenAPI schema.
+    """
+
+    def test_admin_recovery_route_gone(self):
+        """POST /api/v1/admin/recovery must 404 (route removed)."""
         backend = MagicMock()
-        backend.get_session.return_value = db
+        backend.get_session.return_value = MagicMock()
         app = _create_test_app(backend=backend)
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -498,31 +501,16 @@ class TestAdminRecovery:
                 "webauthn_assertion": {"challenge": "abc"},
             },
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["success"] is True
-        assert data["action"] == "new_admin"
-        assert data["user_id"] == "newadmin"
+        assert resp.status_code == 404
 
-    def test_recovery_user_exists(self):
-        """POST /admin/recovery should return 400 if user already exists."""
-        user = SimpleNamespace(user_id="existing")
-        db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = user
+    def test_admin_recovery_absent_from_openapi(self):
+        """/admin/recovery must not appear in the OpenAPI schema."""
         backend = MagicMock()
-        backend.get_session.return_value = db
+        backend.get_session.return_value = MagicMock()
         app = _create_test_app(backend=backend)
 
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/admin/recovery",
-            json={
-                "recovery_code": "recovery-123",
-                "new_user_id": "existing",
-                "webauthn_assertion": {"challenge": "abc"},
-            },
-        )
-        assert resp.status_code == 400
+        schema = app.openapi()
+        assert "/api/v1/admin/recovery" not in schema["paths"]
 
 
 class TestAdminAddAllowedCommand:
