@@ -667,6 +667,139 @@ class TestAuditNonAdmin:
         assert data["total"] == 1
         assert data["events"][0]["user_id"] == "alice"
 
+    def test_non_admin_cannot_see_null_userid_events(self):
+        """Non-admin user cannot see events with user_id IS NULL (Gate 3 audit ticket).
+
+        SQL equality NULL == 'alice' evaluates to UNKNOWN, so these rows
+        are excluded. This is the paired negative for test_non_admin_sees_own_events_only.
+        """
+        import json
+        from datetime import datetime
+
+        null_event = SimpleNamespace(
+            id=1,
+            event_type="executor_registered",
+            user_id=None,
+            fields=json.dumps({"executor_id": "exec-1"}),
+            timestamp=datetime.now(UTC),
+        )
+        alice_event = SimpleNamespace(
+            id=2,
+            event_type="command_executed",
+            user_id="alice",
+            fields=json.dumps({"executor_id": "exec-2"}),
+            timestamp=datetime.now(UTC),
+        )
+
+        class MockQuery:
+            def __init__(self, events):
+                self._events = events
+                self._filters = []
+
+            def filter(self, *args, **kwargs):
+                self._filters.append(args)
+                return self
+
+            def count(self):
+                return len(self.all())
+
+            def order_by(self, *args, **kwargs):
+                return self
+
+            def offset(self, *args, **kwargs):
+                return self
+
+            def limit(self, *args, **kwargs):
+                return self
+
+            def all(self):
+                result = self._events
+                for args in self._filters:
+                    if len(args) >= 1:
+                        expr = args[0]
+                        if hasattr(expr, "left") and hasattr(expr, "right"):
+                            col = expr.left
+                            val = expr.right.value if hasattr(expr.right, "value") else expr.right
+                            if hasattr(col, "name") and col.name == "user_id":
+                                result = [e for e in result if e.user_id is not None and e.user_id == val]
+                return result
+
+        db = MagicMock()
+        db.query.return_value = MockQuery([null_event, alice_event])
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = self._make_app_with_user("alice", is_admin=False, backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["events"][0]["user_id"] == "alice"
+        assert data["events"][0]["event_type"] == "command_executed"
+
+    def test_admin_sees_null_userid_events(self):
+        """Admin user can see events with user_id IS NULL (Gate 3 audit ticket).
+
+        Admin has no filter applied, so NULL rows pass through.
+        """
+        import json
+        from datetime import datetime
+
+        null_event = SimpleNamespace(
+            id=1,
+            event_type="executor_registered",
+            user_id=None,
+            fields=json.dumps({"executor_id": "exec-1"}),
+            timestamp=datetime.now(UTC),
+        )
+        admin_event = SimpleNamespace(
+            id=2,
+            event_type="command_executed",
+            user_id="admin",
+            fields=json.dumps({"executor_id": "exec-2"}),
+            timestamp=datetime.now(UTC),
+        )
+
+        class MockQuery:
+            def __init__(self, events):
+                self._events = events
+                self._filters = []
+
+            def filter(self, *args, **kwargs):
+                self._filters.append(args)
+                return self
+
+            def count(self):
+                return len(self.all())
+
+            def order_by(self, *args, **kwargs):
+                return self
+
+            def offset(self, *args, **kwargs):
+                return self
+
+            def limit(self, *args, **kwargs):
+                return self
+
+            def all(self):
+                return self._events
+
+        db = MagicMock()
+        db.query.return_value = MockQuery([null_event, admin_event])
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = self._make_app_with_user("admin", is_admin=True, backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/audit")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        event_types = {e["event_type"] for e in data["events"]}
+        assert "executor_registered" in event_types
+        assert "command_executed" in event_types
+
     def test_admin_sees_all_events(self):
         """Admin user sees events for all users."""
         import json
