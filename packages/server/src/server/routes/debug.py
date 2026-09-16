@@ -16,7 +16,7 @@ that are flagged in the security review (rate_limiter threading.Lock,
 audit.py blocking calls, dual DB sessions per request).
 
 Access control: Admin-only (RBAC) under /api/v1/admin/* path prefix.
-Inherits mTLS enforcement from Caddy configuration.
+Inherits mTLS enforcement from nginx configuration.
 
 Python version compatibility: 3.13+ (uses task.get_name(), get_coro())
 
@@ -179,7 +179,7 @@ router = APIRouter(tags=["debug"])
     - Verify background task health (session-cleanup should be in "pending" state)
 
     **Security:** Admin-only endpoint. Requires valid admin mTLS certificate
-    (Caddy-enforced) + admin role (RBAC-enforced).
+    (nginx-enforced) + admin role (RBAC-enforced).
     """,
     responses={
         status.HTTP_200_OK: {
@@ -200,7 +200,7 @@ async def get_asyncio_state(
     """Get asyncio task and event loop state.
 
     Protected by:
-    1. mTLS client certificate verification (Caddy, /api/v1/admin/* path)
+    1. mTLS client certificate verification (nginx, /api/v1/admin/* path)
     2. Bearer token validation (auth middleware)
     3. RBAC admin role requirement (this endpoint)
 
