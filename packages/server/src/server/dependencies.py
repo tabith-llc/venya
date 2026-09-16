@@ -291,7 +291,7 @@ def require_admin(
             detail="Admin permission required",
         )
 
-    # mTLS admin callers are already verified by Caddy + middleware
+    # mTLS admin callers are already verified by nginx + middleware
     if user_info.get("caller") == "admin":
         return user_info
 

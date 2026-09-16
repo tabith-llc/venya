@@ -141,18 +141,6 @@ class AdminSetCommandPolicyResponse(BaseModel):
     updated: bool
 
 
-class AdminRecoveryRequest(BaseModel):
-    recovery_code: str = Field(..., description="Break-glass recovery code")
-    new_user_id: str = Field(..., description="New admin user ID")
-    webauthn_assertion: dict = Field(..., description="WebAuthn assertion from enrolled device")
-
-
-class AdminRecoveryResponse(BaseModel):
-    success: bool
-    action: str  # "re_establish" or "new_admin"
-    user_id: str
-
-
 class AdminAddAllowedCommandRequest(BaseModel):
     command_path: str = Field(..., description="Absolute path to allowed command")
 
@@ -663,69 +651,6 @@ async def admin_set_command_policy(
             preset=req.preset,
             updated=True,
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
-
-
-@router.post(
-    "/admin/recovery",
-    response_model=AdminRecoveryResponse,
-    status_code=status.HTTP_200_OK,
-)
-async def admin_recovery(
-    req: AdminRecoveryRequest,
-    _: dict = Depends(require_admin),
-    db: Session = Depends(get_db),
-) -> AdminRecoveryResponse:
-    """Break-glass recovery (admin only).
-
-    Validates recovery code + WebAuthn assertion from enrolled device.
-    """
-    try:
-        from core.iam.models import User
-
-        # In production, this would validate the recovery code against
-        # a secure store and verify the WebAuthn assertion.
-        # For now, we create a new admin user.
-        existing = db.query(User).filter(User.user_id == req.new_user_id).first()
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"User already exists: {req.new_user_id}",
-            )
-
-        # Create new admin user
-        new_user = User(
-            user_id=req.new_user_id,
-            auth_mode="security-key",
-            enrolled_at=datetime.now(UTC),
-        )
-        db.add(new_user)
-
-        # Add admin role (assuming admin role exists with name "admin")
-        from core.iam.models import Role, RoleMember
-
-        admin_role = db.query(Role).filter(Role.name == "admin").first()
-        if admin_role:
-            membership = RoleMember(
-                user_id=req.new_user_id,
-                role_id=admin_role.id,
-            )
-            db.add(membership)
-
-        db.commit()
-
-        logger.info("Admin recovery: created new admin user %s", req.new_user_id)
-        return AdminRecoveryResponse(
-            success=True,
-            action="new_admin",
-            user_id=req.new_user_id,
-        )
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
