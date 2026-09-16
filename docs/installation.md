@@ -19,7 +19,11 @@ URLs used below always resolve to the current release; pin
 Requirements: Ubuntu 24.04 LTS (tested target) on servers; PostgreSQL and
 nginx are installed automatically by the core installer; Python 3.14 is
 provisioned automatically via `uv`; a FIDO2 security key (YubiKey, TrustKey,
-etc.) for every human operator.
+etc.) for every human operator. **Executor hosts additionally require
+hardware-virtualization access (`/dev/kvm`, `kvm` group)** — sbx runs each
+command in a microVM. If the executor itself is a virtual machine, nested
+virtualization must be enabled in the hypervisor; without it the install
+completes but every sandboxed execution fails.
 
 ## 1. Install the core server
 
