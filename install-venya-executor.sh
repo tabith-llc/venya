@@ -21,7 +21,11 @@ set -euo pipefail
 # Environment variables:
 #   VENYA_INSTALL_DIR   - Install location (default: /opt/venya)
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
-#   VENYA_TARBALL       - URL of the tarball to install (auto-detected if on same host)
+#   VENYA_TARBALL       - Tarball URL (default: latest GitHub release asset —
+#                         https://github.com/tabith-llc/venya/releases/latest/download/venya-executor-install.tar.gz)
+#   VENYA_TARBALL_SHA256 - Pin the expected sha256 (recommended: strict integrity).
+#                         If unset, the installer fetches <tarball-url>.sha256 from the
+#                         same origin as a corruption guardrail and fail-closes on error.
 #   VENYA_EXECUTOR_ID              - Executor ID (default: venya-exec-1). CONTRACT: the ID
 #                                    is the relay dial hostname + client-cert SAN — it MUST
 #                                    be resolvable from every core (e.g. via /etc/hosts or DNS).
@@ -41,7 +45,7 @@ set -euo pipefail
 ###############################################################################
 
 # --- Defaults ---
-TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-executor-install.tar.gz}"
+TARBALL_URL="${VENYA_TARBALL:-https://github.com/tabith-llc/venya/releases/latest/download/venya-executor-install.tar.gz}"
 EXECUTOR_ID="${VENYA_EXECUTOR_ID:-venya-exec-1}"
 
 # --- Source common library ---

@@ -1,6 +1,6 @@
 # Venya HTTP Install Scripts
 
-Installation scripts for Venya components, served via HTTP for VM provisioning.
+Installation scripts for Venya components, published as GitHub release assets (https://github.com/tabith-llc/venya/releases). The dev LAN server (below) mirrors them for VM provisioning.
 
 ## Scripts
 
@@ -21,7 +21,8 @@ Installs the Venya Core server on a fresh VM. Includes:
 
 **Usage:**
 ```bash
-curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo bash
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
+  VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=<strong-db-password> bash -s
 ```
 
 **Environment variables:**
@@ -32,7 +33,8 @@ curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo bash
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompts |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL venya user password |
 | `VENYA_DB_PASSPHRASE` | `venya_test_passphrase_2024` | Server encryption passphrase |
-| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-core-install.tar.gz` | Tarball URL |
+| `VENYA_TARBALL` | `https://github.com/tabith-llc/venya/releases/latest/download/venya-core-install.tar.gz` | Tarball URL |
+| `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed |
 | `CORE_HOSTNAME` | `$(hostname)` | Hostname for TLS/Nginx (auto-detected by default) |
 | `TLS_MODE` | `internal` | Nginx TLS mode (internal = self-signed, manual = provide certs) |
 | `VENYA_ADMIN_MTLS_ENABLED` | `true` | Enforce admin mTLS (admin client cert required) |
@@ -55,7 +57,9 @@ Installs the Venya Executor daemon on a fresh VM. Includes:
 
 **Usage:**
 ```bash
-curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | sudo \
+  VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
+  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> bash -s
 ```
 
 **Environment variables:**
@@ -64,7 +68,8 @@ curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
 |---|---|---|
 | `VENYA_INSTALL_DIR` | `/opt/venya` | Install location |
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompts |
-| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-executor-install.tar.gz` | Tarball URL |
+| `VENYA_TARBALL` | `https://github.com/tabith-llc/venya/releases/latest/download/venya-executor-install.tar.gz` | Tarball URL |
+| `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed |
 | `VENYA_EXECUTOR_ID` | `venya-exec-1` | Executor identifier — CONTRACT: used as the relay dial hostname + client-cert SAN; must be resolvable from every core |
 | `VENYA_SERVER_URL` | `https://venya-core` | Core server URL |
 | `VENYA_EXECUTOR_ENROLLMENT_TOKEN` | (empty) | Bootstrap enrollment token — enables mTLS cert registration and heartbeat bootstrap at install time |
@@ -83,7 +88,7 @@ Installs the Venya workstation client bundle for the current operator user. **No
 
 **Usage (on the operator workstation):**
 ```bash
-curl -fsSL http://10.27.27.35:8080/install-venya-cli.sh | VENYA_TARBALL_SHA256=<cli-sha256> bash
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
 ```
 
 **Environment variables:**
@@ -92,8 +97,8 @@ curl -fsSL http://10.27.27.35:8080/install-venya-cli.sh | VENYA_TARBALL_SHA256=<
 |---|---|---|
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompt |
 | `VENYA_INSTALL_MCP` | `yes` | Set to `no` to install only the CLI (skip `venya-mcp`) |
-| `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-cli-install.tar.gz` | Tarball URL (workstation bundle: `packages/cli` + `packages/mcp`) |
-| `VENYA_TARBALL_SHA256` | (required) | SHA-256 of the CLI tarball; aborts without it |
+| `VENYA_TARBALL` | `https://github.com/tabith-llc/venya/releases/latest/download/venya-cli-install.tar.gz` | Tarball URL (workstation bundle: `packages/cli` + `packages/mcp`) |
+| `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed |
 
 ### Uninstallers
 
@@ -108,11 +113,11 @@ Each artifact has a matching uninstaller (served from the same origin):
 **Usage:**
 ```bash
 # Core VM / Executor VM
-curl -fsSL http://10.27.27.35:8080/uninstall-venya-core.sh | sudo VENYA_SKIP_PROMPT=yes bash
-curl -fsSL http://10.27.27.35:8080/uninstall-venya-executor.sh | sudo VENYA_SKIP_PROMPT=yes bash
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstall-venya-core.sh | sudo VENYA_SKIP_PROMPT=yes bash
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstall-venya-executor.sh | sudo VENYA_SKIP_PROMPT=yes bash
 
 # Operator workstation (no sudo)
-curl -fsSL http://10.27.27.35:8080/uninstall-venya-cli.sh | VENYA_SKIP_PROMPT=yes VENYA_PURGE_CONFIG=yes bash
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstall-venya-cli.sh | VENYA_SKIP_PROMPT=yes VENYA_PURGE_CONFIG=yes bash
 ```
 
 ## Deployment
@@ -124,21 +129,24 @@ cd /media/dust/dust-ext1/projects/venya-installer
 ./create-tarball-and-serve.sh
 ```
 
-This creates three tarballs (`venya-core-install.tar.gz`, `venya-executor-install.tar.gz`, and the minimal `venya-cli-install.tar.gz` — `packages/cli` only), copies the install scripts **and the shared `venya-common.sh` library** to the serving directory, and starts an HTTP server on port 8080.
+This creates three tarballs (`venya-core-install.tar.gz`, `venya-executor-install.tar.gz`, and the minimal `venya-cli-install.tar.gz` — `packages/cli` + `packages/mcp`), copies the install scripts **and the shared `venya-common.sh` library** to the serving directory, and starts an HTTP server on port 8080.
 
 The piped install one-liners below work because the install scripts self-fetch `venya-common.sh` from the same origin as `VENYA_TARBALL` when it is not next to the script (no-`$0` case, i.e. `curl | sudo bash`).
 
-### Install on VMs
+### Install on VMs (dev LAN server — override the GitHub defaults)
 
 ```bash
 # Core VM
-curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo bash
+curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo \
+  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://10.27.27.35:8080/venya-core-install.tar.gz bash
 
 # Executor VM
-curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo bash
+curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo \
+  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://10.27.27.35:8080/venya-executor-install.tar.gz bash
 
 # Operator workstation (no sudo)
-curl -fsSL http://10.27.27.35:8080/install-venya-cli.sh | VENYA_TARBALL_SHA256=<cli-sha256> bash
+curl -fsSL http://10.27.27.35:8080/install-venya-cli.sh | \
+  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://10.27.27.35:8080/venya-cli-install.tar.gz bash
 
 # Stop the server
 pkill -f 'python3 -m http.server 8080'
@@ -146,16 +154,15 @@ pkill -f 'python3 -m http.server 8080'
 
 ## Dependency Summary
 
-| Dependency | Core | Executor | Debug Tools |
-|---|---|---|---|
-| `curl` | Yes | Yes | — |
-| `sudo` | Yes | Yes | — |
-| `build-essential` | No | Yes | — |
-| `Rust / cargo` | No | Yes | — |
-| `Nginx` | Yes | No | — |
-| `PostgreSQL` | Yes | No | — |
-| `sbx CLI` | No | Yes | — |
-| Debug packages | — | — | Yes |
+| Dependency | Core | Executor |
+|---|---|---|
+| `curl` | Yes | Yes |
+| `sudo` | Yes | Yes |
+| `build-essential` | No | Yes |
+| `Rust / cargo` | No | Yes |
+| `Nginx` | Yes | No |
+| `PostgreSQL` | Yes | No |
+| `sbx CLI` | No | Yes |
 
 ## Post-Install
 

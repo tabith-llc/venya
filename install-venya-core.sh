@@ -22,7 +22,11 @@ set -euo pipefail
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
 #   VENYA_DB_PASSWORD   - PostgreSQL venya user password (prompts if unset)
 #   VENYA_DB_PASSPHRASE - Server passphrase (default: venya_test_passphrase_2024)
-#   VENYA_TARBALL       - URL of the tarball to install (auto-detected if on same host)
+#   VENYA_TARBALL       - Tarball URL (default: latest GitHub release asset —
+#                         https://github.com/tabith-llc/venya/releases/latest/download/venya-core-install.tar.gz)
+#   VENYA_TARBALL_SHA256 - Pin the expected sha256 (recommended: strict integrity).
+#                         If unset, the installer fetches <tarball-url>.sha256 from the
+#                         same origin as a corruption guardrail and fail-closes on error.
 #   CORE_HOSTNAME      - Hostname for TLS/Nginx (default: localhost)
 #   TLS_MODE            - Nginx TLS mode (default: internal)
 ###############################################################################
@@ -30,7 +34,7 @@ set -euo pipefail
 # --- Defaults ---
 # NOTE: This is a development-only default. Production must override via VENYA_DB_PASSPHRASE.
 DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-venya_test_passphrase_2024}"
-TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-core-install.tar.gz}"
+TARBALL_URL="${VENYA_TARBALL:-https://github.com/tabith-llc/venya/releases/latest/download/venya-core-install.tar.gz}"
 CORE_HOSTNAME="${CORE_HOSTNAME:-$(hostname)}"
 TLS_MODE="${TLS_MODE:-internal}"
 
