@@ -885,6 +885,7 @@ class ExecutorDaemon:
                     # Recreate client with new cert
                     self.client = self._create_mtls_client()
                     self.cert_manager.client = self.client
+                    self.reaper.http_client = self.client
                     self.state.cert_serial = self.cert_manager.serial
                     self.state.cert_not_after = self.cert_manager.not_after
                     logger.info(
