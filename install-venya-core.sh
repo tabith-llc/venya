@@ -227,7 +227,7 @@ fi
 sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/dev/null | grep -q 1 || \
     sudo -u postgres psql -c "CREATE DATABASE venya OWNER venya;" > /dev/null 2>&1
 
-# --- Server binds to localhost only — Caddy terminates TLS ---
+# --- Server binds to localhost only — nginx terminates TLS ---
 BIND_ADDRESS="127.0.0.1"
 info "Server will bind to: $BIND_ADDRESS (Nginx handles TLS)"
 
