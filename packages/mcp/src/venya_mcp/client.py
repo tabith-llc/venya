@@ -84,7 +84,7 @@ class VenyaClient:
     """Async HTTP client for the Venya API.
 
     Token lifecycle:
-    1. Read access_token from config file (written by `venya auth`)
+    1. Read access_token from config file (written by `venya login`)
     2. On 401 → POST /api/v1/auth/refresh with current token → get new token
     3. Update config file in-place with new token (atomic write)
     4. If refresh also fails → SessionExpiredError (human must re-auth)
