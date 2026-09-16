@@ -1,9 +1,11 @@
 # Venya Installation Guide
 
 Full deployment guide for the alpha. Venya runs on dedicated Linux VMs or
-bare metal. Three artifacts are installed from one HTTP-served tarball
-origin (referred to below as `<tarball-host>`; alpha participants receive
-the origin URL and the current SHA-256 hashes out-of-band).
+bare metal. All artifacts — installers, tarballs, SHA-256 sidecars — are
+published on the GitHub releases page:
+https://github.com/tabith-llc/venya/releases. The `releases/latest/download`
+URLs used below always resolve to the current release; pin
+`VENYA_TARBALL_SHA256` (hashes on the release page) for strict integrity.
 
 ## Topology
 
@@ -24,15 +26,16 @@ etc.) for every human operator.
 On the core VM (root):
 
 ```bash
-curl -fsSL http://<tarball-host>/install-venya-core.sh | sudo \
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
   VENYA_SKIP_PROMPT=yes \
   VENYA_DB_PASSWORD=<strong-db-password> \
-  VENYA_TARBALL_SHA256=<core-tarball-sha256> \
   bash -s
 ```
 
-The installer is SHA-256-gated: it refuses to run without
-`VENYA_TARBALL_SHA256` and aborts on mismatch.
+The installer is SHA-256-gated and fail-closed: with `VENYA_TARBALL_SHA256`
+set it verifies against that pin (strict integrity — recommended); unset, it
+fetches the `.sha256` sidecar from the same origin as the tarball (corruption
+guardrail). Any fetch failure or mismatch aborts the install.
 
 What it creates: locked `venya` service account; nginx TLS termination
 (internal CA-signed cert, admin mTLS enforcement); PostgreSQL role/database;
@@ -103,9 +106,8 @@ and must match the pattern `^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`.
 Then on the executor VM (root):
 
 ```bash
-curl -fsSL http://<tarball-host>/install-venya-executor.sh | sudo \
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | sudo \
   VENYA_SKIP_PROMPT=yes \
-  VENYA_TARBALL_SHA256=<executor-tarball-sha256> \
   VENYA_SERVER_URL=https://<core-host> \
   VENYA_EXECUTOR_ID=<executor-id> \
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
@@ -155,8 +157,8 @@ On each operator workstation (Linux, **non-root — no sudo**; the installer
 refuses root):
 
 ```bash
-curl -fsSL http://<tarball-host>/install-venya-cli.sh | \
-  VENYA_SKIP_PROMPT=yes VENYA_TARBALL_SHA256=<cli-tarball-sha256> bash
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-cli.sh | \
+  VENYA_SKIP_PROMPT=yes bash
 ```
 
 Installs `venya` (CLI) and `venya-mcp` (MCP server for LLM clients) as
@@ -232,15 +234,15 @@ touch) and retry — the MCP server reads the refreshed token from the same
 
 ## Uninstalling
 
-One uninstaller per artifact, served from the same origin:
+One uninstaller per artifact, published alongside the installers:
 
 ```bash
 # core / executor VMs (root)
-curl -fsSL http://<tarball-host>/uninstall-venya-core.sh | sudo VENYA_SKIP_PROMPT=yes bash
-curl -fsSL http://<tarball-host>/uninstall-venya-executor.sh | sudo VENYA_SKIP_PROMPT=yes bash
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstall-venya-core.sh | sudo VENYA_SKIP_PROMPT=yes bash
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstall-venya-executor.sh | sudo VENYA_SKIP_PROMPT=yes bash
 
 # workstation (non-root; VENYA_PURGE_CONFIG=yes also removes ~/.config/venya)
-curl -fsSL http://<tarball-host>/uninstall-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstall-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
 ```
 
 The core uninstaller also drops the PostgreSQL database and role. Shared

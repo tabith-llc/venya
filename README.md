@@ -129,6 +129,24 @@ See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)**
 
 ### Full Installation
 
+Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Releases page](https://github.com/tabith-llc/venya/releases)**. Install one-liners (Ubuntu 24.04):
+
+```bash
+# Core server (root)
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
+  VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=<strong-db-password> bash -s
+
+# Executor (root; enrollment token from the core admin; Docker credentials via stdin)
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | sudo \
+  VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
+  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> bash -s
+
+# Workstation CLI (non-root)
+curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
+```
+
+Integrity: pin `VENYA_TARBALL_SHA256` (hashes on the release page) for strict verification; unset, the installer fetches the `.sha256` sidecar from the same origin as a corruption guardrail and fail-closes.
+
 Production deployment guide: **[Installation Guide](docs/installation.md)**
 
 ### Prerequisites

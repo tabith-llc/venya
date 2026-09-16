@@ -23,13 +23,16 @@ set -euo pipefail
 # Environment variables:
 #   VENYA_SKIP_PROMPT     - Set to "yes" to skip the confirmation prompt
 #   VENYA_INSTALL_MCP     - Set to "no" to install only the CLI (default: both)
-#   VENYA_TARBALL         - URL of the venya-cli tarball
-#                           (default: http://10.27.27.35:8080/venya-cli-install.tar.gz)
-#   VENYA_TARBALL_SHA256  - REQUIRED. sha256 of the tarball; aborts without it.
+#   VENYA_TARBALL         - URL of the venya-cli tarball (default: latest GitHub
+#                           release asset — https://github.com/tabith-llc/venya/
+#                           releases/latest/download/venya-cli-install.tar.gz)
+#   VENYA_TARBALL_SHA256  - Pin the expected sha256 (recommended: strict integrity).
+#                           If unset, the installer fetches <tarball-url>.sha256 from
+#                           the same origin as a corruption guardrail; fail-closed.
 ###############################################################################
 
 # --- Defaults ---
-TARBALL_URL="${VENYA_TARBALL:-http://10.27.27.35:8080/venya-cli-install.tar.gz}"
+TARBALL_URL="${VENYA_TARBALL:-https://github.com/tabith-llc/venya/releases/latest/download/venya-cli-install.tar.gz}"
 
 # --- Source common library ---
 # Direct execution: the library sits next to the script. Piped execution
@@ -67,7 +70,7 @@ info "Installing Venya CLI for $(id -un)..."
 export PATH="$HOME/.local/bin:$PATH"
 venya_install_uv
 
-# --- Download + verify (hard-fails without VENYA_TARBALL_SHA256) ---
+# --- Download + verify (sha256: explicit pin, else same-origin sidecar; fail-closed) ---
 venya_download_tarball cli
 
 # --- Extract (workstation bundle: packages/cli + packages/mcp) ---

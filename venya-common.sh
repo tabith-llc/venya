@@ -211,23 +211,42 @@ venya_download_tarball() {
         curl -fsSL "$TARBALL_URL" -o "$TARBALL_FILE"
     fi
 
-    # Integrity verification — hard-fail, no exceptions.
-    # This is a security-critical installer; refusing to proceed
-    # without checksum verification is the correct default.
-    if [ -z "${VENYA_TARBALL_SHA256:-}" ]; then
-        error "VENYA_TARBALL_SHA256 is required."
-        error "Set it to the expected sha256sum for the tarball at:"
-        error "  $TARBALL_URL"
-        error "Aborting — refusing to install without integrity verification."
-        rm -f "$TARBALL_FILE"
-        exit 1
+    # Integrity verification — always runs, fail-closed (user ruling 2026-09-16).
+    # Threat model:
+    #   - VENYA_TARBALL_SHA256 set (operator-pinned hash): full integrity AND
+    #     authenticity — the pin breaks the origin trust chain. This is the
+    #     real security mechanism; prefer it in any security-sensitive deploy.
+    #   - Unset: the expected hash is fetched from "${TARBALL_URL}.sha256" on
+    #     the SAME origin as the tarball. That is a corruption/wrong-version
+    #     guardrail, NOT a security boundary — whoever controls the origin
+    #     controls both files. (A piped install already grants the origin code
+    #     execution, so a same-origin hash adds no attacker protection.)
+    # Sidecar fetch failure or empty sidecar aborts — never install unverified.
+    EXPECTED_SHA256="${VENYA_TARBALL_SHA256:-}"
+    if [ -z "$EXPECTED_SHA256" ]; then
+        info "VENYA_TARBALL_SHA256 not set — fetching checksum sidecar from origin..."
+        SIDECAR_FILE=$(mktemp /tmp/venya-sidecar-XXXXXX.sha256)
+        if ! curl -fsSL "${TARBALL_URL}.sha256" -o "$SIDECAR_FILE"; then
+            error "Cannot fetch checksum sidecar: ${TARBALL_URL}.sha256"
+            error "Aborting — refusing to install without integrity verification."
+            error "(Set VENYA_TARBALL_SHA256 explicitly to pin the expected hash.)"
+            rm -f "$SIDECAR_FILE" "$TARBALL_FILE"
+            exit 1
+        fi
+        EXPECTED_SHA256=$(awk 'NR==1 {print $1}' "$SIDECAR_FILE")
+        rm -f "$SIDECAR_FILE"
+        if [ -z "$EXPECTED_SHA256" ]; then
+            error "Sidecar ${TARBALL_URL}.sha256 contained no hash. Aborting."
+            rm -f "$TARBALL_FILE"
+            exit 1
+        fi
     fi
 
     info "Verifying tarball SHA-256..."
     ACTUAL_SHA256=$(sha256sum "$TARBALL_FILE" | awk '{print $1}')
-    if [ "$ACTUAL_SHA256" != "$VENYA_TARBALL_SHA256" ]; then
+    if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
         error "Tarball SHA-256 mismatch!"
-        error "  Expected: $VENYA_TARBALL_SHA256"
+        error "  Expected: $EXPECTED_SHA256"
         error "  Actual:   $ACTUAL_SHA256"
         error "Possible MITM or corrupted download. Aborting."
         rm -f "$TARBALL_FILE"
