@@ -6,7 +6,7 @@
 
 """Reads Venya CLI config to get server URL + access token.
 
-The config file is written by the CLI after `venya auth` completes FIDO2.
+The config file is written by the CLI after `venya login` completes FIDO2.
 It contains at minimum:
   {
     "server_url": "https://venya-core-1",
