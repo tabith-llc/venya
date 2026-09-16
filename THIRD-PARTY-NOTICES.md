@@ -18,6 +18,10 @@ product of Docker, Inc.
   official apt repository. The package is NOT bundled with or redistributed by Venya.
 - **Docker account required:** installation and operation of sbx require a Docker account
   (username + API key/access token) — sbx pulls its agent template from Docker.
+- **Hardware virtualization required:** sbx runs each sandbox as a microVM via the host's
+  virtualization layer (on Linux, `/dev/kvm` — the Venya executor installer adds its
+  service account to the `kvm` group). VM deployments require nested virtualization
+  enabled; without it the executor install completes but sandboxed execution fails.
 - **Its own third-party components:** the `docker-sbx` package ships its own
   `THIRD-PARTY-NOTICES` file (including the GPL-2.0 Linux kernel, erofs-utils, e2fsprogs,
   crun, and containerd components). Docker, Inc. offers corresponding source for the
