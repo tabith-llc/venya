@@ -95,17 +95,6 @@ curl -fsSL http://10.27.27.35:8080/install-venya-cli.sh | VENYA_TARBALL_SHA256=<
 | `VENYA_TARBALL` | `http://10.27.27.35:8080/venya-cli-install.tar.gz` | Tarball URL (workstation bundle: `packages/cli` + `packages/mcp`) |
 | `VENYA_TARBALL_SHA256` | (required) | SHA-256 of the CLI tarball; aborts without it |
 
-### `install-debug-tools.sh`
-
-Installs development/debugging packages not needed for runtime. Only needed for troubleshooting.
-
-**Packages:** `strace`, `ltrace`, `gdb`, `tcpdump`, `net-tools`, `iproute2`, `wget`, `rsync`, `iptables`
-
-**Usage:**
-```bash
-curl -fsSL http://10.27.27.35:8080/install-debug-tools.sh | sudo bash
-```
-
 ### Uninstallers
 
 Each artifact has a matching uninstaller (served from the same origin):
