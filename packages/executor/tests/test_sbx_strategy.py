@@ -53,56 +53,69 @@ class TestSbxStrategyPrepare:
         return tmp_path
 
     def test_prepare_creates_tmpfs_dir(self, strategy, secrets, tmpfs_dir):
-        strategy.prepare(secrets)
+        strategy.prepare(secrets, "11111111-2222-3333-4444-555555555555")
         assert strategy._session_dir is not None
         assert os.path.isdir(strategy._session_dir)
         assert str(tmpfs_dir) in strategy._session_dir
+
+    def test_prepare_dir_embeds_session_id(self, strategy, secrets, tmpfs_dir):
+        """Reaper contract: dir name = session_<server-session-id>_<rand>.
+
+        The reaper parses parts[1] as the session id (UUIDs carry no
+        underscores; the mkdtemp rand tail CAN — [a-z0-9_] charset).
+        """
+        sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        strategy.prepare(secrets, sid)
+        dirname = os.path.basename(strategy._session_dir)
+        assert dirname.startswith(f"session_{sid}_")
+        parts = dirname.split("_")
+        assert parts[1] == sid
 
     def test_prepare_creates_missing_base(self, strategy, secrets, monkeypatch, tmp_path):
         """Fresh installs have no /dev/shm/venya-secrets — prepare() must
         self-provision it instead of raising FileNotFoundError."""
         base = tmp_path / "not-yet-created"
         monkeypatch.setattr("executor.strategies.sbx_strategy.SECRET_TMPFS_BASE", str(base))
-        strategy.prepare(secrets)
+        strategy.prepare(secrets, "11111111-2222-3333-4444-555555555555")
         assert base.is_dir()
         assert os.path.isdir(strategy._session_dir)
 
     def test_prepare_writes_secret_files(self, strategy, secrets, tmpfs_dir):
-        result = strategy.prepare(secrets)
+        result = strategy.prepare(secrets, "11111111-2222-3333-4444-555555555555")
         for mount in result.secret_mounts:
             assert os.path.isfile(mount.path)
 
     def test_prepare_sets_secret_permissions(self, strategy, secrets, tmpfs_dir):
-        result = strategy.prepare(secrets)
+        result = strategy.prepare(secrets, "11111111-2222-3333-4444-555555555555")
         for mount in result.secret_mounts:
             mode = os.stat(mount.path).st_mode & 0o777
             assert mode == 0o400
 
     def test_prepare_returns_correct_mounts(self, strategy, secrets, tmpfs_dir):
-        result = strategy.prepare(secrets)
+        result = strategy.prepare(secrets, "11111111-2222-3333-4444-555555555555")
         assert len(result.secret_mounts) == 2
         for mount in result.secret_mounts:
             assert mount.container_path.startswith("/run/secrets/venya/")
             assert mount.secret_id in mount.path
 
     def test_prepare_empty_secrets(self, strategy, tmpfs_dir):
-        result = strategy.prepare([])
+        result = strategy.prepare([], "11111111-2222-3333-4444-555555555555")
         assert len(result.secret_mounts) == 0
         assert result.extra_fds == []
 
     def test_prepare_no_extra_fds(self, strategy, secrets, tmpfs_dir):
-        result = strategy.prepare(secrets)
+        result = strategy.prepare(secrets, "11111111-2222-3333-4444-555555555555")
         assert result.extra_fds == []
 
     def test_prepare_cleanup_removes_dir(self, strategy, secrets, tmpfs_dir):
-        result = strategy.prepare(secrets)
+        result = strategy.prepare(secrets, "11111111-2222-3333-4444-555555555555")
         session_dir = strategy._session_dir
         assert os.path.isdir(session_dir)
         result.cleanup()
         assert not os.path.exists(session_dir)
 
     def test_prepare_cleanup_is_idempotent(self, strategy, secrets, tmpfs_dir):
-        result = strategy.prepare(secrets)
+        result = strategy.prepare(secrets, "11111111-2222-3333-4444-555555555555")
         result.cleanup()
         result.cleanup()  # Should not raise
 
