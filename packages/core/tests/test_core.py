@@ -30,18 +30,6 @@ class TestCoreGet:
         with pytest.raises(CoreAccessError, match="user_id is required"):
             core.get("test-key")
 
-    def test_get_secret_not_found(self):
-        """Returns CoreAccessError when secret doesn't exist."""
-        core = self._make_core()
-        session = MagicMock()
-        session.query.return_value.filter.return_value.first.return_value = None
-        backend = MagicMock()
-        backend.get_session.return_value = session
-        core.backend = backend
-
-        with pytest.raises(CoreAccessError, match="Secret not found"):
-            core.get("nonexistent", user_id="user1")
-
     def test_get_human_masked_by_default(self):
         """Human caller gets masked value by default."""
         core = self._make_core()
@@ -91,85 +79,6 @@ class TestCoreGet:
         with patch.object(core, "decrypt_secret", return_value="plaintext-value"):
             result = core.get("test-key", caller="executor", user_id="user1")
             assert result == "plaintext-value"
-
-    def test_get_role_access_denied(self):
-        """Raises CoreAccessError when user lacks role access."""
-        core = self._make_core()
-        mock_secret = MagicMock()
-        mock_secret.id = 1
-
-        mock_secret_role = MagicMock()
-        mock_secret_role.role_id = 999
-
-        mock_role = MagicMock()
-        mock_role.id = 1
-
-        session = MagicMock()
-        session.query.return_value.filter.return_value.first.return_value = mock_secret
-        session.query.return_value.filter.return_value.all.side_effect = [
-            [mock_secret_role],  # secret_roles
-            [mock_role],  # named_roles
-        ]
-        backend = MagicMock()
-        backend.get_session.return_value = session
-        core.backend = backend
-
-        with pytest.raises(CoreAccessError):
-            core.get("test-key", caller="executor", user_id="user1", role_names=["admin"])
-
-    def test_get_uses_role_join_when_role_names_provided(self):
-        """get() uses role-based join when role_names is provided."""
-        core = self._make_core()
-        mock_secret = MagicMock()
-        mock_secret.id = 1
-
-        mock_secret_role = MagicMock()
-        mock_secret_role.role_id = 1
-
-        mock_role = MagicMock()
-        mock_role.id = 1
-
-        session = MagicMock()
-        session.query.return_value.filter.return_value.first.return_value = mock_secret
-        session.query.return_value.filter.return_value.all.side_effect = [
-            [mock_secret_role],  # secret_roles
-            [mock_role],  # named_roles
-        ]
-        backend = MagicMock()
-        backend.get_session.return_value = session
-        core.backend = backend
-
-        # Mock the join chain to return the same query object
-        mock_query = MagicMock()
-        mock_query.join.return_value.filter.return_value.first.return_value = mock_secret
-        mock_query.join.return_value.filter.return_value.all.side_effect = [
-            [mock_secret_role],
-            [mock_role],
-        ]
-        session.query.return_value.join.return_value.filter.return_value = mock_query
-
-        result = core.get("test-key", user_id="user1", role_names=["admin"])
-        assert result == "\u2022" * 8
-
-        # Verify join was called (role-based lookup)
-        session.query.return_value.join.assert_called()
-
-    def test_get_uses_ownership_fallback_when_no_role_names(self):
-        """get() uses ownership fallback when role_names is not provided."""
-        core = self._make_core()
-        mock_secret = MagicMock()
-        mock_secret.id = 1
-
-        session = MagicMock()
-        session.query.return_value.filter.return_value.first.return_value = mock_secret
-        backend = MagicMock()
-        backend.get_session.return_value = session
-        core.backend = backend
-
-        core.get("test-key", user_id="user1")
-
-        # Verify only filter was called (no join — ownership lookup)
-        session.query.return_value.join.assert_not_called()
 
 
 class TestCorePut:
@@ -379,3 +288,139 @@ class TestCoreList:
             records = core.list()
             assert len(records) == 1
             assert records[0].key == "test-key"
+
+
+class TestSecretVisibilitySqlite:
+    """Role-scoping visibility truth table on a REAL SQLite backend.
+
+    Replaces the old mock-chain get() tests (they asserted implementation
+    shape and passed vacuously through auto-generated MagicMock chains).
+    Semantics under test: a secret is visible iff one of the caller's roles
+    is in its scope OR the caller created it; no admin bypass; scoped-out
+    keys are indistinguishable from nonexistent ones.
+    """
+
+    def _make_env(self, tmp_path):
+        from core.engine.backend import BackendConfig
+        from core.engine.encryption import KEK_SIZE
+        from core.iam.models import Base, Role, RoleMember, User
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        db_path = tmp_path / "vis.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(bind=engine)
+
+        s = SessionLocal()
+        alice = User(user_id="alice")
+        bob = User(user_id="bob")
+        admin_role = Role(name="admin", permissions="read-write")
+        user_role = Role(name="user", permissions="read")
+        s.add_all([alice, bob, admin_role, user_role])
+        s.flush()
+        s.add_all(
+            [
+                RoleMember(user_id="alice", role_id=admin_role.id),
+                RoleMember(user_id="bob", role_id=user_role.id),
+            ]
+        )
+        s.commit()
+        s.close()
+
+        kek = b"k" * KEK_SIZE
+        backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+        backend._engine = engine
+        backend._session_factory = SessionLocal
+        core = backend.get_core()
+
+        core.put("admin-secret", b"aaa", "alice", ["admin"], "v1", meta={"executor": "exec-1"})
+        core.put("user-secret", b"uuu", "alice", ["user"], "v1", meta={"purpose": "ssh_login"})
+        core.put("bob-secret", b"bbb", "bob", ["admin"], "v1", meta={"username": "bot"})
+        return core, engine
+
+    def test_get_in_scope_role(self, tmp_path):
+        core, engine = self._make_env(tmp_path)
+        try:
+            assert core.get("admin-secret", user_id="alice", role_names=["admin"]) == "\u2022" * 8
+        finally:
+            engine.dispose()
+
+    def test_get_out_of_scope_indistinguishable_from_nonexistent(self, tmp_path):
+        core, engine = self._make_env(tmp_path)
+        try:
+            with pytest.raises(CoreAccessError, match="Secret not found"):
+                core.get("admin-secret", user_id="bob", role_names=["user"])
+            with pytest.raises(CoreAccessError, match="Secret not found"):
+                core.get("nope", user_id="bob", role_names=["user"])
+        finally:
+            engine.dispose()
+
+    def test_get_owner_fallback_without_matching_role(self, tmp_path):
+        core, engine = self._make_env(tmp_path)
+        try:
+            # bob created bob-secret (admin-scoped); bob holds only 'user'
+            assert core.get("bob-secret", user_id="bob", role_names=["user"]) == "\u2022" * 8
+        finally:
+            engine.dispose()
+
+    def test_get_for_injection_in_scope_returns_plaintext_and_meta(self, tmp_path):
+        core, engine = self._make_env(tmp_path)
+        try:
+            secret_id, plaintext, meta = core.get_for_injection("admin-secret", "alice", ["admin"])
+            assert isinstance(secret_id, int)
+            assert plaintext == "aaa"
+            assert meta == {"executor": "exec-1"}
+        finally:
+            engine.dispose()
+
+    def test_get_for_injection_out_of_scope_raises(self, tmp_path):
+        core, engine = self._make_env(tmp_path)
+        try:
+            with pytest.raises(CoreAccessError, match="Secret not found"):
+                core.get_for_injection("admin-secret", "bob", ["user"])
+        finally:
+            engine.dispose()
+
+    def test_list_visibility_matrix(self, tmp_path):
+        core, engine = self._make_env(tmp_path)
+        try:
+            # alice: admin role sees both admin-scoped; user-secret via creator
+            alice_keys = {r.key for r in core.list(role_names=["admin"], user_id="alice")}
+            assert alice_keys == {"admin-secret", "user-secret", "bob-secret"}
+            # bob: user-secret via role, bob-secret via creator; admin-secret HIDDEN
+            bob_keys = {r.key for r in core.list(role_names=["user"], user_id="bob")}
+            assert bob_keys == {"user-secret", "bob-secret"}
+        finally:
+            engine.dispose()
+
+    def test_list_trusted_plane_no_identity_lists_all(self, tmp_path):
+        """No role_names and no user_id = executor/mTLS plane: everything."""
+        core, engine = self._make_env(tmp_path)
+        try:
+            assert {r.key for r in core.list()} == {"admin-secret", "user-secret", "bob-secret"}
+        finally:
+            engine.dispose()
+
+    def test_list_metadata_filters(self, tmp_path):
+        core, engine = self._make_env(tmp_path)
+        try:
+            rows = core.list(role_names=["admin"], user_id="alice", executor="exec-1")
+            assert [r.key for r in rows] == ["admin-secret"]
+            rows = core.list(role_names=["user"], user_id="bob", purpose="ssh_login")
+            assert [r.key for r in rows] == ["user-secret"]
+            rows = core.list(role_names=["admin"], user_id="alice", username="bot")
+            assert [r.key for r in rows] == ["bob-secret"]
+            rows = core.list(role_names=["admin"], user_id="alice", executor="nope")
+            assert rows == []
+        finally:
+            engine.dispose()
+
+    def test_list_prefix_and_visibility_combine(self, tmp_path):
+        core, engine = self._make_env(tmp_path)
+        try:
+            assert core.list(prefix="admin", role_names=["user"], user_id="bob") == []
+            rows = core.list(prefix="admin", role_names=["admin"], user_id="alice")
+            assert [r.key for r in rows] == ["admin-secret"]
+        finally:
+            engine.dispose()

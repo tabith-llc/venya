@@ -9,7 +9,6 @@
 import base64
 import hashlib
 import logging
-import types
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -309,8 +308,15 @@ async def secrets_list(
     purpose: str | None = None,
     username: str | None = None,
     user_info: dict = Depends(require_role("read")),
+    db: Session = Depends(get_db),
 ) -> SecretListResponse:
-    """List secrets, optionally filtered by key prefix or metadata.
+    """List secrets visible to the caller, optionally filtered by prefix/metadata.
+
+    Visibility is enforced in core.list (single enforcement point): a secret
+    is listed iff one of the caller's roles is in its scope OR the caller
+    created it. Scoped-out secrets are indistinguishable from nonexistent
+    ones. Executor (mTLS) callers carry no user_id — trusted injection plane,
+    they see all secrets (they already receive plaintext at execute time).
 
     Metadata filters:
       ?executor=web-server-3    -> secrets tagged for that executor
@@ -318,58 +324,30 @@ async def secrets_list(
       ?username=bot              -> secrets associated with username 'bot'
 
     Combinable: ?executor=web-server-3&purpose=ssh_login
-
-    No filter params -> returns all secrets (unchanged from current behavior).
     """
-    backend = getattr(request.app.state, "backend", None)
-    has_metadata_filter = executor is not None or purpose is not None or username is not None
-
-    if has_metadata_filter and backend is not None:
-        # Use database query for metadata filtering (does not require core)
-        from core.iam.models import Secret
-
-        db = backend.get_session()
-        try:
-            query = db.query(Secret)
-
-            if executor:
-                query = query.filter(Secret.meta["executor"].as_string() == executor)
-            if purpose:
-                query = query.filter(Secret.meta["purpose"].as_string() == purpose)
-            if username:
-                query = query.filter(Secret.meta["username"].as_string() == username)
-
-            if prefix:
-                query = query.filter(Secret.key.like(f"{prefix}%"))
-
-            orm_records = query.all()
-            records = []
-            for r in orm_records:
-                records.append(
-                    types.SimpleNamespace(
-                        id=r.id,
-                        key=r.key,
-                        key_version_id=r.key_version_id,
-                        created_by=r.created_by,
-                        created_at=r.created_at,
-                        role_names=[sr.role.name for sr in r.roles] if r.roles else [],
-                        meta=r.meta,
-                    )
-                )
-        finally:
-            db.close()
-    else:
-        # Use core.list for non-metadata filtering (requires core)
-        core = getattr(request.app.state, "core", None)
-        if core is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Core not initialized",
-            )
-
-        records = core.list(
-            prefix=prefix,
+    core = getattr(request.app.state, "core", None)
+    if core is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Core not initialized",
         )
+
+    user_id = user_info.get("user_id")
+    role_names: list[str] | None = None
+    if user_id is not None:
+        from core.iam.role_manager import RoleManager
+
+        rm = RoleManager(db)
+        role_names = [m.role.name for m in rm.get_user_roles(user_id)]
+
+    records = core.list(
+        prefix=prefix,
+        role_names=role_names,
+        user_id=user_id,
+        executor=executor,
+        purpose=purpose,
+        username=username,
+    )
 
     secrets = []
     for r in records:
