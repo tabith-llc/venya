@@ -13,7 +13,40 @@ from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
-from venya_cli.api_client import APIClient, APIClientAuthenticationError, APIClientError, Config
+from venya_cli.api_client import (
+    APIClient,
+    APIClientAuthenticationError,
+    APIClientError,
+    Config,
+    default_config_dir,
+)
+
+# ---------------------------------------------------------------------------
+# Default config directory (platform resolution)
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultConfigDir:
+    """Platform-appropriate config directory resolution."""
+
+    def test_darwin_uses_application_support(self):
+        """macOS: ~/Library/Application Support/venya."""
+        with patch("venya_cli.api_client.sys.platform", "darwin"):
+            d = default_config_dir()
+        assert d == Path.home() / "Library" / "Application Support" / "venya"
+
+    def test_linux_uses_xdg_config(self):
+        """POSIX: ~/.config/venya (negative — darwin branch must not leak)."""
+        with patch("venya_cli.api_client.sys.platform", "linux"):
+            d = default_config_dir()
+        assert d == Path.home() / ".config" / "venya"
+
+    def test_unknown_platform_uses_xdg_config(self):
+        """Unrecognized platforms fall back to the POSIX convention."""
+        with patch("venya_cli.api_client.sys.platform", "win32"):
+            d = default_config_dir()
+        assert d == Path.home() / ".config" / "venya"
+
 
 # ---------------------------------------------------------------------------
 # Config tests

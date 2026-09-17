@@ -243,7 +243,12 @@ venya_download_tarball() {
     fi
 
     info "Verifying tarball SHA-256..."
-    ACTUAL_SHA256=$(sha256sum "$TARBALL_FILE" | awk '{print $1}')
+    # Portable: sha256sum (Linux/coreutils) or shasum (macOS/BSD).
+    if command -v sha256sum > /dev/null 2>&1; then
+        ACTUAL_SHA256=$(sha256sum "$TARBALL_FILE" | awk '{print $1}')
+    else
+        ACTUAL_SHA256=$(shasum -a 256 "$TARBALL_FILE" | awk '{print $1}')
+    fi
     if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
         error "Tarball SHA-256 mismatch!"
         error "  Expected: $EXPECTED_SHA256"

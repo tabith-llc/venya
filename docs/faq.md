@@ -105,11 +105,11 @@ not a container, in alpha.
 ## Alpha status
 
 **What is known-broken or rough in alpha?**
-The honest list: `venya store` needs a field fix (seed secrets via the API —
-the demo doc shows the exact call); documentation and packaging are still
-maturing; the offline story is manual. APIs and config formats may change
-between alpha releases — the CHANGELOG will carry user-facing notes from the
-first tagged release.
+The honest list: fresh installs have no active key version, so `venya store`
+needs an explicit `--key-version v1` until key-version bootstrap lands;
+documentation and packaging are still maturing; the offline story is manual.
+APIs and config formats may change between alpha releases — the CHANGELOG
+will carry user-facing notes from the first tagged release.
 
 **How do I get access?**
 Request alpha access via [venya.ai](https://venya.ai/) or info@tabith.com.
