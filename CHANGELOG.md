@@ -6,6 +6,12 @@ Notable changes to Venya will be documented in this file.
 
 ### Added
 
+- macOS support for the Workstation CLI: config dir follows the platform
+  convention (`~/Library/Application Support/venya`), and the CLI installer
+  runs on stock macOS (`shasum` fallback for hash verification, no
+  `readlink -f` dependency, Linux-only `/dev/hidraw` check replaced with an
+  IOKit note). Verified on macOS 26.6.2 arm64 with a full FIDO2 login
+  round-trip.
 - `venya store --key-version`: explicit key version ID to encrypt with.
   Fresh installs have no active key version yet — pass `--key-version v1`
   until key-version bootstrap lands.
