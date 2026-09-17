@@ -202,6 +202,39 @@ Production deployment guide: **[Installation Guide](docs/installation.md)**
 
 ---
 
+## Testing
+
+Full A-Z testing is ongoing. Venya is validated end-to-end from a clean
+hypervisor: VM provision → core/executor/CLI install from hash-verified
+tarballs → FIDO2 identity bootstrap (with wrong-key and replay negatives) →
+secret creation → an MCP `run_command` that consumes the secret with the value
+redacted from all output. Two live full-lifecycle runs passed on 2026-09-17;
+unit suites (cli / core / server / executor / mcp, Python 3.14) green at
+1,722 tests.
+
+- **Run it yourself:** the [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md)
+  is fully self-contained — commands, gates, failure modes, verification
+  queries, results template — and ships with an
+  [interactive MCP driver](testing/mcp_manual_drive.py) so you can drive the
+  tools by hand and see the redaction proof yourself.
+- **Verified MCP clients:** [opencode](https://opencode.com) and local LLMs
+  via [omlx.ai](https://omlx.ai) — both drive `venya-mcp` as a stdio server.
+- **Hardware:** FIDO2 ceremonies verified with the Yubico **Security Key C
+  NFC** — Basic Compatibility, MFA security key and passkey, USB-C or NFC,
+  FIDO Certified — $29 on Amazon.
+- **Longer timeouts for testing:** default session idle is 15 min and executor
+  enrollment tokens expire in 30 min. For relaxed test runs, append to
+  `/opt/venya/.env` on the core, restart, and **re-login** (existing sessions
+  keep their original expiry):
+
+  ```bash
+  echo 'VENYA_SESSION__SESSION_TIMEOUT=28800' | sudo tee -a /opt/venya/.env
+  echo 'VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS=14400' | sudo tee -a /opt/venya/.env
+  sudo systemctl restart venya-core
+  ```
+
+---
+
 ## Roadmap
 
 | Phase | Status | Description |
@@ -256,6 +289,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | Document | Description |
 |----------|-------------|
 | [Alpha Demo Guide](docs/alpha-demo.md) | 5-minute end-to-end demo |
+| [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md) | A-Z validation from clean hypervisor to MCP use-a-secret proof |
 | [Installation Guide](docs/installation.md) | Full deployment instructions |
 | [Architecture](docs/architecture.md) | Technical deep dive |
 | [FAQ](docs/faq.md) | Frequently asked questions |
