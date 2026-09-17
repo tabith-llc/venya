@@ -17,20 +17,18 @@ key.
 
 ## 1. Seed a demo secret (~1 min)
 
-Known alpha limitation: `venya store` currently omits a required field
-(ticketed, fix deferred post-alpha). Seed via the API instead — the token
-comes from your login:
-
 ```bash
-TOKEN=$(python3 -c "import json; print(json.load(open('$HOME/.config/venya/config.json'))['access_token'])")
-curl -s --cacert ~/.config/venya-ca.crt \
-  --cert admin-cert/admin.crt --key admin-cert/admin.key \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"key":"demo-pass","value":"hunter2-demo-only","roles":["user"],"key_version_id":"v1"}' \
-  https://<core-host>/api/v1/secrets
+SSL_CERT_FILE=~/.config/venya-ca.crt venya store demo-pass 'hunter2-demo-only' \
+  --roles user --key-version v1
 ```
 
-Note the response: id, key, roles — **the value is never echoed back**.
+On a fresh install the server has no active key version yet, so pass
+`--key-version v1` explicitly (once an active key version exists, the flag is
+optional — `venya store` resolves it automatically). Re-running `store` with
+the same key creates a second row — there is no upsert; delete the old secret
+first if you are replacing one.
+
+Note the response: key, roles — **the value is never echoed back**.
 
 ## 2. Discovery sees metadata only (~30 s)
 
