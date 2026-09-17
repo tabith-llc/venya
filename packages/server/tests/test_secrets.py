@@ -104,7 +104,7 @@ def _build_orm_backed_app(tmp_path):
     """
     from core.engine.backend import Backend, BackendConfig
     from core.engine.encryption import KEK_SIZE, encrypt_secret
-    from core.iam.models import Base, Role, Secret, SecretRole, User
+    from core.iam.models import Base, Role, RoleMember, Secret, SecretRole, User
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
@@ -117,9 +117,11 @@ def _build_orm_backed_app(tmp_path):
     s = SessionLocal()
     wrapped_dek, nonce, ciphertext = encrypt_secret(kek, b"top-secret")
     user = User(user_id="user1")
+    test_user = User(user_id="test-user")
     role = Role(name="dev", permissions="read-write")
-    s.add_all([user, role])
+    s.add_all([user, test_user, role])
     s.flush()
+    s.add(RoleMember(user_id="test-user", role_id=role.id))
     secret = Secret(
         key="db-password",
         encrypted_value=ciphertext,
@@ -144,6 +146,60 @@ def _build_orm_backed_app(tmp_path):
     # backend.get_session, which a real Backend must not have replaced.
     app = FastAPI()
     app.state.core = core
+    app.state.backend = backend
+    app.include_router(secrets_routes.router, prefix="/api/v1")
+    app.dependency_overrides[get_current_user] = lambda: TEST_USER
+    return app, engine
+
+
+def _build_scoped_app(tmp_path, member_role: str):
+    """ORM-backed app for role-scoping tests (ticket secret-role-scoping-unenforced).
+
+    Dataset: 'admin-credentials' created by admin-user, scoped to role 'admin'.
+    TEST_USER ('test-user') is a member of `member_role` ('admin' or 'user').
+    Real core.list enforcement — no mocks in the visibility path.
+    """
+    from core.engine.backend import Backend, BackendConfig
+    from core.engine.encryption import KEK_SIZE, encrypt_secret
+    from core.iam.models import Base, Role, RoleMember, Secret, SecretRole, User
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    db_path = tmp_path / "scoped.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+
+    kek = b"k" * KEK_SIZE
+    s = SessionLocal()
+    wrapped_dek, nonce, ciphertext = encrypt_secret(kek, b"top-secret")
+    admin_role = Role(name="admin", permissions="read-write")
+    user_role = Role(name="user", permissions="read")
+    s.add_all([User(user_id="admin-user"), User(user_id="test-user"), admin_role, user_role])
+    s.flush()
+    member = admin_role if member_role == "admin" else user_role
+    s.add(RoleMember(user_id="test-user", role_id=member.id))
+    secret = Secret(
+        key="admin-credentials",
+        encrypted_value=ciphertext,
+        nonce=nonce,
+        wrapped_dek=wrapped_dek,
+        key_version_id="v1",
+        created_by="admin-user",
+        meta={"executor": "web-server-3"},
+    )
+    s.add(secret)
+    s.flush()
+    s.add(SecretRole(secret_id=secret.id, role_id=admin_role.id))
+    s.commit()
+    s.close()
+
+    backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+    backend._engine = engine
+    backend._session_factory = SessionLocal
+
+    app = FastAPI()
+    app.state.core = backend.get_core()
     app.state.backend = backend
     app.include_router(secrets_routes.router, prefix="/api/v1")
     app.dependency_overrides[get_current_user] = lambda: TEST_USER
@@ -321,6 +377,11 @@ class TestSecretsList:
 
         core.list.assert_called_once_with(
             prefix=None,
+            role_names=[],
+            user_id="test-user",
+            executor=None,
+            purpose=None,
+            username=None,
         )
 
     def test_list_with_prefix(self):
@@ -334,6 +395,11 @@ class TestSecretsList:
 
         core.list.assert_called_once_with(
             prefix="db-",
+            role_names=[],
+            user_id="test-user",
+            executor=None,
+            purpose=None,
+            username=None,
         )
 
     def test_list_empty(self):
@@ -697,35 +763,21 @@ class TestSecretsMetadata:
         assert resp.status_code == 422
 
     def test_filter_by_executor(self):
-        """GET /secrets?executor= should filter by executor metadata."""
+        """GET /secrets?executor= hands the filter to core.list (enforcement point).
+
+        Real-DB filtering behavior: core suite TestSecretVisibilitySqlite.
+        """
         core = _make_mock_core()
-        backend = MagicMock()
-        mock_session = MagicMock()
-        mock_secret1 = MagicMock()
-        mock_secret1.id = 1
-        mock_secret1.key = "secret-1"
-        mock_secret1.key_version_id = "v1"
-        mock_secret1.created_by = "user1"
-        mock_secret1.created_at = None
-        mock_secret1.role_names = ["dev"]
-        mock_secret1.meta = {"executor": "web-server-3"}
-        mock_secret1.roles = []
-        mock_secret2 = MagicMock()
-        mock_secret2.id = 2
-        mock_secret2.key = "secret-2"
-        mock_secret2.key_version_id = "v1"
-        mock_secret2.created_by = "user1"
-        mock_secret2.created_at = None
-        mock_secret2.role_names = ["dev"]
-        mock_secret2.meta = {"executor": "other-server"}
-        mock_secret2.roles = []
-        mock_query = MagicMock()
-        mock_filtered = MagicMock()
-        mock_filtered.all.return_value = [mock_secret1]
-        mock_query.filter.return_value = mock_filtered
-        mock_session.query.return_value = mock_query
-        app = _create_test_app(core=core, backend=backend)
-        backend.get_session.return_value = mock_session
+        rec = MagicMock()
+        rec.id = 1
+        rec.key = "secret-1"
+        rec.key_version_id = "v1"
+        rec.created_by = "user1"
+        rec.created_at = None
+        rec.role_names = ["dev"]
+        rec.meta = {"executor": "web-server-3"}
+        core.list.return_value = [rec]
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
@@ -735,28 +787,21 @@ class TestSecretsMetadata:
         assert len(data["secrets"]) == 1
         assert data["secrets"][0]["key"] == "secret-1"
         assert data["secrets"][0]["metadata"] == {"executor": "web-server-3"}
+        assert core.list.call_args.kwargs["executor"] == "web-server-3"
 
     def test_filter_by_purpose(self):
-        """GET /secrets?purpose= should filter by purpose metadata."""
+        """GET /secrets?purpose= hands the filter to core.list."""
         core = _make_mock_core()
-        backend = MagicMock()
-        mock_session = MagicMock()
-        mock_secret = MagicMock()
-        mock_secret.id = 1
-        mock_secret.key = "api-key"
-        mock_secret.key_version_id = "v1"
-        mock_secret.created_by = "user1"
-        mock_secret.created_at = None
-        mock_secret.role_names = ["dev"]
-        mock_secret.meta = {"purpose": "api_key"}
-        mock_secret.roles = []
-        mock_query = MagicMock()
-        mock_filtered = MagicMock()
-        mock_filtered.all.return_value = [mock_secret]
-        mock_query.filter.return_value = mock_filtered
-        mock_session.query.return_value = mock_query
-        app = _create_test_app(core=core, backend=backend)
-        backend.get_session.return_value = mock_session
+        rec = MagicMock()
+        rec.id = 1
+        rec.key = "api-key"
+        rec.key_version_id = "v1"
+        rec.created_by = "user1"
+        rec.created_at = None
+        rec.role_names = ["dev"]
+        rec.meta = {"purpose": "api_key"}
+        core.list.return_value = [rec]
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets", params={"purpose": "api_key"})
@@ -765,29 +810,21 @@ class TestSecretsMetadata:
         data = resp.json()
         assert len(data["secrets"]) == 1
         assert data["secrets"][0]["key"] == "api-key"
+        assert core.list.call_args.kwargs["purpose"] == "api_key"
 
     def test_filter_combined_executor_and_purpose(self):
-        """GET /secrets?executor=&purpose= should AND-combine filters."""
+        """GET /secrets?executor=&purpose= AND-combines — both reach core.list."""
         core = _make_mock_core()
-        backend = MagicMock()
-        mock_session = MagicMock()
-        mock_secret = MagicMock()
-        mock_secret.id = 1
-        mock_secret.key = "ssh-key"
-        mock_secret.key_version_id = "v1"
-        mock_secret.created_by = "user1"
-        mock_secret.created_at = None
-        mock_secret.role_names = ["dev"]
-        mock_secret.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
-        mock_secret.roles = []
-        mock_query = MagicMock()
-        mock_filtered = MagicMock()
-        mock_filtered.all.return_value = [mock_secret]
-        mock_filtered.filter.return_value = mock_filtered  # chain filter calls
-        mock_query.filter.return_value = mock_filtered
-        mock_session.query.return_value = mock_query
-        app = _create_test_app(core=core, backend=backend)
-        backend.get_session.return_value = mock_session
+        rec = MagicMock()
+        rec.id = 1
+        rec.key = "ssh-key"
+        rec.key_version_id = "v1"
+        rec.created_by = "user1"
+        rec.created_at = None
+        rec.role_names = ["dev"]
+        rec.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        core.list.return_value = [rec]
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get(
@@ -799,6 +836,9 @@ class TestSecretsMetadata:
         data = resp.json()
         assert len(data["secrets"]) == 1
         assert data["secrets"][0]["key"] == "ssh-key"
+        kwargs = core.list.call_args.kwargs
+        assert kwargs["executor"] == "web-server-3"
+        assert kwargs["purpose"] == "ssh_login"
 
     def test_patch_metadata_merge(self):
         """PATCH /secrets/{key}/metadata should merge with existing metadata."""
@@ -905,24 +945,16 @@ class TestSecretsMetadata:
     def test_list_secrets_returns_metadata(self):
         """GET /secrets should include metadata in response."""
         core = _make_mock_core()
-        backend = MagicMock()
-        mock_session = MagicMock()
-        mock_secret = MagicMock()
-        mock_secret.id = 42
-        mock_secret.key = "test-key"
-        mock_secret.key_version_id = "v1"
-        mock_secret.created_by = "user1"
-        mock_secret.created_at = None
-        mock_secret.role_names = ["dev"]
-        mock_secret.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
-        mock_secret.roles = []
-        mock_query = MagicMock()
-        mock_filtered = MagicMock()
-        mock_filtered.all.return_value = [mock_secret]
-        mock_query.filter.return_value = mock_filtered
-        mock_session.query.return_value = mock_query
-        app = _create_test_app(core=core, backend=backend)
-        backend.get_session.return_value = mock_session
+        rec = MagicMock()
+        rec.id = 42
+        rec.key = "test-key"
+        rec.key_version_id = "v1"
+        rec.created_by = "user1"
+        rec.created_at = None
+        rec.role_names = ["dev"]
+        rec.meta = {"executor": "web-server-3", "purpose": "ssh_login"}
+        core.list.return_value = [rec]
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
@@ -933,66 +965,52 @@ class TestSecretsMetadata:
         assert data["secrets"][0]["metadata"]["executor"] == "web-server-3"
         assert data["secrets"][0]["metadata"]["purpose"] == "ssh_login"
 
-    def test_cross_user_list_with_metadata_filter(self):
-        """Cross-user isolation: metadata-filter path returns same results as no-filter.
+    def test_cross_user_visibility_requires_shared_role(self, tmp_path):
+        """Cross-user visibility is role-scoped (ticket secret-role-scoping-unenforced).
 
-        The authorization model is role-gated, not user-scoped. Any user with
-        ``read`` permission sees all secrets matching the filter, regardless of
-        which user created them. This is intentional for the alpha LLM discovery
-        flow (operator stores a secret, LLM lists by executor to find it).
-
-        This test pins the current semantics so a future change to user-scoping
-        fails loudly instead of silently.
+        REPLACES the old pin ("any user with read permission sees all secrets
+        regardless of creator") — that semantics was the bug: it made
+        --roles scoping decorative. A secret created by another user is
+        visible iff one of the caller's roles is in its scope (or the caller
+        created it). ORM-backed: real core.list enforcement path.
         """
-        core = _make_mock_core()
-        backend = MagicMock()
-        mock_session = MagicMock()
-        mock_secret = MagicMock()
-        mock_secret.id = 1
-        mock_secret.key = "admin-credentials"
-        mock_secret.key_version_id = "v1"
-        mock_secret.created_by = "admin-user"
-        mock_secret.created_at = None
-        mock_secret.role_names = ["admin"]
-        mock_secret.meta = {"executor": "web-server-3"}
-        mock_secret.roles = []
-        mock_query = MagicMock()
-        mock_filtered = MagicMock()
-        mock_filtered.all.return_value = [mock_secret]
-        mock_query.filter.return_value = mock_filtered
-        mock_session.query.return_value = mock_query
-        app = _create_test_app(core=core, backend=backend)
-        backend.get_session.return_value = mock_session
+        app, engine = _build_scoped_app(tmp_path, member_role="admin")
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
 
         assert resp.status_code == 200
-        data = resp.json()
-        assert len(data["secrets"]) == 1
-        assert data["secrets"][0]["key"] == "admin-credentials"
+        keys = [s["key"] for s in resp.json()["secrets"]]
+        assert "admin-credentials" in keys
+        engine.dispose()
+
+    def test_cross_user_out_of_scope_secret_hidden(self, tmp_path):
+        """Paired negative: without a scoped role the other user's secret is
+        invisible — the list simply omits it (indistinguishable from nonexistent)."""
+        app, engine = _build_scoped_app(tmp_path, member_role="user")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets")
+
+        assert resp.status_code == 200
+        keys = [s["key"] for s in resp.json()["secrets"]]
+        assert "admin-credentials" not in keys
+        assert keys == []
+        engine.dispose()
 
     def test_list_null_meta_returns_empty_object(self):
         """List where stored meta is NULL → {}, not missing key or null."""
         core = _make_mock_core()
-        backend = MagicMock()
-        mock_session = MagicMock()
-        mock_secret = MagicMock()
-        mock_secret.id = 1
-        mock_secret.key = "legacy-secret"
-        mock_secret.key_version_id = "v1"
-        mock_secret.created_by = "user1"
-        mock_secret.created_at = None
-        mock_secret.role_names = ["dev"]
-        mock_secret.meta = None  # NULL from DB (legacy row)
-        mock_secret.roles = []
-        mock_query = MagicMock()
-        mock_filtered = MagicMock()
-        mock_filtered.all.return_value = [mock_secret]
-        mock_query.filter.return_value = mock_filtered
-        mock_session.query.return_value = mock_query
-        app = _create_test_app(core=core, backend=backend)
-        backend.get_session.return_value = mock_session
+        rec = MagicMock()
+        rec.id = 1
+        rec.key = "legacy-secret"
+        rec.key_version_id = "v1"
+        rec.created_by = "user1"
+        rec.created_at = None
+        rec.role_names = ["dev"]
+        rec.meta = None  # NULL from DB (legacy row)
+        core.list.return_value = [rec]
+        app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets", params={"executor": "web-server-3"})
