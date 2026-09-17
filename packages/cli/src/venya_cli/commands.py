@@ -18,26 +18,12 @@ from typing import Any
 import httpx2
 from cryptography import x509
 
-from .api_client import APIClient, APIClientAuthenticationError, APIClientError
-
-# ---------------------------------------------------------------------------
-# Sensitive output helpers
-# ---------------------------------------------------------------------------
-
-_SENSITIVE_REDACTED = "[REDACTED — use --show-sensitive to view]"
-
-
-def _print_sensitive(value: str | None, show: bool) -> None:
-    """Print a sensitive value only if --show-sensitive is set.
-
-    Args:
-        value: The sensitive value to print.
-        show: Whether --show-sensitive was passed.
-    """
-    if show:
-        print(f"  {value}")
-    else:
-        print(f"  {_SENSITIVE_REDACTED}")
+from .api_client import (
+    DEFAULT_CONFIG_FILE,
+    APIClient,
+    APIClientAuthenticationError,
+    APIClientError,
+)
 
 
 def run_command(args: Any) -> int:
@@ -209,12 +195,26 @@ def cmd_store(client: APIClient, args: Any) -> int:
         print("Error: secret value required (provide as argument or stdin)", file=sys.stderr)
         return 1
 
+    # Resolve key_version_id: explicit --key-version wins, otherwise the
+    # server's active key version (POST /secrets requires the field).
+    key_version_id = getattr(args, "key_version", None)
+    if not key_version_id:
+        try:
+            kv = client.get("/api/v1/key-versions/active")
+            key_version_id = kv["key_version_id"]
+        except APIClientError as e:
+            print(
+                f"Failed to resolve active key version: {e}. " "Pass --key-version explicitly (e.g. --key-version v1).",
+                file=sys.stderr,
+            )
+            return 1
+
     try:
         payload = {
             "key": args.key,
             "value": value,
             "roles": args.roles,
-            "force": getattr(args, "force", False),
+            "key_version_id": key_version_id,
         }
 
         # Parse metadata key=value pairs
@@ -444,9 +444,7 @@ def cmd_admin_enroll(client: APIClient, args: Any) -> int:
         )
         print(f"User '{args.user_id}' enrolled successfully.")
         if "enrollment_token" in result:
-            print(f"Enrollment token: {_SENSITIVE_REDACTED}")
-            if getattr(args, "show_sensitive", False):
-                print(f"  {result['enrollment_token']}")
+            print(f"Enrollment token: {result['enrollment_token']}")
         return 0
     except APIClientError as e:
         print(f"Enrollment failed: {e}", file=sys.stderr)
@@ -558,11 +556,10 @@ def cmd_admin_create_user(client: APIClient, args: Any) -> int:
         print(f"  Status:        {result.get('status', '')}")
         token = result.get("enrollment_token", "")
         expires = result.get("expires_in_seconds", 900)
-        print(f"  Enrollment Token: {_SENSITIVE_REDACTED}")
         if token:
+            print(f"  Enrollment Token: {token}")
             print("    WARNING: Token is printed once and never stored.")
             print(f"    Expires in: {expires} seconds")
-            _print_sensitive(token, getattr(args, "show_sensitive", False))
         return 0
     except APIClientError as e:
         print(f"Create user failed: {e}", file=sys.stderr)
@@ -764,12 +761,8 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
             print(f"Note: This bundle is valid for {expires_in // 60} minutes.")
         else:
             print(f"Enrollment token for executor '{args.executor_id}':")
-            print(f"  Token: {_SENSITIVE_REDACTED}")
-            if token:
-                print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
-                _print_sensitive(token, getattr(args, "show_sensitive", False))
-            else:
-                print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
+            print(f"  Token: {token}")
+            print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
             print("Deliver this token to the executor operator out-of-band.")
 
         return 0
@@ -839,9 +832,8 @@ def cmd_admin_issue_token(client: APIClient, args: Any) -> int:
         print(f"Token issued successfully for user '{args.user_id}'.")
         token = result.get("enrollment_token", "")
         if token:
-            print(f"  Enrollment Token: {_SENSITIVE_REDACTED}")
+            print(f"  Enrollment Token: {token}")
             print("    WARNING: Token is printed once and never stored.")
-            _print_sensitive(token, getattr(args, "show_sensitive", False))
         print(f"  Previous tokens revoked: {result.get('previous_tokens_revoked', 0)}")
         print(f"  Expires in: {result.get('expires_in_seconds', 900)} seconds")
         return 0
@@ -881,9 +873,8 @@ def cmd_admin_re_enroll(client: APIClient, args: Any) -> int:
         print(f"  Status:        {result.get('status', '')}")
         token = result.get("enrollment_token", "")
         if token:
-            print(f"  Enrollment Token: {_SENSITIVE_REDACTED}")
+            print(f"  Enrollment Token: {token}")
             print("    WARNING: Token is printed once and never stored.")
-            _print_sensitive(token, getattr(args, "show_sensitive", False))
         print(f"  Credentials deactivated: {result.get('credentials_deactivated', False)}")
         print(f"  Tokens revoked: {result.get('tokens_revoked', 0)}")
         print(f"  Expires in: {result.get('expires_in_seconds', 900)} seconds")
@@ -1701,7 +1692,7 @@ def executor_register(client: APIClient, args: Any) -> int:
         server_url = client.config.server_url.rstrip("/")
     else:
         print(
-            "Error: core URL required. Set it in config (~/.config/venya/config.json) or pass --core-url",
+            f"Error: core URL required. Set it in config ({DEFAULT_CONFIG_FILE}) or pass --core-url",
             file=sys.stderr,
         )
         return 1
@@ -1867,7 +1858,8 @@ def _get_server_url(args: Any) -> str:
 
     Fallback chain:
     1. --core-url arg
-    2. ~/.config/venya/config.json via Config()
+    2. config.json via Config() (default: ~/.config/venya on Linux,
+       ~/Library/Application Support/venya on macOS)
     3. /etc/venya/executor.toml via tomllib
     4. "unknown" as last resort
     """

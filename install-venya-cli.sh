@@ -114,7 +114,7 @@ if [ "$INSTALL_MCP" != "no" ]; then
         exit 1
     fi
     # No --help probe: venya-mcp is a stdio server (would block). Import check instead.
-    MCP_PY="$(dirname "$(readlink -f "$(command -v venya-mcp)")")/python"
+    MCP_PY="$(uv tool dir)/venya-mcp/bin/python"
     if [ -x "$MCP_PY" ] && ! "$MCP_PY" -c "import venya_mcp.server" 2> /dev/null; then
         error "venya-mcp installed but its server module fails to import."
         exit 1
@@ -122,20 +122,32 @@ if [ "$INSTALL_MCP" != "no" ]; then
     info "venya-mcp installed: $(command -v venya-mcp)"
 fi
 
-# --- FIDO2 non-root access check (actionable, never silently requires root) ---
-HIDRAW_RW=0
-for d in /dev/hidraw*; do
-    if [ -r "$d" ] && [ -w "$d" ]; then
-        HIDRAW_RW=1
-        break
+# --- FIDO2 access check (Linux: /dev/hidraw perms; macOS: IOKit HID, no setup) ---
+if [ "$(uname -s)" = "Darwin" ]; then
+    info "FIDO2 on macOS uses IOKit HID — no udev rules or root required."
+    info "Plug in the security key before first venya login/enroll."
+else
+    HIDRAW_RW=0
+    for d in /dev/hidraw*; do
+        if [ -r "$d" ] && [ -w "$d" ]; then
+            HIDRAW_RW=1
+            break
+        fi
+    done
+    if [ "$HIDRAW_RW" != "1" ]; then
+        warn "No read/write access to /dev/hidraw* — FIDO2 key will not be reachable as this user."
+        warn "Fix (one-time, needs sudo):"
+        warn "  echo 'KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", MODE=\"0660\", GROUP=\"plugdev\"' | sudo tee /etc/udev/rules.d/60-fido2.rules"
+        warn "  sudo udevadm control --reload-rules && sudo udevadm trigger"
+        warn "  sudo usermod -aG plugdev $(id -un)   # then re-login"
     fi
-done
-if [ "$HIDRAW_RW" != "1" ]; then
-    warn "No read/write access to /dev/hidraw* — FIDO2 key will not be reachable as this user."
-    warn "Fix (one-time, needs sudo):"
-    warn "  echo 'KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", MODE=\"0660\", GROUP=\"plugdev\"' | sudo tee /etc/udev/rules.d/60-fido2.rules"
-    warn "  sudo udevadm control --reload-rules && sudo udevadm trigger"
-    warn "  sudo usermod -aG plugdev $(id -un)   # then re-login"
+fi
+
+# Platform-appropriate default CA cert location (instructional, not enforced)
+if [ "$(uname -s)" = "Darwin" ]; then
+    CA_CERT="$HOME/Library/Application Support/venya/venya-ca.crt"
+else
+    CA_CERT="$HOME/.config/venya-ca.crt"
 fi
 
 echo ""
@@ -145,12 +157,13 @@ echo "============================================"
 echo ""
 echo "Day-one commands:"
 echo "  venya config set-server https://<core-host>"
-echo "  curl -sk https://<core-host>/.well-known/venya-ca.crt -o ~/.config/venya-ca.crt"
-echo "  SSL_CERT_FILE=~/.config/venya-ca.crt venya login <user-id>"
+echo "  curl -sk https://<core-host>/.well-known/venya-ca.crt -o $CA_CERT"
+echo "  SSL_CERT_FILE=$CA_CERT venya init <user-id>    # create the first admin account (FIDO2 key required)"
+echo "  SSL_CERT_FILE=$CA_CERT venya login <user-id>"
 if [ "$INSTALL_MCP" != "no" ]; then
     echo ""
     echo "MCP (LLM clients) — point the client at the venya-mcp shim and provide:"
     echo "  VENYA_CONFIG=<path>/config.json  (server_url + access_token from venya login)"
-    echo "  VENYA_CA_CERT=~/.config/venya-ca.crt  (required at startup)"
+    echo "  VENYA_CA_CERT=$CA_CERT  (required at startup)"
 fi
 echo ""

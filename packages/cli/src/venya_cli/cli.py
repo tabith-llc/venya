@@ -39,11 +39,6 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable verbose output",
     )
-    parser.add_argument(
-        "--show-sensitive",
-        action="store_true",
-        help="Show sensitive values (tokens, recovery codes) in output. " "By default these are redacted.",
-    )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -72,9 +67,9 @@ def create_parser() -> argparse.ArgumentParser:
         help="Role(s) to scope the secret to",
     )
     store_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite even if roles differ",
+        "--key-version",
+        default=None,
+        help="Key version ID to encrypt with (default: server's active key version)",
     )
     store_parser.add_argument(
         "--metadata",

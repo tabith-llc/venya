@@ -129,7 +129,7 @@ See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)**
 
 ### Full Installation
 
-Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Releases page](https://github.com/tabith-llc/venya/releases)**. Install one-liners (Ubuntu 24.04):
+Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Releases page](https://github.com/tabith-llc/venya/releases)**. Install one-liners (core/executor: Ubuntu 24.04; the Workstation CLI one-liner also runs on macOS):
 
 ```bash
 # Core server (root)
@@ -141,17 +141,19 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
   VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> bash -s
 
-# Workstation CLI (non-root)
+# Workstation CLI (non-root; Ubuntu 24.04 or macOS — verified on macOS 26.6.2 arm64)
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
 ```
 
 Integrity: pin `VENYA_TARBALL_SHA256` (hashes on the release page) for strict verification; unset, the installer fetches the `.sha256` sidecar from the same origin as a corruption guardrail and fail-closes.
 
+Workstation CLI config file: `~/.config/venya/config.json` on Linux, `~/Library/Application Support/venya/config.json` on macOS. FIDO2 needs no extra setup on macOS (native IOKit HID transport, no root); on Linux the installer prints udev rules if `/dev/hidraw*` is not user-readable.
+
 Production deployment guide: **[Installation Guide](docs/installation.md)**
 
 ### Prerequisites
 
-- Linux — Ubuntu 24.04 LTS (tested target; installers assume it)
+- Linux — Ubuntu 24.04 LTS (core/executor; tested target, installers assume it). Workstation CLI additionally supports macOS (verified macOS 26.6.2 arm64)
 - PostgreSQL — installed automatically by the core installer (16 on Ubuntu 24.04)
 - Python 3.14 — pinned (`>=3.14,<3.15`); provisioned automatically via uv
 - FIDO2 security key (YubiKey, SoloKeys, etc.)
@@ -197,6 +199,39 @@ Production deployment guide: **[Installation Guide](docs/installation.md)**
 ```
 
 **Technical deep dive:** [Architecture Documentation](docs/architecture.md)
+
+---
+
+## Testing
+
+Full A-Z testing is ongoing. Venya is validated end-to-end from a clean
+hypervisor: VM provision → core/executor/CLI install from hash-verified
+tarballs → FIDO2 identity bootstrap (with wrong-key and replay negatives) →
+secret creation → an MCP `run_command` that consumes the secret with the value
+redacted from all output. Two live full-lifecycle runs passed on 2026-09-17;
+unit suites (cli / core / server / executor / mcp, Python 3.14) green at
+1,722 tests.
+
+- **Run it yourself:** the [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md)
+  is fully self-contained — commands, gates, failure modes, verification
+  queries, results template — and ships with an
+  [interactive MCP driver](testing/mcp_manual_drive.py) so you can drive the
+  tools by hand and see the redaction proof yourself.
+- **Verified MCP clients:** [opencode](https://opencode.com) and local LLMs
+  via [omlx.ai](https://omlx.ai) — both drive `venya-mcp` as a stdio server.
+- **Hardware:** FIDO2 ceremonies verified with the Yubico **Security Key C
+  NFC** — Basic Compatibility, MFA security key and passkey, USB-C or NFC,
+  FIDO Certified — $29 on Amazon.
+- **Longer timeouts for testing:** default session idle is 15 min and executor
+  enrollment tokens expire in 30 min. For relaxed test runs, append to
+  `/opt/venya/.env` on the core, restart, and **re-login** (existing sessions
+  keep their original expiry):
+
+  ```bash
+  echo 'VENYA_SESSION__SESSION_TIMEOUT=28800' | sudo tee -a /opt/venya/.env
+  echo 'VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS=14400' | sudo tee -a /opt/venya/.env
+  sudo systemctl restart venya-core
+  ```
 
 ---
 
@@ -254,6 +289,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | Document | Description |
 |----------|-------------|
 | [Alpha Demo Guide](docs/alpha-demo.md) | 5-minute end-to-end demo |
+| [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md) | A-Z validation from clean hypervisor to MCP use-a-secret proof |
 | [Installation Guide](docs/installation.md) | Full deployment instructions |
 | [Architecture](docs/architecture.md) | Technical deep dive |
 | [FAQ](docs/faq.md) | Frequently asked questions |
