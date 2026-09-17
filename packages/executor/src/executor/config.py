@@ -297,10 +297,6 @@ class ExecutorConfig(BaseSettings):
         default=100,
         description="Base FD number for injected secrets (unused for sbx)",
     )
-    secret_tmpfs_dir: str = Field(
-        default="/tmp/venya_secrets",  # nosec B108 — tmpfs-backed, not persistent disk
-        description="Directory on tmpfs for temporary secret storage",
-    )
 
     # Egress allowlist
     egress_allowlist_path: str = Field(

@@ -18,6 +18,7 @@ Manages the persistent executor daemon lifecycle:
 import hashlib
 import logging
 import os
+import shutil
 import signal
 import ssl
 import sys
@@ -48,7 +49,7 @@ from .command_validator import (
 from .config import ExecutorConfig
 from .executor import Executor
 from .relay_listener import RelayListener
-from .strategies.sbx_strategy import SbxStrategy, sweep_workspace_base
+from .strategies.sbx_strategy import SECRET_TMPFS_BASE, SbxStrategy, sweep_workspace_base
 
 logger = logging.getLogger("venya.executor.daemon")
 
@@ -64,7 +65,6 @@ class DaemonState:
 
     def __init__(self) -> None:
         self.running = False
-        self.session_id: str | None = None
         self.executor_id: str = "default"
         self.command_policy: Any = None
         self.revoked = False
@@ -574,15 +574,13 @@ class ReaperLoop:
         self,
         config: ExecutorConfig,
         state: DaemonState,
-        tmpfs_dir: str = "/tmp/venya_secrets",  # nosec B108 — tmpfs, not persistent disk
+        tmpfs_dir: str = SECRET_TMPFS_BASE,
         http_client: Any | None = None,
-        session_id: str | None = None,
     ) -> None:
         self.config = config
         self.state = state
         self.tmpfs_dir = tmpfs_dir
         self.http_client = http_client
-        self.session_id = session_id
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
@@ -614,72 +612,80 @@ class ReaperLoop:
             self._stop_event.wait(self.config.reaper.check_interval)
 
     def _check_orphaned(self) -> None:
-        """Check for and clean up orphaned resources.
+        """Delete orphaned per-run secret dirs and revoke their session secrets.
 
-        Scans tmpfs_dir for secret files older than secret_ttl_seconds.
-        Deletes orphaned files and revokes tokens via server API.
+        Scans tmpfs_dir (default: the sbx strategy's SECRET_TMPFS_BASE) for
+        `session_<server-session-id>_<rand>` directories older than
+        secret_ttl_seconds. Live runs clean up their own dir; an aged dir
+        belongs to a dead run (daemon killed mid-execution). The dir name
+        carries the real execution-session id, so revokes are attributed per
+        session. The old flat `venya_*.secret` file scan matched nothing under
+        the sbx dir layout, and the phantom "default" session id never matched
+        a real session (ticket daemon-reaper-phantom-session).
         """
         import time
 
         ttl_seconds = self.config.reaper.secret_ttl_seconds
         now = time.time()
-        orphaned_files: list[str] = []
-        orphaned_secret_ids: list[str] = []
 
-        # Scan tmpfs_dir for venya secret files
         try:
             if not os.path.exists(self.tmpfs_dir):
                 return
-
-            for filename in os.listdir(self.tmpfs_dir):
-                if not filename.startswith("venya_") or not filename.endswith(".secret"):
-                    continue
-
-                filepath = os.path.join(self.tmpfs_dir, filename)
-                try:
-                    file_stat = os.stat(filepath)
-                    file_age = now - file_stat.st_mtime
-
-                    if file_age > ttl_seconds:
-                        orphaned_files.append(filepath)
-                        # Extract secret_id from filename if possible
-                        # Format: venya_<secret_id>_<random>.secret
-                        # or just venya_<random>.secret
-                        parts = filename.replace(".secret", "").split("_")
-                        if len(parts) >= 2:
-                            orphaned_secret_ids.append(parts[1])
-                except OSError:
-                    continue
+            entries = os.listdir(self.tmpfs_dir)
         except OSError:
-            logger.exception("Failed to scan tmpfs_dir for orphaned files")
+            logger.exception("Failed to scan %s for orphaned session dirs", self.tmpfs_dir)
             return
 
-        if not orphaned_files:
-            return
-
-        # Delete orphaned files
-        for filepath in orphaned_files:
+        for dirname in entries:
+            if not dirname.startswith("session_"):
+                continue
+            dirpath = os.path.join(self.tmpfs_dir, dirname)
+            if not os.path.isdir(dirpath):
+                continue
             try:
-                os.unlink(filepath)
-                logger.info("Deleted orphaned secret file: %s", filepath)
+                age = now - os.stat(dirpath).st_mtime
             except OSError:
-                logger.exception("Failed to delete orphaned file: %s", filepath)
+                continue
+            if age <= ttl_seconds:
+                continue
 
-        # Revoke tokens for orphaned secrets via server
-        if orphaned_secret_ids and self.http_client and self.session_id:
+            # session_<session-id>_<mkdtemp-rand>: execution-session ids are
+            # UUIDs (no underscores — d4a8d9f contract), while the mkdtemp
+            # random suffix CAN contain underscores ([a-z0-9_] charset), so
+            # parse from the left and ignore the tail. Unparseable → delete
+            # without revoke (never a phantom-session revoke).
+            parts = dirname.split("_")
+            session_id = parts[1] if len(parts) >= 3 else None
             try:
-                self.http_client.post(
-                    f"/api/v1/sessions/{self.session_id}/secrets/revoke",
-                    json={"secret_ids": orphaned_secret_ids},
-                    timeout=self.config.network.request_timeout_seconds,
-                )
+                secret_ids = sorted(os.listdir(dirpath))
+            except OSError:
+                secret_ids = []
+
+            try:
+                shutil.rmtree(dirpath)
                 logger.info(
-                    "Revoked tokens for %d orphaned secrets in session %s",
-                    len(orphaned_secret_ids),
-                    self.session_id,
+                    "Deleted orphaned session secret dir: %s (%d secret file(s))",
+                    dirname,
+                    len(secret_ids),
                 )
-            except Exception:
-                logger.exception("Failed to revoke orphaned secret tokens")
+            except OSError:
+                logger.exception("Failed to delete orphaned session dir: %s", dirpath)
+                continue
+
+            if session_id and secret_ids and self.http_client:
+                try:
+                    self.http_client.post(
+                        f"/api/v1/sessions/{session_id}/secrets/revoke",
+                        json={"secret_ids": secret_ids},
+                        timeout=self.config.network.request_timeout_seconds,
+                    )
+                    logger.info(
+                        "Revoked %d secret(s) for orphaned session %s",
+                        len(secret_ids),
+                        session_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to revoke secrets for orphaned session %s", session_id)
 
 
 def build_command_policy(cv: Any) -> CommandPolicy:
@@ -736,7 +742,6 @@ class ExecutorDaemon:
         self.reaper = ReaperLoop(
             config,
             self.state,
-            tmpfs_dir=config.secret_tmpfs_dir,
         )
 
         # Relay listener (B0) — wired to the existing execution engine. The
@@ -842,7 +847,6 @@ class ExecutorDaemon:
 
         # Configure reaper with mTLS client and session info
         self.reaper.http_client = self.client
-        self.reaper.session_id = self.state.session_id or "default"
 
         # Setup signal handlers
         signal.signal(signal.SIGTERM, self._handle_signal)
