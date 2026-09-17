@@ -126,12 +126,31 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstal
 
 ```bash
 cd /media/dust/dust-ext1/projects/venya-installer
-./create-tarball-and-serve.sh
+./create-tarball-and-serve.sh --ref <tag-or-commit>   # deterministic: builds from the git ref
+./create-tarball-and-serve.sh                         # DEPRECATED working-tree mode (rollback only)
 ```
 
-This creates three tarballs (`venya-core-install.tar.gz`, `venya-executor-install.tar.gz`, and the minimal `venya-cli-install.tar.gz` — `packages/cli` + `packages/mcp`), copies the install scripts **and the shared `venya-common.sh` library** to the serving directory, and starts an HTTP server on port 8080.
+This creates three tarballs (`venya-core-install.tar.gz`, `venya-executor-install.tar.gz`, and the minimal `venya-cli-install.tar.gz` — `packages/cli` + `packages/mcp`), copies the install scripts **and the shared `venya-common.sh` library** to the serving directory, and starts an HTTP server on port 8080. In `--ref` mode every served byte (tarballs, scripts, `venya-common.sh`, this README) comes from the committed ref — the working tree is never consulted.
 
 The piped install one-liners below work because the install scripts self-fetch `venya-common.sh` from the same origin as `VENYA_TARBALL` when it is not next to the script (no-`$0` case, i.e. `curl | sudo bash`).
+
+### Deterministic rebuild from a published tag
+
+Release tarballs from `v0.1.0-alpha.5` onward are `git archive` outputs — **byte-reproducible from any clone of the tag**. Anyone can verify a published asset:
+
+```bash
+git clone git@github.com:tabith-llc/venya.git && cd venya
+TAG=v0.1.0-alpha.5   # any release tag ≥ alpha.5
+cd /tmp
+git -C venya archive --format=tar "$TAG" | gzip -n > venya-core-install.tar.gz
+git -C venya archive --format=tar "$TAG" packages/cli packages/mcp | gzip -n > venya-cli-install.tar.gz
+BASE=https://github.com/tabith-llc/venya/releases/download/$TAG
+curl -fsSLO $BASE/venya-core-install.tar.gz.sha256
+curl -fsSLO $BASE/venya-cli-install.tar.gz.sha256
+sha256sum -c venya-core-install.tar.gz.sha256 venya-cli-install.tar.gz.sha256
+```
+
+Notes: the executor tarball is byte-identical to the core tarball by design (whole-tree archive; component choice happens at install time). Byte-stability requires `gzip -n` (strips the timestamp) and the same git major version. The tar carries a `pax_global_header` record containing the commit SHA — metadata only; `tar xzf` never extracts it as a file.
 
 ### Install on VMs (dev LAN server — override the GitHub defaults)
 
