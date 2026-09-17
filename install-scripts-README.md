@@ -136,21 +136,21 @@ The piped install one-liners below work because the install scripts self-fetch `
 
 ### Deterministic rebuild from a published tag
 
-Release tarballs from `v0.1.0-alpha.5` onward are `git archive` outputs — **byte-reproducible from any clone of the tag**. Anyone can verify a published asset:
+Release tarballs from `v0.1.0-alpha.6` onward are `git archive` outputs — **byte-reproducible from any clone of the tag**. Anyone can verify a published asset:
 
 ```bash
 git clone git@github.com:tabith-llc/venya.git && cd venya
-TAG=v0.1.0-alpha.5   # any release tag ≥ alpha.5
+TAG=v0.1.0-alpha.6   # any release tag ≥ alpha.6
 cd /tmp
-git -C venya archive --format=tar "$TAG" | gzip -n > venya-core-install.tar.gz
-git -C venya archive --format=tar "$TAG" packages/cli packages/mcp | gzip -n > venya-cli-install.tar.gz
+git -C venya archive --format=tar --prefix=./ "$TAG" | gzip -n > venya-core-install.tar.gz
+git -C venya archive --format=tar --prefix=./ "$TAG" packages/cli packages/mcp | gzip -n > venya-cli-install.tar.gz
 BASE=https://github.com/tabith-llc/venya/releases/download/$TAG
 curl -fsSLO $BASE/venya-core-install.tar.gz.sha256
 curl -fsSLO $BASE/venya-cli-install.tar.gz.sha256
 sha256sum -c venya-core-install.tar.gz.sha256 venya-cli-install.tar.gz.sha256
 ```
 
-Notes: the executor tarball is byte-identical to the core tarball by design (whole-tree archive; component choice happens at install time). Byte-stability requires `gzip -n` (strips the timestamp) and the same git major version. The tar carries a `pax_global_header` record containing the commit SHA — metadata only; `tar xzf` never extracts it as a file.
+Notes: the executor tarball is byte-identical to the core tarball by design (whole-tree archive; component choice happens at install time). Byte-stability requires `gzip -n` (strips the timestamp) and the same git major version. `--prefix=./` is load-bearing: the installers extract with `tar --strip-components=1`, which consumes the `./` component — an unprefixed archive loses every top-level file (the v0.1.0-alpha.5 defect; its assets match the recipe without `--prefix=./`). Local `git archive` output carries no `pax_global_header` entry (that record appears only in GitHub-generated tarballs).
 
 ### Install on VMs (dev LAN server — override the GitHub defaults)
 
