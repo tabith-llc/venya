@@ -478,3 +478,119 @@ class TestMainLoop:
                             daemon._main_loop()
 
         assert rotate_called[0] is True
+
+
+# ---------------------------------------------------------------------------
+# ReaperLoop._check_orphaned — real sbx layout (ticket daemon-reaper-phantom-session)
+# ---------------------------------------------------------------------------
+
+
+class TestReaperOrphanCleanup:
+    """_check_orphaned against session_<server-session-id>_<rand> dirs."""
+
+    def _session_dir(self, base: Path, session_id: str, secret_ids: list, age: float = 10.0) -> Path:
+        d = base / f"session_{session_id}_abcd1234"
+        d.mkdir()
+        for sid in secret_ids:
+            (d / sid).write_bytes(b"x")
+        old = time.time() - age
+        os.utime(d, (old, old))
+        return d
+
+    def test_aged_session_dir_deleted_and_revoked_under_real_session(self, config, state, tmpfs_dir):
+        sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        d = self._session_dir(tmpfs_dir, sid, ["7", "3"])
+        client = MagicMock()
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()
+
+        assert not d.exists()
+        client.post.assert_called_once()
+        args, kwargs = client.post.call_args
+        assert args[0] == f"/api/v1/sessions/{sid}/secrets/revoke"
+        assert kwargs["json"] == {"secret_ids": ["3", "7"]}  # sorted, real ids from dir children
+
+    def test_fresh_session_dir_untouched(self, config, state, tmpfs_dir):
+        d = self._session_dir(tmpfs_dir, "fresh-sid", ["1"], age=0.0)
+        client = MagicMock()
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()
+
+        assert d.exists()
+        client.post.assert_not_called()
+
+    def test_foreign_entries_ignored(self, config, state, tmpfs_dir):
+        legacy = tmpfs_dir / "venya_1_x.secret"
+        legacy.write_bytes(b"x")
+        old = time.time() - 10
+        os.utime(legacy, (old, old))
+        other = tmpfs_dir / "not-a-session"
+        other.mkdir()
+        client = MagicMock()
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()
+
+        assert legacy.exists()
+        assert other.exists()
+        client.post.assert_not_called()
+
+    def test_unparseable_name_deleted_without_revoke(self, config, state, tmpfs_dir):
+        d = tmpfs_dir / "session_x"
+        d.mkdir()
+        (d / "9").write_bytes(b"x")
+        old = time.time() - 10
+        os.utime(d, (old, old))
+        client = MagicMock()
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()
+
+        assert not d.exists()  # cleanup still happens
+        client.post.assert_not_called()  # but no phantom-session revoke
+
+    def test_revoke_failure_does_not_crash_loop(self, config, state, tmpfs_dir):
+        d = self._session_dir(tmpfs_dir, "sid-fail", ["2"])
+        client = MagicMock()
+        client.post.side_effect = RuntimeError("server down")
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()  # must not raise
+
+        assert not d.exists()
+
+    def test_no_http_client_deletes_without_revoke(self, config, state, tmpfs_dir):
+        d = self._session_dir(tmpfs_dir, "sid-noclient", ["4"])
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir))
+
+        reaper._check_orphaned()
+
+        assert not d.exists()
+
+    def test_rand_suffix_with_underscore_still_parses(self, config, state, tmpfs_dir):
+        """mkdtemp rand charset includes '_' — parse must not swallow it into
+        the session id (regression: join(parts[1:-1]) broke on such suffixes)."""
+        d = tmpfs_dir / "session_11111111-2222-3333-4444-555555555555_t7bzq8n_"
+        d.mkdir()
+        (d / "5").write_bytes(b"x")
+        old = time.time() - 10
+        os.utime(d, (old, old))
+        client = MagicMock()
+        reaper = ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir), http_client=client)
+
+        reaper._check_orphaned()
+
+        assert not d.exists()
+        args, _ = client.post.call_args
+        assert args[0] == "/api/v1/sessions/11111111-2222-3333-4444-555555555555/secrets/revoke"
+
+    def test_default_base_is_the_sbx_writer_base(self, config, state):
+        # Compare in the daemon module's namespace: conftest patches the
+        # sbx_strategy attribute per-test, but the ReaperLoop default binds
+        # the daemon-side import — that binding is the wiring under test.
+        import executor.daemon as daemon_mod
+
+        reaper = ReaperLoop(config, state)
+        assert reaper.tmpfs_dir == daemon_mod.SECRET_TMPFS_BASE
