@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..dependencies import get_db, require_admin
+from ..dependencies import enrollment_manager, get_db, require_admin
 from ..utils.time import effective_expiry_check_time
 
 router = APIRouter()
@@ -57,6 +57,7 @@ class EnrollmentTokenRevokeResponse(BaseModel):
 )
 async def enrollment_create_token(
     req: EnrollmentTokenCreateRequest,
+    request: Request,
     _: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> EnrollmentTokenCreateResponse:
@@ -66,10 +67,10 @@ async def enrollment_create_token(
     """
     try:
 
-        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentError
         from core.iam.models import User
 
-        em = EnrollmentManager(db)
+        em = enrollment_manager(db, request)
 
         # Find user by user_id string
         user = db.query(User).filter(User.user_id == req.user_id).first()
@@ -83,7 +84,7 @@ async def enrollment_create_token(
         db.commit()
         return EnrollmentTokenCreateResponse(
             token=plaintext,
-            expires_in_seconds=900,
+            expires_in_seconds=int(em.config.token_expiry.total_seconds()),
         )
     except HTTPException:
         raise
@@ -151,6 +152,7 @@ async def enrollment_list_tokens(
 )
 async def enrollment_revoke_token(
     token_id: int,
+    request: Request,
     _: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> EnrollmentTokenRevokeResponse:
@@ -158,10 +160,8 @@ async def enrollment_revoke_token(
 
     Requires admin permission.
     """
-    from core.iam.enrollment_manager import EnrollmentManager
-
     try:
-        em = EnrollmentManager(db)
+        em = enrollment_manager(db, request)
         revoked = em.revoke_token(token_id)
         db.commit()
         return EnrollmentTokenRevokeResponse(revoked=revoked)

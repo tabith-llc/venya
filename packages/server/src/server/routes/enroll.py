@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..dependencies import get_db
+from ..dependencies import enrollment_manager, get_db
 from ..fido2.browser_adapter import (
     browser_registration_to_fido2,
     challenge_to_browser_registration_options,
@@ -90,10 +90,10 @@ async def browser_enroll_start(
     Transitions token state from 'created' to 'in_progress'.
     """
     try:
-        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentError
         from core.iam.models import User
 
-        em = EnrollmentManager(db)
+        em = enrollment_manager(db, request)
 
         # Validate token and check user status
         token = em.validate_token_for_start(req.enrollment_token)
@@ -188,10 +188,10 @@ async def browser_enroll_complete(
     user status from 'pending_enrollment' to 'active'.
     """
     try:
-        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentError
         from core.iam.models import User, WebAuthnCredential
 
-        em = EnrollmentManager(db)
+        em = enrollment_manager(db, request)
 
         # Validate token is in in_progress state
         try:

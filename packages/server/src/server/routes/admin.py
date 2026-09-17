@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .. import metrics
-from ..dependencies import get_db, require_admin
+from ..dependencies import enrollment_manager, get_db, require_admin
 from ..rate_limit import rate_limit_admin_token_gen
 from ..utils.executor_id import validate_executor_id
 from ..utils.token_binding import compute_binding_hash
@@ -224,10 +224,10 @@ async def admin_enroll(
     """
     try:
 
-        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentError
         from core.iam.models import User
 
-        em = EnrollmentManager(db)
+        em = enrollment_manager(db, request)
 
         # Check if user already exists
         existing = db.query(User).filter(User.user_id == req.user_id).first()
@@ -288,10 +288,10 @@ async def admin_create_user(
     """
     try:
 
-        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentError
         from core.iam.models import Role, RoleMember, User
 
-        em = EnrollmentManager(db)
+        em = enrollment_manager(db, request)
 
         # Check if user already exists
         existing = db.query(User).filter(User.user_id == req.username).first()
@@ -334,7 +334,7 @@ async def admin_create_user(
             user_id=req.username,
             status="pending_enrollment",
             enrollment_token=plaintext,
-            expires_in_seconds=900,
+            expires_in_seconds=int(em.config.token_expiry.total_seconds()),
         )
     except HTTPException:
         raise
@@ -1124,10 +1124,10 @@ async def admin_re_enroll(
     """
     try:
 
-        from core.iam.enrollment_manager import EnrollmentError, EnrollmentManager
+        from core.iam.enrollment_manager import EnrollmentError
         from core.iam.models import User, WebAuthnCredential
 
-        em = EnrollmentManager(db)
+        em = enrollment_manager(db, request)
 
         # Find user
         user = db.query(User).filter(User.user_id == user_id).first()
@@ -1171,7 +1171,7 @@ async def admin_re_enroll(
         return AdminReEnrollResponse(
             user_id=user_id,
             enrollment_token=plaintext,
-            expires_in_seconds=900,
+            expires_in_seconds=int(em.config.token_expiry.total_seconds()),
             credentials_deactivated=deactivated,
             tokens_revoked=tokens_revoked,
         )
@@ -1252,10 +1252,9 @@ async def admin_create_user_token(
     Phase 7: Revokes existing tokens and issues a new one.
     """
     try:
-        from core.iam.enrollment_manager import EnrollmentManager
         from core.iam.models import User
 
-        em = EnrollmentManager(db)
+        em = enrollment_manager(db, request)
 
         user = db.query(User).filter(User.user_id == user_id).first()
         if user is None:
@@ -1277,7 +1276,7 @@ async def admin_create_user_token(
         return AdminUserTokenCreateResponse(
             user_id=user_id,
             enrollment_token=plaintext,
-            expires_in_seconds=900,
+            expires_in_seconds=int(em.config.token_expiry.total_seconds()),
             previous_tokens_revoked=tokens_revoked,
         )
     except HTTPException:
@@ -1296,6 +1295,7 @@ async def admin_create_user_token(
 )
 async def admin_revoke_token(
     token_id: int,
+    request: Request,
     _: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminTokenRevokeResponse:
@@ -1304,9 +1304,7 @@ async def admin_revoke_token(
     Phase 7: Revokes a single token by ID.
     """
     try:
-        from core.iam.enrollment_manager import EnrollmentManager
-
-        em = EnrollmentManager(db)
+        em = enrollment_manager(db, request)
         revoked = em.revoke_token(token_id)
         db.commit()
         if revoked:
