@@ -19,12 +19,13 @@ key.
 
 ```bash
 SSL_CERT_FILE=~/.config/venya-ca.crt venya store demo-pass 'hunter2-demo-only' \
-  --roles user --key-version v1
+  --roles user
 ```
 
-On a fresh install the server has no active key version yet, so pass
-`--key-version v1` explicitly (once an active key version exists, the flag is
-optional — `venya store` resolves it automatically). Re-running `store` with
+Fresh installs seed an active key version (`v1`) at migration time, so
+`venya store` resolves it automatically — no `--key-version` flag needed
+(installs predating that migration must pass `--key-version v1`; the CLI
+fails loudly with that hint if the lookup 503s). Re-running `store` with
 the same key creates a second row — there is no upsert; delete the old secret
 first if you are replacing one.
 

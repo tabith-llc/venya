@@ -4,6 +4,21 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fresh installs now seed an initial active key version (`v1`) at migration
+  time: `venya store` works without `--key-version`, and
+  `GET /api/v1/key-versions/active` answers 200 instead of 503. The seed is
+  idempotent and never touches installs that already have key versions.
+- `VENYA_FIDO2__ENROLLMENT_TOKEN_TTL` (minutes) is now wired: it was defined
+  but read by nothing — user-enrollment token lifetimes were hardcoded to
+  900 s and the reported `expires_in_seconds` was a literal. All enrollment
+  routes now construct through a single config-aware helper, and reported
+  lifetimes are derived from the same config. Default unchanged (15 min).
+- `venya-mcp` startup precondition failures (no session/config yet, or a
+  malformed config file) now print their actionable message to stderr and
+  exit 1 — no raw Python traceback on first run.
+
 ## [0.1.0-alpha.4] - 2026-09-17
 
 ### Security
