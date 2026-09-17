@@ -18,6 +18,7 @@ Token model (per plan section 5.1):
 
 import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -26,8 +27,20 @@ import httpx2
 
 logger = logging.getLogger("venya_cli.api_client")
 
+
+def default_config_dir() -> Path:
+    """Platform-appropriate config directory.
+
+    macOS convention: ~/Library/Application Support/venya.
+    POSIX (Linux, etc.): ~/.config/venya.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "venya"
+    return Path.home() / ".config" / "venya"
+
+
 # Default config file location
-DEFAULT_CONFIG_DIR = Path.home() / ".config" / "venya"
+DEFAULT_CONFIG_DIR = default_config_dir()
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
 
 
@@ -42,8 +55,8 @@ class APIClientAuthenticationError(APIClientError):
 class Config:
     """CLI configuration manager.
 
-    Reads/writes config from ~/.config/venya/config.json.
-    Keys: server_url, access_token
+    Reads/writes config from config.json in the platform config directory
+    (see default_config_dir()). Keys: server_url, access_token
     """
 
     def __init__(self, config_file: Path | None = None) -> None:
