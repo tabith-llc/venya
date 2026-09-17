@@ -52,7 +52,6 @@ def _make_args(**overrides):
     args.key = "mykey"
     args.value = "myvalue"
     args.roles = ["admin"]
-    args.force = False
     args.metadata = None
     args.key_version = None
     for k, v in overrides.items():
@@ -93,6 +92,9 @@ class TestCmdStore:
             assert payload["key"] == "mykey"
             assert payload["value"] == "myvalue"
             assert payload["roles"] == ["admin"]
+            assert (
+                "force" not in payload
+            )  # --force removed: server has no force field (ticket cli-store-force-field-ignored)
         finally:
             client.close()
             config_file.unlink()

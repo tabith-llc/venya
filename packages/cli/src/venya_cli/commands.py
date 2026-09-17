@@ -233,7 +233,6 @@ def cmd_store(client: APIClient, args: Any) -> int:
             "key": args.key,
             "value": value,
             "roles": args.roles,
-            "force": getattr(args, "force", False),
             "key_version_id": key_version_id,
         }
 
