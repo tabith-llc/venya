@@ -77,6 +77,11 @@ def create_parser() -> argparse.ArgumentParser:
         help="Overwrite even if roles differ",
     )
     store_parser.add_argument(
+        "--key-version",
+        default=None,
+        help="Key version ID to encrypt with (default: server's active key version)",
+    )
+    store_parser.add_argument(
         "--metadata",
         "-m",
         action="append",
