@@ -25,25 +25,6 @@ from .api_client import (
     APIClientError,
 )
 
-# ---------------------------------------------------------------------------
-# Sensitive output helpers
-# ---------------------------------------------------------------------------
-
-_SENSITIVE_REDACTED = "[REDACTED — use --show-sensitive to view]"
-
-
-def _print_sensitive(value: str | None, show: bool) -> None:
-    """Print a sensitive value only if --show-sensitive is set.
-
-    Args:
-        value: The sensitive value to print.
-        show: Whether --show-sensitive was passed.
-    """
-    if show:
-        print(f"  {value}")
-    else:
-        print(f"  {_SENSITIVE_REDACTED}")
-
 
 def run_command(args: Any) -> int:
     """Run a CLI command.
@@ -463,9 +444,7 @@ def cmd_admin_enroll(client: APIClient, args: Any) -> int:
         )
         print(f"User '{args.user_id}' enrolled successfully.")
         if "enrollment_token" in result:
-            print(f"Enrollment token: {_SENSITIVE_REDACTED}")
-            if getattr(args, "show_sensitive", False):
-                print(f"  {result['enrollment_token']}")
+            print(f"Enrollment token: {result['enrollment_token']}")
         return 0
     except APIClientError as e:
         print(f"Enrollment failed: {e}", file=sys.stderr)
@@ -577,11 +556,10 @@ def cmd_admin_create_user(client: APIClient, args: Any) -> int:
         print(f"  Status:        {result.get('status', '')}")
         token = result.get("enrollment_token", "")
         expires = result.get("expires_in_seconds", 900)
-        print(f"  Enrollment Token: {_SENSITIVE_REDACTED}")
         if token:
+            print(f"  Enrollment Token: {token}")
             print("    WARNING: Token is printed once and never stored.")
             print(f"    Expires in: {expires} seconds")
-            _print_sensitive(token, getattr(args, "show_sensitive", False))
         return 0
     except APIClientError as e:
         print(f"Create user failed: {e}", file=sys.stderr)
@@ -783,12 +761,8 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
             print(f"Note: This bundle is valid for {expires_in // 60} minutes.")
         else:
             print(f"Enrollment token for executor '{args.executor_id}':")
-            print(f"  Token: {_SENSITIVE_REDACTED}")
-            if token:
-                print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
-                _print_sensitive(token, getattr(args, "show_sensitive", False))
-            else:
-                print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
+            print(f"  Token: {token}")
+            print(f"  Expires in: {expires_in} seconds ({expires_in // 60} minutes)")
             print("Deliver this token to the executor operator out-of-band.")
 
         return 0
@@ -858,9 +832,8 @@ def cmd_admin_issue_token(client: APIClient, args: Any) -> int:
         print(f"Token issued successfully for user '{args.user_id}'.")
         token = result.get("enrollment_token", "")
         if token:
-            print(f"  Enrollment Token: {_SENSITIVE_REDACTED}")
+            print(f"  Enrollment Token: {token}")
             print("    WARNING: Token is printed once and never stored.")
-            _print_sensitive(token, getattr(args, "show_sensitive", False))
         print(f"  Previous tokens revoked: {result.get('previous_tokens_revoked', 0)}")
         print(f"  Expires in: {result.get('expires_in_seconds', 900)} seconds")
         return 0
@@ -900,9 +873,8 @@ def cmd_admin_re_enroll(client: APIClient, args: Any) -> int:
         print(f"  Status:        {result.get('status', '')}")
         token = result.get("enrollment_token", "")
         if token:
-            print(f"  Enrollment Token: {_SENSITIVE_REDACTED}")
+            print(f"  Enrollment Token: {token}")
             print("    WARNING: Token is printed once and never stored.")
-            _print_sensitive(token, getattr(args, "show_sensitive", False))
         print(f"  Credentials deactivated: {result.get('credentials_deactivated', False)}")
         print(f"  Tokens revoked: {result.get('tokens_revoked', 0)}")
         print(f"  Expires in: {result.get('expires_in_seconds', 900)} seconds")
