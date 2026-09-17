@@ -18,7 +18,12 @@ from typing import Any
 import httpx2
 from cryptography import x509
 
-from .api_client import APIClient, APIClientAuthenticationError, APIClientError
+from .api_client import (
+    DEFAULT_CONFIG_FILE,
+    APIClient,
+    APIClientAuthenticationError,
+    APIClientError,
+)
 
 # ---------------------------------------------------------------------------
 # Sensitive output helpers
@@ -1701,7 +1706,7 @@ def executor_register(client: APIClient, args: Any) -> int:
         server_url = client.config.server_url.rstrip("/")
     else:
         print(
-            "Error: core URL required. Set it in config (~/.config/venya/config.json) or pass --core-url",
+            f"Error: core URL required. Set it in config ({DEFAULT_CONFIG_FILE}) or pass --core-url",
             file=sys.stderr,
         )
         return 1
@@ -1867,7 +1872,8 @@ def _get_server_url(args: Any) -> str:
 
     Fallback chain:
     1. --core-url arg
-    2. ~/.config/venya/config.json via Config()
+    2. config.json via Config() (default: ~/.config/venya on Linux,
+       ~/Library/Application Support/venya on macOS)
     3. /etc/venya/executor.toml via tomllib
     4. "unknown" as last resort
     """
