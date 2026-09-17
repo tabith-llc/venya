@@ -6,6 +6,11 @@ Notable changes to Venya will be documented in this file.
 
 ### Added
 
+- Full-lifecycle test plan (`docs/full-lifecycle-test.md`) and interactive MCP
+  driver (`testing/mcp_manual_drive.py`): reproducible A-Z validation from a
+  clean hypervisor to the MCP use-a-secret redaction proof, operator-run.
+  Verified with opencode and local-LLM (omlx.ai) clients; two live PASS runs
+  2026-09-17. Full A-Z testing is ongoing.
 - macOS support for the Workstation CLI: config dir follows the platform
   convention (`~/Library/Application Support/venya`), and the CLI installer
   runs on stock macOS (`shasum` fallback for hash verification, no
