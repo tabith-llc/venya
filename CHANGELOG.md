@@ -4,6 +4,8 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-09-17
+
 ### Security
 
 - Secret role scoping is now enforced on listing and execution-session
@@ -16,6 +18,15 @@ Notable changes to Venya will be documented in this file.
   *use*, e.g. ssh-ing with an admin-scoped credential unseen). Physically
   accepted: the exact probe that succeeded pre-fix now 404s, and the
   admin/creator happy path still injects and redacts.
+- Test hardening: the core visibility rules now have a real-SQLite truth
+  table (in-scope, out-of-scope-indistinguishable, creator fallback,
+  injection pos+neg, list matrix, metadata filters); the server test that
+  had *pinned* the old any-reader-sees-all behavior was reversed into a
+  shared-role-visible + out-of-scope-hidden pair; session-create gained an
+  indistinguishable-404 paired negative. Suites at the tag: 1,729 passed
+  (cli 291 / core 95+7 skipped / server 726 / executor 581 / mcp 36).
+
+## [0.1.0-alpha.3] - 2026-09-17
 
 ### Added
 
@@ -54,6 +65,9 @@ Notable changes to Venya will be documented in this file.
   CLI resolves the server's active key version
   (`GET /api/v1/key-versions/active`); a failed lookup (fresh install, 503)
   exits loudly with a `--key-version` hint and writes nothing.
+- Executor installer: registration failures are now loud — full command
+  output plus an explicit error block — instead of a silent exit that left
+  no service unit and no diagnostics.
 
 ### Removed
 
