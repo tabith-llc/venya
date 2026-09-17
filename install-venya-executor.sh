@@ -416,14 +416,18 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
             warn "Core health check failed — proceeding with registration anyway"
         fi
 
-        # Run registration — do NOT use || true, failures must abort install
+        # Run registration — failures must abort install WITH diagnostics.
+        # `|| REG_EXIT=$?` is required: under set -e a failing command
+        # substitution in an assignment kills the script at the assignment,
+        # making the handler below unreachable and swallowing REG_OUTPUT
+        # (observed live 2026-09-17: bad token → silent exit, no error shown).
+        REG_EXIT=0
         REG_OUTPUT=$("$INSTALL_DIR/.venv/bin/venya" exec register \
             --executor-id "$EXECUTOR_ID" \
             --core-url "$SERVER_URL" \
             --output-dir /etc/venya/executor \
             --enrollment-token "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" \
-            2>&1)
-        REG_EXIT=$?
+            2>&1) || REG_EXIT=$?
         echo "$REG_OUTPUT"
 
         if [ "$REG_EXIT" -ne 0 ]; then
