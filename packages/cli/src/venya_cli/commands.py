@@ -214,12 +214,27 @@ def cmd_store(client: APIClient, args: Any) -> int:
         print("Error: secret value required (provide as argument or stdin)", file=sys.stderr)
         return 1
 
+    # Resolve key_version_id: explicit --key-version wins, otherwise the
+    # server's active key version (POST /secrets requires the field).
+    key_version_id = getattr(args, "key_version", None)
+    if not key_version_id:
+        try:
+            kv = client.get("/api/v1/key-versions/active")
+            key_version_id = kv["key_version_id"]
+        except APIClientError as e:
+            print(
+                f"Failed to resolve active key version: {e}. " "Pass --key-version explicitly (e.g. --key-version v1).",
+                file=sys.stderr,
+            )
+            return 1
+
     try:
         payload = {
             "key": args.key,
             "value": value,
             "roles": args.roles,
             "force": getattr(args, "force", False),
+            "key_version_id": key_version_id,
         }
 
         # Parse metadata key=value pairs
