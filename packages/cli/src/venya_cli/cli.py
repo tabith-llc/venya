@@ -72,11 +72,6 @@ def create_parser() -> argparse.ArgumentParser:
         help="Role(s) to scope the secret to",
     )
     store_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite even if roles differ",
-    )
-    store_parser.add_argument(
         "--key-version",
         default=None,
         help="Key version ID to encrypt with (default: server's active key version)",
