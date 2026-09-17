@@ -6,7 +6,7 @@
 
 """Tests for enrollment flow endpoints (legacy)."""
 
-from datetime import UTC
+from datetime import UTC, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -61,6 +61,8 @@ class TestEnrollmentCreateToken:
         mock_token = SimpleNamespace(id=1)
         em = MagicMock()
         em.create_enrollment_token.return_value = (mock_token, "enc-token-123")
+        # response lifetime is derived from the manager's config, not hardcoded
+        em.config.token_expiry = timedelta(minutes=15)
 
         db = _make_mock_db_with_user()
         backend = MagicMock()

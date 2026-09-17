@@ -9,10 +9,14 @@
 import logging
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from core.iam.enrollment_manager import EnrollmentManager
 
 logger = logging.getLogger("venya.server")
 
@@ -50,6 +54,31 @@ def init_db(db_config: BackendConfig, db_url: str | None = None) -> Backend:
         passphrase=db_config.passphrase if db_config.passphrase else None,
     )
     return Backend(config)
+
+
+def enrollment_manager(db: Session, request: Request) -> EnrollmentManager:
+    """EnrollmentManager wired to the configured enrollment-token TTL.
+
+    Single construction point for every route that builds an enrollment
+    manager (ticket fido2-enrollment-ttl-config-dead): reads
+    ServerConfig.fido2.enrollment_token_ttl (minutes) from app state, so
+    VENYA_FIDO2__ENROLLMENT_TOKEN_TTL takes effect on every mint path and
+    response lifetimes are derived, not hardcoded. Falls back to the
+    EnrollmentConfig default (15 minutes) when no config is on app state
+    (minimal test apps).
+    """
+    # Function-local import: matches the route-module idiom and keeps
+    # call-time patching of core.iam.enrollment_manager.EnrollmentManager
+    # (the codebase's established mock point) effective.
+    from core.iam.enrollment_manager import EnrollmentConfig, EnrollmentManager
+
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        return EnrollmentManager(db)
+    return EnrollmentManager(
+        db,
+        EnrollmentConfig(token_expiry=timedelta(minutes=config.fido2.enrollment_token_ttl)),
+    )
 
 
 def get_backend(request: Request) -> Backend:

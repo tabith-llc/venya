@@ -244,7 +244,7 @@ class Executor:
             self._bundles.append(bundle)
 
         # Delegate actual injection to strategy
-        self._injection_result = self.injection_strategy.prepare(self._bundles)
+        self._injection_result = self.injection_strategy.prepare(self._bundles, self.session_id)
         logger.info(
             "Injected %d secrets via strategy '%s'",
             len(self._bundles),
