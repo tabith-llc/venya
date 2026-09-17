@@ -16,6 +16,15 @@ Notable changes to Venya will be documented in this file.
   Fresh installs have no active key version yet — pass `--key-version v1`
   until key-version bootstrap lands.
 
+### Changed
+
+- Admin commands that mint enrollment tokens (`admin enroll`, `admin
+  create-user`, `admin executor-enroll`, `admin issue-token`, `admin
+  re-enroll`) now always print the token. These are single-use, short-TTL
+  bootstrap artifacts handed to the enrolling party — the redaction gate
+  added friction without protecting anything (the `--json` output of the
+  same commands already printed tokens unredacted).
+
 ### Fixed
 
 - CLI installer day-one printout: now lists `venya init <user-id>` (creates
@@ -30,6 +39,9 @@ Notable changes to Venya will be documented in this file.
 
 ### Removed
 
+- `--show-sensitive` global flag: tokens no longer redacted, so the flag has
+  nothing to unlock. Passing it now fails with an argparse error instead of
+  being silently accepted.
 - `venya store --force`: silent no-op — the server never accepted a `force`
   field and has no upsert semantics. Storing an existing key creates a new
   row; delete the old secret first when replacing one.
