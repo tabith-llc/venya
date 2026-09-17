@@ -126,12 +126,12 @@ Unexplained deltas must be investigated before provisioning.
   (passphrase delivered to the daemon via `/etc/venya/venya-core.env`). The
   root/executor CA key is still plaintext at rest (0600) — known limitation,
   fix deferred.
-- **`venya store` on a fresh install needs `--key-version v1`.** A fresh server
-  has no *active* key version (bootstrap is a known open gap), so the automatic
-  active-version lookup returns 503 and `store` fails loudly with a hint. Pass
-  `--key-version v1` explicitly until key-version bootstrap ships. Labels are
-  stored without validation and decryption never consults `key_versions`, so
-  `v1` is safe.
+- **`venya store` key-version resolution.** Migration 027 seeds one active
+  `v1` at install, so the automatic active-version lookup succeeds and
+  `--key-version` is optional. On installs predating 027 the lookup 503s and
+  `store` fails loudly with a hint — pass `--key-version v1` explicitly there.
+  Labels are stored without validation and decryption never consults
+  `key_versions`, so `v1` is safe.
 - **No upsert.** `venya store` on an existing key creates a **second row**
   (there is no `--force`; the flag was removed as a no-op). Delete the old
   secret first when replacing one.
@@ -724,21 +724,21 @@ failure was logged (login still succeeded by design) — record it.
 ### D.2 Create the secret (admin workstation)
 
 The secret carries the target's login so `run_command` can ssh into the target.
-Fresh install → pass `--key-version v1` (see Operational constraints):
+The server seeds an active `v1` at install (migration 027), so no
+`--key-version` flag is needed:
 
 ```bash
 VENYA_CONFIG=$ADMIN_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt \
   $ADMIN_WS/.venv/bin/venya store $SECRET_KEY "$TARGET_PW" \
-    --roles admin --key-version v1 \
+    --roles admin \
     --metadata executor=$EXEC_ID --metadata purpose=ssh_login --metadata username=$TARGET_USER
 # Expected: "Secret '$SECRET_KEY' stored successfully."
 ```
 
 `--roles` is required. Metadata `executor`/`purpose`/`username` is what
-`list_secrets` surfaces (values are never shown). Without `--key-version`, a
-fresh server answers the active-version lookup with 503 and `store` fails
-loudly with a hint, writing nothing — that fail-loud path is itself worth
-recording once per run.
+`list_secrets` surfaces (values are never shown). On installs predating
+migration 027, the active-version lookup answers 503 and `store` fails loudly
+with a hint, writing nothing — pass `--key-version v1` explicitly there.
 
 ### D.3 Discover `SECRET_PK` (the sandbox path uses the DB primary key, not the key name)
 
@@ -1012,12 +1012,15 @@ Never paste full tokens, PINs, passwords, or recovery codes.
 
 1. **FIDO2 keys must be physically attached to the workstation.** No remote
    ceremony exists; PIN prompts require a local TTY.
-2. **Token windows are hard by default:** user enrollment 15 min (**fixed —
-   the TTL config knob is dead, fix pending**), executor enrollment ~30 min
-   (dev runs raise it to 4 h — D.1), both single-use. Mint immediately before
-   use, and remember TTL changes require re-login (D.1).
-3. **Fresh installs have no active key version** — `venya store` needs
-   `--key-version v1` until bootstrap ships.
+2. **Token windows are tight by default:** user enrollment 15 min — adjustable
+   via `VENYA_FIDO2__ENROLLMENT_TOKEN_TTL` (minutes; wired at the manager —
+   installs predating that fix have a dead knob and hardcode 900 s); executor
+   enrollment ~30 min (dev runs raise it to 4 h — D.1); both single-use. Mint
+   immediately before use, and remember TTL changes require re-login (D.1).
+3. **Key-version bootstrap:** migration 027 seeds one active `v1` at install —
+   `venya store` works without `--key-version` and `GET /key-versions/active`
+   answers 200. Installs predating 027 have no active version: the lookup 503s
+   and `store` fails loudly with a `--key-version v1` hint.
 4. **The session refresh path cannot revive an expired token** — long runs need
    the D.1 timeout accommodation.
 5. **No secret upsert** — re-storing a key creates a second row.
