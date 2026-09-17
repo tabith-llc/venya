@@ -13,6 +13,7 @@ Communicates over stdin/stdout using the MCP protocol.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 
@@ -274,8 +275,20 @@ async def main() -> None:
 
 
 def run() -> None:
-    """Sync console-script entry point — async main() must be awaited."""
-    asyncio.run(main())
+    """Sync console-script entry point — async main() must be awaited.
+
+    Startup-precondition failures (missing or malformed config) exit 1 with the
+    actionable message on stderr instead of a raw traceback
+    (ticket mcp-missing-config-traceback-ux).
+    """
+    try:
+        asyncio.run(main())
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Venya config is not valid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
