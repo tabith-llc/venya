@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx2
 import pytest
+from core.engine.core import CoreAccessError
 from fastapi import FastAPI
 from server.dependencies import get_current_user
 from server.routes import executors as executors_routes
@@ -52,6 +53,7 @@ def _create_test_app(backend=None):
     # Server-side secret resolution/wrapping
     app.state.core = MagicMock()
     app.state.core.decrypt_secret.return_value = "s3cret-value"
+    app.state.core.get_for_injection.return_value = (1, "s3cret-value", {})
 
     app.include_router(executors_routes.router, prefix="/api/v1")
 
@@ -153,6 +155,7 @@ class TestCreateExecutionSession:
         mock_executor.hostname = "10.27.28.14"
         mock_db = _mock_db_for_session(mock_executor, [None])
         backend.get_session.return_value = mock_db
+        app.state.core.get_for_injection.side_effect = CoreAccessError("Secret not found: missing-key")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -161,6 +164,35 @@ class TestCreateExecutionSession:
         )
 
         assert resp.status_code == 404
+
+    def test_scoped_out_key_404_indistinguishable_from_missing(self):
+        """Paired negative (secret-role-scoping-unenforced): a role-scoped-out
+        key yields the exact same 404 detail shape as a nonexistent key — no
+        cross-role key-name enumeration."""
+        app, backend = _create_test_app()
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "10.27.28.14"
+        mock_db = _mock_db_for_session(mock_executor, [None])
+        backend.get_session.return_value = mock_db
+
+        client = TestClient(app, raise_server_exceptions=False)
+
+        app.state.core.get_for_injection.side_effect = CoreAccessError("Secret not found: admin-only")
+        resp1 = client.post(
+            "/api/v1/executors/sessions",
+            json={"executor_id": "exec-1", "secret_keys": ["admin-only"]},
+        )
+        app.state.core.get_for_injection.side_effect = CoreAccessError("Secret not found: truly-missing")
+        resp2 = client.post(
+            "/api/v1/executors/sessions",
+            json={"executor_id": "exec-1", "secret_keys": ["truly-missing"]},
+        )
+
+        assert resp1.status_code == 404
+        assert resp2.status_code == 404
+        assert resp1.json()["detail"] == "Secret 'admin-only' not found"
+        assert resp2.json()["detail"] == "Secret 'truly-missing' not found"
 
     def test_create_session_stores_wrapped_secrets(self):
         """Keys are resolved and wrapped server-side into SessionSecret rows."""
@@ -173,6 +205,10 @@ class TestCreateExecutionSession:
         secrets = _mock_secret_rows(("db-password", None), ("api-key", None))
         mock_db = _mock_db_for_session(mock_executor, list(secrets))
         backend.get_session.return_value = mock_db
+        app.state.core.get_for_injection.side_effect = [
+            (1, "s3cret-value", {}),
+            (2, "s3cret-value", {}),
+        ]
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -200,6 +236,7 @@ class TestCreateExecutionSession:
         secrets = _mock_secret_rows(("db-password", None))
         mock_db = _mock_db_for_session(mock_executor, list(secrets))
         backend.get_session.return_value = mock_db
+        app.state.core.get_for_injection.side_effect = [(1, "s3cret-value", {})]
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
@@ -233,6 +270,7 @@ class TestCreateExecutionSession:
         secrets = _mock_secret_rows(("db-password", {"executor": "other-exec"}))
         mock_db = _mock_db_for_session(mock_executor, list(secrets))
         backend.get_session.return_value = mock_db
+        app.state.core.get_for_injection.side_effect = [(1, "s3cret-value", {"executor": "other-exec"})]
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(

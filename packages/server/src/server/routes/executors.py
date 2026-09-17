@@ -780,7 +780,7 @@ async def create_execution_session(
     key, decrypts, and sentinel-wraps the value server-side; clients never
     send or receive wrapped values.
     """
-    from core.iam.models import ExecutionSession, Executor, Secret, SessionSecret
+    from core.iam.models import ExecutionSession, Executor, SessionSecret
 
     core = getattr(request.app.state, "core", None)
     if core is None:
@@ -806,15 +806,32 @@ async def create_execution_session(
     )
     db.add(session)
 
-    # Resolve, wrap, and store secrets server-side (single transaction)
+    # Resolve, wrap, and store secrets server-side (single transaction).
+    # Visibility is enforced via core.get_for_injection: a secret resolves iff
+    # one of the caller's roles is in its scope OR the caller created it; a
+    # scoped-out key 404s indistinguishably from a nonexistent one (no
+    # cross-role key-name enumeration). No admin bypass.
+    from core.engine.core import CoreAccessError
+    from core.iam.role_manager import RoleManager
+
+    rm = RoleManager(db)
+    caller_roles = [m.role.name for m in rm.get_user_roles(auth_user["user_id"])]
+
     mismatched_keys: list[str] = []
     for key in req.secret_keys:
-        secret = db.query(Secret).filter(Secret.key == key).order_by(Secret.id).first()
-        if secret is None:
+        try:
+            secret_id, plaintext, meta = core.get_for_injection(key, auth_user["user_id"], caller_roles)
+        except CoreAccessError:
             raise HTTPException(status_code=404, detail=f"Secret '{key}' not found")
+        except Exception:
+            logger.exception("Failed to decrypt secret '%s' for session %s", key, session.id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Secret decryption unavailable",
+            )
 
         # metadata.executor is an organizational hint; mismatch warns, does not block
-        declared = (secret.meta or {}).get("executor")
+        declared = meta.get("executor")
         if declared and declared != req.executor_id:
             mismatched_keys.append(key)
             logger.warning(
@@ -826,19 +843,10 @@ async def create_execution_session(
                 auth_user["user_id"],
             )
 
-        try:
-            plaintext = core.decrypt_secret(secret)
-        except Exception:
-            logger.exception("Failed to decrypt secret '%s' for session %s", key, session.id)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Secret decryption unavailable",
-            )
-
         db.add(
             SessionSecret(
                 session_id=session.id,
-                secret_id=secret.id,
+                secret_id=secret_id,
                 wrapped_value=wrap_with_sentinel(key, plaintext.encode("utf-8")),
             )
         )
