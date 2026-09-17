@@ -158,6 +158,7 @@ echo ""
 echo "Day-one commands:"
 echo "  venya config set-server https://<core-host>"
 echo "  curl -sk https://<core-host>/.well-known/venya-ca.crt -o $CA_CERT"
+echo "  SSL_CERT_FILE=$CA_CERT venya init <user-id>    # create the first admin account (FIDO2 key required)"
 echo "  SSL_CERT_FILE=$CA_CERT venya login <user-id>"
 if [ "$INSTALL_MCP" != "no" ]; then
     echo ""
