@@ -25,10 +25,6 @@ from .api_client import (
     APIClientError,
 )
 
-# ---------------------------------------------------------------------------
-# Sensitive output helpers
-# ---------------------------------------------------------------------------
-
 
 def run_command(args: Any) -> int:
     """Run a CLI command.
