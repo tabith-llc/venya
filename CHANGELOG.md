@@ -4,6 +4,8 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7] - 2026-09-17
+
 ### Fixed
 
 - Fresh installs now seed an initial active key version (`v1`) at migration
@@ -18,6 +20,15 @@ Notable changes to Venya will be documented in this file.
 - `venya-mcp` startup precondition failures (no session/config yet, or a
   malformed config file) now print their actionable message to stderr and
   exit 1 — no raw Python traceback on first run.
+- Executor reaper: orphaned-secret cleanup scanned a pre-sandbox file layout
+  that the live writer no longer produces (it never matched anything), and
+  revocations targeted a phantom session id. The reaper now scans the real
+  per-run session directories, and revocations are attributed to the actual
+  execution session — audit records no longer misattribute.
+- Installer robustness: nine command-substitution sites under `set -e` could
+  kill installs silently at the assignment, making the intended error
+  handling unreachable (e.g. a failing Rust-extension import check died
+  before printing its own diagnostic). Error paths now fire as designed.
 
 ## [0.1.0-alpha.4] - 2026-09-17
 
