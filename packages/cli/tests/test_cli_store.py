@@ -86,7 +86,7 @@ class TestCmdStore:
 
             get_call = mock_http.request.call_args_list[0]
             assert get_call[0][0] == "GET"
-            assert get_call[0][1] == "/api/v1/secrets/key-versions/active"
+            assert get_call[0][1] == "/api/v1/key-versions/active"
 
             payload = _post_payload(mock_http)
             assert payload["key_version_id"] == "v1"

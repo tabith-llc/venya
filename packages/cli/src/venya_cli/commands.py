@@ -219,7 +219,7 @@ def cmd_store(client: APIClient, args: Any) -> int:
     key_version_id = getattr(args, "key_version", None)
     if not key_version_id:
         try:
-            kv = client.get("/api/v1/secrets/key-versions/active")
+            kv = client.get("/api/v1/key-versions/active")
             key_version_id = kv["key_version_id"]
         except APIClientError as e:
             print(
