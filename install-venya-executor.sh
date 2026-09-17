@@ -330,7 +330,9 @@ CORE_HOSTNAME="${VENYA_CORE_HOSTNAME:-$(printf '%s' "$SERVER_URL" | sed -E 's#^[
 if [[ "$CORE_HOSTNAME" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
     info "VENYA_SERVER_URL host is an IP — no /etc/hosts entry needed"
 else
-    EXISTING_IP=$( (grep " ${CORE_HOSTNAME}$" /etc/hosts 2>/dev/null || true) | awk '{print $1}' | head -1)
+    # awk 'NR==1' reads all input before exiting — no head early-close, so no
+    # SIGPIPE→141→pipefail silent death in the duplicate-entry case this handles.
+    EXISTING_IP=$( (grep " ${CORE_HOSTNAME}$" /etc/hosts 2>/dev/null || true) | awk 'NR==1 {print $1}' )
     if [ -n "${VENYA_CORE_IP:-}" ]; then
         if [ -n "$EXISTING_IP" ] && [ "$EXISTING_IP" != "$VENYA_CORE_IP" ]; then
             warn "Found ${CORE_HOSTNAME} in /etc/hosts with IP ${EXISTING_IP}; explicit VENYA_CORE_IP=${VENYA_CORE_IP} wins. Updating."
