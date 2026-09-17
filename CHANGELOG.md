@@ -18,6 +18,10 @@ Notable changes to Venya will be documented in this file.
 
 ### Fixed
 
+- CLI installer day-one printout: now lists `venya init <user-id>` (creates
+  the first admin account, FIDO2 key required) before `venya login` —
+  previously an operator following the printout attempted login with no
+  account.
 - `venya store` now sends the required `key_version_id`; previously every
   store failed with HTTP 422 on every server. Without `--key-version`, the
   CLI resolves the server's active key version
