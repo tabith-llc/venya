@@ -117,19 +117,24 @@ class SbxStrategy(InjectionStrategy):
                 "sudo usermod -aG kvm $USER && newgrp kvm"
             )
 
-    def prepare(self, secrets: list) -> InjectionResult:
+    def prepare(self, secrets: list, session_id: str) -> InjectionResult:
         """Write secrets to host tmpfs.
 
         Each secret is written to:
-            /dev/shm/venya-secrets/{session_uuid}/{secret_id}
+            /dev/shm/venya-secrets/session_{session_id}_{rand}/{secret_id}
 
         And will be copied into the sandbox at:
             /run/secrets/venya/{secret_id}
+
+        The dir name embeds the server execution-session id — the daemon
+        reaper parses it back to attribute orphan revocation to the real
+        session (ticket daemon-reaper-phantom-session).
 
         The sandbox is NOT created here — that happens in the executor.
 
         Args:
             secrets: List of SecretBundle objects.
+            session_id: Server execution-session id for this run.
 
         Returns:
             InjectionResult with secret mounts and cleanup functions.
@@ -137,7 +142,7 @@ class SbxStrategy(InjectionStrategy):
         # Create unique session directory on tmpfs (base is self-provisioned —
         # a fresh install has no /dev/shm/venya-secrets)
         os.makedirs(SECRET_TMPFS_BASE, mode=0o700, exist_ok=True)
-        self._session_dir = tempfile.mkdtemp(prefix="session_", dir=SECRET_TMPFS_BASE)
+        self._session_dir = tempfile.mkdtemp(prefix=f"session_{session_id}_", dir=SECRET_TMPFS_BASE)
         os.chmod(self._session_dir, 0o700)
 
         mounts: list[SecretMount] = []

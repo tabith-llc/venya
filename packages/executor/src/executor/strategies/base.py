@@ -75,8 +75,13 @@ class InjectionStrategy(abc.ABC):
         self.secret_base_fd = secret_base_fd
 
     @abc.abstractmethod
-    def prepare(self, secrets: list[SecretBundle]) -> InjectionResult:
-        """Prepare injection resources. Returns result with cleanup funcs."""
+    def prepare(self, secrets: list[SecretBundle], session_id: str) -> InjectionResult:
+        """Prepare injection resources for the given execution session.
+
+        session_id is the server execution-session id; implementations that
+        stage secrets on disk embed it in the staging path so the daemon
+        reaper can attribute orphan cleanup/revocation to the real session.
+        """
 
     @abc.abstractmethod
     def validate(self) -> None:

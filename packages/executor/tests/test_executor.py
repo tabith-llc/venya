@@ -6,8 +6,6 @@
 
 """Tests for Executor.revoke_tokens(), _send_to_stage2(), and create_executor()."""
 
-import os
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -169,7 +167,15 @@ class TestCreateExecutor:
 
 
 class TestReaperLoop:
-    """Tests for ReaperLoop._check_orphaned()."""
+    """Tests for ReaperLoop._check_orphaned() — layout-independent edges only.
+
+    The sbx-layout orphan behavior (session_<id>_<rand> dirs: aged deletion,
+    per-session revocation, TTL, foreign entries, failure tolerance) lives in
+    test_daemon_loop.py::TestReaperOrphanCleanup. The legacy flat
+    venya_*.secret file tests were removed together with the layout they
+    pinned — that scan matched nothing under the sbx writer (ticket
+    daemon-reaper-phantom-session).
+    """
 
     def _create_reaper(
         self,
@@ -191,143 +197,18 @@ class TestReaperLoop:
         return ReaperLoop(config, state, tmpfs_dir=str(tmpfs_dir))
 
     def test_check_orphaned_no_files(self, tmp_path: Path):
-        """Does nothing when no secret files exist."""
+        """Does nothing when the base dir is empty."""
         reaper = self._create_reaper(tmp_path)
 
         reaper._check_orphaned()  # Should not raise
 
-    def test_check_orphaned_new_files_not_orphaned(self, tmp_path: Path):
-        """Does not delete files newer than TTL."""
-        reaper = self._create_reaper(tmp_path, secret_ttl_seconds=300)
-        tmpfs_dir = Path(reaper.tmpfs_dir)
-
-        # Create a new file
-        secret_file = tmpfs_dir / "venya_db-password_abc123.secret"
-        secret_file.write_bytes(b"secret-value")
-
-        reaper._check_orphaned()
-
-        # File should still exist
-        assert secret_file.exists()
-
-    def test_check_orphaned_old_files_deleted(self, tmp_path: Path):
-        """Deletes files older than TTL."""
-        reaper = self._create_reaper(tmp_path, secret_ttl_seconds=1)
-        tmpfs_dir = Path(reaper.tmpfs_dir)
-
-        # Create an old file by backdating its mtime
-        secret_file = tmpfs_dir / "venya_api-key_xyz789.secret"
-        secret_file.write_bytes(b"secret-value")
-        old_time = time.time() - 10  # 10 seconds ago
-        os.utime(secret_file, (old_time, old_time))
-
-        reaper._check_orphaned()
-
-        # File should be deleted
-        assert not secret_file.exists()
-
-    def test_check_orphaned_non_venya_files_ignored(self, tmp_path: Path):
-        """Does not touch files that don't match venya pattern."""
-        reaper = self._create_reaper(tmp_path, secret_ttl_seconds=1)
-        tmpfs_dir = Path(reaper.tmpfs_dir)
-
-        # Create a non-venya file
-        other_file = tmpfs_dir / "some_other_file.txt"
-        other_file.write_bytes(b"not a secret")
-        old_time = time.time() - 10
-        os.utime(other_file, (old_time, old_time))
-
-        reaper._check_orphaned()
-
-        # File should still exist
-        assert other_file.exists()
-
-    def test_check_orphaned_revokes_tokens(self, tmp_path: Path):
-        """Revokes tokens for orphaned secrets via server API."""
-        mock_client = MagicMock(spec=httpx2.Client)
-        response = MagicMock(spec=httpx2.Response)
-        response.status_code = 200
-        mock_client.post.return_value = response
-
-        reaper = self._create_reaper(tmp_path, secret_ttl_seconds=1)
-        reaper.http_client = mock_client
-        reaper.session_id = "test-session-123"
-        tmpfs_dir = Path(reaper.tmpfs_dir)
-
-        # Create an old file
-        secret_file = tmpfs_dir / "venya_db-password_abc123.secret"
-        secret_file.write_bytes(b"secret-value")
-        old_time = time.time() - 10
-        os.utime(secret_file, (old_time, old_time))
-
-        reaper._check_orphaned()
-
-        # Should have called revoke endpoint
-        mock_client.post.assert_called_once()
-        call_args = mock_client.post.call_args
-        assert "/api/v1/sessions/test-session-123/secrets/revoke" in call_args[0][0]
-        # Secret ID extracted as parts[1] from "venya_db-password_abc123.secret"
-        assert call_args[1]["json"]["secret_ids"] == ["db-password"]
-
-    def test_check_orphaned_no_revocation_without_client(self, tmp_path: Path):
-        """Does not attempt revocation when no HTTP client is available."""
-        reaper = self._create_reaper(tmp_path, secret_ttl_seconds=1)
-        reaper.http_client = None
-        tmpfs_dir = Path(reaper.tmpfs_dir)
-
-        secret_file = tmpfs_dir / "venya_api-key_xyz789.secret"
-        secret_file.write_bytes(b"secret-value")
-        old_time = time.time() - 10
-        os.utime(secret_file, (old_time, old_time))
-
-        reaper._check_orphaned()  # Should not raise
-
-        # File should still be deleted
-        assert not secret_file.exists()
-
     def test_check_orphaned_nonexistent_tmpfs_dir(self):
-        """Does nothing when tmpfs_dir does not exist."""
-        config = ExecutorConfig()
+        """Does nothing when the base dir does not exist."""
+        config = ExecutorConfig(reaper=ReaperConfig(secret_ttl_seconds=1))
         state = DaemonState()
-        reaper = ReaperLoop(config, state, tmpfs_dir="/tmp/nonexistent-venya-dir-12345")
+        reaper = ReaperLoop(config, state, tmpfs_dir="/nonexistent/venya-secrets-test")
 
         reaper._check_orphaned()  # Should not raise
-
-    def test_check_orphaned_multiple_orphaned_files(self, tmp_path: Path):
-        """Handles multiple orphaned files correctly."""
-        mock_client = MagicMock(spec=httpx2.Client)
-        response = MagicMock(spec=httpx2.Response)
-        response.status_code = 200
-        mock_client.post.return_value = response
-
-        reaper = self._create_reaper(tmp_path, secret_ttl_seconds=1)
-        reaper.http_client = mock_client
-        reaper.session_id = "test-session"
-        tmpfs_dir = Path(reaper.tmpfs_dir)
-
-        # Create multiple old files
-        for name in ["venya_secret1_abc.secret", "venya_secret2_def.secret", "venya_secret3_ghi.secret"]:
-            f = tmpfs_dir / name
-            f.write_bytes(b"data")
-            old_time = time.time() - 10
-            os.utime(f, (old_time, old_time))
-
-        # Create one new file
-        new_file = tmpfs_dir / "venya_secret4_jkl.secret"
-        new_file.write_bytes(b"data")
-
-        reaper._check_orphaned()
-
-        # All old files should be deleted
-        assert not (tmpfs_dir / "venya_secret1_abc.secret").exists()
-        assert not (tmpfs_dir / "venya_secret2_def.secret").exists()
-        assert not (tmpfs_dir / "venya_secret3_ghi.secret").exists()
-        # New file should still exist
-        assert new_file.exists()
-
-        # Should have revoked tokens for 3 orphaned secrets
-        call_args = mock_client.post.call_args
-        assert len(call_args[1]["json"]["secret_ids"]) == 3
 
 
 # --- Tests: _send_to_stage2 ---
