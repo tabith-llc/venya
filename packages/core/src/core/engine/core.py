@@ -9,6 +9,8 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from sqlalchemy import or_
+
 from ..iam.models import Role, Secret, SecretRole, SessionSecret
 from .backend import Backend
 from .encryption import decrypt_secret as _decrypt_secret_impl
@@ -68,6 +70,57 @@ class Core:
         self.rate_limiter = rate_limiter or RateLimiter()
         self.kek = kek
 
+    def _resolve_secret_in(
+        self,
+        session,
+        secret_key: str,
+        user_id: str | None,
+        role_names: list[str] | None = None,
+    ) -> Secret | None:
+        """Single enforcement point for secret visibility.
+
+        A secret is visible to the caller iff any of the caller's role_names
+        is in the secret's role scope, OR the caller created it. No admin
+        bypass: the admin role matches only admin-scoped secrets. Returns
+        None when neither holds — callers MUST treat that as "not found" so
+        scoped-out keys are indistinguishable from nonexistent ones (no
+        cross-role key-name enumeration).
+        """
+        query = session.query(Secret).filter(Secret.key == secret_key)
+        if role_names:
+            role_ids = session.query(Role.id).filter(Role.name.in_(role_names))
+            scoped_ids = session.query(SecretRole.secret_id).filter(SecretRole.role_id.in_(role_ids))
+            if user_id is not None:
+                query = query.filter(or_(Secret.id.in_(scoped_ids), Secret.created_by == user_id))
+            else:
+                query = query.filter(Secret.id.in_(scoped_ids))
+        else:
+            # No roles supplied: ownership only (legacy core.get semantics)
+            query = query.filter(Secret.created_by == user_id)
+        return query.order_by(Secret.id).first()
+
+    def get_for_injection(
+        self, secret_key: str, user_id: str, role_names: list[str] | None = None
+    ) -> tuple[int, str, dict]:
+        """Resolve + decrypt a secret for session injection (server-side only).
+
+        Returns (secret_id, plaintext, meta). Raises CoreAccessError when the
+        secret is not visible to the caller (role-scoped out and not the
+        creator) — routes map that to 404 "Secret not found", indistinguishable
+        from a nonexistent key.
+        """
+        if user_id is None:
+            raise CoreAccessError("user_id is required for secret injection")
+
+        session = self.backend.get_session()
+        try:
+            secret = self._resolve_secret_in(session, secret_key, user_id, role_names)
+            if secret is None:
+                raise CoreAccessError(f"Secret not found: {secret_key}")
+            return secret.id, self.decrypt_secret(secret), dict(secret.meta or {})
+        finally:
+            session.close()
+
     def get(
         self,
         secret_key: str,
@@ -100,44 +153,13 @@ class Core:
 
         session = self.backend.get_session()
         try:
-            # Look up the secret with scoping
-            if role_names:
-                # Role-based join: find secret accessible via provided roles
-                secret = (
-                    session.query(Secret)
-                    .join(SecretRole, SecretRole.secret_id == Secret.id)
-                    .join(Role, Role.id == SecretRole.role_id)
-                    .filter(
-                        Secret.key == secret_key,
-                        Role.name.in_(role_names),
-                    )
-                    .first()
-                )
-            else:
-                # Ownership fallback: only the creator can retrieve
-                secret = (
-                    session.query(Secret)
-                    .filter(
-                        Secret.key == secret_key,
-                        Secret.created_by == user_id,
-                    )
-                    .first()
-                )
+            # Visibility: role-scoped match OR creator (single enforcement
+            # point — _resolve_secret_in). Scoped-out and nonexistent keys are
+            # indistinguishable.
+            secret = self._resolve_secret_in(session, secret_key, user_id, role_names)
 
             if secret is None:
                 raise CoreAccessError(f"Secret not found: {secret_key}")
-
-            # Check role access if role_names provided
-            if role_names:
-                secret_roles = session.query(SecretRole).filter(SecretRole.secret_id == secret.id).all()
-                secret_role_ids = {sr.role_id for sr in secret_roles}
-
-                # Get role IDs for the named roles
-                named_roles = session.query(Role.id).filter(Role.name.in_(role_names)).all()
-                named_role_ids = {r.id for r in named_roles}
-
-                if not secret_role_ids.intersection(named_role_ids):
-                    raise CoreAccessError("User lacks access to any of the required roles")
 
             # For executor: always plaintext
             if caller == Caller.EXECUTOR:
@@ -288,15 +310,26 @@ class Core:
         self,
         prefix: str | None = None,
         role_names: list[str] | None = None,
+        user_id: str | None = None,
+        executor: str | None = None,
+        purpose: str | None = None,
+        username: str | None = None,
     ) -> list[SecretRecord]:
-        """List secrets, optionally filtered by prefix.
+        """List secrets visible to the caller.
 
         Args:
             prefix: Optional key prefix to filter by.
-            role_names: Role names to filter secrets by.
+            role_names: Caller's role names — a secret is visible if any of
+                these is in its scope.
+            user_id: Caller's user ID — creator-owned secrets are always
+                visible to their creator. No role_names and no user_id (the
+                trusted executor/mTLS plane) lists everything.
+            executor: Filter by metadata.executor.
+            purpose: Filter by metadata.purpose.
+            username: Filter by metadata.username.
 
         Returns:
-            List of secret records the user has read access to.
+            List of secret records visible to the caller.
         """
 
         session = self.backend.get_session()
@@ -306,14 +339,26 @@ class Core:
             if prefix:
                 query = query.filter(Secret.key.like(f"{prefix}%"))
 
-            if role_names:
-                # Get role IDs for the named roles
-                named_roles = session.query(Role.id).filter(Role.name.in_(role_names)).all()
-                named_role_ids = {r.id for r in named_roles}
-                if named_role_ids:
-                    query = query.filter(SecretRole.role_id.in_(named_role_ids))
+            if role_names or user_id:
+                visibility = []
+                if role_names:
+                    role_ids = session.query(Role.id).filter(Role.name.in_(role_names))
+                    scoped_ids = session.query(SecretRole.secret_id).filter(SecretRole.role_id.in_(role_ids))
+                    visibility.append(Secret.id.in_(scoped_ids))
+                if user_id:
+                    visibility.append(Secret.created_by == user_id)
+                query = query.filter(or_(*visibility))
 
             secrets = query.distinct().all()
+
+            # ponytail: metadata filters in Python (dialect-proof JSON access);
+            # push into SQL if secret counts ever make the scan measurable.
+            if executor:
+                secrets = [s for s in secrets if (s.meta or {}).get("executor") == executor]
+            if purpose:
+                secrets = [s for s in secrets if (s.meta or {}).get("purpose") == purpose]
+            if username:
+                secrets = [s for s in secrets if (s.meta or {}).get("username") == username]
 
             roles_by_secret: dict[int, list[str]] = {}
             if secrets:

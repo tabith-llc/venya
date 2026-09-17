@@ -4,6 +4,19 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Secret role scoping is now enforced on listing and execution-session
+  injection. A secret is visible/usable only if one of the caller's roles is
+  in its `--roles` scope or the caller created it — no admin bypass. A
+  scoped-out key returns the same 404 as a nonexistent one (no cross-role
+  key-name enumeration). Previously any read-permission user could list every
+  secret and any read-write user could inject and use any secret via
+  `run_command` (values stayed masked by output redaction — the gap was
+  *use*, e.g. ssh-ing with an admin-scoped credential unseen). Physically
+  accepted: the exact probe that succeeded pre-fix now 404s, and the
+  admin/creator happy path still injects and redacts.
+
 ### Added
 
 - Full-lifecycle test plan (`docs/full-lifecycle-test.md`) and interactive MCP
