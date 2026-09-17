@@ -129,7 +129,7 @@ See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)**
 
 ### Full Installation
 
-Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Releases page](https://github.com/tabith-llc/venya/releases)**. Install one-liners (Ubuntu 24.04):
+Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Releases page](https://github.com/tabith-llc/venya/releases)**. Install one-liners (core/executor: Ubuntu 24.04; the Workstation CLI one-liner also runs on macOS):
 
 ```bash
 # Core server (root)
@@ -141,17 +141,19 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
   VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> bash -s
 
-# Workstation CLI (non-root)
+# Workstation CLI (non-root; Ubuntu 24.04 or macOS — verified on macOS 26.6.2 arm64)
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
 ```
 
 Integrity: pin `VENYA_TARBALL_SHA256` (hashes on the release page) for strict verification; unset, the installer fetches the `.sha256` sidecar from the same origin as a corruption guardrail and fail-closes.
 
+Workstation CLI config file: `~/.config/venya/config.json` on Linux, `~/Library/Application Support/venya/config.json` on macOS. FIDO2 needs no extra setup on macOS (native IOKit HID transport, no root); on Linux the installer prints udev rules if `/dev/hidraw*` is not user-readable.
+
 Production deployment guide: **[Installation Guide](docs/installation.md)**
 
 ### Prerequisites
 
-- Linux — Ubuntu 24.04 LTS (tested target; installers assume it)
+- Linux — Ubuntu 24.04 LTS (core/executor; tested target, installers assume it). Workstation CLI additionally supports macOS (verified macOS 26.6.2 arm64)
 - PostgreSQL — installed automatically by the core installer (16 on Ubuntu 24.04)
 - Python 3.14 — pinned (`>=3.14,<3.15`); provisioned automatically via uv
 - FIDO2 security key (YubiKey, SoloKeys, etc.)
