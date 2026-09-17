@@ -126,7 +126,9 @@ venya_create_venv "venya-executor-requirements.txt" "/home/venya/.cargo/bin"
 # filter.py:87 when the 3.12-targeted .so was loaded on 3.14.7.)
 
 info "Building Rust filter extension (cargo + tagged copy)..."
-SITE_PACKAGES=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
+# -print -quit, not `| head -1`: under set -o pipefail, head exiting early can
+# SIGPIPE find (141) and kill the script silently at the assignment.
+SITE_PACKAGES=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' -print -quit)
 VENV_PYTHON="$INSTALL_DIR/.venv/bin/python3.14"
 RUST_LOG="/var/log/venya/rust-build.log"
 mkdir -p "$(dirname "$RUST_LOG")"
@@ -162,15 +164,20 @@ if [ ! -f "$DEST" ]; then
 fi
 
 # Build-id verification — catches partial copies
-SRC_BUILD_ID=$(readelf -n "$INSTALL_DIR/packages/executor/target/release/libvenya_filter.so" 2>/dev/null | grep "Build ID" | awk '{print $3}')
-DEST_BUILD_ID=$(readelf -n "$DEST" 2>/dev/null | grep "Build ID" | awk '{print $3}')
+# `|| true` inside the substitutions: grep-no-match (no readelf, no Build ID)
+# would fail the pipeline → set -e kills the script AT the assignment, making
+# the mismatch error below unreachable (REG_OUTPUT incident class).
+SRC_BUILD_ID=$(readelf -n "$INSTALL_DIR/packages/executor/target/release/libvenya_filter.so" 2>/dev/null | grep "Build ID" | awk '{print $3}' || true)
+DEST_BUILD_ID=$(readelf -n "$DEST" 2>/dev/null | grep "Build ID" | awk '{print $3}' || true)
 if [ "$SRC_BUILD_ID" != "$DEST_BUILD_ID" ]; then
     error "Build-id mismatch: source=$SRC_BUILD_ID dest=$DEST_BUILD_ID"
     exit 1
 fi
 
 # Post-install assertion: import resolves to the tagged path
-IMPORT_CHECK=$("$VENV_PYTHON" -c "import venya_filter; print(venya_filter.__file__)" 2>&1)
+# `|| true`: a FAILING import is exactly what this check reports — without it,
+# set -e kills the script at the assignment and the diagnostic below never runs.
+IMPORT_CHECK=$("$VENV_PYTHON" -c "import venya_filter; print(venya_filter.__file__)" 2>&1 || true)
 if ! echo "$IMPORT_CHECK" | grep -q "venya_filter${TAG}"; then
     error "venya_filter import resolves to unexpected path: $IMPORT_CHECK"
     exit 1

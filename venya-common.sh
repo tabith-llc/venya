@@ -513,7 +513,11 @@ venya_verify_deployment() {
         # Verify the deployed auth.py matches the source auth.py
         local source_auth="$INSTALL_DIR/packages/server/src/server/middleware/auth.py"
         local deployed_auth
-        deployed_auth=$(sudo -H -u venya "$python_bin" -c "import server; import os; print(os.path.dirname(server.__file__))" 2>/dev/null)/middleware/auth.py
+        # `|| true`: an unimportable server package is the drift condition this
+        # verifier diagnoses — without it set -e kills the whole verify pass at
+        # the assignment (REG_OUTPUT incident class). Empty result → the [ -f ]
+        # guard below skips this check; the site-packages checks still run.
+        deployed_auth=$(sudo -H -u venya "$python_bin" -c "import server; import os; print(os.path.dirname(server.__file__))" 2>/dev/null || true)/middleware/auth.py
         if [ -f "$source_auth" ] && [ -f "$deployed_auth" ]; then
             if ! diff -q "$source_auth" "$deployed_auth" >/dev/null 2>&1; then
                 error "DEPLOYMENT MISMATCH: auth.py in site-packages differs from source"
@@ -527,7 +531,9 @@ venya_verify_deployment() {
     # Check executor package if this was an executor install
     if [ "$tarball_type" = "executor" ]; then
         local site_packages
-        site_packages=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' | head -1)
+        # -print -quit, not `| head -1`: head exiting early can SIGPIPE find
+        # (141) → pipefail → set -e kills the verify pass at the assignment.
+        site_packages=$(find "$INSTALL_DIR/.venv" -type d -name 'site-packages' -print -quit)
         if [ -z "$site_packages" ]; then
             error "Cannot find site-packages directory"
             errors=$((errors + 1))
@@ -539,8 +545,8 @@ venya_verify_deployment() {
             # A missing cpython-314 tag (or a bare venya_filter.so) means the
             # extension was compiled against the wrong interpreter. (Bug B root cause.)
             local tagged_so bare_so
-            tagged_so=$(find "$site_packages" -name 'venya_filter.cpython-314-*.so' 2>/dev/null | head -1)
-            bare_so=$(find "$site_packages" -name 'venya_filter.so' -not -name '*.cpython-*' 2>/dev/null | head -1)
+            tagged_so=$(find "$site_packages" -name 'venya_filter.cpython-314-*.so' -print -quit 2>/dev/null)
+            bare_so=$(find "$site_packages" -name 'venya_filter.so' -not -name '*.cpython-*' -print -quit 2>/dev/null)
             if [ -n "$bare_so" ]; then
                 error "DEPLOYMENT MISMATCH: bare-named venya_filter.so in site-packages (wrong-interpreter build)"
                 error "  File: $bare_so"
