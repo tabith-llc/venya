@@ -19,6 +19,14 @@ Notable changes to Venya will be documented in this file.
   label and remain decryptable; new secrets receive the new label
   automatically. Rollback (both routes) now performs a real flip-back of the
   active version instead of only marking the job row.
+- `venya store` now actually reads the secret value from stdin, as its help
+  text always claimed: pass `-` as the value positional (or omit it when
+  stdin is piped), or omit it at an interactive TTY for a hidden `getpass`
+  prompt. Trailing newline stripped from piped input (`echo` convention).
+  Empty input fails with an actionable error (exit 1, nothing sent). The
+  argv positional still works and takes precedence; the stdin/prompt paths
+  keep values out of `/proc/*/cmdline` and shell history — the same
+  stdin-carriage discipline the installers use for passwords.
 
 ### Changed
 
