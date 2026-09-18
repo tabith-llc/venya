@@ -38,6 +38,7 @@ class SecretRecord:
     created_at: datetime
     role_names: list[str] = field(default_factory=list)
     meta: dict | None = None
+    replaced: bool = False  # True when put() replaced a visible existing row
 
 
 class CoreError(Exception):
@@ -184,8 +185,9 @@ class Core:
         role_names: list[str],
         key_version_id: str,
         meta: dict | None = None,
+        caller_roles: list[str] | None = None,
     ) -> SecretRecord:
-        """Store a secret.
+        """Store a secret (upsert on a visible existing key).
 
         Args:
             key: Secret key.
@@ -194,9 +196,27 @@ class Core:
             role_names: Role names to scope the secret to.
             key_version_id: Key version to use for encryption.
             meta: Structured metadata for discovery (executor, purpose, etc.).
+            caller_roles: The caller's ACTUAL role names (fresh from the DB —
+                NOT user_info["roles"], which carries role IDs). Used solely
+                to resolve an existing row for replacement; omit for
+                creator-only upsert semantics.
+
+        Upsert semantics (ticket cli-store-force-field-ignored option-2
+        ruling): if the key resolves for this caller under the SAME
+        visibility primitive as get/inject/list (role in scope OR creator),
+        the existing row is REPLACED in place — value re-encrypted,
+        key_version_id/meta/role links overwritten, row id preserved
+        (injection path /run/secrets/venya/<pk> and FK refs stay stable) and
+        created_by immutable (audit lineage). A key that exists but is
+        scoped-out for the caller resolves to None → a second row is
+        INSERTED exactly as before: no existence leak (identical 201 shape),
+        no cross-role clobber. You may replace exactly what you may see —
+        replacing is never worse than deleting, which visibility already
+        allows.
 
         Returns:
-            The created secret record.
+            The stored secret record; record.replaced distinguishes
+            replace-in-place (True) from insert (False).
 
         Raises:
             CoreAccessError: If user doesn't have write access.
@@ -213,6 +233,36 @@ class Core:
 
         session = self.backend.get_session()
         try:
+            existing = self._resolve_secret_in(session, key, user_id, caller_roles)
+
+            if existing is not None:
+                # Replace in place — id + created_by preserved (see docstring).
+                existing.encrypted_value = ciphertext
+                existing.nonce = nonce
+                existing.wrapped_dek = wrapped_dek
+                existing.key_version_id = key_version_id
+                existing.meta = meta or {}
+                session.query(SecretRole).filter(SecretRole.secret_id == existing.id).delete()
+                for role_name in role_names:
+                    role = session.query(Role).filter(Role.name == role_name).first()
+                    if role is None:
+                        raise CoreAccessError(f"Role not found: {role_name}")
+                    session.add(SecretRole(secret_id=existing.id, role_id=role.id))
+                session.commit()
+                return SecretRecord(
+                    id=str(existing.id),
+                    key=existing.key,
+                    encrypted_value=existing.encrypted_value,
+                    nonce=existing.nonce,
+                    wrapped_dek=existing.wrapped_dek,
+                    key_version_id=existing.key_version_id,
+                    created_by=existing.created_by,
+                    created_at=existing.created_at,
+                    role_names=role_names,
+                    meta=existing.meta,
+                    replaced=True,
+                )
+
             # Create the secret record
             secret = Secret(
                 key=key,

@@ -69,6 +69,7 @@ def _make_mock_core():
         id=42,
         key="test-key",
         role_names=["dev"],
+        replaced=False,
     )
 
     core.get.return_value = "\u2022" * 8
@@ -238,6 +239,10 @@ class TestSecretsCreate:
             role_names=["dev"],
             key_version_id="v1",
             meta={},
+            # caller_roles resolved fresh from the DB via RoleManager (upsert
+            # visibility context); the mocked role wiring yields []. Real
+            # role semantics: TestSecretUpsertRoute + core TestSecretUpsertSqlite.
+            caller_roles=[],
         )
 
     def test_create_unauthenticated(self):
@@ -1020,3 +1025,106 @@ class TestSecretsMetadata:
         assert len(data["secrets"]) == 1
         assert "metadata" in data["secrets"][0]
         assert data["secrets"][0]["metadata"] == {}
+
+
+class TestSecretUpsertRoute:
+    """Route-level upsert loop (ticket cli-store-force-field-ignored option-2).
+
+    Real Backend over SQLite, real secrets router, real require_role chain —
+    2×POST closes the loop at the endpoint, not just the engine.
+    """
+
+    def _build_app(self, tmp_path):
+        from core.engine.backend import Backend, BackendConfig
+        from core.engine.encryption import KEK_SIZE
+        from core.iam.models import Base, Role, RoleMember, User
+        from fastapi import FastAPI
+        from server.dependencies import get_current_user
+        from server.routes import secrets as secrets_routes
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from starlette.testclient import TestClient
+
+        db_path = tmp_path / "upsert_route.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(bind=engine)
+
+        kek = b"k" * KEK_SIZE
+        s = SessionLocal()
+        role = Role(name="dev", permissions="read-write")
+        s.add_all([User(user_id="test-user"), role])
+        s.flush()
+        s.add(RoleMember(user_id="test-user", role_id=role.id))
+        s.commit()
+        s.close()
+
+        backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+        backend._engine = engine
+        backend._session_factory = SessionLocal
+
+        app = FastAPI()
+        app.state.backend = backend
+        app.state.core = backend.get_core()
+        app.include_router(secrets_routes.router, prefix="/api/v1")
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": "test-user"}
+        return TestClient(app, raise_server_exceptions=False), SessionLocal, kek
+
+    def _payload(self, value, **over):
+        body = {"key": "rotating-pw", "value": value, "roles": ["dev"], "key_version_id": "v1"}
+        body.update(over)
+        return body
+
+    def test_double_post_replaces_in_place(self, tmp_path):
+        from core.engine.encryption import decrypt_secret
+        from core.iam.models import Secret
+
+        client, SessionLocal, kek = self._build_app(tmp_path)
+        r1 = client.post("/api/v1/secrets", json=self._payload("first-value"))
+        assert r1.status_code == 201, r1.text
+        b1 = r1.json()
+        assert b1["replaced"] is False
+
+        r2 = client.post("/api/v1/secrets", json=self._payload("second-value"))
+        assert r2.status_code == 201, r2.text
+        b2 = r2.json()
+        assert b2["replaced"] is True
+        assert b2["id"] == b1["id"], "row id must be stable across replace (injection-path contract)"
+
+        with SessionLocal() as s:
+            rows = s.query(Secret).filter(Secret.key == "rotating-pw").all()
+            assert len(rows) == 1, "replace must not duplicate the row"
+            assert decrypt_secret(kek, rows[0].wrapped_dek, rows[0].nonce, rows[0].encrypted_value) == b"second-value"
+
+    def test_scoped_out_caller_inserts_second_row_no_clobber(self, tmp_path):
+        """Paired negative at the endpoint: a caller who cannot see the row
+        gets a plain insert (identical 201 shape — no existence leak) and the
+        original is untouched."""
+        from core.engine.encryption import decrypt_secret
+        from core.iam.models import Role, RoleMember, Secret, User
+
+        client, SessionLocal, kek = self._build_app(tmp_path)
+        r1 = client.post("/api/v1/secrets", json=self._payload("owner-value"))
+        assert r1.status_code == 201 and r1.json()["replaced"] is False
+
+        # Second identity: member of a different role, same key string.
+        with SessionLocal() as s:
+            other_role = Role(name="other", permissions="read-write")
+            s.add(other_role)
+            s.add(User(user_id="other-user"))
+            s.flush()
+            s.add(RoleMember(user_id="other-user", role_id=other_role.id))
+            s.commit()
+        from server.dependencies import get_current_user
+
+        app = client.app
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": "other-user"}
+        r2 = client.post("/api/v1/secrets", json=self._payload("intruder-value", roles=["other"]))
+        assert r2.status_code == 201
+        assert r2.json()["replaced"] is False
+        assert r2.json()["id"] != r1.json()["id"]
+
+        with SessionLocal() as s:
+            rows = s.query(Secret).filter(Secret.key == "rotating-pw").order_by(Secret.id).all()
+            assert len(rows) == 2
+            assert decrypt_secret(kek, rows[0].wrapped_dek, rows[0].nonce, rows[0].encrypted_value) == b"owner-value"

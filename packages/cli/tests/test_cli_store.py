@@ -246,3 +246,42 @@ class TestCmdStoreStdin:
         finally:
             client.close()
             config_file.unlink()
+
+
+class TestCmdStoreReplacedMessage:
+    """Operator-visible replace signal (upsert option-2 ruling)."""
+
+    def test_replaced_response_prints_replaced_message(self, capsys):
+        client, config_file = _make_client()
+        try:
+            mock_http = MagicMock()
+            mock_http.request.side_effect = [
+                _make_mock_response(200, {"key_version_id": "v1"}),
+                _make_mock_response(201, {"id": 7, "key": "mykey", "role_names": ["admin"], "replaced": True}),
+            ]
+            client._http = mock_http
+            assert cmd_store(client, _make_args()) == 0
+            out = capsys.readouterr().out
+            assert "replaced existing" in out
+            assert "id 7" in out
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_fresh_store_message_unchanged(self, capsys):
+        """Paired negative: replaced=False keeps the classic message."""
+        client, config_file = _make_client()
+        try:
+            mock_http = MagicMock()
+            mock_http.request.side_effect = [
+                _make_mock_response(200, {"key_version_id": "v1"}),
+                _make_mock_response(201, {"id": 1, "key": "mykey", "role_names": ["admin"], "replaced": False}),
+            ]
+            client._http = mock_http
+            assert cmd_store(client, _make_args()) == 0
+            out = capsys.readouterr().out
+            assert "stored successfully" in out
+            assert "replaced" not in out
+        finally:
+            client.close()
+            config_file.unlink()
