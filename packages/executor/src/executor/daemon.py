@@ -823,6 +823,20 @@ class ExecutorDaemon:
 
     def start(self) -> None:
         """Start the executor daemon."""
+        # Refuse to boot "deaf": an empty allowlist means the relay listener
+        # would fail closed and never bind, yet the process would look healthy
+        # to systemd and every normal ops probe. Checked FIRST — before
+        # registration — so the one-shot enrollment token is never consumed on
+        # a doomed boot (ticket relay-listener-empty-allowlist-not-observable,
+        # option B).
+        if not self.config.relay_client_ids:
+            logger.error(
+                "relay_client_ids is empty — refusing to start: the relay listener "
+                "would never bind and this executor could not receive commands. "
+                "Set relay_client_ids to the core's relay client certificate CN "
+                "in executor.toml."
+            )
+            raise SystemExit(1)
         logger.info("Starting executor daemon: %s", self.config.executor_id)
 
         # /dev/shm survives daemon kills and reboots but sandboxes never do:
@@ -857,6 +871,12 @@ class ExecutorDaemon:
 
         # Start the mTLS relay listener (certs already on disk after registration)
         self.relay.start()
+        if not self.relay.active:
+            # Bind/SSL-setup failure class (the empty-allowlist cause is
+            # refused before registration): same deaf-but-booted outcome,
+            # same loud refusal.
+            logger.error("Relay listener failed to bind — refusing to run deaf")
+            raise SystemExit(1)
 
         # Mark as running
         self.state.running = True
