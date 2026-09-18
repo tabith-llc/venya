@@ -6,19 +6,26 @@
 
 <#
 .SYNOPSIS
-    Venya Workstation CLI Uninstaller (Windows)
+    Venya Workstation CLI Uninstaller (Windows, machine-wide)
 
 .DESCRIPTION
-    Removes what install-venya-cli.ps1 created for the CURRENT user:
-      - the venya-cli and venya-mcp uv tools (shims in %USERPROFILE%\.local\bin)
-      - optionally %APPDATA%\venya (config + stored access token)
+    Removes what install-venya-cli.ps1 created:
+      - the whole install root (default C:\Program Files\Venya) — pinned uv,
+        uv-managed Python, both tool venvs and the shims
+      - the install root's bin directory from the MACHINE PATH
+      - optionally the INVOKING user's %APPDATA%\venya (config + access token)
 
-    No administrator rights required. Mirrors uninstall-venya-cli.sh.
+    REQUIRES ADMINISTRATOR RIGHTS, matching the installer.
+
+    Per-user config for OTHER users is not removed: it lives in each user's own
+    profile, which this script does not enumerate. Those files contain an access
+    token, so the command to find them is printed instead of being run silently.
 
     Environment variables:
       VENYA_SKIP_PROMPT  - "yes" skips the confirmation prompt
-      VENYA_PURGE_CONFIG - "yes" also deletes %APPDATA%\venya
+      VENYA_PURGE_CONFIG - "yes" also deletes the invoking user's %APPDATA%\venya
                            (default: ask; when non-interactive, config is KEPT)
+      VENYA_INSTALL_DIR  - install root to remove (must match the installer)
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File uninstall-venya-cli.ps1
@@ -32,22 +39,30 @@ function Info([string]$m) { Write-Host "[INFO]  $m" -ForegroundColor Green }
 function Warn([string]$m) { Write-Host "[WARN]  $m" -ForegroundColor Yellow }
 function Fail([string]$m) { Write-Host "[ERROR] $m" -ForegroundColor Red; exit 1 }
 
-$binDir  = Join-Path $env:USERPROFILE '.local\bin'
-$uv      = Join-Path $binDir 'uv.exe'
-$toolDir = Join-Path $env:APPDATA 'uv\tools'
-$cfgDir  = Join-Path $env:APPDATA 'venya'
-# Pre-gap-A builds wrote here; remove it too if present so no stale token survives.
-$legacyCfgDir = Join-Path $env:USERPROFILE '.config\venya'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Fail @"
+Administrator rights are REQUIRED to uninstall the machine-wide Venya CLI.
+Re-run from an elevated terminal: right-click PowerShell -> Run as administrator.
+"@
+}
+
+$Base   = if ($env:VENYA_INSTALL_DIR) { $env:VENYA_INSTALL_DIR } else { 'C:\Program Files\Venya' }
+$BinDir = Join-Path $Base 'bin'
+$cfgDir = Join-Path $env:APPDATA 'venya'
+
+Info "Removing the machine-wide Venya CLI from $Base"
 
 if ($env:VENYA_SKIP_PROMPT -ne 'yes') {
-    $answer = Read-Host "Remove the venya CLI for user $env:USERNAME? [Y/n]"
+    $answer = Read-Host "Remove the Venya CLI for ALL users of this machine? [Y/n]"
     if ($answer -match '^[Nn]') { Info 'Aborted.'; exit 0 }
 }
 
 $purge = $env:VENYA_PURGE_CONFIG
 if (-not $purge) {
     if (-not [Console]::IsInputRedirected) {
-        $a = Read-Host "Also delete $cfgDir (server URL + stored access token)? [y/N]"
+        $a = Read-Host "Also delete YOUR config at $cfgDir (server URL + stored access token)? [y/N]"
         if ($a -match '^[Yy]') { $purge = 'yes' } else { $purge = 'no' }
     } else {
         $purge = 'no'
@@ -55,39 +70,46 @@ if (-not $purge) {
     }
 }
 
-if (Test-Path $uv) {
-    foreach ($t in 'venya-cli','venya-mcp') {
-        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        & $uv tool uninstall $t 2>&1 | Out-Null
-        $code = $LASTEXITCODE
-        $ErrorActionPreference = $prev
-        if ($code -ne 0) { Warn "uv tool uninstall reported nothing to remove ($t)." }
-    }
+if (Test-Path $Base) {
+    Remove-Item -LiteralPath $Base -Recurse -Force
+    Info "Removed $Base"
 } else {
-    Warn 'uv not found - removing shims/venvs manually.'
+    Warn "Install root $Base not present - nothing to remove there."
 }
 
-# Belt and braces: uv tool uninstall normally clears both, but a partial or
-# manual install can leave either behind, and a stale shim means a stale token path.
-foreach ($t in 'venya-cli','venya-mcp') {
-    $v = Join-Path $toolDir $t
-    if (Test-Path $v) { Remove-Item -LiteralPath $v -Recurse -Force -ErrorAction SilentlyContinue }
-}
-foreach ($s in 'venya.exe','venya-mcp.exe') {
-    $p = Join-Path $binDir $s
-    if (Test-Path $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+# Remove only our own entry, preserving the rest of the machine PATH verbatim.
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+if ($machinePath) {
+    $parts = $machinePath -split ';' | Where-Object { $_ -and ($_ -ne $BinDir) }
+    $newPath = ($parts -join ';')
+    if ($newPath -ne $machinePath) {
+        [Environment]::SetEnvironmentVariable('Path', $newPath, 'Machine')
+        Info "Removed $BinDir from the MACHINE PATH."
+    } else {
+        Info "Machine PATH did not contain $BinDir"
+    }
 }
 
 if ($purge -eq 'yes') {
-    foreach ($d in @($cfgDir, $legacyCfgDir)) {
-        if (Test-Path $d) { Remove-Item -LiteralPath $d -Recurse -Force; Info "Removed $d" }
-    }
+    if (Test-Path $cfgDir) { Remove-Item -LiteralPath $cfgDir -Recurse -Force; Info "Removed $cfgDir" }
+    $legacy = Join-Path $env:USERPROFILE '.config\venya'
+    if (Test-Path $legacy) { Remove-Item -LiteralPath $legacy -Recurse -Force; Info "Removed $legacy (pre-%APPDATA% build)" }
 }
 
-# Fail loudly if anything still resolves - mirrors the .sh contract.
+# Fail loudly if a shim still resolves anywhere - mirrors the .sh contract.
 foreach ($s in 'venya.exe','venya-mcp.exe') {
-    if (Test-Path (Join-Path $binDir $s)) { Fail "$s still present in $binDir - inspect manually." }
+    $p = Join-Path $BinDir $s
+    if (Test-Path $p) { Fail "$s still present at $p - inspect manually." }
+}
+$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+foreach ($s in 'venya','venya-mcp') {
+    $c = Get-Command $s -ErrorAction SilentlyContinue
+    if ($c) { Fail "$s still resolves at $($c.Source) - inspect manually." }
 }
 
-Info "Venya CLI uninstalled for $env:USERNAME."
-Info "uv itself and the $binDir PATH entry were left in place (shared with other tools)."
+Warn 'Per-user config for OTHER users was NOT removed. Each holds an access token at:'
+Warn '  %APPDATA%\venya\config.json'
+Warn 'To find them (admin, read-only listing):'
+Warn '  Get-ChildItem C:\Users\*\AppData\Roaming\venya\config.json -ErrorAction SilentlyContinue'
+
+Info 'Venya CLI uninstalled machine-wide.'

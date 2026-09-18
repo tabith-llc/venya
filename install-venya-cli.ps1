@@ -6,20 +6,30 @@
 
 <#
 .SYNOPSIS
-    Venya Workstation CLI Installer (Windows)
+    Venya Workstation CLI Installer (Windows, machine-wide)
 
 .DESCRIPTION
-    Installs the Venya workstation client bundle for the CURRENT user:
-      - uv (if missing) into %USERPROFILE%\.local\bin
-      - venya-cli via `uv tool install` (isolated venv, `venya` shim)
-      - venya-mcp via `uv tool install` (isolated venv, `venya-mcp` shim;
-        set VENYA_INSTALL_MCP=no to skip)
+    Installs the Venya workstation client bundle ONCE FOR THE WHOLE MACHINE:
+      - a pinned uv binary (verified by sha256) under the install root
+      - a uv-managed CPython 3.14
+      - venya-cli and venya-mcp as isolated uv tool venvs
+      - `venya` and `venya-mcp` shims on the MACHINE PATH
 
-    No administrator rights required. Mirrors install-venya-cli.sh.
+    REQUIRES ADMINISTRATOR RIGHTS. This is deliberate, not an oversight:
+    Windows 10 1903+ refuses to let a standard (Medium integrity) user traverse a
+    junction that a standard user created, and uv needs a junction for its Python
+    minor-version alias. An admin-created junction IS traversable by standard
+    users, so a machine-wide admin install works for everyone while a per-user
+    install cannot. See ticket windows-uv-junction-standard-user.
+
+    Standard users need no rights to USE the CLI. Per-user state (server URL,
+    access token) still lives in each user's own %APPDATA%\venya\config.json.
 
     Environment variables:
       VENYA_SKIP_PROMPT     - "yes" skips the confirmation prompt
       VENYA_INSTALL_MCP     - "no" installs only the CLI (default: both)
+      VENYA_INSTALL_DIR     - install root (default: C:\Program Files\Venya)
+      VENYA_UV_VERSION      - pinned uv version (default: 0.12.17)
       VENYA_TARBALL         - URL of the venya-cli tarball (default: latest
                               GitHub release asset)
       VENYA_TARBALL_SHA256  - Pin the expected sha256 (recommended: strict
@@ -36,7 +46,7 @@
 $ErrorActionPreference = 'Stop'
 
 # PowerShell 5.1 on older Windows 10 can default below TLS 1.2, which GitHub
-# and astral.sh both reject. Explicit, so the failure class cannot occur.
+# rejects. Explicit, so the failure class cannot occur.
 [Net.ServicePointManager]::SecurityProtocol =
     [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
@@ -44,10 +54,9 @@ function Info([string]$m) { Write-Host "[INFO]  $m" -ForegroundColor Green }
 function Warn([string]$m) { Write-Host "[WARN]  $m" -ForegroundColor Yellow }
 function Fail([string]$m) { Write-Host "[ERROR] $m" -ForegroundColor Red; exit 1 }
 
-# Native executables do not raise on failure and their stderr becomes a
+# Native executables do not raise on failure, and their stderr becomes a
 # PowerShell ErrorRecord under $ErrorActionPreference='Stop'. Both are handled
-# here: stderr is allowed through as text, and the exit code is checked, so no
-# step can fail silently.
+# here so no step can fail silently.
 function Invoke-Native {
     param(
         [Parameter(Mandatory)][string]$Exe,
@@ -66,54 +75,93 @@ function Get-SystemTool([string]$name) {
     return $p
 }
 
+# --- Elevation is a hard requirement ---
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Fail @"
+Administrator rights are REQUIRED to install the Venya CLI on Windows.
+This installs machine-wide (once per machine, by IT), not per user.
+Reason: Windows 10 1903+ will not let a standard user traverse a junction that a
+standard user created, and uv needs one for its Python minor-version alias.
+Re-run from an elevated terminal: right-click PowerShell -> Run as administrator.
+"@
+}
+
 $curl = Get-SystemTool 'curl.exe'
 $tar  = Get-SystemTool 'tar.exe'
+
+$Base      = if ($env:VENYA_INSTALL_DIR) { $env:VENYA_INSTALL_DIR } else { 'C:\Program Files\Venya' }
+$UvDir     = Join-Path $Base 'uv'
+$UvExe     = Join-Path $UvDir 'uv.exe'
+$BinDir    = Join-Path $Base 'bin'
+$ToolDir   = Join-Path $Base 'uv-tools'
+$PyDir     = Join-Path $Base 'python'
+
+$UvVersion = if ($env:VENYA_UV_VERSION) { $env:VENYA_UV_VERSION } else { '0.12.17' }
+# Checksum of the PUBLIC uv release artifact, not a credential. detect-secrets
+# flags any 64-char hex run; the pragma is the tool's own false-positive marker
+# and matches existing repo precedent (tests/e2e/test_rbac_secrets.py).
+$UvSha256  = 'a252121d5b59398fcb137c6ea448176459a44010f33f67e0072305a637119ca7'  # pragma: allowlist secret
 
 $tarballUrl = if ($env:VENYA_TARBALL) { $env:VENYA_TARBALL } else {
     'https://github.com/tabith-llc/venya/releases/latest/download/venya-cli-install.tar.gz'
 }
 
-Info "Installing Venya CLI for $env:USERNAME..."
+Info "Installing Venya CLI machine-wide into $Base"
+Info "Administrator: $($identity.Name)"
 
 if ($env:VENYA_SKIP_PROMPT -ne 'yes') {
-    $answer = Read-Host "Install venya CLI for user $env:USERNAME? [Y/n]"
+    $answer = Read-Host "Install venya CLI machine-wide into $Base? [Y/n]"
     if ($answer -match '^[Nn]') { Info 'Aborted.'; exit 0 }
 }
 
-# --- uv (per-user) ---
-$binDir = Join-Path $env:USERPROFILE '.local\bin'
-$uv = Join-Path $binDir 'uv.exe'
-
-if (-not (Test-Path $uv)) {
-    Info 'Installing uv...'
-    try {
-        $installPs1 = Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1'
-    } catch {
-        Fail "Cannot fetch the uv installer: $($_.Exception.Message)"
-    }
-    # Invoke-RestMethod's return type is server-controlled: a recognised text
-    # Content-Type yields String, an absent or unrecognised one yields byte[], and
-    # Invoke-Expression cannot bind a byte[] to its command parameter. astral.sh
-    # currently sends NO Content-Type at all, so this is byte[]-by-luck today.
-    # Assert the invariant on every run instead of relying on the server's headers.
-    if ($installPs1 -isnot [string]) {
-        Fail "uv install script: expected a string payload, got $($installPs1.GetType().Name)."
-    }
-    Invoke-Expression $installPs1
-    if (-not (Test-Path $uv)) { Fail "uv install completed but $uv was not found." }
-} else {
-    Info "uv already installed: $(& $uv --version)"
-}
-
-# uv persisted .local\bin into the user PATH, but this session started before
-# that happened, so the shims are not resolvable here yet.
-$env:Path = "$binDir;$env:Path"
-
-# --- Download + verify (sha256: explicit pin, else same-origin sidecar; fail-closed) ---
 $workDir = Join-Path $env:TEMP ("venya-cli-install-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 
 try {
+    # --- uv (machine-wide, pinned, sha256-verified) ---
+    if ((Test-Path $UvExe) -and ((& $UvExe --version 2>&1) -match [regex]::Escape($UvVersion))) {
+        Info "uv $UvVersion already present at $UvExe"
+    } else {
+        Info "Fetching uv $UvVersion..."
+        New-Item -ItemType Directory -Force -Path $UvDir | Out-Null
+        $uvZip = Join-Path $workDir 'uv.zip'
+        $uvUrl = "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip"
+        Invoke-Native -Exe $curl -Arguments @('-fsSL', '-o', $uvZip, $uvUrl) -What "uv download from $uvUrl"
+
+        # Fail-closed, same discipline as the tarball. A pinned hash also replaces
+        # the old `Invoke-Expression` of a remote script with a verified binary.
+        $uvActual = (Get-FileHash -LiteralPath $uvZip -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($uvActual -ne $UvSha256) {
+            Fail @"
+uv archive SHA-256 mismatch!
+  Expected: $UvSha256
+  Actual:   $uvActual
+Refusing to run an unverified binary. Aborting.
+"@
+        }
+        Info 'uv SHA-256 verified.'
+        Invoke-Native -Exe $tar -Arguments @('-xf', $uvZip, '-C', $UvDir) -What 'uv archive extraction'
+        Remove-Item -LiteralPath $uvZip -Force
+        if (-not (Test-Path $UvExe)) { Fail "uv.exe missing after extraction into $UvDir" }
+    }
+
+    # Machine-wide locations, so nothing depends on the installing admin's profile.
+    # The uv cache is deliberately TEMPORARY and outside the install root: uv writes
+    # its built-wheel cache entries with an explicit protected DACL that names the
+    # invoking admin (measured: SYSTEM + Administrators + <admin>, inherited=False).
+    # Those files are never read at runtime, so keeping them out of $Base means the
+    # delivered tree is entirely inheritance-based, the install does not record who
+    # performed it, and ~50 MB is not left behind.
+    $CacheDir = Join-Path $workDir 'uv-cache'
+    $env:UV_PYTHON_INSTALL_DIR = $PyDir
+    $env:UV_TOOL_DIR           = $ToolDir
+    $env:UV_TOOL_BIN_DIR       = $BinDir
+    $env:UV_CACHE_DIR          = $CacheDir
+    New-Item -ItemType Directory -Force -Path $BinDir, $CacheDir | Out-Null
+
+    # --- Download + verify the tarball (pin, else same-origin sidecar; fail-closed) ---
     $tarballFile = Join-Path $workDir 'venya-cli-install.tar.gz'
     Info "Downloading tarball from $tarballUrl..."
     Invoke-Native -Exe $curl -Arguments @('-fsSL', '-o', $tarballFile, $tarballUrl) -What "Download of $tarballUrl"
@@ -122,15 +170,14 @@ try {
     if (-not $expected) {
         Info 'VENYA_TARBALL_SHA256 not set - fetching checksum sidecar from origin...'
         $sidecarFile = Join-Path $workDir 'tarball.sha256'
-        Invoke-Native -Exe $curl -Arguments @('-fsSL', '-o', $sidecarFile, "$tarballUrl.sha256") -What "Sidecar fetch ${tarballUrl}.sha256 - refusing to install without integrity verification (set VENYA_TARBALL_SHA256 to pin the expected hash)"
+        Invoke-Native -Exe $curl -Arguments @('-fsSL', '-o', $sidecarFile, "$tarballUrl.sha256") -What "Sidecar fetch ${tarballUrl}.sha256 - refusing to install without integrity verification (set VENYA_TARBALL_SHA256 to pin)"
         $line = Get-Content -LiteralPath $sidecarFile -TotalCount 1
         $expected = ($line -split '\s+')[0]
         if (-not $expected) { Fail "Sidecar ${tarballUrl}.sha256 contained no hash. Aborting." }
     }
 
     Info 'Verifying tarball SHA-256...'
-    # Get-FileHash emits uppercase and the sidecar is lowercase; normalise both
-    # or the comparison can never succeed.
+    # Get-FileHash emits uppercase and the sidecar is lowercase; normalise both.
     $actual = (Get-FileHash -LiteralPath $tarballFile -Algorithm SHA256).Hash.ToLowerInvariant()
     $expectedNorm = $expected.Trim().ToLowerInvariant()
     if ($actual -ne $expectedNorm) {
@@ -143,39 +190,64 @@ Possible MITM or corrupted download. Aborting.
     }
     Info 'SHA-256 verified.'
 
-    # --- Extract (workstation bundle: packages/cli + packages/mcp) ---
-    # The archive is built with `git archive --prefix=./`, so members are
-    # already at the top level. No --strip-components, unlike the core and
-    # executor installers.
+    # --- Extract (archive is built with `git archive --prefix=./`: no strip) ---
     $extractDir = Join-Path $workDir 'src'
     New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
     Invoke-Native -Exe $tar -Arguments @('xzf', $tarballFile, '-C', $extractDir) -What 'Tarball extraction'
     Remove-Item -LiteralPath $tarballFile -Force
 
-    $cliProject = Join-Path $extractDir 'packages\cli\pyproject.toml'
-    if (-not (Test-Path $cliProject)) {
+    if (-not (Test-Path (Join-Path $extractDir 'packages\cli\pyproject.toml'))) {
         Fail 'Tarball layout unexpected: packages/cli/pyproject.toml not found.'
     }
 
-    # --- Install via uv tool (isolated venvs + .local\bin shims) ---
-    Info 'Installing venya-cli via uv tool...'
-    Invoke-Native -Exe $uv -Arguments @('tool', 'install', '--force', '--python', '3.14', (Join-Path $extractDir 'packages\cli')) -What 'uv tool install venya-cli'
+    # --- Python + tools ---
+    Info 'Installing uv-managed Python 3.14...'
+    Invoke-Native -Exe $UvExe -Arguments @('python', 'install', '3.14') -What 'uv python install 3.14'
+
+    # --link-mode copy is LOAD-BEARING. uv defaults to hardlinking wheels out of its
+    # cache; a hardlink shares one security descriptor with the cached original,
+    # which carries a PROTECTED DACL and no Users ACE, so standard users get
+    # PermissionError on import. Measured: 1982 of 4278 files protected in hardlink
+    # mode, 0 of 4277 in copy mode. Do not "optimise" this back to the default.
+    Info 'Installing venya-cli via uv tool (copy link mode)...'
+    Invoke-Native -Exe $UvExe -Arguments @('tool', 'install', '--force', '--python', '3.14', '--link-mode', 'copy', (Join-Path $extractDir 'packages\cli')) -What 'uv tool install venya-cli'
 
     $installMcp = if ($env:VENYA_INSTALL_MCP) { $env:VENYA_INSTALL_MCP } else { 'yes' }
     if ($installMcp -ne 'no') {
-        $mcpProject = Join-Path $extractDir 'packages\mcp\pyproject.toml'
-        if (-not (Test-Path $mcpProject)) {
+        if (-not (Test-Path (Join-Path $extractDir 'packages\mcp\pyproject.toml'))) {
             Fail 'Tarball layout unexpected: packages/mcp/pyproject.toml not found (VENYA_INSTALL_MCP != no).'
         }
-        Info 'Installing venya-mcp via uv tool...'
-        Invoke-Native -Exe $uv -Arguments @('tool', 'install', '--force', '--python', '3.14', (Join-Path $extractDir 'packages\mcp')) -What 'uv tool install venya-mcp'
+        Info 'Installing venya-mcp via uv tool (copy link mode)...'
+        Invoke-Native -Exe $UvExe -Arguments @('tool', 'install', '--force', '--python', '3.14', '--link-mode', 'copy', (Join-Path $extractDir 'packages\mcp')) -What 'uv tool install venya-mcp'
     }
 
-    # --- Verify ---
-    $venyaExe = Join-Path $binDir 'venya.exe'
-    if (-not (Test-Path $venyaExe)) {
-        Fail "venya shim not found at $venyaExe after install. Open a new terminal, or run: uv tool update-shell"
+    # --- Regression guard for the hardlink/protected-DACL class ---
+    # Cheap enough to always run, and it is the only thing standing between a
+    # silent revert to hardlink mode and an install standard users cannot read.
+    Info 'Verifying no file was left with a protected DACL...'
+    $protected = 0
+    Get-ChildItem $Base -Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $a = Get-Acl -LiteralPath $_.FullName -ErrorAction SilentlyContinue
+        if ($a -and $a.AreAccessRulesProtected) { $protected++ }
     }
+    if ($protected -gt 0) {
+        Fail "$protected file(s) under $Base carry a protected DACL and would be unreadable by standard users. Likely cause: --link-mode copy was dropped. Refusing to leave a broken install."
+    }
+    Info 'ACL check passed: 0 protected DACLs.'
+
+    # --- Machine PATH (idempotent; never clobbers the existing value) ---
+    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    if ($machinePath -notlike "*$BinDir*") {
+        [Environment]::SetEnvironmentVariable('Path', ($machinePath.TrimEnd(';') + ';' + $BinDir), 'Machine')
+        Info "Added $BinDir to the MACHINE PATH (effective in new terminals)."
+    } else {
+        Info "Machine PATH already contains $BinDir"
+    }
+    $env:Path = "$BinDir;$env:Path"
+
+    # --- Verify ---
+    $venyaExe = Join-Path $BinDir 'venya.exe'
+    if (-not (Test-Path $venyaExe)) { Fail "venya shim not found at $venyaExe after install." }
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     & $venyaExe --help *> $null
@@ -185,12 +257,11 @@ Possible MITM or corrupted download. Aborting.
     Info "venya CLI installed: $venyaExe"
 
     if ($installMcp -ne 'no') {
-        $mcpExe = Join-Path $binDir 'venya-mcp.exe'
+        $mcpExe = Join-Path $BinDir 'venya-mcp.exe'
         if (-not (Test-Path $mcpExe)) { Fail "venya-mcp shim not found at $mcpExe after install." }
         # No --help probe: venya-mcp is a stdio server and would block. Import check.
-        # Windows venvs place the interpreter in Scripts\, not bin/.
-        $toolDir = (& $uv tool dir | Out-String).Trim()
-        $mcpPython = Join-Path $toolDir 'venya-mcp\Scripts\python.exe'
+        # Windows venvs put the interpreter in Scripts\, not bin/.
+        $mcpPython = Join-Path $ToolDir 'venya-mcp\Scripts\python.exe'
         if (Test-Path $mcpPython) {
             Invoke-Native -Exe $mcpPython -Arguments @('-c', 'import venya_mcp.server') -What 'venya-mcp server module import'
         } else {
@@ -199,13 +270,14 @@ Possible MITM or corrupted download. Aborting.
         Info "venya-mcp installed: $mcpExe"
     }
 } finally {
+    Remove-Item Env:\UV_PYTHON_INSTALL_DIR, Env:\UV_TOOL_DIR, Env:\UV_TOOL_BIN_DIR, Env:\UV_CACHE_DIR -ErrorAction SilentlyContinue
     if (Test-Path $workDir) { Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 # --- FIDO2 access check ---
 # fido2 ships a native Windows HID backend (fido2/hid/windows.py, pure ctypes
 # against hid.dll/setupapi.dll), so there is no libusb, no Zadig and no driver
-# setup. Administrator rights ARE currently required, see the warning below.
+# setup. Administrator rights ARE still needed for the ceremonies, see below.
 Info 'FIDO2 on Windows uses the native HID backend - no driver setup, no libusb, no Zadig.'
 Warn 'LIMITATION: since Windows 10 1903 the OS restricts raw CTAP/HID access to'
 Warn 'elevated processes (documented by python-fido2 itself). Until the platform'
@@ -217,22 +289,23 @@ Warn 'non-admin user will see a misleading "No FIDO2 devices found".'
 Warn 'Tracked as ticket windows-fido2-requires-elevation.'
 Info 'Plug in the security key before the first venya login/enroll.'
 
-$caCert = Join-Path $env:APPDATA 'venya\venya-ca.crt'
-
 Write-Host ''
 Write-Host '============================================'
-Write-Host "  Venya CLI installed for $env:USERNAME"
+Write-Host '  Venya CLI installed machine-wide'
+Write-Host "  $Base"
 Write-Host '============================================'
 Write-Host ''
-Write-Host 'Day-one commands (open a NEW terminal so PATH refreshes):'
+Write-Host 'For EACH operator (standard user, no admin needed to run these):'
+Write-Host '  open a NEW terminal so the machine PATH refreshes, then:'
 Write-Host '  venya config set-server https://<core-host>'
-Write-Host "  curl.exe -sk https://<core-host>/.well-known/venya-ca.crt -o `"$caCert`""
-Write-Host "  `$env:SSL_CERT_FILE=`"$caCert`"; venya init <user-id>    # first admin account (FIDO2 key required)"
-Write-Host "  `$env:SSL_CERT_FILE=`"$caCert`"; venya login <user-id>"
+Write-Host '  curl.exe -sk https://<core-host>/.well-known/venya-ca.crt -o "$env:APPDATA\venya\venya-ca.crt"'
+Write-Host '  $env:SSL_CERT_FILE="$env:APPDATA\venya\venya-ca.crt"; venya login <user-id>'
+Write-Host ''
+Write-Host '  Per-user config/token: %APPDATA%\venya\config.json'
 if ($installMcp -ne 'no') {
     Write-Host ''
     Write-Host 'MCP (LLM clients) - point the client at the venya-mcp shim and provide:'
-    Write-Host "  VENYA_CONFIG=$env:APPDATA\venya\config.json  (server_url + access_token from venya login)"
-    Write-Host "  VENYA_CA_CERT=$caCert  (required at startup)"
+    Write-Host '  VENYA_CONFIG=%APPDATA%\venya\config.json  (server_url + access_token from venya login)'
+    Write-Host '  VENYA_CA_CERT=%APPDATA%\venya\venya-ca.crt  (required at startup)'
 }
 Write-Host ''
