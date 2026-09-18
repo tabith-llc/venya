@@ -97,9 +97,12 @@ non-interactive SSH does not load `~/bin` into `PATH`):
 
 **Suite health gate (before any VM work):** from `$VENYA_SRC`, all five package
 suites must be green — `cli`, `core`, `server`, `executor`, `mcp`
-(`uv run -p 3.14 --directory packages/<pkg> pytest tests/`). Reference counts
-as of 2026-09-17: cli 291 / core 90+7skip / server 724 / executor 581 / mcp 36.
-Unexplained deltas must be investigated before provisioning.
+(`uv run -p 3.14 --directory packages/<pkg> pytest tests/`). Record the counts
+in the run's results file; an unexplained delta versus the previous recorded
+run — **including any shrinkage** — is a stop-condition to investigate before
+provisioning. (Absolute reference counts deliberately do not live in this
+plan: they rot with every merge and nothing enforces their sync; the
+results-file lineage carries them.)
 
 ---
 
@@ -223,22 +226,22 @@ each component. Installer URLs below assume the default serve port 8080 on
 
 ### B.1 Build tarballs + start the installer server (on `$BUILD_HOST`)
 
-**Build hygiene first** — purge test artifacts the exclusion lists miss, or the
-hashes are not reproducible across builds of identical git state (observed
-live: `.pytest_cache` inside `packages/cli`/`packages/mcp` rode into the CLI
-tarball; removing caches also reorders directory traversal and shifts *all*
-tarball bytes):
+Build from the committed ref — never the working tree:
 
 ```bash
-rm -rf $VENYA_SRC/packages/*/.pytest_cache
-create-tarball-and-serve.sh
+create-tarball-and-serve.sh --ref <tag-or-commit>
 ```
 
-Prints SHA-256 hashes and writes `<tarball>.sha256` sidecars. Capture:
-`CORE_SHA`, `EXEC_SHA`, `CLI_SHA`. To stop the server later:
-`pkill -f 'python3 -m http.server 8080'`. (Working-tree tarballs remain
-mtime/order-sensitive by construction — only a `git archive`-based build is
-byte-stable; that script fix is an open ruling.)
+Every served byte comes from the git ref (tarballs via
+`git archive --prefix=./ | gzip -n`; scripts/common/README via `git show`):
+the working tree is never consulted, and the output is byte-reproducible from
+any clone of the ref. The script runs a **fail-closed pre-publish extraction
+check** (extract with the installer's exact `--strip-components=1` flags and
+assert the requirements + packages layout) — the build aborts unless it
+prints its PASS line; **never publish a build without seeing it**. It prints
+SHA-256 hashes and writes `<tarball>.sha256` sidecars. Capture: `CORE_SHA`,
+`EXEC_SHA`, `CLI_SHA`. To stop the server later: kill it **by PID** (a blind
+`pkill -f` has self-matched and killed the operator's own shell — twice).
 
 Installer env vars (all three installers): `VENYA_TARBALL_SHA256` is
 **mandatory** — the installer hard-fails without it. `VENYA_SKIP_PROMPT=yes`
@@ -695,12 +698,16 @@ failure was logged (login still succeeded by design) — record it.
      ssh bot@$CORE_HOST "printf 'VENYA_FIDO2__ENROLLMENT_TOKEN_TTL=240\nVENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS=14400\n' | sudo tee -a /opt/venya/.env && sudo systemctl restart venya-core"
      ```
 
-     > **Known gap (observed live 2026-09-17):** `VENYA_FIDO2__ENROLLMENT_TOKEN_TTL`
-     > is dead config — the user-enrollment TTL is hardcoded 900 s server-side
-     > (DB-verified with the knob set to 240 min; fix pending). The line is
-     > kept above so the accommodation takes effect automatically once wired.
-     > Until then the C.5 mint→enroll window stays **15 min** — treat it as a
-     > timed step.
+     > **Knob status:** `VENYA_FIDO2__ENROLLMENT_TOKEN_TTL` is wired on
+     > installs carrying the enrollment-manager fix (single construction
+     > point; reported lifetimes derive from the config). Installs predating
+     > it carry the dead knob (hardcoded 900 s) — treat the C.5 mint→enroll
+     > window as **15 min** there. **Verify the wiring physically; do not
+     > trust the unit suites** (unit-green-insufficient is on file three
+     > times): mint a create-user token, then
+     > `SELECT EXTRACT(EPOCH FROM (expires_at - created_at))::int FROM enrollment_tokens ORDER BY created_at DESC LIMIT 1;`
+     > must read **14400** with the knob at 240. A 900 on a post-fix install
+     > means the wiring claim is fiction — **stop and report**.
 
   **Verify pickup** before burning FIDO2 ceremonies: mint a throwaway executor
   token and check the DB — `SELECT EXTRACT(EPOCH FROM (expires_at -
@@ -833,7 +840,7 @@ for the user session — criterion #5's self-filter.)*
 | 1 | MCP server starts | `venya-mcp` launches, reads config | no crash; tools listed |
 | 2 | list_secrets | `list_secrets` | returns `$SECRET_KEY` + metadata, **no value** |
 | 3 | list_executors | `list_executors` | `$EXEC_ID` **ONLINE** |
-| 4 | **run_command uses a secret** | `run_command(executor_id=$EXEC_ID, command=<D.6>, secret_keys=[$SECRET_KEY])` | exit 0, command consumed the secret, **`masked_count ≥ 1`** (value redacted) |
+| 4 | **run_command uses a secret** | `run_command(executor_id=$EXEC_ID, command=<D.6>, secret_keys=[$SECRET_KEY])` | exit 0; command read the injected secret file; **raw value ABSENT from all returned output**. Minimal echo shape: `probe=[REDACTED:<pk>]` + `masked_count ≥ 1`. Canonical ssh shape: `masked_count 0` expected (the value never traverses stdout) — proof = remote-identity output (hostname/whoami) + zero raw-value hits across payloads, journals, executor spool, and transcript |
 | 5 | get_audit *(full matrix)* | admin makes ≥1 call; user calls `get_audit` | user sees own event (positive); admin event **absent** (negative = security claim) |
 | 6 | Token refresh | 401 → refresh → retry | retry succeeds **or** documented known-limitation behavior (refresh path dead — see D.1) |
 | 7 | Session expired | let the TTL lapse | actionable error message (not a crash) |
