@@ -289,10 +289,12 @@ class TestCaptureOutput:
 
         with patch("executor.executor.select.select", return_value=[[], [], []]):
             with patch("executor.executor.scan_open_fds", return_value={0, 1, 2, 4, 5}):
-                stdout, stderr = executor._capture_output(mock_process)
+                stdout, stderr, stdout_total, stderr_total = executor._capture_output(mock_process)
 
         assert stdout == b""
         assert stderr == b""
+        assert stdout_total == 0
+        assert stderr_total == 0
 
     def test_capture_none_fds(self):
         """Returns empty when stdout/stderr FDs are None."""
@@ -303,10 +305,12 @@ class TestCaptureOutput:
 
         executor = Executor(command_validator=CommandValidator(), session_id="test")
 
-        stdout, stderr = executor._capture_output(mock_process)
+        stdout, stderr, stdout_total, stderr_total = executor._capture_output(mock_process)
 
         assert stdout == b""
         assert stderr == b""
+        assert stdout_total == 0
+        assert stderr_total == 0
 
     def test_select_timeout_breaks_on_poll(self):
         """select timeout breaks loop when process has exited."""
@@ -332,7 +336,58 @@ class TestCaptureOutput:
 
         with patch("executor.executor.select.select", side_effect=mock_select):
             with patch("executor.executor.scan_open_fds", return_value={0, 1, 2, 4, 5}):
-                _stdout, _stderr = executor._capture_output(mock_process)
+                _stdout, _stderr, _stdout_total, _stderr_total = executor._capture_output(mock_process)
+
+    def test_truncation_totals_exact_and_marker_fits_cap(self):
+        """Mocked feed: totals are true observed bytes; truncated payload is
+        exactly MAX_OUTPUT_BYTES (marker carved out of the cap) — ticket
+        executor-sbx-truncation-accounting-wrong issue 3."""
+        from executor.executor import MAX_OUTPUT_BYTES
+
+        mock_process = MagicMock()
+        mock_process.stdout = MagicMock()
+        mock_process.stderr = MagicMock()
+        mock_process.stdout.fileno.return_value = 4
+        mock_process.stderr.fileno.return_value = 5
+
+        chunk = b"A" * 65536
+        reads = {4: [chunk, chunk, chunk, chunk, chunk], 5: [b""]}
+
+        def mock_read(fd, n):
+            return reads[fd].pop(0)
+
+        executor = Executor(command_validator=CommandValidator(), session_id="test")
+
+        with patch("executor.executor.select.select", side_effect=lambda r, w, e, t: (list(r), [], [])):
+            with patch("executor.executor.os.read", side_effect=mock_read):
+                stdout, stderr, stdout_total, stderr_total = executor._capture_output(mock_process)
+
+        assert stdout_total == 327680
+        assert stderr_total == 0
+        assert len(stdout) == MAX_OUTPUT_BYTES
+        assert b"65536 bytes discarded" in stdout
+        assert stderr == b""
+
+    def test_truncation_physical_subprocess_over_cap(self):
+        """Physical feed (real pipe + select/os.read): output over the cap
+        truncates to exactly the cap with true observed totals."""
+        import subprocess
+
+        from executor.executor import MAX_OUTPUT_BYTES
+
+        executor = Executor(command_validator=CommandValidator(), session_id="test")
+
+        with subprocess.Popen(
+            ["/usr/bin/head", "-c", "300000", "/dev/zero"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as proc:
+            stdout, stderr, stdout_total, stderr_total = executor._capture_output(proc)
+
+        assert MAX_OUTPUT_BYTES < stdout_total <= 300000
+        assert len(stdout) == MAX_OUTPUT_BYTES
+        assert stderr_total == 0
+        assert stderr == b""
 
 
 # ---------------------------------------------------------------------------
