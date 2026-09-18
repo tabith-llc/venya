@@ -66,9 +66,13 @@ TRUNCATION_MARKER = "... [OUTPUT TRUNCATED: {n} bytes discarded]\n"
 SBX_TIMEOUT = 3600  # 1 hour max
 
 # Shell metacharacters that are not permitted in executor commands.
-# The executor runs commands without shell interpretation (shell=False),
-# so these characters are rejected outright. Users needing pipes, redirects,
-# or other shell features should provide a script file.
+# Enforced WHOLE-STRING by `_validate_command_structure` at the top of
+# `execute()` — before policy validation and before any strategy dispatch —
+# because the production sbx path hands the command string to `sh -c` inside
+# the sandbox (the memfd/direct path's shell=False is the exception, not the
+# rule). Rejection at the gate means these characters never reach any shell.
+# Users needing pipes, redirects, or other shell features should provide a
+# script file.
 SHELL_METACHARS = set("|;&$`(){}<>!*?\n\r")
 
 
@@ -151,7 +155,28 @@ class Executor:
         Returns:
             CommandResult with exit code, filtered output, and audit data.
         """
-        # Step 1: Validate command
+        # Step 1a: STRUCTURAL gate — unconditional whole-string invariant
+        # (ticket executor-sbx-skips-shell-metachar-validation, solution A,
+        # ruled 2026-09-16). Runs BEFORE the policy gate because: policy is
+        # admin-configurable (`permissive` returns True early) and nothing
+        # config-dependent may sit in front of the non-negotiable check;
+        # cheapest-first (char scan before shlex/PATH work); and the policy
+        # layer's `_split_local_remote` shlex-parses, so structure-first
+        # guarantees it receives parseable input.
+        # ACCEPTED TRADEOFF (ruled, recorded in the ticket + plan-9 tracker
+        # Deviations row 6): quoted metachars in arguments (e.g. `echo "a; b"`)
+        # are rejected although a shell would treat them safely — quote-scoped
+        # parsing cannot soundly distinguish local vs remote interpretation
+        # here; the sandbox shell sees the whole string. Shell features must
+        # use the script-file path.
+        try:
+            _validate_command_structure(command)
+        except ValueError as exc:
+            if self.audit_logger:
+                self.audit_logger.emit("command_rejected", command=command, reason=str(exc))
+            raise ValueError(f"Command rejected: {exc}") from None
+
+        # Step 1b: POLICY gate — dangerous patterns / preset checks.
         is_valid, reason = self.command_validator.validate(command)
         if not is_valid:
             if self.audit_logger:
@@ -278,7 +303,10 @@ class Executor:
         if self._injection_result:
             pass_fds.update(self._injection_result.extra_fds)
 
-        # Validate command structure (rejects shell metacharacters)
+        # Validate command structure (rejects shell metacharacters).
+        # REDUNDANT with execute() step 1a's whole-string gate — kept
+        # deliberately: refactor-5 guardrails lock memfd/sbx coexistence and
+        # this path must not diverge if reached directly (ruled 2026-09-16).
         args = _validate_command_structure(command)
 
         # Create subprocess — shell=False for security
@@ -313,21 +341,32 @@ class Executor:
             logger.warning("Unexpected open FDs before exec: %s", unexpected)
 
         # Capture output with size limit
-        stdout, stderr = self._capture_output(process)
+        stdout, stderr, stdout_total, stderr_total = self._capture_output(process)
 
         # Wait for process to complete
         exit_code = process.wait()
 
-        return self._filter_and_build_result(command, exit_code, stdout, stderr, injections)
+        return self._filter_and_build_result(
+            command,
+            exit_code,
+            stdout,
+            stderr,
+            injections,
+            original_stdout_size=stdout_total,
+            original_stderr_size=stderr_total,
+        )
 
-    def _capture_output(self, process: subprocess.Popen) -> tuple[bytes, bytes]:
+    def _capture_output(self, process: subprocess.Popen) -> tuple[bytes, bytes, int, int]:
         """Capture stdout/stderr with batch mode and size limit.
 
         Args:
             process: The subprocess to capture from.
 
         Returns:
-            Tuple of (stdout, stderr) bytes, truncated if needed.
+            Tuple of (stdout, stderr, stdout_total, stderr_total). The
+            payloads are truncated if needed; the totals are the true
+            observed byte counts BEFORE truncation, so callers can report
+            accurate truncation metadata.
         """
         stdout_truncated = False
         stderr_truncated = False
@@ -339,7 +378,7 @@ class Executor:
 
         if stdout_fd is None or stderr_fd is None:
             process.wait()
-            return b"", b""
+            return b"", b"", 0, 0
 
         fd_map = {stdout_fd.fileno(): "stdout", stderr_fd.fileno(): "stderr"}
         chunk_buffers: dict[int, bytearray] = {
@@ -405,17 +444,20 @@ class Executor:
         stdout = bytes(chunk_buffers[stdout_fd.fileno()])
         stderr = bytes(chunk_buffers[stderr_fd.fileno()])
 
-        # Apply truncation markers
+        # Apply truncation markers. The marker's own bytes are carved out of
+        # the cap, so a truncated payload is exactly MAX_OUTPUT_BYTES long —
+        # the invariant "truncated ⇒ len == cap" is stable for downstream
+        # checks (ticket executor-sbx-truncation-accounting-wrong, issue 3).
         if stdout_truncated and stdout:
             discarded = max(0, stdout_total - MAX_OUTPUT_BYTES)
-            marker = TRUNCATION_MARKER.format(discarded).encode()
-            stdout = stdout[:MAX_OUTPUT_BYTES] + marker
+            marker = TRUNCATION_MARKER.format(n=discarded).encode()
+            stdout = stdout[: MAX_OUTPUT_BYTES - len(marker)] + marker
         if stderr_truncated and stderr:
             discarded = max(0, stderr_total - MAX_OUTPUT_BYTES)
-            marker = TRUNCATION_MARKER.format(discarded).encode()
-            stderr = stderr[:MAX_OUTPUT_BYTES] + marker
+            marker = TRUNCATION_MARKER.format(n=discarded).encode()
+            stderr = stderr[: MAX_OUTPUT_BYTES - len(marker)] + marker
 
-        return stdout, stderr
+        return stdout, stderr, stdout_total, stderr_total
 
     # ================================================================
     # SBX SANDBOX EXECUTION
@@ -477,6 +519,11 @@ class Executor:
             logger.info("Executing in sandbox: %s", command)
             result = strategy.execute_command(command, env_override=env_override, cwd=cwd)
 
+            # Record true pre-slice sizes BEFORE capping — truncation
+            # metadata must describe the real output, not the sliced copy
+            # (ticket executor-sbx-truncation-accounting-wrong).
+            original_stdout_size = len(result.stdout)
+            original_stderr_size = len(result.stderr)
             stdout = result.stdout[:MAX_OUTPUT_BYTES]
             stderr = result.stderr[:MAX_OUTPUT_BYTES]
 
@@ -488,7 +535,15 @@ class Executor:
             )
 
             # Stage 1 + Stage 2 filtering (same as direct path)
-            return self._filter_and_build_result(command, result.returncode, stdout, stderr, injections)
+            return self._filter_and_build_result(
+                command,
+                result.returncode,
+                stdout,
+                stderr,
+                injections,
+                original_stdout_size=original_stdout_size,
+                original_stderr_size=original_stderr_size,
+            )
 
         except subprocess.TimeoutExpired:
             logger.error("Sandbox command timed out after %d seconds", SBX_TIMEOUT)
@@ -516,6 +571,8 @@ class Executor:
         stdout: bytes,
         stderr: bytes,
         injections: list[SecretBundle],
+        original_stdout_size: int | None = None,
+        original_stderr_size: int | None = None,
     ) -> CommandResult:
         """Run Stage 1 + Stage 2 filtering and build CommandResult.
 
@@ -526,9 +583,13 @@ class Executor:
         Args:
             command: Original command string.
             exit_code: Process exit code.
-            stdout: Raw stdout bytes.
-            stderr: Raw stderr bytes.
+            stdout: Raw stdout bytes (already capped by the caller).
+            stderr: Raw stderr bytes (already capped by the caller).
             injections: Secret bundles for filtering reference.
+            original_stdout_size: True pre-truncation stdout byte count.
+                None falls back to len(stdout) (uncapped callers).
+            original_stderr_size: True pre-truncation stderr byte count.
+                None falls back to len(stderr) (uncapped callers).
 
         Returns:
             CommandResult with filtered output.
@@ -557,8 +618,14 @@ class Executor:
             except Exception:
                 logger.exception("Stage 2 filter failed — using Stage 1 results")
 
-        stdout_truncated = len(stdout) > MAX_OUTPUT_BYTES
-        stderr_truncated = len(stderr) > MAX_OUTPUT_BYTES
+        # Truncation metadata derives from the TRUE pre-slice sizes, never
+        # from the already-capped payload (which would always compare ≤ cap).
+        if original_stdout_size is None:
+            original_stdout_size = len(stdout)
+        if original_stderr_size is None:
+            original_stderr_size = len(stderr)
+        stdout_truncated = original_stdout_size > MAX_OUTPUT_BYTES
+        stderr_truncated = original_stderr_size > MAX_OUTPUT_BYTES
 
         logger.info(
             "Command exited with code %d, %d secrets masked",
@@ -573,8 +640,8 @@ class Executor:
             stderr=stage2_stderr,
             masked_secret_ids=stage2_masked_ids,
             output_truncated=stdout_truncated or stderr_truncated,
-            original_stdout_size=len(stdout),
-            original_stderr_size=len(stderr),
+            original_stdout_size=original_stdout_size,
+            original_stderr_size=original_stderr_size,
         )
 
     # ================================================================
