@@ -90,7 +90,7 @@ class Config:
                 fd.write(json.dumps(self._data).encode())
                 fd.flush()
                 os.fchmod(fd.fileno(), 0o600)
-                os.replace(tmp_path, self.config_file)
+            os.replace(tmp_path, self.config_file)
         except BaseException:
             if tmp_path is not None:
                 try:

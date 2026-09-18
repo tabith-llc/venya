@@ -84,8 +84,8 @@ class MCPConfig:
                 fd.write(json.dumps(self._data, indent=2))
                 fd.flush()
                 os.fchmod(fd.fileno(), 0o600)
-                os.replace(tmp_fd, self.path)
-                tmp_fd = None
+            os.replace(tmp_fd, self.path)
+            tmp_fd = None
         finally:
             if tmp_fd is not None:
                 try:
