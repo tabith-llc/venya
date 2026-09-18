@@ -87,9 +87,17 @@ $uv = Join-Path $binDir 'uv.exe'
 if (-not (Test-Path $uv)) {
     Info 'Installing uv...'
     try {
-        $installPs1 = (Invoke-WebRequest -Uri 'https://astral.sh/uv/install.ps1' -UseBasicParsing).Content
+        $installPs1 = Invoke-RestMethod -Uri 'https://astral.sh/uv/install.ps1'
     } catch {
         Fail "Cannot fetch the uv installer: $($_.Exception.Message)"
+    }
+    # Invoke-RestMethod's return type is server-controlled: a recognised text
+    # Content-Type yields String, an absent or unrecognised one yields byte[], and
+    # Invoke-Expression cannot bind a byte[] to its command parameter. astral.sh
+    # currently sends NO Content-Type at all, so this is byte[]-by-luck today.
+    # Assert the invariant on every run instead of relying on the server's headers.
+    if ($installPs1 -isnot [string]) {
+        Fail "uv install script: expected a string payload, got $($installPs1.GetType().Name)."
     }
     Invoke-Expression $installPs1
     if (-not (Test-Path $uv)) { Fail "uv install completed but $uv was not found." }
