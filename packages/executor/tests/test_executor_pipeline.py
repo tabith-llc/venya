@@ -14,7 +14,7 @@ import httpx2
 import pytest
 
 from executor.command_validator import CommandValidator
-from executor.executor import CommandResult, Executor, SecretBundle
+from executor.executor import SHELL_METACHARS, CommandResult, Executor, SecretBundle
 from executor.injector import wrap_with_sentinel
 
 # ---------------------------------------------------------------------------
@@ -289,10 +289,12 @@ class TestCaptureOutput:
 
         with patch("executor.executor.select.select", return_value=[[], [], []]):
             with patch("executor.executor.scan_open_fds", return_value={0, 1, 2, 4, 5}):
-                stdout, stderr = executor._capture_output(mock_process)
+                stdout, stderr, stdout_total, stderr_total = executor._capture_output(mock_process)
 
         assert stdout == b""
         assert stderr == b""
+        assert stdout_total == 0
+        assert stderr_total == 0
 
     def test_capture_none_fds(self):
         """Returns empty when stdout/stderr FDs are None."""
@@ -303,10 +305,12 @@ class TestCaptureOutput:
 
         executor = Executor(command_validator=CommandValidator(), session_id="test")
 
-        stdout, stderr = executor._capture_output(mock_process)
+        stdout, stderr, stdout_total, stderr_total = executor._capture_output(mock_process)
 
         assert stdout == b""
         assert stderr == b""
+        assert stdout_total == 0
+        assert stderr_total == 0
 
     def test_select_timeout_breaks_on_poll(self):
         """select timeout breaks loop when process has exited."""
@@ -332,7 +336,58 @@ class TestCaptureOutput:
 
         with patch("executor.executor.select.select", side_effect=mock_select):
             with patch("executor.executor.scan_open_fds", return_value={0, 1, 2, 4, 5}):
-                _stdout, _stderr = executor._capture_output(mock_process)
+                _stdout, _stderr, _stdout_total, _stderr_total = executor._capture_output(mock_process)
+
+    def test_truncation_totals_exact_and_marker_fits_cap(self):
+        """Mocked feed: totals are true observed bytes; truncated payload is
+        exactly MAX_OUTPUT_BYTES (marker carved out of the cap) — ticket
+        executor-sbx-truncation-accounting-wrong issue 3."""
+        from executor.executor import MAX_OUTPUT_BYTES
+
+        mock_process = MagicMock()
+        mock_process.stdout = MagicMock()
+        mock_process.stderr = MagicMock()
+        mock_process.stdout.fileno.return_value = 4
+        mock_process.stderr.fileno.return_value = 5
+
+        chunk = b"A" * 65536
+        reads = {4: [chunk, chunk, chunk, chunk, chunk], 5: [b""]}
+
+        def mock_read(fd, n):
+            return reads[fd].pop(0)
+
+        executor = Executor(command_validator=CommandValidator(), session_id="test")
+
+        with patch("executor.executor.select.select", side_effect=lambda r, w, e, t: (list(r), [], [])):
+            with patch("executor.executor.os.read", side_effect=mock_read):
+                stdout, stderr, stdout_total, stderr_total = executor._capture_output(mock_process)
+
+        assert stdout_total == 327680
+        assert stderr_total == 0
+        assert len(stdout) == MAX_OUTPUT_BYTES
+        assert b"65536 bytes discarded" in stdout
+        assert stderr == b""
+
+    def test_truncation_physical_subprocess_over_cap(self):
+        """Physical feed (real pipe + select/os.read): output over the cap
+        truncates to exactly the cap with true observed totals."""
+        import subprocess
+
+        from executor.executor import MAX_OUTPUT_BYTES
+
+        executor = Executor(command_validator=CommandValidator(), session_id="test")
+
+        with subprocess.Popen(
+            ["/usr/bin/head", "-c", "300000", "/dev/zero"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as proc:
+            stdout, stderr, stdout_total, stderr_total = executor._capture_output(proc)
+
+        assert MAX_OUTPUT_BYTES < stdout_total <= 300000
+        assert len(stdout) == MAX_OUTPUT_BYTES
+        assert stderr_total == 0
+        assert stderr == b""
 
 
 # ---------------------------------------------------------------------------
@@ -623,3 +678,111 @@ class TestTruncatedAudit:
             [],
         )
         assert result.output_truncated is False
+
+
+class TestStructuralGate:
+    """Solution A (ruled 2026-09-16, ticket executor-sbx-skips-shell-metachar-validation):
+    unconditional WHOLE-STRING structural gate in execute() step 1a — before
+    the policy gate, before any strategy dispatch. The production sbx path
+    hands the command string to `sh -c` inside the sandbox; metacharacters
+    must never reach it. Truth table: alphabet rejection through production
+    execute() + audit, quoted-metachar tradeoff, gate ordering, permissive-
+    policy invariance, both-paths parity, clean-pass control."""
+
+    def _executor(self, audit=None, preset=None):
+        import dataclasses
+
+        from executor.strategies.sbx_strategy import SbxStrategy
+
+        strategy = MagicMock(spec=SbxStrategy)
+        cv = CommandValidator()
+        if preset is not None:
+            cv.policy = dataclasses.replace(cv.policy, preset=preset)
+        ex = Executor(
+            command_validator=cv,
+            session_id="s-struct",
+            injection_strategy=strategy,
+            audit_logger=audit,
+        )
+        ex.http_client = None
+        return ex, strategy
+
+    @pytest.mark.parametrize("ch", sorted(SHELL_METACHARS))
+    def test_metachar_alphabet_rejected_via_production_execute(self, ch):
+        """Every SHELL_METACHARS member through production execute() →
+        rejected BEFORE any strategy call (acceptance: sbx path guarded)."""
+        ex, strategy = self._executor()
+        with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
+            ex.execute(f"/usr/bin/echo hi{ch}tail", [])
+        strategy.create_sandbox.assert_not_called()
+        strategy.execute_command.assert_not_called()
+
+    def test_quoted_metachar_rejected_documented_tradeoff(self):
+        """ACCEPTED TRADEOFF (ruling condition 1, recorded in ticket +
+        plan-9 Deviations row 6): `echo "a; b"` is safe to a shell but
+        rejected whole-string — quote-scoped parsing cannot soundly
+        distinguish local vs remote interpretation here."""
+        ex, _strategy = self._executor()
+        with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
+            ex.execute('/usr/bin/echo "a; b"', [])
+
+    def test_structural_gate_precedes_policy(self):
+        """Ordering ruling: the reason string proves the structural gate got
+        the first word — `;` is caught structurally, not as a policy
+        'Dangerous pattern' (sudo sits in the same command)."""
+        ex, _strategy = self._executor()
+        with pytest.raises(ValueError) as exc:
+            ex.execute("/usr/bin/sudo ls; rm x", [])
+        assert "metacharacters" in str(exc.value)
+        assert "Dangerous pattern" not in str(exc.value)
+
+    def test_gate_unconditional_under_permissive_policy(self):
+        """The invariant is not config-dependent: `permissive` preset returns
+        True early in the policy layer, yet metachars are still rejected."""
+        ex, strategy = self._executor(preset="permissive")
+        with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
+            ex.execute("/usr/bin/echo hi; rm x", [])
+        strategy.execute_command.assert_not_called()
+
+    def test_structural_rejection_emits_command_rejected_audit(self):
+        """Ruling condition 2: explicit audit assertion, not an assumption —
+        silent structural rejection = F11-class bug."""
+        audit = MagicMock()
+        ex, _strategy = self._executor(audit=audit)
+        cmd = "/usr/bin/echo hi; tail"
+        with pytest.raises(ValueError):
+            ex.execute(cmd, [])
+        audit.emit.assert_called_once()
+        args, kwargs = audit.emit.call_args
+        assert args == ("command_rejected",)
+        assert kwargs["command"] == cmd
+        assert "metacharacters" in kwargs["reason"]
+
+    def test_policy_rejection_audits_with_distinct_reason(self):
+        """Both rejection classes emit command_rejected with DISTINCT reason
+        strings (ordering rationale, ruling 2026-09-16)."""
+        audit = MagicMock()
+        ex, _strategy = self._executor(audit=audit)
+        with pytest.raises(ValueError, match="Dangerous pattern"):
+            ex.execute("/usr/bin/sudo ls", [])
+        args, kwargs = audit.emit.call_args
+        assert args == ("command_rejected",)
+        assert "metacharacters" not in kwargs["reason"]
+
+    def test_direct_path_rejects_identically(self):
+        """Both-paths parity (acceptance): _run_command_direct keeps its own
+        call (redundancy comment per ruling; refactor-5 coexistence
+        guardrail) and rejects the same shapes."""
+        ex, _strategy = self._executor()
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            ex._run_command_direct("/usr/bin/echo hi; tail", [], None, None)
+
+    def test_clean_command_passes_structural_gate(self):
+        """Control: a metachar-free command flows through execute() to the
+        strategy untouched."""
+        ex, strategy = self._executor()
+        strategy.execute_command.return_value = MagicMock(returncode=0, stdout=b"ok", stderr=b"")
+        with patch("executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])):
+            result = ex.execute("/usr/bin/echo hello", [])
+        assert result.exit_code == 0
+        strategy.execute_command.assert_called_once()

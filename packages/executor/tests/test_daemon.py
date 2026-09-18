@@ -1156,3 +1156,63 @@ class TestBuildCommandPolicy:
         cv = self._make_cv("permissive", allowed_commands=None, dangerous_patterns=None, match_word_boundaries=True)
         policy = build_command_policy(cv)
         assert policy.trusted_paths == frozenset()
+
+
+class TestDeafBootRefusal:
+    """Ticket relay-listener-empty-allowlist-not-observable (option B): a
+    daemon that cannot bind its relay must not boot healthy-looking — it
+    exits non-zero BEFORE consuming the one-shot enrollment token, so
+    systemd status/journal show the failure instead of a deaf 'running'."""
+
+    def _daemon(self, config):
+        from executor.daemon import ExecutorDaemon
+
+        d = ExecutorDaemon(config)
+        d.cert_manager = MagicMock()
+        d.reaper = MagicMock()
+        return d
+
+    def test_empty_allowlist_exits_before_registration(self, config):
+        assert config.relay_client_ids == []  # fixture default is the broken shape
+        d = self._daemon(config)
+        with pytest.raises(SystemExit) as exc:
+            d.start()
+        assert exc.value.code == 1
+        d.cert_manager.register.assert_not_called()  # one-shot token not consumed
+        assert d.state.running is False
+
+    def test_nonempty_allowlist_passes_the_guard(self, config):
+        """Paired negative: the guard fires ONLY on the broken shape."""
+        cfg = config.model_copy(update={"relay_client_ids": ["core-relay"]})
+        d = self._daemon(cfg)
+        sentinel = RuntimeError("past-the-guard")
+        d.cert_manager.register.side_effect = sentinel
+        with pytest.raises(RuntimeError) as exc:
+            d.start()
+        assert exc.value is sentinel  # reached registration ⇒ guard passed
+
+    def test_bind_failure_also_refuses(self, config):
+        """Bind/SSL deaf class: relay.start() ran but listener never bound → exit 1."""
+        cfg = config.model_copy(update={"relay_client_ids": ["core-relay"]})
+        d = self._daemon(cfg)
+        d._create_mtls_client = MagicMock(return_value=MagicMock())
+        d.relay = MagicMock()
+        d.relay.active = False
+        with pytest.raises(SystemExit) as exc:
+            d.start()
+        assert exc.value.code == 1
+        assert d.state.running is False
+
+    def test_bound_relay_proceeds(self, config):
+        """Happy-path invariant (acceptance #2): bound relay → normal start."""
+        cfg = config.model_copy(update={"relay_client_ids": ["core-relay"]})
+        d = self._daemon(cfg)
+        d._create_mtls_client = MagicMock(return_value=MagicMock())
+        d.relay = MagicMock()
+        d.relay.active = True
+        d._main_loop = MagicMock()
+        d.stop = MagicMock()
+        d._write_pidfile = MagicMock()
+        d.start()
+        assert d.state.running is True
+        d._main_loop.assert_called_once()

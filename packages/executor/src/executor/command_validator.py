@@ -55,7 +55,12 @@ DEFAULT_DANGEROUS_PATTERNS: tuple[str, ...] = (
     "mount",
     "insmod",
     "modprobe",
-    # Shell chaining
+    # NOTE: no "shell chaining" patterns belong here — chaining/injection
+    # metacharacters are blocked STRUCTURALLY by the whole-string
+    # `_validate_command_structure` gate in executor.execute() (step 1a),
+    # which runs before this policy layer. Do not add a second, pattern-based
+    # gate for them (ruled 2026-09-16, ticket
+    # executor-sbx-skips-shell-metachar-validation condition 3).
 )
 
 # Trusted paths for balanced mode

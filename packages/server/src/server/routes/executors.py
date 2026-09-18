@@ -970,6 +970,12 @@ async def execute_command_on_executor(
         raise HTTPException(status_code=503, detail="Executor unreachable (connection refused)")
     except httpx2.TimeoutException:
         raise HTTPException(status_code=503, detail="Executor timed out")
+    except httpx2.RemoteProtocolError as e:
+        # Executor died mid-response (e.g. daemon SEGV): peer closed without a
+        # complete HTTP message. Sibling of ConnectError/TimeoutException under
+        # TransportError — same 503 class (ticket d1-remote-protocol-error-500).
+        logger.warning("Executor connection lost mid-response for session %s: %s", session.id, e)
+        raise HTTPException(status_code=503, detail="Executor unreachable (connection lost mid-response)")
     except httpx2.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=str(e))
 

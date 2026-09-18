@@ -4,6 +4,61 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.9] - 2026-09-18
+
+### Security
+
+- Commands are now structurally validated on the production execution path.
+  An unconditional whole-string shell-metachar gate (``| ; & $ ` ( ) { } < > ! * ?``
+  and newlines) runs in `Executor.execute()` BEFORE policy validation and
+  before any sandbox dispatch — previously the structural check existed only
+  on the unused memfd/direct path while the production sandbox path passed
+  the raw string to `sh -c`. Quoted metachars (e.g. `echo "a; b"`) are
+  rejected as well: a documented accepted tradeoff, since quote-scoped
+  parsing cannot soundly distinguish local from remote interpretation.
+  Shell features must use the script-file path; the full-lifecycle test
+  plan's D.6 command shapes were rewritten metachar-free in the same
+  changeset. Structural and policy rejections both emit `command_rejected`
+  audit events with distinct reason strings.
+
+- Executor relay listener is bounded against misbehaving authenticated
+  peers: a 16 MiB request-body cap (checked before any read/allocation,
+  413 on excess), negative `Content-Length` rejected with 400 (previously
+  `read(-N)` meant read-until-EOF — an unbounded hang), and a 30-second
+  per-recv inactivity timeout so a silent peer cannot pin the single
+  handler thread. Fixed-length protocol documented: chunked bodies are
+  never decoded and answer 400.
+
+- Executor daemon refuses to boot "deaf": an empty `relay_client_ids`
+  allowlist now exits 1 at startup with a log line naming the knob —
+  checked BEFORE registration, so the one-shot enrollment token is never
+  consumed on a doomed boot. Previously the daemon logged a single ERROR,
+  never bound the relay, and kept running healthy-looking to every normal
+  ops probe. The bind/SSL-failure deaf class gets the same refusal.
+
+### Fixed
+
+- Output-truncation metadata tells the truth. The sandbox path sliced
+  stdout/stderr to the 256 KB cap BEFORE computing `output_truncated`
+  (structurally always `False`) and `original_*_size` recorded post-slice
+  lengths on both paths — oversized output silently lied about
+  completeness. True pre-slice sizes are now threaded through the shared
+  result builder; a truncated payload is exactly the cap (the truncation
+  marker is carved out of it); and the direct path's marker — which raised
+  `KeyError: 'n'`, crashing capture on ANY real >256 KB output — now works.
+
+- Core relay handler maps `httpx2.RemoteProtocolError` (executor died
+  mid-response) to 503 "Executor unreachable (connection lost mid-response)"
+  instead of an unhandled 500 — completing the ConnectError/Timeout guard
+  class.
+
+- `venya run -- <command>` no longer ships the literal `--` separator to
+  the executor. argparse REMAINDER captures it verbatim; the resulting
+  `-- `-prefixed command string broke the validator's ssh-shape recognition
+  (false "Dangerous pattern" rejections of legitimate sshpass-to-target
+  flows) and would exit 127 in the sandbox. Exactly one leading separator
+  is consumed; `run --help` documents it.
+
 ## [0.1.0-alpha.8] - 2026-09-18
 
 ### Security
