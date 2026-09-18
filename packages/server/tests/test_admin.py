@@ -322,116 +322,10 @@ class TestAdminKeyVersionList:
         assert data["versions"][0]["active"] is True
 
 
-class TestAdminKeyVersionRotate:
-    """Tests for admin key rotation endpoint."""
-
-    def test_rotate_success(self):
-        """POST /admin/key-versions/rotate should create rotation job."""
-        active_v = SimpleNamespace(id=1, active=True)
-        secret = SimpleNamespace(id=1)
-        db = MagicMock()
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def order_by(self, *args, **kwargs):
-                return self
-
-            def first(self):
-                return active_v
-
-            def count(self):
-                return 5
-
-            def all(self):
-                return [secret]
-
-        db.query.return_value = MockQuery()
-        db.add.side_effect = lambda x: setattr(x, "id", 99) if not hasattr(x, "id") or x.id is None else None
-        backend = MagicMock()
-        backend.get_session.return_value = db
-        app = _create_test_app(backend=backend)
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/admin/key-versions/rotate", json={})
-        assert resp.status_code == 202
-        data = resp.json()
-        assert data["status"] == "pending"
-        assert data["old_key_version_id"] == 1
-        assert data["new_key_version_id"] is not None
-
-    def test_rotate_no_active_version(self):
-        """POST /admin/key-versions/rotate should work with no active version."""
-        db = MagicMock()
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def order_by(self, *args, **kwargs):
-                return self
-
-            def first(self):
-                return None
-
-            def count(self):
-                return 0
-
-            def all(self):
-                return []
-
-        db.query.return_value = MockQuery()
-        db.add.side_effect = lambda x: setattr(x, "id", 99) if not hasattr(x, "id") or x.id is None else None
-        backend = MagicMock()
-        backend.get_session.return_value = db
-        app = _create_test_app(backend=backend)
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/admin/key-versions/rotate", json={})
-        assert resp.status_code == 202
-        data = resp.json()
-        assert data["old_key_version_id"] is None
-
-
-class TestAdminKeyVersionRollback:
-    """Tests for admin key version rollback endpoint."""
-
-    def test_rollback_success(self):
-        """POST /admin/key-versions/rollback should rollback rotation."""
-        job = SimpleNamespace(id=1, status="running")
-        db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = job
-        db.query.return_value.filter.return_value.count.return_value = 3
-        backend = MagicMock()
-        backend.get_session.return_value = db
-        app = _create_test_app(backend=backend)
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/admin/key-versions/rollback",
-            json={"job_id": 1},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["rolled_back"] is True
-        assert data["job_id"] == 1
-        assert data["restored_secrets_count"] == 3
-
-    def test_rollback_not_found(self):
-        """POST /admin/key-versions/rollback should return 404 for missing job."""
-        db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = None
-        backend = MagicMock()
-        backend.get_session.return_value = db
-        app = _create_test_app(backend=backend)
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/admin/key-versions/rollback",
-            json={"job_id": 999},
-        )
-        assert resp.status_code == 404
+# Key-rotation route tests (rotate + both rollbacks + alias) moved to
+# test_key_rotation.py — real-SQLite truth table per the option-2 ruling
+# (ticket key-rotation-worker-missing); the mock classes here pinned the
+# old 202/pending fiction and could not observe DB state.
 
 
 class TestAdminSetCommandPolicy:
@@ -664,37 +558,7 @@ class TestAdminKeyRotationStatus:
         assert data["jobs"][0]["completed_secrets"] == 50
 
 
-class TestAdminKeyRotationJobRollback:
-    """Tests for admin key rotation job rollback endpoint."""
-
-    def test_rollback_job_success(self):
-        """POST /admin/key-rotation/{id}/rollback should rollback job."""
-        job = SimpleNamespace(id=1, status="failed")
-        db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = job
-        db.query.return_value.filter.return_value.count.return_value = 10
-        backend = MagicMock()
-        backend.get_session.return_value = db
-        app = _create_test_app(backend=backend)
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/admin/key-rotation/1/rollback")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["rolled_back"] is True
-        assert data["restored_secrets_count"] == 10
-
-    def test_rollback_job_not_found(self):
-        """POST /admin/key-rotation/{id}/rollback should return 404."""
-        db = MagicMock()
-        db.query.return_value.filter.return_value.first.return_value = None
-        backend = MagicMock()
-        backend.get_session.return_value = db
-        app = _create_test_app(backend=backend)
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/admin/key-rotation/999/rollback")
-        assert resp.status_code == 404
+# Key-rotation job rollback tests: see test_key_rotation.py (real SQLite).
 
 
 class TestAdminRevokeExecutor:
@@ -774,42 +638,7 @@ class TestAdminRevokeExecutor:
         assert resp.json()["revoked"] is False
 
 
-class TestAdminKeyRotationAlias:
-    """Tests for admin key rotation alias endpoint."""
-
-    def test_rotation_alias_delegates(self):
-        """POST /admin/key-rotation should delegate to rotate endpoint."""
-        active_v = SimpleNamespace(id=1, active=True)
-        secret = SimpleNamespace(id=1)
-        db = MagicMock()
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def order_by(self, *args, **kwargs):
-                return self
-
-            def first(self):
-                return active_v
-
-            def count(self):
-                return 5
-
-            def all(self):
-                return [secret]
-
-        db.query.return_value = MockQuery()
-        db.add.side_effect = lambda x: setattr(x, "id", 99) if not hasattr(x, "id") or x.id is None else None
-        backend = MagicMock()
-        backend.get_session.return_value = db
-        app = _create_test_app(backend=backend)
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/admin/key-rotation", json={})
-        assert resp.status_code == 202
-        data = resp.json()
-        assert data["status"] == "pending"
+# Key-rotation alias test: see test_key_rotation.py (real SQLite).
 
 
 class TestAdminReEnroll:
