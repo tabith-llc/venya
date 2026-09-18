@@ -877,7 +877,7 @@ injected secret file**, uses it, and the returned output has the value
 | `ClientError code=3 CONFIGURATION_UNSUPPORTED` on init/enroll/login | key has no PIN (UV impossible) | set the PIN (C.2), re-run; 409 afterwards → `--installation-reset` |
 | CLI shows raw `409 Conflict`, no hint | CLI hides the server `detail` (known limitation) | confirm state via `journalctl -u venya-core` or the `users` table |
 | `admin …` 403 | admin mTLS client cert stale/missing | re-sync C.1; do not sudo-curl around it |
-| `venya store` fails: "No active key version configured" | fresh install, no active key version (503) | pass `--key-version v1` |
+| `venya store` fails: "No active key version configured" | pre-027 install with no active key version (503) — post-027 fresh installs seed `v1`; if seen there, check `alembic_version` | pass `--key-version v1` (pre-027 installs only) |
 | `venya store` 422 `key_version_id Field required` | running a pre-fix CLI | update the workstation venv/install (B.3) |
 | Executor offline after install | token single-use/expired, or mTLS | re-mint (C.4), reinstall executor |
 | Every sandbox create 503 | `venya-sandboxd` down / `sbx policy init deny-all` missing / Docker login skipped | check service + policy + `sbx login` on the executor |
@@ -977,7 +977,7 @@ Create per run: `testing/results-YYYY-MM-DD-HH-MM.md`
 | Step | Result |
 |------|--------|
 | D.1 TTL accommodation + prerequisites | |
-| D.2 secret stored (`--key-version v1`) | |
+| D.2 secret stored (flag-free — 027 seed) | |
 | D.3 SECRET_PK discovered | |
 | D.5 #1 server starts | |
 | D.5 #2 list_secrets (metadata, no value) | |
