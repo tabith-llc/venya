@@ -115,6 +115,12 @@ class TestCorePut:
         session = MagicMock()
         session.flush = MagicMock()
         session.commit = MagicMock()
+        # Upsert resolve step must see "no existing row" (insert path under
+        # test): pin the _resolve_secret_in chain (filter→filter→order_by→
+        # first) to None — MagicMock auto-chains are truthy otherwise.
+        session.query.return_value.filter.return_value.filter.return_value.order_by.return_value.first.return_value = (
+            None
+        )
         backend = MagicMock()
         backend.get_session.return_value = session
         core.backend = backend
@@ -127,11 +133,19 @@ class TestCorePut:
 
             assert record.key == "test-key"
             assert record.role_names == ["admin"]
+            assert record.replaced is False
             assert len(session.add.call_args_list) == 2  # Secret + SecretRole
             session.commit.assert_called_once()
 
-    def test_put_rejects_duplicate_key_per_user(self):
-        """Raises on duplicate key for same user (DB constraint)."""
+    def test_put_propagates_flush_error_with_rollback(self):
+        """A DB error on the insert path propagates and rolls back.
+
+        (Renamed from test_put_rejects_duplicate_key_per_user: its premise —
+        a per-user UNIQUE constraint on key — never existed; duplicates were
+        the documented behavior and visible-key re-stores are now upserts
+        per the option-2 ruling. What the test actually pins is flush-error
+        propagation, which survives the semantics change.)
+        """
         core = self._make_core()
 
         mock_role = MagicMock()
@@ -141,6 +155,9 @@ class TestCorePut:
         session = MagicMock()
         session.flush = MagicMock(side_effect=Exception("UNIQUE constraint failed"))
         session.commit = MagicMock()
+        session.query.return_value.filter.return_value.filter.return_value.order_by.return_value.first.return_value = (
+            None
+        )
         backend = MagicMock()
         backend.get_session.return_value = session
         core.backend = backend
@@ -422,5 +439,141 @@ class TestSecretVisibilitySqlite:
             assert core.list(prefix="admin", role_names=["user"], user_id="bob") == []
             rows = core.list(prefix="admin", role_names=["admin"], user_id="alice")
             assert [r.key for r in rows] == ["admin-secret"]
+        finally:
+            engine.dispose()
+
+
+class TestSecretUpsertSqlite:
+    """Upsert truth table on a REAL SQLite backend (ticket
+    cli-store-force-field-ignored option-2 ruling).
+
+    Semantics under test: re-storing a key REPLACES the row the caller can
+    see (role in scope OR creator — the same _resolve_secret_in primitive as
+    get/inject/list), preserving row id (injection-path stability) and
+    created_by (audit lineage); a scoped-out caller gets a SECOND row with
+    the original untouched (no existence leak, no cross-role clobber — the
+    indistinguishability invariant from secret-role-scoping-unenforced).
+    """
+
+    def _make_env(self, tmp_path):
+        from core.engine.backend import BackendConfig
+        from core.engine.encryption import KEK_SIZE
+        from core.iam.models import Base, Role, RoleMember, User
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        db_path = tmp_path / "upsert.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(bind=engine)
+
+        s = SessionLocal()
+        admin_role = Role(name="admin", permissions="read-write")
+        user_role = Role(name="user", permissions="read-write")
+        s.add_all([User(user_id="alice"), User(user_id="bob"), admin_role, user_role])
+        s.flush()
+        s.add_all(
+            [
+                RoleMember(user_id="alice", role_id=admin_role.id),
+                RoleMember(user_id="bob", role_id=user_role.id),
+            ]
+        )
+        s.commit()
+        s.close()
+
+        kek = b"k" * KEK_SIZE
+        backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+        backend._engine = engine
+        backend._session_factory = SessionLocal
+        return backend.get_core(), engine, SessionLocal
+
+    def test_fresh_store_inserts_not_replaced(self, tmp_path):
+        core, engine, _ = self._make_env(tmp_path)
+        try:
+            rec = core.put("k1", b"first", "alice", ["admin"], "v1", caller_roles=["admin"])
+            assert rec.replaced is False
+        finally:
+            engine.dispose()
+
+    def test_reput_by_creator_replaces_in_place(self, tmp_path):
+        from core.iam.models import Secret
+
+        core, engine, SessionLocal = self._make_env(tmp_path)
+        try:
+            r1 = core.put("k1", b"first", "alice", ["admin"], "v1", meta={"purpose": "a"}, caller_roles=["admin"])
+            r2 = core.put("k1", b"second", "alice", ["user"], "v2", meta={"purpose": "b"}, caller_roles=["admin"])
+            assert r2.replaced is True
+            assert r2.id == r1.id, "row id must be stable (injection path /run/secrets/venya/<pk>)"
+            assert r2.created_by == "alice"
+            assert core.get_for_injection("k1", "alice", ["admin"])[1] == "second"
+            with SessionLocal() as s:
+                assert s.query(Secret).filter(Secret.key == "k1").count() == 1
+                row = s.query(Secret).filter(Secret.key == "k1").one()
+                assert row.key_version_id == "v2"
+                assert row.meta == {"purpose": "b"}
+        finally:
+            engine.dispose()
+
+    def test_reput_by_in_scope_member_replaces_creator_immutable(self, tmp_path):
+        core, engine, _ = self._make_env(tmp_path)
+        try:
+            r1 = core.put("shared", b"aaa", "alice", ["user"], "v1", caller_roles=["admin"])
+            r2 = core.put("shared", b"bbb", "bob", ["user"], "v1", caller_roles=["user"])
+            assert r2.replaced is True
+            assert r2.id == r1.id
+            assert r2.created_by == "alice", "created_by is audit lineage — immutable on replace"
+            assert core.get_for_injection("shared", "bob", ["user"])[1] == "bbb"
+        finally:
+            engine.dispose()
+
+    def test_reput_scoped_out_creates_second_row_original_untouched(self, tmp_path):
+        """Paired negative: no clobber, no existence signal beyond a plain insert."""
+        from core.iam.models import Secret, SecretRole
+
+        core, engine, SessionLocal = self._make_env(tmp_path)
+        try:
+            r1 = core.put("admin-secret", b"aaa", "alice", ["admin"], "v1", caller_roles=["admin"])
+            r2 = core.put("admin-secret", b"bbb", "bob", ["user"], "v1", caller_roles=["user"])
+            assert r2.replaced is False
+            assert r2.id != r1.id
+            with SessionLocal() as s:
+                rows = s.query(Secret).filter(Secret.key == "admin-secret").order_by(Secret.id).all()
+                assert len(rows) == 2
+                first = rows[0]
+                assert first.created_by == "alice"
+                roles = s.query(SecretRole).filter(SecretRole.secret_id == first.id).count()
+                assert roles == 1, "original role links untouched"
+            # original still decrypts for alice, unchanged
+            assert core.get_for_injection("admin-secret", "alice", ["admin"])[1] == "aaa"
+        finally:
+            engine.dispose()
+
+    def test_reput_default_caller_roles_is_creator_only(self, tmp_path):
+        """caller_roles omitted → ownership-only resolution (legacy semantics)."""
+        core, engine, _ = self._make_env(tmp_path)
+        try:
+            r1 = core.put("k", b"one", "alice", ["admin"], "v1")
+            r_alice = core.put("k", b"two", "alice", ["admin"], "v1")
+            assert r_alice.replaced is True and r_alice.id == r1.id
+            r_bob = core.put("k", b"three", "bob", ["admin"], "v1")
+            assert r_bob.replaced is False and r_bob.id != r1.id
+        finally:
+            engine.dispose()
+
+    def test_reput_replaces_role_links_without_residue(self, tmp_path):
+        from core.iam.models import Role, SecretRole
+
+        core, engine, SessionLocal = self._make_env(tmp_path)
+        try:
+            core.put("k", b"1", "alice", ["admin"], "v1", caller_roles=["admin"])
+            core.put("k", b"2", "alice", ["user"], "v1", caller_roles=["admin"])
+            with SessionLocal() as s:
+                from core.iam.models import Secret
+
+                sid = s.query(Secret).filter(Secret.key == "k").one().id
+                links = s.query(SecretRole).filter(SecretRole.secret_id == sid).all()
+                assert len(links) == 1
+                role = s.query(Role).filter(Role.id == links[0].role_id).one()
+                assert role.name == "user"
         finally:
             engine.dispose()

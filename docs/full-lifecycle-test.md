@@ -132,9 +132,13 @@ Unexplained deltas must be investigated before provisioning.
   `store` fails loudly with a hint — pass `--key-version v1` explicitly there.
   Labels are stored without validation and decryption never consults
   `key_versions`, so `v1` is safe.
-- **No upsert.** `venya store` on an existing key creates a **second row**
-  (there is no `--force`; the flag was removed as a no-op). Delete the old
-  secret first when replacing one.
+- **Upsert on visible keys.** `venya store` on an existing key you can see
+  (one of your roles in its scope OR you created it) **replaces that row in
+  place** — id stable, `created_by` immutable, response `"replaced": true`,
+  CLI prints "replaced existing". A key that exists but is scoped out for
+  you inserts a **second row** (identical 201 shape — no existence leak, no
+  cross-role clobber). There is no `--force`; the flag was removed as a
+  no-op before upsert became real.
 - **Static files serve from site-packages, not the source tree.** Any
   HTML/CSS/JS edit must be copied into
   `/opt/venya/.venv/lib/python3.14/site-packages/server/static/` on the core VM.
@@ -1023,4 +1027,4 @@ Never paste full tokens, PINs, passwords, or recovery codes.
    and `store` fails loudly with a `--key-version v1` hint.
 4. **The session refresh path cannot revive an expired token** — long runs need
    the D.1 timeout accommodation.
-5. **No secret upsert** — re-storing a key creates a second row.
+5. **Secret upsert is visibility-scoped** — re-storing a key replaces it iff you can see it (role in scope or creator); scoped-out callers create a second row.

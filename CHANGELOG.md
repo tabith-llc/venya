@@ -54,6 +54,15 @@ Notable changes to Venya will be documented in this file.
   ACTIVE key version at the database level — concurrent rotations can no
   longer both commit (the loser gets a 409). Includes a defensive pre-clean
   keeping the newest of any legacy extra-active rows.
+- `venya store` / `POST /api/v1/secrets` are now an UPSERT on keys the caller
+  can see (one of the caller's roles in scope, or caller is the creator —
+  the same visibility rule as get/inject/list): the existing row is replaced
+  in place (stable id, immutable `created_by`; value, key version, metadata
+  and role scope overwritten), the response gains `"replaced": true`, and
+  the CLI prints "replaced existing". Re-storing a key that exists but is
+  scoped out for the caller still inserts a second row with an identical
+  response shape — no existence leak, no cross-role clobber. Previously
+  every re-store created a duplicate row.
 
 ## [0.1.0-alpha.7] - 2026-09-17
 

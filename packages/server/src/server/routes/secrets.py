@@ -41,6 +41,7 @@ class SecretCreateResponse(BaseModel):
     key: str
     role_names: list[str]
     metadata: dict[str, Any] | None = None
+    replaced: bool = False  # True when the store replaced a visible existing row (upsert)
 
 
 class SecretMetadata(BaseModel):
@@ -152,10 +153,16 @@ async def secrets_create(
     req: SecretCreateRequest,
     request: Request,
     user_info: dict = Depends(require_role("read-write")),
+    db: Session = Depends(get_db),
 ) -> SecretCreateResponse:
-    """Store a new secret.
+    """Store a secret (upsert on a visible existing key).
 
-    Requires read-write permission on all specified roles.
+    Requires read-write permission on all specified roles. Re-storing a key
+    the caller can see (role in scope OR creator — the same visibility
+    primitive as get/inject/list) REPLACES that row in place: id preserved,
+    created_by immutable, response carries replaced=true. A scoped-out
+    caller gets a plain insert (second row) — no existence leak, no
+    cross-role clobber (ticket cli-store-force-field-ignored option-2).
     """
     core = getattr(request.app.state, "core", None)
     if core is None:
@@ -165,6 +172,14 @@ async def secrets_create(
         )
 
     try:
+        # Caller's ACTUAL role names, fresh from the DB (NOT user_info["roles"]
+        # — that carries role IDs; same wiring as the injection path in
+        # executors.py). Visibility context for the upsert resolve.
+        from core.iam.role_manager import RoleManager
+
+        rm = RoleManager(db)
+        caller_roles = [m.role.name for m in rm.get_user_roles(user_info["user_id"])]
+
         meta = req.metadata.model_dump(exclude_none=True) if req.metadata else {}
         record = core.put(
             key=req.key,
@@ -173,6 +188,7 @@ async def secrets_create(
             role_names=req.roles,
             key_version_id=req.key_version_id,
             meta=meta,
+            caller_roles=caller_roles,
         )
     except Exception as e:
         raise HTTPException(
@@ -185,6 +201,7 @@ async def secrets_create(
         key=req.key,
         role_names=req.roles,
         metadata=meta if meta else {},
+        replaced=record.replaced,
     )
 
 
