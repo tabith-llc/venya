@@ -434,3 +434,66 @@ class TestRunCommandStage2:
         # Should use Stage 1 results directly
         assert result.stdout == stage1_stdout
         assert result.masked_secret_ids == ["a1a1a1a1"]
+
+
+class TestEnvCwdThreadThrough:
+    """Executor-level matrix for env_override/cwd (ticket
+    executor-env-override-cwd-sbx-noop): the sbx path must forward both to
+    the strategy, and the direct path must keep honoring them — consistent,
+    documented behavior on both paths, not works-on-one/no-ops-on-other."""
+
+    def _executor_with_mock_sbx(self):
+        from executor.executor import Executor
+        from executor.strategies.sbx_strategy import SbxStrategy
+
+        strategy = MagicMock(spec=SbxStrategy)
+        strategy.name.return_value = "sbx"
+        strategy.execute_command.return_value = MagicMock(returncode=0, stdout=b"ok", stderr=b"")
+        ex = Executor(command_validator=MagicMock(), session_id="s-thread", injection_strategy=strategy)
+        ex.http_client = None
+        return ex, strategy
+
+    def test_sbx_path_forwards_env_and_cwd(self):
+        ex, strategy = self._executor_with_mock_sbx()
+        with patch("executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])):
+            ex._run_command_sbx("cmd", [], env_override={"A": "1"}, cwd="/work")
+        kwargs = strategy.execute_command.call_args
+        assert kwargs[0][0] == "cmd"
+        assert kwargs[1]["env_override"] == {"A": "1"}
+        assert kwargs[1]["cwd"] == "/work"
+        # cwd also feeds the workspace mount at create time (coherent dual role)
+        assert strategy.create_sandbox.call_args[0][1] == "/work"
+
+    def test_sbx_path_defaults_none(self):
+        ex, strategy = self._executor_with_mock_sbx()
+        with patch("executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])):
+            ex._run_command_sbx("cmd", [], None, None)
+        kwargs = strategy.execute_command.call_args
+        assert kwargs[1]["env_override"] is None
+        assert kwargs[1]["cwd"] is None
+
+    def test_direct_path_honors_env_and_cwd(self):
+        """Matrix other half: direct/memfd path passes env + cwd to Popen."""
+        from executor.executor import Executor
+
+        ex = Executor(command_validator=MagicMock(), session_id="s-direct")
+        ex.http_client = None
+        ex._injection_result = None
+        mock_process = MagicMock()
+        mock_process.stdin.fileno.return_value = 3
+        mock_process.stdout.fileno.return_value = 4
+        mock_process.stderr.fileno.return_value = 5
+        mock_process.wait.return_value = 0
+        mock_process.returncode = 0
+        with patch("executor.executor.subprocess.Popen", return_value=mock_process) as popen:
+            with patch("executor.executor.select.select", return_value=([], [], [])):
+                with patch("executor.executor.scan_open_fds", return_value=[0, 1, 2]):
+                    with patch("executor.executor.set_cloexec"):
+                        with patch("executor.executor.verify_fd_whitelist", return_value=[]):
+                            with patch(
+                                "executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])
+                            ):
+                                ex._run_command_direct("ls", [], env_override={"FOO": "bar"}, cwd="/tmp")
+        env = popen.call_args[1]["env"]
+        assert env["FOO"] == "bar"
+        assert popen.call_args[1]["cwd"] == "/tmp"

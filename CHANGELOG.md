@@ -38,6 +38,15 @@ Notable changes to Venya will be documented in this file.
   argv positional still works and takes precedence; the stdin/prompt paths
   keep values out of `/proc/*/cmdline` and shell history — the same
   stdin-carriage discipline the installers use for passwords.
+- Executor sandbox path no longer silently drops `env_override` and `cwd`:
+  both now thread through to `sbx exec` as `-e KEY=VALUE` / `-w DIR` argv
+  tokens (docker-exec semantics — values are data, never shell-parsed; `-w`
+  overrides the workspace-mount default per command without conflicting with
+  the mount; physically probed on the deployed sbx). Previously
+  `Executor.execute()` accepted both parameters and returned success while
+  honoring them only on the unused direct path. No wire surface
+  (relay/API/CLI/MCP) sends either today, so no observable caller behavior
+  changes — the internal contract simply stops lying.
 
 ### Changed
 
