@@ -59,7 +59,11 @@ def create_parser() -> argparse.ArgumentParser:
     # store
     store_parser = subparsers.add_parser("store", help="Store a secret")
     store_parser.add_argument("key", help="Secret key")
-    store_parser.add_argument("value", nargs="?", help="Secret value (or read from stdin)")
+    store_parser.add_argument(
+        "value",
+        nargs="?",
+        help="Secret value; '-' or omitted reads stdin (interactive TTY: hidden prompt)",
+    )
     store_parser.add_argument(
         "--roles",
         nargs="+",
