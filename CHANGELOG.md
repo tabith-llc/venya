@@ -4,6 +4,17 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Break-glass recovery codes are now truly single-use. `POST /api/v1/recovery`
+  always CLAIMED (docstring) to burn the one-shot code but never did: the same
+  recovery code could mint new admins repeatedly, forever. The stored hash is
+  now nulled in the same transaction that mints the recovered admin; reuse
+  answers the same 401 as an invalid code and mints nothing. Failed recoveries
+  (existing user id → 400, missing admin role → 503) deliberately do NOT
+  consume the code — the operator needs it for the retry. Re-issuance of a
+  fresh code for the recovered system remains separate scope.
+
 ### Fixed
 
 - Key rotation is no longer administratively broken. `POST
