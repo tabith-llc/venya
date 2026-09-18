@@ -244,11 +244,14 @@ def cmd_store(client: APIClient, args: Any) -> int:
                 meta_dict[k] = v
             payload["metadata"] = meta_dict
 
-        client.post(
+        resp = client.post(
             "/api/v1/secrets",
             json=payload,
         )
-        print(f"Secret '{args.key}' stored successfully.")
+        if isinstance(resp, dict) and resp.get("replaced"):
+            print(f"Secret '{args.key}' replaced existing (id {resp.get('id')}).")
+        else:
+            print(f"Secret '{args.key}' stored successfully.")
         return 0
     except APIClientError as e:
         print(f"Failed to store secret: {e}", file=sys.stderr)

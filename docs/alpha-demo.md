@@ -25,9 +25,12 @@ SSL_CERT_FILE=~/.config/venya-ca.crt venya store demo-pass 'hunter2-demo-only' \
 Fresh installs seed an active key version (`v1`) at migration time, so
 `venya store` resolves it automatically — no `--key-version` flag needed
 (installs predating that migration must pass `--key-version v1`; the CLI
-fails loudly with that hint if the lookup 503s). Re-running `store` with
-the same key creates a second row — there is no upsert; delete the old secret
-first if you are replacing one.
+fails loudly with that hint if the lookup 503s). Re-running `store` with the
+same key REPLACES the secret if you can see it (one of your roles in its
+scope, or you created it): same row id, value/roles/metadata overwritten,
+response carries `"replaced": true` and the CLI prints "replaced existing".
+A key that exists but is scoped out for you inserts a second row — you can
+neither see nor clobber other roles' secrets.
 
 Note the response: key, roles — **the value is never echoed back**.
 
