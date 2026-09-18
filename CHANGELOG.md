@@ -4,6 +4,8 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] - 2026-09-18
+
 ### Security
 
 - Break-glass recovery codes are now truly single-use. `POST /api/v1/recovery`
