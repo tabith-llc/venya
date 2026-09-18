@@ -840,24 +840,35 @@ for the user session — criterion #5's self-filter.)*
 | 1 | MCP server starts | `venya-mcp` launches, reads config | no crash; tools listed |
 | 2 | list_secrets | `list_secrets` | returns `$SECRET_KEY` + metadata, **no value** |
 | 3 | list_executors | `list_executors` | `$EXEC_ID` **ONLINE** |
-| 4 | **run_command uses a secret** | `run_command(executor_id=$EXEC_ID, command=<D.6>, secret_keys=[$SECRET_KEY])` | exit 0; command read the injected secret file; **raw value ABSENT from all returned output**. Minimal echo shape: `probe=[REDACTED:<pk>]` + `masked_count ≥ 1`. Canonical ssh shape: `masked_count 0` expected (the value never traverses stdout) — proof = remote-identity output (hostname/whoami) + zero raw-value hits across payloads, journals, executor spool, and transcript |
+| 4 | **run_command uses a secret** | `run_command(executor_id=$EXEC_ID, command=<D.6>, secret_keys=[$SECRET_KEY])` | exit 0; command read the injected secret file; **raw value ABSENT from all returned output**. Minimal cat shape: stdout = `[REDACTED:<pk>]` + `masked_count ≥ 1`. Canonical ssh shape: `masked_count 0` expected (the value never traverses stdout) — proof = remote-identity output (hostname) + zero raw-value hits across payloads, journals, executor spool, and transcript |
 | 5 | get_audit *(full matrix)* | admin makes ≥1 call; user calls `get_audit` | user sees own event (positive); admin event **absent** (negative = security claim) |
 | 6 | Token refresh | 401 → refresh → retry | retry succeeds **or** documented known-limitation behavior (refresh path dead — see D.1) |
 | 7 | Session expired | let the TTL lapse | actionable error message (not a crash) |
 
 ### D.6 The "use a secret" command (criterion #4)
 
-**Canonical shape** (matches the codebase's own validator test + MCP docstring)
-— ssh into the target using the injected secret as the password:
+**Structural-gate note (2026-09-18):** the executor rejects ANY shell
+metacharacter (`| ; & $ ` + backtick + `( ) { } < > ! * ?`, newlines) ANYWHERE
+in the WHOLE command string — quoted and remote portions included — before
+dispatch (solution A, ticket executor-sbx-skips-shell-metachar-validation;
+ruled accepted tradeoff, plan-9 Deviations row 6). The former shapes here
+(`$(cat ...)` minimal, `'hostname && whoami && uptime'` canonical) physically
+PASSed on pre-gate builds (run-2, results-2026-09-17-2353) and are now
+rejected BY DESIGN. Shell features ⇒ script-file path. Commands must be a
+SINGLE LINE (a newline is a metachar).
+
+**Canonical shape** — ssh into the target using the injected secret as the
+password, ONE remote command:
 
 ```
-sshpass -f /run/secrets/venya/<SECRET_PK> ssh \
-  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-  <TARGET_USER>@<TARGET_HOST> 'hostname && whoami && uptime'
+sshpass -f /run/secrets/venya/<SECRET_PK> ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null <TARGET_USER>@<TARGET_HOST> hostname
 ```
 
 > The **remote** portion (after the first `ssh`) is exempt from the jump-host
 > dangerous-pattern scan; a **local** `sudo` before `ssh` is still blocked.
+> Remote chaining (`&&`, pipes, `$( )`) is blocked by the whole-string
+> structural gate — for multi-command remote work, place a script on the
+> target and invoke it: `... ssh <TARGET_USER>@<TARGET_HOST> /tmp/probe.sh`.
 >
 > **Target-auth precondition:** this shape needs the target to accept
 > **password** auth for `$TARGET_USER`. Provisioned targets default to
@@ -867,11 +878,12 @@ sshpass -f /run/secrets/venya/<SECRET_PK> ssh \
 **Minimal shape** (isolates injection + redaction from target connectivity):
 
 ```
-echo "probe=$(cat /run/secrets/venya/<SECRET_PK>)"
+cat /run/secrets/venya/<SECRET_PK>
 ```
 
-Expected: stdout shows `probe=[REDACTED:<SECRET_PK>]` (value masked),
-`masked_count ≥ 1`.
+Expected: stdout is the secret file's value **masked** —
+`[REDACTED:<SECRET_PK>]`, `masked_count ≥ 1` (the command read the injected
+file; the value never appears raw).
 
 **Acceptance for criterion #4:** either shape — the command **reads the
 injected secret file**, uses it, and the returned output has the value

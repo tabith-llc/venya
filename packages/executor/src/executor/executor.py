@@ -66,9 +66,13 @@ TRUNCATION_MARKER = "... [OUTPUT TRUNCATED: {n} bytes discarded]\n"
 SBX_TIMEOUT = 3600  # 1 hour max
 
 # Shell metacharacters that are not permitted in executor commands.
-# The executor runs commands without shell interpretation (shell=False),
-# so these characters are rejected outright. Users needing pipes, redirects,
-# or other shell features should provide a script file.
+# Enforced WHOLE-STRING by `_validate_command_structure` at the top of
+# `execute()` — before policy validation and before any strategy dispatch —
+# because the production sbx path hands the command string to `sh -c` inside
+# the sandbox (the memfd/direct path's shell=False is the exception, not the
+# rule). Rejection at the gate means these characters never reach any shell.
+# Users needing pipes, redirects, or other shell features should provide a
+# script file.
 SHELL_METACHARS = set("|;&$`(){}<>!*?\n\r")
 
 
@@ -151,7 +155,28 @@ class Executor:
         Returns:
             CommandResult with exit code, filtered output, and audit data.
         """
-        # Step 1: Validate command
+        # Step 1a: STRUCTURAL gate — unconditional whole-string invariant
+        # (ticket executor-sbx-skips-shell-metachar-validation, solution A,
+        # ruled 2026-09-16). Runs BEFORE the policy gate because: policy is
+        # admin-configurable (`permissive` returns True early) and nothing
+        # config-dependent may sit in front of the non-negotiable check;
+        # cheapest-first (char scan before shlex/PATH work); and the policy
+        # layer's `_split_local_remote` shlex-parses, so structure-first
+        # guarantees it receives parseable input.
+        # ACCEPTED TRADEOFF (ruled, recorded in the ticket + plan-9 tracker
+        # Deviations row 6): quoted metachars in arguments (e.g. `echo "a; b"`)
+        # are rejected although a shell would treat them safely — quote-scoped
+        # parsing cannot soundly distinguish local vs remote interpretation
+        # here; the sandbox shell sees the whole string. Shell features must
+        # use the script-file path.
+        try:
+            _validate_command_structure(command)
+        except ValueError as exc:
+            if self.audit_logger:
+                self.audit_logger.emit("command_rejected", command=command, reason=str(exc))
+            raise ValueError(f"Command rejected: {exc}") from None
+
+        # Step 1b: POLICY gate — dangerous patterns / preset checks.
         is_valid, reason = self.command_validator.validate(command)
         if not is_valid:
             if self.audit_logger:
@@ -278,7 +303,10 @@ class Executor:
         if self._injection_result:
             pass_fds.update(self._injection_result.extra_fds)
 
-        # Validate command structure (rejects shell metacharacters)
+        # Validate command structure (rejects shell metacharacters).
+        # REDUNDANT with execute() step 1a's whole-string gate — kept
+        # deliberately: refactor-5 guardrails lock memfd/sbx coexistence and
+        # this path must not diverge if reached directly (ruled 2026-09-16).
         args = _validate_command_structure(command)
 
         # Create subprocess — shell=False for security
