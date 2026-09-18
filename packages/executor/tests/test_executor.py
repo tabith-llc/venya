@@ -497,3 +497,79 @@ class TestEnvCwdThreadThrough:
         env = popen.call_args[1]["env"]
         assert env["FOO"] == "bar"
         assert popen.call_args[1]["cwd"] == "/tmp"
+
+
+class TestSbxTruncationAccounting:
+    """Ticket executor-sbx-truncation-accounting-wrong: oversized sandbox
+    output must report output_truncated=True and the true pre-slice sizes.
+    Previously both were derived from the already-sliced payload, so the sbx
+    path structurally always reported False / post-slice sizes."""
+
+    def _executor_with_output(self, stdout: bytes, stderr: bytes = b""):
+        from executor.strategies.sbx_strategy import SbxStrategy
+
+        strategy = MagicMock(spec=SbxStrategy)
+        strategy.execute_command.return_value = MagicMock(returncode=0, stdout=stdout, stderr=stderr)
+        ex = Executor(command_validator=MagicMock(), session_id="s-trunc", injection_strategy=strategy)
+        ex.http_client = None
+        return ex
+
+    def _run_sbx(self, ex: Executor):
+        with patch("executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])):
+            return ex._run_command_sbx("cmd", [], None, None)
+
+    def test_oversized_stdout_reports_truncated_and_true_size(self):
+        from executor.executor import MAX_OUTPUT_BYTES
+
+        true_size = MAX_OUTPUT_BYTES + 4096
+        result = self._run_sbx(self._executor_with_output(b"x" * true_size))
+
+        assert result.output_truncated is True
+        assert result.original_stdout_size == true_size
+        assert len(result.stdout) == MAX_OUTPUT_BYTES
+
+    def test_oversized_stderr_reports_truncated_and_true_size(self):
+        from executor.executor import MAX_OUTPUT_BYTES
+
+        true_size = MAX_OUTPUT_BYTES + 1
+        result = self._run_sbx(self._executor_with_output(b"out", b"e" * true_size))
+
+        assert result.output_truncated is True
+        assert result.original_stderr_size == true_size
+        assert result.original_stdout_size == 3
+        assert len(result.stderr) == MAX_OUTPUT_BYTES
+
+    def test_under_limit_not_truncated_true_sizes(self):
+        """Negative half: under-cap output keeps False flag and exact sizes."""
+        result = self._run_sbx(self._executor_with_output(b"x" * 100, b"y" * 50))
+
+        assert result.output_truncated is False
+        assert result.original_stdout_size == 100
+        assert result.original_stderr_size == 50
+
+    def test_direct_path_threads_capture_totals(self):
+        """_run_command_direct wiring: the true totals from _capture_output
+        reach CommandResult, not the post-slice payload lengths."""
+        from executor.executor import MAX_OUTPUT_BYTES
+
+        ex = Executor(command_validator=MagicMock(), session_id="s-direct-trunc")
+        ex.http_client = None
+        ex._injection_result = None
+        mock_process = MagicMock()
+        mock_process.stdin.fileno.return_value = 3
+        mock_process.stdout.fileno.return_value = 4
+        mock_process.stderr.fileno.return_value = 5
+        mock_process.wait.return_value = 0
+        with patch("executor.executor.subprocess.Popen", return_value=mock_process):
+            with patch.object(Executor, "_capture_output", return_value=(b"x" * 1000, b"", MAX_OUTPUT_BYTES + 999, 0)):
+                with patch("executor.executor.scan_open_fds", return_value=[0, 1, 2]):
+                    with patch("executor.executor.set_cloexec"):
+                        with patch("executor.executor.verify_fd_whitelist", return_value=[]):
+                            with patch(
+                                "executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])
+                            ):
+                                result = ex._run_command_direct("ls", [], None, None)
+
+        assert result.output_truncated is True
+        assert result.original_stdout_size == MAX_OUTPUT_BYTES + 999
+        assert result.original_stderr_size == 0
