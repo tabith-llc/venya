@@ -744,6 +744,69 @@ class TestExecutorReachability:
         assert resp.status_code == 503
         assert "mTLS" not in resp.json()["detail"]
 
+    def test_remote_protocol_error_returns_503(self):
+        """D1: executor dies mid-response (RemoteProtocolError) → 503, not 500.
+
+        Same class as the ConnectError/TimeoutException guards (M1/M4 lineage):
+        the caught set was incomplete, so a peer closing without a complete
+        HTTP message escaped as an unhandled 500.
+        """
+
+        app, backend = _create_test_app()
+        mock_db = MagicMock()
+
+        mock_exec_session = MagicMock()
+        mock_exec_session.id = "sess-1"
+        mock_exec_session.user_id = "test-user"
+        mock_exec_session.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        mock_exec_session.executor_id = "exec-1"
+
+        mock_session_query = MagicMock()
+        mock_session_filtered = MagicMock()
+        mock_session_filtered.first.return_value = mock_exec_session
+        mock_session_query.filter.return_value = mock_session_filtered
+
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "10.27.28.14"
+
+        mock_executor_query = MagicMock()
+        mock_executor_filtered = MagicMock()
+        mock_executor_filtered.first.return_value = mock_executor
+        mock_executor_query.filter.return_value = mock_executor_filtered
+
+        mock_secrets_query = MagicMock()
+        mock_secrets_query.all.return_value = []
+
+        def query_side_effect(model):
+            if model.__name__ == "ExecutionSession":
+                return mock_session_query
+            elif model.__name__ == "Executor":
+                return mock_executor_query
+            elif model.__name__ == "SessionSecret":
+                return mock_secrets_query
+            return mock_session_query
+
+        mock_db.query.side_effect = query_side_effect
+        backend.get_session.return_value = mock_db
+
+        protocol_err = httpx2.RemoteProtocolError(
+            "peer closed connection without sending complete message body (incomplete chunked read)"
+        )
+
+        mock_ssl_ctx = MagicMock()
+        with patch("server.routes.executors.httpx2.AsyncClient") as mock_client_cls:
+            mock_client_cls.side_effect = protocol_err
+            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+                client = TestClient(app, raise_server_exceptions=False)
+                resp = client.post(
+                    "/api/v1/executors/exec-1/execute",
+                    json={"session_id": "sess-1", "command": "echo hello"},
+                )
+
+        assert resp.status_code == 503
+        assert "connection lost" in resp.json()["detail"]
+
     def test_connect_error_dns_failure_returns_does_not_resolve(self):
         """ConnectError with gaierror cause → 503 'does not resolve' (not 'connection refused')."""
 
