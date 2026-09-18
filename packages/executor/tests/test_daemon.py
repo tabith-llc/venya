@@ -1216,3 +1216,63 @@ class TestDeafBootRefusal:
         d.start()
         assert d.state.running is True
         d._main_loop.assert_called_once()
+
+
+class TestMtlsMaterialNamedError:
+    """Ticket refactor-1-config-consolidation residual (executor polish):
+    missing/unusable mTLS material must produce a NAMED single-line error —
+    at STARTUP it refuses boot (exit 1); at RUNTIME (rotation rebuild) it
+    stays an Exception so _main_loop's tolerant handler keeps the daemon
+    alive (SystemExit would bypass `except Exception` and kill it)."""
+
+    def test_missing_mtls_files_named_runtime_error(self, config, caplog):
+        import logging
+
+        from executor.daemon import ExecutorDaemon
+
+        d = ExecutorDaemon(config)
+        # fixture config points mtls.cert/key at nonexistent tmp_path files
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(RuntimeError, match="mTLS material unusable"):
+                d._create_mtls_client()
+        assert "mTLS material unusable" in caplog.text
+        assert config.mtls.cert in caplog.text
+
+    def test_startup_refuses_when_client_unbuildable(self, config):
+        """start() converts the named RuntimeError into SystemExit(1) —
+        systemd shows failed instead of a daemon with a dead control channel."""
+        from executor.daemon import ExecutorDaemon
+
+        cfg = config.model_copy(update={"relay_client_ids": ["core-relay"]})
+        d = ExecutorDaemon(cfg)
+        d.cert_manager = MagicMock()
+        d.reaper = MagicMock()
+        d._create_mtls_client = MagicMock(side_effect=RuntimeError("mTLS material unusable: boom"))
+        with pytest.raises(SystemExit) as exc:
+            d.start()
+        assert exc.value.code == 1
+        assert d.state.running is False
+
+    def test_runtime_rotation_failure_stays_tolerant(self, config):
+        """Paired invariant: _main_loop's rotation block catches the rebuild
+        failure (Exception subclass) and keeps looping — no SystemExit leak."""
+        from executor.daemon import ExecutorDaemon
+
+        d = ExecutorDaemon(config)
+        d.client = MagicMock()
+        d.state.running = True
+        d._create_mtls_client = MagicMock(side_effect=RuntimeError("mTLS material unusable: boom"))
+        loops = [0]
+
+        def stop_after(*_a, **_k):
+            loops[0] += 1
+            d.state.running = False
+
+        with patch.object(d.cert_manager, "needs_rotation", return_value=True):
+            with patch.object(d.cert_manager, "rotate", side_effect=stop_after):
+                with patch.object(d.cert_manager, "check_revocation", return_value=False):
+                    with patch.object(d, "_send_heartbeat"):
+                        with patch.object(d._shutdown_event, "wait", return_value=False):
+                            d._main_loop()  # must not raise
+
+        assert loops[0] >= 1
