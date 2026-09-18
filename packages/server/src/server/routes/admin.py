@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from core.utils.entropy import get_secure_token
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import metrics
@@ -109,7 +110,12 @@ class AdminKeyVersionListResponse(BaseModel):
 
 
 class AdminKeyVersionRotateRequest(BaseModel):
-    new_key: str | None = Field(None, description="Path to new key file (hex-encoded 32 bytes)")
+    """Rotation takes no parameters under single-KEK bookkeeping semantics.
+
+    The former ``new_key`` field advertised per-version key material that
+    never existed (the KEK derives from the install passphrase); removed
+    with the option-2 ruling — zero callers existed.
+    """
 
 
 class AdminKeyVersionRotateResponse(BaseModel):
@@ -117,6 +123,7 @@ class AdminKeyVersionRotateResponse(BaseModel):
     status: str
     old_key_version_id: int | None
     new_key_version_id: int | None
+    note: str = Field("", description="Rotation semantics note (single-KEK: no secret re-wrap)")
 
 
 class AdminKeyVersionRollbackRequest(BaseModel):
@@ -487,76 +494,171 @@ async def admin_key_version_list(
     return AdminKeyVersionListResponse(versions=result)
 
 
+NO_REWRAP_NOTE = "no re-wrap: single-KEK alpha semantics"
+
+
 @router.post(
     "/admin/key-versions/rotate",
     response_model=AdminKeyVersionRotateResponse,
-    status_code=status.HTTP_202_ACCEPTED,
 )
 async def admin_key_version_rotate(
     req: AdminKeyVersionRotateRequest,
     _: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminKeyVersionRotateResponse:
-    """Start key rotation (admin only).
+    """Rotate the active key version synchronously (admin only).
 
-    Creates a new key version and begins re-wrapping all secrets.
+    Label-boundary rotation under single-KEK alpha semantics: there is no
+    per-version key material (the KEK derives from the install passphrase)
+    and secret decryption never consults key_versions, so NO secrets are
+    re-wrapped. Existing secrets keep their stored label and remain
+    decryptable; new secrets receive the new label via
+    GET /key-versions/active. The rotation job is terminal ("completed")
+    when this request returns. The at-most-one-active invariant is enforced
+    by the uq_key_versions_single_active partial unique index (migration
+    028) — a lost concurrency race surfaces as 409, never a second active
+    version.
     """
-    try:
-        from core.iam.models import KeyRotationJob, KeyRotationSecret, KeyVersion, Secret
+    import uuid
 
-        # Get current active key version
+    from core.iam.models import KeyRotationJob, KeyVersion, Secret
+
+    now = datetime.now(UTC)
+    try:
         active_version = (
             db.query(KeyVersion).filter(KeyVersion.active.is_(True)).order_by(KeyVersion.created_at.desc()).first()
         )
+        old_id = active_version.id if active_version else None
 
-        # Create new key version
-        import uuid
+        # Deactivate ALL active versions (normally exactly one; the partial
+        # unique index makes more unreachable on migrated databases).
+        db.query(KeyVersion).filter(KeyVersion.active.is_(True)).update(
+            {KeyVersion.active: False}, synchronize_session=False
+        )
 
         new_version = KeyVersion(
             version_label=f"v{uuid.uuid4().hex[:8]}",
-            active=False,
-            rotation_pending=True,
+            active=True,
+            rotation_pending=False,
         )
         db.add(new_version)
         db.flush()
 
-        # Create rotation job
         job = KeyRotationJob(
-            status="pending",
+            status="completed",
+            old_key_version_id=old_id,
+            new_key_version_id=new_version.id,
             total_secrets=db.query(Secret).count(),
-            completed_secrets=0,
+            completed_secrets=0,  # truthful: nothing is re-wrapped (single KEK)
             failed_count=0,
+            started_at=now,
+            completed_at=now,
         )
         db.add(job)
-        db.flush()
-
-        # Create per-secret tracking entries
-        secrets = db.query(Secret).all()
-        for secret in secrets:
-            rotation_secret = KeyRotationSecret(
-                rotation_job_id=job.id,
-                secret_id=secret.id,
-                status="pending",
-            )
-            db.add(rotation_secret)
-
-        # Deactivate old version
-        if active_version:
-            active_version.active = False
-
         db.commit()
-
-        return AdminKeyVersionRotateResponse(
-            job_id=job.id,
-            status="pending",
-            old_key_version_id=active_version.id if active_version else None,
-            new_key_version_id=new_version.id,
+    except IntegrityError:
+        # Lost a concurrent-rotation race — the partial unique index caught
+        # it. get_db rolls the session back when this HTTPException escapes
+        # (routes must not touch rollback/close themselves).
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Concurrent rotation committed first; re-check GET /key-versions/active",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+
+    logger.info(
+        "Rotated key version %s -> %s (job %d; %s)",
+        old_id,
+        new_version.version_label,
+        job.id,
+        NO_REWRAP_NOTE,
+    )
+    return AdminKeyVersionRotateResponse(
+        job_id=job.id,
+        status="completed",
+        old_key_version_id=old_id,
+        new_key_version_id=new_version.id,
+        note=NO_REWRAP_NOTE,
+    )
+
+
+def _rollback_key_rotation(db: Session, job_id: int) -> int:
+    """Flip the active key version back for a completed rotation job.
+
+    Shared by both rollback routes. Under single-KEK semantics no secrets
+    were ever re-wrapped, so there is nothing to restore at the secret
+    level — rollback reactivates the job's OLD key version, deactivates the
+    new one, and marks the job rolled_back. Only the MOST RECENT job can be
+    rolled back: flipping under a newer rotation would silently undo it.
+
+    Returns the legacy re-wrap count (structurally 0 post-fix; counted for
+    pre-fix job rows whose KeyRotationSecret entries may exist).
+    """
+    from core.iam.models import KeyRotationJob, KeyRotationSecret, KeyVersion
+
+    job = db.query(KeyRotationJob).filter(KeyRotationJob.id == job_id).first()
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Rotation job {job_id} not found",
+        )
+    if job.status != "completed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Rotation job {job_id} has status {job.status!r}; only 'completed' rotations can be rolled back",
+        )
+    latest = db.query(KeyRotationJob).order_by(KeyRotationJob.id.desc()).first()
+    if latest is not None and latest.id != job.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Rotation job {job_id} is not the most recent rotation (job {latest.id} is); "
+                "roll that one back first"
+            ),
+        )
+    if job.old_key_version_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Rotation job {job_id} created the first key version; there is no prior version to reactivate",
+        )
+    old_version = db.query(KeyVersion).filter(KeyVersion.id == job.old_key_version_id).first()
+    if old_version is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Prior key version {job.old_key_version_id} no longer exists",
+        )
+
+    restored = (
+        db.query(KeyRotationSecret)
+        .filter(
+            KeyRotationSecret.rotation_job_id == job_id,
+            KeyRotationSecret.status == "rotated",
+        )
+        .count()
+    )
+
+    db.query(KeyVersion).filter(KeyVersion.active.is_(True)).update(
+        {KeyVersion.active: False}, synchronize_session=False
+    )
+    old_version.active = True
+    job.status = "rolled_back"
+    job.rolled_back_at = datetime.now(UTC)
+    db.commit()
+
+    logger.info(
+        "Rolled back rotation job %d: reactivated key version %d "
+        "(%d re-wrapped secrets restored — none are re-wrapped under single-KEK semantics)",
+        job_id,
+        old_version.id,
+        restored,
+    )
+    return restored
 
 
 @router.post(
@@ -569,43 +671,15 @@ async def admin_key_version_rollback(
     _: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminKeyVersionRollbackResponse:
-    """Roll back a failed rotation job (admin only)."""
+    """Roll back the most recent completed rotation (admin only).
+
+    Reactivates the prior key version and marks the job rolled_back.
+    restored_secrets_count is 0 under single-KEK semantics (no secret was
+    ever re-wrapped). 404 for a missing job; 409 for non-completed,
+    non-latest, or first-ever rotations.
+    """
     try:
-        from core.iam.models import KeyRotationJob
-
-        job = db.query(KeyRotationJob).filter(KeyRotationJob.id == req.job_id).first()
-        if job is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Rotation job {req.job_id} not found",
-            )
-
-        # Count restored secrets (those that were rotated before rollback)
-        from core.iam.models import KeyRotationSecret
-
-        restored = (
-            db.query(KeyRotationSecret)
-            .filter(
-                KeyRotationSecret.rotation_job_id == req.job_id,
-                KeyRotationSecret.status == "rotated",
-            )
-            .count()
-        )
-
-        job.status = "rolled_back"
-        job.rolled_back_at = datetime.now(UTC)
-        db.commit()
-
-        logger.info(
-            "Rolled back rotation job %d, restored %d secrets",
-            req.job_id,
-            restored,
-        )
-        return AdminKeyVersionRollbackResponse(
-            rolled_back=True,
-            job_id=req.job_id,
-            restored_secrets_count=restored,
-        )
+        restored = _rollback_key_rotation(db, req.job_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -613,6 +687,11 @@ async def admin_key_version_rollback(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+    return AdminKeyVersionRollbackResponse(
+        rolled_back=True,
+        job_id=req.job_id,
+        restored_secrets_count=restored,
+    )
 
 
 @router.post(
@@ -835,41 +914,15 @@ async def admin_key_rotation_job_rollback(
     _: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminKeyRotationJobRollbackResponse:
-    """Roll back a failed or interrupted rotation job (admin only)."""
+    """Roll back a completed rotation by job id (admin only).
+
+    Same semantics as POST /admin/key-versions/rollback: reactivates the
+    prior key version, marks the job rolled_back, restored_secrets_count 0
+    under single-KEK semantics. 404 missing; 409 non-completed / non-latest /
+    first-ever rotation.
+    """
     try:
-        from core.iam.models import KeyRotationJob, KeyRotationSecret
-
-        job = db.query(KeyRotationJob).filter(KeyRotationJob.id == job_id).first()
-        if job is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Rotation job {job_id} not found",
-            )
-
-        # Count restored secrets
-        restored = (
-            db.query(KeyRotationSecret)
-            .filter(
-                KeyRotationSecret.rotation_job_id == job_id,
-                KeyRotationSecret.status == "rotated",
-            )
-            .count()
-        )
-
-        job.status = "rolled_back"
-        job.rolled_back_at = datetime.now(UTC)
-        db.commit()
-
-        logger.info(
-            "Rolled back rotation job %d, restored %d secrets",
-            job_id,
-            restored,
-        )
-        return AdminKeyRotationJobRollbackResponse(
-            rolled_back=True,
-            job_id=job_id,
-            restored_secrets_count=restored,
-        )
+        restored = _rollback_key_rotation(db, job_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -877,6 +930,11 @@ async def admin_key_rotation_job_rollback(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+    return AdminKeyRotationJobRollbackResponse(
+        rolled_back=True,
+        job_id=job_id,
+        restored_secrets_count=restored,
+    )
 
 
 @router.get(
@@ -1321,16 +1379,16 @@ async def admin_revoke_token(
 @router.post(
     "/admin/key-rotation",
     response_model=AdminKeyVersionRotateResponse,
-    status_code=status.HTTP_202_ACCEPTED,
 )
 async def admin_key_rotation(
     req: AdminKeyVersionRotateRequest,
     _: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminKeyVersionRotateResponse:
-    """Start key rotation (alias for /admin/key-versions/rotate).
+    """Rotate the active key version (alias for /admin/key-versions/rotate).
 
-    Admin only. Creates a new key version and begins re-wrapping all secrets.
+    Admin only. Synchronous label-boundary rotation; no secrets are
+    re-wrapped (single-KEK alpha semantics).
     """
     return await admin_key_version_rotate(req, _, db)
 

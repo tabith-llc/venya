@@ -4,6 +4,38 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Key rotation is no longer administratively broken. `POST
+  /admin/key-versions/rotate` previously created an inactive key version plus
+  a pending rotation job that nothing ever completed — and deactivated the
+  old version — leaving the installation with NO active key version
+  (`GET /key-versions/active` 503, secret storage without an explicit
+  `--key-version` dead). Rotation is now a synchronous label-boundary
+  operation under single-KEK alpha semantics: the new version is active when
+  the request returns and the rotation job is terminal with truthful
+  counters. No secrets are re-wrapped (there is no per-version key material;
+  decryption never consults key versions) — existing secrets keep their
+  label and remain decryptable; new secrets receive the new label
+  automatically. Rollback (both routes) now performs a real flip-back of the
+  active version instead of only marking the job row.
+
+### Changed
+
+- `POST /admin/key-versions/rotate` (and its alias `POST
+  /admin/key-rotation`) now answer **200** with `status: "completed"` and a
+  `note` field ("no re-wrap: single-KEK alpha semantics") instead of **202**
+  with `status: "pending"` — the operation is synchronous. The request
+  body's `new_key` field (advertised per-version key material that never
+  existed) is removed; the body is now empty. No production caller existed.
+  Rollback answers 409 (was: silently "succeeded") for jobs that are not the
+  most recent completed rotation, and `restored_secrets_count` is 0 by
+  construction.
+- Database: migration 028 adds a partial unique index enforcing at most one
+  ACTIVE key version at the database level — concurrent rotations can no
+  longer both commit (the loser gets a 409). Includes a defensive pre-clean
+  keeping the newest of any legacy extra-active rows.
+
 ## [0.1.0-alpha.7] - 2026-09-17
 
 ### Fixed
