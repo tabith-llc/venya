@@ -472,7 +472,11 @@ def create_parser() -> argparse.ArgumentParser:
 
     # run (formerly exec)
     run_parser = subparsers.add_parser("run", help="Execute a command via executor (Stage 1 + Stage 2 filtering)")
-    run_parser.add_argument("command_args", help="Command to execute", nargs=argparse.REMAINDER)
+    run_parser.add_argument(
+        "command_args",
+        help="Command to execute (a leading -- separator is consumed, not sent to the executor)",
+        nargs=argparse.REMAINDER,
+    )
     run_parser.add_argument(
         "--secret",
         action="append",

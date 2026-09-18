@@ -1097,6 +1097,16 @@ def cmd_run(client: APIClient, args: Any) -> int:
         5. Display filtered output
     """
     command_args = getattr(args, "command_args", None)
+    # argparse REMAINDER captures a leading `--` separator literally (verified
+    # on CPython 3.14): strip exactly one so `venya run -- cmd...` sends
+    # `cmd...`. A second `--` is the user's intended command token. The
+    # captured separator broke validator ssh-shape recognition (false
+    # 'Dangerous pattern' rejects) and sandbox execution (`sh -c "-- ..."` →
+    # 127) — ticket command-validator-sudo-inconsistency. Any future
+    # REMAINDER-based command needs the same strip (invariant lives here, not
+    # in argparse).
+    if command_args and command_args[0] == "--":
+        command_args = command_args[1:]
     command = " ".join(command_args) if command_args else ""
     if not command:
         print("Error: command required", file=sys.stderr)
