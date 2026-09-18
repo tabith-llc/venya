@@ -160,3 +160,89 @@ class TestCmdStore:
         finally:
             client.close()
             config_file.unlink()
+
+
+class TestCmdStoreStdin:
+    """Value via stdin / hidden prompt — keeps secrets out of argv
+    (/proc/*/cmdline, shell history). Ticket cli-store-stdin-help-false:
+    the help text always claimed stdin; option-1 ruling implemented it."""
+
+    def _client_with_post(self):
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_http.request.return_value = _make_mock_response(201, {"id": 1, "key": "mykey", "role_names": ["admin"]})
+        client._http = mock_http
+        return client, config_file, mock_http
+
+    def test_dash_positional_reads_stdin(self, monkeypatch):
+        import io
+        import sys
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO("piped-secret\n"))
+        client, config_file, mock_http = self._client_with_post()
+        try:
+            assert cmd_store(client, _make_args(value="-", key_version="v1")) == 0
+            assert _post_payload(mock_http)["value"] == "piped-secret"  # trailing newline stripped
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_omitted_value_reads_piped_stdin(self, monkeypatch):
+        import io
+        import sys
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO("s3cret\r\n"))
+        client, config_file, mock_http = self._client_with_post()
+        try:
+            assert cmd_store(client, _make_args(value=None, key_version="v1")) == 0
+            assert _post_payload(mock_http)["value"] == "s3cret"
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_empty_stdin_actionable_error_no_post(self, monkeypatch, capsys):
+        """Paired negative: empty input must fail loudly and send nothing."""
+        import io
+        import sys
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+        client, config_file, mock_http = self._client_with_post()
+        try:
+            assert cmd_store(client, _make_args(value="-", key_version="v1")) == 1
+            assert mock_http.request.call_count == 0
+            assert "stdin" in capsys.readouterr().err
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_tty_prompt_uses_getpass_no_echo(self, monkeypatch):
+        """Omitted value at a TTY: hidden getpass prompt, stdin never read."""
+        import sys
+
+        fake_stdin = MagicMock()
+        fake_stdin.isatty.return_value = True
+        monkeypatch.setattr(sys, "stdin", fake_stdin)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "hidden-val")
+        client, config_file, mock_http = self._client_with_post()
+        try:
+            assert cmd_store(client, _make_args(value=None, key_version="v1")) == 0
+            assert _post_payload(mock_http)["value"] == "hidden-val"
+            fake_stdin.read.assert_not_called()
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_explicit_value_ignores_stdin(self, monkeypatch):
+        """Paired negative for precedence: argv value wins, stdin untouched."""
+        import sys
+
+        fake_stdin = MagicMock()
+        monkeypatch.setattr(sys, "stdin", fake_stdin)
+        client, config_file, mock_http = self._client_with_post()
+        try:
+            assert cmd_store(client, _make_args(value="plain", key_version="v1")) == 0
+            assert _post_payload(mock_http)["value"] == "plain"
+            fake_stdin.read.assert_not_called()
+        finally:
+            client.close()
+            config_file.unlink()
