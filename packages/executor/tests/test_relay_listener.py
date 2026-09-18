@@ -23,8 +23,10 @@ Failure-mode matrix (the plan's "immediate 503 on any failure"):
   - empty relay_client_ids    -> listener never binds (fail-closed)
 """
 
+import json
 import socket
 import ssl
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -37,7 +39,12 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from executor.config import ExecutorConfig, MtlsConfig
 from executor.executor import CommandResult
-from executor.relay_listener import RelayListener
+from executor.relay_listener import (
+    MAX_RELAY_BODY_BYTES,
+    RELAY_READ_TIMEOUT_SECONDS,
+    ExecuteHandler,
+    RelayListener,
+)
 
 ALLOWED = "core-allowed"
 SERVER_CN = "relay-srv"
@@ -353,3 +360,161 @@ class TestRelayListener:
                 socket.create_connection(("127.0.0.1", port), timeout=2)
         finally:
             listener.stop()
+
+
+# --- Body cap + read timeout (ticket relay-listener-body-cap-and-timeout) ---
+
+
+def _raw_exchange(
+    listener: RelayListener,
+    pk,
+    request: bytes,
+    *,
+    client_timeout: float = 5.0,
+    dribble_chunks: int = 0,
+    dribble_interval: float = 0.0,
+) -> tuple[int, bytes, float]:
+    """Drive the listener over a raw TLS socket with the ALLOWED client cert.
+
+    mTLS identity is real (pk.c_ok) — auth is satisfied, never bypassed; only
+    the HTTP framing is hand-rolled so malformed/hostile Content-Length shapes
+    can be sent verbatim. Reads to EOF (handler is HTTP/1.0, closes after
+    every response). Returns (status_code_or_-1, response_bytes, elapsed_s).
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.load_verify_locations(pk.ca_a)
+    ctx.load_cert_chain(*pk.c_ok)
+    start = time.monotonic()
+    with socket.create_connection(("127.0.0.1", listener.port), timeout=client_timeout) as sock:
+        with ctx.wrap_socket(sock) as tls:
+            tls.settimeout(client_timeout)
+            if dribble_chunks > 1:
+                size = max(1, len(request) // dribble_chunks)
+                for i in range(0, len(request), size):
+                    tls.sendall(request[i : i + size])
+                    time.sleep(dribble_interval)
+            else:
+                tls.sendall(request)
+            resp = b""
+            while True:
+                try:
+                    part = tls.recv(65536)
+                except TimeoutError:
+                    break
+                if not part:
+                    break
+                resp += part
+    elapsed = time.monotonic() - start
+    status = int(resp.split(b" ", 2)[1]) if resp.startswith(b"HTTP/") else -1
+    return status, resp, elapsed
+
+
+def _post(content_length: str, body: bytes = b"") -> bytes:
+    return f"POST /execute HTTP/1.0\r\nContent-Length: {content_length}\r\n\r\n".encode() + body
+
+
+class TestRelayBodyCapAndTimeout:
+    """Cap + inactivity-timeout truth table. Boundary contract: CL == cap is
+    ACCEPTED (rejection is strictly `>`); every reject is bounded and happens
+    BEFORE any body read/allocation; the timeout is per-recv inactivity, so a
+    slow-but-steady stream of any duration still succeeds."""
+
+    def test_timeout_contract_constant(self):
+        assert ExecuteHandler.timeout == RELAY_READ_TIMEOUT_SECONDS == 30.0
+
+    def test_cl_at_cap_accepted(self, started):
+        """Boundary (inclusive): a valid JSON body of EXACTLY the cap → 200."""
+        listener, pk, _fake, sessions = started
+        overhead = len(json.dumps({"session_id": "s1", "command": "", "secrets": []}).encode())
+        body = json.dumps(
+            {"session_id": "s1", "command": "A" * (MAX_RELAY_BODY_BYTES - overhead), "secrets": []}
+        ).encode()
+        assert len(body) == MAX_RELAY_BODY_BYTES
+        with _client(pk.ca_a, pk.c_ok) as client:
+            resp = client.post(_url(listener), content=body, headers={"Content-Type": "application/json"})
+        assert resp.status_code == 200
+        assert sessions == ["s1"]
+
+    def test_cl_over_cap_rejected_413_before_read(self, started):
+        """cap+1 → 413 immediately, body never demanded, engine never invoked."""
+        listener, pk, fake, sessions = started
+        status, _resp, elapsed = _raw_exchange(listener, pk, _post(str(MAX_RELAY_BODY_BYTES + 1)))
+        assert status == 413
+        assert elapsed < 2.0  # did not wait for the (never sent) body
+        assert sessions == []
+        assert fake.command is None
+
+    def test_cl_absurd_rejected_413(self, started):
+        """10**30 → 413 fast; Python ints don't overflow, cap check precedes read."""
+        listener, pk, fake, sessions = started
+        status, _resp, elapsed = _raw_exchange(listener, pk, _post(str(10**30)))
+        assert status == 413
+        assert elapsed < 2.0
+        assert sessions == []
+        assert fake.command is None
+
+    def test_cl_negative_rejected_400_not_hang(self, started):
+        """Negative CL → 400. Regression pin: read(-5) meant read-until-EOF."""
+        listener, pk, _fake, _sessions = started
+        status, _resp, elapsed = _raw_exchange(listener, pk, _post("-5"))
+        assert status == 400
+        assert elapsed < 2.0
+
+    def test_cl_non_integer_rejected_400(self, started):
+        listener, pk, _fake, _sessions = started
+        status, _resp, _elapsed = _raw_exchange(listener, pk, _post("1e3"))
+        assert status == 400
+
+    def test_cl_missing_rejected_400(self, started):
+        """No Content-Length → zero-length read → malformed JSON → clean 400."""
+        listener, pk, _fake, _sessions = started
+        status, _resp, elapsed = _raw_exchange(listener, pk, b"POST /execute HTTP/1.0\r\n\r\n")
+        assert status == 400
+        assert elapsed < 2.0
+
+    def test_chunked_not_decoded_rejected_400(self, started):
+        """Documented fixed-length protocol: chunked framing is never parsed
+        (BaseHTTPRequestHandler has no chunked decoder) → 400, no hang."""
+        listener, pk, _fake, _sessions = started
+        req = (
+            b"POST /execute HTTP/1.0\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            b'1a\r\n{"session_id":"s","comma\r\n0\r\n\r\n'
+        )
+        status, _resp, elapsed = _raw_exchange(listener, pk, req)
+        assert status == 400
+        assert elapsed < 2.0
+
+    def test_mid_request_silence_closes_within_timeout(self, started, monkeypatch):
+        """Header + partial body then silence: the inactivity timeout frees the
+        handler (connection closed, no response) well inside the bound — not
+        held until SBX_TIMEOUT."""
+        listener, pk, _fake, _sessions = started
+        monkeypatch.setattr(ExecuteHandler, "timeout", 1.0)
+        status, resp, elapsed = _raw_exchange(listener, pk, _post("100", b'{"session_id"'), client_timeout=5.0)
+        assert status == -1 and resp == b""  # closed with no HTTP response
+        assert elapsed < 3.0
+
+    def test_dribble_slow_but_steady_succeeds(self, started, monkeypatch):
+        """Inverse pin: the clock is per-recv INACTIVITY, not total duration —
+        a request stretched past the timeout in small steady chunks succeeds."""
+        listener, pk, _fake, sessions = started
+        monkeypatch.setattr(ExecuteHandler, "timeout", 1.0)
+        body = json.dumps({"session_id": "s1", "command": "echo hi", "secrets": []}).encode()
+        req = _post(str(len(body)), body)
+        status, _resp, elapsed = _raw_exchange(
+            listener, pk, req, client_timeout=10.0, dribble_chunks=8, dribble_interval=0.4
+        )
+        assert status == 200
+        assert elapsed >= 2.0  # genuinely spanned more than the 1.0s timeout
+        assert sessions == ["s1"]
+
+    def test_valid_request_still_200(self, started):
+        """Guardrail must not touch the legitimate path (acceptance #3)."""
+        listener, pk, _fake, sessions = started
+        with _client(pk.ca_a, pk.c_ok) as client:
+            resp = client.post(_url(listener), json={"session_id": "s1", "command": "true", "secrets": []})
+        assert resp.status_code == 200
+        assert sessions == ["s1"]
