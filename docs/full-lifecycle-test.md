@@ -97,9 +97,12 @@ non-interactive SSH does not load `~/bin` into `PATH`):
 
 **Suite health gate (before any VM work):** from `$VENYA_SRC`, all five package
 suites must be green — `cli`, `core`, `server`, `executor`, `mcp`
-(`uv run -p 3.14 --directory packages/<pkg> pytest tests/`). Reference counts
-as of 2026-09-17: cli 291 / core 90+7skip / server 724 / executor 581 / mcp 36.
-Unexplained deltas must be investigated before provisioning.
+(`uv run -p 3.14 --directory packages/<pkg> pytest tests/`). Record the counts
+in the run's results file; an unexplained delta versus the previous recorded
+run — **including any shrinkage** — is a stop-condition to investigate before
+provisioning. (Absolute reference counts deliberately do not live in this
+plan: they rot with every merge and nothing enforces their sync; the
+results-file lineage carries them.)
 
 ---
 
@@ -132,9 +135,13 @@ Unexplained deltas must be investigated before provisioning.
   `store` fails loudly with a hint — pass `--key-version v1` explicitly there.
   Labels are stored without validation and decryption never consults
   `key_versions`, so `v1` is safe.
-- **No upsert.** `venya store` on an existing key creates a **second row**
-  (there is no `--force`; the flag was removed as a no-op). Delete the old
-  secret first when replacing one.
+- **Upsert on visible keys.** `venya store` on an existing key you can see
+  (one of your roles in its scope OR you created it) **replaces that row in
+  place** — id stable, `created_by` immutable, response `"replaced": true`,
+  CLI prints "replaced existing". A key that exists but is scoped out for
+  you inserts a **second row** (identical 201 shape — no existence leak, no
+  cross-role clobber). There is no `--force`; the flag was removed as a
+  no-op before upsert became real.
 - **Static files serve from site-packages, not the source tree.** Any
   HTML/CSS/JS edit must be copied into
   `/opt/venya/.venv/lib/python3.14/site-packages/server/static/` on the core VM.
@@ -219,22 +226,22 @@ each component. Installer URLs below assume the default serve port 8080 on
 
 ### B.1 Build tarballs + start the installer server (on `$BUILD_HOST`)
 
-**Build hygiene first** — purge test artifacts the exclusion lists miss, or the
-hashes are not reproducible across builds of identical git state (observed
-live: `.pytest_cache` inside `packages/cli`/`packages/mcp` rode into the CLI
-tarball; removing caches also reorders directory traversal and shifts *all*
-tarball bytes):
+Build from the committed ref — never the working tree:
 
 ```bash
-rm -rf $VENYA_SRC/packages/*/.pytest_cache
-create-tarball-and-serve.sh
+create-tarball-and-serve.sh --ref <tag-or-commit>
 ```
 
-Prints SHA-256 hashes and writes `<tarball>.sha256` sidecars. Capture:
-`CORE_SHA`, `EXEC_SHA`, `CLI_SHA`. To stop the server later:
-`pkill -f 'python3 -m http.server 8080'`. (Working-tree tarballs remain
-mtime/order-sensitive by construction — only a `git archive`-based build is
-byte-stable; that script fix is an open ruling.)
+Every served byte comes from the git ref (tarballs via
+`git archive --prefix=./ | gzip -n`; scripts/common/README via `git show`):
+the working tree is never consulted, and the output is byte-reproducible from
+any clone of the ref. The script runs a **fail-closed pre-publish extraction
+check** (extract with the installer's exact `--strip-components=1` flags and
+assert the requirements + packages layout) — the build aborts unless it
+prints its PASS line; **never publish a build without seeing it**. It prints
+SHA-256 hashes and writes `<tarball>.sha256` sidecars. Capture: `CORE_SHA`,
+`EXEC_SHA`, `CLI_SHA`. To stop the server later: kill it **by PID** (a blind
+`pkill -f` has self-matched and killed the operator's own shell — twice).
 
 Installer env vars (all three installers): `VENYA_TARBALL_SHA256` is
 **mandatory** — the installer hard-fails without it. `VENYA_SKIP_PROMPT=yes`
@@ -691,12 +698,16 @@ failure was logged (login still succeeded by design) — record it.
      ssh bot@$CORE_HOST "printf 'VENYA_FIDO2__ENROLLMENT_TOKEN_TTL=240\nVENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS=14400\n' | sudo tee -a /opt/venya/.env && sudo systemctl restart venya-core"
      ```
 
-     > **Known gap (observed live 2026-09-17):** `VENYA_FIDO2__ENROLLMENT_TOKEN_TTL`
-     > is dead config — the user-enrollment TTL is hardcoded 900 s server-side
-     > (DB-verified with the knob set to 240 min; fix pending). The line is
-     > kept above so the accommodation takes effect automatically once wired.
-     > Until then the C.5 mint→enroll window stays **15 min** — treat it as a
-     > timed step.
+     > **Knob status:** `VENYA_FIDO2__ENROLLMENT_TOKEN_TTL` is wired on
+     > installs carrying the enrollment-manager fix (single construction
+     > point; reported lifetimes derive from the config). Installs predating
+     > it carry the dead knob (hardcoded 900 s) — treat the C.5 mint→enroll
+     > window as **15 min** there. **Verify the wiring physically; do not
+     > trust the unit suites** (unit-green-insufficient is on file three
+     > times): mint a create-user token, then
+     > `SELECT EXTRACT(EPOCH FROM (expires_at - created_at))::int FROM enrollment_tokens ORDER BY created_at DESC LIMIT 1;`
+     > must read **14400** with the knob at 240. A 900 on a post-fix install
+     > means the wiring claim is fiction — **stop and report**.
 
   **Verify pickup** before burning FIDO2 ceremonies: mint a throwaway executor
   token and check the DB — `SELECT EXTRACT(EPOCH FROM (expires_at -
@@ -829,7 +840,7 @@ for the user session — criterion #5's self-filter.)*
 | 1 | MCP server starts | `venya-mcp` launches, reads config | no crash; tools listed |
 | 2 | list_secrets | `list_secrets` | returns `$SECRET_KEY` + metadata, **no value** |
 | 3 | list_executors | `list_executors` | `$EXEC_ID` **ONLINE** |
-| 4 | **run_command uses a secret** | `run_command(executor_id=$EXEC_ID, command=<D.6>, secret_keys=[$SECRET_KEY])` | exit 0, command consumed the secret, **`masked_count ≥ 1`** (value redacted) |
+| 4 | **run_command uses a secret** | `run_command(executor_id=$EXEC_ID, command=<D.6>, secret_keys=[$SECRET_KEY])` | exit 0; command read the injected secret file; **raw value ABSENT from all returned output**. Minimal echo shape: `probe=[REDACTED:<pk>]` + `masked_count ≥ 1`. Canonical ssh shape: `masked_count 0` expected (the value never traverses stdout) — proof = remote-identity output (hostname/whoami) + zero raw-value hits across payloads, journals, executor spool, and transcript |
 | 5 | get_audit *(full matrix)* | admin makes ≥1 call; user calls `get_audit` | user sees own event (positive); admin event **absent** (negative = security claim) |
 | 6 | Token refresh | 401 → refresh → retry | retry succeeds **or** documented known-limitation behavior (refresh path dead — see D.1) |
 | 7 | Session expired | let the TTL lapse | actionable error message (not a crash) |
@@ -877,7 +888,7 @@ injected secret file**, uses it, and the returned output has the value
 | `ClientError code=3 CONFIGURATION_UNSUPPORTED` on init/enroll/login | key has no PIN (UV impossible) | set the PIN (C.2), re-run; 409 afterwards → `--installation-reset` |
 | CLI shows raw `409 Conflict`, no hint | CLI hides the server `detail` (known limitation) | confirm state via `journalctl -u venya-core` or the `users` table |
 | `admin …` 403 | admin mTLS client cert stale/missing | re-sync C.1; do not sudo-curl around it |
-| `venya store` fails: "No active key version configured" | fresh install, no active key version (503) | pass `--key-version v1` |
+| `venya store` fails: "No active key version configured" | pre-027 install with no active key version (503) — post-027 fresh installs seed `v1`; if seen there, check `alembic_version` | pass `--key-version v1` (pre-027 installs only) |
 | `venya store` 422 `key_version_id Field required` | running a pre-fix CLI | update the workstation venv/install (B.3) |
 | Executor offline after install | token single-use/expired, or mTLS | re-mint (C.4), reinstall executor |
 | Every sandbox create 503 | `venya-sandboxd` down / `sbx policy init deny-all` missing / Docker login skipped | check service + policy + `sbx login` on the executor |
@@ -977,7 +988,7 @@ Create per run: `testing/results-YYYY-MM-DD-HH-MM.md`
 | Step | Result |
 |------|--------|
 | D.1 TTL accommodation + prerequisites | |
-| D.2 secret stored (`--key-version v1`) | |
+| D.2 secret stored (flag-free — 027 seed) | |
 | D.3 SECRET_PK discovered | |
 | D.5 #1 server starts | |
 | D.5 #2 list_secrets (metadata, no value) | |
@@ -1023,4 +1034,4 @@ Never paste full tokens, PINs, passwords, or recovery codes.
    and `store` fails loudly with a `--key-version v1` hint.
 4. **The session refresh path cannot revive an expired token** — long runs need
    the D.1 timeout accommodation.
-5. **No secret upsert** — re-storing a key creates a second row.
+5. **Secret upsert is visibility-scoped** — re-storing a key replaces it iff you can see it (role in scope or creator); scoped-out callers create a second row.

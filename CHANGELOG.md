@@ -4,6 +4,77 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] - 2026-09-18
+
+### Security
+
+- Break-glass recovery codes are now truly single-use. `POST /api/v1/recovery`
+  always CLAIMED (docstring) to burn the one-shot code but never did: the same
+  recovery code could mint new admins repeatedly, forever. The stored hash is
+  now nulled in the same transaction that mints the recovered admin; reuse
+  answers the same 401 as an invalid code and mints nothing. Failed recoveries
+  (existing user id → 400, missing admin role → 503) deliberately do NOT
+  consume the code — the operator needs it for the retry. Re-issuance of a
+  fresh code for the recovered system remains separate scope.
+
+### Fixed
+
+- Key rotation is no longer administratively broken. `POST
+  /admin/key-versions/rotate` previously created an inactive key version plus
+  a pending rotation job that nothing ever completed — and deactivated the
+  old version — leaving the installation with NO active key version
+  (`GET /key-versions/active` 503, secret storage without an explicit
+  `--key-version` dead). Rotation is now a synchronous label-boundary
+  operation under single-KEK alpha semantics: the new version is active when
+  the request returns and the rotation job is terminal with truthful
+  counters. No secrets are re-wrapped (there is no per-version key material;
+  decryption never consults key versions) — existing secrets keep their
+  label and remain decryptable; new secrets receive the new label
+  automatically. Rollback (both routes) now performs a real flip-back of the
+  active version instead of only marking the job row.
+- `venya store` now actually reads the secret value from stdin, as its help
+  text always claimed: pass `-` as the value positional (or omit it when
+  stdin is piped), or omit it at an interactive TTY for a hidden `getpass`
+  prompt. Trailing newline stripped from piped input (`echo` convention).
+  Empty input fails with an actionable error (exit 1, nothing sent). The
+  argv positional still works and takes precedence; the stdin/prompt paths
+  keep values out of `/proc/*/cmdline` and shell history — the same
+  stdin-carriage discipline the installers use for passwords.
+- Executor sandbox path no longer silently drops `env_override` and `cwd`:
+  both now thread through to `sbx exec` as `-e KEY=VALUE` / `-w DIR` argv
+  tokens (docker-exec semantics — values are data, never shell-parsed; `-w`
+  overrides the workspace-mount default per command without conflicting with
+  the mount; physically probed on the deployed sbx). Previously
+  `Executor.execute()` accepted both parameters and returned success while
+  honoring them only on the unused direct path. No wire surface
+  (relay/API/CLI/MCP) sends either today, so no observable caller behavior
+  changes — the internal contract simply stops lying.
+
+### Changed
+
+- `POST /admin/key-versions/rotate` (and its alias `POST
+  /admin/key-rotation`) now answer **200** with `status: "completed"` and a
+  `note` field ("no re-wrap: single-KEK alpha semantics") instead of **202**
+  with `status: "pending"` — the operation is synchronous. The request
+  body's `new_key` field (advertised per-version key material that never
+  existed) is removed; the body is now empty. No production caller existed.
+  Rollback answers 409 (was: silently "succeeded") for jobs that are not the
+  most recent completed rotation, and `restored_secrets_count` is 0 by
+  construction.
+- Database: migration 028 adds a partial unique index enforcing at most one
+  ACTIVE key version at the database level — concurrent rotations can no
+  longer both commit (the loser gets a 409). Includes a defensive pre-clean
+  keeping the newest of any legacy extra-active rows.
+- `venya store` / `POST /api/v1/secrets` are now an UPSERT on keys the caller
+  can see (one of the caller's roles in scope, or caller is the creator —
+  the same visibility rule as get/inject/list): the existing row is replaced
+  in place (stable id, immutable `created_by`; value, key version, metadata
+  and role scope overwritten), the response gains `"replaced": true`, and
+  the CLI prints "replaced existing". Re-storing a key that exists but is
+  scoped out for the caller still inserts a second row with an identical
+  response shape — no existence leak, no cross-role clobber. Previously
+  every re-store created a duplicate row.
+
 ## [0.1.0-alpha.7] - 2026-09-17
 
 ### Fixed

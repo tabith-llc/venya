@@ -418,11 +418,28 @@ class SbxStrategy(InjectionStrategy):
                 )
             logger.debug("Allowed network %s for sandbox %s", host, sandbox_name)
 
-    def execute_command(self, command: str) -> subprocess.CompletedProcess:
+    def execute_command(
+        self,
+        command: str,
+        env_override: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> subprocess.CompletedProcess:
         """Execute a command inside the sandbox.
+
+        env_override and cwd ride as `sbx exec -e K=V / -w DIR` argv tokens
+        (docker-exec semantics). Physically probed on the deployed sbx
+        (2026-09-18, exec-1): values stay DATA — a metachar-laden env value
+        is never parsed by a shell; `-w` overrides the workspace-mount
+        default pwd per command without conflicting with the mount
+        (workspace is mounted at its host path inside the sandbox).
+        Ticket executor-env-override-cwd-sbx-noop: these parameters were
+        previously accepted by Executor.execute() and silently dropped on
+        this path.
 
         Args:
             command: The command to execute inside the sandbox.
+            env_override: Environment variables to set (one -e per K=V).
+            cwd: Per-command working directory inside the sandbox (-w).
 
         Returns:
             CompletedProcess with stdout, stderr, and returncode.
@@ -430,8 +447,15 @@ class SbxStrategy(InjectionStrategy):
         if not self._sandbox_name:
             raise RuntimeError("Sandbox not created yet")
 
+        cmd = ["sbx", "exec"]
+        for name, value in (env_override or {}).items():
+            cmd += ["-e", f"{name}={value}"]
+        if cwd:
+            cmd += ["-w", cwd]
+        cmd += [self._sandbox_name, "sh", "-c", command]
+
         result = subprocess.run(  # nosec
-            ["sbx", "exec", self._sandbox_name, "sh", "-c", command],
+            cmd,
             capture_output=True,
             timeout=SBX_TIMEOUT,
             check=False,
