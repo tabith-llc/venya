@@ -41,9 +41,26 @@ class TestDefaultConfigDir:
             d = default_config_dir()
         assert d == Path.home() / ".config" / "venya"
 
+    def test_win32_uses_appdata(self):
+        """Windows: %APPDATA%/venya."""
+        roaming = r"C:\Users\test\AppData\Roaming"
+        with patch("venya_cli.api_client.sys.platform", "win32"), patch.dict(
+            "venya_cli.api_client.os.environ", {"APPDATA": roaming}
+        ):
+            d = default_config_dir()
+        assert d == Path(roaming) / "venya"
+
+    def test_win32_empty_appdata_falls_back_to_profile(self):
+        """Windows with APPDATA unset/empty (service context) must not raise."""
+        with patch("venya_cli.api_client.sys.platform", "win32"), patch.dict(
+            "venya_cli.api_client.os.environ", {"APPDATA": ""}
+        ):
+            d = default_config_dir()
+        assert d == Path.home() / "AppData" / "Roaming" / "venya"
+
     def test_unknown_platform_uses_xdg_config(self):
         """Unrecognized platforms fall back to the POSIX convention."""
-        with patch("venya_cli.api_client.sys.platform", "win32"):
+        with patch("venya_cli.api_client.sys.platform", "plan9"):
             d = default_config_dir()
         assert d == Path.home() / ".config" / "venya"
 

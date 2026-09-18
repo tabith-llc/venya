@@ -32,10 +32,14 @@ def default_config_dir() -> Path:
     """Platform-appropriate config directory.
 
     macOS convention: ~/Library/Application Support/venya.
+    Windows convention: %APPDATA%/venya.
     POSIX (Linux, etc.): ~/.config/venya.
     """
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "venya"
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        return Path(appdata or Path.home() / "AppData" / "Roaming") / "venya"
     return Path.home() / ".config" / "venya"
 
 
