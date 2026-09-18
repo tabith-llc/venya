@@ -500,3 +500,66 @@ class TestSbxStrategyStoreHttpSecret:
             mock_run.return_value = MagicMock(returncode=1, stderr="auth failed")
             with pytest.raises(RuntimeError, match="Failed to store HTTP secret"):
                 strategy.store_http_secret("openai", "sk-test123")
+
+
+class TestSbxStrategyExecuteEnvCwd:
+    """env_override/cwd thread-through (ticket executor-env-override-cwd-sbx-noop).
+
+    Physically probed on the deployed sbx (exec-1, 2026-09-18): -e/-w are
+    docker-exec semantics; env values stay data (metachar-laden value never
+    shell-parsed, no /tmp/pwned); -w overrides the workspace-mount default
+    pwd per command without conflicting with the mount. These tests pin the
+    argv contract the probe verified live.
+    """
+
+    def _strategy(self):
+        strategy = SbxStrategy()
+        strategy._sandbox_name = "venya-test123"
+        return strategy
+
+    def _run(self, strategy, **kwargs):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+            strategy.execute_command("cmd", **kwargs)
+            return mock_run.call_args[0][0]
+
+    def test_env_only_argv(self):
+        argv = self._run(self._strategy(), env_override={"A": "1"})
+        assert argv == ["sbx", "exec", "-e", "A=1", "venya-test123", "sh", "-c", "cmd"]
+
+    def test_cwd_only_argv(self):
+        argv = self._run(self._strategy(), cwd="/work")
+        assert argv == ["sbx", "exec", "-w", "/work", "venya-test123", "sh", "-c", "cmd"]
+
+    def test_env_and_cwd_combined_argv(self):
+        argv = self._run(self._strategy(), env_override={"A": "1", "B": "2"}, cwd="/work")
+        assert argv == [
+            "sbx",
+            "exec",
+            "-e",
+            "A=1",
+            "-e",
+            "B=2",
+            "-w",
+            "/work",
+            "venya-test123",
+            "sh",
+            "-c",
+            "cmd",
+        ]
+
+    def test_neither_backward_compatible_argv(self):
+        """Legacy contract unchanged when neither parameter is supplied."""
+        argv = self._run(self._strategy())
+        assert argv == ["sbx", "exec", "venya-test123", "sh", "-c", "cmd"]
+        argv2 = self._run(self._strategy(), env_override={}, cwd=None)
+        assert argv2 == argv
+
+    def test_metachar_env_value_stays_single_token(self):
+        """Injection safety: the value is ONE argv token — data, not command
+        text (matches the physical probe: printenv echoes it literally and
+        the embedded `touch` never runs)."""
+        argv = self._run(self._strategy(), env_override={"TRICKY": "v; touch /tmp/pwned"})
+        assert "TRICKY=v; touch /tmp/pwned" in argv
+        token = argv[argv.index("-e") + 1]
+        assert token == "TRICKY=v; touch /tmp/pwned"
