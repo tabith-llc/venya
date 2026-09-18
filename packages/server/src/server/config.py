@@ -8,7 +8,6 @@
 
 import logging
 import os
-from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -360,27 +359,3 @@ class ServerConfig(BaseSettings):
     recovery_code_pepper: str = Field(
         description="Server-side secret for recovery code hashing. REQUIRED — deployment fails if empty.",
     )
-
-    @classmethod
-    def from_file(cls, path: str | Path) -> ServerConfig:
-        """Load configuration from a TOML file.
-
-        Args:
-            path: Path to config file.
-
-        Returns:
-            Configured ServerConfig.
-        """
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"Config file not found: {path}")
-
-        try:
-            import tomllib
-        except ImportError:
-            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
-
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-
-        return cls(**data)
