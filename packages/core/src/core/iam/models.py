@@ -23,11 +23,13 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, relationship, validates
@@ -244,9 +246,28 @@ class ExecutorEnrollmentToken(Base):
 
 
 class KeyVersion(Base):
-    """Key rotation versions."""
+    """Key rotation versions.
+
+    Bookkeeping labels under single-KEK alpha semantics: no per-version key
+    material exists (the KEK derives from the install passphrase) and secret
+    decryption never consults this table. Rotation is a synchronous label
+    boundary (ticket key-rotation-worker-missing, option-2 ruling).
+    """
 
     __tablename__ = "key_versions"
+    # At most ONE row may be active — enforced by the database, not app code:
+    # partial unique index over (active) WHERE active — every indexed row
+    # carries the same value, so a second active row violates uniqueness.
+    # Concurrent rotations cannot both commit (migration 028; PG + SQLite).
+    __table_args__ = (
+        Index(
+            "uq_key_versions_single_active",
+            "active",
+            unique=True,
+            postgresql_where=text("active"),
+            sqlite_where=text("active"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True)
     version_label = Column(String(64), unique=True, nullable=False)
