@@ -30,6 +30,28 @@ logger = logging.getLogger("venya.executor.relay")
 
 RELAY_PORT = 8443
 
+# Request-body cap. Derivation (ticket relay-listener-body-cap-and-timeout):
+# the wire protocol has NO hard maximum — core bounds its own ingress with
+# max_request_body_bytes (default 1 MiB, operator-raisable to 100 MB) and a
+# session's secret_keys list is unbounded (each wrapped_value ≈ value×4/3).
+# 16 MiB covers a default-cap command plus ~11 max-size wrapped secrets with
+# margin; it bounds a misbehaving authenticated peer's nominal allocation
+# (multi-GB Content-Length) without tightening the legitimate contract. If an
+# operator raises core's max_request_body_bytes past ~12 MiB, this constant
+# needs a matching knob (refactor-1 config-consolidation territory).
+MAX_RELAY_BODY_BYTES = 16 * 1024 * 1024
+
+# Per-socket-operation INACTIVITY timeout (not a total-duration ceiling):
+# socketserver applies it via connection.settimeout, so a slow-but-steady
+# transfer of any size never trips it, while a silent peer releases the single
+# handler thread well below SBX_TIMEOUT (1h) and inside one heartbeat interval.
+# HTTP/1.0 (BaseHTTPRequestHandler default) closes the connection after every
+# response, so no keep-alive idle clock exists. Residual: a byte-trickle peer
+# can still hold the handler — bounded in practice by core's own httpx2 client
+# timeout (300s), after which the socket EOFs. Threat model is a misbehaving
+# AUTHENTICATED peer (mTLS + CN allowlist), not an adversarial one.
+RELAY_READ_TIMEOUT_SECONDS = 30.0
+
 
 class ExecuteHandler(BaseHTTPRequestHandler):
     """Handle ``POST /execute`` with mTLS mutual authentication.
@@ -37,7 +59,17 @@ class ExecuteHandler(BaseHTTPRequestHandler):
     Identity (B0.3) is the *parsed* CN of the peer certificate, compared by
     exact match — case- and whitespace-sensitive, no normalization. A CN bound
     for ``TLS`` peer verification; the same CN is what the operator allowlists.
+
+    Bodies are fixed-length only: ``BaseHTTPRequestHandler`` never decodes
+    ``Transfer-Encoding: chunked``, and a chunked request (no Content-Length)
+    reads zero bytes and is rejected 400 as malformed — a documented protocol
+    assumption, matching the core client (``httpx2.post(json=...)`` always
+    sends Content-Length).
     """
+
+    # Inactivity ceiling for every blocking socket op on this connection
+    # (header read, body read, response write); see RELAY_READ_TIMEOUT_SECONDS.
+    timeout = RELAY_READ_TIMEOUT_SECONDS
 
     # Silence default per-request stderr logging.
     def log_message(self, *args: Any) -> None:
@@ -56,10 +88,30 @@ class ExecuteHandler(BaseHTTPRequestHandler):
             self._reply(403, {"detail": "unknown client identity"})
             return
 
+        # Body-size guard BEFORE any read/allocation: reject absurd or
+        # negative Content-Length without touching the socket payload.
+        # (Negative would otherwise mean read-until-EOF — an unbounded hang.)
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError as exc:
+            self._reply(400, {"detail": f"malformed Content-Length: {exc}"})
+            return
+        if length < 0:
+            self._reply(400, {"detail": "invalid Content-Length"})
+            return
+        if length > MAX_RELAY_BODY_BYTES:
+            logger.warning(
+                "Relay /execute rejected: Content-Length %d exceeds cap %d (peer CN %r)",
+                length,
+                MAX_RELAY_BODY_BYTES,
+                peer_cn,
+            )
+            self._reply(413, {"detail": "request body exceeds relay cap"})
+            return
+
         # Parse + normalize the payload. ``wrapped_value`` arrives as a JSON
         # string; the executor engine's ``strip_sentinel()`` requires bytes.
         try:
-            length = int(self.headers.get("Content-Length", 0) or 0)
             body = json.loads(self.rfile.read(length).decode("utf-8"))
             session_id = body["session_id"]
             command = body["command"]
@@ -125,6 +177,15 @@ class RelayListener:
     Single-threaded ``HTTPServer`` => one command at a time (sequential
     execution, per the plan). The listener runs in its own daemon thread so it
     never contends with the reaper, heartbeat, or revocation loops.
+
+    DOCUMENTED TRADEOFF (ticket relay-listener-body-cap-and-timeout, part 2 —
+    deliberate, not an omission): sequential execution keeps per-command
+    secrets, filter state, and bundles isolated from interleaving. Consequence,
+    accepted: a legitimately slow command (up to SBX_TIMEOUT) delays every
+    other authorized peer's request behind it — one busy slot starves the
+    daemon's responsiveness. The body cap + inactivity timeout bound the
+    *allocation* and *silence* failure modes, not execution parallelism. Do
+    not "fix" the queueing without re-weighing the isolation argument.
     """
 
     def __init__(
