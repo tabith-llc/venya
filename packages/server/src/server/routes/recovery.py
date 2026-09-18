@@ -121,6 +121,15 @@ async def recovery(
         )
         db.add(membership)
 
+        # Burn the one-shot code: null the hash in the SAME commit that mints
+        # the new admin, so a reuse attempt fails the hash-match query above
+        # with 401. Deliberately placed after the user-exists (400) and
+        # missing-role (503) guards: a FAILED recovery must not consume the
+        # code — the operator needs it for the retry. Re-issuance of a fresh
+        # code for the recovered system is separate scope (see ticket
+        # test-recovery-admin-enrollment-key cross-reference).
+        admin_user.recovery_code_hash = None
+
         db.commit()
 
         logger.info(
