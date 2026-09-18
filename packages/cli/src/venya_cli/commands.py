@@ -6,6 +6,7 @@
 
 """Command implementations for the CLI."""
 
+import getpass
 import hashlib
 import json
 import os
@@ -189,11 +190,28 @@ def cmd_init(client: APIClient, args: Any) -> int:
 
 
 def cmd_store(client: APIClient, args: Any) -> int:
-    """Store a secret."""
+    """Store a secret.
+
+    Value input, in precedence order: explicit positional argument; stdin
+    (positional ``-``, or omitted value with piped stdin); hidden TTY prompt
+    (omitted value with interactive stdin). The stdin/prompt paths keep the
+    value out of argv — /proc/*/cmdline and shell history are not secret
+    stores (ticket cli-store-stdin-help-false; same stdin-carriage discipline
+    the installers use for passwords). Trailing newline stripped from piped
+    input (``echo`` convention).
+    """
     value = args.value
-    if value is None:
-        print("Error: secret value required (provide as argument or stdin)", file=sys.stderr)
-        return 1
+    if value is None or value == "-":
+        if value == "-" or not sys.stdin.isatty():
+            value = sys.stdin.read().rstrip("\r\n")
+        else:
+            value = getpass.getpass("Secret value (input hidden): ")
+        if not value:
+            print(
+                "Error: secret value required (provide as argument, pipe via stdin, or pass '-' to read stdin)",
+                file=sys.stderr,
+            )
+            return 1
 
     # Resolve key_version_id: explicit --key-version wins, otherwise the
     # server's active key version (POST /secrets requires the field).
@@ -226,11 +244,14 @@ def cmd_store(client: APIClient, args: Any) -> int:
                 meta_dict[k] = v
             payload["metadata"] = meta_dict
 
-        client.post(
+        resp = client.post(
             "/api/v1/secrets",
             json=payload,
         )
-        print(f"Secret '{args.key}' stored successfully.")
+        if isinstance(resp, dict) and resp.get("replaced"):
+            print(f"Secret '{args.key}' replaced existing (id {resp.get('id')}).")
+        else:
+            print(f"Secret '{args.key}' stored successfully.")
         return 0
     except APIClientError as e:
         print(f"Failed to store secret: {e}", file=sys.stderr)

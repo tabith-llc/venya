@@ -439,8 +439,14 @@ class Executor:
         Args:
             command: The command to execute inside the sandbox.
             injections: Secret bundles (for filtering reference).
-            env_override: Environment variables to set.
-            cwd: Working directory (sandbox uses its workspace).
+            env_override: Environment variables to set — injected per command
+                via `sbx exec -e K=V` argv tokens (values are data, never
+                shell-parsed). Previously dropped on this path (ticket
+                executor-env-override-cwd-sbx-noop).
+            cwd: Working directory — used twice, coherently: as the sandbox
+                workspace mount at create time AND as the per-command
+                working directory (`sbx exec -w`). None keeps the strategy's
+                per-run workspace default for both.
 
         Returns:
             CommandResult with filtered output.
@@ -469,7 +475,7 @@ class Executor:
         try:
             # Execute command inside sandbox
             logger.info("Executing in sandbox: %s", command)
-            result = strategy.execute_command(command)
+            result = strategy.execute_command(command, env_override=env_override, cwd=cwd)
 
             stdout = result.stdout[:MAX_OUTPUT_BYTES]
             stderr = result.stderr[:MAX_OUTPUT_BYTES]
