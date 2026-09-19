@@ -368,10 +368,55 @@ class TestCredentialAdd:
         client.close()
         config_file.unlink()
 
+    # ---------------------------------------------------------------------------
+    # cmd_credential_remove tests
+    # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# cmd_credential_remove tests
-# ---------------------------------------------------------------------------
+    def test_add_credential_routes_through_fido2auth_with_server_url(self):
+        """Regression (option-B rewrite, found physically on win11): the inline
+        ceremony hardcoded DefaultClientDataCollector("https://localhost"), so
+        rp_id verification failed -> ClientError.BAD_REQUEST(cause=None) on any
+        real deployment, every platform. cmd_credential_add must route through
+        Fido2Auth bound to the CONFIGURED server URL, like cmd_enroll."""
+        client, config_file = _make_client()
+        client.config.server_url = "https://venya-core-1"
+        mock_http = MagicMock()
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"id": "venya-core-1", "name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        complete_resp = _make_mock_response(
+            status_code=200, json_data={"id": "cred_new_789", "label": "YubiKey 2", "status": "ok"}
+        )
+        mock_http.request.side_effect = [start_resp, complete_resp]
+        client._http = mock_http
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            with patch("venya_cli.fido2_client.Fido2Auth") as mock_auth_cls:
+                mock_auth = MagicMock()
+                mock_auth_cls.return_value = mock_auth
+                mock_auth._get_credential.return_value = MagicMock()
+                mock_auth._format_credential_response.return_value = {"id": "x"}
+                args = MagicMock()
+                args.label = "YubiKey 2"
+                args.json = False
+
+                result = cmd_credential_add(client, args)
+
+        assert result == 0
+        mock_auth_cls.assert_called_once_with("https://venya-core-1")
+        mock_auth._build_registration_options.assert_called_once()
+        client.close()
+        config_file.unlink()
 
 
 class TestCredentialRemove:
