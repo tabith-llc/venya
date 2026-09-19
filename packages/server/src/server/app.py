@@ -36,6 +36,39 @@ def _admin_ca_security(config: ServerConfig) -> CASecurityConfig:
     return CASecurityConfig(key_passphrase_env=config.admin_mtls.ca_key_passphrase_env)
 
 
+def _validate_relay_mtls_config(config: ServerConfig) -> None:
+    """Fail startup when the relay-client mTLS material is unset or missing.
+
+    Without VENYA_MTLS_CERT/VENYA_MTLS_KEY the core cannot present a client
+    certificate to executors: every run_command dies at REQUEST time with a
+    misleading "mTLS verification failed" 503 that points at the executor's
+    trust store while the actual gap is this core's own config. Refuse to boot
+    instead — same fail-fast pattern as the executor deaf-boot refusal and the
+    admin-CA check in lifespan (ticket refactor-1-config-consolidation
+    residual, option (a) ruling 2026-09-18). Unconditional — no debug
+    exemption: the relay is core function, and config-dependent exemptions
+    are exactly what the structural-gate ordering rationale rejects.
+
+    Raises:
+        RuntimeError: naming the unset field or the missing file path.
+    """
+    from pathlib import Path
+
+    for field_name, env_name in (("mtls_cert", "VENYA_MTLS_CERT"), ("mtls_key", "VENYA_MTLS_KEY")):
+        path = getattr(config, field_name)
+        if not path:
+            raise RuntimeError(
+                f"{env_name} is not set — the relay client cannot present mTLS to executors, "
+                f"so every run_command would fail at request time. Set {env_name} to the relay "
+                f"client certificate/key path (the core installer mints the pair and writes both)."
+            )
+        if not Path(path).expanduser().exists():
+            raise RuntimeError(
+                f"{env_name} points to a missing file: {path} — the relay client cannot present "
+                f"mTLS to executors. Restore the file or fix {env_name}."
+            )
+
+
 def create_app(config: ServerConfig | None = None) -> FastAPI:
     """Create the FastAPI application.
 
@@ -166,6 +199,11 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             "CORS origins are still default (['http://localhost']) in non-debug mode. "
             "Update VENYA__CORS__ORIGINS to allow browser clients."
         )
+
+    # Relay-client mTLS material is functionally mandatory — validated BEFORE
+    # any DB/CA work so a misconfigured core never boots "healthy but unable
+    # to relay" (ticket refactor-1-config-consolidation residual, option (a)).
+    _validate_relay_mtls_config(config)
 
     # Startup: initialize DB, core, and CA (FIDO2 is already initialized)
     from .dependencies import init_db

@@ -4,6 +4,61 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.10] - 2026-09-19
+
+### Added
+
+- **Windows support for the venya CLI** (first release). Machine-wide
+  PowerShell installer `install-venya-cli.ps1` (admin-run once per machine —
+  Windows junction-trust semantics make per-user standard installs impossible;
+  standard users then USE the CLI with no admin rights) plus matching
+  uninstaller. Per-user config/token/state in `%APPDATA%\venya\`. FIDO2
+  ceremonies (`init`, `login`, `enroll`, `credential add`) route through the
+  Windows platform WebAuthn API, so **standard (non-admin) users** get
+  OS-drawn PIN/touch dialogs — raw CTAP/HID access has been admin-only since
+  Windows 10 1903. Interactive desktop sessions only (the platform API needs
+  a foreground window; SSH/WinRM cannot drive ceremonies). Authenticator
+  reset and PIN set/change remain with the vendor tool / customer IT.
+  Accepted physically on Windows 11 as a genuine standard user.
+- CLI error log: every stderr write is teed to `<config-dir>/venya.log`
+  (session headers, 1 MiB single-generation rotation); failed commands print
+  the log path.
+- Platform-aware ceremony guidance on Windows: which key to use at which
+  dialog (registered vs enrolling), insert-vs-touch wording, and the
+  dual-key `credential add` sequence.
+
+### Security
+
+- Server refuses to boot when relay mTLS material is unset or missing — named
+  RuntimeError before DB/CA initialization instead of failing later in
+  ambiguous ways; the executor daemon fails the same way at startup (exit 1,
+  named single-line error) while keeping its runtime cert-rotation tolerance.
+
+### Fixed
+
+- Windows config saves: `os.replace` ran inside the open temporary-file block,
+  and Windows cannot rename an open handle — every config write died
+  `PermissionError [WinError 32]`, first save included (the CLI was entirely
+  non-functional on Windows before this fix; POSIX unaffected).
+- `venya credential add` never worked on ANY platform: its duplicated inline
+  ceremony read `credential.auth_response` (absent from the `RegistrationResponse`
+  the pinned fido2 library returns — AttributeError after every successful
+  ceremony) and hardcoded an `https://localhost` collector origin (RP-ID
+  verification failure on every real deployment). The duplication is deleted;
+  the command now routes through the same proven machinery as `venya enroll`.
+- Elevation (`venya credential add/remove`, unmask, and every elevated
+  operation) sent no session bearer token — every elevation 401'd "Missing
+  authentication token" on every platform since inception.
+- `venya credential list` crashed on the server's integer credential ids
+  ("object of type 'int' has no len()") in table mode.
+- WebAuthn options normalizer: elevation challenges (browser-adapter shape)
+  carry the RP id inside an `rp` object rather than an `rpId` scalar; the
+  normalizer now derives it, fixing `rp_id=None` ceremonies (platform
+  NTE_INVALID_PARAMETER on Windows; RP-hash rejection elsewhere).
+- Windows platform errors now surface as readable messages (pinned texts for
+  observed HRESULTs such as duplicate-key registration; OS text + HRESULT
+  preserved for everything else) instead of raw `ClientError` tuples.
+
 ## [0.1.0-alpha.9] - 2026-09-18
 
 ### Security

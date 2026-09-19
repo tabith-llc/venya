@@ -759,10 +759,26 @@ class ExecutorDaemon:
         self.client: httpx2.Client | None = None
 
     def _create_mtls_client(self) -> httpx2.Client:
-        """Create HTTP client with mTLS after certificate registration."""
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.load_cert_chain(self.config.mtls.cert, self.config.mtls.key)
-        ssl_ctx.load_verify_locations(self.config.mtls.ca_cert)
+        """Create HTTP client with mTLS after certificate registration.
+
+        Missing/unusable material is a named single-line startup refusal, not
+        a raw traceback (ticket refactor-1-config-consolidation residual —
+        same fail-loud pattern as the deaf-boot guard).
+        """
+        try:
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.load_cert_chain(self.config.mtls.cert, self.config.mtls.key)
+            ssl_ctx.load_verify_locations(self.config.mtls.ca_cert)
+        except (OSError, ssl.SSLError) as exc:
+            logger.error(
+                "mTLS material unusable (cert=%s key=%s ca=%s): %s — "
+                "restore the files or re-run the executor installer",
+                self.config.mtls.cert,
+                self.config.mtls.key,
+                self.config.mtls.ca_cert,
+                exc,
+            )
+            raise RuntimeError(f"mTLS material unusable: {exc}") from exc
         return httpx2.Client(
             base_url=self.config.server_url,
             verify=ssl_ctx,
@@ -855,8 +871,17 @@ class ExecutorDaemon:
         if enrollment_token:
             self._clear_enrollment_token()
 
-        # Create mTLS client — takes over for all subsequent communication
-        self.client = self._create_mtls_client()
+        # Create mTLS client — takes over for all subsequent communication.
+        # Startup refusal: without a working control channel the daemon is
+        # useless (heartbeat/revocation/rotation all dead) — exit 1, systemd
+        # shows failed. The RUNTIME rotation path in _main_loop keeps its
+        # tolerant except-Exception behavior (RuntimeError is an Exception;
+        # SystemExit would bypass it and kill a running daemon on a
+        # transient rebuild failure).
+        try:
+            self.client = self._create_mtls_client()
+        except RuntimeError:
+            raise SystemExit(1) from None
         self.cert_manager.client = self.client
 
         # Configure reaper with mTLS client and session info
