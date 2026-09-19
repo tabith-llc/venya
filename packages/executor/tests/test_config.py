@@ -50,17 +50,29 @@ class TestMtlsConfig:
 class TestCertificateRotationConfig:
     """Tests for CertificateRotationConfig defaults."""
 
-    def test_default_rotation_days(self):
-        cfg = CertificateRotationConfig()
-        assert cfg.rotation_days == 30
-
     def test_default_rotate_before_days(self):
         cfg = CertificateRotationConfig()
         assert cfg.rotate_before_days == 3
 
-    def test_default_revocation_poll_seconds(self):
+    def test_dead_knobs_removed(self):
+        """Ticket executor-dead-rotation-config: fields nobody read must not
+        come back — validity is a server constant, poll cadence is the main loop."""
         cfg = CertificateRotationConfig()
-        assert cfg.revocation_poll_seconds == 60
+        assert not hasattr(cfg, "rotation_days")
+        assert not hasattr(cfg, "revocation_poll_seconds")
+
+    def test_legacy_toml_with_removed_keys_still_loads(self, tmp_path):
+        """Deployed executor.toml files may still carry the removed keys —
+        they must load (ignored), not fail (negative half of the removal)."""
+        from executor.config import ExecutorConfig
+
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text(
+            "[cert_rotation]\nrotation_days = 45\nrevocation_poll_seconds = 120\nrotate_before_days = 5\n"
+        )
+        cfg = ExecutorConfig.from_file(toml_path)
+        assert cfg.cert_rotation.rotate_before_days == 5
+        assert not hasattr(cfg.cert_rotation, "rotation_days")
 
 
 class TestSessionConfig:
@@ -296,7 +308,7 @@ class TestExecutorConfigFromEnv:
         monkeypatch.setenv("VENYA_EXECUTOR_SERVER_URL", "https://prod.example.com")
         monkeypatch.setenv("VENYA_EXECUTOR_EXECUTOR_ID", "jump-host-1")
         monkeypatch.setenv("VENYA_EXECUTOR_LOG_LEVEL", "debug")
-        monkeypatch.setenv("VENYA_EXECUTOR_CERT_ROTATION__ROTATION_DAYS", "60")
+        monkeypatch.setenv("VENYA_EXECUTOR_CERT_ROTATION__ROTATE_BEFORE_DAYS", "6")
         monkeypatch.setenv("VENYA_EXECUTOR_REAPER__CHECK_INTERVAL", "10.0")
 
     def test_env_overrides_defaults(self):
@@ -307,7 +319,7 @@ class TestExecutorConfigFromEnv:
 
     def test_nested_env_vars(self):
         cfg = ExecutorConfig()
-        assert cfg.cert_rotation.rotation_days == 60
+        assert cfg.cert_rotation.rotate_before_days == 6
         assert cfg.reaper.check_interval == 10.0
 
     def test_only_some_env_vars(self, monkeypatch):
@@ -347,7 +359,6 @@ executor_id = "executor-42"
 log_level = "warning"
 
 [cert_rotation]
-rotation_days = 14
 rotate_before_days = 5
 
 [reaper]
@@ -361,7 +372,6 @@ secret_ttl_seconds = 60
         assert cfg.server_url == "https://core.example.com"
         assert cfg.executor_id == "executor-42"
         assert cfg.log_level == "warning"
-        assert cfg.cert_rotation.rotation_days == 14
         assert cfg.cert_rotation.rotate_before_days == 5
         assert cfg.reaper.check_interval == 1.0
         assert cfg.reaper.secret_ttl_seconds == 60
@@ -381,7 +391,7 @@ secret_ttl_seconds = 60
             server_url="https://test.com",
             executor_id="my-exec",
             log_level="error",
-            cert_rotation=CertificateRotationConfig(rotation_days=45),
+            cert_rotation=CertificateRotationConfig(rotate_before_days=9),
             reaper=ReaperConfig(check_interval=2.5, secret_ttl_seconds=120),
         )
 
@@ -392,7 +402,7 @@ secret_ttl_seconds = 60
         assert reloaded.server_url == original.server_url
         assert reloaded.executor_id == original.executor_id
         assert reloaded.log_level == original.log_level
-        assert reloaded.cert_rotation.rotation_days == original.cert_rotation.rotation_days
+        assert reloaded.cert_rotation.rotate_before_days == original.cert_rotation.rotate_before_days
         assert reloaded.reaper.check_interval == original.reaper.check_interval
         assert reloaded.reaper.secret_ttl_seconds == original.reaper.secret_ttl_seconds
 
@@ -419,7 +429,7 @@ secret_ttl_seconds = 60
         ca_file = tmp_path / "audit-ca.crt"
         ca_file.write_text("dummy-ca")
         cfg = ExecutorConfig(
-            cert_rotation=CertificateRotationConfig(rotation_days=7, rotate_before_days=1),
+            cert_rotation=CertificateRotationConfig(rotate_before_days=1, max_revocation_failures=7),
             audit=AuditForwarderConfig(
                 remote_url="https://sink.example.com:6514",
                 ca_cert_path=str(ca_file),
@@ -429,7 +439,7 @@ secret_ttl_seconds = 60
         cfg.save_file(config_file)
 
         reloaded = ExecutorConfig.from_file(config_file)
-        assert reloaded.cert_rotation.rotation_days == 7
+        assert reloaded.cert_rotation.max_revocation_failures == 7
         assert reloaded.audit.remote_url == "https://sink.example.com:6514"
         assert reloaded.audit.max_buffer_size == 5000
 

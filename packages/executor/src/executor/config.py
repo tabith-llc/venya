@@ -25,19 +25,20 @@ class MtlsConfig(BaseModel):
 
 
 class CertificateRotationConfig(BaseModel):
-    """Certificate rotation configuration."""
+    """Certificate rotation configuration.
 
-    rotation_days: int = Field(
-        default=30,
-        description="Certificate validity period in days",
-    )
+    Deliberately has NO `rotation_days` / `revocation_poll_seconds` fields
+    (ticket executor-dead-rotation-config): cert validity is a SERVER-side
+    constant (EXECUTOR_VALIDITY_DAYS, server ca.py) and the revocation cadence
+    is the daemon main loop (~30s, daemon.py). Both existed here as dead
+    knobs — defined, never read — so tuning them silently did nothing.
+    Old executor.toml files carrying the removed keys still load (extra keys
+    are ignored); see test_config.py TOML-compat pin.
+    """
+
     rotate_before_days: int = Field(
         default=3,
         description="Request new certificate N days before expiry",
-    )
-    revocation_poll_seconds: int = Field(
-        default=60,
-        description="Poll revocation status every N seconds",
     )
     max_revocation_failures: int = Field(
         default=3,

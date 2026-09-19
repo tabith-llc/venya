@@ -103,8 +103,8 @@ registers at install time (`:416-474`). The SSH user on provisioned hosts is `bo
 - `venya admin revoke-executor <id>` adds the current cert SERIAL to the revocation
   list (`server/routes/admin.py:985-1030`).
 - Executors poll the public list every main-loop iteration (~30 s —
-  `daemon.py:948,977`; the `revocation_poll_seconds` config field is dead, ticket
-  `executor-dead-rotation-config`). Endpoint (no auth): 
+  `daemon.py:948,977`; the formerly-dead `revocation_poll_seconds` config field was
+  REMOVED 2026-09-19, ticket `executor-dead-rotation-config`). Endpoint (no auth): 
   `curl -sk https://<core-host>/api/v1/executors/certs/revocation-list`
 - On detection: the daemon logs, sets `revoked`, and performs an ORDERLY stop
   (`daemon.py:950-953,1004-1020`) — in-flight commands are NOT force-aborted and
@@ -247,6 +247,6 @@ preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scop
 - `cli-ca-dir-default-mismatch` — FIXED 2026-09-19 (default now `/var/lib/venya/ca`; pre-fix CLIs need explicit `--ca-dir`, §5)
 - `shamir-combine-no-threshold-verification` (M) — verify pairing after shares-restore (§5)
 - `export-ca-key-echoed-passphrase` — FIXED 2026-09-19 (all secret prompts now getpass; pre-fix CLIs echoed)
-- `executor-dead-rotation-config` (L) — `revocation_poll_seconds` / `rotation_days` are inert (§4)
+- `executor-dead-rotation-config` — FIXED 2026-09-19 (dead fields removed; legacy executor.toml keys still load, ignored)
 - `root-ca-key-plaintext-at-rest` — root CA key unencrypted at rest (§0)
 - `executor-ero-fs-crash-loop-on-empty-token` (H) — never deploy an executor without an install-time token (§3)
