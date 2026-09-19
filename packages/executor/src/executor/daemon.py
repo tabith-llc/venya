@@ -276,6 +276,22 @@ class CertificateManager:
         if not os.path.exists(self.cert_path):
             raise RuntimeError("Cannot rotate: no existing certificate (must register first)")
 
+        # Fail BEFORE any network call if the new cert could not be persisted:
+        # the register POST replaces the server-side cert record, so a doomed
+        # write (read-only mount, permissions) would burn server state and lose
+        # the freshly generated keypair every retry (ticket
+        # executor-cert-rotation-erofs — deployed units had
+        # ReadOnlyPaths=/etc/venya without the identity dir in ReadWritePaths).
+        cert_dir = os.path.dirname(os.path.abspath(self.cert_path))
+        if not os.access(cert_dir, os.W_OK):
+            raise RuntimeError(
+                f"Cannot rotate: certificate directory {cert_dir} is not writable "
+                "(read-only mount or permissions). Refusing before contacting the "
+                "server — an unpersistable rotation burns the server-side record "
+                "and loses the new keypair. Fix the unit's ReadWritePaths "
+                "(must include /etc/venya/executor) or the directory permissions."
+            )
+
         # Generate new keypair and CSR
         private_key = _generate_ecdsa_p256_keypair()
         executor_id = _extract_executor_id_from_cert(self.cert_path)
@@ -295,8 +311,6 @@ class CertificateManager:
 
         cert_pem = data["cert_pem"].encode()
         ca_cert_pem = data["ca_cert_pem"].encode()
-        self.serial = data["serial_number"]
-        self._not_after = datetime.fromisoformat(data["not_after"]).replace(tzinfo=UTC)
 
         # Validate certificate
         validate_executor_certificate(cert_pem, ca_cert_pem, executor_id)
@@ -315,6 +329,16 @@ class CertificateManager:
 
         # Update CA cert from server response
         Path(self.ca_cert_path).write_bytes(ca_cert_pem)
+
+        # In-memory identity adopts the new serial ONLY after every disk write
+        # succeeded — memory must never claim an identity disk doesn't hold
+        # (pre-fix, a failed write left serial=new while disk=old, making
+        # revocation matching restart-dependent). NOTE: this narrows but does
+        # not close the structural gap — a write failure after the POST still
+        # diverges the server record from disk; tracked separately (ticket
+        # executor-revocation-by-identity).
+        self.serial = data["serial_number"]
+        self._not_after = datetime.fromisoformat(data["not_after"]).replace(tzinfo=UTC)
 
         logger.info(
             "Certificate rotated: serial=%s, expires=%s",
