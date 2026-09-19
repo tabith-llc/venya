@@ -38,6 +38,7 @@ from fido2.ctap import CtapError
 from fido2.ctap2 import Ctap2
 from fido2.hid import list_devices
 from fido2.webauthn import (
+    AttestationObject,
     AuthenticatorData,
     CollectedClientData,
     CredentialCreationOptions,
@@ -926,26 +927,34 @@ class Fido2Auth:
 
         if FIDO2_DEBUG:
             print("DEBUG: make_credential OK", file=sys.stderr)
-        # Wrap the raw AttestationResponse so it looks like the high-level
-        # CredentialSelection.auth_response that _format_credential_response expects.
+        return self._wrap_attestation_response(response, client_data)
+
+    @staticmethod
+    def _wrap_attestation_response(response: Any, client_data: Any) -> Any:
+        """Wrap a raw CTAP2 AttestationResponse into the legacy auth_response
+        shape _format_credential_response expects.
+
+        fido2 2.x AttestationResponse exposes fmt/auth_data/att_stmt -- it has NO
+        .credential_id / .attestation_object (reading them raises AttributeError).
+        Source them correctly: credential_id from auth_data.credential_data, and
+        attestation_object via AttestationObject.create. Same bug class as the
+        already-fixed assertion twin (_format_assertion_response): a helper written
+        against an imagined response shape, masked by mocks with those attributes.
+        """
         auth_response = type(
             "obj",
             (object,),
             {
-                "credential_id": response.credential_id,
+                "credential_id": response.auth_data.credential_data.credential_id,
                 "auth_data": response.auth_data,
                 "client_data": client_data,
-                "attestation_object": response.attestation_object,
+                "attestation_object": AttestationObject.create(response.fmt, response.auth_data, response.att_stmt),
             },
         )()
-
         return type(
             "obj",
             (object,),
-            {
-                "auth_response": auth_response,
-                "transports": None,
-            },
+            {"auth_response": auth_response, "transports": None},
         )()
 
     def _format_assertion_response(
