@@ -206,7 +206,8 @@ sessions) is untouched — secret encryption does not depend on the TLS CA.
 ```bash
 # --- 0. Prepare: one enrollment token per executor (§3 step 1). Note the env vars
 #        used at the original install (CORE_HOSTNAME, DB password, passphrases).
-#        Read the current admin CA passphrase — you will need it to keep the admin CA:
+#        The admin CA passphrase is auto-reused from the EnvironmentFile on re-run
+#        (post-fix); read it anyway if you plan to wipe admin-ca/ too:
 sudo cat /etc/venya/venya-core.env        # VENYA_ADMIN_CA_KEY_PASSPHRASE=...
 
 # --- 1. Stop the core service (nginx may stay up):
@@ -216,15 +217,17 @@ sudo systemctl stop venya-core
 sudo cp -a /var/lib/venya/ca /secure/ca-backup-$(date +%F)
 sudo rm -f /var/lib/venya/ca/ca.key /var/lib/venya/ca/ca.crt
 
-# --- 3. Re-run the core installer with the SAME env vars as the original install,
-#        passing the EXISTING admin CA passphrase (an unattended run without it
-#        generates a NEW one and rewrites /etc/venya/venya-core.env, :124-137 —
-#        that would silently break the preserved admin CA key decryption):
+# --- 3. Re-run the core installer with the SAME env vars as the original install.
+#        Since the installer-rerun-admin-ca-passphrase-mismatch fix (2026-09-19),
+#        a re-run AUTOMATICALLY reuses the passphrase stored in
+#        /etc/venya/venya-core.env when the admin CA is preserved — passing
+#        VENYA_ADMIN_CA_PASSPHRASE explicitly still wins (and is REQUIRED if the
+#        env file was lost, or if you also wipe admin-ca/ to rotate the admin CA):
 curl -fsSL <origin>/install-venya-core.sh | sudo \
   VENYA_SKIP_PROMPT=yes \
   VENYA_DB_PASSWORD=<original> VENYA_DB_PASSPHRASE=<original> \
   CORE_HOSTNAME=<original> \
-  VENYA_ADMIN_CA_PASSPHRASE=<value from venya-core.env> \
+  VENYA_ADMIN_CA_PASSPHRASE=<value from venya-core.env — optional on pre-fix-free installs, see above> \
   bash -s
 # New CA generated; server + relay certs re-signed; system trust, well-known copy,
 # and nginx bundle (root + admin) rebuilt; admin cert pair re-issued.

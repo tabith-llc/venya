@@ -181,6 +181,14 @@ interactive desktop session; standard (non-admin) users are supported for
 ceremonies. macOS is handled by the same `.sh` installer (IOKit HID — no
 udev rules needed).
 
+**macOS workstation + core in a lima VM:** the server certificate is issued
+for `CORE_HOSTNAME` (default: the VM's `$(hostname)`, e.g. `lima-venya-ubuntu`),
+while lima forwards the VM's :443 to the mac's localhost — so TLS hostname
+verification fails until the mac resolves that name to the forwarded port.
+Fix: add `127.0.0.1 <vm-hostname>` to the mac's `/etc/hosts` (field-verified
+report, 2026-09-19), or install the core with `CORE_HOSTNAME` set to a name
+the mac already resolves. Do NOT disable verification.
+
 Day-one:
 
 ```bash
