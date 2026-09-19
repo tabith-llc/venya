@@ -8,20 +8,19 @@ Critical configuration fields that must be set before deployment. Missing these 
 
 ### `recovery_code_pepper`
 
-**Config key:** `recovery_code_pepper` (TOML: `[server].recovery_code_pepper` or env `VENYA_RECOVERY_PEPPER`)
+**Config key:** `recovery_code_pepper` (top-level field; env `VENYA_RECOVERY_CODE_PEPPER`)
 
-**Requirement:** MUST be set to a non-empty value. Deployment fails unconditionally if empty.
+**Requirement:** MUST be set to a non-empty value. A wholly missing value fails with a Pydantic `ValidationError` when `ServerConfig()` is constructed in `create_app()`; an empty value fails unconditionally (not debug-gated) during `lifespan()` startup.
 
 **Purpose:** Server-side secret used to hash break-glass recovery codes before storing them in the database. Without a pepper, recovery code hashes are vulnerable to rainbow table attacks — an attacker with database access can precompute hashes for common recovery codes and match them against stored values.
 
-**Error on missing:**
+**Error on missing (empty value; verbatim from `app.py`):**
 ```
-RuntimeError: Recovery code pepper must be configured. Set VENYA_RECOVERY_PEPPER
+RuntimeError: Recovery code pepper must be configured. Set VENYA_RECOVERY_CODE_PEPPER
+in /opt/venya/.env (installer input variable: VENYA_RECOVERY_PEPPER)
 or config.recovery_code_pepper. Recovery codes without a server-side
 pepper are vulnerable to rainbow table attacks.
 ```
-
-**PEP 784 env var:** `VENYA_RECOVERY_PEPPER`
 
 **Generation:** Use a CSPRNG to generate at least 32 bytes of randomness, encoded as hex or base64:
 ```bash
@@ -34,44 +33,56 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 ### `db.passphrase` (production only)
 
-**Config key:** `db.passphrase` (TOML: `[db].passphrase` or env `VENYA_DB_PASSPHRASE`)
+**Config key:** `db.passphrase` (env `VENYA_DB__PASSPHRASE` — note the DOUBLE underscore: `db` is a nested config section)
 
-**Requirement:** MUST be set in production. In debug mode, a warning is logged but deployment proceeds.
+**Requirement:** MUST be set in production. In debug mode startup proceeds WITHOUT a warning — but the system is not usable for secrets: every secret operation fails closed with `CoreError("KEK not configured")`. There is NO unencrypted-storage fallback path.
 
-**Purpose:** Passphrase used to derive the Key Encryption Key (KEK) for encrypting secrets at rest. Without a passphrase, secrets are stored unencrypted in the database.
+**Purpose:** Passphrase used to derive the Key Encryption Key (KEK) for encrypting secrets at rest (envelope encryption: KEK wraps a per-secret DEK via AES-256-KW; values are ChaCha20-Poly1305).
 
-**Error on missing (production):**
+**Error on missing (production; verbatim from `app.py`):**
 ```
-RuntimeError: VENYA_DB_PASSPHRASE is not set.
+RuntimeError: VENYA_DB__PASSPHRASE is not set.
 Core secrets cannot be encrypted without a passphrase.
-Set the passphrase in your secrets manager and restart.
+Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart
+(installer input variable: VENYA_DB_PASSPHRASE).
 ```
 
 ---
 
 ## Configuration Loading
 
-Configuration is loaded from these sources (in order of precedence):
+The server config is a pydantic-settings `BaseSettings` class (`packages/server/src/server/config.py`). There is NO TOML config file for the server (the inert `/etc/venya/server.toml` written by old installers is actively removed; the sole file source is the env file). Sources, in precedence order:
 
-1. Environment variables (PEP 784 format: `VENYA__SECTION__FIELD`)
-2. TOML config file (loaded via `ServerConfig.from_file()`)
+1. Process environment variables — format `VENYA_<SECTION>__<KEY>` (single underscore after the `VENYA` prefix, DOUBLE underscore between section and key; top-level fields use `VENYA_<KEY>`)
+2. The env file `$VENYA_ENV_DIR/.env` (default `/opt/venya/.env`, written by the installer)
 3. Field defaults (where defined)
 
-Fields without defaults (like `recovery_code_pepper`) will raise a Pydantic validation error during config loading if not set via env var or config file.
+Unknown `VENYA_*` names are silently ignored (`extra="ignore"`) — a misspelled var is a no-op, so verify names against `config.py`.
 
-### PEP 784 Environment Variable Mapping
+### Environment Variable Mapping (examples)
 
-| TOML Path | Environment Variable |
+| Config field | Environment Variable |
 |-----------|---------------------|
-| `server.recovery_code_pepper` | `VENYA_RECOVERY_PEPPER` |
-| `db.passphrase` | `VENYA_DB_PASSPHRASE` |
-| `db.database_url` | `VENYA_DB_DATABASE_URL` |
+| `recovery_code_pepper` | `VENYA_RECOVERY_CODE_PEPPER` |
+| `db.passphrase` | `VENYA_DB__PASSPHRASE` |
+| `db.database_url` | `VENYA_DB__DATABASE_URL` |
+| `session.session_timeout` | `VENYA_SESSION__SESSION_TIMEOUT` |
+| `fido2.enrollment_token_ttl` (minutes) | `VENYA_FIDO2__ENROLLMENT_TOKEN_TTL` |
+| `executor_enrollment.token_ttl_seconds` | `VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS` |
+| `cors.origins` (JSON list) | `VENYA_CORS__ORIGINS` |
+
+Installer-level input variables (e.g. `VENYA_DB_PASSWORD`, `VENYA_DB_PASSPHRASE`, `VENYA_RECOVERY_PEPPER`, `CORE_HOSTNAME`) are consumed by `install-venya-core.sh`, which writes the correctly-named server variables into `/opt/venya/.env`. Setting an installer var in the server's environment does nothing.
 
 ---
 
 ## Validation Timing
 
-All required field checks happen during `lifespan()` startup (before the first request is served). This ensures:
+Two layers:
+
+- **Construction time** (`ServerConfig()` inside `create_app()`): fields declared without defaults — `recovery_code_pepper` — raise a Pydantic `ValidationError` before the app exists.
+- **`lifespan()` startup** (before the first request is served): empty-pepper and missing-passphrase checks raise `RuntimeError`.
+
+Together these ensure:
 
 - Developers learn about misconfiguration early (during local deployment)
 - Production deployments never start with missing critical config
@@ -81,5 +92,6 @@ All required field checks happen during `lifespan()` startup (before the first r
 
 ## Related
 
+- `cli-reference.md` — complete CLI command/argument reference (generated from the parser)
 - `cert-rotation-runbook.md` — Executor certificate rotation procedures
 - `bandit-nosec-suppressions.md` — Security scanner suppression list

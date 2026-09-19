@@ -810,7 +810,7 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
             print("    sudo VENYA_SERVER_URL=https://venya-core-1 \\")
             print(f"         VENYA_EXECUTOR_ID={args.executor_id} \\")
             print(f"         VENYA_EXECUTOR_ENROLLMENT_TOKEN=$(cat {token_path}) \\")
-            print(f"         VENYA_CORE_CA_CERT={core_ca_path} \\")
+            print(f"         VENYA_VENYA_CA_FILE={core_ca_path} \\")
             print("         bash -s")
             print()
             print(f"Note: This bundle is valid for {expires_in // 60} minutes.")
@@ -2353,8 +2353,14 @@ def executor_status(args: Any) -> int:
 
 
 def _resolve_ca_dir(args: Any) -> str:
-    """Resolve the CA directory path."""
-    return getattr(args, "ca_dir", None) or "/etc/venya/ca"
+    """Resolve the CA directory path.
+
+    Default MUST match the server's ca_dir default (/var/lib/venya/ca,
+    server config.py) and the --ca-dir help text in cli.py — the old
+    /etc/venya/ca value existed nowhere in a deployment (ticket
+    cli-ca-dir-default-mismatch).
+    """
+    return getattr(args, "ca_dir", None) or "/var/lib/venya/ca"
 
 
 def cmd_admin_export_ca_cert(args: Any) -> int:
@@ -2419,8 +2425,8 @@ def cmd_admin_export_ca_key(args: Any) -> int:
     # Prompt for passphrase (twice for confirmation)
     passphrase1 = None
     while passphrase1 is None:
-        passphrase1 = input("Enter passphrase for encrypted key: ")
-        passphrase2 = input("Confirm passphrase: ")
+        passphrase1 = getpass.getpass("Enter passphrase for encrypted key: ")
+        passphrase2 = getpass.getpass("Confirm passphrase: ")
         if passphrase1 != passphrase2:
             print("Passphrases do not match. Try again.")
             passphrase1 = None
@@ -2553,6 +2559,13 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
                 return 1
             shares.append(bytes([share_id]) + data)
 
+        if shares and not shares[0][1:].startswith(b"V2"):
+            print(
+                "warning: pre-V2 share files — threshold and integrity cannot be verified; "
+                "after restore, validate ca.key against ca.crt before trusting it",
+                file=sys.stderr,
+            )
+
         try:
             reconstructed = combine(shares)
         except ValueError as e:
@@ -2582,7 +2595,7 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
         iv = encrypted_data[16:32]
         ciphertext = encrypted_data[32:]
 
-        passphrase = input("Enter passphrase to decrypt backup: ")
+        passphrase = getpass.getpass("Enter passphrase to decrypt backup: ")
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,

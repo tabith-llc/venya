@@ -148,7 +148,7 @@ class TestCreateExecutor:
                 cert="/tmp/executor.crt",
                 key="/tmp/executor.key",
             ),
-            cert_rotation=CertificateRotationConfig(rotation_days=30),
+            cert_rotation=CertificateRotationConfig(rotate_before_days=3),
         )
 
         daemon = ExecutorDaemon(config)

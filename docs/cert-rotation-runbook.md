@@ -1,330 +1,277 @@
-# Certificate Rotation Runbook
+# Venya Certificate & Key Rotation Runbook
 
-Procedures for managing executor mTLS certificates and CA key rotation.
+> **Provenance:** rewritten 2026-09-19 against the working tree at dev `28941fb`
+> (full evidence register: venya-dev `testing/results-2026-09-19-1755.md`). The previous
+> version of this document described a pre-nginx deployment (TLS on :8080, CA under
+> `/etc/venya/ca`, users `venya-core`/`venya-executor`, a nonexistent
+> `venya-executor generate-csr` command) and was largely unrunnable as written.
+> Every path, command, and behavior below cites its source. Open defects that affect
+> procedures are flagged with ⚠ and their ticket IDs.
 
-## Prerequisites
+## 0. Key material inventory — what rotates, and where it lives
 
-- Access to the Core Server (as `venya-core` user or admin)
-- `venya` CLI installed and configured
-- Access to executor machines (for CA cert distribution)
+| Material | Location | Validity / rotation | Notes |
+|---|---|---|---|
+| Root CA keypair | core: `/var/lib/venya/ca/ca.key` (0600), `ca.crt` | manual break-glass only (§5) | key is PLAINTEXT at rest — ⚠ ticket `root-ca-key-plaintext-at-rest`; encryption deferred |
+| Admin CA keypair | core: `/var/lib/venya/ca/admin-ca/` | manual (§7) | key ENCRYPTED; passphrase in `/etc/venya/venya-core.env` (0640 root:venya) |
+| Server TLS leaf | core: `/etc/venya/tls/server.crt|.key` | 365 days; re-signed on every installer run (`install-venya-core.sh:335-349`) | CN + SAN DNS = `CORE_HOSTNAME` |
+| Relay client cert | core: `/etc/venya/relay/relay-client.crt|.key` | regenerated on installer run (`:355-400`) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids` |
+| Executor client cert | executor: `/etc/venya/executor/executor.crt|.key` (ca.crt alongside) | 30 days (`EXECUTOR_VALIDITY_DAYS = 30`, server `ca.py`); auto-rotation attempted 3 days before expiry (`rotate_before_days`, executor `config.py`) | Auto-rotation persistence FIXED 2026-09-19 (ticket `executor-cert-rotation-erofs`, §1); pre-fix hosts need the unit refresh; manual path: §2 |
+| Admin client certs | workstations / core: `/etc/venya/admin/admin.crt|.key` | manual (§7) | re-issued on every core installer run |
+| Secret-encryption KEK + key versions | core: database + server config | `venya admin rotate-key` (§6) | independent of the TLS CA hierarchy |
 
----
+nginx terminates TLS on :443 and proxies to the plain-HTTP backend on 127.0.0.1:8080
+(`install-venya-core.sh:458-480`). Nothing listens on `https://…:8080`; all verification
+curls below go through `https://<core-host>/…`.
 
-## 1. Normal Certificate Rotation (Executor Self-Rotation)
+## 1. Executor certificate auto-rotation (design + deployment caveat)
 
-Executors automatically rotate their certificates every 30 days (configurable via `executor.certificate_rotation_days`).
+Design (daemon `CertManager`, `packages/executor/src/executor/daemon.py:239-323`):
 
-**No admin action required.** The executor:
-1. Detects cert expiry within `rotate_before_days` (default: 3 days)
-2. Generates a new keypair + CSR
-3. Submits CSR to `POST /api/v1/executors/register`
-4. Receives and installs the new certificate
+1. Every main-loop iteration (~30 s) checks `needs_rotation()`: cert expires within
+   `rotate_before_days` (default 3), or is already expired.
+2. `rotate()` generates a fresh ECDSA P-256 keypair + CSR and POSTs it to
+   `/api/v1/executors/register` (same endpoint as enrollment; server replaces the cert
+   record and returns `cert_pem` + `ca_cert_pem` + serial + expiry).
+3. The daemon validates the new cert against the CA, then writes cert/key/ca to disk.
 
-**Verify rotation succeeded:**
-```bash
-# Check executor logs
-sudo journalctl -u venya-executor --since "1 hour ago" | grep -i "cert\|rotate"
-
-# Check cert expiry on executor
-openssl x509 -in /etc/venya/executor/executor.crt -noout -enddate
-```
-
-Expected output:
-```
-notAfter=Nov  5 12:00:00 2025 GMT  # Should be ~30 days from now
-```
-
----
-
-## 2. Manual Executor Certificate Rotation
-
-Force an executor to rotate its certificate early.
-
-### Step 1: Revoke the old certificate (optional)
-
-```bash
-venya admin revoke-executor <executor_id>
-```
-
-This adds the executor's certificate serial number to the revocation list. The executor will detect this on its next revocation check (every 60 seconds) and disconnect.
-
-### Step 2: Re-register the executor
-
-On the executor machine:
-```bash
-# Stop the executor
-sudo systemctl stop venya-executor
-
-# Delete old cert and key
-sudo rm -f /etc/venya/executor/executor.crt
-sudo rm -f /etc/venya/executor/executor.key
-
-# Start the executor — it will auto-register
-sudo systemctl start venya-executor
-```
-
-Or manually:
-```bash
-# Generate new keypair + CSR
-venya-executor generate-csr --executor-id <executor_id> --output /tmp/executor.csr
-
-# Submit CSR to server (from server admin machine)
-# The executor daemon handles this automatically on startup if no cert exists
-```
-
-### Step 3: Verify
+**Deployment caveat (FIXED 2026-09-19, ticket `executor-cert-rotation-erofs`):** units
+installed BEFORE the fix set `ReadOnlyPaths=/etc/venya` without the identity dir in
+`ReadWritePaths`, so step 3 died EROFS *after* the server had already replaced the cert
+record — retries every ~30 s burned server state and lost each fresh keypair, and the
+executor died unrecoverably at day 30 (an expired cert cannot even `renew` — the mTLS
+handshake fails first; only §3 re-registration works). The fix: the unit now carries
+`ReadWritePaths=... /etc/venya/executor`; `rotate()` refuses BEFORE contacting the server
+when the cert dir is unwritable; and the in-memory serial adopts the new cert only after
+all disk writes succeed. **Pre-fix deployed hosts** need the corrected unit: re-run the
+executor installer (refreshes the unit) or add a drop-in:
 
 ```bash
-# On server: check new cert is registered
-# On executor: check cert expiry
-openssl x509 -in /etc/venya/executor/executor.crt -noout -enddate
+sudo systemctl edit venya-executor   # add: [Service] / ReadWritePaths=/etc/venya/executor
+sudo systemctl daemon-reload && sudo systemctl restart venya-executor
 ```
 
----
-
-## 3. CA Key Backup
-
-### 3a. Export CA Key (Encrypted)
+Watch for the historical failure signature on un-upgraded hosts:
 
 ```bash
-venya admin export-ca-key \
-  --output /mnt/backup/ca.key.encrypted \
-  --ca-dir /etc/venya/ca
+sudo journalctl -u venya-executor | grep -i "rotation failed"
 ```
 
-You will be prompted for a passphrase. Confirm it. The encrypted key is written to the output file with mode 0600.
+Residual structural note (ticket `executor-revocation-by-identity`): if a write fails
+between the register POST and persistence (e.g. ENOSPC), the server record and the
+on-disk cert still diverge — revocation matching is serial-based and can miss the
+running identity. The pre-check narrows this window; closing it structurally is tracked
+separately.
 
-### 3b. Split CA Key (Shamir's Secret Sharing)
+## 2. Manual executor cert operations (working path)
+
+Run ON the executor host. The CLI is installed in the executor venv; writes need root
+(the unit's read-only mount does not apply to manual shells):
 
 ```bash
-venya admin split-ca-key \
-  --threshold 3 \
-  --shares 5 \
-  --output-dir /mnt/backup/shares/ \
-  --ca-dir /etc/venya/ca
+sudo /opt/venya/.venv/bin/venya exec cert status                 # expiry + remaining days
+sudo /opt/venya/.venv/bin/venya exec cert renew                  # CSR via existing mTLS identity, atomic write
+sudo /opt/venya/.venv/bin/venya exec cert renew --cert-path /etc/venya/executor/executor.crt
 ```
 
-This creates 5 share files:
-```
-/mnt/backup/shares/share-01
-/mnt/backup/shares/share-02
-/mnt/backup/shares/share-03
-/mnt/backup/shares/share-04
-/mnt/backup/shares/share-05
-```
+`renew` authenticates with the CURRENT cert — run it while the cert is still valid
+(the same 3-day window the daemon uses). If the cert already expired, re-register
+instead (§3).
 
-Any 3 shares can reconstruct the key. Distribute shares to different locations or administrators.
-
-**Store shares:**
-- Primary: Encrypted USB hardware token (YubiKey PIV slot or dedicated HSM)
-- Secondary: Printed base64 on paper, stored in a physical safe
-- Tertiary: Different physical locations (if using SSS)
-
-### 3c. Export CA Certificate (for distribution)
+Revoke (admin action, from a workstation holding the admin mTLS cert, or on the core):
 
 ```bash
-venya admin export-ca-cert \
-  --output /tmp/ca.crt \
-  --ca-dir /etc/venya/ca
+SSL_CERT_FILE=~/.config/venya-ca.crt \
+VENYA_ADMIN_CERT=admin-cert/admin.crt VENYA_ADMIN_KEY=admin-cert/admin.key \
+  venya admin revoke-executor <executor-id>
+# or, targeting the executor's own cert from the executor host:
+sudo /opt/venya/.venv/bin/venya exec cert revoke --executor-id <executor-id>
 ```
 
-Transfer `ca.crt` out-of-band to executor machines (USB, secure copy during provisioning).
+## 3. Re-registering an executor (lost/expired cert, or after CA rotation)
 
----
-
-## 4. CA Key Restore
-
-### 4a. Restore from Encrypted Backup
+Runtime (daemon-side) registration cannot write `/etc/venya/executor` either
+(`daemon.py:118-136` fails closed; empty-token installs crash-loop — ticket
+`executor-ero-fs-crash-loop-on-empty-token`). The supported path is install-time
+registration with a bootstrap token:
 
 ```bash
-venya admin restore-ca-key \
-  --mode backup \
-  --backup-file /mnt/backup/ca.key.encrypted \
-  --ca-dir /etc/venya/ca
+# 1. On the core (admin mTLS cert lives there) or a workstation holding it:
+venya admin executor-enroll <executor-id> --output-dir /secure/enroll
+#    (token TTL default 1800 s, single-use, stored hashed — server config.py:131-136)
+
+# 2. Transfer /secure/enroll to the executor host, then re-run the executor installer:
+curl -fsSL <origin>/install-venya-executor.sh | sudo \
+  VENYA_SKIP_PROMPT=yes \
+  VENYA_SERVER_URL=https://<core-host> \
+  VENYA_EXECUTOR_ID=<executor-id> \
+  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
+  bash -s
 ```
 
-Enter the passphrase when prompted. The CA key is restored to `/etc/venya/ca/ca.key` with mode 0600.
+The installer fetches the current CA from `/.well-known/venya-ca.crt`, updates system
+trust (`install-venya-executor.sh:361-376`), writes `/etc/venya/executor/`, and
+registers at install time (`:416-474`). The SSH user on provisioned hosts is `bot`
+(there are no `venya-executor`/`venya-core` user accounts; the service account is
+`venya`, nologin).
 
-### 4b. Restore from Shares (SSS)
+## 4. Revocation behavior (what an executor does when revoked)
+
+- `venya admin revoke-executor <id>` adds the current cert SERIAL to the revocation
+  list (`server/routes/admin.py:985-1030`).
+- Executors poll the public list every main-loop iteration (~30 s —
+  `daemon.py:948,977`; the formerly-dead `revocation_poll_seconds` config field was
+  REMOVED 2026-09-19, ticket `executor-dead-rotation-config`). Endpoint (no auth): 
+  `curl -sk https://<core-host>/api/v1/executors/certs/revocation-list`
+- On detection: the daemon logs, sets `revoked`, and performs an ORDERLY stop
+  (`daemon.py:950-953,1004-1020`) — in-flight commands are NOT force-aborted and
+  injected secrets are NOT immediately zeroed by this path; the tmpfs reaper (TTL,
+  default 300 s) and the next daemon start's sweep clean up (`daemon.py:614-688,858-862`).
+- Fail-loud: 3 consecutive unreachable-server revocation checks
+  (`max_revocation_failures`, `config.py:42-45`) → the executor self-revokes and stops
+  (`daemon.py:963-971`).
+
+## 5. Root CA backup and restore (break-glass)
+
+The CLI's `--ca-dir` defaults to `/var/lib/venya/ca` (matches the server; fixed 2026-09-19
+under ticket `cli-ca-dir-default-mismatch` — pre-fix CLIs defaulted to a nonexistent
+`/etc/venya/ca`, so on older workstations pass `--ca-dir /var/lib/venya/ca` explicitly).
+The examples below pass it explicitly anyway — harmless and version-independent.
 
 ```bash
-venya admin restore-ca-key \
-  --mode shares \
-  --shares /mnt/backup/shares/share-01 \
-           /mnt/backup/shares/share-03 \
-           /mnt/backup/shares/share-05 \
-  --ca-dir /etc/venya/ca
+# Encrypted export of the CA key (prompts for a passphrase, hidden input —
+# fixed 2026-09-19 under ticket export-ca-key-echoed-passphrase; pre-fix CLIs
+# ECHOED the prompt):
+venya admin export-ca-key --output /secure/venya-ca.key.enc --ca-dir /var/lib/venya/ca
+
+# Shamir K-of-N split (writes share-01..share-NN):
+venya admin split-ca-key -t 2 -s 3 -d /secure/shares --ca-dir /var/lib/venya/ca
+
+# Public cert export (what executors/workstations hold):
+venya admin export-ca-cert --output /secure/venya-ca.crt --ca-dir /var/lib/venya/ca
+
+# Restore — from shares:
+venya admin restore-ca-key --mode shares --shares share-01 share-02 --ca-dir /var/lib/venya/ca
+# Restore — from encrypted backup:
+venya admin restore-ca-key --mode backup --backup-file /secure/venya-ca.key.enc --ca-dir /var/lib/venya/ca
 ```
 
-Provide at least `threshold` share files. The shares are reconstructed and written to `/etc/venya/ca/ca.key`.
-
----
-
-## 5. CA Key Rotation (Disaster Recovery)
-
-If the CA key is compromised or lost and cannot be restored from backup, you must rotate the entire CA.
-
-### Warning
-
-Rotating the CA key invalidates ALL existing executor certificates. Every executor must be re-registered.
-
-### Step 1: Backup existing CA (if possible)
+**Threshold + integrity enforcement (fixed 2026-09-19, ticket
+`shamir-combine-no-threshold-verification`):** V2 share files carry the threshold K
+and a checksum — restore with fewer than K shares, corrupt files, or files from
+different splits now fails loudly instead of silently writing a corrupt key.
+PRE-V2 share files (split before the fix) restore with the old unverified behavior
+(the CLI warns) — for those, and as general practice after ANY shares-restore, verify
+before trusting:
 
 ```bash
-# Backup current CA cert (for reference)
-cp /etc/venya/ca/ca.crt /etc/venya/ca/ca.crt.old
+# restored ca.key must pair with the surviving ca.crt:
+openssl pkey -in /var/lib/venya/ca/ca.key -pubout -out /tmp/k.pub
+openssl x509 -in /var/lib/venya/ca/ca.crt -pubkey -noout -out /tmp/c.pub
+diff /tmp/k.pub /tmp/c.pub && echo "PAIRING OK" || echo "CORRUPT RESTORE — do not proceed"
 ```
 
-### Step 2: Delete old CA and re-initialize
+## 6. KEK / secret-encryption rotation (independent of the TLS CA)
 
 ```bash
-# Remove old CA files
-sudo rm -f /etc/venya/ca/ca.key
-sudo rm -f /etc/venya/ca/ca.crt
-
-# Re-initialize CA (this creates a new CA keypair)
-# This must be done on the Core Server
-venya init --skip-migrations
+venya admin rotate-key                      # server generates the new KEK
+venya admin rotate-key --new-key /secure/kek.bin
+venya admin key-version rotate-status       # rotation job progress
+venya admin key-version rollback <job-id>   # roll back a FAILED rotation job
+venya admin key-version list --json         # versions + active flag
+venya admin key-version deactivate <id>
+venya admin key-version revoke <id>
 ```
 
-Note: `venya init` will fail if the system is already initialized. In this case, manually initialize the CA:
+Fresh installs seed one active `v1` key version (migration
+`027_bootstrap_active_key_version.py`), so `venya store` never needs `--key-version`.
 
-```python
-# Python one-liner on the server
-python3 -c "
-from server.ca import CAManager
-ca = CAManager('/etc/venya/ca')
-ca.initialize()
-print('CA re-initialized')
-"
-```
+## 7. Full root-CA rotation (compromise) — the honest procedure
 
-### Step 3: Distribute new CA certificate
+There is NO in-place CA-rotation command. The supported mechanism is the installer's
+create-if-absent behavior: the CA is generated only when `/var/lib/venya/ca/ca.key` is
+absent (`install-venya-core.sh:289-331`), while the server TLS cert, relay cert, system
+trust, well-known copy, and nginx client-CA bundle are rebuilt on EVERY run
+(`:335-457`). Rotating the root CA therefore means: remove it, re-run the installer,
+then re-enroll every executor.
+
+**Impact:** ALL executor client certs signed by the old CA become unverifiable — every
+executor must re-register (§3). The admin CA under `/var/lib/venya/ca/admin-ca/` can be
+PRESERVED (installer re-creates it only if absent, `:166-168`) — preserving it keeps
+existing admin client certs valid for mTLS, but note the installer still RE-ISSUES the
+`/etc/venya/admin/admin.crt|.key` pair each run (`:172-192`), so workstation copies
+should be refreshed from the core afterwards. The database (users, secrets, KEK,
+sessions) is untouched — secret encryption does not depend on the TLS CA.
 
 ```bash
-# Export new CA cert
-venya admin export-ca-cert --output /tmp/ca.crt
+# --- 0. Prepare: one enrollment token per executor (§3 step 1). Note the env vars
+#        used at the original install (CORE_HOSTNAME, DB password, passphrases).
+#        The admin CA passphrase is auto-reused from the EnvironmentFile on re-run
+#        (post-fix); read it anyway if you plan to wipe admin-ca/ too:
+sudo cat /etc/venya/venya-core.env        # VENYA_ADMIN_CA_KEY_PASSPHRASE=...
 
-# Copy to each executor machine (out-of-band)
-scp /tmp/ca.crt venya-executor@<executor-ip>:/tmp/ca.crt
+# --- 1. Stop the core service (nginx may stay up):
+sudo systemctl stop venya-core
 
-# On each executor:
-sudo cp /tmp/ca.crt /etc/venya/ca/ca.crt
-sudo rm /tmp/ca.crt
+# --- 2. Back up, then remove the root CA keypair (KEEP admin-ca/ to preserve admin identity):
+sudo cp -a /var/lib/venya/ca /secure/ca-backup-$(date +%F)
+sudo rm -f /var/lib/venya/ca/ca.key /var/lib/venya/ca/ca.crt
+
+# --- 3. Re-run the core installer with the SAME env vars as the original install.
+#        Since the installer-rerun-admin-ca-passphrase-mismatch fix (2026-09-19),
+#        a re-run AUTOMATICALLY reuses the passphrase stored in
+#        /etc/venya/venya-core.env when the admin CA is preserved — passing
+#        VENYA_ADMIN_CA_PASSPHRASE explicitly still wins (and is REQUIRED if the
+#        env file was lost, or if you also wipe admin-ca/ to rotate the admin CA):
+curl -fsSL <origin>/install-venya-core.sh | sudo \
+  VENYA_SKIP_PROMPT=yes \
+  VENYA_DB_PASSWORD=<original> VENYA_DB_PASSPHRASE=<original> \
+  CORE_HOSTNAME=<original> \
+  VENYA_ADMIN_CA_PASSPHRASE=<value from venya-core.env — optional on pre-fix-free installs, see above> \
+  bash -s
+# New CA generated; server + relay certs re-signed; system trust, well-known copy,
+# and nginx bundle (root + admin) rebuilt; admin cert pair re-issued.
+
+# --- 4. Verify the core:
+curl -sk https://<core-host>/api/v1/health
+# expect: {"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}
+
+# --- 5. Every executor: re-install with a fresh token (§3). Runtime re-registration
+#        is not possible (read-only /etc/venya).
+
+# --- 6. Every workstation: refresh CA + admin cert copies, then re-login:
+curl -sk https://<core-host>/.well-known/venya-ca.crt -o ~/.config/venya-ca.crt
+ssh <core-host> "sudo cat /etc/venya/admin/admin.crt" > admin-cert/admin.crt
+ssh <core-host> "sudo cat /etc/venya/admin/admin.key" > admin-cert/admin.key
+chmod 600 admin-cert/admin.key
+SSL_CERT_FILE=~/.config/venya-ca.crt venya login <user-id>   # FIDO2 touch
+
+# --- 7. Smoke-test end to end:
+venya run --executor-id <executor-id> -- /usr/bin/true
 ```
 
-### Step 4: Re-register all executors
+If the old CA private key was compromised, treat all material it signed as compromised:
+prefer wiping `admin-ca/` too (fresh admin CA + fresh admin certs everywhere) over
+preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scope.
 
-On each executor machine:
-```bash
-sudo systemctl stop venya-executor
-sudo rm -f /etc/venya/executor/executor.crt
-sudo rm -f /etc/venya/executor/executor.key
-sudo systemctl start venya-executor
-```
+## 8. Verification quick table
 
-The executor will auto-register with the new CA on startup.
+| Check | Command | Expected |
+|---|---|---|
+| Core health | `curl -sk https://<core-host>/api/v1/health` | `{"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}` |
+| Revocation list reachable | `curl -sk https://<core-host>/api/v1/executors/certs/revocation-list` | JSON list (public endpoint) |
+| Executor cert expiry | `sudo /opt/venya/.venv/bin/venya exec cert status` (on executor) | remaining days > 3 |
+| Executor registered/ONLINE | `venya admin list` / `venya exec status` | executor ONLINE |
+| CA keypair pairing after restore | §5 openssl diff | `PAIRING OK` |
+| Rotation not failing silently | `journalctl -u venya-executor \| grep -i "rotation failed"` | no hits (on pre-fix units, hits near expiry mean the RO-mount bug — upgrade the unit, §1) |
 
-### Step 5: Verify all executors
+## 9. Known issues affecting this runbook (tickets)
 
-```bash
-# On server: list all registered executors
-curl -sk --cert /etc/venya/executor/server.crt \
-     --key /etc/venya/executor/server.key \
-     https://localhost:8080/api/v1/executors
-
-# On each executor: check logs
-sudo journalctl -u venya-executor --since "5 minutes ago"
-```
-
----
-
-## 6. Emergency Revocation
-
-If an executor is compromised, revoke its certificate immediately.
-
-```bash
-venya admin revoke-executor <executor_id>
-```
-
-The executor will detect revocation within `revocation_poll_seconds` (default: 60s) and:
-1. Abort any running commands
-2. Clean up injected secrets
-3. Disconnect from the server
-
-Verify revocation:
-```bash
-# Check revocation list
-curl -sk https://localhost:8080/api/v1/executors/certs/revocation-list
-
-# Check executor status
-sudo journalctl -u venya-executor --since "2 minutes ago" | grep -i revoke
-```
-
----
-
-## 7. Scheduled Maintenance Checklist
-
-### Monthly
-
-- [ ] Check executor certificate expiry: `openssl x509 -in /etc/venya/executor/executor.crt -noout -enddate`
-- [ ] Review revocation list: `curl -sk https://localhost:8080/api/v1/executors/certs/revocation-list`
-- [ ] Check CA key backup integrity (test restore in isolated environment)
-
-### Quarterly
-
-- [ ] Test CA key restore procedure in isolated environment
-- [ ] Review and rotate CA key backup passphrases
-- [ ] Audit executor registrations (remove decommissioned executors)
-- [ ] Review revocation list (clean up stale entries if possible)
-
-### Annually
-
-- [ ] Consider CA key rotation (generate new CA, re-register all executors)
-- [ ] Review certificate rotation interval (30 days may be adjusted)
-- [ ] Test full disaster recovery procedure (CA loss + restore)
-- [ ] Update this runbook with any procedure changes
-
----
-
-## 8. Troubleshooting
-
-### Executor fails to connect after cert rotation
-
-```bash
-# Check cert expiry
-openssl x509 -in /etc/venya/executor/executor.crt -noout -dates
-
-# Check CA cert on executor matches server
-diff /etc/venya/ca/ca.crt /path/to/server/ca.crt
-
-# Check executor logs
-sudo journalctl -u venya-executor -n 50
-
-# Check server logs for registration errors
-sudo journalctl -u venya-core -n 50 | grep -i "cert\|csr\|register"
-```
-
-### Revocation list not syncing
-
-```bash
-# Check revocation polling interval
-grep revocation_poll_seconds /etc/venya/executor.toml
-
-# Manually trigger revocation check
-sudo systemctl restart venya-executor
-
-# Check if executor is polling
-sudo journalctl -u venya-executor -f | grep -i revocation
-```
-
-### CA key file has wrong permissions
-
-```bash
-# Fix permissions
-sudo chown venya-core:venya-core /etc/venya/ca/ca.key
-sudo chmod 600 /etc/venya/ca/ca.key
-
-# Restart core server
-sudo systemctl restart venya-core
-```
+- `executor-cert-rotation-erofs` (H) — FIXED 2026-09-19 (unit RW path + rotate() ordering; pre-fix hosts need the unit refresh, §1); physical probe OPEN with trigger: lands with the next executor deployment or before any fleet is expected to live 30 days
+- `executor-revocation-by-identity` (M) — serial-match revocation can miss a diverged identity after a failed persist (§1 residual note)
+- `cli-ca-dir-default-mismatch` — FIXED 2026-09-19 (default now `/var/lib/venya/ca`; pre-fix CLIs need explicit `--ca-dir`, §5)
+- `shamir-combine-no-threshold-verification` — FIXED 2026-09-19 (V2 shares carry K + checksum; below-threshold/corrupt/mixed sets fail loudly; pre-V2 files restore unverified with a CLI warning — still run the §5 pairing check)
+- `export-ca-key-echoed-passphrase` — FIXED 2026-09-19 (all secret prompts now getpass; pre-fix CLIs echoed)
+- `executor-dead-rotation-config` — FIXED 2026-09-19 (dead fields removed; legacy executor.toml keys still load, ignored)
+- `root-ca-key-plaintext-at-rest` — root CA key unencrypted at rest (§0)
+- `executor-ero-fs-crash-loop-on-empty-token` (H) — never deploy an executor without an install-time token (§3)

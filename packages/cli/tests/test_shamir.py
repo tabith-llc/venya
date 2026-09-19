@@ -21,8 +21,8 @@ class TestShamirSplitCombine:
         shares = split(secret, threshold=3, shares=5)
 
         assert len(shares) == 5
-        # Each share has 1 ID byte + len(secret) data bytes
-        assert len(shares[0]) == len(secret) + 1
+        # V2 format: 1 ID byte + b"V2" + K byte + 4-byte checksum + len(secret) data bytes
+        assert len(shares[0]) == len(secret) + 8
 
         # Any 3 shares should reconstruct
         for i in range(5):
@@ -51,11 +51,12 @@ class TestShamirSplitCombine:
         reconstructed = combine(shares)
         assert reconstructed == secret
 
-        # Any 4 shares should produce wrong result
+        # Any 4 shares must now FAIL LOUDLY (pre-fix: silently wrong bytes —
+        # ticket shamir-combine-no-threshold-verification)
         for i in range(5):
             subset = shares[:i] + shares[i + 1 :]
-            reconstructed = combine(subset)
-            assert reconstructed != secret, f"4 shares incorrectly reconstructed for index {i}"
+            with pytest.raises(ValueError):
+                combine(subset)
 
     def test_various_secret_sizes(self):
         """Test with various secret sizes."""
@@ -69,7 +70,7 @@ class TestShamirSplitCombine:
         secret = b""
         shares = split(secret, threshold=2, shares=3)
         assert len(shares) == 3
-        assert len(shares[0]) == 1  # Only ID byte
+        assert len(shares[0]) == 8  # ID + V2 + K + 4-byte checksum, no data bytes
         assert combine([shares[0], shares[1]]) == secret
 
     def test_all_zero_bytes(self):
