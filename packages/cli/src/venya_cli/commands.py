@@ -39,9 +39,18 @@ def run_command(args: Any) -> int:
     server_url = getattr(args, "server_url", None)
     client = APIClient(server_url=server_url)
 
-    # Authenticate if no token is available (init, recovery, config, and exec are public)
+    # Authenticate if no token is available (init, enroll, login, recovery,
+    # config, exec are public). Headless admin exemption: `venya admin ...` with
+    # VENYA_ADMIN_CERT/KEY configured presents the mTLS client cert instead, and
+    # the server's require_admin cert-only shortcut is the authority (a bad cert
+    # surfaces as its 401/403). Scoped to command == "admin" ONLY -- role-gated
+    # commands (list/store/audit/...) still require FIDO2/token, matching the
+    # server, which 401s cert-only callers on require_role routes.
     command = args.command
-    if command not in ("init", "enroll", "login", "recovery", "config", "exec") and not client.config.access_token:
+    admin_mtls_exempt = command == "admin" and getattr(client, "has_admin_mtls", False)
+    if admin_mtls_exempt and not client.config.access_token:
+        print("Using admin mTLS certificate (VENYA_ADMIN_CERT) for authentication.")
+    elif command not in ("init", "enroll", "login", "recovery", "config", "exec") and not client.config.access_token:
         user_id = getattr(args, "user_id", None)
         try:
             print("Authenticating with security key...")
