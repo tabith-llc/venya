@@ -573,6 +573,14 @@ class Fido2Auth:
         # rp object (registration)
         if "rp" in options:
             norm["rp"] = options["rp"]
+            # The browser-adapter wire shape (server/fido2/browser_adapter.py
+            # challenge_to_browser_options, emitted by e.g.
+            # /auth/elevate/challenge) folds rpId into rp.id and drops the
+            # scalar. Assertion options still need rp_id — without it the
+            # Windows platform API gets a NULL pwszRpId and fails
+            # NTE_INVALID_PARAMETER (0x80090027), found physically on win11.
+            if "rp_id" not in norm and isinstance(options["rp"], dict) and options["rp"].get("id"):
+                norm["rp_id"] = options["rp"]["id"]
 
         # user object (registration)
         if "user" in options:

@@ -642,3 +642,65 @@ class TestWindowsCeremonyDispatch:
                 auth._get_credential(options, timeout=10.0)
         mock_list.assert_not_called()
         mock_ctap2.assert_not_called()
+
+
+class TestNormalizerRpShape:
+    """Truth table for normalize_webauthn_options rp_id derivation.
+
+    The server emits TWO wire shapes: /auth/login/start passes the raw manager
+    options through ("rpId" scalar), while /auth/elevate/challenge and the
+    browser routes run challenge_to_browser_options, which folds rpId into an
+    "rp": {"id", "name"} object and DROPS the scalar. Pre-fix the normalizer
+    only read the scalar, so elevation built request options with rp_id=None —
+    on Windows the platform API got a NULL pwszRpId and failed
+    NTE_INVALID_PARAMETER (0x80090027); found physically on win11 (venyastd,
+    `venya credential remove 1`).
+    """
+
+    def test_raw_login_shape_keeps_rp_id_scalar(self):
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        norm = auth.normalize_webauthn_options(
+            {
+                "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                "rpId": "venya-core-1",
+                "timeout": 60000,
+                "userVerification": "discouraged",
+                "allowCredentials": [{"type": "public-key", "id": "YWJj"}],
+            }
+        )
+        assert norm["rp_id"] == "venya-core-1"
+        assert norm["allow_credentials"][0]["id"] == b"abc"
+
+    def test_browser_elevation_shape_derives_rp_id_from_rp_object(self):
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        norm = auth.normalize_webauthn_options(
+            {
+                "challenge": "dGVzdC1jaGFsbGVuZ2U",
+                "rp": {"id": "venya-core-1", "name": "Venya"},
+                "timeout": 60000,
+                "userVerification": "discouraged",
+                "allowCredentials": [{"type": "public-key", "id": "YWJj"}],
+            }
+        )
+        assert norm["rp_id"] == "venya-core-1"
+        assert norm["rp"] == {"id": "venya-core-1", "name": "Venya"}
+
+    def test_browser_shape_without_rp_id_stays_absent(self):
+        """NEGATIVE half: rp object with no usable id must NOT invent an rp_id."""
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        norm = auth.normalize_webauthn_options({"challenge": "dGVzdC1jaGFsbGVuZ2U=", "rp": {"name": "Venya"}})
+        assert "rp_id" not in norm
+
+    def test_build_request_options_from_elevation_shape(self):
+        """End-to-end through the assertion options builder: rp_id must land on
+        the PublicKeyCredentialRequestOptions the ceremony consumes."""
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        req = auth._build_request_options(
+            {
+                "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                "rp": {"id": "venya-core-1", "name": "Venya"},
+                "timeout": 60000,
+                "allowCredentials": [{"type": "public-key", "id": "YWJj"}],
+            }
+        )
+        assert req.public_key.rp_id == "venya-core-1"
