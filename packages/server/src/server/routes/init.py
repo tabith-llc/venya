@@ -123,10 +123,12 @@ async def init_reset(
     except HTTPException:
         raise
     except Exception as e:
+        # Log full detail (incl. any SQL) server-side; never leak it to the client.
+        logger.exception("Core reset failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
-        )
+            detail="Reset failed",
+        ) from e
 
 
 @router.post(
@@ -204,19 +206,27 @@ async def init_core(
                 except CAExistsError:
                     logger.debug("CA already exists on disk")
 
-        admin_role = Role(
-            name="admin",
-            permissions="read-write",
-            description="System administrator — full access",
-        )
-        db.add(admin_role)
+        # Idempotent get-or-create on roles.name: a re-init over a wiped-but-
+        # roles-intact DB (the AGENTS.md re-enrollment recipe leaves roles, and a
+        # fresh installer seeds them via migration) must not die on the
+        # uq_roles_name UniqueViolation a bare INSERT would raise.
+        admin_role = db.query(Role).filter(Role.name == "admin").first()
+        if admin_role is None:
+            admin_role = Role(
+                name="admin",
+                permissions="read-write",
+                description="System administrator — full access",
+            )
+            db.add(admin_role)
 
-        user_role = Role(
-            name="user",
-            permissions="read",
-            description="Regular user — read-only access",
-        )
-        db.add(user_role)
+        user_role = db.query(Role).filter(Role.name == "user").first()
+        if user_role is None:
+            user_role = Role(
+                name="user",
+                permissions="read",
+                description="Regular user — read-only access",
+            )
+            db.add(user_role)
         db.flush()
 
         admin_user = User(
@@ -258,10 +268,12 @@ async def init_core(
     except HTTPException:
         raise
     except Exception as e:
+        # Log full detail (incl. any SQL) server-side; never leak it to the client.
+        logger.exception("Core initialization failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
-        )
+            detail="Initialization failed",
+        ) from e
 
 
 @router.post(
@@ -325,7 +337,7 @@ async def init_complete(
             logger.error(traceback.format_exc())
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Registration failed: {e!s}",
+                detail="Registration failed",
             ) from e
 
         # Find the pending user matching the submitted user_id
@@ -393,10 +405,12 @@ async def init_complete(
     except HTTPException:
         raise
     except Exception as e:
+        # Log full detail (incl. any SQL) server-side; never leak it to the client.
+        logger.exception("Init completion failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e),
-        )
+            detail="Enrollment completion failed",
+        ) from e
 
 
 def _generate_recovery_code() -> str:
