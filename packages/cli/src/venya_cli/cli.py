@@ -8,6 +8,7 @@
 
 import argparse
 import sys
+from datetime import UTC
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -684,6 +685,63 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _install_stderr_tee():
+    """Append a copy of everything written to stderr into <config_dir>/venya.log.
+
+    Every command failure path ends in a print to stderr (and verbose mode
+    raises tracebacks there too), so tee-ing stderr captures them all without
+    touching any call site. Returns the log path, or None if logging could not
+    be set up — a broken log must never break the CLI.
+
+    PIN prompts (getpass) go to stderr but typed PINs never pass through it
+    (TTY echo-off), so no secret material lands in the file.
+    """
+    try:
+        from datetime import datetime
+
+        from .api_client import default_config_dir
+
+        log_dir = default_config_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "venya.log"
+        # ponytail: single-generation rotation at 1 MiB; a real retention
+        # policy only if logs ever become operationally important.
+        try:
+            if log_path.stat().st_size > 1_048_576:
+                log_path.replace(log_path.with_suffix(".log.1"))
+        except FileNotFoundError:
+            pass
+        logf = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 — lives for the process lifetime
+        logf.write(f"\n=== {datetime.now(UTC).isoformat()} argv={sys.argv[1:]} ===\n")
+        logf.flush()
+        original = sys.stderr
+
+        class _Tee:
+            def write(self, s: str) -> int:
+                original.write(s)
+                try:
+                    logf.write(s)
+                    logf.flush()
+                except Exception:  # noqa: S110  # nosec B110 — logging must never break the command
+                    pass
+                return len(s)
+
+            def flush(self) -> None:
+                original.flush()
+                try:
+                    logf.flush()
+                except Exception:  # noqa: S110  # nosec B110
+                    pass
+
+            def __getattr__(self, name: str):
+                return getattr(original, name)
+
+        sys.stderr = _Tee()
+        return log_path
+    except Exception:  # nosec B110 — unwritable config dir must not break the CLI
+        return None
+
+
 def main() -> int:
     """Entry point for the CLI."""
     parser = create_parser()
@@ -693,13 +751,18 @@ def main() -> int:
         parser.print_help()
         return 1
 
+    log_path = _install_stderr_tee()
+
     # Import command implementations
     from .commands import run_command
 
     try:
-        return run_command(args)
+        rc = run_command(args)
     except Exception as e:
         if args.verbose:
             raise
         print(f"Error: {e}", file=sys.stderr)
-        return 1
+        rc = 1
+    if rc != 0 and log_path is not None:
+        print(f"(error details logged to {log_path})", file=sys.stderr)
+    return rc

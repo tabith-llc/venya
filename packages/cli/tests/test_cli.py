@@ -41,9 +41,26 @@ class TestDefaultConfigDir:
             d = default_config_dir()
         assert d == Path.home() / ".config" / "venya"
 
+    def test_win32_uses_appdata(self):
+        """Windows: %APPDATA%/venya."""
+        roaming = r"C:\Users\test\AppData\Roaming"
+        with patch("venya_cli.api_client.sys.platform", "win32"), patch.dict(
+            "venya_cli.api_client.os.environ", {"APPDATA": roaming}
+        ):
+            d = default_config_dir()
+        assert d == Path(roaming) / "venya"
+
+    def test_win32_empty_appdata_falls_back_to_profile(self):
+        """Windows with APPDATA unset/empty (service context) must not raise."""
+        with patch("venya_cli.api_client.sys.platform", "win32"), patch.dict(
+            "venya_cli.api_client.os.environ", {"APPDATA": ""}
+        ):
+            d = default_config_dir()
+        assert d == Path.home() / "AppData" / "Roaming" / "venya"
+
     def test_unknown_platform_uses_xdg_config(self):
         """Unrecognized platforms fall back to the POSIX convention."""
-        with patch("venya_cli.api_client.sys.platform", "win32"):
+        with patch("venya_cli.api_client.sys.platform", "plan9"):
             d = default_config_dir()
         assert d == Path.home() / ".config" / "venya"
 
@@ -592,3 +609,114 @@ class TestAPIClient:
             client2.close()
         finally:
             config_file.unlink()
+
+
+class TestErrorLog:
+    """stderr tee into <config_dir>/venya.log (support-logging feature).
+
+    Truth table: capture works; rotation at 1 MiB; unwritable config dir
+    degrades to no-logging without breaking the CLI; non-zero exit prints the
+    log-path hint.
+    """
+
+    def test_tee_captures_stderr(self, tmp_path, monkeypatch):
+        import sys
+
+        from venya_cli.cli import _install_stderr_tee
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "stderr", sys.stderr)  # register auto-restore
+        log_path = _install_stderr_tee()
+        assert log_path == tmp_path / ".config" / "venya" / "venya.log"
+        print("boom-marker", file=sys.stderr)
+        content = log_path.read_text()
+        assert "boom-marker" in content
+        assert "argv=" in content  # session header
+
+    def test_rotation_at_1mib(self, tmp_path, monkeypatch):
+        import sys
+
+        from venya_cli.cli import _install_stderr_tee
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "stderr", sys.stderr)
+        log_dir = tmp_path / ".config" / "venya"
+        log_dir.mkdir(parents=True)
+        (log_dir / "venya.log").write_bytes(b"x" * (1_048_576 + 1))
+        log_path = _install_stderr_tee()
+        assert (log_dir / "venya.log.1").exists()
+        assert log_path.stat().st_size < 1024  # fresh session header only
+
+    def test_unwritable_config_dir_returns_none_and_keeps_stderr(self, tmp_path, monkeypatch):
+        import sys
+
+        from venya_cli.cli import _install_stderr_tee
+
+        blocker = tmp_path / "blocker"
+        blocker.write_text("i am a file, not a directory")
+        monkeypatch.setenv("HOME", str(blocker))  # mkdir under a FILE path fails
+        monkeypatch.setattr(sys, "stderr", sys.stderr)
+        before = sys.stderr
+        assert _install_stderr_tee() is None
+        assert sys.stderr is before
+
+    def test_nonzero_exit_prints_log_hint(self, tmp_path, monkeypatch, capsys):
+        import sys
+        from unittest.mock import patch
+
+        from venya_cli.cli import main
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "argv", ["venya", "config", "show"])
+        with patch("venya_cli.commands.run_command", return_value=1):
+            rc = main()
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "error details logged to" in err
+        assert str(tmp_path) in err
+
+
+class TestWindowsCeremonyHints:
+    """Ticket cli-windows-ceremony-guidance-ux (RELEASE GATE). Truth table:
+    win32 gets dialog-matching guidance per ceremony kind (insert-vs-touch,
+    registered-vs-enrolling, dual-key sequencing); non-win32 gets None so POSIX
+    terminal output stays byte-identical."""
+
+    KINDS = ("assertion", "registration", "credential-add")
+
+    def test_win32_hints_match_dialog_reality(self, monkeypatch):
+        from venya_cli.commands import _win_ceremony_hint
+
+        monkeypatch.setattr("sys.platform", "win32")
+        a = _win_ceremony_hint("assertion")
+        r = _win_ceremony_hint("registration")
+        d = _win_ceremony_hint("credential-add")
+        assert a and "REGISTERED" in a and "insert" in a.lower()
+        assert r and "INSERT" in r and "enrolling" in r
+        assert d and "TWO dialogs" in d and "REGISTERED" in d and "NEW key" in d
+
+    def test_non_win32_returns_none_for_all_kinds(self, monkeypatch):
+        from venya_cli.commands import _win_ceremony_hint
+
+        for plat in ("linux", "darwin"):
+            monkeypatch.setattr("sys.platform", plat)
+            for kind in self.KINDS:
+                assert _win_ceremony_hint(kind) is None, f"{plat}/{kind} must stay silent"
+
+    def test_cmd_login_prints_hint_on_win32_and_stays_silent_on_posix(self, monkeypatch, capsys):
+        from unittest.mock import MagicMock
+
+        from venya_cli.commands import cmd_login
+
+        client = MagicMock()
+        client.authenticate.return_value = {"user_id": "hopper", "session_token": "t", "credential_id": "c"}
+        args = MagicMock()
+        args.user_id = "hopper"
+
+        monkeypatch.setattr("sys.platform", "win32")
+        assert cmd_login(client, args) == 0
+        assert "Windows:" in capsys.readouterr().out
+
+        monkeypatch.setattr("sys.platform", "linux")
+        assert cmd_login(client, args) == 0
+        assert "Windows:" not in capsys.readouterr().out

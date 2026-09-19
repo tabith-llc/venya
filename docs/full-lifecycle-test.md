@@ -473,6 +473,16 @@ current PIN) instead.
 > -R`) **wipes the PIN** — always follow it with `change-pin` / `-S` before
 > the ceremony.
 
+**Windows variant (ruling 2026-09-18, ticket `windows-fido2-requires-elevation`):**
+C.2 reset + PIN management are **the operator's/customer IT's responsibility,
+performed with the vendor tool on a non-Windows host or via the vendor's
+Windows utility** (e.g. YubiKey Manager). The venya CLI on Windows deliberately
+does not own the authenticator lifecycle: the platform WebAuthn API exposes no
+reset and no PIN set/change. Do not attempt `ykman`/`fido2-token` steps through
+the venya CLI on Windows — Phase C.2 is executed as written on the key before
+it is used from a Windows workstation, and the Windows phases that follow
+assume a reset key with a PIN already set.
+
 ### C.3 Admin bootstrap `[FIDO2 — attach KEY_A]`
 
 ```bash
@@ -509,6 +519,19 @@ VENYA_CONFIG=$ADMIN_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt \
 (The reset is allowed only while no user is fully enrolled.) Confirm the stuck
 state from the core if needed: `journalctl -u venya-core` or
 `SELECT user_id, status FROM users;`.
+
+**Windows workstation variant (ticket `windows-fido2-requires-elevation`):**
+when C.3 — or any FIDO2 ceremony — runs from a Windows workstation, ceremonies
+go through the Windows platform WebAuthn API: OS-drawn dialogs own the PIN and
+touch prompts, and the terminal never asks for a PIN. Ceremonies require an
+**interactive desktop session** (never SSH/WinRM — the platform API needs a
+foreground window). Standard (non-admin) users are fully supported for
+`init`/`login`/`enroll`/`credential add`; only the machine-wide installer
+(`install-venya-cli.ps1`) is admin-run, once per machine. Per-user state lives
+in `%APPDATA%\venya\`; CLI stderr is teed to `%APPDATA%\venya\venya.log` for
+diagnostics. `venya credential add` elevates with an **already-registered** key
+first, then registers the **new** key — have both keys at hand and follow the
+dialog sequence (insert the enrolling key when the registration dialog opens).
 
 ### C.4 Mint the executor token → install the executor (Phase B.4) **now**
 
