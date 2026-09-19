@@ -995,7 +995,7 @@ async def admin_revoke_executor(
     """Revoke an executor certificate (admin only).
 
     Adds the executor's certificate serial number to the revocation list.
-    The executor will be rejected on next revocation check (polls every 60s).
+    The executor will be rejected on next revocation check (polls ~every 30s).
     """
     from datetime import datetime
 

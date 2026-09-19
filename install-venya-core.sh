@@ -27,7 +27,7 @@ set -euo pipefail
 #   VENYA_TARBALL_SHA256 - Pin the expected sha256 (recommended: strict integrity).
 #                         If unset, the installer fetches <tarball-url>.sha256 from the
 #                         same origin as a corruption guardrail and fail-closes on error.
-#   CORE_HOSTNAME      - Hostname for TLS/Nginx (default: localhost)
+#   CORE_HOSTNAME      - Hostname for TLS/Nginx (default: $(hostname))
 #   TLS_MODE            - Nginx TLS mode (default: internal)
 ###############################################################################
 
@@ -121,6 +121,22 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     # would silently yield an UNENCRYPTED admin CA key. Nobody needs to
     # memorize a CA key passphrase, so unattended keeps the strong random
     # default; typing is for delivery hygiene, not for replacing randomness.
+    #
+    # Re-run idempotency (ticket installer-rerun-admin-ca-passphrase-mismatch):
+    # an existing install PRESERVES the encrypted admin CA key (has_ca guard
+    # below), so a re-run must reuse the passphrase already stored in the
+    # EnvironmentFile — regenerating the credential makes the preserved key
+    # undecryptable and aborts the run at sign_admin_cert. Precedence:
+    # explicit VENYA_ADMIN_CA_PASSPHRASE env (operator override; a WRONG value
+    # still fails loudly downstream — never silently swallowed) > stored >
+    # prompt > random. sed extraction, not source: no other line of the env
+    # file is executed, and base64 '=' padding survives the prefix-only sub.
+    if [ -z "$ADMIN_CA_PASSPHRASE" ] && [ -f /etc/venya/venya-core.env ]; then
+        ADMIN_CA_PASSPHRASE=$(sed -n 's/^VENYA_ADMIN_CA_KEY_PASSPHRASE=//p' /etc/venya/venya-core.env | head -n1)
+        if [ -n "$ADMIN_CA_PASSPHRASE" ]; then
+            info "Existing install: reusing stored admin CA passphrase from /etc/venya/venya-core.env."
+        fi
+    fi
     if [ -z "$ADMIN_CA_PASSPHRASE" ]; then
         if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
             while :; do
@@ -165,7 +181,9 @@ from server.config import CASecurityConfig
 cm = AdminCAManager(Path(\"$1\"), CASecurityConfig(key_passphrase_env=\"VENYA_ADMIN_CA_KEY_PASSPHRASE\"))
 if not cm.has_ca:
     cm.initialize()
-print(\"Admin CA initialized\")
+    print(\"Admin CA initialized\")
+else:
+    print(\"Admin CA already exists - preserved\")
 "
     ' _ "$ADMIN_CA_DIR" <<<"$ADMIN_CA_PASSPHRASE"
 
@@ -244,7 +262,7 @@ VENYA_DB__DATABASE_URL=postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya
 VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
 VENYA_FIDO2__RP_ID=$CORE_HOSTNAME
 VENYA_FIDO2__RP_NAME=Venya Core
-VENYA_CORS_ORIGINS=["https://$CORE_HOSTNAME"]
+VENYA_CORS__ORIGINS=["https://$CORE_HOSTNAME"]
 VENYA_RECOVERY_CODE_PEPPER=$RECOVERY_PEPPER
 EOF
 

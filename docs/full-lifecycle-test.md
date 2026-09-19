@@ -35,7 +35,7 @@ A run that returns the plaintext secret value is a redaction failure — **STOP*
 | `run_command` args: `executor_id`, `command`, `secret_keys` (all required) | same file → `run_command` |
 | Secret mount path inside sandbox: `/run/secrets/venya/<pk>` | `packages/executor/src/executor/strategies/sbx_strategy.py` |
 | `pk` = DB `secrets.id` (integer), normalized to `str` at the API boundary | `packages/executor/src/executor/executor.py` |
-| Secret value wrapped with sentinel `[VENYA:xxxxxxxx]` for redaction | same file → sentinel wrap |
+| Secret value wrapped with sentinel `[VENYA:xxxxxxxx]` for redaction | `packages/executor/src/executor/injector.py` → `wrap_with_sentinel` (server-side wrap: `packages/server/src/server/routes/secrets.py`) |
 | Secret create CLI: `venya store <key> <value> --roles <r> [--key-version v] [--metadata k=v]` | `packages/cli/src/venya_cli/commands.py` → `cmd_store` |
 | Canonical use-a-secret command shape | `packages/executor/tests/test_command_validator.py` |
 
@@ -72,7 +72,8 @@ run notes beyond what the operator needs.
 The provisioning scripts create VMs named `venya-core-N` / `venya-exec-N` /
 `venya-target-N` on a private network (`venya-net`, default `10.27.28.0/24`),
 each with SSH user `bot` (passwordless sudo, key auth only). VM RAM/CPU/disk
-sizes are constants in the provisioning script (default 5 GB / 2 vCPU / 10 GB).
+sizes are constants in the provisioning script (5 GB RAM / 2 vCPU each; disk
+10 GB core/target, 60 GB exec).
 
 **Provisioning tooling** (from the `venya-test-hypervisor` project, deployed to
 `$HYPERVISOR_BIN` on the hypervisor; invoke with **absolute paths** —
@@ -157,9 +158,10 @@ results-file lineage carries them.)
 
 ## Phase A — Provision (destroy + create)
 
-> **DESTRUCTIVE.** `destroy` removes **all** Venya VMs **and both virtual
-> networks** (`venya-net`, `physnet`). There is no per-VM destroy. Confirm
-> before running.
+> **DESTRUCTIVE.** Bare `destroy` removes **all** Venya VMs **and the
+> `venya-net` network** (no other network exists). Selective destroy is
+> available: `destroy core 3` (one VM), `destroy exec 3-7` (range),
+> `destroy target` (whole type). Confirm before running.
 
 ### A.0 RAM guard
 
@@ -244,7 +246,9 @@ SHA-256 hashes and writes `<tarball>.sha256` sidecars. Capture: `CORE_SHA`,
 `pkill -f` has self-matched and killed the operator's own shell — twice).
 
 Installer env vars (all three installers): `VENYA_TARBALL_SHA256` is
-**mandatory** — the installer hard-fails without it. `VENYA_SKIP_PROMPT=yes`
+**recommended** — if unset, the installer fetches the `<tarball>.sha256`
+sidecar from the same origin (fail-closed: aborts on fetch failure or
+mismatch). `VENYA_SKIP_PROMPT=yes`
 disables interactive prompts (required for piped installs).
 
 > **`VENYA_TARBALL` must be set explicitly for dev-state installs.** The
@@ -508,8 +512,8 @@ echo "Admin token: ${ADMIN_TOKEN:0:20}..."          # prefix only — never log 
 
 **409 on retry:** if FIDO2 registration failed *after* the server committed a
 pending user row (e.g. key not attached → `No FIDO2 devices found`), retrying
-`init` returns **409**. The CLI prints only the raw HTTP error and hides the
-actionable server `detail` (known limitation). Reset, then re-init:
+`init` returns **409**. The CLI carries the server `detail` and prints an
+actionable hint (`Use --installation-reset to clear it`). Reset, then re-init:
 
 ```bash
 VENYA_CONFIG=$ADMIN_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt \
@@ -565,7 +569,8 @@ VENYA_CONFIG=$ADMIN_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt \
   VENYA_ADMIN_CERT=$ADMIN_WS/admin-cert/admin.crt \
   VENYA_ADMIN_KEY=$ADMIN_WS/admin-cert/admin.key \
   $ADMIN_WS/.venv/bin/venya admin create-user $USER_ID --roles user
-# → "Enrollment Token: enrl_..." printed directly; capture as ENROLL_TOKEN
+# → "Enrollment Token: <43-char urlsafe token>" printed directly (user tokens
+#   are UNPREFIXED; only executor tokens carry enrl_exec_); capture as ENROLL_TOKEN
 
 # detach KEY_A, attach KEY_B, then from the USER workstation:
 VENYA_CONFIG=$USER_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt VENYA_FIDO2_DEBUG=1 \
@@ -711,6 +716,11 @@ failure was logged (login still succeeded by design) — record it.
      ```bash
      ssh bot@$CORE_HOST "echo 'VENYA_SESSION__SESSION_TIMEOUT=28800' | sudo tee -a /opt/venya/.env && sudo systemctl restart venya-core"
      ```
+
+     > **Hard cap:** total session lifetime is separately capped at
+     > `VENYA_SESSION__MAX_SESSION_DURATION` (default 14400 s = 4 h, measured
+     > from creation — raising SESSION_TIMEOUT alone does NOT extend it). For
+     > runs longer than 4 h, raise both.
 
   2. *Enrollment token TTLs* — defaults are 15 min (user enrollment) and
      30 min (executor enrollment, `VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS`,
@@ -918,10 +928,10 @@ injected secret file**, uses it, and the returned output has the value
 
 | Symptom | Cause | Recovery |
 |---------|-------|----------|
-| `venya init`/`enroll` 409 | partial pending row committed | `venya init <u> --installation-reset`, re-run (C.3) |
+| `venya init`/`enroll` 409 | partial pending row committed | CLI prints the server detail + hint; `venya init <u> --installation-reset`, re-run (C.3) |
 | Pasted block did nothing after the ssh banner | paste race: lines typed while ssh connects are consumed by the local terminal buffer (observed twice, 2026-09-17) | verify remote state before rerunning (`ls /tmp/...`, `ls /opt/venya`); use single-line commands or paste only after the remote prompt |
 | `ClientError code=3 CONFIGURATION_UNSUPPORTED` on init/enroll/login | key has no PIN (UV impossible) | set the PIN (C.2), re-run; 409 afterwards → `--installation-reset` |
-| CLI shows raw `409 Conflict`, no hint | CLI hides the server `detail` (known limitation) | confirm state via `journalctl -u venya-core` or the `users` table |
+| CLI 409 message unclear | stale CLI predating detail-carrying fix | update the workstation venv/install (B.3); state also visible via `journalctl -u venya-core` or the `users` table |
 | `admin …` 403 | admin mTLS client cert stale/missing | re-sync C.1; do not sudo-curl around it |
 | `venya store` fails: "No active key version configured" | pre-027 install with no active key version (503) — post-027 fresh installs seed `v1`; if seen there, check `alembic_version` | pass `--key-version v1` (pre-027 installs only) |
 | `venya store` 422 `key_version_id Field required` | running a pre-fix CLI | update the workstation venv/install (B.3) |

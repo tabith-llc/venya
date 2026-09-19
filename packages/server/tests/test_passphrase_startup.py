@@ -6,10 +6,32 @@
 
 """Tests for app startup passphrase check."""
 
+from pathlib import Path
+
 import pytest
 from server.config import DatabaseConfig, ServerConfig
 
 _TEST_PEPPER = "test-pepper"
+
+
+class TestMessageSourceInterlock:
+    """The replicas below raise hand-copied messages — this pins them to app.py.
+
+    Without it, the replica strings silently diverge from the real ones (they
+    did: the shipped messages named installer-level env vars that the server
+    never reads — ticket misleading-env-names-in-errors).
+    """
+
+    def test_replica_messages_exist_verbatim_in_app_source(self):
+        src = (Path(__file__).resolve().parents[1] / "src" / "server" / "app.py").read_text()
+        assert "VENYA_DB__PASSPHRASE is not set. " in src
+        assert "Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart " in src
+        assert "Set VENYA_RECOVERY_CODE_PEPPER " in src
+        assert "Update VENYA_CORS__ORIGINS to allow browser clients." in src
+        # negative half: the misleading installer-level names must not be
+        # presented as the server's own knobs in these messages
+        assert "Set VENYA_RECOVERY_PEPPER " not in src
+        assert "VENYA__CORS__ORIGINS" not in src
 
 
 class TestPassphraseStartupCheck:
@@ -25,11 +47,12 @@ class TestPassphraseStartupCheck:
 
         # Replicate the exact check from app.py lifespan
         if not config.debug and not config.db.passphrase:
-            with pytest.raises(RuntimeError, match="VENYA_DB_PASSPHRASE is not set"):
+            with pytest.raises(RuntimeError, match="VENYA_DB__PASSPHRASE is not set"):
                 raise RuntimeError(
-                    "VENYA_DB_PASSPHRASE is not set. "
+                    "VENYA_DB__PASSPHRASE is not set. "
                     "Core secrets cannot be encrypted without a passphrase. "
-                    "Set the passphrase in your secrets manager and restart."
+                    "Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart "
+                    "(installer input variable: VENYA_DB_PASSPHRASE)."
                 )
         else:
             pytest.fail("Expected RuntimeError was not raised")
@@ -76,11 +99,12 @@ class TestPassphraseStartupCheck:
 
         # Empty string is falsy, so the check triggers
         if not config.debug and not config.db.passphrase:
-            with pytest.raises(RuntimeError, match="VENYA_DB_PASSPHRASE is not set"):
+            with pytest.raises(RuntimeError, match="VENYA_DB__PASSPHRASE is not set"):
                 raise RuntimeError(
-                    "VENYA_DB_PASSPHRASE is not set. "
+                    "VENYA_DB__PASSPHRASE is not set. "
                     "Core secrets cannot be encrypted without a passphrase. "
-                    "Set the passphrase in your secrets manager and restart."
+                    "Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart "
+                    "(installer input variable: VENYA_DB_PASSPHRASE)."
                 )
         else:
             pytest.fail("Expected RuntimeError was not raised")
