@@ -4,6 +4,75 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.11] - 2026-09-19
+
+### Added
+
+- **`docs/cli-reference.md`: complete CLI reference** — every command and
+  argument, generated from the live argument parser and kept honest by tests
+  (any parser change without regeneration fails the suite; every documented
+  example invocation is parse-validated). Linked from the README docs table.
+- Installation docs: macOS-workstation + lima-VM-core topology note (the
+  server cert carries the VM hostname while lima forwards 443 — map
+  `127.0.0.1 <vm-hostname>` in the mac's `/etc/hosts`, or install with
+  `CORE_HOSTNAME` set; never disable verification).
+- Internal: exhaustive argparse-contract test surface (419 parser-derived
+  cases) plus doc anti-drift interlocks; five-suite total 1,872 → 2,416.
+
+### Security
+
+- **Shamir CA-key backup: threshold + integrity enforcement (V2 shares).**
+  Restoring with fewer than K shares, corrupt/truncated files, or files from
+  different splits now fails loudly — previously it SILENTLY reconstructed a
+  corrupt CA key. Pre-V2 share files still restore (with a CLI warning to
+  verify the result against `ca.crt`).
+- `venya admin export-ca-key` / `restore-ca-key` passphrase prompts are
+  hidden (getpass) instead of echoed to the terminal.
+- **Executor cert auto-rotation now persists on deployed systems.** The
+  systemd unit grants write access to `/etc/venya/executor` (identity files
+  only — config stays read-only); `rotate()` refuses BEFORE contacting the
+  server when the identity dir is unwritable, and adopts the new serial only
+  after the disk writes succeed. Executors installed before this fix need the
+  refreshed unit: re-run the executor installer or add a
+  `ReadWritePaths=/etc/venya/executor` drop-in (cert-rotation runbook §1).
+
+### Fixed
+
+- `venya admin key-version revoke <id>` was dead on arrival — the parser
+  accepted no argument while the handler required one, so every invocation
+  failed. (The server route always existed.)
+- **Installer re-run over an existing core no longer dead-ends**: unattended
+  re-runs regenerated the admin CA passphrase while the existing encrypted
+  key was (correctly) preserved — then aborted decrypting it. The stored
+  passphrase from `/etc/venya/venya-core.env` is now reused; an explicit
+  `VENYA_ADMIN_CA_PASSPHRASE` still takes precedence (a wrong value still
+  fails loudly).
+- Admin CA commands' `--ca-dir` default now points at the real CA storage
+  (`/var/lib/venya/ca`, matching the server and the flag's own help text)
+  instead of a path that exists in no deployment.
+- CORS: the installer writes `VENYA_CORS__ORIGINS`; the previously written
+  flat `VENYA_CORS_ORIGINS` mapped to no config field and was silently
+  ignored (servers ran on the default).
+- Operator-facing messages now name env vars that actually work:
+  `VENYA_DB__PASSPHRASE` and `VENYA_RECOVERY_CODE_PEPPER` in the startup
+  RuntimeErrors (with the installer input vars named as such),
+  `VENYA_CORS__ORIGINS` in the CORS warning, `VENYA_VENYA_CA_FILE` in the
+  executor-enroll hint.
+- Dead executor config knobs removed (`cert_rotation.rotation_days`,
+  `revocation_poll_seconds`) — defined but never read, so tuning them was a
+  silent no-op. Real values: 30-day cert validity (server-side constant) and
+  ~30 s revocation poll (daemon main loop). Legacy `executor.toml` files
+  carrying the removed keys still load.
+
+### Documentation
+
+- Repo-wide accuracy sweep against source: cert-rotation runbook REWRITTEN
+  (the previous version described a pre-nginx layout — wrong CA paths,
+  wrong URLs, nonexistent commands and users — and was largely unrunnable);
+  bandit-suppressions register regenerated from the live tree with a drift
+  interlock; corrections across installation, architecture, FAQ, agent
+  brief, alpha demo, deployment-config, and the full-lifecycle test plan.
+
 ## [0.1.0-alpha.10] - 2026-09-19
 
 ### Added
