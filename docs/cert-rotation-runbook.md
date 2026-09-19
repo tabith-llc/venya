@@ -116,9 +116,10 @@ registers at install time (`:416-474`). The SSH user on provisioned hosts is `bo
 
 ## 5. Root CA backup and restore (break-glass)
 
-⚠ The CLI's `--ca-dir` default is currently WRONG (`/etc/venya/ca` vs the deployed
-`/var/lib/venya/ca`; ticket `cli-ca-dir-default-mismatch`). Until fixed, ALWAYS pass
-`--ca-dir /var/lib/venya/ca` explicitly on the core.
+The CLI's `--ca-dir` defaults to `/var/lib/venya/ca` (matches the server; fixed 2026-09-19
+under ticket `cli-ca-dir-default-mismatch` — pre-fix CLIs defaulted to a nonexistent
+`/etc/venya/ca`, so on older workstations pass `--ca-dir /var/lib/venya/ca` explicitly).
+The examples below pass it explicitly anyway — harmless and version-independent.
 
 ```bash
 # Encrypted export of the CA key (prompts for a passphrase — ⚠ the prompt currently
@@ -242,7 +243,7 @@ preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scop
 ## 9. Known issues affecting this runbook (tickets)
 
 - `executor-cert-rotation-erofs` (H) — auto-rotation cannot persist on deployed units (§1)
-- `cli-ca-dir-default-mismatch` (M) — always pass `--ca-dir` (§5)
+- `cli-ca-dir-default-mismatch` — FIXED 2026-09-19 (default now `/var/lib/venya/ca`; pre-fix CLIs need explicit `--ca-dir`, §5)
 - `shamir-combine-no-threshold-verification` (M) — verify pairing after shares-restore (§5)
 - `export-ca-key-echoed-passphrase` (M) — echoed passphrase prompt (§5)
 - `executor-dead-rotation-config` (L) — `revocation_poll_seconds` / `rotation_days` are inert (§4)
