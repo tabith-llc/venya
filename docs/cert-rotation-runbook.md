@@ -16,7 +16,7 @@
 | Admin CA keypair | core: `/var/lib/venya/ca/admin-ca/` | manual (§7) | key ENCRYPTED; passphrase in `/etc/venya/venya-core.env` (0640 root:venya) |
 | Server TLS leaf | core: `/etc/venya/tls/server.crt|.key` | 365 days; re-signed on every installer run (`install-venya-core.sh:335-349`) | CN + SAN DNS = `CORE_HOSTNAME` |
 | Relay client cert | core: `/etc/venya/relay/relay-client.crt|.key` | regenerated on installer run (`:355-400`) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids` |
-| Executor client cert | executor: `/etc/venya/executor/executor.crt|.key` (ca.crt alongside) | 30 days (`EXECUTOR_VALIDITY_DAYS = 30`, server `ca.py:44`); auto-rotation attempted 3 days before expiry (`rotate_before_days`, executor `config.py:34-37`) | ⚠ auto-rotation CANNOT persist on deployed systems — ticket `executor-cert-rotation-erofs`; use §2 manual renew |
+| Executor client cert | executor: `/etc/venya/executor/executor.crt|.key` (ca.crt alongside) | 30 days (`EXECUTOR_VALIDITY_DAYS = 30`, server `ca.py`); auto-rotation attempted 3 days before expiry (`rotate_before_days`, executor `config.py`) | Auto-rotation persistence FIXED 2026-09-19 (ticket `executor-cert-rotation-erofs`, §1); pre-fix hosts need the unit refresh; manual path: §2 |
 | Admin client certs | workstations / core: `/etc/venya/admin/admin.crt|.key` | manual (§7) | re-issued on every core installer run |
 | Secret-encryption KEK + key versions | core: database + server config | `venya admin rotate-key` (§6) | independent of the TLS CA hierarchy |
 
@@ -35,16 +35,33 @@ Design (daemon `CertManager`, `packages/executor/src/executor/daemon.py:239-323`
    record and returns `cert_pem` + `ca_cert_pem` + serial + expiry).
 3. The daemon validates the new cert against the CA, then writes cert/key/ca to disk.
 
-⚠ **Deployed reality (ticket `executor-cert-rotation-erofs`):** the systemd unit sets
-`ReadOnlyPaths=/etc/venya` (`systemd/venya-executor.service`), so step 3 fails with
-EROFS — AFTER the server has already replaced the cert, and the freshly generated
-private key is lost. The failure is caught and logged (`Certificate rotation failed`),
-and retried every loop. Consequence: without manual intervention (§2), a deployed
-executor's identity dies no later than day 30. Watch for the log line:
+**Deployment caveat (FIXED 2026-09-19, ticket `executor-cert-rotation-erofs`):** units
+installed BEFORE the fix set `ReadOnlyPaths=/etc/venya` without the identity dir in
+`ReadWritePaths`, so step 3 died EROFS *after* the server had already replaced the cert
+record — retries every ~30 s burned server state and lost each fresh keypair, and the
+executor died unrecoverably at day 30 (an expired cert cannot even `renew` — the mTLS
+handshake fails first; only §3 re-registration works). The fix: the unit now carries
+`ReadWritePaths=... /etc/venya/executor`; `rotate()` refuses BEFORE contacting the server
+when the cert dir is unwritable; and the in-memory serial adopts the new cert only after
+all disk writes succeed. **Pre-fix deployed hosts** need the corrected unit: re-run the
+executor installer (refreshes the unit) or add a drop-in:
+
+```bash
+sudo systemctl edit venya-executor   # add: [Service] / ReadWritePaths=/etc/venya/executor
+sudo systemctl daemon-reload && sudo systemctl restart venya-executor
+```
+
+Watch for the historical failure signature on un-upgraded hosts:
 
 ```bash
 sudo journalctl -u venya-executor | grep -i "rotation failed"
 ```
+
+Residual structural note (ticket `executor-revocation-by-identity`): if a write fails
+between the register POST and persistence (e.g. ENOSPC), the server record and the
+on-disk cert still diverge — revocation matching is serial-based and can miss the
+running identity. The pre-check narrows this window; closing it structurally is tracked
+separately.
 
 ## 2. Manual executor cert operations (working path)
 
@@ -243,11 +260,12 @@ preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scop
 | Executor cert expiry | `sudo /opt/venya/.venv/bin/venya exec cert status` (on executor) | remaining days > 3 |
 | Executor registered/ONLINE | `venya admin list` / `venya exec status` | executor ONLINE |
 | CA keypair pairing after restore | §5 openssl diff | `PAIRING OK` |
-| Rotation not failing silently | `journalctl -u venya-executor \| grep -i "rotation failed"` | no hits (until `executor-cert-rotation-erofs` is fixed, hits are EXPECTED near expiry — renew manually) |
+| Rotation not failing silently | `journalctl -u venya-executor \| grep -i "rotation failed"` | no hits (on pre-fix units, hits near expiry mean the RO-mount bug — upgrade the unit, §1) |
 
 ## 9. Known issues affecting this runbook (tickets)
 
-- `executor-cert-rotation-erofs` (H) — auto-rotation cannot persist on deployed units (§1)
+- `executor-cert-rotation-erofs` (H) — FIXED 2026-09-19 (unit RW path + rotate() ordering; pre-fix hosts need the unit refresh, §1); physical probe OPEN with trigger: lands with the next executor deployment or before any fleet is expected to live 30 days
+- `executor-revocation-by-identity` (M) — serial-match revocation can miss a diverged identity after a failed persist (§1 residual note)
 - `cli-ca-dir-default-mismatch` — FIXED 2026-09-19 (default now `/var/lib/venya/ca`; pre-fix CLIs need explicit `--ca-dir`, §5)
 - `shamir-combine-no-threshold-verification` — FIXED 2026-09-19 (V2 shares carry K + checksum; below-threshold/corrupt/mixed sets fail loudly; pre-V2 files restore unverified with a CLI warning — still run the §5 pairing check)
 - `export-ca-key-echoed-passphrase` — FIXED 2026-09-19 (all secret prompts now getpass; pre-fix CLIs echoed)
