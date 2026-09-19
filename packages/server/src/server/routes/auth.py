@@ -87,9 +87,12 @@ async def auth_registration_start(
             detail="FIDO2 manager not initialized",
         )
 
-    # Get existing credentials for this user
-    existing = fido2_manager.get_user_credentials(req.user_id)
-    existing_ids = [c["credential_id"] for c in existing]
+    # Existing credential IDs as raw BYTES for the exclude list. Use the store
+    # view (StoredCredential.credential_id: bytes), NOT a display/dict view —
+    # start_registration re-encodes each with base64.b64encode(cid), which
+    # TypeErrors on a str. Matches credentials_add_start's bytes-based path.
+    existing = fido2_manager.store.get_user_credentials(req.user_id)
+    existing_ids = [c.credential_id for c in existing]
 
     challenge_id, options = fido2_manager.start_registration(
         user_id=req.user_id,

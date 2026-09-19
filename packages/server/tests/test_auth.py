@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI
+from server.fido2.manager import Fido2Manager, StoredCredential
 from server.routes import auth as auth_routes
 from starlette.testclient import TestClient
 
@@ -50,7 +51,7 @@ class TestAuthRegistrationStart:
     def test_start_success(self):
         """POST /auth/registration/start should return challenge options."""
         fido2 = MagicMock()
-        fido2.get_user_credentials.return_value = []
+        fido2.store.get_user_credentials.return_value = []
         fido2.start_registration.return_value = (
             "challenge-123",
             {"publicKey": {}},
@@ -78,6 +79,50 @@ class TestAuthRegistrationStart:
             json={"user_id": "user1", "username": "Alice"},
         )
         assert resp.status_code == 503
+
+
+class TestRegistrationStartExclude:
+    """Truth table for the exclude-list build in /auth/registration/start.
+
+    Ticket registration-start-existing-credential-typeerror: auth.py built the
+    exclude list from the dict-view get_user_credentials (b64 STR ids) and passed
+    them to start_registration, which does base64.b64encode(cid) expecting BYTES
+    -> TypeError -> 500 for any user with an existing credential. First-credential
+    registration passes an empty list, so the mock suite never caught it. Real
+    Fido2Manager here (not a mock): a mocked start_registration cannot trigger the
+    b64encode(str) TypeError.
+    """
+
+    def _app(self):
+        fm = Fido2Manager(rp_id="localhost", rp_name="Venya")
+        return _create_test_app(fido2_manager=fm), fm
+
+    def test_first_credential_empty_exclude(self):
+        """Fresh user (no existing creds) -> 200, empty exclude list."""
+        app, _fm = self._app()
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/auth/registration/start",
+            json={"user_id": "u1", "username": "alice"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert not resp.json()["options"].get("excludeCredentials")
+
+    def test_subsequent_credential_populates_exclude_no_typeerror(self):
+        """User with an existing credential -> 200 (pre-fix: 500 TypeError);
+        exclude carries the stored id as correct standard base64."""
+        app, fm = self._app()
+        cred_id = b"\xaa" * 32
+        fm.store.store_credential(StoredCredential(user_id="u1", credential_id=cred_id, public_key=b"k"))
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/auth/registration/start",
+            json={"user_id": "u1", "username": "alice"},
+        )
+        assert resp.status_code == 200, resp.text  # pre-fix: 500 (b64encode of str)
+        exclude = resp.json()["options"]["excludeCredentials"]
+        assert len(exclude) == 1
+        assert exclude[0]["id"] == base64.b64encode(cred_id).decode("ascii")
 
 
 class TestAuthRegistrationComplete:
