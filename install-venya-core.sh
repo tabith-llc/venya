@@ -27,7 +27,7 @@ set -euo pipefail
 #   VENYA_TARBALL_SHA256 - Pin the expected sha256 (recommended: strict integrity).
 #                         If unset, the installer fetches <tarball-url>.sha256 from the
 #                         same origin as a corruption guardrail and fail-closes on error.
-#   CORE_HOSTNAME      - Hostname for TLS/Nginx (default: localhost)
+#   CORE_HOSTNAME      - Hostname for TLS/Nginx (default: $(hostname))
 #   TLS_MODE            - Nginx TLS mode (default: internal)
 ###############################################################################
 
