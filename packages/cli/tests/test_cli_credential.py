@@ -58,13 +58,13 @@ class TestCredentialList:
             json_data={
                 "credentials": [
                     {
-                        "id": "cred_001",
+                        "id": 1,
                         "label": "YubiKey 1",
                         "created_at": "2025-01-01T00:00:00",
                         "last_used_at": "2025-01-15T10:30:00",
                     },
                     {
-                        "id": "cred_002",
+                        "id": 2,
                         "label": None,
                         "created_at": "2025-02-01T00:00:00",
                         "last_used_at": None,
@@ -79,8 +79,17 @@ class TestCredentialList:
         args = MagicMock()
         args.json = False
 
-        result = cmd_credential_list(client, args)
+        import io
+        from contextlib import redirect_stdout
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            result = cmd_credential_list(client, args)
         assert result == 0
+        table = f.getvalue()
+        # Regression: int DB ids (the real server shape) must render, not raise
+        # TypeError in the len() width pass ("object of type 'int' has no len()")
+        assert "1" in table and "YubiKey 1" in table
 
         call_args = mock_http.request.call_args
         assert call_args[0][0] == "GET"
@@ -97,7 +106,7 @@ class TestCredentialList:
             json_data={
                 "credentials": [
                     {
-                        "id": "cred_001",
+                        "id": 1,
                         "label": "YubiKey 1",
                         "created_at": "2025-01-01T00:00:00",
                         "last_used_at": "2025-01-15T10:30:00",
