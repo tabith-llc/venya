@@ -18,7 +18,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/venya/executor /var/log/venya /home/venya
+# /etc/venya/executor must be writable: CertManager.rotate() persists the
+# renewed cert/key there every ~30 days (ticket executor-cert-rotation-erofs).
+# RW subpath under the RO parent is the intended systemd mechanism; the
+# config file /etc/venya/executor.toml stays read-only (outside the subdir).
+ReadWritePaths=/var/lib/venya/executor /var/log/venya /home/venya /etc/venya/executor
 ReadOnlyPaths=/etc/venya
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=true
