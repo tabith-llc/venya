@@ -29,11 +29,14 @@ to that human.
    attributed to your human.
 2. `[REDACTED:<id>]` markers in output are the system working, not an
    error. Do not try to decode, work around, or re-request them.
-3. **Commands must use absolute binary paths** (`/bin/cat`,
-   `/usr/bin/ssh`, `/usr/bin/apt-get`). Shell builtins and bare command
-   names are rejected (503) by design.
-4. With the `venya` CLI, do **not** pass a `--` separator to `venya run` —
-   it is captured literally into the command string (known quirk).
+3. **Commands must resolve into trusted directories** — use absolute binary
+   paths (`/bin/cat`, `/usr/bin/ssh`, `/usr/bin/apt-get`). Bare names are
+   PATH-resolved and accepted only if they land in a trusted dir; shell
+   builtins are rejected (503) by design.
+4. With the `venya` CLI, a leading `--` separator on `venya run` is consumed
+   (not sent to the executor); venya's own flags (`--secret`,
+   `--executor-id`) must come BEFORE the command — everything after the
+   first command token belongs to the remote command.
 5. Use **IP addresses** for hosts inside commands when instructed —
    sandbox DNS does not resolve site-local hostnames.
 6. **First run after an executor install may time out** (~60 s agent-

@@ -88,7 +88,8 @@ without the operator or the LLM ever touching the target's credentials:
 
 Sandbox notes for the extended demo: commands run in an sbx microVM with
 deny-by-default egress (allowlist on the executor); trusted-path validation
-requires absolute binary paths (`/bin/cat`, `/usr/bin/ssh`) — shell builtins
+requires commands to resolve into trusted directories (absolute paths like
+`/bin/cat`, `/usr/bin/ssh`; bare names are PATH-resolved) — shell builtins
 are rejected by design; the sandbox template must contain the tools you
 invoke (`sshpass` etc.).
 
@@ -105,10 +106,9 @@ invoke (`sshpass` etc.).
 ## Troubleshooting
 
 - `422` on step 1: check the JSON body carries `key_version_id` (required).
-- `503` on step 3: builtins/relative paths in the command — use absolute
-  paths. Do NOT pass a `--` separator to `venya run`; it is captured
-  literally into the command string (known quirk, ticketed) and can trip
-  the command validator.
+- `503` on step 3: builtins/unresolvable commands — use absolute trusted
+  paths. A leading `--` separator on `venya run` is consumed by the CLI and
+  is safe to pass (as the step-3 example does).
 - **First run times out** ("read operation timed out") on a freshly
   installed executor: the first sandbox create pulls the agent template
   (~60 s+) and can exceed the client read timeout while the command

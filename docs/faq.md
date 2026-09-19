@@ -24,8 +24,9 @@ per-command attribution. See the README's "Who Is Venya For?".
 
 **Can the AI agent extract secrets by crafting clever commands?**
 The agent never receives plaintext: wrapped material routes server →
-executor, unwraps only inside the sbx sandbox as a tmpfs file
-(`/run/secrets/venya/<id>`), and all stdout/stderr pass a Rust redaction
+executor, is unwrapped host-side by the executor daemon into a per-session
+tmpfs file, and is exposed inside the sbx sandbox at
+`/run/secrets/venya/<id>`; all stdout/stderr pass a Rust redaction
 filter that replaces secret material with `[REDACTED:...]` before it
 returns. A command that `cat`s the secret demonstrates the filter, not a
 bypass (see the [alpha demo](alpha-demo.md)). Exfiltration over the network
@@ -68,8 +69,10 @@ workstation installer prints the exact commands if your user cannot reach
 `/dev/hidraw*`.
 
 **Can I use passwords or TOTP?**
-No. There is no password pathway for humans — that is the point. Lost key =
-the one-time recovery code (printed at enrollment) or admin re-enrollment.
+No. There is no password pathway for humans — that is the point. Lost key:
+the first admin has a one-time recovery code (printed once at `venya init`);
+all other users are restored by admin re-enrollment
+(`venya admin re-enroll <user>`).
 
 **Why do sessions expire so aggressively?**
 Because an LLM client holds the session token. Short idle windows and a hard
@@ -79,9 +82,11 @@ always means a human touching a physical key.
 ## Deployment
 
 **What platforms are supported?**
-Ubuntu 24.04 LTS is the tested server target; workstations are Linux
-(macOS/Windows CLI support is tracked, not shipped). Python 3.14 is pinned
-and provisioned automatically — you do not install it.
+Ubuntu 24.04 LTS is the tested server/executor target. Workstation CLI:
+Linux and macOS (install-venya-cli.sh), and Windows 10 1903+/11
+(install-venya-cli.ps1, machine-wide, admin-run; FIDO2 ceremonies go
+through the Windows platform API and need an interactive desktop session).
+Python 3.14 is pinned and provisioned automatically — you do not install it.
 
 **Can Venya run air-gapped?**
 Not turnkey yet. Full offline installation is a tracked beta goal; the
