@@ -773,3 +773,50 @@ class TestWindowsErrorTranslation:
         assert "already registered" in str(exc_info.value)
         mock_list.assert_not_called()
         mock_ctap2.assert_not_called()
+
+
+class TestWrapAttestationResponse:
+    """_wrap_attestation_response must read the REAL fido2 2.x AttestationResponse.
+
+    Ticket fido2-pin-only-attestation-attributeerror: the clientPin-only
+    registration path (_get_credential_pin_only) wrapped ctap2.make_credential's
+    raw AttestationResponse by reading response.credential_id /
+    response.attestation_object -- attributes that DO NOT EXIST on fido2 2.x
+    AttestationResponse (it exposes fmt/auth_data/att_stmt). -> AttributeError on
+    the primary Linux/macOS enrollment path for clientPin keys (TrustKey T120,
+    YubiKey). The assertion twin (_format_assertion_response) was already fixed;
+    this is the attestation twin. Masked because no test drove the real device
+    shape (mocks carried the imagined attributes). Real library objects here.
+    """
+
+    def test_sources_credential_id_and_attestation_object_from_real_shape(self):
+        from types import SimpleNamespace
+
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from fido2.cose import ES256
+        from fido2.webauthn import AttestationObject, AttestedCredentialData, AuthenticatorData
+
+        cred_id = b"\xaa" * 32
+        priv = ec.generate_private_key(ec.SECP256R1())
+        cose = ES256.from_cryptography_key(priv.public_key())
+        cred_data = AttestedCredentialData.create(b"\x00" * 16, cred_id, cose)
+        auth_data = AuthenticatorData.create(
+            b"\x11" * 32,
+            AuthenticatorData.FLAG.UP | AuthenticatorData.FLAG.AT,
+            0,
+            credential_data=cred_data,
+        )
+        # Mimic the real AttestationResponse container: fmt/auth_data/att_stmt ONLY.
+        response = SimpleNamespace(fmt="packed", auth_data=auth_data, att_stmt={})
+
+        # Bug premise: the real shape has NO .credential_id/.attestation_object --
+        # exactly what the pre-fix code read -> AttributeError.
+        assert not hasattr(response, "credential_id")
+        assert not hasattr(response, "attestation_object")
+
+        wrapper = Fido2Auth._wrap_attestation_response(response, client_data=b"cd")
+        ar = wrapper.auth_response
+        assert ar.credential_id == cred_id  # bytes, from auth_data.credential_data
+        assert bytes(ar.attestation_object) == bytes(AttestationObject.create("packed", auth_data, {}))
+        assert ar.client_data == b"cd"
+        assert wrapper.transports is None
