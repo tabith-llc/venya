@@ -122,8 +122,9 @@ under ticket `cli-ca-dir-default-mismatch` — pre-fix CLIs defaulted to a nonex
 The examples below pass it explicitly anyway — harmless and version-independent.
 
 ```bash
-# Encrypted export of the CA key (prompts for a passphrase — ⚠ the prompt currently
-# ECHOES input, ticket export-ca-key-echoed-passphrase; prefer a private terminal):
+# Encrypted export of the CA key (prompts for a passphrase, hidden input —
+# fixed 2026-09-19 under ticket export-ca-key-echoed-passphrase; pre-fix CLIs
+# ECHOED the prompt):
 venya admin export-ca-key --output /secure/venya-ca.key.enc --ca-dir /var/lib/venya/ca
 
 # Shamir K-of-N split (writes share-01..share-NN):
@@ -245,7 +246,7 @@ preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scop
 - `executor-cert-rotation-erofs` (H) — auto-rotation cannot persist on deployed units (§1)
 - `cli-ca-dir-default-mismatch` — FIXED 2026-09-19 (default now `/var/lib/venya/ca`; pre-fix CLIs need explicit `--ca-dir`, §5)
 - `shamir-combine-no-threshold-verification` (M) — verify pairing after shares-restore (§5)
-- `export-ca-key-echoed-passphrase` (M) — echoed passphrase prompt (§5)
+- `export-ca-key-echoed-passphrase` — FIXED 2026-09-19 (all secret prompts now getpass; pre-fix CLIs echoed)
 - `executor-dead-rotation-config` (L) — `revocation_poll_seconds` / `rotation_days` are inert (§4)
 - `root-ca-key-plaintext-at-rest` — root CA key unencrypted at rest (§0)
 - `executor-ero-fs-crash-loop-on-empty-token` (H) — never deploy an executor without an install-time token (§3)
