@@ -291,6 +291,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [Alpha Demo Guide](docs/alpha-demo.md) | 5-minute end-to-end demo |
 | [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md) | A-Z validation from clean hypervisor to MCP use-a-secret proof |
 | [Installation Guide](docs/installation.md) | Full deployment instructions |
+| [CLI Reference](docs/cli-reference.md) | Every `venya` command and argument — generated from the parser, test-enforced against drift |
 | [Architecture](docs/architecture.md) | Technical deep dive |
 | [FAQ](docs/faq.md) | Frequently asked questions |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy + safe harbor |
