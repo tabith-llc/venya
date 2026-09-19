@@ -404,3 +404,68 @@ class TestB64Decode:
             _b64_decode("QQ!QQ")
         with pytest.raises(ValueError):
             _b64_decode("QQ!Q")
+
+
+class TestFinishAuthenticationActiveGate:
+    """Fix B: the DB is authoritative for is_active. A credential soft-deleted in
+    the DB must NOT authenticate even while still cached in the per-process
+    in-memory store (the stale-cache scenario; also the future-HA case where a
+    DELETE lands on another core). FAIL-CLOSED gate. The sign_count persist stays
+    fail-open (separate deferred fido2-counter-persist-fail-closed decision).
+    Real SQLite -- a mock DB read for an authz gate would be circular."""
+
+    def _real_manager(self, tmp_path, cred_id, cose_key_bytes):
+        from core.engine.backend import Backend, BackendConfig
+        from core.engine.encryption import KEK_SIZE
+        from core.iam.models import Base, WebAuthnCredential
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        db_path = tmp_path / "fido2.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(bind=engine)
+        s = SessionLocal()
+        s.add(
+            WebAuthnCredential(
+                user_id="u1", credential_id=cred_id, public_key=cose_key_bytes, sign_count=0, is_active=True
+            )
+        )
+        s.commit()
+        s.close()
+        backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=b"k" * KEK_SIZE))
+        backend._engine = engine
+        backend._session_factory = SessionLocal
+        manager = Fido2Manager(rp_id=RP_ID, rp_name="Venya", backend=backend)
+        return manager, SessionLocal
+
+    def test_active_credential_authenticates(self, tmp_path, es256_keypair, cose_key_bytes):
+        private_key, _ = es256_keypair
+        cred_id = b"\xdd" * 32
+        manager, _ = self._real_manager(tmp_path, cred_id, cose_key_bytes)
+        challenge_id, _ = manager.start_authentication(user_id="u1")
+        raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+        response = _build_assertion_response(cred_id, private_key, raw, counter=1)
+        result = manager.finish_authentication(challenge_id, response)
+        assert result["user_id"] == "u1"
+
+    def test_db_inactive_credential_rejected_even_if_cached(self, tmp_path, es256_keypair, cose_key_bytes):
+        from core.iam.models import WebAuthnCredential
+
+        private_key, _ = es256_keypair
+        cred_id = b"\xdd" * 32
+        manager, SessionLocal = self._real_manager(tmp_path, cred_id, cose_key_bytes)
+        # Simulate a DELETE that soft-deactivated the DB row but did NOT evict the
+        # per-process store (fix A's job; B is the authoritative belt-and-suspenders).
+        s = SessionLocal()
+        row = s.query(WebAuthnCredential).filter(WebAuthnCredential.credential_id == cred_id).one()
+        row.is_active = False
+        s.commit()
+        s.close()
+        assert manager.store.get_credential(cred_id) is not None  # still cached
+
+        challenge_id, _ = manager.start_authentication(user_id="u1")
+        raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+        response = _build_assertion_response(cred_id, private_key, raw, counter=1)
+        with pytest.raises(ValueError, match="Credential not found"):
+            manager.finish_authentication(challenge_id, response)

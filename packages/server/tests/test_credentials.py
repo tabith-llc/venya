@@ -389,7 +389,7 @@ class TestCredentialRemove:
 
     def test_remove_success(self):
         """Should soft-delete credential and return removed=True."""
-        mock_cred = SimpleNamespace(id=5, is_active=True)
+        mock_cred = SimpleNamespace(id=5, is_active=True, credential_id=b"cred-5-bytes")
         active_creds = [SimpleNamespace(id=1, is_active=True), mock_cred]
 
         db = MagicMock()
@@ -631,3 +631,45 @@ class TestCredentialList:
         assert resp.status_code == 200
         data = resp.json()
         assert data["credentials"] == []
+
+
+class TestCredentialRemoveEviction:
+    """DELETE /credentials/{id} must evict the credential from the in-memory auth
+    store. finish_authentication reads the per-process store (loaded once at
+    startup), NOT the DB, so a soft-delete alone leaves the removed credential
+    valid until a restart. Ticket credential-removal-store-eviction (fix A)."""
+
+    def test_remove_evicts_from_fido2_store(self):
+        from server.fido2.manager import Fido2Manager, StoredCredential
+
+        cred_bytes = b"\xaa" * 32
+        fm = Fido2Manager(rp_id="localhost", rp_name="Venya")
+        fm.store.store_credential(StoredCredential(user_id="user1", credential_id=cred_bytes, public_key=b"k"))
+        assert fm.store.get_credential(cred_bytes) is not None  # precondition
+
+        db = MagicMock()
+
+        def _query(model):
+            q = MagicMock()
+            if model.__name__ == "ElevationToken":
+                q.filter.return_value.first.return_value = SimpleNamespace(id=1)
+            else:  # WebAuthnCredential
+                q.filter.return_value.first.return_value = SimpleNamespace(
+                    id=1, user_id="user1", credential_id=cred_bytes, is_active=True
+                )
+                q.filter.return_value.with_for_update.return_value.all.return_value = [
+                    SimpleNamespace(id=1),
+                    SimpleNamespace(id=2),
+                ]
+            return q
+
+        db.query.side_effect = _query
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(fido2_manager=fm, backend=backend, auth_user="user1")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.delete("/api/v1/credentials/1", headers={"X-Elevation-Token": "tok"})
+        assert resp.status_code == 200, resp.text
+        # THE FIX: store evicted, so the credential stops working immediately.
+        assert fm.store.get_credential(cred_bytes) is None

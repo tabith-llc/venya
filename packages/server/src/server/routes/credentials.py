@@ -318,8 +318,17 @@ async def credentials_remove(
             )
 
         # Soft-delete (under lock)
+        cred_bytes = cred.credential_id  # capture before commit (expire_on_commit refresh)
         cred.is_active = False
         db.commit()
+
+        # Evict from the in-memory auth store so the credential stops working
+        # IMMEDIATELY. finish_authentication reads the per-process store (loaded
+        # once at startup), not the DB, so a soft-delete alone leaves the removed
+        # credential valid until a restart. remove_credential is keyed on raw bytes.
+        fido2_manager = getattr(request.app.state, "fido2_manager", None)
+        if fido2_manager is not None and cred_bytes is not None:
+            fido2_manager.remove_credential(cred_bytes)
 
         logger.info("User %s removed credential ID %d", user_id, credential_id)
 
