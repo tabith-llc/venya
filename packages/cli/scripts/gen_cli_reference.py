@@ -141,7 +141,7 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
         ),
     ],
     ("admin", "key-version", "revoke"): [
-        (["admin", "key-version", "revoke"], "revoke the current key version"),
+        (["admin", "key-version", "revoke", "3"], "revoke a key version by ID (compromise path; irreversible)"),
     ],
     ("admin", "key-version", "rotate-status"): [
         (["admin", "key-version", "rotate-status"], "progress of the running rotation job"),
