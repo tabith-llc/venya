@@ -1425,98 +1425,24 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
 
         print("Please touch your security key to register the credential...")
 
-        # Step 3: Perform WebAuthn registration
-        from fido2.client import DefaultClientDataCollector, verify_rp_id
-        from fido2.ctap import CtapError
-        from fido2.webauthn import (
-            PublicKeyCredentialDescriptor,
-        )
+        # Steps 3+4: Perform WebAuthn registration and format the response —
+        # routed through the shared Fido2Auth machinery exactly like cmd_enroll:
+        # platform factory on Windows (WindowsClient), raw CTAP path elsewhere,
+        # server-URL origin for the client-data collector, real-shape formatter.
+        # The duplicated inline ceremony that lived here produced three
+        # independent platform-agnostic bugs (.auth_response AttributeError;
+        # no bearer token on the elevation calls; hardcoded https://localhost
+        # origin -> rp_id verification -> BAD_REQUEST, found physically on
+        # win11) — deleted, not patched (option-B ruling 2026-09-19).
+        from .fido2_client import Fido2Auth, Fido2ClientError
 
-        from .fido2_client import (
-            Fido2Auth,
-            _b64_decode_id,
-            _make_webauthn_client,
-        )
-
-        challenge = _b64_decode_id(options["challenge"])
-        user_id = _b64_decode_id(options["user"]["id"])
-
-        pub_key_cred_params = []
-        for param in options.get("pubKeyCredParams", []):
-            pub_key_cred_params.append(
-                {
-                    "type": param.get("type", "public-key"),
-                    "alg": param.get("alg"),
-                }
-            )
-
-        exclude_credentials = []
-        for cred in options.get("excludeCredentials", []):
-            if "id" in cred:
-                cred_id = _b64_decode_id(cred["id"])
-                exclude_credentials.append(
-                    PublicKeyCredentialDescriptor(
-                        type=cred.get("type", "public-key"),
-                        id=cred_id,
-                        transports=cred.get("transports"),
-                    )
-                )
-
-        public_key = {
-            "rp": options.get("rp", {}),
-            "user": {
-                "id": user_id,
-                "name": options["user"].get("name", ""),
-                "display_name": options["user"].get("displayName", ""),
-            },
-            "challenge": challenge,
-            "pubKeyCredParams": pub_key_cred_params,
-            "timeout": options.get("timeout", 60000),
-            "excludeCredentials": exclude_credentials or None,
-            "attestation": options.get("attestation", "none"),
-        }
-
+        fido2 = Fido2Auth(client.config.server_url)
         try:
-            collector = DefaultClientDataCollector("https://localhost", verify_rp_id)
-            # Factory: WindowsClient (platform API, no enumeration) on win32;
-            # raw Fido2Client over the first HID device elsewhere. Raises
-            # Fido2NotFoundError (non-win32, no device) or Fido2ClientError
-            # (win32, platform API unavailable).
-            webauthn_client = _make_webauthn_client(collector)
-            max_pin_retries = 3
-            for attempt in range(max_pin_retries):
-                try:
-                    credential = webauthn_client.make_credential(public_key)
-                    break
-                except CtapError as e:
-                    if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
-                        if attempt < max_pin_retries - 1:
-                            continue
-                        raise APIClientError(f"PIN incorrect after {max_pin_retries} attempts") from e
-                    if e.code == CtapError.ERR.PIN_BLOCKED:
-                        raise APIClientError("Security key PIN is blocked.") from e
-                    raise
-        except OSError as e:
-            err_str = str(e).lower()
-            if "fido" in err_str or "device" in err_str or "usb" in err_str or "no such" in err_str:
-                raise APIClientError(f"No FIDO2 device found: {e}") from e
-            if "time" in err_str or "timeout" in err_str:
-                raise APIClientError(f"Registration timed out: {e}") from e
+            request_options = fido2._build_registration_options(options)
+            credential = fido2._get_credential(request_options, timeout=60.0)
+        except Fido2ClientError as e:
             raise APIClientError(f"FIDO2 error: {e}") from e
-        except ValueError as e:
-            err_msg = str(e).lower()
-            if "user" in err_msg or "presence" in err_msg or "touch" in err_msg:
-                raise APIClientError("Please touch your security key") from e
-            raise APIClientError(f"FIDO2 error: {e}") from e
-
-        # Step 4: Format credential response — shared formatter handles both the
-        # modern RegistrationResponse returned by Fido2Client/WindowsClient
-        # make_credential in fido2 2.x and the legacy CredentialSelection shape.
-        # (The previous inline `credential.auth_response` access was dead-on-
-        # arrival against the real library: RegistrationResponse has no
-        # auth_response attribute — AttributeError on every platform, masked in
-        # unit tests by a legacy-shaped MagicMock.)
-        cred_response = Fido2Auth._format_credential_response(credential)
+        cred_response = fido2._format_credential_response(credential)
 
         # Step 5: Complete registration
         result = client.post(
