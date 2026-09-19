@@ -96,6 +96,37 @@ def run_command(args: Any) -> int:
         client.close()
 
 
+def _win_ceremony_hint(kind: str) -> str | None:
+    """Windows platform-dialog guidance (ticket cli-windows-ceremony-guidance-ux).
+
+    On Windows the OS-drawn dialogs own PIN/touch — and when no key is attached
+    they wait for INSERTION. Terminal text written for the raw-CTAP path
+    ("touch your key") contradicts what the operator sees, and dual-key flows
+    (credential add: registered key for elevation, then the NEW key for
+    registration) need step-scoped guidance. Returns the win32 hint for the
+    ceremony kind ("assertion" | "registration" | "credential-add"), or None on
+    other platforms so POSIX output stays byte-identical (truth-table tested).
+    """
+    if sys.platform != "win32":
+        return None
+    if kind == "assertion":
+        return (
+            "Windows: a security dialog will open — use your REGISTERED key "
+            "(PIN and touch happen in the dialog, not this terminal). If it asks "
+            "you to insert a key, plug in the registered one."
+        )
+    if kind == "registration":
+        return (
+            "Windows: a security dialog will open — INSERT the key you are "
+            "enrolling when asked (PIN and touch happen in the dialog)."
+        )
+    return (
+        "Windows: TWO dialogs will open, in order — FIRST verify with your "
+        "REGISTERED key (elevation), THEN insert the NEW key you are enrolling "
+        "when the registration dialog opens (about 60 s total)."
+    )
+
+
 def cmd_init(client: APIClient, args: Any) -> int:
     """Bootstrap the core with mandatory FIDO2 enrollment.
 
@@ -143,6 +174,9 @@ def cmd_init(client: APIClient, args: Any) -> int:
 
         print(f"Starting core initialization for user '{args.user_id}'...")
         print("Please insert your security key when prompted.\n")
+        _hint = _win_ceremony_hint("registration")
+        if _hint:
+            print(_hint)
 
         result = fido2.register(user_id=args.user_id, timeout=60.0)
 
@@ -1253,10 +1287,13 @@ def cmd_credential_list(client: APIClient, args: Any) -> int:
         for c in credentials:
             rows.append(
                 [
-                    c.get("id", ""),
-                    c.get("label") or "-",
-                    c.get("created_at") or "-",
-                    c.get("last_used_at") or "-",
+                    # Server returns the DB id as int; table cells must be str
+                    # before the len() width pass below (TypeError otherwise —
+                    # found physically on Windows, broken on every platform).
+                    str(c.get("id", "")),
+                    str(c.get("label") or "-"),
+                    str(c.get("created_at") or "-"),
+                    str(c.get("last_used_at") or "-"),
                 ]
             )
 
@@ -1288,19 +1325,17 @@ def _elevate(client: APIClient) -> str:
     Raises:
         APIClientError: If elevation fails.
     """
-    from .fido2_client import (
-        Fido2Auth,
-        Fido2ClientError,
-    )
-
-    fido2 = Fido2Auth(client.config.server_url)
-
     try:
-        # Step 1: Get elevation challenge
-        challenge_result = fido2._post("/api/v1/auth/elevate/challenge", {})
+        # Step 1: Get elevation challenge. MUST go through the APIClient: the
+        # route requires the session bearer token (Depends(get_current_user)),
+        # and Fido2Auth._post sends no Authorization header — pre-fix every
+        # elevation died 401 "Missing authentication token" on every platform
+        # (found physically on win11 during the elevation acceptance run;
+        # unit tests had only ever exercised a mocked _post).
+        challenge_result = client.post("/api/v1/auth/elevate/challenge", json={})
         challenge_id = challenge_result["challenge_id"]
         options = challenge_result["options"]
-    except Fido2ClientError as e:
+    except APIClientError as e:
         raise APIClientError(f"Elevation challenge failed: {e}") from e
 
     # Step 2: Build request options
@@ -1387,16 +1422,17 @@ def _elevate(client: APIClient) -> str:
     # inline formatter used non-existent AssertionSelection.assertions/.client_data).
     response = fido2._format_assertion_response(assertion)
 
-    # Step 5: Submit assertion to get elevation token
+    # Step 5: Submit assertion to get elevation token (APIClient — bearer
+    # token required, same reason as step 1)
     try:
-        assert_result = fido2._post(
+        assert_result = client.post(
             "/api/v1/auth/elevate/assert",
-            {
+            json={
                 "challenge_id": challenge_id,
                 "response": response,
             },
         )
-    except Fido2ClientError as e:
+    except APIClientError as e:
         raise APIClientError(f"Elevation assertion failed: {e}") from e
 
     return assert_result["elevation_token"]
@@ -1409,6 +1445,9 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
 
         # Step 1: Elevate
         print("Re-authenticating with security key for elevation...")
+        _hint = _win_ceremony_hint("credential-add")
+        if _hint:
+            print(_hint)
         elevation_token = _elevate(client)
         print("Elevation successful.")
 
@@ -1423,112 +1462,24 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
 
         print("Please touch your security key to register the credential...")
 
-        # Step 3: Perform WebAuthn registration
-        from fido2.client import DefaultClientDataCollector, Fido2Client, verify_rp_id
-        from fido2.ctap import CtapError
-        from fido2.hid import list_devices
-        from fido2.webauthn import (
-            PublicKeyCredentialDescriptor,
-        )
+        # Steps 3+4: Perform WebAuthn registration and format the response —
+        # routed through the shared Fido2Auth machinery exactly like cmd_enroll:
+        # platform factory on Windows (WindowsClient), raw CTAP path elsewhere,
+        # server-URL origin for the client-data collector, real-shape formatter.
+        # The duplicated inline ceremony that lived here produced three
+        # independent platform-agnostic bugs (.auth_response AttributeError;
+        # no bearer token on the elevation calls; hardcoded https://localhost
+        # origin -> rp_id verification -> BAD_REQUEST, found physically on
+        # win11) — deleted, not patched (option-B ruling 2026-09-19).
+        from .fido2_client import Fido2Auth, Fido2ClientError
 
-        from .fido2_client import (
-            CliInteraction,
-            Fido2NotFoundError,
-            _b64_decode_id,
-            _b64url_encode,
-            _serialize_auth_data,
-            _serialize_client_data,
-        )
-
-        challenge = _b64_decode_id(options["challenge"])
-        user_id = _b64_decode_id(options["user"]["id"])
-
-        pub_key_cred_params = []
-        for param in options.get("pubKeyCredParams", []):
-            pub_key_cred_params.append(
-                {
-                    "type": param.get("type", "public-key"),
-                    "alg": param.get("alg"),
-                }
-            )
-
-        exclude_credentials = []
-        for cred in options.get("excludeCredentials", []):
-            if "id" in cred:
-                cred_id = _b64_decode_id(cred["id"])
-                exclude_credentials.append(
-                    PublicKeyCredentialDescriptor(
-                        type=cred.get("type", "public-key"),
-                        id=cred_id,
-                        transports=cred.get("transports"),
-                    )
-                )
-
-        public_key = {
-            "rp": options.get("rp", {}),
-            "user": {
-                "id": user_id,
-                "name": options["user"].get("name", ""),
-                "display_name": options["user"].get("displayName", ""),
-            },
-            "challenge": challenge,
-            "pubKeyCredParams": pub_key_cred_params,
-            "timeout": options.get("timeout", 60000),
-            "excludeCredentials": exclude_credentials or None,
-            "attestation": options.get("attestation", "none"),
-        }
-
+        fido2 = Fido2Auth(client.config.server_url)
         try:
-            devices = list(list_devices())
-            if not devices:
-                raise Fido2NotFoundError("No FIDO2 device found")
-            collector = DefaultClientDataCollector("https://localhost", verify_rp_id)
-            interaction = CliInteraction()
-            webauthn_client = Fido2Client(devices[0], collector, user_interaction=interaction)
-            max_pin_retries = 3
-            for attempt in range(max_pin_retries):
-                try:
-                    credential = webauthn_client.make_credential(public_key)
-                    break
-                except CtapError as e:
-                    if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
-                        if attempt < max_pin_retries - 1:
-                            continue
-                        raise APIClientError(f"PIN incorrect after {max_pin_retries} attempts") from e
-                    if e.code == CtapError.ERR.PIN_BLOCKED:
-                        raise APIClientError("Security key PIN is blocked.") from e
-                    raise
-        except OSError as e:
-            err_str = str(e).lower()
-            if "fido" in err_str or "device" in err_str or "usb" in err_str or "no such" in err_str:
-                raise APIClientError(f"No FIDO2 device found: {e}") from e
-            if "time" in err_str or "timeout" in err_str:
-                raise APIClientError(f"Registration timed out: {e}") from e
+            request_options = fido2._build_registration_options(options)
+            credential = fido2._get_credential(request_options, timeout=60.0)
+        except Fido2ClientError as e:
             raise APIClientError(f"FIDO2 error: {e}") from e
-        except ValueError as e:
-            err_msg = str(e).lower()
-            if "user" in err_msg or "presence" in err_msg or "touch" in err_msg:
-                raise APIClientError("Please touch your security key") from e
-            raise APIClientError(f"FIDO2 error: {e}") from e
-
-        # Step 4: Format credential response
-        auth_response = credential.auth_response
-        cred_id = auth_response.credential_id
-        auth_data_bytes = auth_response.auth_data
-        attestation_object = auth_response.attestation_object
-
-        cred_response = {
-            "id": _b64url_encode(cred_id),
-            "rawId": _b64url_encode(cred_id),
-            "response": {
-                "clientDataJSON": _b64url_encode(_serialize_client_data(auth_response.client_data)),
-                "authenticatorData": _b64url_encode(_serialize_auth_data(auth_data_bytes)),
-                "attestationObject": _b64url_encode(attestation_object),
-                "transports": auth_response.transports or [],
-            },
-            "type": "public-key",
-            "clientExtensionResults": {},
-        }
+        cred_response = fido2._format_credential_response(credential)
 
         # Step 5: Complete registration
         result = client.post(
@@ -1565,6 +1516,9 @@ def cmd_credential_remove(client: APIClient, args: Any) -> int:
 
         # Step 1: Elevate
         print("Re-authenticating with security key for elevation...")
+        _hint = _win_ceremony_hint("assertion")
+        if _hint:
+            print(_hint)
         elevation_token = _elevate(client)
         print("Elevation successful.")
 
@@ -1599,6 +1553,9 @@ def cmd_enroll(client: APIClient, args: Any) -> int:
         fido2 = Fido2Auth(client.config.server_url)
         print("Starting enrollment...")
         print("Please insert/touch your security key when prompted.\n")
+        _hint = _win_ceremony_hint("registration")
+        if _hint:
+            print(_hint)
         start = client.post("/api/v1/enroll/browser/start", json={"enrollment_token": token})
         request_options = fido2._build_registration_options(start["options"])
         credential = fido2._get_credential(request_options, timeout=60.0)
@@ -1631,6 +1588,9 @@ def cmd_enroll(client: APIClient, args: Any) -> int:
 def cmd_login(client: APIClient, args: Any) -> int:
     """Authenticate with a security key and store the session token."""
     try:
+        _hint = _win_ceremony_hint("assertion")
+        if _hint:
+            print(_hint)
         result = client.authenticate(user_id=args.user_id)
         print(f"Authenticated as {result['user_id']}.")
         return 0

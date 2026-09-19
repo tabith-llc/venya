@@ -58,13 +58,13 @@ class TestCredentialList:
             json_data={
                 "credentials": [
                     {
-                        "id": "cred_001",
+                        "id": 1,
                         "label": "YubiKey 1",
                         "created_at": "2025-01-01T00:00:00",
                         "last_used_at": "2025-01-15T10:30:00",
                     },
                     {
-                        "id": "cred_002",
+                        "id": 2,
                         "label": None,
                         "created_at": "2025-02-01T00:00:00",
                         "last_used_at": None,
@@ -79,8 +79,17 @@ class TestCredentialList:
         args = MagicMock()
         args.json = False
 
-        result = cmd_credential_list(client, args)
+        import io
+        from contextlib import redirect_stdout
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            result = cmd_credential_list(client, args)
         assert result == 0
+        table = f.getvalue()
+        # Regression: int DB ids (the real server shape) must render, not raise
+        # TypeError in the len() width pass ("object of type 'int' has no len()")
+        assert "1" in table and "YubiKey 1" in table
 
         call_args = mock_http.request.call_args
         assert call_args[0][0] == "GET"
@@ -97,7 +106,7 @@ class TestCredentialList:
             json_data={
                 "credentials": [
                     {
-                        "id": "cred_001",
+                        "id": 1,
                         "label": "YubiKey 1",
                         "created_at": "2025-01-01T00:00:00",
                         "last_used_at": "2025-01-15T10:30:00",
@@ -173,27 +182,30 @@ class TestCredentialAdd:
     """Tests for venya credential add command."""
 
     def _make_mock_credential(self):
-        """Create a mock FIDO2 credential object."""
-        mock_auth_data = MagicMock()
-        mock_auth_data.flags = MagicMock()
-        mock_auth_data.flags.value = 0x41
-        mock_auth_data.counter = 1
-        mock_auth_data.rp_id_hash = b"rp_id_hash_bytes"
+        """Create a mock credential in the REAL fido2 2.x RegistrationResponse
+        shape (.id/.raw_id + .response) that Fido2Client/WindowsClient
+        make_credential actually returns.
 
-        mock_auth_response = MagicMock()
-        mock_auth_response.credential_id = b"cred_id_bytes"
-        mock_auth_response.auth_data = mock_auth_data
-        mock_auth_response.attestation_object = b"attestation_bytes"
-        mock_auth_response.client_data = MagicMock()
-        mock_auth_response.client_data.type = "webauthn.create"
-        mock_auth_response.client_data.challenge = b"test-challenge"
-        mock_auth_response.client_data.origin = "https://localhost"
-        mock_auth_response.client_data.cross_origin = False
-        mock_auth_response.transports = None
+        The legacy CredentialSelection shape (.auth_response) this replaced is
+        never produced by the pinned library — the old MagicMock encoded that
+        lie and masked an AttributeError in cmd_credential_add's formatter
+        (ticket: windows-fido2-requires-elevation, latent cross-platform bug).
+        SimpleNamespace, not MagicMock: hasattr() must discriminate branches.
+        """
+        from types import SimpleNamespace
 
-        mock_credential = MagicMock()
-        mock_credential.auth_response = mock_auth_response
-        return mock_credential
+        client_data = SimpleNamespace(
+            type="webauthn.create",
+            challenge=b"test-challenge",
+            origin="https://localhost",
+            cross_origin=False,
+        )
+        response = SimpleNamespace(
+            attestation_object=b"attestation_bytes",
+            client_data=client_data,
+            transports=None,
+        )
+        return SimpleNamespace(id=None, raw_id=b"cred_id_bytes", response=response)
 
     def test_add_credential_success(self):
         """Add credential succeeds through elevation + registration flow."""
@@ -233,8 +245,8 @@ class TestCredentialAdd:
         mock_credential = self._make_mock_credential()
 
         with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
-            with patch("fido2.hid.list_devices", return_value=["fake_device"]):
-                with patch("fido2.client.Fido2Client") as mock_fido2:
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2:
                     mock_instance = MagicMock()
                     mock_fido2.return_value = mock_instance
                     mock_instance.make_credential.return_value = mock_credential
@@ -287,8 +299,8 @@ class TestCredentialAdd:
         mock_credential = self._make_mock_credential()
 
         with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
-            with patch("fido2.hid.list_devices", return_value=["fake_device"]):
-                with patch("fido2.client.Fido2Client") as mock_fido2:
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2:
                     mock_instance = MagicMock()
                     mock_fido2.return_value = mock_instance
                     mock_instance.make_credential.return_value = mock_credential
@@ -321,7 +333,7 @@ class TestCredentialAdd:
         MagicMock()
 
         with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
-            with patch("fido2.hid.list_devices", return_value=[]):
+            with patch("venya_cli.fido2_client.list_devices", return_value=[]):
                 args = MagicMock()
                 args.label = "YubiKey 2"
                 args.json = False
@@ -356,10 +368,55 @@ class TestCredentialAdd:
         client.close()
         config_file.unlink()
 
+    # ---------------------------------------------------------------------------
+    # cmd_credential_remove tests
+    # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# cmd_credential_remove tests
-# ---------------------------------------------------------------------------
+    def test_add_credential_routes_through_fido2auth_with_server_url(self):
+        """Regression (option-B rewrite, found physically on win11): the inline
+        ceremony hardcoded DefaultClientDataCollector("https://localhost"), so
+        rp_id verification failed -> ClientError.BAD_REQUEST(cause=None) on any
+        real deployment, every platform. cmd_credential_add must route through
+        Fido2Auth bound to the CONFIGURED server URL, like cmd_enroll."""
+        client, config_file = _make_client()
+        client.config.server_url = "https://venya-core-1"
+        mock_http = MagicMock()
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"id": "venya-core-1", "name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        complete_resp = _make_mock_response(
+            status_code=200, json_data={"id": "cred_new_789", "label": "YubiKey 2", "status": "ok"}
+        )
+        mock_http.request.side_effect = [start_resp, complete_resp]
+        client._http = mock_http
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            with patch("venya_cli.fido2_client.Fido2Auth") as mock_auth_cls:
+                mock_auth = MagicMock()
+                mock_auth_cls.return_value = mock_auth
+                mock_auth._get_credential.return_value = MagicMock()
+                mock_auth._format_credential_response.return_value = {"id": "x"}
+                args = MagicMock()
+                args.label = "YubiKey 2"
+                args.json = False
+
+                result = cmd_credential_add(client, args)
+
+        assert result == 0
+        mock_auth_cls.assert_called_once_with("https://venya-core-1")
+        mock_auth._build_registration_options.assert_called_once()
+        client.close()
+        config_file.unlink()
 
 
 class TestCredentialRemove:
@@ -468,5 +525,52 @@ class TestCredentialRemove:
 
             result = cmd_credential_remove(client, args)
             assert result == 1
+        client.close()
+        config_file.unlink()
+
+
+class TestElevateBearerToken:
+    """Regression for _elevate (found PHYSICALLY on win11, 2026-09-19): the
+    /auth/elevate/* routes require the session bearer token
+    (Depends(get_current_user)). Pre-fix _elevate called Fido2Auth._post, which
+    sends no Authorization header, so every elevation on every platform died
+    401 'Missing authentication token'. Both calls must go through APIClient."""
+
+    def test_elevate_sends_authorization_on_both_calls(self):
+        from venya_cli.commands import _elevate
+        from venya_cli.fido2_client import Fido2Auth
+
+        client, config_file = _make_client()
+        client.config.access_token = "test-token-abc"
+        client.config.server_url = "https://venya-core-1"
+        mock_http = MagicMock()
+        challenge_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "chal_1",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp_id": "venya-core-1",
+                    "timeout": 60000,
+                },
+            },
+        )
+        assert_resp = _make_mock_response(status_code=200, json_data={"elevation_token": "elev_tok"})
+        mock_http.request.side_effect = [challenge_resp, assert_resp]
+        client._http = mock_http
+
+        with patch.object(Fido2Auth, "_get_assertion", return_value=MagicMock()):
+            with patch.object(Fido2Auth, "_format_assertion_response", return_value={"id": "x"}):
+                token = _elevate(client)
+
+        assert token == "elev_tok"
+        assert mock_http.request.call_count == 2
+        paths = [c.args[1] for c in mock_http.request.call_args_list]
+        assert paths == ["/api/v1/auth/elevate/challenge", "/api/v1/auth/elevate/assert"]
+        for call in mock_http.request.call_args_list:
+            headers = call.kwargs.get("headers") or {}
+            assert (
+                headers.get("Authorization") == "Bearer test-token-abc"
+            ), f"elevate call to {call.args[1]} missing bearer token"
         client.close()
         config_file.unlink()
