@@ -173,27 +173,30 @@ class TestCredentialAdd:
     """Tests for venya credential add command."""
 
     def _make_mock_credential(self):
-        """Create a mock FIDO2 credential object."""
-        mock_auth_data = MagicMock()
-        mock_auth_data.flags = MagicMock()
-        mock_auth_data.flags.value = 0x41
-        mock_auth_data.counter = 1
-        mock_auth_data.rp_id_hash = b"rp_id_hash_bytes"
+        """Create a mock credential in the REAL fido2 2.x RegistrationResponse
+        shape (.id/.raw_id + .response) that Fido2Client/WindowsClient
+        make_credential actually returns.
 
-        mock_auth_response = MagicMock()
-        mock_auth_response.credential_id = b"cred_id_bytes"
-        mock_auth_response.auth_data = mock_auth_data
-        mock_auth_response.attestation_object = b"attestation_bytes"
-        mock_auth_response.client_data = MagicMock()
-        mock_auth_response.client_data.type = "webauthn.create"
-        mock_auth_response.client_data.challenge = b"test-challenge"
-        mock_auth_response.client_data.origin = "https://localhost"
-        mock_auth_response.client_data.cross_origin = False
-        mock_auth_response.transports = None
+        The legacy CredentialSelection shape (.auth_response) this replaced is
+        never produced by the pinned library — the old MagicMock encoded that
+        lie and masked an AttributeError in cmd_credential_add's formatter
+        (ticket: windows-fido2-requires-elevation, latent cross-platform bug).
+        SimpleNamespace, not MagicMock: hasattr() must discriminate branches.
+        """
+        from types import SimpleNamespace
 
-        mock_credential = MagicMock()
-        mock_credential.auth_response = mock_auth_response
-        return mock_credential
+        client_data = SimpleNamespace(
+            type="webauthn.create",
+            challenge=b"test-challenge",
+            origin="https://localhost",
+            cross_origin=False,
+        )
+        response = SimpleNamespace(
+            attestation_object=b"attestation_bytes",
+            client_data=client_data,
+            transports=None,
+        )
+        return SimpleNamespace(id=None, raw_id=b"cred_id_bytes", response=response)
 
     def test_add_credential_success(self):
         """Add credential succeeds through elevation + registration flow."""
@@ -233,8 +236,8 @@ class TestCredentialAdd:
         mock_credential = self._make_mock_credential()
 
         with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
-            with patch("fido2.hid.list_devices", return_value=["fake_device"]):
-                with patch("fido2.client.Fido2Client") as mock_fido2:
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2:
                     mock_instance = MagicMock()
                     mock_fido2.return_value = mock_instance
                     mock_instance.make_credential.return_value = mock_credential
@@ -287,8 +290,8 @@ class TestCredentialAdd:
         mock_credential = self._make_mock_credential()
 
         with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
-            with patch("fido2.hid.list_devices", return_value=["fake_device"]):
-                with patch("fido2.client.Fido2Client") as mock_fido2:
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2:
                     mock_instance = MagicMock()
                     mock_fido2.return_value = mock_instance
                     mock_instance.make_credential.return_value = mock_credential
@@ -321,7 +324,7 @@ class TestCredentialAdd:
         MagicMock()
 
         with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
-            with patch("fido2.hid.list_devices", return_value=[]):
+            with patch("venya_cli.fido2_client.list_devices", return_value=[]):
                 args = MagicMock()
                 args.label = "YubiKey 2"
                 args.json = False

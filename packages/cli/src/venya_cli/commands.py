@@ -1424,20 +1424,16 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
         print("Please touch your security key to register the credential...")
 
         # Step 3: Perform WebAuthn registration
-        from fido2.client import DefaultClientDataCollector, Fido2Client, verify_rp_id
+        from fido2.client import DefaultClientDataCollector, verify_rp_id
         from fido2.ctap import CtapError
-        from fido2.hid import list_devices
         from fido2.webauthn import (
             PublicKeyCredentialDescriptor,
         )
 
         from .fido2_client import (
-            CliInteraction,
-            Fido2NotFoundError,
+            Fido2Auth,
             _b64_decode_id,
-            _b64url_encode,
-            _serialize_auth_data,
-            _serialize_client_data,
+            _make_webauthn_client,
         )
 
         challenge = _b64_decode_id(options["challenge"])
@@ -1479,12 +1475,12 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
         }
 
         try:
-            devices = list(list_devices())
-            if not devices:
-                raise Fido2NotFoundError("No FIDO2 device found")
             collector = DefaultClientDataCollector("https://localhost", verify_rp_id)
-            interaction = CliInteraction()
-            webauthn_client = Fido2Client(devices[0], collector, user_interaction=interaction)
+            # Factory: WindowsClient (platform API, no enumeration) on win32;
+            # raw Fido2Client over the first HID device elsewhere. Raises
+            # Fido2NotFoundError (non-win32, no device) or Fido2ClientError
+            # (win32, platform API unavailable).
+            webauthn_client = _make_webauthn_client(collector)
             max_pin_retries = 3
             for attempt in range(max_pin_retries):
                 try:
@@ -1511,24 +1507,14 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
                 raise APIClientError("Please touch your security key") from e
             raise APIClientError(f"FIDO2 error: {e}") from e
 
-        # Step 4: Format credential response
-        auth_response = credential.auth_response
-        cred_id = auth_response.credential_id
-        auth_data_bytes = auth_response.auth_data
-        attestation_object = auth_response.attestation_object
-
-        cred_response = {
-            "id": _b64url_encode(cred_id),
-            "rawId": _b64url_encode(cred_id),
-            "response": {
-                "clientDataJSON": _b64url_encode(_serialize_client_data(auth_response.client_data)),
-                "authenticatorData": _b64url_encode(_serialize_auth_data(auth_data_bytes)),
-                "attestationObject": _b64url_encode(attestation_object),
-                "transports": auth_response.transports or [],
-            },
-            "type": "public-key",
-            "clientExtensionResults": {},
-        }
+        # Step 4: Format credential response — shared formatter handles both the
+        # modern RegistrationResponse returned by Fido2Client/WindowsClient
+        # make_credential in fido2 2.x and the legacy CredentialSelection shape.
+        # (The previous inline `credential.auth_response` access was dead-on-
+        # arrival against the real library: RegistrationResponse has no
+        # auth_response attribute — AttributeError on every platform, masked in
+        # unit tests by a legacy-shaped MagicMock.)
+        cred_response = Fido2Auth._format_credential_response(credential)
 
         # Step 5: Complete registration
         result = client.post(

@@ -489,3 +489,156 @@ class TestPostErrorDetailPropagation:
         )
         msg = self._post_and_catch(resp)
         assert msg  # non-empty, Fido2ClientError (not TypeError/AttributeError)
+
+
+class TestWindowsClientFactory:
+    """Truth table for _make_webauthn_client (ticket windows-fido2-requires-elevation).
+
+    win32 routes to the platform WebAuthn API (WindowsClient) with NO device
+    enumeration (raw HID enumeration is admin-only since Windows 10 1903 and a
+    pre-check would emit a false "No FIDO2 devices found" for standard users).
+    When the platform API is unavailable there is deliberately NO raw-path
+    fallback — a fallback would reproduce the silent admin-only failure.
+    Non-win32 behavior must be byte-identical to before the factory existed.
+    """
+
+    @staticmethod
+    def _install_fake_windows_client(monkeypatch, available=True):
+        import sys
+        from types import SimpleNamespace
+
+        wc_cls = MagicMock(name="WindowsClientClass")
+        wc_cls.is_available.return_value = available
+        wc_instance = MagicMock(name="WindowsClientInstance")
+        wc_cls.return_value = wc_instance
+        monkeypatch.setitem(sys.modules, "fido2.client.windows", SimpleNamespace(WindowsClient=wc_cls))
+        return wc_cls, wc_instance
+
+    @staticmethod
+    def _reg_options(auth):
+        return auth._build_registration_options(
+            {
+                "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                "rp": {"name": "Venya"},
+                "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                "timeout": 60000,
+            }
+        )
+
+    @staticmethod
+    def _req_options(auth):
+        return auth._build_request_options(
+            {"challenge": "dGVzdC1jaGFsbGVuZ2U=", "rp_id": "venya-core-1", "timeout": 60000}
+        )
+
+    def test_win32_available_returns_windows_client_without_enumeration(self, monkeypatch):
+        """POSITIVE: win32 + platform API available -> WindowsClient(collector); list_devices never called."""
+        from venya_cli.fido2_client import _make_webauthn_client
+
+        monkeypatch.setattr("sys.platform", "win32")
+        wc_cls, wc_instance = self._install_fake_windows_client(monkeypatch, available=True)
+        collector = MagicMock(name="collector")
+        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
+            "venya_cli.fido2_client.Fido2Client"
+        ) as mock_raw:
+            result = _make_webauthn_client(collector)
+        assert result is wc_instance
+        wc_cls.assert_called_once_with(collector)
+        mock_list.assert_not_called()
+        mock_raw.assert_not_called()
+
+    def test_win32_unavailable_raises_explicit_error_no_raw_fallback(self, monkeypatch):
+        """NEGATIVE (the pinned truth-table case): win32 + is_available() False ->
+        explicit Fido2ClientError, and NO fallback to the raw path — list_devices
+        and Fido2Client must not be touched."""
+        from venya_cli.fido2_client import _make_webauthn_client
+
+        monkeypatch.setattr("sys.platform", "win32")
+        self._install_fake_windows_client(monkeypatch, available=False)
+        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
+            "venya_cli.fido2_client.Fido2Client"
+        ) as mock_raw:
+            with pytest.raises(Fido2ClientError) as exc_info:
+                _make_webauthn_client(MagicMock(name="collector"))
+        assert "1903" in str(exc_info.value)
+        mock_list.assert_not_called()
+        mock_raw.assert_not_called()
+
+    def test_non_win32_enumerates_and_builds_raw_client(self, monkeypatch):
+        """POSITIVE: non-win32 + device present -> Fido2Client(device, collector, user_interaction=...)."""
+        from venya_cli.fido2_client import _make_webauthn_client
+
+        monkeypatch.setattr("sys.platform", "linux")
+        collector = MagicMock(name="collector")
+        with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]) as mock_list, patch(
+            "venya_cli.fido2_client.Fido2Client"
+        ) as mock_raw:
+            result = _make_webauthn_client(collector)
+        mock_list.assert_called_once()
+        assert result is mock_raw.return_value
+        args = mock_raw.call_args
+        assert args[0][0] == "fake_device"
+        assert args[0][1] is collector
+        assert args[1]["user_interaction"] is not None
+
+    def test_non_win32_no_devices_raises_not_found(self, monkeypatch):
+        """NEGATIVE: non-win32 + empty enumeration -> Fido2NotFoundError."""
+        from venya_cli.fido2_client import _make_webauthn_client
+
+        monkeypatch.setattr("sys.platform", "linux")
+        with patch("venya_cli.fido2_client.list_devices", return_value=[]):
+            with pytest.raises(Fido2NotFoundError):
+                _make_webauthn_client(MagicMock(name="collector"))
+
+
+class TestWindowsCeremonyDispatch:
+    """win32 ceremony routing: both ceremony sites go through WindowsClient and
+    never touch raw enumeration, raw Ctap2, or the clientPin-only fallbacks."""
+
+    def test_get_assertion_win32_uses_windows_client_only(self, monkeypatch):
+        monkeypatch.setattr("sys.platform", "win32")
+        _wc_cls, wc_instance = TestWindowsClientFactory._install_fake_windows_client(monkeypatch)
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = TestWindowsClientFactory._req_options(auth)
+        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
+            "venya_cli.fido2_client.Ctap2"
+        ) as mock_ctap2, patch("venya_cli.fido2_client.Fido2Client") as mock_raw:
+            result = auth._get_assertion(options, timeout=10.0)
+        assert result is wc_instance.get_assertion.return_value
+        wc_instance.get_assertion.assert_called_once_with(options.public_key)
+        mock_list.assert_not_called()
+        mock_ctap2.assert_not_called()
+        mock_raw.assert_not_called()
+
+    def test_get_credential_win32_uses_windows_client_only(self, monkeypatch):
+        monkeypatch.setattr("sys.platform", "win32")
+        _wc_cls, wc_instance = TestWindowsClientFactory._install_fake_windows_client(monkeypatch)
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = TestWindowsClientFactory._reg_options(auth)
+        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
+            "venya_cli.fido2_client.Ctap2"
+        ) as mock_ctap2:
+            result = auth._get_credential(options, timeout=10.0)
+        assert result is wc_instance.make_credential.return_value
+        wc_instance.make_credential.assert_called_once_with(options.public_key)
+        mock_list.assert_not_called()
+        mock_ctap2.assert_not_called()
+
+    def test_get_credential_win32_client_error_propagates_without_pin_fallback(self, monkeypatch):
+        """NEGATIVE: on win32 a ClientError from the platform API must propagate —
+        the raw-Ctap2 clientPin fallback is admin-only and must not be attempted."""
+        from fido2.client import ClientError
+
+        monkeypatch.setattr("sys.platform", "win32")
+        _wc_cls, wc_instance = TestWindowsClientFactory._install_fake_windows_client(monkeypatch)
+        wc_instance.make_credential.side_effect = ClientError.ERR.OTHER_ERROR(ValueError("platform boom"))
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = TestWindowsClientFactory._reg_options(auth)
+        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
+            "venya_cli.fido2_client.Ctap2"
+        ) as mock_ctap2:
+            with pytest.raises(ClientError):
+                auth._get_credential(options, timeout=10.0)
+        mock_list.assert_not_called()
+        mock_ctap2.assert_not_called()
