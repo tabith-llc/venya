@@ -16,14 +16,11 @@ Critical configuration fields that must be set before deployment. Missing these 
 
 **Error on missing (empty value; verbatim from `app.py`):**
 ```
-RuntimeError: Recovery code pepper must be configured. Set VENYA_RECOVERY_PEPPER
+RuntimeError: Recovery code pepper must be configured. Set VENYA_RECOVERY_CODE_PEPPER
+in /opt/venya/.env (installer input variable: VENYA_RECOVERY_PEPPER)
 or config.recovery_code_pepper. Recovery codes without a server-side
 pepper are vulnerable to rainbow table attacks.
 ```
-> Note: the message names `VENYA_RECOVERY_PEPPER`, which is the *installer's input
-> variable* — the server itself reads `VENYA_RECOVERY_CODE_PEPPER`. The installer maps
-> one to the correctly-named var when writing `/opt/venya/.env`. (Message correction
-> tracked in ticket `misleading-env-names-in-errors`.)
 
 **Generation:** Use a CSPRNG to generate at least 32 bytes of randomness, encoded as hex or base64:
 ```bash
@@ -44,12 +41,11 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 **Error on missing (production; verbatim from `app.py`):**
 ```
-RuntimeError: VENYA_DB_PASSPHRASE is not set.
+RuntimeError: VENYA_DB__PASSPHRASE is not set.
 Core secrets cannot be encrypted without a passphrase.
-Set the passphrase in your secrets manager and restart.
+Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart
+(installer input variable: VENYA_DB_PASSPHRASE).
 ```
-> Note: same caveat as above — the message names the installer input var; the server
-> reads `VENYA_DB__PASSPHRASE`.
 
 ---
 

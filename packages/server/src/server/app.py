@@ -197,7 +197,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     if not config.debug and config.cors.origins == ["http://localhost"]:
         logger.warning(
             "CORS origins are still default (['http://localhost']) in non-debug mode. "
-            "Update VENYA__CORS__ORIGINS to allow browser clients."
+            "Update VENYA_CORS__ORIGINS to allow browser clients."
         )
 
     # Relay-client mTLS material is functionally mandatory — validated BEFORE
@@ -221,15 +221,17 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     # attacks are viable even in dev — but local DB encryption is a lower risk.
     if not config.debug and not config.db.passphrase:
         raise RuntimeError(
-            "VENYA_DB_PASSPHRASE is not set. "
+            "VENYA_DB__PASSPHRASE is not set. "
             "Core secrets cannot be encrypted without a passphrase. "
-            "Set the passphrase in your secrets manager and restart."
+            "Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart "
+            "(installer input variable: VENYA_DB_PASSPHRASE)."
         )
 
     # Hard failure on missing recovery code pepper — prevents rainbow table attacks
     if not config.recovery_code_pepper:
         raise RuntimeError(
-            "Recovery code pepper must be configured. Set VENYA_RECOVERY_PEPPER "
+            "Recovery code pepper must be configured. Set VENYA_RECOVERY_CODE_PEPPER "
+            "in /opt/venya/.env (installer input variable: VENYA_RECOVERY_PEPPER) "
             "or config.recovery_code_pepper. Recovery codes without a server-side "
             "pepper are vulnerable to rainbow table attacks."
         )
