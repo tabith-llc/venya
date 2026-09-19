@@ -94,3 +94,30 @@ class TestAdminMtlsClientCert:
             APIClient(config_file=tmp_path / "config.json")
 
         mock_client_cls.assert_not_called()
+
+    @patch("venya_cli.api_client.httpx2.Client")
+    def test_has_admin_mtls_true_when_cert_configured(self, mock_client_cls, tmp_path: Path, monkeypatch):
+        """Both env vars set (valid files) -> has_admin_mtls flag is True.
+
+        run_command's headless gate reads this to exempt `admin` from FIDO2.
+        """
+        cert = tmp_path / "admin.crt"
+        key = tmp_path / "admin.key"
+        cert.write_text("dummy cert")
+        key.write_text("dummy key")
+        monkeypatch.setenv("VENYA_ADMIN_CERT", str(cert))
+        monkeypatch.setenv("VENYA_ADMIN_KEY", str(key))
+
+        client = APIClient(config_file=tmp_path / "config.json")
+
+        assert client.has_admin_mtls is True
+
+    @patch("venya_cli.api_client.httpx2.Client")
+    def test_has_admin_mtls_false_when_no_cert(self, mock_client_cls, tmp_path: Path, monkeypatch):
+        """Neither env var set -> has_admin_mtls is False (gate fires normally)."""
+        monkeypatch.delenv("VENYA_ADMIN_CERT", raising=False)
+        monkeypatch.delenv("VENYA_ADMIN_KEY", raising=False)
+
+        client = APIClient(config_file=tmp_path / "config.json")
+
+        assert client.has_admin_mtls is False

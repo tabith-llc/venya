@@ -179,6 +179,12 @@ class APIClient:
                 "VENYA_ADMIN_KEY is set but VENYA_ADMIN_CERT is not. Both are required for admin mTLS."
             )
 
+        # True when both admin-mTLS env vars are set. The file-existence check
+        # below raises if either path is invalid, so a constructed client with
+        # has_admin_mtls=True always has a usable cert. run_command's headless
+        # gate reads this to exempt `admin` from interactive FIDO2.
+        self.has_admin_mtls = bool(cert_path and key_path)
+
         http_kwargs: dict[str, Any] = {
             "base_url": self.config.server_url,
             "timeout": httpx2.Timeout(30.0),
