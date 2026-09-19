@@ -460,17 +460,6 @@ class Fido2Manager:
             "credential_id": base64url_encode(credential.credential_id),
         }
 
-    def get_user_credentials(self, user_id: str) -> list[dict]:
-        """Get all registered credentials for a user."""
-        return [
-            {
-                "credential_id": base64.b64encode(c.credential_id).decode("ascii"),
-                "label": c.label,
-                "sign_count": c.sign_count,
-            }
-            for c in self.store.get_user_credentials(user_id)
-        ]
-
     def remove_credential(self, credential_id: bytes) -> bool:
         """Remove a registered credential."""
         return self.store.remove_credential(credential_id)
