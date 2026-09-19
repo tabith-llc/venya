@@ -609,3 +609,68 @@ class TestAPIClient:
             client2.close()
         finally:
             config_file.unlink()
+
+
+class TestErrorLog:
+    """stderr tee into <config_dir>/venya.log (support-logging feature).
+
+    Truth table: capture works; rotation at 1 MiB; unwritable config dir
+    degrades to no-logging without breaking the CLI; non-zero exit prints the
+    log-path hint.
+    """
+
+    def test_tee_captures_stderr(self, tmp_path, monkeypatch):
+        import sys
+
+        from venya_cli.cli import _install_stderr_tee
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "stderr", sys.stderr)  # register auto-restore
+        log_path = _install_stderr_tee()
+        assert log_path == tmp_path / ".config" / "venya" / "venya.log"
+        print("boom-marker", file=sys.stderr)
+        content = log_path.read_text()
+        assert "boom-marker" in content
+        assert "argv=" in content  # session header
+
+    def test_rotation_at_1mib(self, tmp_path, monkeypatch):
+        import sys
+
+        from venya_cli.cli import _install_stderr_tee
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "stderr", sys.stderr)
+        log_dir = tmp_path / ".config" / "venya"
+        log_dir.mkdir(parents=True)
+        (log_dir / "venya.log").write_bytes(b"x" * (1_048_576 + 1))
+        log_path = _install_stderr_tee()
+        assert (log_dir / "venya.log.1").exists()
+        assert log_path.stat().st_size < 1024  # fresh session header only
+
+    def test_unwritable_config_dir_returns_none_and_keeps_stderr(self, tmp_path, monkeypatch):
+        import sys
+
+        from venya_cli.cli import _install_stderr_tee
+
+        blocker = tmp_path / "blocker"
+        blocker.write_text("i am a file, not a directory")
+        monkeypatch.setenv("HOME", str(blocker))  # mkdir under a FILE path fails
+        monkeypatch.setattr(sys, "stderr", sys.stderr)
+        before = sys.stderr
+        assert _install_stderr_tee() is None
+        assert sys.stderr is before
+
+    def test_nonzero_exit_prints_log_hint(self, tmp_path, monkeypatch, capsys):
+        import sys
+        from unittest.mock import patch
+
+        from venya_cli.cli import main
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(sys, "argv", ["venya", "config", "show"])
+        with patch("venya_cli.commands.run_command", return_value=1):
+            rc = main()
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "error details logged to" in err
+        assert str(tmp_path) in err
