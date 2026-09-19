@@ -139,9 +139,13 @@ venya admin restore-ca-key --mode shares --shares share-01 share-02 --ca-dir /va
 venya admin restore-ca-key --mode backup --backup-file /secure/venya-ca.key.enc --ca-dir /var/lib/venya/ca
 ```
 
-⚠ **Threshold not enforced (ticket `shamir-combine-no-threshold-verification`):**
-restoring with FEWER than `threshold` shares silently reconstructs a CORRUPT key.
-After any shares-restore, verify before trusting it:
+**Threshold + integrity enforcement (fixed 2026-09-19, ticket
+`shamir-combine-no-threshold-verification`):** V2 share files carry the threshold K
+and a checksum — restore with fewer than K shares, corrupt files, or files from
+different splits now fails loudly instead of silently writing a corrupt key.
+PRE-V2 share files (split before the fix) restore with the old unverified behavior
+(the CLI warns) — for those, and as general practice after ANY shares-restore, verify
+before trusting:
 
 ```bash
 # restored ca.key must pair with the surviving ca.crt:
@@ -245,7 +249,7 @@ preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scop
 
 - `executor-cert-rotation-erofs` (H) — auto-rotation cannot persist on deployed units (§1)
 - `cli-ca-dir-default-mismatch` — FIXED 2026-09-19 (default now `/var/lib/venya/ca`; pre-fix CLIs need explicit `--ca-dir`, §5)
-- `shamir-combine-no-threshold-verification` (M) — verify pairing after shares-restore (§5)
+- `shamir-combine-no-threshold-verification` — FIXED 2026-09-19 (V2 shares carry K + checksum; below-threshold/corrupt/mixed sets fail loudly; pre-V2 files restore unverified with a CLI warning — still run the §5 pairing check)
 - `export-ca-key-echoed-passphrase` — FIXED 2026-09-19 (all secret prompts now getpass; pre-fix CLIs echoed)
 - `executor-dead-rotation-config` — FIXED 2026-09-19 (dead fields removed; legacy executor.toml keys still load, ignored)
 - `root-ca-key-plaintext-at-rest` — root CA key unencrypted at rest (§0)

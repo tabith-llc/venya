@@ -12,15 +12,31 @@ with the AES irreducible polynomial (x^8 + x^4 + x^3 + x + 1).
 This allows splitting a secret (byte string) into N shares where
 any K shares can reconstruct it, but fewer than K reveal nothing.
 
+Share format (V2, ticket shamir-combine-no-threshold-verification):
+    id | b"V2" | K | shard(checksum + secret)
+where checksum = sha256(secret)[:4] is shared along the polynomial, so
+combine() can (a) refuse fewer-than-K sets up front and (b) verify the
+reconstruction — pre-V2, a K-1 restore SILENTLY yielded a corrupt secret.
+Legacy shares (id | shard, no marker) still combine with the old UNVERIFIED
+behavior; mixing formats is rejected.
+
 Usage:
     shares = split(b"secret_key_data", threshold=3, shares=5)
     secret = combine(shares[:3])  # any 3 shares work
 """
 
+import hashlib
 import os
 
 # AES irreducible polynomial: x^8 + x^4 + x^3 + x + 1
 _MODULUS = 0x11B
+
+_V2_MAGIC = b"V2"
+_CHECKSUM_LEN = 4
+
+
+def _checksum(secret: bytes) -> bytes:
+    return hashlib.sha256(secret).digest()[:_CHECKSUM_LEN]
 
 
 def _gf256_add(a: int, b: int) -> int:
@@ -81,7 +97,8 @@ def split(secret: bytes, threshold: int, shares: int) -> list[bytes]:
         shares: Total number of shares to create (N).
 
     Returns:
-        List of N shares, each being threshold bytes + 1 (the share ID byte).
+        List of N shares: id byte | b"V2" | K byte | shard bytes, where the
+        sharded payload is sha256(secret)[:4] + secret (see module docstring).
 
     Raises:
         ValueError: If threshold > shares or threshold < 2.
@@ -93,11 +110,13 @@ def split(secret: bytes, threshold: int, shares: int) -> list[bytes]:
     if shares > 255:
         raise ValueError("Maximum 255 shares supported")
 
+    payload = _checksum(secret) + secret
+
     result: list[bytes] = []
 
-    for i in range(len(secret)):
-        # Random polynomial of degree (threshold - 1) with secret[i] as constant term
-        coeffs = [secret[i]]
+    for i in range(len(payload)):
+        # Random polynomial of degree (threshold - 1) with payload[i] as constant term
+        coeffs = [payload[i]]
         for _ in range(threshold - 1):
             coeffs.append(ord(os.urandom(1)))
 
@@ -117,22 +136,26 @@ def split(secret: bytes, threshold: int, shares: int) -> list[bytes]:
         for i, byte_val in enumerate(share):
             transposed[i].append(byte_val)
 
-    # Prepend share ID (1-indexed) to each share
-    return [bytes([i + 1]) + share for i, share in enumerate(transposed)]
+    # V2 wire format: id (1-indexed) | magic | K | shard
+    return [bytes([i + 1]) + _V2_MAGIC + bytes([threshold]) + share for i, share in enumerate(transposed)]
 
 
 def combine(shares: list[bytes]) -> bytes:
     """Reconstruct a secret from shares.
 
     Args:
-        shares: List of at least `threshold` shares. Each share is
-                one byte ID + data bytes.
+        shares: List of shares. Each share is one byte ID + body. V2 bodies
+                (b"V2" + K + shard) get threshold enforcement + integrity
+                verification; legacy bodies (bare shard) reconstruct with the
+                old UNVERIFIED behavior — all shares must be the same format.
 
     Returns:
         The reconstructed secret bytes.
 
     Raises:
-        ValueError: If fewer than 2 shares provided.
+        ValueError: If fewer than 2 shares, duplicate/mismatched IDs or
+            lengths, mixed format versions, fewer than K V2 shares, or a
+            failed integrity check (corrupt shares / wrong split / < K set).
     """
     if len(shares) < 2:
         raise ValueError("At least 2 shares required")
@@ -142,17 +165,42 @@ def combine(shares: list[bytes]) -> bytes:
     if len(ids) != len(shares):
         raise ValueError("Duplicate share IDs")
 
-    # All shares must have the same data length
-    data_len = len(shares[0]) - 1  # Subtract 1 for ID byte
-    for share in shares:
-        if len(share) - 1 != data_len:
+    bodies = [s[1:] for s in shares]
+    v2_flags = [b.startswith(_V2_MAGIC) for b in bodies]
+    if any(v2_flags) and not all(v2_flags):
+        raise ValueError("Mixed share format versions (V2 and legacy) — cannot combine")
+
+    # All shares must have the same body length
+    data_len = len(bodies[0])
+    for body in bodies:
+        if len(body) != data_len:
             raise ValueError("Inconsistent share lengths")
 
-    # Reconstruct each byte position using Lagrange interpolation at x=0
-    # (group by position below)
-    result = []
-    for pos in range(data_len):
-        share_points = [(s[0], s[pos + 1]) for s in shares]
-        result.append(_lagrange_interpolate(share_points, 0))
+    if all(v2_flags):
+        thresholds = {b[2] for b in bodies}
+        if len(thresholds) != 1:
+            raise ValueError("Inconsistent threshold markers across shares")
+        threshold = thresholds.pop()
+        if len(shares) < threshold:
+            raise ValueError(f"Below threshold: at least {threshold} shares required, got {len(shares)}")
+        shard_body = [b[3:] for b in bodies]
+    else:
+        shard_body = bodies
 
-    return bytes(result)
+    # Reconstruct each byte position using Lagrange interpolation at x=0
+    result = []
+    for pos in range(len(shard_body[0])):
+        share_points = [(s[0], shard_body[i][pos]) for i, s in enumerate(shares)]
+        result.append(_lagrange_interpolate(share_points, 0))
+    reconstructed = bytes(result)
+
+    if all(v2_flags):
+        secret = reconstructed[_CHECKSUM_LEN:]
+        if reconstructed[:_CHECKSUM_LEN] != _checksum(secret):
+            raise ValueError(
+                "Integrity check failed — shares are corrupt, truncated, "
+                "or from different splits; refusing to return a wrong secret"
+            )
+        return secret
+
+    return reconstructed

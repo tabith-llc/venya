@@ -2559,6 +2559,13 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
                 return 1
             shares.append(bytes([share_id]) + data)
 
+        if shares and not shares[0][1:].startswith(b"V2"):
+            print(
+                "warning: pre-V2 share files — threshold and integrity cannot be verified; "
+                "after restore, validate ca.key against ca.crt before trusting it",
+                file=sys.stderr,
+            )
+
         try:
             reconstructed = combine(shares)
         except ValueError as e:
