@@ -200,6 +200,14 @@ class TestHeartbeatSuccess:
         assert "cert_fingerprint" in json_payload
         assert isinstance(json_payload["cert_fingerprint"], str)
         assert len(json_payload["cert_fingerprint"]) == 64  # SHA-256 hex digest
+        # The fingerprint must be over the DER encoding (matching server ca.py
+        # compute_fingerprint + executor daemon.py), NOT the PEM bytes -- so it
+        # matches the admin-listing fingerprint for the same cert.
+        import hashlib
+
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+        expected = hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+        assert json_payload["cert_fingerprint"] == expected
 
 
 # ---------------------------------------------------------------------------

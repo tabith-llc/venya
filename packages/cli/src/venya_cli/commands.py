@@ -1506,7 +1506,6 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
             return 0
 
         print("Credential added successfully.")
-        print(f"  Credential ID: {result.get('id', '')}")
         print(f"  Label: {result.get('label', label)}")
         print("  Status: ok")
         return 0
@@ -2179,11 +2178,17 @@ def executor_heartbeat(args: Any) -> int:
         print("Error: server URL not configured. Use --core-url or set config.", file=sys.stderr)
         return 1
 
-    # Compute SHA-256 fingerprint of the certificate
+    # Compute SHA-256 fingerprint of the certificate over its DER encoding --
+    # matching the server (ca.py compute_fingerprint) and executor (daemon.py)
+    # convention. Hashing the PEM bytes produced a value that could never match
+    # the admin-listing fingerprint for the same cert.
     try:
+        from cryptography.hazmat.primitives import serialization
+
         cert_pem = Path(cert_path).read_bytes()
-        x509.load_pem_x509_certificate(cert_pem)
-        fingerprint = hashlib.sha256(cert_pem).hexdigest()
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        der = cert.public_bytes(serialization.Encoding.DER)
+        fingerprint = hashlib.sha256(der).hexdigest()
     except Exception as e:
         print(f"Failed to compute certificate fingerprint: {e}", file=sys.stderr)
         return 1
