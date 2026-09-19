@@ -494,15 +494,17 @@ venya admin key-version deactivate 3  # deactivate a version (existing secrets s
 Revoke a key version
 
 ```
-venya admin key-version revoke
+venya admin key-version revoke <VERSION_ID>
 ```
 
-*Takes no arguments.*
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `VERSION_ID` (positional) | **yes** | string | — | Version ID |
 
 **Examples**
 
 ```bash
-venya admin key-version revoke  # revoke the current key version
+venya admin key-version revoke 3  # revoke a key version by ID (compromise path; irreversible)
 ```
 
 #### `venya admin key-version rotate-status`
