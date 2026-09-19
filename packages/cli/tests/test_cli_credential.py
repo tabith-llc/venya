@@ -482,3 +482,50 @@ class TestCredentialRemove:
             assert result == 1
         client.close()
         config_file.unlink()
+
+
+class TestElevateBearerToken:
+    """Regression for _elevate (found PHYSICALLY on win11, 2026-09-19): the
+    /auth/elevate/* routes require the session bearer token
+    (Depends(get_current_user)). Pre-fix _elevate called Fido2Auth._post, which
+    sends no Authorization header, so every elevation on every platform died
+    401 'Missing authentication token'. Both calls must go through APIClient."""
+
+    def test_elevate_sends_authorization_on_both_calls(self):
+        from venya_cli.commands import _elevate
+        from venya_cli.fido2_client import Fido2Auth
+
+        client, config_file = _make_client()
+        client.config.access_token = "test-token-abc"
+        client.config.server_url = "https://venya-core-1"
+        mock_http = MagicMock()
+        challenge_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "chal_1",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp_id": "venya-core-1",
+                    "timeout": 60000,
+                },
+            },
+        )
+        assert_resp = _make_mock_response(status_code=200, json_data={"elevation_token": "elev_tok"})
+        mock_http.request.side_effect = [challenge_resp, assert_resp]
+        client._http = mock_http
+
+        with patch.object(Fido2Auth, "_get_assertion", return_value=MagicMock()):
+            with patch.object(Fido2Auth, "_format_assertion_response", return_value={"id": "x"}):
+                token = _elevate(client)
+
+        assert token == "elev_tok"
+        assert mock_http.request.call_count == 2
+        paths = [c.args[1] for c in mock_http.request.call_args_list]
+        assert paths == ["/api/v1/auth/elevate/challenge", "/api/v1/auth/elevate/assert"]
+        for call in mock_http.request.call_args_list:
+            headers = call.kwargs.get("headers") or {}
+            assert (
+                headers.get("Authorization") == "Bearer test-token-abc"
+            ), f"elevate call to {call.args[1]} missing bearer token"
+        client.close()
+        config_file.unlink()

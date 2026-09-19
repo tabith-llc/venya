@@ -1291,19 +1291,17 @@ def _elevate(client: APIClient) -> str:
     Raises:
         APIClientError: If elevation fails.
     """
-    from .fido2_client import (
-        Fido2Auth,
-        Fido2ClientError,
-    )
-
-    fido2 = Fido2Auth(client.config.server_url)
-
     try:
-        # Step 1: Get elevation challenge
-        challenge_result = fido2._post("/api/v1/auth/elevate/challenge", {})
+        # Step 1: Get elevation challenge. MUST go through the APIClient: the
+        # route requires the session bearer token (Depends(get_current_user)),
+        # and Fido2Auth._post sends no Authorization header — pre-fix every
+        # elevation died 401 "Missing authentication token" on every platform
+        # (found physically on win11 during the elevation acceptance run;
+        # unit tests had only ever exercised a mocked _post).
+        challenge_result = client.post("/api/v1/auth/elevate/challenge", json={})
         challenge_id = challenge_result["challenge_id"]
         options = challenge_result["options"]
-    except Fido2ClientError as e:
+    except APIClientError as e:
         raise APIClientError(f"Elevation challenge failed: {e}") from e
 
     # Step 2: Build request options
@@ -1390,16 +1388,17 @@ def _elevate(client: APIClient) -> str:
     # inline formatter used non-existent AssertionSelection.assertions/.client_data).
     response = fido2._format_assertion_response(assertion)
 
-    # Step 5: Submit assertion to get elevation token
+    # Step 5: Submit assertion to get elevation token (APIClient — bearer
+    # token required, same reason as step 1)
     try:
-        assert_result = fido2._post(
+        assert_result = client.post(
             "/api/v1/auth/elevate/assert",
-            {
+            json={
                 "challenge_id": challenge_id,
                 "response": response,
             },
         )
-    except Fido2ClientError as e:
+    except APIClientError as e:
         raise APIClientError(f"Elevation assertion failed: {e}") from e
 
     return assert_result["elevation_token"]
