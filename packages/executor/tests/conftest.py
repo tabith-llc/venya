@@ -286,7 +286,6 @@ def executor_config(tmp_path: Path, tmp_ca_dir: Path) -> ExecutorConfig:
             key=str(tmp_path / "executor.key"),
         ),
         cert_rotation=CertificateRotationConfig(
-            rotation_days=30,
             rotate_before_days=3,
         ),
     )
