@@ -49,11 +49,11 @@ CA (`/var/lib/venya/ca/`), an Admin CA with an encrypted key, and an admin
 client certificate (`/etc/venya/admin/`); database migrations; and the
 `venya-core.service` systemd unit.
 
-Key environment variables (all optional except the SHA-256):
+Key environment variables (all optional):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VENYA_TARBALL_SHA256` | (required) | integrity gate |
+| `VENYA_TARBALL_SHA256` | (sidecar fetch) | integrity gate — recommended; if unset, the installer fetches the `.sha256` sidecar from the same origin and aborts on fetch failure or mismatch |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL password |
 | `VENYA_DB_PASSPHRASE` | dev default | server encryption passphrase — set a strong one in any real deployment |
 | `CORE_HOSTNAME` | `$(hostname)` | TLS cert SAN and relay CN base |
@@ -92,9 +92,12 @@ chmod 600 admin-cert/admin.key
 
 ## 3. Install executors
 
-Executors need a single-use enrollment token minted by an admin from the
-workstation (FIDO2 + admin mTLS cert; these operations cannot run on the
-headless core):
+Executors need a single-use enrollment token minted by an admin. With admin
+mTLS enabled (the default), the admin client cert alone authorizes these
+operations — no FIDO2 touch needed — and the cert pair lives on the core
+(`/etc/venya/admin/`), so minting can run on the headless core itself (the
+installer's completion banner shows the exact command) or from any
+workstation holding the cert:
 
 ```bash
 SSL_CERT_FILE=~/.config/venya-ca.crt \
@@ -169,6 +172,14 @@ Installs `venya` (CLI) and `venya-mcp` (MCP server for LLM clients) as
 isolated `uv tool` venvs with shims in `~/.local/bin`. Set
 `VENYA_INSTALL_MCP=no` for CLI-only. If the FIDO2 key is not reachable as
 your user, the installer prints the exact udev/plugdev commands to fix it.
+
+**Windows:** use `install-venya-cli.ps1` from the same release (run as
+Administrator — machine-wide install to `C:\Program Files\Venya`; per-user
+state under `%APPDATA%\venya\`). Uninstall: `uninstall-venya-cli.ps1`.
+FIDO2 ceremonies on Windows go through the platform API and require an
+interactive desktop session; standard (non-admin) users are supported for
+ceremonies. macOS is handled by the same `.sh` installer (IOKit HID — no
+udev rules needed).
 
 Day-one:
 
@@ -276,14 +287,18 @@ procedure exists but is not yet packaged.
   `sudo -H -u venya sbx policy init deny-all` on the executor (the
   installer does this automatically since the 2026-09 fix).
 - `503` on otherwise-valid commands: the executor's trusted-path validation
-  requires absolute binary paths (`/bin/echo`, `/usr/bin/ssh`) — shell
-  builtins and bare command names are rejected by design. Also do not pass a
-  `--` separator to `venya run`: the CLI captures it literally into the
-  command string (known quirk, ticketed).
+  requires commands to resolve into trusted directories (`/usr/bin`,
+  `/usr/sbin`, `/bin`, `/sbin`) — absolute paths like `/bin/echo` always
+  qualify; bare names are resolved via PATH and accepted if they land in a
+  trusted dir; shell builtins are rejected by design. A leading `--`
+  separator on `venya run` is consumed by the CLI (not sent to the
+  executor) and is safe to pass.
 - `Host key verification failed` / TLS failures between components: the CA
   must be provisioned, never verification disabled. Re-fetch
-  `/.well-known/venya-ca.crt` after any core reinstall (every install mints
-  a new CA).
+  `/.well-known/venya-ca.crt` after any core reinstall (the CA is
+  regenerated only if absent — an uninstall or a fresh machine mints a new
+  one; a plain reinstall reuses the existing CA but re-signs the server
+  leaf cert).
 - Admin endpoints return 403: admin mTLS is enforced — pass
   `VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY` from the current core install.
 - Executor relay rejects the core (403 at handshake): the core's relay
