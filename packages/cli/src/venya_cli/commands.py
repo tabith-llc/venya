@@ -2425,8 +2425,8 @@ def cmd_admin_export_ca_key(args: Any) -> int:
     # Prompt for passphrase (twice for confirmation)
     passphrase1 = None
     while passphrase1 is None:
-        passphrase1 = input("Enter passphrase for encrypted key: ")
-        passphrase2 = input("Confirm passphrase: ")
+        passphrase1 = getpass.getpass("Enter passphrase for encrypted key: ")
+        passphrase2 = getpass.getpass("Confirm passphrase: ")
         if passphrase1 != passphrase2:
             print("Passphrases do not match. Try again.")
             passphrase1 = None
@@ -2588,7 +2588,7 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
         iv = encrypted_data[16:32]
         ciphertext = encrypted_data[32:]
 
-        passphrase = input("Enter passphrase to decrypt backup: ")
+        passphrase = getpass.getpass("Enter passphrase to decrypt backup: ")
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
