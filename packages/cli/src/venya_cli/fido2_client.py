@@ -145,6 +145,38 @@ def _make_webauthn_client(collector: DefaultClientDataCollector) -> Any:
     return Fido2Client(devices[0], collector, user_interaction=CliInteraction())
 
 
+# Windows platform WebAuthn (webauthn.dll) HRESULT -> operator-facing message.
+# Kept evidence-driven on purpose: only codes PHYSICALLY OBSERVED on the win11
+# acceptance runs get a pinned message; unmapped codes fall through to the OS's
+# own text with a clear prefix — accurate, never invented.
+_WINDOWS_HRESULT_MESSAGES = {
+    0x8009000F: (  # NTE_EXISTS — observed 2026-09-19, `credential add` with an already-registered key
+        "This security key is already registered for the account. "
+        "Use a different key, or remove the existing credential first."
+    ),
+}
+
+
+def _translate_windows_error(exc: Exception) -> Fido2ClientError:
+    """Convert a WindowsClient ClientError into an accurate, readable message.
+
+    WindowsClient wraps OS failures as ClientError.ERR.OTHER_ERROR(OSError);
+    the HRESULT rides in OSError.winerror (signed). Acceptance requirement:
+    device-absent must read as device-absent — never a privilege error, never
+    a raw tuple like "(<ERR.OTHER_ERROR: 1>, OSError(22, ...))".
+    """
+    cause = getattr(exc, "cause", None)
+    winerror = getattr(cause, "winerror", None)
+    if winerror is not None:
+        hresult = winerror & 0xFFFFFFFF
+        message = _WINDOWS_HRESULT_MESSAGES.get(hresult)
+        if message:
+            return Fido2ClientError(message)
+        detail = getattr(cause, "strerror", None) or cause
+        return Fido2ClientError(f"Windows WebAuthn error: {detail} (HRESULT {hresult:#010x})")
+    return Fido2ClientError(f"Windows WebAuthn error: {exc}")
+
+
 class Fido2Auth:
     """Headless FIDO2/WebAuthn client for CLI authentication.
 
@@ -455,7 +487,7 @@ class Fido2Auth:
                 # The OS owns the PIN/UV dialog on the platform path, and the
                 # raw-Ctap2 clientPin fallbacks below require admin-only
                 # device access — unreachable for standard users by design.
-                raise
+                raise _translate_windows_error(e) from e
             print(
                 f"DEBUG: make_credential high-level exception: {type(e).__name__} code={getattr(e, 'code', None)}",
                 file=sys.stderr,
@@ -665,7 +697,10 @@ class Fido2Auth:
         if sys.platform == "win32":
             # Platform API path: no enumeration (admin-only on Windows), no
             # info-based dispatch — the OS negotiates UV/PIN via its own UI.
-            return _make_webauthn_client(collector).get_assertion(public_key)
+            try:
+                return _make_webauthn_client(collector).get_assertion(public_key)
+            except ClientError as e:
+                raise _translate_windows_error(e) from e
 
         devices = list(list_devices())
         if not devices:

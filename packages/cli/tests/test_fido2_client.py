@@ -638,8 +638,10 @@ class TestWindowsCeremonyDispatch:
         with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
             "venya_cli.fido2_client.Ctap2"
         ) as mock_ctap2:
-            with pytest.raises(ClientError):
+            with pytest.raises(Fido2ClientError) as exc_info:
                 auth._get_credential(options, timeout=10.0)
+        # translated, not raw: operators must never see "(<ERR.OTHER_ERROR: 1>, ...)"
+        assert "Windows WebAuthn error" in str(exc_info.value)
         mock_list.assert_not_called()
         mock_ctap2.assert_not_called()
 
@@ -704,3 +706,70 @@ class TestNormalizerRpShape:
             }
         )
         assert req.public_key.rp_id == "venya-core-1"
+
+
+class TestWindowsErrorTranslation:
+    """Truth table for _translate_windows_error (operator-facing accuracy).
+
+    Mapped HRESULTs get pinned messages; unmapped codes keep the OS's own text
+    plus the HRESULT (accurate, never invented); non-OSError causes fall back
+    to the exception text. Evidence-driven list: NTE_EXISTS observed physically
+    on win11 (`credential add` with an already-registered key, 2026-09-19)."""
+
+    @staticmethod
+    def _client_error(cause):
+        from fido2.client import ClientError
+
+        return ClientError.ERR.OTHER_ERROR(cause)
+
+    @staticmethod
+    def _win_oserror(strerror, winerror):
+        """Model a WINDOWS OSError: .winerror exists only on Windows (on POSIX
+        the value rides in .args and the attribute is absent), so unit tests on
+        Linux must model the shape the translator sees in production. The
+        physical win11 acceptance run covers the real OSError end-to-end."""
+        from types import SimpleNamespace
+
+        return SimpleNamespace(winerror=winerror, strerror=strerror)
+
+    def test_mapped_nte_exists_gets_duplicate_message(self):
+        from venya_cli.fido2_client import _translate_windows_error
+
+        err = _translate_windows_error(self._client_error(self._win_oserror("Object already exists", -2146893809)))
+        assert isinstance(err, Fido2ClientError)
+        assert "already registered" in str(err)
+        assert "HRESULT" not in str(err)  # pinned message, not raw dump
+
+    def test_unmapped_hresult_keeps_os_text_and_code(self):
+        from venya_cli.fido2_client import _translate_windows_error
+
+        err = _translate_windows_error(self._client_error(self._win_oserror("The parameter is incorrect", -2146893785)))
+        text = str(err)
+        assert "Windows WebAuthn error" in text
+        assert "The parameter is incorrect" in text  # OS text preserved verbatim
+        assert "0x80090027" in text  # unsigned HRESULT for support lookup
+
+    def test_non_oserror_cause_falls_back_to_exception_text(self):
+        from venya_cli.fido2_client import _translate_windows_error
+
+        err = _translate_windows_error(self._client_error(ValueError("platform boom")))
+        assert "Windows WebAuthn error" in str(err)
+
+    def test_get_assertion_win32_translates_platform_error(self, monkeypatch):
+        """Integration: the assertion site surfaces the translated error, and
+        still never touches raw enumeration or Ctap2."""
+        monkeypatch.setattr("sys.platform", "win32")
+        _wc_cls, wc_instance = TestWindowsClientFactory._install_fake_windows_client(monkeypatch)
+        wc_instance.get_assertion.side_effect = self._client_error(
+            self._win_oserror("Object already exists", -2146893809)
+        )
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = TestWindowsClientFactory._req_options(auth)
+        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
+            "venya_cli.fido2_client.Ctap2"
+        ) as mock_ctap2:
+            with pytest.raises(Fido2ClientError) as exc_info:
+                auth._get_assertion(options, timeout=10.0)
+        assert "already registered" in str(exc_info.value)
+        mock_list.assert_not_called()
+        mock_ctap2.assert_not_called()
