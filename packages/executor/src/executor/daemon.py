@@ -23,7 +23,7 @@ import signal
 import ssl
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -779,6 +779,12 @@ class ExecutorDaemon:
         # HTTP thread pool — keeps network calls off the main loop
         self._http_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="http")
 
+        # Bounded-heartbeat guard: last submitted heartbeat future.
+        # _submit_heartbeat skips a tick if this is still in flight, so the
+        # pool's unbounded work queue cannot grow when request_timeout_seconds
+        # is raised above the ~30s loop cadence.
+        self._heartbeat_future: Future[None] | None = None
+
         # HTTP client — initialized in start() after registration
         self.client: httpx2.Client | None = None
 
@@ -994,11 +1000,29 @@ class ExecutorDaemon:
                 self.state.revoked = True
                 break
 
-            # Heartbeat — fire and forget in thread pool
-            self._http_executor.submit(self._send_heartbeat)
+            # Heartbeat — fire and forget, but bounded (skip+warn if prior in flight)
+            self._submit_heartbeat()
 
             # Wait before next iteration (interruptible by signals)
             self._shutdown_event.wait(30.0)
+
+    def _submit_heartbeat(self) -> None:
+        """Submit a heartbeat unless the previous one is still in flight.
+
+        Fire-and-forget into the 2-worker pool, but bounded: if the prior
+        heartbeat hasn't completed (server slow/hung so the request outlives the
+        ~30s loop cadence — possible when request_timeout_seconds is raised above
+        it), skip this tick and warn. Without the guard the pool's unbounded work
+        queue grows silently. Fails loudly on every skip so a backlog can never
+        accumulate unnoticed.
+        """
+        if self._heartbeat_future is not None and not self._heartbeat_future.done():
+            logger.warning(
+                "Heartbeat skipped — previous still in flight (server slow or hung); "
+                "backpressure guard tripped, not a normal state"
+            )
+            return
+        self._heartbeat_future = self._http_executor.submit(self._send_heartbeat)
 
     def _send_heartbeat(self) -> None:
         """Send heartbeat to server.
