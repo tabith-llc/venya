@@ -275,18 +275,17 @@ Possible MITM or corrupted download. Aborting.
 }
 
 # --- FIDO2 access check ---
-# fido2 ships a native Windows HID backend (fido2/hid/windows.py, pure ctypes
-# against hid.dll/setupapi.dll), so there is no libusb, no Zadig and no driver
-# setup. Administrator rights ARE still needed for the ceremonies, see below.
-Info 'FIDO2 on Windows uses the native HID backend - no driver setup, no libusb, no Zadig.'
-Warn 'LIMITATION: since Windows 10 1903 the OS restricts raw CTAP/HID access to'
-Warn 'elevated processes (documented by python-fido2 itself). Until the platform'
-Warn 'WebAuthn API path lands, these commands must be run from an ADMINISTRATOR'
-Warn 'terminal, and only in an interactive desktop session:'
+# Ceremonies route through the Windows platform WebAuthn API
+# (fido2.client.windows.WindowsClient) - the supported non-elevated path since
+# Windows 10 1903. No admin rights needed to USE the CLI; the OS owns the PIN
+# dialog and touch prompt. Ticket: windows-fido2-requires-elevation.
+Info 'FIDO2 works for standard (non-admin) users via the Windows platform WebAuthn API.'
+Info 'The OS shows its own PIN/touch dialog - no driver setup, no libusb, no Zadig.'
+Warn 'FIDO2 ceremonies require an INTERACTIVE DESKTOP session:'
 Warn '    venya init / venya login / venya credential add'
-Warn 'They will not work over SSH or WinRM (no foreground window), and a standard'
-Warn 'non-admin user will see a misleading "No FIDO2 devices found".'
-Warn 'Tracked as ticket windows-fido2-requires-elevation.'
+Warn 'They cannot run over SSH or WinRM (the platform API needs a foreground window).'
+Warn 'Authenticator reset and PIN set/change are out of scope for the CLI on'
+Warn 'Windows - customer IT performs them with the vendor tool (e.g. ykman).'
 Info 'Plug in the security key before the first venya login/enroll.'
 
 Write-Host ''
