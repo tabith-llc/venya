@@ -2353,8 +2353,14 @@ def executor_status(args: Any) -> int:
 
 
 def _resolve_ca_dir(args: Any) -> str:
-    """Resolve the CA directory path."""
-    return getattr(args, "ca_dir", None) or "/etc/venya/ca"
+    """Resolve the CA directory path.
+
+    Default MUST match the server's ca_dir default (/var/lib/venya/ca,
+    server config.py) and the --ca-dir help text in cli.py — the old
+    /etc/venya/ca value existed nowhere in a deployment (ticket
+    cli-ca-dir-default-mismatch).
+    """
+    return getattr(args, "ca_dir", None) or "/var/lib/venya/ca"
 
 
 def cmd_admin_export_ca_cert(args: Any) -> int:
