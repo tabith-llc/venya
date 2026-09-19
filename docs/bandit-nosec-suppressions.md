@@ -1,98 +1,73 @@
 # Bandit `# nosec` Suppressions
 
-All entries below are intentional — false positives or deliberate design decisions.
-Each line has a corresponding `# nosec` comment added to the source.
+<!-- GENERATED FILE — DO NOT HAND-EDIT.
+     Source of truth: every `nosec` marker under packages/*/src.
+     Regenerate: uv run -p 3.14 --directory packages/core python scripts/gen_bandit_suppressions.py
+     Enforced by packages/core/tests/test_bandit_suppressions_doc.py (drift = RED). -->
 
-## B108 — Hardcoded tmp directory (tmpfs paths)
+Every suppression in the scanned source, verbatim. All entries are intentional —
+false positives or deliberate design decisions; the comment on each line carries its
+justification. Rows are keyed on file + line content (line numbers drift and are
+deliberately not recorded). Scope = `packages/*/src` — the same tree the pre-commit
+bandit hook scans (tests dirs are hook-excluded).
 
-| File | Line | Reason |
-|------|------|--------|
-| `packages/executor/src/executor/daemon.py` | 500 | `/tmp/venya_secrets` is on tmpfs, not persistent disk |
-| `packages/executor/src/executor/daemon.py` | 638 | `/tmp/venya_secrets` is on tmpfs, not persistent disk |
-| `packages/executor/src/executor/injector.py` | 166 | `/tmp/venya_secrets` is on tmpfs, not persistent disk |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 28 | `/dev/shm/venya-secrets` is tmpfs, not persistent disk |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 31 | `/dev/shm/venya-workspaces` is tmpfs, not persistent disk |
+**56 suppression lines across 19 files.**
 
-## B105 — Hardcoded password string (non-password strings)
-
-| File | Line | Reason |
-|------|------|--------|
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 28 | Path string `/dev/shm/venya-secrets`, not a password |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 31 | Path string `/dev/shm/venya-workspaces`, not a password |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 36 | Mount path `/run/secrets/venya`, not a password |
-| `packages/server/src/server/ca.py` | 119 | Env var name `VENYA_CA_KEY_PASSPHRASE`, not a password |
-| `packages/server/src/server/ca.py` | 581 | Env var name `VENYA_ADMIN_CA_KEY_PASSPHRASE`, not a password |
-| `packages/server/src/server/middleware/auth.py` | 124 | Cookie name `venya_access_token`, not a password |
-
-## B106 — Hardcoded password function argument (placeholders)
-
-| File | Line | Reason |
-|------|------|--------|
-| `packages/executor/src/executor/injector.py` | 196 | `secret_id=""` and `sentinel_hash=""` are placeholders set by caller |
-| `packages/executor/src/executor/injector.py` | 234 | `secret_id=""` and `sentinel_hash=""` are placeholders set by caller |
-| `packages/executor/src/executor/injector.py` | 275 | `secret_id=""` and `sentinel_hash=""` are placeholders set by caller |
-
-## B602 — subprocess call with shell=True
-
-| File | Line | Reason |
-|------|------|--------|
-| `packages/executor/src/executor/executor.py` | 255 | Core executor design — runs user commands via shell |
-
-## B404 — Import subprocess
-
-| File | Line | Reason |
-|------|------|--------|
-| `packages/executor/src/executor/executor.py` | 19 | Executor requires subprocess to run commands |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 20 | Sandbox strategy requires subprocess for sbx commands |
-| `packages/server/src/server/utils/disk_encryption.py` | 5 | Disk encryption check requires subprocess for system commands |
-
-## B603 — subprocess call without shell=True
-
-| File | Line | Reason |
-|------|------|--------|
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 152 | Intentional `sbx exec` system call |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 175 | Intentional `sbx exec mkdir` system call |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 184 | Intentional `sbx cp` system call |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 195 | Intentional `sbx exec chmod` system call |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 220 | Intentional `sbx policy allow` system call |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 243 | Intentional `sbx exec sh -c` system call |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 255 | Intentional `sbx rm` system call |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 277 | Intentional `sbx secret set` system call |
-| `packages/server/src/server/utils/disk_encryption.py` | 109 | Intentional `findmnt` system call |
-| `packages/server/src/server/utils/disk_encryption.py` | 130 | Intentional `lsblk` system call |
-| `packages/server/src/server/utils/disk_encryption.py` | 155 | Intentional `dmsetup table` system call |
-
-## B607 — Start process with partial path
-
-| File | Line | Reason |
-|------|------|--------|
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 175 | `sbx` is on PATH, standard sandbox CLI |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 184 | `sbx` is on PATH, standard sandbox CLI |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 195 | `sbx` is on PATH, standard sandbox CLI |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 220 | `sbx` is on PATH, standard sandbox CLI |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 243 | `sbx` is on PATH, standard sandbox CLI |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 255 | `sbx` is on PATH, standard sandbox CLI |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | 277 | `sbx` is on PATH, standard sandbox CLI |
-| `packages/server/src/server/utils/disk_encryption.py` | 109 | `findmnt` is on PATH, standard Linux utility |
-| `packages/server/src/server/utils/disk_encryption.py` | 130 | `lsblk` is on PATH, standard Linux utility |
-| `packages/server/src/server/utils/disk_encryption.py` | 155 | `dmsetup` is on PATH, standard Linux utility |
-
-## B110 — Try/except pass
-
-| File | Line | Reason |
-|------|------|--------|
-| `packages/server/src/server/fido2/manager.py` | 115 | DB cleanup in finally block, outer scope handles error |
-| `packages/server/src/server/rate_limit.py` | 93 | Best-effort JSON parse, None falls through |
-| `packages/server/src/server/rate_limit.py` | 124 | Best-effort DB query, None falls through |
-| `packages/server/src/server/routes/credentials.py` | 265 | Rollback best-effort before raising HTTPException |
-| `packages/server/src/server/routes/enroll.py` | 284 | Rollback best-effort before re-raising HTTPException |
-| `packages/server/src/server/routes/enroll.py` | 290 | Rollback best-effort before raising HTTPException |
-| `packages/server/src/server/routes/secrets.py` | 278 | Rollback best-effort before raising HTTPException |
-| `packages/core/src/core/engine/secure_memory.py` | 216 | Best-effort unlock in `__del__`, no stack to unwind |
-| `packages/core/src/core/cli/commands.py` | 1801 | Best-effort config fallback, falls through to next source |
-
-## B112 — Try/except continue
-
-| File | Line | Reason |
-|------|------|--------|
-| `packages/server/src/server/middleware/auth.py` | 246 | Iterate over trusted CAs, continue on each cert failure |
+| File | Source line (verbatim) |
+|------|------------------------|
+| `packages/cli/src/venya_cli/cli.py` | `except Exception:  # noqa: S110  # nosec B110 — logging must never break the command` |
+| `packages/cli/src/venya_cli/cli.py` | `except Exception:  # noqa: S110  # nosec B110` |
+| `packages/cli/src/venya_cli/cli.py` | `except Exception:  # nosec B110 — unwritable config dir must not break the CLI` |
+| `packages/cli/src/venya_cli/commands.py` | `except Exception:  # nosec B110  # noqa: S110 — ignore optional config parse errors` |
+| `packages/cli/src/venya_cli/commands.py` | `except Exception:  # nosec B110  # noqa: S110` |
+| `packages/cli/src/venya_cli/fido2_client.py` | `except Exception:  # noqa: S110  # nosec B110 — deliberate: parse failure keeps raw status text` |
+| `packages/cli/src/venya_cli/webauthn.py` | `except Exception:  # nosec B110  # noqa: S110` |
+| `packages/core/src/core/engine/encryption.py` | `from Crypto.Cipher import AES as PyCryptoAES  # nosec B413 — AES-KW per RFC 5649 requires pycryptodome` |
+| `packages/core/src/core/engine/encryption.py` | `cipher = PyCryptoAES.new(kek, PyCryptoAES.MODE_ECB)  # nosec B305 — AES-KW per RFC 5649 requires ECB` |
+| `packages/core/src/core/engine/encryption.py` | `cipher = PyCryptoAES.new(kek, PyCryptoAES.MODE_ECB)  # nosec B305 — AES-KW per RFC 5649 requires ECB` |
+| `packages/core/src/core/engine/secure_memory.py` | `except Exception:  # nosec B110 — best-effort unlock in __del__, no stack to unwind  # noqa: S110` |
+| `packages/core/src/core/utils/sensitive_log.py` | `def token(value: Any, token_type: str = "UNKNOWN") -> Token:  # nosec B107 — not a password, just a type label` | <!-- pragma: allowlist secret -->
+| `packages/executor/src/executor/executor.py` | `import subprocess  # nosec B404 — executor requires subprocess to run commands` |
+| `packages/executor/src/executor/executor.py` | `shell=False,  # nosec B603 — shell explicitly disabled for security` |
+| `packages/executor/src/executor/injector.py` | `tmpfs_dir: str = "/tmp/venya_secrets",  # nosec B108 — tmpfs, not persistent disk` | <!-- pragma: allowlist secret -->
+| `packages/executor/src/executor/injector.py` | `secret_id="",  # nosec B106 — placeholder set by caller` | <!-- pragma: allowlist secret -->
+| `packages/executor/src/executor/injector.py` | `sentinel_hash="",  # nosec B106 — placeholder set by caller` |
+| `packages/executor/src/executor/injector.py` | `secret_id="",  # nosec B106 — placeholder set by caller` | <!-- pragma: allowlist secret -->
+| `packages/executor/src/executor/injector.py` | `sentinel_hash="",  # nosec B106 — placeholder set by caller` |
+| `packages/executor/src/executor/injector.py` | `secret_id="",  # nosec B106 — placeholder set by caller` | <!-- pragma: allowlist secret -->
+| `packages/executor/src/executor/injector.py` | `sentinel_hash="",  # nosec B106 — placeholder set by caller` |
+| `packages/executor/src/executor/relay_listener.py` | `host: str = "0.0.0.0",  # nosec B104 — private relay net; mTLS CERT_REQUIRED + CN allowlist is the access control` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx commands` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec` | <!-- pragma: allowlist secret -->
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `WORKSPACE_BASE = str(Path.home() / ".venya-workspaces")  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `CONTAINER_SECRET_DIR = "/run/secrets/venya"  # nosec` | <!-- pragma: allowlist secret -->
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `# nosec B108: /tmp here is inside the sandbox's own` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `["sbx", "exec", "-i", sandbox_name, "tee", "/tmp/sshpass"],  # nosec B108` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `["sbx", "exec", sandbox_name, "chmod", "+x", "/tmp/sshpass"],  # nosec B108` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `mkdir_result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `chmod_result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec B603 B607` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
+| `packages/server/src/server/ca.py` | `self._key_passphrase_env = "VENYA_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
+| `packages/server/src/server/ca.py` | `self._key_passphrase_env = "VENYA_ADMIN_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
+| `packages/server/src/server/fido2/cli_enroll.py` | `except Exception:  # nosec B110  # noqa: S110 — skip devices that fail to open` |
+| `packages/server/src/server/fido2/manager.py` | `except Exception:  # nosec B110 — db cleanup in finally block, outer scope handles error  # noqa: S110` |
+| `packages/server/src/server/fido2/manager.py` | `except Exception:  # nosec B110` |
+| `packages/server/src/server/middleware/auth.py` | `ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password` | <!-- pragma: allowlist secret -->
+| `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort JSON parse, None falls through  # noqa: S110` |
+| `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort DB query, None falls through  # noqa: S110` |
+| `packages/server/src/server/routes/auth.py` | `pass  # nosec B110 — intentional, transaction rolled back by get_db finally` |
+| `packages/server/src/server/routes/auth_browser.py` | `except Exception:  # nosec B110 — rollback best-effort before raising HTTPException` |
+| `packages/server/src/server/utils/disk_encryption.py` | `import subprocess  # nosec B404 — disk encryption check requires subprocess for system commands` |
+| `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |
+| `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |
+| `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |

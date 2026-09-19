@@ -40,7 +40,7 @@ for the threat-model pitch see the [README](../README.md).
 
 | Package | Distribution | Contents |
 |---|---|---|
-| `packages/core` | `core` | Shared library: IAM models, role manager, session manager, encryption engine (envelope encryption, KEK/DEK), Shamir split/combine for CA-key backup, DB models + Alembic migrations (`core/migrations.py`) |
+| `packages/core` | `core` | Shared library: IAM models, role manager, session manager, encryption engine (envelope encryption, KEK/DEK), DB models + Alembic migrations (`core/migrations.py`) |
 | `packages/server` | `server` | FastAPI application: REST API, FIDO2 ceremonies, secrets routes, executor enrollment/revocation, audit, admin mTLS enforcement, static enrollment/login pages |
 | `packages/executor` | `executor` | Daemon: mTLS registration + rotation + revocation polling, relay listener, sandbox execution (sbx), secret injection, output filtering via the Rust extension, egress allowlist enforcement |
 | `packages/cli` | `venya-cli` | Workstation CLI (`venya`): init/enroll/login (FIDO2 via python-fido2, USB HID), admin operations (mTLS client cert), secrets, `run`, executor lifecycle. Deps: httpx2, fido2, cryptography — nothing server-side |
@@ -68,9 +68,11 @@ executor-ID validator is the only shared logic (see
 - **Executors:** X.509 client certificates issued by the core at enrollment
   (single-use bootstrap token, ~30 min TTL, stored hashed). Rotation is
   supported; revocation propagates via the executor's revocation-list poll.
-- **Recovery:** the first admin's one-time recovery code, plus Shamir-split
-  CA-key backup (`venya admin ca-backup`), are the designed break-glass
-  paths.
+- **Recovery:** the first admin's one-time recovery code, plus CA-key backup
+  (`venya admin export-ca-key` encrypted export, or Shamir-split via
+  `venya admin split-ca-key`; restore via `venya admin restore-ca-key`), are
+  the designed break-glass paths. (Shamir split/combine lives in
+  `packages/cli`.)
 
 ## Trust and CA layout
 
@@ -80,8 +82,7 @@ executor-ID validator is the only shared logic (see
 | Server TLS cert | core: `/etc/venya/tls/` | nginx termination for `<core-host>` |
 | Relay client cert | core: `/etc/venya/relay/` | CN `<core-host>-relay`; presented when the core dials an executor's relay listener |
 | Admin CA | core: `/var/lib/venya/ca/admin-ca/` (key encrypted) | admin mTLS client certs |
-| Executor client cert | executor: `/etc/venya/executor/` (0700/0600) | executor → core mTLS identity; SAN = executor-id |
-| Executor CA | executor: `/var/lib/venya/executor-ca/` | executor-local issuance |
+| Executor client cert | executor: `/etc/venya/executor/` (0700/0600) | executor → core mTLS identity; SAN = executor-id; issued by the core CA (`/var/lib/venya/ca/`), copied to the executor as `/etc/venya/executor/ca.crt` |
 
 Relay CN contract: executors accept relay connections only from client-cert
 CNs listed in `relay_client_ids` (derived from the core hostname). Empty
@@ -92,7 +93,9 @@ unauthenticated transport.
 ## Secret lifecycle (zero-knowledge injection)
 
 1. **Store.** Secret value encrypted server-side under envelope encryption
-   (KEK-wrapped DEK, AES-256), scoped to roles. Plaintext never persists;
+   (random DEK per secret, wrapped by the KEK with AES-256-KW per RFC 5649;
+   the value itself is ChaCha20-Poly1305), scoped to roles. Plaintext never
+   persists;
    the API never returns values — only metadata (key, roles, purpose,
    executor hints) for discovery by humans and LLMs.
 2. **Dispatch.** For a `run_command`/`venya run` execution, the server
@@ -100,9 +103,10 @@ unauthenticated transport.
    over the mTLS relay channel to the targeted executor. The calling client
    (human or LLM) sees only the command result — the wrapped blob is routed
    server → executor, never through the caller.
-3. **Inject.** The executor unwraps **inside the sbx sandbox** and injects
-   into the command environment. Execution sessions are ephemeral (tmpfs
-   secrets mount).
+3. **Inject.** The executor daemon unwraps **host-side**, writes the
+   plaintext to a per-session tmpfs staging file (0400, zeroed after the
+   run), and exposes it inside the sbx sandbox at `/run/secrets/venya/<id>`.
+   Execution sessions are ephemeral.
 4. **Filter.** stdout/stderr pass through the Rust filter, which replaces
    any occurrence of secret material with `[REDACTED:...]` before the output
    returns to the caller.
@@ -118,8 +122,9 @@ seeds the local subnet + DNS); a compromised command cannot phone home.
 The executor service runs under a seccomp profile, `PrivateTmp`, and no
 `CAP_IPC_LOCK` (mlock is confined to the core by design and enforced by
 tests in both packages). The daemon user has KVM access for sandboxing;
-sandbox SSH tooling requires absolute binary paths (builtins are rejected
-by design — 503).
+sandbox SSH tooling requires commands to resolve into trusted directories
+(absolute paths, or bare names resolved via PATH; shell builtins and
+unresolvable tokens are rejected by design — 503).
 
 ## Data stores
 
