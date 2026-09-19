@@ -94,10 +94,22 @@ chmod 600 admin-cert/admin.key
 
 Executors need a single-use enrollment token minted by an admin. With admin
 mTLS enabled (the default), the admin client cert alone authorizes these
-operations — no FIDO2 touch needed — and the cert pair lives on the core
-(`/etc/venya/admin/`), so minting can run on the headless core itself (the
-installer's completion banner shows the exact command) or from any
-workstation holding the cert:
+operations **server-side** — from any workstation holding the cert
+(`VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`). Two caveats, physically verified
+2026-09-19 (ticket `cli-admin-mtls-headless-gate`):
+
+- The **CLI** additionally requires a stored access token (`venya login`
+  first) or an interactive FIDO2 touch for `admin` commands, even when the
+  mTLS cert is present — so the installer banner's `sudo -u venya venya
+  admin executor-enroll ...` on the headless core fails there today.
+- Headless minting works via the cert-only API path directly:
+
+```bash
+sudo -u venya curl -sk -X POST \
+  --cert /etc/venya/admin/admin.crt --key /etc/venya/admin/admin.key \
+  https://<core-host>/api/v1/admin/executors/<executor-id>/enroll
+# → {"enrollment_token": "enrl_exec_...", "expires_in_seconds": 1800, ...}
+```
 
 ```bash
 SSL_CERT_FILE=~/.config/venya-ca.crt \
