@@ -1253,10 +1253,13 @@ def cmd_credential_list(client: APIClient, args: Any) -> int:
         for c in credentials:
             rows.append(
                 [
-                    c.get("id", ""),
-                    c.get("label") or "-",
-                    c.get("created_at") or "-",
-                    c.get("last_used_at") or "-",
+                    # Server returns the DB id as int; table cells must be str
+                    # before the len() width pass below (TypeError otherwise —
+                    # found physically on Windows, broken on every platform).
+                    str(c.get("id", "")),
+                    str(c.get("label") or "-"),
+                    str(c.get("created_at") or "-"),
+                    str(c.get("last_used_at") or "-"),
                 ]
             )
 
