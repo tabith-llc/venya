@@ -32,10 +32,14 @@ def default_config_dir() -> Path:
     """Platform-appropriate config directory.
 
     macOS convention: ~/Library/Application Support/venya.
+    Windows convention: %APPDATA%/venya.
     POSIX (Linux, etc.): ~/.config/venya.
     """
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "venya"
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        return Path(appdata or Path.home() / "AppData" / "Roaming") / "venya"
     return Path.home() / ".config" / "venya"
 
 
@@ -90,7 +94,7 @@ class Config:
                 fd.write(json.dumps(self._data).encode())
                 fd.flush()
                 os.fchmod(fd.fileno(), 0o600)
-                os.replace(tmp_path, self.config_file)
+            os.replace(tmp_path, self.config_file)
         except BaseException:
             if tmp_path is not None:
                 try:

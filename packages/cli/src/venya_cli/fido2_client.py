@@ -108,6 +108,75 @@ class Fido2UserInteractionRequiredError(Fido2ClientError):
     """User interaction (key touch) required."""
 
 
+def _make_webauthn_client(collector: DefaultClientDataCollector) -> Any:
+    """Return the platform-appropriate WebAuthn client.
+
+    Windows 10 1903+ restricts raw CTAP/HID access to elevated processes, so the
+    raw Fido2Client path silently fails for standard (non-admin) users with a
+    misleading "No FIDO2 devices found" — enumeration itself is admin-only. The
+    Windows platform WebAuthn API (WindowsClient) is the supported unelevated
+    path: the OS owns device enumeration, the PIN dialog, and user-presence
+    prompts. Ticket: windows-fido2-requires-elevation.
+
+    There is deliberately NO fallback to the raw path when the platform API is
+    unavailable (Windows < 10 1903, missing webauthn.dll): a fallback would
+    reproduce the silent admin-only failure this factory exists to eliminate.
+    Callers get an explicit Fido2ClientError instead.
+
+    On Linux/macOS the raw CTAP path is unchanged: enumerate HID devices, fail
+    with Fido2NotFoundError when empty, wrap the first device in Fido2Client.
+    """
+    if sys.platform == "win32":
+        # Lazy import: fido2.client.windows imports ctypes.WinDLL at module
+        # load and is unimportable on Linux/macOS.
+        from fido2.client.windows import WindowsClient
+
+        if not WindowsClient.is_available():
+            raise Fido2ClientError(
+                "Windows WebAuthn platform API is unavailable "
+                "(webauthn.dll missing or WEBAUTHN_API_VERSION == 0). "
+                "Windows 10 version 1903 or later is required for venya CLI "
+                "FIDO2 support."
+            )
+        return WindowsClient(collector)
+    devices = list(list_devices())
+    if not devices:
+        raise Fido2NotFoundError("No FIDO2 devices found")
+    return Fido2Client(devices[0], collector, user_interaction=CliInteraction())
+
+
+# Windows platform WebAuthn (webauthn.dll) HRESULT -> operator-facing message.
+# Kept evidence-driven on purpose: only codes PHYSICALLY OBSERVED on the win11
+# acceptance runs get a pinned message; unmapped codes fall through to the OS's
+# own text with a clear prefix — accurate, never invented.
+_WINDOWS_HRESULT_MESSAGES = {
+    0x8009000F: (  # NTE_EXISTS — observed 2026-09-19, `credential add` with an already-registered key
+        "This security key is already registered for the account. "
+        "Use a different key, or remove the existing credential first."
+    ),
+}
+
+
+def _translate_windows_error(exc: Exception) -> Fido2ClientError:
+    """Convert a WindowsClient ClientError into an accurate, readable message.
+
+    WindowsClient wraps OS failures as ClientError.ERR.OTHER_ERROR(OSError);
+    the HRESULT rides in OSError.winerror (signed). Acceptance requirement:
+    device-absent must read as device-absent — never a privilege error, never
+    a raw tuple like "(<ERR.OTHER_ERROR: 1>, OSError(22, ...))".
+    """
+    cause = getattr(exc, "cause", None)
+    winerror = getattr(cause, "winerror", None)
+    if winerror is not None:
+        hresult = winerror & 0xFFFFFFFF
+        message = _WINDOWS_HRESULT_MESSAGES.get(hresult)
+        if message:
+            return Fido2ClientError(message)
+        detail = getattr(cause, "strerror", None) or cause
+        return Fido2ClientError(f"Windows WebAuthn error: {detail} (HRESULT {hresult:#010x})")
+    return Fido2ClientError(f"Windows WebAuthn error: {exc}")
+
+
 class Fido2Auth:
     """Headless FIDO2/WebAuthn client for CLI authentication.
 
@@ -399,10 +468,6 @@ class Fido2Auth:
         Returns:
             Credential selection from python-fido2.
         """
-        devices = list(list_devices())
-        if not devices:
-            raise Fido2NotFoundError("No FIDO2 devices found")
-
         origin = self.server_url
         if FIDO2_DEBUG:
             rp_id = request_options.public_key.get("rp", {}).get("id", "unknown")
@@ -410,33 +475,45 @@ class Fido2Auth:
             print(f"DEBUG: make_credential rp_id={rp_id} pubKeyCredParams={pub_params}", file=sys.stderr)
 
         collector = DefaultClientDataCollector(origin, verify_rp_id)
-        interaction = CliInteraction()
-        client = Fido2Client(devices[0], collector, user_interaction=interaction)
+        # Factory: WindowsClient (platform API, no enumeration) on win32;
+        # raw Fido2Client over the first HID device elsewhere. Raises
+        # Fido2NotFoundError (non-win32, no device) or Fido2ClientError
+        # (win32, platform API unavailable).
+        client = _make_webauthn_client(collector)
         try:
             return client.make_credential(request_options.public_key)
         except (ClientError, CtapError) as e:
+            if sys.platform == "win32":
+                # The OS owns the PIN/UV dialog on the platform path, and the
+                # raw-Ctap2 clientPin fallbacks below require admin-only
+                # device access — unreachable for standard users by design.
+                raise _translate_windows_error(e) from e
             print(
                 f"DEBUG: make_credential high-level exception: {type(e).__name__} code={getattr(e, 'code', None)}",
                 file=sys.stderr,
             )
+            device = next(iter(list_devices()), None)
+            if device is None:
+                raise
+            interaction = CliInteraction()
             # Unwrap ClientError to check the underlying CtapError
             cause = getattr(e, "cause", None)
             if isinstance(cause, CtapError) and cause.code == CtapError.ERR.OPERATION_DENIED:
-                ctap2 = Ctap2(devices[0])
+                ctap2 = Ctap2(device)
                 if ctap2.info.options.get("clientPin"):
                     return self._get_credential_pin_only(ctap2, request_options, interaction)
             if isinstance(e, ClientError) and e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
-                ctap2 = Ctap2(devices[0])
+                ctap2 = Ctap2(device)
                 if ctap2.info.options.get("clientPin"):
                     return self._get_credential_pin_only(ctap2, request_options, interaction)
             if isinstance(e, CtapError) and e.code == CtapError.ERR.OPERATION_DENIED:
-                ctap2 = Ctap2(devices[0])
+                ctap2 = Ctap2(device)
                 if ctap2.info.options.get("clientPin"):
                     return self._get_credential_pin_only(ctap2, request_options, interaction)
             raise
 
+    @staticmethod
     def _format_credential_response(
-        self,
         credential: Any,
     ) -> dict[str, Any]:
         """Convert python-fido2 credential to server-expected format.
@@ -528,6 +605,14 @@ class Fido2Auth:
         # rp object (registration)
         if "rp" in options:
             norm["rp"] = options["rp"]
+            # The browser-adapter wire shape (server/fido2/browser_adapter.py
+            # challenge_to_browser_options, emitted by e.g.
+            # /auth/elevate/challenge) folds rpId into rp.id and drops the
+            # scalar. Assertion options still need rp_id — without it the
+            # Windows platform API gets a NULL pwszRpId and fails
+            # NTE_INVALID_PARAMETER (0x80090027), found physically on win11.
+            if "rp_id" not in norm and isinstance(options["rp"], dict) and options["rp"].get("id"):
+                norm["rp_id"] = options["rp"]["id"]
 
         # user object (registration)
         if "user" in options:
@@ -604,16 +689,25 @@ class Fido2Auth:
         Returns:
             AssertionSelection from python-fido2.
         """
+        public_key = request_options.public_key
+        rp_id = public_key.rp_id or "localhost"
+        origin = f"https://{rp_id}" if not self.server_url.startswith("http") else self.server_url
+        collector = DefaultClientDataCollector(origin, verify_rp_id)
+
+        if sys.platform == "win32":
+            # Platform API path: no enumeration (admin-only on Windows), no
+            # info-based dispatch — the OS negotiates UV/PIN via its own UI.
+            try:
+                return _make_webauthn_client(collector).get_assertion(public_key)
+            except ClientError as e:
+                raise _translate_windows_error(e) from e
+
         devices = list(list_devices())
         if not devices:
             raise Fido2NotFoundError("No FIDO2 devices found")
 
-        public_key = request_options.public_key
         ctap2 = Ctap2(devices[0])
         info = ctap2.info
-        rp_id = public_key.rp_id or "localhost"
-        origin = f"https://{rp_id}" if not self.server_url.startswith("http") else self.server_url
-        collector = DefaultClientDataCollector(origin, verify_rp_id)
         interaction = CliInteraction()
 
         # WHY THIS PATH EXISTS — deviation from library-norm documented deliberately.

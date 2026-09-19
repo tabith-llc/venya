@@ -100,6 +100,46 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 | `VENYA_TARBALL` | `https://github.com/tabith-llc/venya/releases/latest/download/venya-cli-install.tar.gz` | Tarball URL (workstation bundle: `packages/cli` + `packages/mcp`) |
 | `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed |
 
+### `install-venya-cli.ps1` (Windows)
+
+Windows equivalent of `install-venya-cli.sh`, for PowerShell 5.1 and later. Installs
+the same bundle; **no administrator rights are needed for the install itself.**
+
+- **uv** (if missing, into `%USERPROFILE%\.local\bin`; uv persists that directory in the user `PATH`)
+- `venya-cli` and `venya-mcp` via `uv tool install` (isolated venvs under `%APPDATA%\uv\tools`)
+- Config lands in `%APPDATA%\venya\config.json`
+- Uses the built-in `curl.exe` and `tar.exe` (bsdtar) — no extra tooling, no compiler
+
+**Usage (on the operator workstation):**
+```powershell
+powershell -ExecutionPolicy Bypass -File install-venya-cli.ps1
+```
+
+Same environment variables as `install-venya-cli.sh`, set PowerShell-style:
+```powershell
+$env:VENYA_TARBALL = "http://<build-host>:8080/venya-cli-install.tar.gz"
+$env:VENYA_TARBALL_SHA256 = "<sha256>"
+$env:VENYA_SKIP_PROMPT = "yes"
+.\install-venya-cli.ps1
+```
+
+> **FIDO2 limitation on Windows.** Since Windows 10 1903 the OS restricts raw
+> CTAP/HID access to elevated processes. Until the platform WebAuthn API path
+> lands, `venya init`, `venya login` and `venya credential add` require an
+> **Administrator** terminal, and only work in an interactive desktop session —
+> not over SSH or WinRM, because the platform API needs a foreground window
+> handle. A standard (non-admin) user sees a misleading `No FIDO2 devices found`.
+> Tracked as ticket `windows-fido2-requires-elevation`.
+>
+> Authenticator **reset** and **PIN management** are out of scope on Windows; the
+> platform API exposes only `make_credential` / `get_assertion`. Customer IT owns
+> those steps via the vendor's own tool.
+
+*Serving note:* `create-tarball-and-serve.sh` serves both `.ps1` files when the
+built ref contains them, and omits them (with a `WARN`, removing any stale copy)
+for older refs. They are not yet GitHub release assets — adding them is a
+`RELEASES.md` step.
+
 ### Uninstallers
 
 Each artifact has a matching uninstaller (served from the same origin):
@@ -109,6 +149,7 @@ Each artifact has a matching uninstaller (served from the same origin):
 | `uninstall-venya-core.sh` | root (on core VM) | service+unit, nginx site, /opt/venya, /etc/venya, /var/lib/venya (CA keys), well-known CA, trust entries, PostgreSQL db+role, venya user | nginx/postgresql OS packages |
 | `uninstall-venya-executor.sh` | root (on executor VM) | service+mount+seccomp units, /opt/venya, /etc/venya (mTLS key), /var/lib/venya, trust entries, venya user (Rust/uv/sbx state) | sbx/docker packages, /etc/hosts (provisioning-owned); revoke the cert on the core separately |
 | `uninstall-venya-cli.sh` | operator user (no sudo) | uv tools `venya-cli` + `venya-mcp` and shims; optionally `~/.config/venya` (`VENYA_PURGE_CONFIG=yes`) | uv itself |
+| `uninstall-venya-cli.ps1` | operator user (Windows, no admin) | uv tools `venya-cli` + `venya-mcp` and shims; optionally `%APPDATA%\venya` (`VENYA_PURGE_CONFIG=yes`) | uv itself and the `.local\bin` `PATH` entry |
 
 **Usage:**
 ```bash
