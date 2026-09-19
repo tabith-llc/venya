@@ -96,6 +96,37 @@ def run_command(args: Any) -> int:
         client.close()
 
 
+def _win_ceremony_hint(kind: str) -> str | None:
+    """Windows platform-dialog guidance (ticket cli-windows-ceremony-guidance-ux).
+
+    On Windows the OS-drawn dialogs own PIN/touch — and when no key is attached
+    they wait for INSERTION. Terminal text written for the raw-CTAP path
+    ("touch your key") contradicts what the operator sees, and dual-key flows
+    (credential add: registered key for elevation, then the NEW key for
+    registration) need step-scoped guidance. Returns the win32 hint for the
+    ceremony kind ("assertion" | "registration" | "credential-add"), or None on
+    other platforms so POSIX output stays byte-identical (truth-table tested).
+    """
+    if sys.platform != "win32":
+        return None
+    if kind == "assertion":
+        return (
+            "Windows: a security dialog will open — use your REGISTERED key "
+            "(PIN and touch happen in the dialog, not this terminal). If it asks "
+            "you to insert a key, plug in the registered one."
+        )
+    if kind == "registration":
+        return (
+            "Windows: a security dialog will open — INSERT the key you are "
+            "enrolling when asked (PIN and touch happen in the dialog)."
+        )
+    return (
+        "Windows: TWO dialogs will open, in order — FIRST verify with your "
+        "REGISTERED key (elevation), THEN insert the NEW key you are enrolling "
+        "when the registration dialog opens (about 60 s total)."
+    )
+
+
 def cmd_init(client: APIClient, args: Any) -> int:
     """Bootstrap the core with mandatory FIDO2 enrollment.
 
@@ -143,6 +174,9 @@ def cmd_init(client: APIClient, args: Any) -> int:
 
         print(f"Starting core initialization for user '{args.user_id}'...")
         print("Please insert your security key when prompted.\n")
+        _hint = _win_ceremony_hint("registration")
+        if _hint:
+            print(_hint)
 
         result = fido2.register(user_id=args.user_id, timeout=60.0)
 
@@ -1411,6 +1445,9 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
 
         # Step 1: Elevate
         print("Re-authenticating with security key for elevation...")
+        _hint = _win_ceremony_hint("credential-add")
+        if _hint:
+            print(_hint)
         elevation_token = _elevate(client)
         print("Elevation successful.")
 
@@ -1479,6 +1516,9 @@ def cmd_credential_remove(client: APIClient, args: Any) -> int:
 
         # Step 1: Elevate
         print("Re-authenticating with security key for elevation...")
+        _hint = _win_ceremony_hint("assertion")
+        if _hint:
+            print(_hint)
         elevation_token = _elevate(client)
         print("Elevation successful.")
 
@@ -1513,6 +1553,9 @@ def cmd_enroll(client: APIClient, args: Any) -> int:
         fido2 = Fido2Auth(client.config.server_url)
         print("Starting enrollment...")
         print("Please insert/touch your security key when prompted.\n")
+        _hint = _win_ceremony_hint("registration")
+        if _hint:
+            print(_hint)
         start = client.post("/api/v1/enroll/browser/start", json={"enrollment_token": token})
         request_options = fido2._build_registration_options(start["options"])
         credential = fido2._get_credential(request_options, timeout=60.0)
@@ -1545,6 +1588,9 @@ def cmd_enroll(client: APIClient, args: Any) -> int:
 def cmd_login(client: APIClient, args: Any) -> int:
     """Authenticate with a security key and store the session token."""
     try:
+        _hint = _win_ceremony_hint("assertion")
+        if _hint:
+            print(_hint)
         result = client.authenticate(user_id=args.user_id)
         print(f"Authenticated as {result['user_id']}.")
         return 0

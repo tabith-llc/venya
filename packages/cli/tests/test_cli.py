@@ -674,3 +674,49 @@ class TestErrorLog:
         err = capsys.readouterr().err
         assert "error details logged to" in err
         assert str(tmp_path) in err
+
+
+class TestWindowsCeremonyHints:
+    """Ticket cli-windows-ceremony-guidance-ux (RELEASE GATE). Truth table:
+    win32 gets dialog-matching guidance per ceremony kind (insert-vs-touch,
+    registered-vs-enrolling, dual-key sequencing); non-win32 gets None so POSIX
+    terminal output stays byte-identical."""
+
+    KINDS = ("assertion", "registration", "credential-add")
+
+    def test_win32_hints_match_dialog_reality(self, monkeypatch):
+        from venya_cli.commands import _win_ceremony_hint
+
+        monkeypatch.setattr("sys.platform", "win32")
+        a = _win_ceremony_hint("assertion")
+        r = _win_ceremony_hint("registration")
+        d = _win_ceremony_hint("credential-add")
+        assert a and "REGISTERED" in a and "insert" in a.lower()
+        assert r and "INSERT" in r and "enrolling" in r
+        assert d and "TWO dialogs" in d and "REGISTERED" in d and "NEW key" in d
+
+    def test_non_win32_returns_none_for_all_kinds(self, monkeypatch):
+        from venya_cli.commands import _win_ceremony_hint
+
+        for plat in ("linux", "darwin"):
+            monkeypatch.setattr("sys.platform", plat)
+            for kind in self.KINDS:
+                assert _win_ceremony_hint(kind) is None, f"{plat}/{kind} must stay silent"
+
+    def test_cmd_login_prints_hint_on_win32_and_stays_silent_on_posix(self, monkeypatch, capsys):
+        from unittest.mock import MagicMock
+
+        from venya_cli.commands import cmd_login
+
+        client = MagicMock()
+        client.authenticate.return_value = {"user_id": "hopper", "session_token": "t", "credential_id": "c"}
+        args = MagicMock()
+        args.user_id = "hopper"
+
+        monkeypatch.setattr("sys.platform", "win32")
+        assert cmd_login(client, args) == 0
+        assert "Windows:" in capsys.readouterr().out
+
+        monkeypatch.setattr("sys.platform", "linux")
+        assert cmd_login(client, args) == 0
+        assert "Windows:" not in capsys.readouterr().out
