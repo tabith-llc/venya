@@ -40,21 +40,6 @@ def base64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + padding)
 
 
-def _base64url_bytes_to_b64(s: str) -> str:
-    """Convert a base64url-encoded string to standard base64.
-
-    Used when the browser sends base64url data that needs to be
-    processed by python-fido2 (which expects standard base64).
-
-    Args:
-        s: Base64url-encoded string from the browser.
-
-    Returns:
-        Standard base64-encoded string.
-    """
-    return base64.urlsafe_b64decode(s).decode("latin-1")
-
-
 def base64_to_base64url(s: str) -> str:
     """Convert standard base64 to base64url without padding.
 
