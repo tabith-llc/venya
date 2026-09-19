@@ -6,6 +6,7 @@
 
 """Tests for auth (WebAuthn) endpoints."""
 
+import base64
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -108,7 +109,8 @@ class TestAuthRegistrationComplete:
         )
         assert resp.status_code == 201
         data = resp.json()
-        assert data["credential_id"] == "cred-123"
+        # base64url of b"cred-123", padding stripped (venya response convention)
+        assert data["credential_id"] == "Y3JlZC0xMjM"
         # Verify credential was added to DB via backend
         assert backend.get_session.return_value.add.called
 
@@ -151,6 +153,75 @@ class TestAuthRegistrationComplete:
             },
         )
         assert resp.status_code == 400
+
+    def test_complete_non_utf8_id_no_500(self):
+        """A real (non-UTF-8) credential ID must serialize, not 500.
+
+        Regression for auth-registration-complete-bytes-500: cred.credential_id
+        is raw bytes; handing it to a pydantic str field UTF-8-decodes it and
+        raises on binary IDs. Fix emits base64url.
+        """
+        raw_id = b"\xbb" * 32
+        cred = SimpleNamespace(
+            credential_id=raw_id,
+            user_id="user1",
+            public_key=b"public-key-data",
+            sign_count=0,
+        )
+        fido2 = MagicMock()
+        fido2.finish_registration.return_value = cred
+        backend = MagicMock()
+        backend.get_session.return_value = MagicMock()
+        app = _create_test_app(fido2_manager=fido2, backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/auth/registration/complete",
+            json={"challenge_id": "c", "response": {"id": "dGVzdA==", "response": {}}},
+        )
+        assert resp.status_code == 201
+        cid = resp.json()["credential_id"]
+        expected = base64.urlsafe_b64encode(raw_id).rstrip(b"=").decode("ascii")
+        assert cid == expected
+        # base64url alphabet only: no '+', '/', and padding stripped (no '=')
+        assert not any(ch in cid for ch in "+/=")
+        # round-trips back to the exact raw bytes
+        pad = "=" * ((4 - len(cid) % 4) % 4)
+        assert base64.urlsafe_b64decode(cid + pad) == raw_id
+
+    def test_complete_id_with_b64_special_chars_is_urlsafe(self):
+        """An ID whose STANDARD b64 contains '+' and '/' must emit base64url.
+
+        Proves the alphabet flip (not just padding): the same bytes that would
+        yield '+'/'/' under base64.b64encode come back as '-'/'_' with no '='.
+        """
+        raw_id = bytes([0xFB, 0xEF, 0xBE, 0xFF] * 8)  # 32 bytes
+        # sanity: these bytes genuinely exercise the alphabet delta
+        std = base64.b64encode(raw_id).decode("ascii")
+        assert "+" in std and "/" in std
+
+        cred = SimpleNamespace(
+            credential_id=raw_id,
+            user_id="user1",
+            public_key=b"public-key-data",
+            sign_count=0,
+        )
+        fido2 = MagicMock()
+        fido2.finish_registration.return_value = cred
+        backend = MagicMock()
+        backend.get_session.return_value = MagicMock()
+        app = _create_test_app(fido2_manager=fido2, backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/auth/registration/complete",
+            json={"challenge_id": "c", "response": {"id": "dGVzdA==", "response": {}}},
+        )
+        assert resp.status_code == 201
+        cid = resp.json()["credential_id"]
+        assert not any(ch in cid for ch in "+/=")
+        pad = "=" * ((4 - len(cid) % 4) % 4)
+        assert base64.urlsafe_b64decode(cid + pad) == raw_id
 
 
 class TestAuthLoginStart:

@@ -165,6 +165,29 @@ class TestFinishRegistration:
             manager.finish_registration(challenge_id, response)
 
 
+class TestCredentialIdEncodingBoundary:
+    """The base64url flip is scoped to venya API-response credential_id fields.
+
+    WebAuthn WIRE fields (excludeCredentials/allowCredentials id, challenge)
+    stay standard base64 — browser_adapter converts them for browsers and the
+    CLI decodes them leniently. This guard proves the response-channel change
+    did NOT touch the wire channel, so the encoding fix and the separate
+    registration/start type-mismatch defect stay decoupled in the record.
+    """
+
+    def test_start_registration_exclude_stays_standard_b64(self, manager):
+        cred_id = bytes([0xFB, 0xEF, 0xBE, 0xFF] * 8)  # std b64 contains '+' and '/'
+        _, options = manager.start_registration(
+            user_id="u1",
+            username="user1",
+            existing_credential_ids=[cred_id],
+        )
+        exclude_id = options["excludeCredentials"][0]["id"]
+        # wire field UNCHANGED: standard base64, padding intact, +// still present
+        assert exclude_id == _b64std(cred_id)
+        assert "+" in exclude_id and "/" in exclude_id and exclude_id.endswith("=")
+
+
 # ---------------------------------------------------------------------------
 # Authentication tests
 # ---------------------------------------------------------------------------
@@ -228,12 +251,33 @@ class TestFinishAuthentication:
         result = manager.finish_authentication(challenge_id, response)
 
         assert result["user_id"] == "u1"
-        assert result["credential_id"] == _b64std(cred_id)
+        assert result["credential_id"] == _b64url(cred_id)
 
         # sign_count updated in memory
         stored_cred = manager.store.get_credential(cred_id)
         assert stored_cred is not None
         assert stored_cred.sign_count == 1
+
+    def test_credential_id_emitted_as_base64url(self, manager, es256_keypair, cose_key_bytes):
+        """finish_authentication's credential_id is base64url (no '+', '/', or '=').
+
+        This is the manager-level source of /auth/login/complete's credential_id
+        (auth.py routes result["credential_id"] straight into the response), so
+        it is the second venya emission site flipped by the base64url sweep.
+        """
+        private_key, _ = es256_keypair
+        cred_id = bytes([0xFB, 0xEF, 0xBE, 0xFF] * 8)  # std b64 would contain + and /
+        assert "+" in _b64std(cred_id) and "/" in _b64std(cred_id)
+        _store_credential(manager, "u1", cred_id, cose_key_bytes, sign_count=0)
+
+        challenge_id, _ = manager.start_authentication(user_id="u1")
+        raw_challenge = manager.store._challenges[challenge_id].data["raw_challenge"]
+        response = _build_assertion_response(cred_id, private_key, raw_challenge, counter=1)
+        result = manager.finish_authentication(challenge_id, response)
+
+        cid = result["credential_id"]
+        assert cid == _b64url(cred_id)
+        assert not any(ch in cid for ch in "+/=")
 
     def test_tampered_signature_rejected(self, manager, es256_keypair, cose_key_bytes):
         """Tampered signature → ValueError with 'Signature verification failed'."""

@@ -21,6 +21,8 @@ from typing import Any
 
 from core.utils.entropy import get_secure_token
 
+from .browser_adapter import base64url_encode
+
 logger = logging.getLogger(__name__)
 
 
@@ -455,7 +457,7 @@ class Fido2Manager:
 
         return {
             "user_id": credential.user_id,
-            "credential_id": base64.b64encode(credential.credential_id).decode("ascii"),
+            "credential_id": base64url_encode(credential.credential_id),
         }
 
     def get_user_credentials(self, user_id: str) -> list[dict]:

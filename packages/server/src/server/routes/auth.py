@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from .. import metrics
 from ..dependencies import get_db
+from ..fido2.browser_adapter import base64url_encode
 
 logger = logging.getLogger("venya.server")
 
@@ -146,7 +147,7 @@ async def auth_registration_complete(
         # transaction is rolled back by get_db's `finally: close()`.
         pass  # nosec B110 — intentional, transaction rolled back by get_db finally
 
-    return RegistrationCompleteResponse(credential_id=cred.credential_id)
+    return RegistrationCompleteResponse(credential_id=base64url_encode(cred.credential_id))
 
 
 @router.post(
