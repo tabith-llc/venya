@@ -256,7 +256,7 @@ class TestMTLSHandshake:
                 cert=str(tmp_path / "executor.crt"),
                 key=str(tmp_path / "executor.key"),
             ),
-            cert_rotation=CertificateRotationConfig(rotation_days=30, rotate_before_days=3),
+            cert_rotation=CertificateRotationConfig(rotate_before_days=3),
         )
         mgr = CertificateManager(config)
 

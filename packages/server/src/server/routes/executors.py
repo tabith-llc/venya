@@ -520,7 +520,7 @@ async def get_revocation_list(
 ) -> Response:
     """Get the list of revoked certificate serial numbers.
 
-    Executors poll this endpoint periodically (every 60s) to check
+    Executors poll this endpoint periodically (~every 30s, daemon main loop) to check
     if their certificate has been revoked. Supports conditional GET
     via ETag for caching — returns 304 Not Modified when the list
     has not changed.
