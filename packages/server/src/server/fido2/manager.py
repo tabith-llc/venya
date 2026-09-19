@@ -432,28 +432,42 @@ class Fido2Manager:
         # Update sign count in memory
         credential.sign_count = auth_data.counter
 
-        # Persist to DB
+        # Authoritative active-state gate (FAIL-CLOSED) + sign_count persist.
+        # The in-memory store is a per-process startup cache; the DB decides
+        # whether a credential is still active (it may have been soft-deleted via
+        # DELETE /credentials/{id}, possibly on another core under future HA). A
+        # removed/unknown credential must never authenticate: reject if the row is
+        # missing/inactive OR if the check itself cannot run. Availability tradeoff
+        # (DB outage -> auth outage) is deliberate and recorded in the ticket. The
+        # sign_count WRITE below stays FAIL-OPEN (a persist failure after a
+        # successful active-check does not block login) -- that is the separate,
+        # still-deferred fido2-counter-persist-fail-closed decision, unchanged.
         if self.backend is not None:
             from datetime import UTC, datetime
 
             from core.iam.models import WebAuthnCredential
 
+            db = self.backend.get_session()
             try:
-                db = self.backend.get_session()
                 try:
                     db_cred = (
                         db.query(WebAuthnCredential)
                         .filter(WebAuthnCredential.credential_id == credential.credential_id)
                         .first()
                     )
-                    if db_cred:
-                        db_cred.sign_count = auth_data.counter
-                        db_cred.last_used_at = datetime.now(UTC)
-                        db.commit()
-                finally:
-                    db.close()
-            except Exception:  # nosec B110
-                logger.exception("sign_count persist failed; login succeeded, counter update lost")
+                except Exception:
+                    logger.exception("credential active-state check failed; rejecting auth (fail-closed)")
+                    raise ValueError("Credential not found") from None
+                if db_cred is None or not db_cred.is_active:
+                    raise ValueError("Credential not found")
+                try:
+                    db_cred.sign_count = auth_data.counter
+                    db_cred.last_used_at = datetime.now(UTC)
+                    db.commit()
+                except Exception:  # nosec B110
+                    logger.exception("sign_count persist failed; login succeeded, counter update lost")
+            finally:
+                db.close()
 
         return {
             "user_id": credential.user_id,
