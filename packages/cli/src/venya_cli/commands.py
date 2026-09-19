@@ -810,7 +810,7 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
             print("    sudo VENYA_SERVER_URL=https://venya-core-1 \\")
             print(f"         VENYA_EXECUTOR_ID={args.executor_id} \\")
             print(f"         VENYA_EXECUTOR_ENROLLMENT_TOKEN=$(cat {token_path}) \\")
-            print(f"         VENYA_CORE_CA_CERT={core_ca_path} \\")
+            print(f"         VENYA_VENYA_CA_FILE={core_ca_path} \\")
             print("         bash -s")
             print()
             print(f"Note: This bundle is valid for {expires_in // 60} minutes.")
