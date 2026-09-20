@@ -23,7 +23,9 @@ etc.) for every human operator. **Executor hosts additionally require
 hardware-virtualization access (`/dev/kvm`, `kvm` group)** — sbx runs each
 command in a microVM. If the executor itself is a virtual machine, nested
 virtualization must be enabled in the hypervisor; without it the install
-completes but every sandboxed execution fails.
+completes but every sandboxed execution fails. Executor hosts also need a few
+GiB free on the state volume before the first `sbx create` — the agent-template
+pull fails below ~3.5 GiB (observed floor).
 
 ## 1. Install the core server
 
