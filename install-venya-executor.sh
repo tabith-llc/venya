@@ -81,7 +81,7 @@ info "Installing Venya Executor to $INSTALL_DIR"
 venya_create_user
 
 # --- Install system packages ---
-venya_install_system_pkgs curl sudo build-essential
+venya_install_system_pkgs curl sudo build-essential sshpass
 
 # --- Install Rust for venya user ---
 SU_CARGO="/home/venya/.cargo/bin/cargo"
