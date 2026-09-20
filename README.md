@@ -301,6 +301,8 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [Installation Guide](docs/installation.md) | Full deployment instructions |
 | [CLI Reference](docs/cli-reference.md) | Every `venya` command and argument — generated from the parser, test-enforced against drift |
 | [Architecture](docs/architecture.md) | Technical deep dive |
+| [Firewall & Network Requirements](docs/FIREWALL.md) | Ports/protocols per host type — *(alpha, untested)* |
+| [Backup & Restore](docs/BACKUPS.md) | What to back up, the crypto pairings, restore + backup security — *(alpha, untested)* |
 | [FAQ](docs/faq.md) | Frequently asked questions |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy + safe harbor |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (incl. license terms for contributions) |
