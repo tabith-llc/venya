@@ -1030,8 +1030,18 @@ class TestMalformedExecutorResponse:
                 )
         assert resp.status_code == 502
 
-    def test_extra_keys_dropped_valid_fields_preserved(self):
-        """200 response with extra keys → 502 is NOT returned; valid fields preserved, junk dropped."""
+    def test_extra_key_returns_502(self):
+        """200 response with an extra/unknown key → 502 (extra=forbid).
+
+        refactor-2 negative half: pre-contract, pydantic's default silently DROPPED
+        unknown keys and returned 200, so a one-sided field rename of a defaulted
+        field (e.g. masked_count -> redacted_count on the server only) lost data with
+        no error. The frozen relay contract (venya_contract, extra="forbid") rejects
+        unknown fields, making a one-sided addition/rename a loud 502 at the boundary.
+        This aligns with the class contract (malformed -> 502) and its two siblings
+        (missing field, wrong type); the old "extra keys dropped -> 200" behavior was
+        the inconsistent one and is deliberately reversed by the extra=forbid ruling.
+        """
         app, _backend, mock_client, mock_ssl_ctx = self._setup_db(
             MagicMock(),
             {
@@ -1049,12 +1059,7 @@ class TestMalformedExecutorResponse:
                     "/api/v1/executors/exec-1/execute",
                     json={"session_id": "sess-1", "command": "echo hello"},
                 )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["exit_code"] == 0
-        assert body["stdout"] == "hello\n"
-        assert body["masked_count"] == 1
-        assert "rogue_field" not in body
+        assert resp.status_code == 502
 
 
 # --- TLS misconfiguration tests (M2) ---

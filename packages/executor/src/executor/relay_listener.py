@@ -15,7 +15,9 @@ The executor requires a client certificate (``CERT_REQUIRED``) and, after the
 handshake, rejects any peer whose CN is not an explicitly configured relay
 client (``relay_client_ids``).
 
-Stdlib only (``http.server`` + ``ssl.SSLContext``) — no new dependencies.
+Transport is stdlib (``http.server`` + ``ssl.SSLContext``). The wire shape comes
+from ``venya_contract`` (pydantic) — the frozen relay contract shared with the
+server, so a one-sided field change is an import/type error, not a runtime drift.
 """
 
 import json
@@ -25,6 +27,9 @@ import threading
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
+
+from pydantic import ValidationError
+from venya_contract import RelayRequest, RelayResponse
 
 logger = logging.getLogger("venya.executor.relay")
 
@@ -109,22 +114,25 @@ class ExecuteHandler(BaseHTTPRequestHandler):
             self._reply(413, {"detail": "request body exceeds relay cap"})
             return
 
-        # Parse + normalize the payload. ``wrapped_value`` arrives as a JSON
-        # string; the executor engine's ``strip_sentinel()`` requires bytes.
+        # Parse + normalize the payload via the frozen relay contract
+        # (venya_contract). ``wrapped_value`` arrives as a JSON string; the executor
+        # engine's ``strip_sentinel()`` requires bytes, so the str->bytes mapping
+        # happens here — an executor-internal concern, not part of the wire shape.
         try:
             body = json.loads(self.rfile.read(length).decode("utf-8"))
-            session_id = body["session_id"]
-            command = body["command"]
-            secrets = [
-                {
-                    "secret_id": secret["secret_id"],
-                    "wrapped_value": str(secret["wrapped_value"]).encode("utf-8"),
-                }
-                for secret in body.get("secrets", [])
-            ]
-        except (ValueError, KeyError, UnicodeDecodeError) as exc:
+            req = RelayRequest(**body)
+        except (ValueError, ValidationError, UnicodeDecodeError) as exc:
             self._reply(400, {"detail": f"malformed request: {exc}"})
             return
+        session_id = req.session_id
+        command = req.command
+        secrets = [
+            {
+                "secret_id": s.secret_id,
+                "wrapped_value": s.wrapped_value.encode("utf-8"),
+            }
+            for s in req.secrets
+        ]
 
         # B0.2: wire to the existing engine. The factory is wired to
         # ExecutorDaemon.create_executor in production; tests inject a stub.
@@ -140,12 +148,12 @@ class ExecuteHandler(BaseHTTPRequestHandler):
 
         self._reply(
             200,
-            {
-                "exit_code": result.exit_code,
-                "stdout": result.stdout.decode("utf-8", "replace"),
-                "stderr": result.stderr.decode("utf-8", "replace"),
-                "masked_count": len(result.masked_secret_ids),
-            },
+            RelayResponse(
+                exit_code=result.exit_code,
+                stdout=result.stdout.decode("utf-8", "replace"),
+                stderr=result.stderr.decode("utf-8", "replace"),
+                masked_count=len(result.masked_secret_ids),
+            ).model_dump(),
         )
 
     def _peer_common_name(self) -> str | None:

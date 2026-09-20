@@ -24,6 +24,7 @@ core = { workspace = true }
 server = { workspace = true }
 executor = { workspace = true }
 venya-cli = { workspace = true }
+venya-contract = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["packages/core/tests"]

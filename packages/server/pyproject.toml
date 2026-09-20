@@ -5,6 +5,7 @@ description = "FastAPI server: WebAuthn, REST API"
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "core",
+    "venya-contract",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "fido2>=2.0.0",
