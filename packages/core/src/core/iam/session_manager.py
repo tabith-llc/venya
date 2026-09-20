@@ -152,21 +152,41 @@ class SessionManager:
         self.db.flush()
         return True
 
+    def check_refresh_window(self, session: SessionModel) -> bool:
+        """Refresh gate: HARD CAP only (mcp-refresh-path-unreachable Option A,
+        user ruling 2026-09-20).
+
+        Idle-expired sessions remain refreshable until ``created_at +
+        max_session_duration``; past that, refresh dies and re-auth (FIDO2) is
+        required. Deliberate ruled trade-off: revival widens the stolen-token
+        renewal window from idle-timeout to hard-cap; the token rotation in
+        ``refresh_token`` (old token invalidated on success) keeps a theft race
+        detectable. The middleware's ``check_expiry`` (idle + hard cap) stays
+        UNCHANGED — API calls from idle-expired sessions still 401, and that
+        401 is what triggers the client refresh path.
+        """
+        return session.created_at + self.config.max_session_duration >= datetime.now(UTC)
+
     def refresh_token(self, access_token: str) -> AccessToken | None:
-        """Refresh an access token within an active session.
+        """Refresh an access token within the hard-cap window.
+
+        Idle-expired sessions are revived (Option A ruling 2026-09-20 — the
+        former validate_session gate made every refresh of an idle-expired
+        session fail: the mcp-refresh-path-unreachable dead-path root cause).
 
         Args:
             access_token: The current access token string.
 
         Returns:
-            New AccessToken if successful, None if session expired or max cap reached.
+            New AccessToken if successful, None if unknown token or the
+            session is past max_session_duration (re-auth required).
         """
         # Find session by access token
         session = self.db.query(SessionModel).filter(SessionModel.access_token == access_token).first()
         if session is None:
             return None
 
-        if not self.validate_session(session.id):
+        if not self.check_refresh_window(session):
             return None
 
         # Extend session

@@ -365,7 +365,10 @@ class TestAuthRefresh:
     """Tests for auth refresh endpoint."""
 
     def test_refresh_success(self):
-        """POST /auth/refresh should return new access token."""
+        """POST /auth/refresh should return new access token.
+
+        updated (mcp-refresh-path-unreachable Option A): the route gate is
+        check_refresh_window (hard cap only), no longer check_expiry."""
         session_mock = SimpleNamespace(id=1, access_token="old-token", access_token_jti="uuid-hex")
 
         db = MagicMock()
@@ -377,7 +380,7 @@ class TestAuthRefresh:
         backend.get_session.return_value = db
 
         with patch("core.iam.session_manager.SessionManager") as mock_sm:
-            mock_sm.return_value.check_expiry.return_value = True
+            mock_sm.return_value.check_refresh_window.return_value = True
             mock_sm.return_value.refresh_token.return_value = new_token_mock
 
             app = _create_test_app(backend=backend)
@@ -389,6 +392,29 @@ class TestAuthRefresh:
             assert resp.status_code == 200
             data = resp.json()
             assert data["access_token"] == "new-access-token"
+
+    def test_refresh_past_hard_cap_401(self):
+        """Paired negative (Option A): past max_session_duration the refresh
+        window is closed — 401 Session expired (FIDO2 re-auth required)."""
+        session_mock = SimpleNamespace(id=1, access_token="old-token", access_token_jti="uuid-hex")
+
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = session_mock
+
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm:
+            mock_sm.return_value.check_refresh_window.return_value = False
+
+            app = _create_test_app(backend=backend)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post(
+                "/api/v1/auth/refresh",
+                headers={"authorization": "Bearer old-token"},
+            )
+            assert resp.status_code == 401
+            assert resp.json()["detail"] == "Session expired"
 
     def test_refresh_missing_token(self):
         """POST /auth/refresh should return 401 if no token provided."""

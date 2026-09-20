@@ -260,8 +260,11 @@ async def auth_refresh(
 ) -> AuthenticationRefreshResponse:
     """Refresh the current access token.
 
-    Validates the existing session and issues a new access token.
-    The session must still be active (not idle-expired, not past max duration).
+    Gate: HARD CAP only (mcp-refresh-path-unreachable Option A, user ruling
+    2026-09-20) — idle-expired sessions are revived within
+    max_session_duration; past the hard cap this 401s and re-auth (FIDO2) is
+    required. The distinction: API calls still 401 at idle expiry (middleware
+    check_expiry unchanged); that 401 is what makes this route reachable.
     """
     from datetime import timedelta
 
@@ -296,8 +299,8 @@ async def auth_refresh(
             detail="Invalid token",
         )
 
-    # Check session expiry
-    if not manager.check_expiry(session):
+    # Check the refresh window (hard cap only — idle-expired revives; Option A)
+    if not manager.check_refresh_window(session):
         metrics.AUTH_REFRESH_TOTAL.labels(result="expired").inc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

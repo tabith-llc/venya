@@ -39,6 +39,15 @@ Notable changes to Venya will be documented in this file.
 
 ### Fixed
 
+- Session token refresh now works as designed: `/api/v1/auth/refresh` is gated
+  by the 4-hour hard cap ONLY, so idle-expired sessions (15-min idle window by
+  default) renew without human intervention. Previously the refresh applied
+  the same idle check as the API middleware — a session idle-expired at the
+  API could never be refreshed, making every client 401→refresh→retry recovery
+  path dead code. The hard cap stays non-negotiable: past it, FIDO2 re-auth is
+  required. Ruled trade-off (recorded): idle-expiry revival extends a stolen
+  token's renewable window to the hard cap; refresh rotates the token (old one
+  dies immediately), keeping a theft race detectable.
 - `venya` CLI now honors `VENYA_SERVER_URL` for every command; previously most
   paths only accepted `--server-url` or a stored config, so headless,
   env-driven invocations could fall back to the wrong default URL.
