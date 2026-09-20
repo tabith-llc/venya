@@ -119,14 +119,34 @@ venya_create_user() {
 
 # --- 6. Install system packages ---
 
+# apt-get wrapper: waits for the dpkg/apt lock via apt's NATIVE timeout (no
+# fuser/psmic bootstrap dependency — fuser is not guaranteed present at the
+# first apt call on a fresh cloud image) and surfaces the output tail on failure
+# instead of dying silently under `set -e`. Without this, an apt-daily /
+# unattended-upgrades lock race makes apt-get exit 100 pre-transaction with zero
+# diagnostics (ticket installer-apt-lock-silent-fail). On failure the log is kept
+# and its path printed. Override the wait with VENYA_APT_LOCK_TIMEOUT (seconds).
+venya_apt() {
+    local log rc=0
+    log=$(mktemp /tmp/venya-apt-XXXXXX.log)
+    apt-get -o DPkg::Lock::Timeout="${VENYA_APT_LOCK_TIMEOUT:-120}" "$@" > "$log" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        error "apt-get $* failed (exit $rc). Last 25 lines:"
+        tail -25 "$log" >&2
+        error "Full apt log: $log"
+        return "$rc"
+    fi
+    rm -f "$log"
+}
+
 venya_install_system_pkgs() {
     # Args: space-separated package names
     if [ $# -eq 0 ]; then
         return
     fi
     info "Installing system packages..."
-    apt-get update -qq
-    apt-get install -y -qq "$@" > /dev/null 2>&1
+    venya_apt update -qq
+    venya_apt install -y -qq "$@"
 }
 
 # --- 7. Install uv (root) ---
