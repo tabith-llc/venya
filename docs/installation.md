@@ -137,6 +137,23 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
   bash -s
 ```
 
+**Deferred registration (bootstrap token file).** If install-time registration
+does not run (core unreachable → CA not installed), the installer writes the
+token to `/var/lib/venya/executor/bootstrap-token` (0600 venya:venya) — the
+canonical bootstrap location, inside the daemon unit's `ReadWritePaths`
+(`/etc/venya` itself is read-only to the daemon). The daemon registers
+automatically at service start once the core is reachable, then deletes the
+token file. Retry at any time: `sudo systemctl restart venya-executor`.
+
+**Legacy `[bootstrap]` recovery (runbook).** Pre-migration installs kept the
+token in a `[bootstrap]` section of `/etc/venya/executor.toml`. The daemon
+still READS that location but cannot rewrite the read-only config: after a
+successful daemon-side registration it logs `remove the [bootstrap] section
+manually; the enrollment token is already consumed server-side` and continues
+— no crash-loop. Operator recovery: as root, delete the `[bootstrap]` section
+from `/etc/venya/executor.toml`. The residue is a spent single-use token only,
+but remove it as hygiene.
+
 **Docker account credentials are required.** The sbx sandbox runtime pulls
 its agent template from Docker: the installer prompts for a Docker username
 and API key/access token (interactive runs), or takes
