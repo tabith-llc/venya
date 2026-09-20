@@ -88,6 +88,12 @@ def _mock_db_for_session(executor, secrets_first_side_effect):
     def query_side_effect(model):
         if model.__name__ == "Executor":
             return executor_q
+        if model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+            # updated: the shared revocation state (executor-revocation-by-identity)
+            # queries cert/CRL when no identity flag is set — model "no rows".
+            none_q = MagicMock()
+            none_q.filter.return_value.first.return_value = None
+            return none_q
         return secret_q
 
     mock_session.query.side_effect = query_side_effect
@@ -104,8 +110,11 @@ class TestCreateExecutionSession:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         mock_query = MagicMock()
         mock_query.first.return_value = mock_executor
+        mock_query.filter.return_value.first.return_value = mock_executor
         mock_session.query.return_value = mock_query
         backend.get_session.return_value = mock_session
 
@@ -153,6 +162,8 @@ class TestCreateExecutionSession:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         mock_db = _mock_db_for_session(mock_executor, [None])
         backend.get_session.return_value = mock_db
         app.state.core.get_for_injection.side_effect = CoreAccessError("Secret not found: missing-key")
@@ -173,6 +184,8 @@ class TestCreateExecutionSession:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         mock_db = _mock_db_for_session(mock_executor, [None])
         backend.get_session.return_value = mock_db
 
@@ -202,6 +215,8 @@ class TestCreateExecutionSession:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         secrets = _mock_secret_rows(("db-password", None), ("api-key", None))
         mock_db = _mock_db_for_session(mock_executor, list(secrets))
         backend.get_session.return_value = mock_db
@@ -233,6 +248,8 @@ class TestCreateExecutionSession:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         secrets = _mock_secret_rows(("db-password", None))
         mock_db = _mock_db_for_session(mock_executor, list(secrets))
         backend.get_session.return_value = mock_db
@@ -267,6 +284,8 @@ class TestCreateExecutionSession:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         secrets = _mock_secret_rows(("db-password", {"executor": "other-exec"}))
         mock_db = _mock_db_for_session(mock_executor, list(secrets))
         backend.get_session.return_value = mock_db
@@ -294,7 +313,7 @@ class TestCreateExecutionSession:
     def test_session_10_minute_ttl(self):
         """Session expires_at is created_at + 10 minutes."""
         app, backend = _create_test_app()
-        mock_db = _mock_db_for_session(MagicMock(id="exec-1", hostname="10.27.28.14"), [])
+        mock_db = _mock_db_for_session(MagicMock(id="exec-1", hostname="10.27.28.14", revoked_at=None), [])
         backend.get_session.return_value = mock_db
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -436,6 +455,8 @@ class TestExecuteCommandOnExecutor:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -453,6 +474,11 @@ class TestExecuteCommandOnExecutor:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
+            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+                # updated: shared revocation state models "no cert/CRL rows"
+                none_q = MagicMock()
+                none_q.filter.return_value.first.return_value = None
+                return none_q
             return mock_session_query
 
         mock_db.query.side_effect = query_side_effect
@@ -531,6 +557,8 @@ class TestExecuteCommandOnExecutor:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -548,6 +576,11 @@ class TestExecuteCommandOnExecutor:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
+            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+                # updated: shared revocation state models "no cert/CRL rows"
+                none_q = MagicMock()
+                none_q.filter.return_value.first.return_value = None
+                return none_q
             return mock_session_query
 
         mock_db.query.side_effect = query_side_effect
@@ -613,6 +646,8 @@ class TestExecutorReachability:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
         mock_query = MagicMock()
         mock_query.first.side_effect = [mock_session, mock_executor]
@@ -650,6 +685,8 @@ class TestExecutorReachability:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -666,6 +703,11 @@ class TestExecutorReachability:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
+            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+                # updated: shared revocation state models "no cert/CRL rows"
+                none_q = MagicMock()
+                none_q.filter.return_value.first.return_value = None
+                return none_q
             return mock_session_query
 
         mock_db.query.side_effect = query_side_effect
@@ -708,6 +750,8 @@ class TestExecutorReachability:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -724,6 +768,11 @@ class TestExecutorReachability:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
+            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+                # updated: shared revocation state models "no cert/CRL rows"
+                none_q = MagicMock()
+                none_q.filter.return_value.first.return_value = None
+                return none_q
             return mock_session_query
 
         mock_db.query.side_effect = query_side_effect
@@ -769,6 +818,8 @@ class TestExecutorReachability:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -785,6 +836,11 @@ class TestExecutorReachability:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
+            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+                # updated: shared revocation state models "no cert/CRL rows"
+                none_q = MagicMock()
+                none_q.filter.return_value.first.return_value = None
+                return none_q
             return mock_session_query
 
         mock_db.query.side_effect = query_side_effect
@@ -827,6 +883,7 @@ class TestExecutorReachability:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "no-such-exec"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -843,6 +900,11 @@ class TestExecutorReachability:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
+            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+                # updated: shared revocation state models "no cert/CRL rows"
+                none_q = MagicMock()
+                none_q.filter.return_value.first.return_value = None
+                return none_q
             return mock_session_query
 
         mock_db.query.side_effect = query_side_effect
@@ -894,6 +956,8 @@ class TestMalformedExecutorResponse:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -910,6 +974,11 @@ class TestMalformedExecutorResponse:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
+            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+                # updated: shared revocation state models "no cert/CRL rows"
+                none_q = MagicMock()
+                none_q.filter.return_value.first.return_value = None
+                return none_q
             return mock_session_query
 
         mock_db.query.side_effect = query_side_effect
@@ -1012,6 +1081,8 @@ class TestTlsMisconfiguration:
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
         mock_executor.hostname = "10.27.28.14"
+        mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -1028,6 +1099,11 @@ class TestTlsMisconfiguration:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
+            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+                # updated: shared revocation state models "no cert/CRL rows"
+                none_q = MagicMock()
+                none_q.filter.return_value.first.return_value = None
+                return none_q
             return mock_session_query
 
         mock_db.query.side_effect = query_side_effect

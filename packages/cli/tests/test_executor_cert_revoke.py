@@ -92,6 +92,7 @@ class TestExecutorCertRevoke:
         mock_client.post.return_value = {"revoked": True, "executor_id": "jump-1"}
 
         args = MagicMock()
+        args.serial = None  # updated: serial-form flag exists now (executor-revocation-by-identity)
         args.executor_id = "jump-1"
         args.cert_path = str(tmp_path / "executor.crt")
 
@@ -100,7 +101,7 @@ class TestExecutorCertRevoke:
         result = executor_cert_revoke(args, client=mock_client)
 
         assert result == 0
-        mock_client.post.assert_called_once_with("/api/v1/admin/executors/jump-1/revoke")
+        mock_client.post.assert_called_once_with("/api/v1/admin/executors/jump-1/revoke", json=None)
 
         captured = capsys.readouterr()
         assert "Certificate revoked." in captured.out
@@ -115,6 +116,7 @@ class TestExecutorCertRevoke:
         mock_client.post.return_value = {"revoked": True, "executor_id": "local-exec"}
 
         args = MagicMock()
+        args.serial = None  # updated: serial-form flag exists now (executor-revocation-by-identity)
         args.executor_id = None
         args.cert_path = str(cert_path)
 
@@ -123,7 +125,7 @@ class TestExecutorCertRevoke:
         result = executor_cert_revoke(args, client=mock_client)
 
         assert result == 0
-        mock_client.post.assert_called_once_with("/api/v1/admin/executors/local-exec/revoke")
+        mock_client.post.assert_called_once_with("/api/v1/admin/executors/local-exec/revoke", json=None)
 
         captured = capsys.readouterr()
         assert "Certificate revoked." in captured.out
@@ -137,6 +139,7 @@ class TestExecutorCertRevoke:
         mock_client.post.side_effect = APIClientAuthenticationError("Invalid token")
 
         args = MagicMock()
+        args.serial = None  # updated: serial-form flag exists now (executor-revocation-by-identity)
         args.executor_id = "jump-1"
         args.cert_path = str(tmp_path / "executor.crt")
 
@@ -158,6 +161,7 @@ class TestExecutorCertRevoke:
         mock_client.post.side_effect = APIClientError("Executor not found: unknown-exec")
 
         args = MagicMock()
+        args.serial = None  # updated: serial-form flag exists now (executor-revocation-by-identity)
         args.executor_id = "unknown-exec"
         args.cert_path = str(tmp_path / "executor.crt")
 
@@ -179,6 +183,7 @@ class TestExecutorCertRevoke:
         mock_client.post.side_effect = APIClientError("Connection refused")
 
         args = MagicMock()
+        args.serial = None  # updated: serial-form flag exists now (executor-revocation-by-identity)
         args.executor_id = "jump-1"
         args.cert_path = str(tmp_path / "executor.crt")
 
@@ -194,6 +199,7 @@ class TestExecutorCertRevoke:
     def test_revoke_cert_fallback_missing_file(self, tmp_path, capsys):
         """Missing cert file for fallback mode returns exit 1."""
         args = MagicMock()
+        args.serial = None  # updated: serial-form flag exists now (executor-revocation-by-identity)
         args.executor_id = None
         args.cert_path = str(tmp_path / "nonexistent.pem")
 
@@ -212,6 +218,7 @@ class TestExecutorCertRevoke:
         cert_path, _, _ = _setup_cert_files(tmp_path, executor_id="auto-exec", validity_days=30)
 
         args = MagicMock()
+        args.serial = None  # updated: serial-form flag exists now (executor-revocation-by-identity)
         args.executor_id = None
         args.cert_path = str(cert_path)
 
@@ -226,7 +233,45 @@ class TestExecutorCertRevoke:
 
             assert result == 0
             MockAPIClient.assert_called_once()
-            mock_instance.post.assert_called_once_with("/api/v1/admin/executors/auto-exec/revoke")
+            mock_instance.post.assert_called_once_with("/api/v1/admin/executors/auto-exec/revoke", json=None)
+
+    def test_revoke_serial_form_passes_body(self, tmp_path, capsys):
+        """--serial sends the body form (casefolded) and prints the
+        identity-NOT-revoked distinction (ruling 1)."""
+        mock_client = MagicMock()
+        mock_client.post.return_value = {"revoked": True, "executor_id": "exec-x", "serial_number": "00ff00ff"}
+
+        args = MagicMock()
+        args.serial = "00FF00FF"
+        args.executor_id = "exec-x"
+        args.cert_path = str(tmp_path / "executor.crt")
+
+        from venya_cli.commands import executor_cert_revoke
+
+        result = executor_cert_revoke(args, client=mock_client)
+
+        assert result == 0
+        mock_client.post.assert_called_once_with("/api/v1/admin/executors/exec-x/revoke", json={"serial": "00ff00ff"})
+        captured = capsys.readouterr()
+        assert "identity NOT revoked" in captured.out
+        assert "00ff00ff" in captured.out
+
+    def test_revoke_serial_bad_hex_rejected(self, tmp_path, capsys):
+        """Paired negative: non-hex --serial fails client-side, no request sent."""
+        mock_client = MagicMock()
+
+        args = MagicMock()
+        args.serial = "not-hex-zz"
+        args.executor_id = "exec-x"
+        args.cert_path = str(tmp_path / "executor.crt")
+
+        from venya_cli.commands import executor_cert_revoke
+
+        result = executor_cert_revoke(args, client=mock_client)
+
+        assert result == 1
+        mock_client.post.assert_not_called()
+        assert "--serial must be hex" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +288,7 @@ class TestAdminRevokeExecutorDelegation:
         mock_client.post.return_value = {"revoked": True, "executor_id": "admin-exec"}
 
         args = MagicMock()
+        args.serial = None  # updated: serial-form flag exists now (executor-revocation-by-identity)
         args.executor_id = "admin-exec"
 
         with patch("venya_cli.commands.executor_cert_revoke") as mock_revoke:
@@ -259,11 +305,29 @@ class TestAdminRevokeExecutorDelegation:
             # Second arg should be client=mock_client
             assert call_args[1]["client"] is mock_client
 
+    def test_admin_revoke_delegates_serial(self, capsys):
+        """--serial threads through the admin delegation (executor-revocation-by-identity)."""
+        mock_client = MagicMock()
+
+        args = MagicMock()
+        args.serial = "ABC123"
+        args.executor_id = "admin-exec"
+
+        with patch("venya_cli.commands.executor_cert_revoke") as mock_revoke:
+            mock_revoke.return_value = 0
+            from venya_cli.commands import cmd_admin_revoke_executor
+
+            result = cmd_admin_revoke_executor(mock_client, args)
+
+            assert result == 0
+            assert mock_revoke.call_args[0][0].serial == "ABC123"
+
     def test_admin_revoke_returns_error_code(self, capsys):
         """cmd_admin_revoke_executor returns error code from executor_cert_revoke."""
         mock_client = MagicMock()
 
         args = MagicMock()
+        args.serial = None  # updated: serial-form flag exists now (executor-revocation-by-identity)
         args.executor_id = "bad-exec"
 
         with patch("venya_cli.commands.executor_cert_revoke") as mock_revoke:

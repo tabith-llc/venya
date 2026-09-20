@@ -88,6 +88,9 @@ class MockExecutorCert:
 @dataclass
 class MockExecutorCertRevocation:
     serial_number: str
+    # updated: the shared revocation state (executor-revocation-by-identity)
+    # surfaces the row's revoked_at — mock models the full schema.
+    revoked_at: object = None
 
 
 # ---------------------------------------------------------------------------

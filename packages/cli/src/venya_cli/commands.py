@@ -759,6 +759,7 @@ def cmd_admin_revoke_executor(client: APIClient, args: Any) -> int:
     class _RevokeArgs:
         executor_id = args.executor_id
         cert_path = "/etc/venya/executor/executor.crt"
+        serial = getattr(args, "serial", None)
 
     return executor_cert_revoke(_RevokeArgs(), client=client)
 
@@ -2141,6 +2142,18 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
     """
     executor_id = getattr(args, "executor_id", None)
     cert_path = getattr(args, "cert_path", "/etc/venya/executor/executor.crt")
+    serial = getattr(args, "serial", None)
+    if serial is not None:
+        # Serial form (ticket executor-revocation-by-identity, ruling 1):
+        # kill ONE credential (e.g. an orphaned predecessor serial) WITHOUT
+        # revoking the executor identity. Incident-response tool.
+        try:
+            int(serial, 16)
+            if not 1 <= len(serial) <= 16:
+                raise ValueError("bad length")
+        except (ValueError, TypeError):
+            print(f"Error: --serial must be hex, 1-16 chars (got {serial!r})", file=sys.stderr)
+            return 1
 
     # Resolve executor_id: explicit arg > local cert CN
     if executor_id is None:
@@ -2156,10 +2169,20 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
         client = APIClient()
 
     try:
-        result = client.post(f"/api/v1/admin/executors/{executor_id}/revoke")
+        result = client.post(
+            f"/api/v1/admin/executors/{executor_id}/revoke",
+            json={"serial": serial.casefold()} if serial else None,
+        )
         revoked = result.get("revoked", False) if result else False
-        print("Certificate revoked.")
-        print(f"  Executor ID:  {executor_id}")
+        if serial:
+            print("Certificate serial revoked (identity NOT revoked).")
+            print(f"  Executor ID:  {executor_id}")
+            print(f"  Serial:       {serial.casefold()}")
+        else:
+            print("Certificate revoked.")
+            print(f"  Executor ID:  {executor_id}")
+        if not serial and revoked:
+            print("  Identity:     REVOKED (terminal — re-enrollment requires a NEW executor_id)")
         print(f"  Revoked:      {'Yes' if revoked else 'No'}")
         return 0
     except APIClientAuthenticationError as e:

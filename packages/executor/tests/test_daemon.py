@@ -556,6 +556,45 @@ class TestCheckRevocation:
         with patch.object(cert_manager.client, "get", return_value=mock_response):
             assert cert_manager.check_revocation() is True
 
+    def test_check_revocation_identity_match(self, cert_manager: CertificateManager, caplog):
+        """updated: executor-revocation-by-identity ruling 2 — own executor_id in
+        revoked_identities revokes REGARDLESS of serial (this is the cell that
+        catches a restarted daemon on a diverged/stale cert that the serial-only
+        list can never match), with a distinct TERMINAL warning."""
+        import logging
+
+        cert_manager.serial = "0000000000000099"  # NOT in any serial list
+
+        mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"etag": '"id001"'}
+        mock_response.json.return_value = {
+            "revoked_serials": ["0000000000000002"],
+            "revoked_identities": [cert_manager.config.executor_id],
+        }
+        mock_response.raise_for_status.return_value = None
+
+        with caplog.at_level(logging.WARNING):
+            with patch.object(cert_manager.client, "get", return_value=mock_response):
+                assert cert_manager.check_revocation() is True
+        assert "IDENTITY revoked" in caplog.text
+
+    def test_check_revocation_foreign_identity_ignored(self, cert_manager: CertificateManager):
+        """Paired negative: another identity's entry must keep this daemon running."""
+        cert_manager.serial = "0000000000000001"
+
+        mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.status_code = 200
+        mock_response.headers = {"etag": '"id002"'}
+        mock_response.json.return_value = {
+            "revoked_serials": ["0000000000000002"],
+            "revoked_identities": ["some-other-executor"],
+        }
+        mock_response.raise_for_status.return_value = None
+
+        with patch.object(cert_manager.client, "get", return_value=mock_response):
+            assert cert_manager.check_revocation() is False
+
     def test_check_revocation_not_revoked(self, cert_manager: CertificateManager):
         """Returns False when serial is not in the revocation list."""
         cert_manager.serial = "0000000000000001"

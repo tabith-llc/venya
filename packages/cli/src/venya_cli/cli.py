@@ -243,6 +243,15 @@ def create_parser() -> argparse.ArgumentParser:
     # admin revoke-executor
     revoke_executor_parser = admin_sub.add_parser("revoke-executor", help="Revoke an executor certificate")
     revoke_executor_parser.add_argument("executor_id", help="Executor ID to revoke")
+    revoke_executor_parser.add_argument(
+        "--serial",
+        default=None,
+        help=(
+            "Revoke ONLY this certificate serial (hex, up to 16 chars) without revoking "
+            "the executor identity — for orphaned/predecessor credentials. Omit for the "
+            "identity form (terminal: re-enrollment then requires a NEW executor_id)."
+        ),
+    )
 
     # admin executor-enroll
     enroll_executor_parser = admin_sub.add_parser(

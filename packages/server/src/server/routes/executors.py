@@ -35,6 +35,7 @@ from .. import metrics
 from ..ca import CAManager
 from ..dependencies import get_db, require_role
 from ..rate_limit import rate_limit_registration
+from ..revocation import executor_revocation_state
 from ..utils.executor_id import EXECUTOR_ID_PATTERN
 from ..utils.time import effective_expiry_check_time, is_expired
 from .secrets import wrap_with_sentinel
@@ -112,6 +113,13 @@ class RevocationListResponse(BaseModel):
     """Response for revocation list polling."""
 
     revoked_serials: list[str] = Field(default_factory=list, description="List of revoked certificate serial numbers")
+    revoked_identities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Executor IDs whose IDENTITY is revoked (terminal) — matches any serial. "
+            "Additive field (executor-revocation-by-identity); older daemons ignore it."
+        ),
+    )
 
 
 class HeartbeatRequest(BaseModel):
@@ -397,6 +405,25 @@ async def register_executor(
             )
         token_audit_fields = {"with_token": False}
 
+    # Terminal identity check (executor-revocation-by-identity, ruling 3/condition 4):
+    # a revoked identity can NEVER re-register — even with a valid fresh token,
+    # which by this point is already consumed by validation (recorded behavior:
+    # admin sees a consumed token + 403; re-enrollment requires a NEW
+    # executor_id). Fires before cert issuance and any identity DB write.
+    # Serial-history revocation does NOT block here: killing a credential must
+    # not kill re-enrollment (that is what the identity form is for).
+    _terminal = executor_revocation_state(db, resolved_executor_id)
+    if _terminal.reason == "identity":
+        metrics.EXECUTOR_REGISTERED.labels(result="identity_revoked").inc()
+        logger.warning("Registration rejected — executor identity revoked (terminal): %s", resolved_executor_id)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Executor identity '{resolved_executor_id}' is revoked (terminal). "
+                "Re-enroll under a NEW executor_id; this identity cannot be reused."
+            ),
+        )
+
     # Create executor user account if it doesn't exist
     existing_user = db.query(User).filter(User.user_id == resolved_executor_id).first()
     if existing_user is None:
@@ -441,6 +468,24 @@ async def register_executor(
     )
 
     if existing_cert:
+        # F6 auto-revoke (executor-revocation-by-identity ruling 1): the
+        # replaced predecessor serial is CRLed IN THE SAME TRANSACTION — normal
+        # operation must not mint off-record chain-valid orphans, and a diverged
+        # daemon still running the predecessor dies within one poll (fail-closed).
+        old_serial = (existing_cert.serial_number or "").casefold()
+        if old_serial and old_serial != serial_hex.casefold():
+            from core.iam.models import ExecutorCertRevocation
+
+            prior = db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == old_serial).first()
+            if prior is None:
+                db.add(
+                    ExecutorCertRevocation(
+                        serial_number=old_serial,
+                        executor_id=resolved_executor_id,
+                        revoked_at=datetime.now(UTC),
+                        reason="Replaced by re-registration/rotation",
+                    )
+                )
         # Update existing cert record
         existing_cert.serial_number = serial_hex
         existing_cert.not_before = cert.not_valid_before_utc
@@ -538,14 +583,17 @@ async def get_revocation_list(
     # Fetch remaining revocations
     revocations = db.query(ExecutorCertRevocation).all()
     serials = sorted([r.serial_number for r in revocations])
-    payload = json.dumps(serials, sort_keys=True).encode()
+    # Identity-level revocations (terminal flag on the Executor row) ride
+    # alongside the serial history — additive wire field, ETag covers BOTH.
+    identities = sorted(row[0] for row in db.query(Executor.id).filter(Executor.revoked_at.isnot(None)).all())
+    payload = json.dumps({"s": serials, "i": identities}, sort_keys=True).encode()
     etag = f'"{hashlib.sha256(payload).hexdigest()}"'
 
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers={"ETag": etag})
 
     return Response(
-        content=json.dumps({"revoked_serials": serials}).encode(),
+        content=json.dumps({"revoked_serials": serials, "revoked_identities": identities}).encode(),
         media_type="application/json",
         headers={
             "ETag": etag,
@@ -635,29 +683,28 @@ async def heartbeat(
     Executors POST to this endpoint every 30s to signal liveness.
     The server responds with revocation status and cert rotation hint.
 
-    Public endpoint — no authentication required. It only liveness-stamps the
-    executor (drives the advisory "online" flag on GET /api/v1/executors). That
-    status is informational, not access-enforcing: real availability is checked
-    at mTLS relay time, and revocation (a real control) rides the cert list.
+    Public endpoint — no authentication required. It only liveness-stamps
+    the executor (drives the advisory "online" flag on GET /api/v1/executors).
+    The `revoked` flag is computed from the SHARED revocation state and is a
+    fast cooperative stop signal; the enforcing control is the dial-gate
+    refusal in create_execution_session/execute (ruling 4).
     """
-    from core.iam.models import ExecutorCert, ExecutorCertRevocation
+    from core.iam.models import ExecutorCert
 
     executor_id = req.executor_id
     revoked = False
     new_cert_required = False
 
     if executor_id:
-        # Check if executor's current cert is revoked
+        # Revoked-ness comes from the SHARED state (executor-revocation-by-identity
+        # condition 2 — this computation was a second, record-pointer-only
+        # implementation; the helper adds the identity flag).
+        revoked = executor_revocation_state(db, executor_id).revoked
+
+        # Rotation hint still reads the record's expiry
         current_cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
 
         if current_cert:
-            # Check revocation list
-            revoked = (
-                db.query(ExecutorCertRevocation)
-                .filter(ExecutorCertRevocation.serial_number == current_cert.serial_number)
-                .first()
-                is not None
-            )
 
             # Check if cert needs rotation (within 3 days of expiry)
             now = datetime.now(UTC)
@@ -712,7 +759,12 @@ async def list_executors(
             delta = now - exec_rec.last_heartbeat
             is_online = delta.total_seconds() < 60
 
-        if exec_rec.revoked_at:
+        # Status display is a CLIENT of the shared revocation state (condition 2
+        # — no second revoked-ness implementation). Note: this also surfaces
+        # serial-form revocation of the CURRENT record serial as "revoked",
+        # consistent with the dial refusal.
+        _rev = executor_revocation_state(db, exec_rec.id, executor_row=exec_rec)
+        if _rev.revoked:
             status = "revoked"
         elif exec_rec.enrolled_at:
             status = "active"
@@ -793,6 +845,17 @@ async def create_execution_session(
     executor = db.query(Executor).filter(Executor.id == req.executor_id).first()
     if executor is None:
         raise HTTPException(status_code=404, detail="Executor not found")
+
+    # Dial gate (executor-revocation-by-identity ruling 4 — the enforcement
+    # point that actually stops an uncooperative daemon): shared revocation
+    # state governs — identity flag OR current-record serial in the CRL
+    # (condition 1: a serial-form revocation of the record serial refuses too).
+    _rev = executor_revocation_state(db, req.executor_id, executor_row=executor)
+    if _rev.revoked:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Executor '{req.executor_id}' is revoked ({_rev.reason}) — refusing to route execution",
+        )
 
     # Create session with 10-minute TTL
     now = datetime.now(UTC)
@@ -917,6 +980,15 @@ async def execute_command_on_executor(
     executor = db.query(Executor).filter(Executor.id == id).first()
     if executor is None:
         raise HTTPException(status_code=404, detail="Executor not found")
+
+    # Dial gate #2 (execute): the session may predate the revocation — the
+    # shared state is re-checked at relay time, not only at session create.
+    _rev = executor_revocation_state(db, id, executor_row=executor)
+    if _rev.revoked:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Executor '{id}' is revoked ({_rev.reason}) — refusing to route execution",
+        )
 
     # Load wrapped secrets from session
     secrets = db.query(SessionSecret).filter(SessionSecret.session_id == session.id).all()

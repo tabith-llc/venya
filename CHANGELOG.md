@@ -6,6 +6,16 @@ Notable changes to Venya will be documented in this file.
 
 ### Security
 
+- Executor revocation is now identity-based (hybrid model): `venya admin
+  revoke-executor <id>` terminally revokes the IDENTITY (`Executor.revoked_at`,
+  previously a dead-wired column) — command routing refuses revoked executors
+  server-side, registration under a revoked identity is rejected even with a
+  valid token, and a restarted daemon on a diverged/stale certificate is caught
+  via the new `revoked_identities` list entries and the heartbeat `revoked`
+  flag. A `--serial` form kills one credential without touching the identity
+  (incident tool for orphans), and re-registration/rotation now auto-revokes
+  the replaced serial in the same transaction — normal operation no longer
+  leaves off-record, chain-valid predecessor certificates.
 - Executor registration now requires an enrollment token by default
   (`executor_enrollment.require_token` — previously open: any host reaching the
   core could enroll itself as an executor). Rejections carry an actionable error
