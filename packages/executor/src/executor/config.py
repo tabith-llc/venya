@@ -245,7 +245,7 @@ class ExecutorConfig(BaseSettings):
     # Bootstrap (registration-only)
     bootstrap: BootstrapConfig = Field(default_factory=BootstrapConfig)
 
-    # Path to this config file (for _clear_enrollment_token)
+    # Path to this config file (legacy [bootstrap] clear in _clear_bootstrap_token)
     config_path: Path | None = None
 
     # Executor identity

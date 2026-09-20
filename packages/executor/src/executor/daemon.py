@@ -53,6 +53,14 @@ from .strategies.sbx_strategy import SECRET_TMPFS_BASE, SbxStrategy, sweep_works
 
 logger = logging.getLogger("venya.executor.daemon")
 
+# Canonical bootstrap enrollment-token storage (ticket
+# daemon-bootstrap-token-clear-erofs): /etc/venya is ReadOnlyPaths for the
+# daemon, so a token kept in executor.toml could never be cleared after use —
+# the cleanup itself crash-looped the daemon. This path sits under the unit's
+# ReadWritePaths; the toml [bootstrap] section remains a read-only-to-daemon
+# LEGACY location honored until old installs are cut over.
+BOOTSTRAP_TOKEN_PATH = Path("/var/lib/venya/executor/bootstrap-token")
+
 CLOCK_SKEW_TOLERANCE = timedelta(seconds=300)
 
 
@@ -823,6 +831,7 @@ class ExecutorDaemon:
 
         self.config = config
         self._config_path = self.config.config_path or Path("/etc/venya/executor.toml")
+        self._bootstrap_token_path = BOOTSTRAP_TOKEN_PATH
         self.state = DaemonState()
         self.state.executor_id = config.executor_id
 
@@ -889,13 +898,54 @@ class ExecutorDaemon:
             timeout=self.config.network.request_timeout_seconds,
         )
 
-    def _clear_enrollment_token(self) -> None:
-        """Remove the consumed enrollment token from the config file.
+    def _resolve_bootstrap_token(self) -> str | None:
+        """Resolve the bootstrap enrollment token from both storage locations.
 
-        The token should only be on disk for the one-time registration.
-        After registration, it's cleared to prevent exposure.
+        Canonical file wins over the legacy toml [bootstrap] section (dual-
+        location reader until legacy installs are cut over — ticket
+        daemon-bootstrap-token-clear-erofs). Called ONCE from start(); the
+        resolved value is never re-read per loop iteration.
+        """
+        token_path = self._bootstrap_token_path
+        if token_path.exists():
+            try:
+                token = token_path.read_text().strip()
+            except OSError as e:
+                logger.error("Bootstrap token file %s unreadable: %s — ignoring", token_path, e)
+                return self.config.bootstrap.enrollment_token
+            if token:
+                return token
+            logger.warning("Bootstrap token file %s is empty — falling back to config", token_path)
+        return self.config.bootstrap.enrollment_token
+
+    def _clear_bootstrap_token(self) -> None:
+        """Remove the consumed bootstrap token from BOTH storage locations.
+
+        The token is server-side single-use and already consumed by the time
+        this runs — what gets deleted is spent residue, not a live credential.
+        The canonical file lives under the unit's ReadWritePaths, so its
+        removal is clean. The legacy executor.toml section sits under
+        ReadOnlyPaths=/etc/venya: the rewrite fails EROFS on hardened units.
+        That failure must NOT kill the daemon (the uncaught-OSError crash-loop
+        is exactly the ticket harm, and exit-1 would reinstate it for the
+        legacy population least able to self-heal) — ruling 2026-09-20:
+        loud actionable ERROR + proceed, grace strictly scoped to the legacy
+        location.
         """
         import tomllib
+
+        token_path = self._bootstrap_token_path
+        if token_path.exists():
+            try:
+                token_path.unlink()
+                logger.info("Cleared bootstrap token file %s", token_path)
+            except OSError as e:
+                logger.error(
+                    "Could not remove bootstrap token file %s: %s — remove it manually "
+                    "(token already consumed server-side)",
+                    token_path,
+                    e,
+                )
 
         config_path = self._config_path
         if not config_path.exists():
@@ -915,11 +965,22 @@ class ExecutorDaemon:
             if not data["bootstrap"]:
                 del data["bootstrap"]
 
-            path = Path(config_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(config_path, "w") as f:
-                tomli_w.dump(data, f)
-            logger.info("Cleared enrollment token from config")
+            try:
+                # tomli_w.dump requires BINARY mode — the pre-fix text-mode
+                # open was a latent TypeError on every successful clear
+                # (masked in production: hardened units hit EROFS first and
+                # installer-flow clears the toml as root before daemon boot).
+                with open(config_path, "wb") as f:
+                    tomli_w.dump(data, f)
+                logger.info("Cleared enrollment token from config")
+            except OSError as e:
+                logger.error(
+                    "Config file %s is not writable (%s) — remove the [bootstrap] section "
+                    "manually; the enrollment token is already consumed server-side and "
+                    "the residue is a spent credential only",
+                    config_path,
+                    e,
+                )
 
     def create_executor(self, session_id: str) -> Executor:
         """Create an Executor instance with mTLS client.
@@ -968,12 +1029,13 @@ class ExecutorDaemon:
         # Register with server (creates cert/key if not present)
         # register() uses throwaway httpx2.Client instances internally —
         # never self.client. After registration, certs are on disk.
-        enrollment_token = self.config.bootstrap.enrollment_token
+        enrollment_token = self._resolve_bootstrap_token()
         self.cert_manager.register(self.state.executor_id, enrollment_token=enrollment_token)
 
-        # Clear enrollment token from config after successful registration
+        # Clear the consumed bootstrap token (both locations) after successful
+        # registration — once per start(), never per loop iteration.
         if enrollment_token:
-            self._clear_enrollment_token()
+            self._clear_bootstrap_token()
 
         # Create mTLS client — takes over for all subsequent communication.
         # Startup refusal: without a working control channel the daemon is
