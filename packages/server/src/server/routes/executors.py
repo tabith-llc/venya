@@ -233,6 +233,48 @@ def _get_ca_manager(request: Request) -> CAManager:
     return ca_manager
 
 
+def _mark_execution_session_completed(
+    db: Session,
+    session_id: str,
+    command: str,
+    completed_at: datetime,
+    result: dict,
+) -> None:
+    """Best-effort post-relay bookkeeping for an execution session.
+
+    Uses a bulk ``UPDATE ... WHERE id=`` rather than mutating the loaded ORM object:
+    a bulk UPDATE matching 0 rows is a silent no-op, whereas an ORM flush raises
+    ``StaleDataError`` if the row vanished mid-execute — e.g. the
+    ``cleanup_expired_execution_sessions`` maintenance pass deleting a session whose
+    10-min TTL lapsed during a long relay (ticket execute-stale-session-update-500).
+    The command already ran on the executor and the caller returns its result
+    regardless; the caller commits the audit event in the same transaction, so the
+    command stays audited even when this update no-ops.
+    """
+    res = db.execute(
+        text(
+            "UPDATE execution_sessions "
+            "SET command = :command, completed_at = :completed_at, exit_code = :exit_code, "
+            "stdout = :stdout, stderr = :stderr "
+            "WHERE id = :sid"
+        ),
+        {
+            "command": command,
+            "completed_at": completed_at,
+            "exit_code": result["exit_code"],
+            "stdout": result["stdout"],
+            "stderr": result["stderr"],
+            "sid": session_id,
+        },
+    )
+    if res.rowcount == 0:
+        logger.warning(
+            "Execution session %s vanished before post-relay bookkeeping (TTL cleanup "
+            "race); command result returned, session update skipped",
+            session_id,
+        )
+
+
 # --- Endpoints ---
 
 
@@ -1147,12 +1189,11 @@ async def execute_command_on_executor(
     )
     db.add(audit_event)
 
-    # Mark session as completed
-    session.command = req.command
-    session.completed_at = now
-    session.exit_code = result["exit_code"]
-    session.stdout = result["stdout"]
-    session.stderr = result["stderr"]
+    # Mark session as completed via a bulk UPDATE that tolerates a row that vanished
+    # mid-execute (ticket execute-stale-session-update-500) — an ORM flush here raised
+    # StaleDataError -> 500 after the command already ran. The audit event above commits
+    # atomically in the same transaction.
+    _mark_execution_session_completed(db, session.id, req.command, now, result)
     db.commit()
 
     return RelayResponse(**result)
