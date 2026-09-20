@@ -4,6 +4,22 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- The core installer now encrypts the root CA private key at rest and delivers
+  its passphrase through a restricted systemd EnvironmentFile, matching the
+  existing admin CA key handling.
+- Preparing for beta: the core installer no longer carries a development
+  passphrase. `VENYA_DB_PASSPHRASE` is now always operator-provided — prompted
+  on interactive installs, required for unattended installs — and, together
+  with the recovery pepper, is safely reused across idempotent re-installs.
+
+### Fixed
+
+- `venya` CLI now honors `VENYA_SERVER_URL` for every command; previously most
+  paths only accepted `--server-url` or a stored config, so headless,
+  env-driven invocations could fall back to the wrong default URL.
+
 ## [0.1.0-alpha.11] - 2026-09-19
 
 ### Added
