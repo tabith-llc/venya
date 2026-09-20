@@ -82,6 +82,65 @@ class TestFilterSessionOutput:
         assert data["stdout"] == stdout
         assert data["stderr"] == stderr
 
+    def test_legacy_payload_with_secrets_field_tolerated_and_dropped(self):
+        """Wire-compat truth table (ruling 2026-09-20, ticket
+        executor-stage2-plaintext-signoff): the executor's dead `secrets`
+        field was deleted from the sender — but OLD daemons still send it.
+        FilterRequest never declared it (pydantic drops extra keys), so a
+        legacy payload must return 200 with a response IDENTICAL to the
+        new shape. Old daemons talking to new cores must not break."""
+        session = SimpleNamespace(id=123, user_id="user1")
+
+        class MockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                return session
+
+        class EmptyMockQuery:
+            def filter(self, *args, **kwargs):
+                return self
+
+            def all(self):
+                return []
+
+        db = MagicMock()
+
+        def query_side_effect(model):
+            if model.__name__ == "Secret":
+                return EmptyMockQuery()
+            return MockQuery()
+
+        db.query.side_effect = query_side_effect
+
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        import base64
+
+        stdout = base64.b64encode(b"hello world").decode()
+        stderr = base64.b64encode(b"error msg").decode()
+
+        legacy = client.post(
+            "/api/v1/sessions/123/filter",
+            json={
+                "stdout": stdout,
+                "stderr": stderr,
+                "secrets": [{"secret_id": "s1", "hash": "abc123"}],
+            },
+        )
+        current = client.post(
+            "/api/v1/sessions/123/filter",
+            json={"stdout": stdout, "stderr": stderr},
+        )
+        assert legacy.status_code == 200
+        assert current.status_code == 200
+        assert legacy.json() == current.json()
+        assert legacy.json()["stdout"] == stdout
+
     def test_filter_no_backend(self):
         """POST /sessions/{id}/filter should return 503 if no backend."""
         app = _create_test_app()

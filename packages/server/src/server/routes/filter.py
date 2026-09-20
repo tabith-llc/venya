@@ -25,7 +25,21 @@ logger = logging.getLogger("venya.server")
 
 
 class FilterRequest(BaseModel):
-    """Filter request from executor."""
+    """Request from executor.
+
+    SIGN-OFF INVARIANT (ticket executor-stage2-plaintext-signoff, ruling
+    2026-09-20): the body carries plaintext-equivalent (base64) UNFILTERED
+    command output BY DESIGN — Stage-2 is the definitive filter and must see
+    pre-Stage-1 bytes to be authoritative over Stage-1 misses. Transport
+    protection is mutual mTLS only; request/response bodies at this hop must
+    NEVER be logged on either side. Any future logger touching bodies here
+    is a REGRESSION.
+
+    Note: no `secrets` field by design — the handler reconstructs plaintext
+    from the server's own DB via KEK. Legacy daemons that still send a
+    `secrets` key are tolerated (pydantic drops undeclared keys; pinned by
+    test_legacy_payload_with_secrets_field_tolerated_and_dropped).
+    """
 
     stdout: str = Field(..., description="Base64-encoded stdout bytes")
     stderr: str = Field(..., description="Base64-encoded stderr bytes")

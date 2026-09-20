@@ -242,7 +242,6 @@ class TestSendToStage2:
 
         stdout = b"hello secret_value world"
         stderr = b""
-        secret_entries = [{"secret_id": "test-secret", "value": b"secret_value"}]
 
         mock_response = self._create_mock_response(
             stdout_data=b"hello [REDACTED] world",
@@ -251,7 +250,7 @@ class TestSendToStage2:
         )
         mock_http_client.post.return_value = mock_response
 
-        result_stdout, result_stderr, masked_ids = executor._send_to_stage2(stdout, stderr, secret_entries)
+        result_stdout, result_stderr, masked_ids = executor._send_to_stage2(stdout, stderr)
 
         # Verify payload sent to server
         call_args = mock_http_client.post.call_args
@@ -259,7 +258,8 @@ class TestSendToStage2:
         payload = call_args[1]["json"]
         assert payload["stdout"] == base64.b64encode(stdout).decode()
         assert payload["stderr"] == base64.b64encode(stderr).decode()
-        assert payload["secrets"] == secret_entries
+        # dead `secrets` field deleted (ticket executor-stage2-plaintext-signoff)
+        assert "secrets" not in payload
         assert call_args[1]["timeout"] == 30.0
 
         # Verify returned data
@@ -282,7 +282,7 @@ class TestSendToStage2:
         }
         mock_http_client.post.return_value = mock_response
 
-        _, _, masked_ids = executor._send_to_stage2(b"out", b"err", [])
+        _, _, masked_ids = executor._send_to_stage2(b"out", b"err")
 
         assert masked_ids == ["a1b2c3d4", "c3d4e5f6"]
 
@@ -301,7 +301,7 @@ class TestSendToStage2:
         }
         mock_http_client.post.return_value = mock_response
 
-        _, _, masked_ids = executor._send_to_stage2(b"out", b"", [])
+        _, _, masked_ids = executor._send_to_stage2(b"out", b"")
 
         assert masked_ids == []
 
@@ -311,7 +311,7 @@ class TestSendToStage2:
         mock_http_client.post.side_effect = httpx2.RequestError("Connection refused", request=MagicMock())
 
         with pytest.raises(httpx2.RequestError):
-            executor._send_to_stage2(b"out", b"err", [])
+            executor._send_to_stage2(b"out", b"err")
 
 
 # --- Tests: _run_command Stage 2 integration ---
