@@ -482,7 +482,8 @@ class TestRotate:
         """updated: require_token default flip — rotation against a require_token
         server raises the SAME knob-name/re-enrollment-path actionable message as
         bootstrap register (shared invariant), plus the Phase-2 incumbent-exemption
-        forward-reference (rotation-only). Runtime-tolerant: _main_loop catches it;
+        reference (rotation-only; exemption LANDED — the message now explains a
+        rotation 400 as not-the-record-credential). Runtime-tolerant: _main_loop catches it;
         the on-disk cert must be untouched (refusal happens before any write)."""
         ca_key, ca_cert = _make_ca_pair()
         initial_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
@@ -502,7 +503,7 @@ class TestRotate:
 
         msg = str(ei.value)
         assert "VENYA_EXECUTOR_ENROLLMENT_TOKEN" in msg
-        assert "incumbent" in msg  # Phase-2 exemption forward-reference, rotation-only
+        assert "incumbent" in msg  # Phase-2 exemption reference (landed), rotation-only
         saved = x509.load_pem_x509_certificate(Path(cert_manager.cert_path).read_bytes())
         assert saved.serial_number == initial_cert.serial_number  # no partial write
 

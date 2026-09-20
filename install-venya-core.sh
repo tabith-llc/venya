@@ -631,6 +631,7 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header X-Client-Verified \$ssl_client_verify;
         proxy_set_header X-Client-Subject \$ssl_client_s_dn;
+        proxy_set_header X-Client-Serial \$ssl_client_serial;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }

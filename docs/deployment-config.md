@@ -76,8 +76,8 @@ Unknown `VENYA_*` names are silently ignored (`extra="ignore"`) — a misspelled
 without a valid enrollment token is rejected 400. Setting it `false` restores open
 enrollment — any host reaching the core can mint an executor identity (physically
 proven); do not disable outside deliberately open test networks. Rotation interaction:
-see `cert-rotation-runbook.md` §1 (tokenless `rotate()` is rejected until the
-incumbent-mTLS exemption lands).
+see `cert-rotation-runbook.md` §1 (tokenless `rotate()` is exempt for the verified
+incumbent credential — clean revocation state plus serial == current record).
 | `cors.origins` (JSON list) | `VENYA_CORS__ORIGINS` |
 
 Installer-level input variables (e.g. `VENYA_DB_PASSWORD`, `VENYA_DB_PASSPHRASE`, `VENYA_RECOVERY_PEPPER`, `CORE_HOSTNAME`) are consumed by `install-venya-core.sh`, which writes the correctly-named server variables into `/opt/venya/.env`. Setting an installer var in the server's environment does nothing.
