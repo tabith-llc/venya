@@ -13,7 +13,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from core.utils.entropy import get_secure_token
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -183,9 +183,22 @@ class AdminKeyRotationJobRollbackResponse(BaseModel):
     restored_secrets_count: int
 
 
+class AdminRevokeExecutorRequest(BaseModel):
+    """Optional body for the serial form of executor revocation."""
+
+    serial: str | None = Field(
+        default=None,
+        description=(
+            "Specific certificate serial (hex) to revoke WITHOUT revoking the "
+            "executor identity. Omit for the identity form (terminal)."
+        ),
+    )
+
+
 class AdminRevokeExecutorResponse(BaseModel):
     revoked: bool
     executor_id: str
+    serial_number: str | None = None
 
 
 class AdminEnrollExecutorResponse(BaseModel):
@@ -989,52 +1002,98 @@ async def admin_list_executors(
 )
 async def admin_revoke_executor(
     executor_id: str,
+    req: AdminRevokeExecutorRequest | None = Body(default=None),
     _: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminRevokeExecutorResponse:
-    """Revoke an executor certificate (admin only).
+    """Revoke an executor certificate or identity (admin only).
 
-    Adds the executor's certificate serial number to the revocation list.
-    The executor will be rejected on next revocation check (polls ~every 30s).
+    Two forms (ticket executor-revocation-by-identity, ruling 1):
+
+    - IDENTITY form (no body serial): sets Executor.revoked_at — TERMINAL for
+      alpha (no un-revoke; re-enrollment requires a NEW executor_id) — and
+      adds the current record serial to the revocation list. Dial gates refuse
+      immediately; a cooperative daemon self-terminates on next poll (~30s).
+    - SERIAL form (body {"serial": "<hex>"}): kills ONE credential without
+      touching the identity — for incident response (e.g. an orphaned
+      predecessor serial whose record pointer has moved on). Note: a serial
+      form on the CURRENT record serial also refuses dial (the shared
+      revocation state checks the record serial when none is presented).
     """
-    from datetime import datetime
+    from core.iam.models import Executor, ExecutorCert, ExecutorCertRevocation
 
-    from core.iam.models import ExecutorCert, ExecutorCertRevocation
+    now = datetime.now(UTC)
+    serial_arg = req.serial if req is not None else None
 
-    # Look up the executor's current certificate
+    if serial_arg is not None:
+        # --- Serial form: credential-only, identity untouched ---
+        try:
+            int(serial_arg, 16)
+            if len(serial_arg) > 16 or len(serial_arg) == 0:
+                raise ValueError("bad length")
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="serial must be hex, 1-16 chars",
+            )
+        serial_arg = serial_arg.casefold()
+        existing = db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == serial_arg).first()
+        if existing is not None:
+            return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=serial_arg)
+        db.add(
+            ExecutorCertRevocation(
+                serial_number=serial_arg,
+                executor_id=executor_id,
+                revoked_at=now,
+                reason="Admin revocation (serial form)",
+            )
+        )
+        db.commit()
+        metrics.TOKEN_REVOKED.labels(reason="executor_serial_revoked").inc()
+        logger.info(
+            "Revoked executor cert serial (identity NOT revoked): executor_id=%s, serial=%s",
+            executor_id,
+            serial_arg,
+        )
+        return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id, serial_number=serial_arg)
+
+    # --- Identity form: terminal flag + current record serial ---
     cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
-
     if cert is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Executor not found: {executor_id}",
         )
 
-    # Check if already revoked
+    executor_row = db.query(Executor).filter(Executor.id == executor_id).first()
+    already = executor_row is not None and executor_row.revoked_at is not None
+    if not already and executor_row is not None:
+        executor_row.revoked_at = now
+
     existing_revocation = (
         db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == cert.serial_number).first()
     )
-
-    if existing_revocation is not None:
-        return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id)
-
-    # Add to revocation list
-    revocation = ExecutorCertRevocation(
-        serial_number=cert.serial_number,
-        executor_id=executor_id,
-        revoked_at=datetime.now(UTC),
-        reason="Admin revocation",
-    )
-    db.add(revocation)
+    if existing_revocation is None:
+        db.add(
+            ExecutorCertRevocation(
+                serial_number=cert.serial_number,
+                executor_id=executor_id,
+                revoked_at=now,
+                reason="Admin revocation",
+            )
+        )
     db.commit()
-    metrics.TOKEN_REVOKED.labels(reason="executor_revoked").inc()
 
+    if already and existing_revocation is not None:
+        return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=cert.serial_number)
+
+    metrics.TOKEN_REVOKED.labels(reason="executor_revoked").inc()
     logger.info(
-        "Revoked executor cert: executor_id=%s, serial=%s",
+        "Revoked executor identity (TERMINAL): executor_id=%s, record serial=%s",
         executor_id,
         cert.serial_number,
     )
-    return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id)
+    return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id, serial_number=cert.serial_number)
 
 
 @router.post(

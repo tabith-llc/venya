@@ -615,19 +615,29 @@ class TestAdminRevokeExecutor:
         """POST /admin/executors/{id}/revoke should return revoked=False if already revoked."""
         cert = SimpleNamespace(serial_number="cert-123")
         revocation = SimpleNamespace(serial_number="cert-123")
+        # updated: executor-revocation-by-identity — the route now queries
+        # ExecutorCert -> Executor -> ExecutorCertRevocation and the identity
+        # flag lives on the Executor row; mocks model the schema per-model
+        # instead of by call order.
+        executor_row = SimpleNamespace(id="exec1", revoked_at=object())
         db = MagicMock()
 
-        call_num = [0]
-
         class MockQuery:
+            def __init__(self, model):
+                self.model = model
+
             def filter(self, *args, **kwargs):
                 return self
 
             def first(self):
-                call_num[0] += 1
-                return cert if call_num[0] == 1 else revocation
+                name = getattr(self.model, "__name__", "")
+                if name == "ExecutorCert":
+                    return cert
+                if name == "Executor":
+                    return executor_row
+                return revocation
 
-        db.query.return_value = MockQuery()
+        db.query.side_effect = lambda model: MockQuery(model)
         backend = MagicMock()
         backend.get_session.return_value = db
         app = _create_test_app(backend=backend)
