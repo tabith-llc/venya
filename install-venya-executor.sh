@@ -207,9 +207,14 @@ info "Installing Docker Sandboxes (sbx) CLI..."
 if ! command -v sbx &>/dev/null; then
     SBX_SCRIPT=$(mktemp /tmp/docker-sbx-install-XXXXXX.sh)
     curl -fsSL https://get.docker.com -o "$SBX_SCRIPT"
-    REPO_ONLY=1 sh "$SBX_SCRIPT" > /dev/null 2>&1
+    if ! REPO_ONLY=1 sh "$SBX_SCRIPT" > /tmp/venya-sbx-repo.log 2>&1; then
+        error "Docker sbx apt-repo setup failed; last 25 lines:"
+        tail -25 /tmp/venya-sbx-repo.log >&2
+        rm -f "$SBX_SCRIPT"
+        exit 1
+    fi
     rm -f "$SBX_SCRIPT"
-    apt-get install -y -qq docker-sbx > /dev/null 2>&1
+    venya_apt install -y -qq docker-sbx
     usermod -aG kvm venya 2>/dev/null || true
     info "sbx CLI installed. venya user added to kvm group."
 else

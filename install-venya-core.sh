@@ -184,7 +184,7 @@ venya_install_system_pkgs curl sudo
 # --- Install Nginx (core-specific) ---
 info "Installing Nginx reverse proxy..."
 if ! command -v nginx &>/dev/null; then
-    apt-get install -y -qq nginx > /dev/null 2>&1
+    venya_apt install -y -qq nginx
     info "Nginx installed: $(nginx -v 2>&1)"
 else
     info "Nginx already installed: $(nginx -v 2>&1)"
@@ -318,7 +318,7 @@ fi
 # VENYA_DB_PASSWORD acquired in the secrets zone above (pre-mutation, with
 # the re-run mismatch guard).
 info "Installing PostgreSQL..."
-apt-get install -y -qq postgresql > /dev/null 2>&1
+venya_apt install -y -qq postgresql
 
 info "Setting up PostgreSQL..."
 systemctl start postgresql
