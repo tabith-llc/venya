@@ -66,7 +66,7 @@ The AI agent never touches plaintext credentials. Not in its context window. Not
 **No other product does this.** Existing secrets managers hand plaintext to the requesting process. Venya doesn't.
 
 ### FIDO2 Hardware Key Binding
-Every session begins with a physical security key press. The AI agent cannot initiate a session — only a human pressing a FIDO2 key can authorize access. Sessions expire after 4 hours. Token refresh happens automatically every 5 minutes, but the hard cap is non-negotiable. When the session expires, the AI gets an actionable error: *"Ask the user to re-authenticate."*
+Every session begins with a physical security key press. The AI agent cannot initiate a session — only a human pressing a FIDO2 key can authorize access. Sessions expire after 4 hours. Token refresh happens automatically, and an idle-expired session renews within the 4-hour hard cap — the cap is non-negotiable: past it, a human must re-authenticate with the FIDO2 key. When the session is past the cap, the AI gets an actionable error: *"Ask the user to re-authenticate."*
 
 ### mTLS Between Server and Executor
 The Venya server communicates with executor daemons over mutual TLS. Both sides verify each other's certificates. If an executor's certificate is revoked, the server refuses to relay commands. If someone spoofs an executor, the mTLS handshake fails before any secret is transmitted.
