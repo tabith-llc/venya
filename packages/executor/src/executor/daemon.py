@@ -73,6 +73,46 @@ class DaemonState:
         self._consecutive_revocation_failures: int = 0
 
 
+def _token_required_error(exc: httpx2.HTTPStatusError, *, rotation: bool = False) -> RuntimeError | None:
+    """Convert a 400 'Enrollment token required' registration response into an
+    actionable RuntimeError; return None for any other error (caller re-raises).
+
+    Ticket executor-rotation-require-token-400 Phase 1: a bare `400 Bad Request`
+    in the journal is how the day-30 rotation death spiral gets discovered at
+    day 30 instead of day 0. Both the bootstrap register() and the periodic
+    rotate() paths carry the SAME actionable identifiers (knob name +
+    re-enrollment path); only the rotation variant forward-references the
+    incumbent-mTLS exemption (Phase 2). Defensive on non-HTTP responses
+    (test doubles): anything but a real 400 with the token-required detail
+    falls through unchanged.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None or getattr(resp, "status_code", None) != 400:
+        return None
+    try:
+        detail = str(resp.json().get("detail", ""))
+    except Exception:
+        return None
+    if "Enrollment token required" not in detail:
+        return None
+    msg = (
+        "Registration rejected: the server requires an enrollment token "
+        "(server config executor_enrollment.require_token — enforced by default). "
+        "An admin must mint one (`venya admin executor-enroll <executor-id>`) and "
+        "registration re-run with VENYA_EXECUTOR_ENROLLMENT_TOKEN set "
+        "(re-run the executor installer)."
+    )
+    if rotation:
+        msg += (
+            " Certificate rotation will additionally be accepted from a verified "
+            " incumbent mTLS serial once the exemption lands (ticket "
+            "executor-rotation-require-token-400 Phase 2); until then, rotation "
+            "against a require_token server needs a freshly minted token before "
+            "the current cert expires (~30 days)."
+        )
+    return RuntimeError(msg)
+
+
 class CertificateManager:
     """Manages executor mTLS certificate lifecycle.
 
@@ -176,6 +216,13 @@ class CertificateManager:
             with httpx2.Client(verify=verify_param, timeout=self.config.network.registration_timeout_seconds) as client:
                 response = client.post(url, json=payload)
             response.raise_for_status()
+        except httpx2.HTTPStatusError as e:
+            # Token-required 400 becomes an actionable named error; the boot
+            # path lets it propagate → exit 1 (ero-fs fail-fast semantics).
+            actionable = _token_required_error(e)
+            if actionable is not None:
+                raise actionable from e
+            raise
         except httpx2.ConnectError as e:
             # Log full traceback in debug mode for deep diagnostics
             if os.environ.get("VENYA_DEBUG"):
@@ -306,7 +353,18 @@ class CertificateManager:
             },
             timeout=self.config.network.registration_timeout_seconds,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx2.HTTPStatusError as e:
+            # Runtime-tolerant: _main_loop's except-Exception logs this and the
+            # executor keeps running until the cert actually nears expiry —
+            # a transient server error must not kill a mid-loop executor
+            # (refactor-1 ruling). The actionable text names the knob, the
+            # re-enrollment path, and the Phase-2 incumbent exemption.
+            actionable = _token_required_error(e, rotation=True)
+            if actionable is not None:
+                raise actionable from e
+            raise
         data = response.json()
 
         cert_pem = data["cert_pem"].encode()

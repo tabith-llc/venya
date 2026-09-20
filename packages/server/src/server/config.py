@@ -137,8 +137,14 @@ class ExecutorEnrollmentConfig(BaseModel):
 
     # Authorization
     require_token: bool = Field(
-        default=False,
-        description="Reject executor registrations without a valid enrollment token",
+        default=True,
+        description=(
+            "Reject executor registrations without a valid enrollment token. "
+            "Default TRUE (ticket executor-rotation-require-token-400, user ruling "
+            "2026-09-20): tokenless registration physically proven to mint full "
+            "executor identities from any host reaching the core. Set false only "
+            "for deliberately open enrollment."
+        ),
     )
 
     # Rate limiting

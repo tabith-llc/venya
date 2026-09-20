@@ -473,8 +473,8 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     fi
 else
     warn "mTLS registration SKIPPED — VENYA_EXECUTOR_ENROLLMENT_TOKEN is empty."
-    warn "The daemon cannot register at runtime (/etc/venya is read-only) and will exit 1 on boot."
-    warn "Re-run the installer with VENYA_EXECUTOR_ENROLLMENT_TOKEN set to register this executor."
+    warn "The server rejects tokenless registration (executor_enrollment.require_token, enforced by default); the daemon will exit 1 on boot with an actionable error."
+    warn "Re-run the installer with VENYA_EXECUTOR_ENROLLMENT_TOKEN set (admin mints one: venya admin executor-enroll <executor-id>)."
 fi
 
 # --- Write bootstrap config (enrollment token for heartbeat) ---

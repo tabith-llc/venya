@@ -118,7 +118,10 @@ sudo -u venya curl -sk -X POST \
 # → {"enrollment_token": "enrl_exec_...", "expires_in_seconds": 1800, ...}
 ```
 
-The token expires in ~30 minutes and is consumed on first use.
+The token expires in ~30 minutes and is consumed on first use. The core
+**requires a token for executor registration by default**
+(`executor_enrollment.require_token`, enforced since 2026-09-20) — tokenless
+registration attempts are rejected 400 with an actionable error.
 **`<executor-id>` is a contract**: it becomes the client-certificate SAN and
 the hostname cores dial for relay calls — it must resolve from every core,
 and must match the pattern `^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`.

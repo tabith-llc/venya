@@ -4,6 +4,17 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- Executor registration now requires an enrollment token by default
+  (`executor_enrollment.require_token` — previously open: any host reaching the
+  core could enroll itself as an executor). Rejections carry an actionable error
+  naming the knob and the re-enrollment path. Breaking for deployments relying
+  on tokenless enrollment; `VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN=false`
+  restores the old behavior deliberately. Certificate auto-rotation under the
+  new default needs a token until the incumbent-mTLS exemption lands in the
+  same release (see cert-rotation-runbook §1).
+
 ### Changed
 
 - The core installer now encrypts the root CA private key at rest and delivers
