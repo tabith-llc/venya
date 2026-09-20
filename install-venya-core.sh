@@ -612,6 +612,7 @@ cat > /etc/nginx/sites-available/venya << EOF
 server {
     listen 443 ssl;
     server_name $CORE_HOSTNAME;
+    server_tokens off;
 
     ssl_certificate /etc/venya/tls/server.crt;
     ssl_certificate_key /etc/venya/tls/server.key;
