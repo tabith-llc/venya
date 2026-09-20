@@ -216,10 +216,13 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     )
     app.state.backend = backend  # type: ignore[attr-defined]
 
-    # Debug mode allows unencrypted storage for local development convenience.
-    # The recovery_code_pepper check below is unconditional because rainbow table
-    # attacks are viable even in dev — but local DB encryption is a lower risk.
-    if not config.debug and not config.db.passphrase:
+    # Unconditional: a missing passphrase is a hard failure in every mode.
+    # The former `not config.debug` exemption was a dead letter — init_db
+    # above constructs BackendConfig(passphrase=None), which raises
+    # BackendConfigurationError before this check ever ran, so debug boots
+    # never actually got unencrypted storage; the exemption only suppressed
+    # the actionable error message in favor of an opaque one.
+    if not config.db.passphrase:
         raise RuntimeError(
             "VENYA_DB__PASSPHRASE is not set. "
             "Core secrets cannot be encrypted without a passphrase. "
