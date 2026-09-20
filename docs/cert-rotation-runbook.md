@@ -63,6 +63,18 @@ on-disk cert still diverge — revocation matching is serial-based and can miss 
 running identity. The pre-check narrows this window; closing it structurally is tracked
 separately.
 
+**require_token caveat (default TRUE since ticket `executor-rotation-require-token-400`
+Phase 1, 2026-09-20):** the register endpoint rejects tokenless POSTs by default — which
+is exactly what `rotate()` sends. Until the incumbent-mTLS exemption lands (Phase 2),
+auto-rotation against a default-config core fails with an actionable journal error naming
+`executor_enrollment.require_token` and the re-enrollment path; the executor keeps running
+(runtime-tolerant) but the cert expires at ~day 30. Options: mint a fresh token and
+re-register per §3 before expiry, or deliberately set
+`VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN=false` (open enrollment — the pre-2026-09-20
+behavior, physically proven to mint executor identities from ANY host reaching the core;
+not recommended). Both phases ship in the same release; do not run Phase-1-only bytes in
+production past a 30-day cert lifetime.
+
 ## 2. Manual executor cert operations (working path)
 
 Run ON the executor host. The CLI is installed in the executor venv; writes need root
@@ -91,7 +103,11 @@ sudo /opt/venya/.venv/bin/venya exec cert revoke --executor-id <executor-id>
 ## 3. Re-registering an executor (lost/expired cert, or after CA rotation)
 
 Runtime (daemon-side) registration cannot write `/etc/venya/executor` either
-(`daemon.py:118-136` fails closed; empty-token installs crash-loop — ticket
+(`daemon.py:118-136` fails closed), and since ticket
+`executor-rotation-require-token-400` Phase 1 the server additionally rejects
+tokenless registration by default — an empty-token install now exits 1 at boot
+with an actionable journal error naming `executor_enrollment.require_token`
+(no crash-loop; the historical EROFS variant is ticket
 `executor-ero-fs-crash-loop-on-empty-token`). The supported path is install-time
 registration with a bootstrap token:
 

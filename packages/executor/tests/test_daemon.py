@@ -300,6 +300,49 @@ class TestRegisterErrors:
             with pytest.raises(httpx2.HTTPStatusError):
                 cert_manager.register("test-executor")
 
+    def _mock_token_required_response(self):
+        resp = MagicMock(spec=httpx2.Response)
+        resp.status_code = 400
+        resp.json.return_value = {"detail": "Enrollment token required. Contact your administrator."}
+        mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
+            "400 Bad Request", request=MagicMock(), response=resp
+        )
+        return mock_response
+
+    def test_register_token_required_actionable(self, cert_manager: CertificateManager):
+        """updated: require_token default flip (executor-rotation-require-token-400
+        Phase 1) — the token-required 400 becomes an actionable RuntimeError naming
+        the knob + re-enrollment path, not a bare HTTPStatusError rotting in the
+        journal until day-30 expiry."""
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = self._mock_token_required_response()
+
+            with pytest.raises(RuntimeError, match="executor_enrollment.require_token") as ei:
+                cert_manager.register("test-executor")
+
+        msg = str(ei.value)
+        assert "VENYA_EXECUTOR_ENROLLMENT_TOKEN" in msg
+        assert "venya admin executor-enroll" in msg
+
+    def test_register_other_400_unchanged(self, cert_manager: CertificateManager):
+        """Paired negative: a 400 that is NOT the token-required class propagates
+        as the raw HTTPStatusError — no over-conversion."""
+        resp = MagicMock(spec=httpx2.Response)
+        resp.status_code = 400
+        resp.json.return_value = {"detail": "executor_id 'x' does not resolve."}
+        mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
+            "400 Bad Request", request=MagicMock(), response=resp
+        )
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = mock_response
+
+            with pytest.raises(httpx2.HTTPStatusError):
+                cert_manager.register("test-executor")
+
     def test_register_readonly_cert_dir_fails_fast(self, config: ExecutorConfig, tmp_ca_dir: Path):
         """Unwritable cert dir → actionable RuntimeError BEFORE any HTTP call (F1)."""
         cm = CertificateManager(config)
@@ -434,6 +477,34 @@ class TestRotate:
         """Rotation raises RuntimeError when no certificate exists."""
         with pytest.raises(RuntimeError, match="must register first"):
             cert_manager.rotate()
+
+    def test_rotate_token_required_actionable_with_exemption_ref(self, cert_manager: CertificateManager):
+        """updated: require_token default flip — rotation against a require_token
+        server raises the SAME knob-name/re-enrollment-path actionable message as
+        bootstrap register (shared invariant), plus the Phase-2 incumbent-exemption
+        forward-reference (rotation-only). Runtime-tolerant: _main_loop catches it;
+        the on-disk cert must be untouched (refusal happens before any write)."""
+        ca_key, ca_cert = _make_ca_pair()
+        initial_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
+        Path(cert_manager.cert_path).write_bytes(initial_cert.public_bytes(serialization.Encoding.PEM))
+
+        resp = MagicMock(spec=httpx2.Response)
+        resp.status_code = 400
+        resp.json.return_value = {"detail": "Enrollment token required. Contact your administrator."}
+        mock_response = MagicMock(spec=httpx2.Response)
+        mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
+            "400 Bad Request", request=MagicMock(), response=resp
+        )
+
+        with patch.object(cert_manager.client, "post", return_value=mock_response):
+            with pytest.raises(RuntimeError, match="executor_enrollment.require_token") as ei:
+                cert_manager.rotate()
+
+        msg = str(ei.value)
+        assert "VENYA_EXECUTOR_ENROLLMENT_TOKEN" in msg
+        assert "incumbent" in msg  # Phase-2 exemption forward-reference, rotation-only
+        saved = x509.load_pem_x509_certificate(Path(cert_manager.cert_path).read_bytes())
+        assert saved.serial_number == initial_cert.serial_number  # no partial write
 
 
 # --- Tests: get_fingerprint ---
