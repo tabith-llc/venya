@@ -10,10 +10,10 @@ This module is the single source of truth for how the CLI decodes binary
 WebAuthn fields (credential IDs, challenges, etc.).
 
 The server emits venya API-response credential_id fields as base64url
-(/auth/registration/complete, /auth/login/complete), while WebAuthn wire
-fields (challenge, allow/excludeCredentials id) remain standard base64.
-b64_decode_id is a tolerant reader: it accepts BOTH alphabets, so it stays
-correct across that boundary and against any legacy values.
+(/auth/login/complete), while WebAuthn wire fields (challenge,
+allow/excludeCredentials id) remain standard base64. b64_decode_id is a
+tolerant reader: it accepts BOTH alphabets, so it stays correct across that
+boundary and against any legacy values.
 """
 
 import base64

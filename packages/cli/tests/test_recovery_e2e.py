@@ -85,7 +85,7 @@ def _browser_registration_response(cred_id: bytes, private_key) -> dict:
 
 
 def _cli_registration_response(cred_id: bytes, private_key) -> dict:
-    """CLI-shaped registration response accepted by /auth/registration/complete."""
+    """CLI-shaped WebAuthn registration (attestation) response."""
     cose = ES256.from_cryptography_key(private_key.public_key())
     ao = _build_attestation_object(cred_id, dict(cose))
     return {
@@ -270,11 +270,12 @@ def test_recovery_e2e_full_loop(tmp_path):
 
     # --- Step 5: recovered admin enrolls a FIDO2 key and authenticates ---
     # Enrollment goes through the real Fido2Manager (real attestation crypto)
-    # plus the same WebAuthnCredential row /auth/registration/complete would
-    # write. That HTTP route is bypassed deliberately: it 500s on real binary
-    # credential IDs (latent bytes-vs-str response-model bug, no production
-    # caller — ticket auth-registration-complete-bytes-500). The proof this
-    # step owes is the assertion over real HTTP below, not the enroll route.
+    # plus a directly-written WebAuthnCredential row. The legacy public
+    # /auth/registration/complete route this once mirrored was REMOVED
+    # (ticket sec-unauth-webauthn-registration-takeover — unauthenticated
+    # credential binding); production enrollment is the token-bound
+    # /enroll/browser flow. The proof this step owes is the assertion over
+    # real HTTP below, not the enroll route.
     from core.iam.models import WebAuthnCredential
 
     key_b = ec.generate_private_key(ec.SECP256R1())
@@ -297,6 +298,13 @@ def test_recovery_e2e_full_loop(tmp_path):
                 is_active=True,
             )
         )
+        # Mirror the production enroll activation (routes/enroll.py:280): the
+        # session gate (ticket sec-unauth-webauthn-registration-takeover) only
+        # issues sessions for status='active' users, and POST /recovery creates
+        # newadmin as 'pending_enrollment'. The direct credential write above
+        # stands in for the enroll route, so it must carry the activation too.
+        newadmin = db.query(User).filter(User.user_id == "newadmin").first()
+        newadmin.status = "active"
         db.commit()
     finally:
         db.close()

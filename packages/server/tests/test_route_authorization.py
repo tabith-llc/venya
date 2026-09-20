@@ -30,8 +30,6 @@ NO_ROLE_ROUTES = frozenset(
         # --- public / bootstrap: no authenticated session (or role) exists yet ---
         "/api/v1/health",  # liveness, no auth by design
         "/api/v1/ready",  # readiness, no auth by design
-        "/api/v1/auth/registration/start",  # auth flow — user does not exist yet
-        "/api/v1/auth/registration/complete",
         "/api/v1/auth/login/start",
         "/api/v1/auth/login/complete",
         "/api/v1/auth/refresh",  # rotates the caller's own token
