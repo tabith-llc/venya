@@ -95,26 +95,27 @@ chmod 600 admin-cert/admin.key
 Executors need a single-use enrollment token minted by an admin. With admin
 mTLS enabled (the default), the admin client cert alone authorizes these
 operations **server-side** — from any workstation holding the cert
-(`VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`). Two caveats, physically verified
-2026-09-19 (ticket `cli-admin-mtls-headless-gate`):
+(`VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`). Both headless paths below work on a
+core with no browser (CLI gate fix `d59a068` + `VENYA_SERVER_URL` resolution
+fix `3f3ed1b`, dev/unreleased; physically verified 2026-09-20):
 
-- The **CLI** additionally requires a stored access token (`venya login`
-  first) or an interactive FIDO2 touch for `admin` commands, even when the
-  mTLS cert is present — so the installer banner's `sudo -u venya venya
-  admin executor-enroll ...` on the headless core fails there today.
-- Headless minting works via the cert-only API path directly:
+- The **CLI** (installer-banner shape) — note `VENYA_SERVER_URL` is required
+  unless a stored config names the server:
+
+```bash
+SSL_CERT_FILE=/var/lib/venya/ca/ca.crt \
+VENYA_SERVER_URL=https://<core-host> \
+VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
+venya admin executor-enroll <executor-id>
+```
+
+- Or the cert-only API path directly:
 
 ```bash
 sudo -u venya curl -sk -X POST \
   --cert /etc/venya/admin/admin.crt --key /etc/venya/admin/admin.key \
   https://<core-host>/api/v1/admin/executors/<executor-id>/enroll
 # → {"enrollment_token": "enrl_exec_...", "expires_in_seconds": 1800, ...}
-```
-
-```bash
-SSL_CERT_FILE=~/.config/venya-ca.crt \
-VENYA_ADMIN_CERT=admin-cert/admin.crt VENYA_ADMIN_KEY=admin-cert/admin.key \
-venya admin executor-enroll <executor-id>
 ```
 
 The token expires in ~30 minutes and is consumed on first use.
@@ -148,6 +149,12 @@ The installer also starts `venya-sandboxd.service` (the sbx daemon,
 persistent across reboots, ordered before `venya-executor.service`) and
 initializes the sbx global network policy to **deny-all** (per-sandbox
 allow rules come from the egress allowlist at execution time).
+
+The installer's apt list includes `sshpass`: sandbox ssh-password injection
+shapes (`sshpass -f <secret-file> ssh ...`) need it inside the sandbox, and
+the executor copies the host binary in at sandbox create. Hosts provisioned
+out-of-band without it get a loud WARNING at sandbox create and those shapes
+fail 127 in-sandbox.
 
 Hostname resolution: the installer uses the provisioned `/etc/hosts` entry
 for the core if present, else DNS. If the core hostname resolves neither way,
