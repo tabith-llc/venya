@@ -105,8 +105,6 @@ class SessionMiddleware(BaseHTTPMiddleware):
         {
             "/api/v1/health",
             "/api/v1/ready",
-            "/api/v1/auth/registration/start",
-            "/api/v1/auth/registration/complete",
             "/api/v1/auth/login/start",
             "/api/v1/auth/login/complete",
             "/api/v1/auth/login/browser/challenge",

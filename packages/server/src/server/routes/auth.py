@@ -4,7 +4,15 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""WebAuthn registration and login endpoints."""
+"""WebAuthn login endpoints.
+
+The legacy public registration endpoints (/auth/registration/start|complete)
+were REMOVED (ticket sec-unauth-webauthn-registration-takeover): they bound an
+active credential to a client-supplied user_id with no authorization — an
+account-takeover chain. Credential issuance goes exclusively through the
+token-bound flows: routes/enroll.py (users), routes/init.py (bootstrap admin),
+routes/credentials.py (authenticated add).
+"""
 
 import logging
 from typing import Any
@@ -15,7 +23,6 @@ from sqlalchemy.orm import Session
 
 from .. import metrics
 from ..dependencies import get_db
-from ..fido2.browser_adapter import base64url_encode
 from ..fido2.manager import WebAuthnError
 
 logger = logging.getLogger("venya.server")
@@ -24,25 +31,6 @@ router = APIRouter()
 
 
 # --- Request/Response models ---
-
-
-class RegistrationStartRequest(BaseModel):
-    user_id: str = Field(..., description="Internal user ID")
-    username: str = Field(..., description="Human-readable username")
-
-
-class RegistrationStartResponse(BaseModel):
-    challenge_id: str
-    options: dict[str, Any]
-
-
-class RegistrationCompleteRequest(BaseModel):
-    challenge_id: str
-    response: dict[str, Any]
-
-
-class RegistrationCompleteResponse(BaseModel):
-    credential_id: str
 
 
 class AuthenticationStartRequest(BaseModel):
@@ -66,98 +54,6 @@ class AuthenticationCompleteResponse(BaseModel):
 
 
 # --- Endpoints ---
-
-
-@router.post(
-    "/auth/registration/start",
-    response_model=RegistrationStartResponse,
-    status_code=status.HTTP_200_OK,
-)
-async def auth_registration_start(
-    req: RegistrationStartRequest,
-    request: Request,
-) -> RegistrationStartResponse:
-    """Start WebAuthn registration for a new credential.
-
-    Returns challenge options for the client to present to the authenticator.
-    """
-    fido2_manager = getattr(request.app.state, "fido2_manager", None)
-    if fido2_manager is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="FIDO2 manager not initialized",
-        )
-
-    # Existing credential IDs as raw BYTES for the exclude list. Use the store
-    # view (StoredCredential.credential_id: bytes), NOT a display/dict view —
-    # start_registration re-encodes each with base64.b64encode(cid), which
-    # TypeErrors on a str. Matches credentials_add_start's bytes-based path.
-    existing = fido2_manager.store.get_user_credentials(req.user_id)
-    existing_ids = [c.credential_id for c in existing]
-
-    challenge_id, options = fido2_manager.start_registration(
-        user_id=req.user_id,
-        username=req.username,
-        existing_credential_ids=existing_ids,
-    )
-
-    return RegistrationStartResponse(challenge_id=challenge_id, options=options)
-
-
-@router.post(
-    "/auth/registration/complete",
-    response_model=RegistrationCompleteResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def auth_registration_complete(
-    req: RegistrationCompleteRequest,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> RegistrationCompleteResponse:
-    """Complete WebAuthn registration.
-
-    Verifies the authenticator response and stores the credential.
-    """
-    fido2_manager = getattr(request.app.state, "fido2_manager", None)
-    if fido2_manager is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="FIDO2 manager not initialized",
-        )
-
-    try:
-        cred = fido2_manager.finish_registration(req.challenge_id, req.response)
-    except WebAuthnError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        ) from e
-    except ValueError:
-        logger.exception("Registration verification failed (internal)")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Registration verification failed",
-        ) from None
-
-    try:
-        from core.iam.models import WebAuthnCredential
-
-        credential = WebAuthnCredential(
-            user_id=cred.user_id,
-            credential_id=cred.credential_id,
-            public_key=cred.public_key,
-            sign_count=cred.sign_count,
-            is_active=True,
-        )
-        db.add(credential)
-        db.commit()
-    except Exception:  # noqa: S110
-        # D-3: pre-existing swallow — return 201 even if the DB commit fails
-        # (credential was already created in the FIDO2 manager). The open
-        # transaction is rolled back by get_db's `finally: close()`.
-        pass  # nosec B110 — intentional, transaction rolled back by get_db finally
-
-    return RegistrationCompleteResponse(credential_id=base64url_encode(cred.credential_id))
 
 
 @router.post(
@@ -229,7 +125,7 @@ async def auth_login_complete(
 
     from core.iam.role_manager import RoleManager
     from core.iam.session_manager import SessionConfig as CoreSessionConfig
-    from core.iam.session_manager import SessionManager
+    from core.iam.session_manager import SessionManager, UserNotActiveError
 
     sc = request.app.state.config.session
     session_config = CoreSessionConfig(
@@ -245,10 +141,21 @@ async def auth_login_complete(
     user_roles = rm.get_user_roles(result["user_id"])
     role_ids = [m.role_id for m in user_roles]
 
-    _session, access_token = sm.create_session(
-        user_id=result["user_id"],
-        roles=[str(rid) for rid in role_ids],
-    )
+    try:
+        _session, access_token = sm.create_session(
+            user_id=result["user_id"],
+            roles=[str(rid) for rid in role_ids],
+        )
+    except UserNotActiveError:
+        # Status gate refused (ticket sec-unauth-webauthn-registration-takeover).
+        # Uniform 401 — account state is not disclosed to the caller; the true
+        # reason is logged server-side only.
+        metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="failure").inc()
+        logger.warning("Login refused for user_id=%s: session gate (user missing or not active)", result["user_id"])
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login verification failed",
+        ) from None
     db.commit()
     metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="success").inc()
 

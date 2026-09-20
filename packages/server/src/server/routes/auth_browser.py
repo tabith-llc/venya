@@ -248,7 +248,7 @@ async def browser_login_assert(
     db = backend.get_session()
     try:
         from core.iam.role_manager import RoleManager
-        from core.iam.session_manager import SessionConfig, SessionManager
+        from core.iam.session_manager import SessionConfig, SessionManager, UserNotActiveError
 
         sc = request.app.state.config.session
         session_config = SessionConfig(
@@ -272,6 +272,16 @@ async def browser_login_assert(
         response = JSONResponse(content={"status": "ok"})
         _set_session_cookie(response, access_token.token)
         return response
+    except UserNotActiveError:
+        # Status gate refused (ticket sec-unauth-webauthn-registration-takeover).
+        # Uniform 401 — account state not disclosed; true reason logged only.
+        metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
+        logger.warning("Browser login refused for user_id=%s: session gate (not active)", result["user_id"])
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login verification failed",
+        ) from None
     except Exception:
         metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
         import traceback

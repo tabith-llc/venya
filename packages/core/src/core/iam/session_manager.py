@@ -20,10 +20,26 @@ from sqlalchemy.orm import Session
 from core.utils.entropy import get_secure_token
 
 from .models import Session as SessionModel
+from .models import User
 
 
 class SessionError(Exception):
     """Session error."""
+
+
+class UserNotActiveError(SessionError):
+    """Raised when a session is requested for a user that is not 'active'.
+
+    Single enforcement point for the login status gate (ticket
+    sec-unauth-webauthn-registration-takeover): disabled / pending_enrollment /
+    unknown users cannot be issued a session. Subclasses SessionError so any
+    pre-existing `except SessionError` still catches it.
+    """
+
+    def __init__(self, user_id: str, status: str | None) -> None:
+        self.user_id = user_id
+        self.status = status
+        super().__init__(f"User '{user_id}' is not active (status={status!r})")
 
 
 # Default clock skew tolerance for core-side checks
@@ -88,7 +104,21 @@ class SessionManager:
 
         Returns:
             Tuple of (Session, AccessToken).
+
+        Raises:
+            UserNotActiveError: If the user row is missing or its status is not
+                'active' — disabled / pending_enrollment users cannot be issued
+                a session (ticket sec-unauth-webauthn-registration-takeover).
         """
+        # Status gate: no session for a non-active user. Single choke point —
+        # every login path (webauthn, browser) issues through here. The enroll
+        # path sets status='active' and calls create_session in the SAME
+        # transaction; SQLAlchemy autoflush makes that pending UPDATE visible
+        # to this SELECT (ordering pinned by test in test_auth_status_gate.py).
+        user = self.db.query(User).filter(User.user_id == user_id).first()
+        if user is None or user.status != "active":
+            raise UserNotActiveError(user_id, None if user is None else user.status)
+
         now = datetime.now(UTC)
         expires_at = now + self.config.session_timeout
 
