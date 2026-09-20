@@ -220,16 +220,24 @@ async def secrets_get(
     key: str,
     request: Request,
     unmask: bool = False,
-    caller: str = "human",
     elevation_token: str | None = None,
     user_info: dict = Depends(require_role("read")),
     db: Session = Depends(get_db),
 ) -> SecretGetResponse:
-    """Retrieve a secret value.
+    """Retrieve a secret value (HUMAN-ONLY route).
 
-    Returns masked value by default for humans.
-    Executor (mTLS) gets plaintext.
-    Browser users need a valid elevation token to unmask.
+    Masked by default; unmask requires a valid, single-use elevation token
+    (WebAuthn re-auth) and is a loud 403 without one.
+
+    Ticket sec-secret-caller-param-plaintext-bypass: the former
+    client-controlled `caller` query param (`?caller=executor` → plaintext)
+    and the tokenless `?unmask=true` fall-through were both plaintext
+    bypasses of the elevation gate. The route is now human-only BY
+    CONSTRUCTION — no identity branch to derive, forward, or hide in.
+    Executors cannot reach it (the middleware grants caller=executor only on
+    session paths after a real cert check — `_validate_executor_mtls`,
+    ticket sec-executor-session-path-no-auth) and consume secrets via
+    session injection (`core.get_for_injection`), never this endpoint.
     """
     core = getattr(request.app.state, "core", None)
     if core is None:
@@ -238,10 +246,17 @@ async def secrets_get(
             detail="Core not initialized",
         )
 
-    from core.engine.core import CoreAccessError
+    from core.engine.core import Caller, CoreAccessError
 
-    # For browser users requesting unmask, validate elevation token
-    if caller == "human" and unmask and elevation_token:
+    # Unmask is ALWAYS elevation-gated (ticket
+    # sec-secret-caller-param-plaintext-bypass): tokenless unmask is a loud
+    # 403, never a silent fall-through to plaintext.
+    if unmask:
+        if not elevation_token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Elevation token required to unmask",
+            )
         try:
             from core.iam.models import ElevationToken
             from sqlalchemy import update
@@ -275,7 +290,7 @@ async def secrets_get(
                 # Token already consumed by another request, expired, or not found
                 value = core.get(
                     secret_key=key,
-                    caller=caller,
+                    caller=Caller.HUMAN,
                     unmask=False,
                     user_id=user_info.get("user_id"),
                 )
@@ -285,7 +300,7 @@ async def secrets_get(
             try:
                 value = core.get(
                     secret_key=key,
-                    caller=caller,
+                    caller=Caller.HUMAN,
                     unmask=True,
                     user_id=user_info.get("user_id"),
                 )
@@ -316,8 +331,8 @@ async def secrets_get(
     try:
         value = core.get(
             secret_key=key,
-            caller=caller,
-            unmask=unmask,
+            caller=Caller.HUMAN,
+            unmask=False,
             user_id=user_info.get("user_id"),
         )
     except CoreAccessError as e:
@@ -332,7 +347,7 @@ async def secrets_get(
             detail="Secret retrieval failed",
         )
 
-    return SecretGetResponse(key=key, value=value, masked=caller == "human" and not unmask)
+    return SecretGetResponse(key=key, value=value, masked=True)
 
 
 @router.get(

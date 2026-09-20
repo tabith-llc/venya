@@ -347,32 +347,145 @@ class TestSecretsGet:
             user_id="test-user",
         )
 
-    def test_get_success_human_unmasked(self):
-        """GET /secrets/{key}?unmask=true should return plaintext for human."""
+    def test_get_human_unmask_without_token_403(self):
+        """Ticket sec-secret-caller-param-plaintext-bypass (bare-unmask half):
+        `?unmask=true` WITHOUT an elevation token is a loud 403. The old
+        fall-through forwarded unmask=True to core.get and returned plaintext
+        — a bypass the former test_get_success_human_unmasked pinned POSITIVE.
+        Tests can institutionalize a vulnerability as confidently as they can
+        catch one; this rewrite is the paired negative."""
         core = _make_mock_core()
         core.get.return_value = "plaintext-secret"
         app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/db-password", params={"unmask": True})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["key"] == "db-password"
-        assert data["value"] == "plaintext-secret"
-        assert data["masked"] is False
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Elevation token required to unmask"
+        core.get.assert_not_called()
 
-    def test_get_success_executor(self):
-        """GET /secrets/{key}?caller=executor should return plaintext."""
+    def test_get_caller_query_param_ignored(self):
+        """Ticket sec-secret-caller-param-plaintext-bypass (ticket half):
+        `?caller=executor` was client-controlled identity → plaintext (pinned
+        POSITIVE by the former test_get_success_executor). The param is GONE
+        from the route surface: unknown query params drop, caller stays human,
+        output stays masked."""
         core = _make_mock_core()
-        core.get.return_value = "plaintext-secret"
+        core.get.return_value = "\u2022" * 8
         app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.get("/api/v1/secrets/db-password", params={"caller": "executor"})
         assert resp.status_code == 200
         data = resp.json()
+        assert data["value"] == "\u2022" * 8
+        assert data["masked"] is True
+        core.get.assert_called_once_with(
+            secret_key="db-password",
+            caller="human",
+            unmask=False,
+            user_id="test-user",
+        )
+
+    def test_get_caller_param_plus_unmask_still_403(self):
+        """Paired negative — the exact old attack string
+        `?caller=executor&unmask=true` from a bearer: human unmask gate →
+        403, no core.get, no plaintext in the body."""
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"caller": "executor", "unmask": True},
+        )
+        assert resp.status_code == 403
+        assert "plaintext-secret" not in resp.text
+        core.get.assert_not_called()
+
+    def test_get_executor_auth_context_never_yields_plaintext(self):
+        """DEAD-BRANCH PIN (user ruling 2026-09-20): the route carries NO
+        executor branch to forward. Even an auth context shaped EXACTLY like
+        the middleware's cert-verified executor grant ({"caller": "executor",
+        "executor_id": ...} — set only by `_validate_executor_mtls`,
+        middleware/auth.py; cross-branch interlock with
+        sec-executor-session-path-no-auth) cannot put caller=executor into
+        core.get. Production note: the middleware never grants that shape off
+        the session paths, and a real executor carries no user_id (core.get
+        would 404); this pin guards the route-side invariant itself."""
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        app = _create_test_app(core=core)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "caller": "executor",
+            "executor_id": "exec-1",
+        }
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password")
+        assert resp.status_code == 200
+        assert resp.json()["masked"] is True
+        core.get.assert_called_once_with(
+            secret_key="db-password",
+            caller="human",
+            unmask=False,
+            user_id=None,
+        )
+
+    def test_get_unmask_with_valid_token_returns_plaintext(self):
+        """Positive: valid unconsumed elevation token (atomic UPDATE
+        rowcount==1) → token burned, plaintext returned, masked=False. This
+        route's elevation path had NO test coverage before this ticket."""
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        backend = MagicMock()
+        app = _create_test_app(core=core, backend=backend)
+        db = backend.get_session.return_value
+        db.execute.return_value.rowcount = 1
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True, "elevation_token": "elev-token-xyz"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
         assert data["value"] == "plaintext-secret"
         assert data["masked"] is False
+        core.get.assert_called_once_with(
+            secret_key="db-password",
+            caller="human",
+            unmask=True,
+            user_id="test-user",
+        )
+        db.commit.assert_called()
+
+    def test_get_unmask_token_used_or_expired_masked(self):
+        """Paired negative: consumed/expired/foreign token (rowcount==0) →
+        masked value, never plaintext, no burn commit."""
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        backend = MagicMock()
+        app = _create_test_app(core=core, backend=backend)
+        db = backend.get_session.return_value
+        db.execute.return_value.rowcount = 0
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True, "elevation_token": "stale-token"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["value"] == "\u2022" * 8
+        assert data["masked"] is True
+        core.get.assert_called_once_with(
+            secret_key="db-password",
+            caller="human",
+            unmask=False,
+            user_id="test-user",
+        )
 
     def test_get_not_found(self):
         """GET /secrets/{key} should return 404 for missing secret."""
