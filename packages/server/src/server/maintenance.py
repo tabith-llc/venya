@@ -50,6 +50,41 @@ def cleanup_expired_sessions(
     return result.rowcount
 
 
+def cleanup_expired_execution_sessions(db: Session) -> int:
+    """Delete execution_sessions past their expires_at (10-min TTL). Returns rows deleted.
+
+    execution_sessions were NEVER cleaned up: the ``ix_execution_sessions_expires_at``
+    index (migration 025) was orphaned, and each row stores command + stdout + stderr
+    (Text — up to ~512 KB with the 256 KB-per-stream truncation cap), so the table grew
+    unbounded on a busy fleet. The stored stdout/stderr are write-only: no endpoint reads
+    them back (the audit trail lives in ``audit_events``). Deleting past ``expires_at``
+    honors the documented TTL (ticket execute-stale-session-update-500).
+
+    FK child first: ``execution_session_secrets.session_id -> execution_sessions.id`` has
+    no ON DELETE CASCADE, so child rows must go before the parent or the DELETE raises an
+    FK violation. Both deletes use the identical ``expires_at`` predicate (no LIMIT) so
+    they target the same row set — a per-statement LIMIT without ORDER BY could diverge
+    and orphan a parent delete.
+    """
+    # ponytail: no LIMIT (unbounded batch). The backlog is one-time; if a huge first-run
+    # delete ever proves problematic, bound it via a materialized id set selected once —
+    # NOT a writable CTE (FK visibility across CTE sub-statements is not guaranteed).
+    now = datetime.now(UTC)
+    db.execute(
+        text(
+            "DELETE FROM execution_session_secrets "
+            "WHERE session_id IN (SELECT id FROM execution_sessions WHERE expires_at < :now)"
+        ),
+        {"now": now},
+    )
+    result = db.execute(
+        text("DELETE FROM execution_sessions WHERE expires_at < :now"),
+        {"now": now},
+    )
+    db.commit()
+    return result.rowcount
+
+
 def purge_admin_identity_metadata(db: Session, *, days: int = 90) -> int:
     """Blank executor enrollment identity metadata older than ``days``.
 
@@ -107,6 +142,17 @@ def run_maintenance(db: Session, config) -> None:
         tolerance=tolerance,
     )
     logger.info("Session cleanup: deleted %d expired sessions", deleted)
+
+    # Execution-session cleanup — isolated secondary pass (ticket
+    # execute-stale-session-update-500): the relay bookkeeping table grew unbounded
+    # because nothing ever deleted expired execution_sessions rows.
+    try:
+        exec_deleted = cleanup_expired_execution_sessions(db)
+        if exec_deleted:
+            logger.info("Execution-session cleanup: deleted %d expired execution_sessions", exec_deleted)
+    except Exception:
+        db.rollback()
+        logger.exception("Execution-session cleanup failed")
 
     # Secondary passes — each isolated; one failing does not abort the others.
     try:
