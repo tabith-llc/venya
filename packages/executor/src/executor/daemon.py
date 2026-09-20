@@ -453,6 +453,22 @@ class CertificateManager:
             self._last_revocation_etag = response.headers.get("etag")
 
             data = response.json()
+            # Identity-level revocation FIRST (ticket executor-revocation-by-identity,
+            # ruling 2): the server revoked the whole executor_id — terminal, matches
+            # ANY serial. This is what catches a restarted daemon on a diverged
+            # (stale) cert that the serial-only list can never match, and it lets the
+            # cooperative daemon distinguish "my credential was killed" from "my
+            # identity was killed" and fail loudly with the right remedy.
+            revoked_identities = set(data.get("revoked_identities", []))
+            if self.config.executor_id in revoked_identities:
+                logger.warning(
+                    "Executor IDENTITY revoked server-side (executor_id=%s) — TERMINAL: "
+                    "the whole identity was revoked by an admin, not just a serial. "
+                    "This identity cannot be re-registered; re-enroll as a NEW "
+                    "executor_id. Shutting down.",
+                    self.config.executor_id,
+                )
+                return True
             revoked_serials = set(data.get("revoked_serials", []))
             is_revoked = self.serial in revoked_serials
 
@@ -1089,7 +1105,7 @@ class ExecutorDaemon:
         """
         try:
             fingerprint = self.cert_manager.get_fingerprint()
-            self.client.post(  # type: ignore[union-attr]
+            resp = self.client.post(  # type: ignore[union-attr]
                 "/api/v1/heartbeat",
                 json={
                     "executor_id": self.state.executor_id,
@@ -1097,6 +1113,21 @@ class ExecutorDaemon:
                 },
                 timeout=self.config.network.request_timeout_seconds,
             )
+            # The server's revoked flag rides the heartbeat response (ruling 4
+            # F3 ride-along — the daemon previously discarded it): a fast
+            # cooperative stop between revocation-list polls. Advisory channel:
+            # a malformed body never kills the beat; the poll stays the
+            # authoritative stop signal.
+            try:
+                if resp.json().get("revoked"):
+                    logger.warning(
+                        "Heartbeat reports this executor REVOKED — shutting down "
+                        "(server-side revocation state; identity or current serial "
+                        "was revoked — see the revocation list for detail)."
+                    )
+                    self.state.revoked = True
+            except ValueError:
+                pass
         except httpx2.RequestError:
             logger.debug("Heartbeat failed (server unreachable)")
 

@@ -242,6 +242,42 @@ class TestSendHeartbeat:
 
 
 # ---------------------------------------------------------------------------
+# ExecutorDaemon._send_heartbeat — revoked-flag consumption
+# (executor-revocation-by-identity ruling 4, F3 ride-along)
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatRevokedFlag:
+    """The daemon CONSUMES the heartbeat response's revoked flag (previously
+    discarded): a fast cooperative stop between revocation-list polls. The
+    poll remains authoritative; a malformed body must never kill the beat."""
+
+    def _daemon(self, config, resp_json):
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        resp = MagicMock()
+        resp.json.return_value = resp_json
+        daemon.client.post.return_value = resp
+        return daemon
+
+    def test_revoked_flag_sets_state(self, config: ExecutorConfig):
+        daemon = self._daemon(config, {"revoked": True, "new_cert_required": False})
+        daemon._send_heartbeat()
+        assert daemon.state.revoked is True
+
+    def test_clean_flag_leaves_state(self, config: ExecutorConfig):
+        daemon = self._daemon(config, {"revoked": False, "new_cert_required": False})
+        daemon._send_heartbeat()
+        assert daemon.state.revoked is False
+
+    def test_malformed_body_never_kills_beat(self, config: ExecutorConfig):
+        daemon = self._daemon(config, None)
+        daemon.client.post.return_value.json.side_effect = ValueError("no json here")
+        daemon._send_heartbeat()  # must not raise
+        assert daemon.state.revoked is False
+
+
+# ---------------------------------------------------------------------------
 # ExecutorDaemon._submit_heartbeat (bounded-heartbeat backpressure guard)
 # ---------------------------------------------------------------------------
 
