@@ -21,9 +21,11 @@ Notable changes to Venya will be documented in this file.
   core could enroll itself as an executor). Rejections carry an actionable error
   naming the knob and the re-enrollment path. Breaking for deployments relying
   on tokenless enrollment; `VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN=false`
-  restores the old behavior deliberately. Certificate auto-rotation under the
-  new default needs a token until the incumbent-mTLS exemption lands in the
-  same release (see cert-rotation-runbook §1).
+  restores the old behavior deliberately. Certificate auto-rotation keeps
+  working under the new default via the incumbent-mTLS exemption: a tokenless
+  rotation is accepted only from a verified client certificate whose
+  revocation state is clean and whose serial matches the current record
+  (see cert-rotation-runbook §1).
 
 ### Changed
 

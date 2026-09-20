@@ -67,17 +67,27 @@ revocation matches regardless of which serial the daemon presents, and the
 dial gates refuse a revoked identity/record-serial server-side. The pre-check
 from the EROFS fix remains as the availability narrowing.
 
-**require_token caveat (default TRUE since ticket `executor-rotation-require-token-400`
-Phase 1, 2026-09-20):** the register endpoint rejects tokenless POSTs by default — which
-is exactly what `rotate()` sends. Until the incumbent-mTLS exemption lands (Phase 2),
-auto-rotation against a default-config core fails with an actionable journal error naming
-`executor_enrollment.require_token` and the re-enrollment path; the executor keeps running
-(runtime-tolerant) but the cert expires at ~day 30. Options: mint a fresh token and
-re-register per §3 before expiry, or deliberately set
-`VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN=false` (open enrollment — the pre-2026-09-20
-behavior, physically proven to mint executor identities from ANY host reaching the core;
-not recommended). Both phases ship in the same release; do not run Phase-1-only bytes in
-production past a 30-day cert lifetime.
+**require_token (default TRUE since ticket `executor-rotation-require-token-400`,
+Phases 1+2, 2026-09-20):** the register endpoint rejects tokenless POSTs by default.
+Since Phase 2, `rotate()` is EXEMPT: a tokenless rotation is accepted only if the caller
+presents a verified mTLS client cert whose revocation state is clean (the shared
+`executor_revocation_state` — identity flag first, then serial history) AND whose serial
+equals the current `ExecutorCert` record serial for that executor_id (ruled order:
+revocation check FIRST). New identities and bootstrap installs still require a token. A
+rotation 400 under the exemption means the presented cert is not the record credential
+(revoked, diverged, or replaced) — re-register with a fresh token per §3 before expiry.
+**Trust boundary:** the exemption consumes the nginx-forwarded `X-Client-Verified` /
+`X-Client-Subject` / `X-Client-Serial` headers; nginx verifies the client chain against
+`/etc/nginx/ssl/client-ca-bundle.crt` (Root CA + Admin CA) and OVERWRITES these headers
+with its own TLS-layer values — client-sent headers of the same name never survive the
+proxy, and with no client cert the serial header is absent. The CN match is a
+discriminator, not the authorization: the authorization is the Root-CA-issued record
+serial (random 64-bit at signing, no serial-chooser API exists), which an Admin-CA cert
+— even one shaped with an executor CN — cannot carry. Both phases ship in the same
+release (tag-cut gate); never run Phase-1-only bytes in production past a 30-day cert
+lifetime. Do NOT set `VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN=false` in production
+(open enrollment — physically proven to mint executor identities from ANY host reaching
+the core).
 
 ## 2. Manual executor cert operations (working path)
 
@@ -116,7 +126,8 @@ block re-registration (it kills one credential, not the identity).
 Runtime (daemon-side) registration cannot write `/etc/venya/executor` either
 (`daemon.py:118-136` fails closed), and since ticket
 `executor-rotation-require-token-400` Phase 1 the server additionally rejects
-tokenless registration by default — an empty-token install now exits 1 at boot
+tokenless registration by default (bootstrap/new identities — incumbent
+rotation is exempt, §1) — an empty-token install now exits 1 at boot
 with an actionable journal error naming `executor_enrollment.require_token`
 (no crash-loop; the historical EROFS variant is ticket
 `executor-ero-fs-crash-loop-on-empty-token`). The supported path is install-time

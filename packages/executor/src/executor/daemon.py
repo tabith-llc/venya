@@ -81,8 +81,8 @@ def _token_required_error(exc: httpx2.HTTPStatusError, *, rotation: bool = False
     in the journal is how the day-30 rotation death spiral gets discovered at
     day 30 instead of day 0. Both the bootstrap register() and the periodic
     rotate() paths carry the SAME actionable identifiers (knob name +
-    re-enrollment path); only the rotation variant forward-references the
-    incumbent-mTLS exemption (Phase 2). Defensive on non-HTTP responses
+    re-enrollment path); only the rotation variant references the
+    incumbent-mTLS exemption (Phase 2, landed). Defensive on non-HTTP responses
     (test doubles): anything but a real 400 with the token-required detail
     falls through unchanged.
     """
@@ -104,11 +104,11 @@ def _token_required_error(exc: httpx2.HTTPStatusError, *, rotation: bool = False
     )
     if rotation:
         msg += (
-            " Certificate rotation will additionally be accepted from a verified "
-            " incumbent mTLS serial once the exemption lands (ticket "
-            "executor-rotation-require-token-400 Phase 2); until then, rotation "
-            "against a require_token server needs a freshly minted token before "
-            "the current cert expires (~30 days)."
+            " Certificate rotation IS accepted from the verified incumbent mTLS "
+            "serial (ticket executor-rotation-require-token-400 Phase 2): this "
+            "error during rotation means the presented cert is NOT the current "
+            "record credential (revoked, diverged, or replaced) — mint a fresh "
+            "token and re-register before the current cert expires (~30 days)."
         )
     return RuntimeError(msg)
 

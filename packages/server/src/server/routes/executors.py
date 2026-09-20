@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from .. import metrics
 from ..ca import CAManager
 from ..dependencies import get_db, require_role
+from ..middleware.auth import _extract_identity_from_subject
 from ..rate_limit import rate_limit_registration
 from ..revocation import executor_revocation_state
 from ..utils.executor_id import EXECUTOR_ID_PATTERN
@@ -236,6 +237,47 @@ def _dial_hostname_resolvable(hostname: str) -> bool:
         return False
 
 
+def _verified_incumbent_serial(request: Request, executor_id: str) -> str | None:
+    """Extract the verified mTLS client-cert serial for the incumbent exemption.
+
+    Phase 2 (executor-rotation-require-token-400 ruling 2(a)). Trust boundary:
+    nginx verifies the client chain against client-ca-bundle.crt (Root CA +
+    Admin CA) and OVERWRITES X-Client-* from its own ssl variables — a
+    client-sent header of the same name never survives the proxy, and with no
+    (or an unverified) cert the serial variable is empty and nginx drops the
+    header. The CN match is a discriminator, not the authorization: an
+    Admin-CA cert CAN carry an executor-shaped CN, but only the true incumbent
+    can present the Root-CA-issued record serial (random 64-bit at signing,
+    no serial-chooser API exists). Returns the serial normalized to the
+    record format (lowercase, 16-hex zero-padded — nginx sends uppercase and
+    DER encoding may strip leading zero bytes), or None when no verified cert
+    for this executor_id was presented.
+    """
+    if request.headers.get("x-client-verified") != "SUCCESS":
+        return None
+    presented = request.headers.get("x-client-serial", "").strip()
+    if not presented:
+        return None
+    if _extract_identity_from_subject(request.headers.get("x-client-subject", "")) != executor_id:
+        return None
+    try:
+        return format(int(presented, 16), "016x")
+    except ValueError:
+        return None
+
+
+def _incumbent_exemption_applies(db: Session, executor_id: str, presented_serial: str) -> bool:
+    """Ruled exemption order (do not reorder): revocation state FIRST, then
+    presented == current record serial. executor_revocation_state is the ONE
+    revocation source (revocation.py contract names this consumer); a second
+    implementation here would be a rotation/revocation split-brain.
+    """
+    if executor_revocation_state(db, executor_id, presented_serial=presented_serial).revoked:
+        return False
+    cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
+    return cert is not None and (cert.serial_number or "").casefold() == presented_serial
+
+
 @router.post(
     "/executors/register",
     response_model=ExecutorRegisterResponse,
@@ -398,12 +440,19 @@ async def register_executor(
     else:
         server_config = getattr(request.app.state, "config", None)
         if server_config and server_config.executor_enrollment.require_token:
-            metrics.EXECUTOR_REGISTERED.labels(result="token_required").inc()
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Enrollment token required. Contact your administrator.",
-            )
-        token_audit_fields = {"with_token": False}
+            # Phase 2 incumbent exemption (ruling 2(a)): tokenless rotate is
+            # accepted ONLY from the verified current-record credential —
+            # revocation state first, then serial match (see helper).
+            incumbent_serial = _verified_incumbent_serial(request, req.executor_id)
+            if incumbent_serial is None or not _incumbent_exemption_applies(db, req.executor_id, incumbent_serial):
+                metrics.EXECUTOR_REGISTERED.labels(result="token_required").inc()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Enrollment token required. Contact your administrator.",
+                )
+            token_audit_fields = {"with_token": False, "incumbent_exempt": True}
+        else:
+            token_audit_fields = {"with_token": False}
 
     # Terminal identity check (executor-revocation-by-identity, ruling 3/condition 4):
     # a revoked identity can NEVER re-register — even with a valid fresh token,

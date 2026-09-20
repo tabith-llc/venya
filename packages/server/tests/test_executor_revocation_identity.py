@@ -33,11 +33,13 @@ subject under test; mock DBs would pin the mocks, not the semantics.
 import hashlib
 import hmac
 import itertools
+import json
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from core.iam.models import (
+    AuditEvent,
     Base,
     Executor,
     ExecutorCert,
@@ -190,11 +192,11 @@ def _mint_token(SessionLocal, token, executor_id="exec-a"):
     s.close()
 
 
-def _register(client, executor_id="exec-a", token=None):
+def _register(client, executor_id="exec-a", token=None, headers=None):
     body = {"executor_id": executor_id, "csr_pem": _generate_test_csr(executor_id)}
     if token:
         body["enrollment_token"] = token
-    return client.post("/api/v1/executors/register", json=body)
+    return client.post("/api/v1/executors/register", json=body, headers=headers or {})
 
 
 # --- Helper semantics (the ONE source, condition 2) ---
@@ -580,3 +582,156 @@ class TestDialGates:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/executors/exec-a/execute", json={"session_id": "sess-1", "command": "id"})
         assert resp.status_code == 403 and "revoked" in resp.json()["detail"].lower()
+
+
+# --- Phase 2: incumbent serial-match exemption (executor-rotation-require-token-400 ruling 2(a)) ---
+# Truth table user-confirmed 2026-09-20: C1-C6 + preserved negatives.
+# C5/C6 are the ruled-named cells — pinned as NAMED tests (approval condition 2).
+
+
+def _incumbent_headers(serial, cn="exec-a", verified="SUCCESS"):
+    """nginx-forwarded client-cert headers ($ssl_client_serial is uppercase;
+    DER strips leading zero bytes — normalization is the server's job)."""
+    return {
+        "X-Client-Verified": verified,
+        "X-Client-Subject": f"O=Venya,CN={cn}",
+        "X-Client-Serial": serial,
+    }
+
+
+class TestIncumbentExemption:
+    @pytest.fixture(autouse=True)
+    def _reset_rate_limiters(self):
+        """Isolate the module-level limiter cache (pattern: test_executor_enrollment)
+        — 11 register calls on one executor_id/ip would otherwise trip the 5/min cap."""
+        from server import rate_limit as _rl
+
+        saved = dict(_rl._LIMITERS)
+        _rl._LIMITERS.clear()
+        yield
+        _rl._LIMITERS.clear()
+        _rl._LIMITERS.update(saved)
+
+    def test_c1_incumbent_serial_match_exempts_tokenless(self, env):
+        """C1: presented == record, clean state → tokenless rotate exempt (201);
+        F6 CRLs the replaced serial; audit marks incumbent_exempt."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        resp = _register(client, headers=_incumbent_headers("0000000000001000"))
+        assert resp.status_code == 201
+        assert resp.json()["serial_number"] != "0000000000001000"
+        s = SessionLocal()
+        crl_row = s.query(ExecutorCertRevocation).filter_by(serial_number="0000000000001000").first()
+        assert crl_row is not None and "replac" in (crl_row.reason or "").lower()
+        audit = s.query(AuditEvent).filter_by(event_type="executor_registered").first()
+        # AuditEvent.fields is JSON-serialized by the @validates decorator
+        audit_fields = json.loads(audit.fields) if isinstance(audit.fields, str) else audit.fields
+        assert audit_fields.get("incumbent_exempt") is True
+        assert audit_fields.get("with_token") is False
+        s.close()
+
+    def test_c2_diverged_serial_no_exemption(self, env):
+        """C2 paired negative: presented != record (diverged/predecessor), clean → 400."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        resp = _register(client, headers=_incumbent_headers("0000000000002222"))
+        assert resp.status_code == 400
+        assert "Enrollment token required" in resp.json()["detail"]
+
+    def test_c3_identity_revoked_no_exemption_even_on_record_match(self, env):
+        """C3: identity flag is terminal — exemption refused even with the
+        exact record serial in hand (revocation-state check runs FIRST)."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal, revoked_at=datetime.now(UTC))
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        resp = _register(client, headers=_incumbent_headers("0000000000001000"))
+        assert resp.status_code == 400
+
+    def test_c4_crled_serial_no_exemption_even_on_record_match(self, env):
+        """C4: presented serial in the CRL (serial-form on the record) → no exemption."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        _seed_revocation(SessionLocal, "0000000000001000")
+        resp = _register(client, headers=_incumbent_headers("0000000000001000"))
+        assert resp.status_code == 400
+
+    def test_c5_revoked_then_re_enrolled_old_serial_no_exemption(self, env):
+        """C5 (RULED-NAMED): an old credential CRLed by F6 after a token
+        re-enrollment never regains the exemption — the old serial 400s even
+        though a fresh clean record exists."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000009999")  # fresh record post re-enrollment
+        _seed_revocation(SessionLocal, "0000000000001000", reason="Replaced by re-registration/rotation")
+        resp = _register(client, headers=_incumbent_headers("0000000000001000"))
+        assert resp.status_code == 400
+
+    def test_c6_revocation_precedes_record_match(self, env):
+        """C6 (RULED-NAMED) — ordering cell: with the presented serial BOTH
+        CRLed AND equal to the record serial, the revocation state must win.
+        A match-first implementation would exempt (201); a revocation-skipping
+        implementation would not consult the shared helper with the presented
+        serial — the spy pins both halves."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        _seed_revocation(SessionLocal, "0000000000001000")
+        seen = {}
+        real = executors_routes.executor_revocation_state
+
+        def _spy(db, executor_id, presented_serial=None, **kw):
+            seen["presented"] = presented_serial
+            return real(db, executor_id, presented_serial=presented_serial, **kw)
+
+        with patch.object(executors_routes, "executor_revocation_state", _spy):
+            resp = _register(client, headers=_incumbent_headers("0000000000001000"))
+        assert resp.status_code == 400
+        assert seen["presented"] == "0000000000001000"
+
+    def test_no_client_cert_tokenless_still_400(self, env):
+        """Preserved negative (Phase 1): no mTLS headers → the old 400."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        resp = _register(client)
+        assert resp.status_code == 400
+        assert "Enrollment token required" in resp.json()["detail"]
+
+    def test_unverified_cert_no_exemption(self, env):
+        """Preserved negative: X-Client-Verified != SUCCESS → 400 even with a
+        perfect serial + CN (nginx only ever forwards SUCCESS for chain-verified certs)."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        resp = _register(client, headers=_incumbent_headers("0000000000001000", verified="FAILED"))
+        assert resp.status_code == 400
+
+    def test_cn_mismatch_no_exemption(self, env):
+        """Paired negative: the record serial presented under a foreign CN → 400
+        (CN is the discriminator; serials are not transferable across identities)."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        resp = _register(client, headers=_incumbent_headers("0000000000001000", cn="exec-b"))
+        assert resp.status_code == 400
+
+    def test_empty_serial_header_no_exemption(self, env):
+        """nginx drops an empty $ssl_client_serial; a forwarded "" must not exempt."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        resp = _register(client, headers=_incumbent_headers(""))
+        assert resp.status_code == 400
+
+    def test_nginx_serial_case_and_padding_normalized(self, env):
+        """$ssl_client_serial is uppercase and DER strips leading zero bytes:
+        "ABCDEF" must match record "0000000000abcdef" (else ~1/16 of rotations
+        flake on a leading-zero serial)."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000abcdef")
+        resp = _register(client, headers=_incumbent_headers("ABCDEF"))
+        assert resp.status_code == 201
