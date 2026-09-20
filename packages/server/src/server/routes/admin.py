@@ -964,16 +964,11 @@ async def admin_list_executors(
     Executors are deduplicated by executor_id — only the most recent
     active cert per executor is returned.
     """
-    from core.iam.models import ExecutorCert, ExecutorCertRevocation
+    from core.iam.models import ExecutorCert
 
-    revoked_serials = {r.serial_number for r in db.query(ExecutorCertRevocation.serial_number).all()}
+    from ..revocation import executor_revocation_state
 
-    certs = (
-        db.query(ExecutorCert)
-        .filter(~ExecutorCert.serial_number.in_(revoked_serials))
-        .order_by(ExecutorCert.created_at.desc())
-        .all()
-    )
+    certs = db.query(ExecutorCert).order_by(ExecutorCert.created_at.desc()).all()
 
     # Deduplicate: keep latest cert per executor_id
     latest: dict[str, ExecutorCert] = {}
@@ -981,16 +976,24 @@ async def admin_list_executors(
         if cert.executor_id not in latest:
             latest[cert.executor_id] = cert
 
-    result = [
-        {
-            "executor_id": c.executor_id,
-            "serial_number": c.serial_number,
-            "fingerprint": c.fingerprint,
-            "not_before": c.not_before,
-            "not_after": c.not_after,
-        }
-        for c in latest.values()
-    ]
+    # Condition 2 (executor-revocation-by-identity): revoked-ness has exactly
+    # ONE source — the shared state, consulted per candidate cert with the
+    # listed serial as the presented serial (identity flag first, then serial
+    # history). The former batch `serial NOT IN (CRL)` filter was a second
+    # implementation, blind to the identity flag.
+    result = []
+    for c in latest.values():
+        if executor_revocation_state(db, c.executor_id, presented_serial=c.serial_number).revoked:
+            continue
+        result.append(
+            {
+                "executor_id": c.executor_id,
+                "serial_number": c.serial_number,
+                "fingerprint": c.fingerprint,
+                "not_before": c.not_before,
+                "not_after": c.not_after,
+            }
+        )
 
     return AdminExecutorListResponse(executors=result)
 

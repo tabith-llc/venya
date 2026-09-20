@@ -468,6 +468,46 @@ class TestListStatusDisplay:
         assert self._statuses(client)["exec-a"] == "revoked"
 
 
+# --- Admin cert list: client of the shared state (condition-2 sweep catch) ---
+
+
+class TestAdminListRevocationSource:
+    def _listed_ids(self, client):
+        resp = client.get("/api/v1/admin/executors")
+        assert resp.status_code == 200
+        return {e["executor_id"] for e in resp.json()["executors"]}
+
+    def test_identity_revoked_excluded_even_with_clean_serial(self, env):
+        """The sweep catch: identity flag alone (serial NOT in CRL — a state
+        the old batch filter could not see) excludes the executor."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal, revoked_at=datetime.now(UTC))
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        assert "exec-a" not in self._listed_ids(client)
+
+    def test_clean_included(self, env):
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        assert "exec-a" in self._listed_ids(client)
+
+    def test_serial_revoked_record_excluded(self, env):
+        """Pre-existing behavior preserved: CRLed record serial drops out."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        _seed_revocation(SessionLocal, "0000000000001000")
+        assert "exec-a" not in self._listed_ids(client)
+
+    def test_stale_serial_revocation_keeps_listing(self, env):
+        """a722 cell: an off-record revoked serial must NOT drop the executor."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        _seed_revocation(SessionLocal, "0000000000000aaa")
+        assert "exec-a" in self._listed_ids(client)
+
+
 # --- Dial gates (ruling 4 mandatory enforcement) ---
 
 
