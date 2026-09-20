@@ -626,6 +626,11 @@ class TestRevokeSessionSecrets:
             assert data["revoked"] is True
             assert data["count"] == 2
             assert data["session_id"] == "sess-123"
+            # Audit attribution (sec-executor-session-path-no-auth side effect):
+            # the middleware now sets executor_id, so audit events carry the
+            # real executor identity instead of the historical always-None.
+            assert mock_audit_event.call_count == 2
+            assert all(c.kwargs["user_id"] == "exec1" for c in mock_audit_event.call_args_list)
 
     def test_revoke_non_executor_denied(self):
         """POST /sessions/{id}/secrets/revoke should deny non-executor."""
