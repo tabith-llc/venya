@@ -18,7 +18,6 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from core.utils.sensitive_log import token as sensitive_token
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -124,7 +123,6 @@ def _get_session_from_cookie(
     backend = get_backend(request)
     token = request.cookies.get(COOKIE_NAME)
     if not token:
-        logger.info("GET_SESSION DEBUG: no token in cookie")
         return None
 
     db = backend.get_session()
@@ -142,18 +140,10 @@ def _get_session_from_cookie(
         manager = SessionManager(db, session_config)
 
         session = db.query(SessionModel).filter(SessionModel.access_token == token).first()
-        logger.info(
-            "GET_SESSION DEBUG: token=%s, session=%s",
-            sensitive_token(token, "ACCESS") if token else "None",
-            session.id if session else "None",
-        )
-
         if session is None:
-            logger.info("GET_SESSION DEBUG: session not found in DB")
             return None
 
         if not manager.check_expiry(session):
-            logger.info("GET_SESSION DEBUG: session expired, expires_at=%s", session.expires_at)
             return None
 
         user = session.user
@@ -301,9 +291,7 @@ async def browser_refresh(
     Validates the existing session cookie and issues a new
     access token cookie with a fresh expiry.
     """
-    logger.info("REFRESH DEBUG: cookies=%s", dict(request.cookies))
     if session is None:
-        logger.info("REFRESH DEBUG: session not found")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
@@ -596,13 +584,6 @@ async def browser_elevate_assert(
         db.close()
 
 
-@router.get("/auth/debug/cookie")
-async def debug_cookie(request: Request) -> dict:
-    """Debug endpoint to check current cookie state."""
-    cookie = request.cookies.get(COOKIE_NAME, "NONE")
-    return {"cookie": cookie[:30] + "..." if len(cookie) > 30 else cookie}
-
-
 @router.get(
     "/auth/me",
     response_model=AuthMeResponse,
@@ -617,15 +598,11 @@ async def auth_me(request: Request) -> AuthMeResponse:
     """
     result = _get_session_from_cookie(request)
     if result is None:
-        logger.info("AUTH_ME DEBUG: _get_session_from_cookie returned None")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
         )
 
-    logger.info(
-        "AUTH_ME DEBUG: got session, user_id=%s", result[1].user_id if result and len(result) > 1 else "unknown"
-    )
     db, session, user_info = result
     try:
         from core.iam.models import User
