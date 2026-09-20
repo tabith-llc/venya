@@ -55,7 +55,7 @@ Key environment variables (all optional):
 |---|---|---|
 | `VENYA_TARBALL_SHA256` | (sidecar fetch) | integrity gate — recommended; if unset, the installer fetches the `.sha256` sidecar from the same origin and aborts on fetch failure or mismatch |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL password |
-| `VENYA_DB_PASSPHRASE` | dev default | server encryption passphrase — set a strong one in any real deployment |
+| `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-20); on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts |
 | `CORE_HOSTNAME` | `$(hostname)` | TLS cert SAN and relay CN base |
 | `VENYA_ADMIN_MTLS_ENABLED` | `true` | admin client-cert enforcement |
 | `VENYA_ADMIN_CA_PASSPHRASE` | auto-generated | stored in `/etc/venya/venya-core.env` (0640) |
@@ -66,6 +66,16 @@ Verify:
 curl -sk https://<core-host>/api/v1/health
 # {"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}
 ```
+
+**Re-runs are the idempotency contract.** Re-running an installer on a live
+host reuses stored secrets (`.env` stays byte-identical; an explicitly passed
+passphrase must MATCH the stored one or the install aborts), redeploys the
+packages, and **restarts the running service when the process predates the
+new bytes** — a loud NOTICE names both timestamps and a PROOF-OF-FRESH-BYTES
+line attests the verification probed the new process (ticket
+`installer-rerun-no-service-restart`). No manual `systemctl restart` is
+needed after a re-run; check for the PROOF line in the transcript before
+trusting any acceptance probe.
 
 ## 2. Bootstrap the first admin (workstation, FIDO2)
 

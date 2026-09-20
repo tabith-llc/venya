@@ -515,10 +515,16 @@ cp "$INSTALL_DIR/systemd/tmp-venya_secrets.mount" "$SYSTEMD_DIR/"
 cp "$INSTALL_DIR/systemd/venya-executor.seccomp" "$SYSTEMD_DIR/"
 systemctl daemon-reload
 systemctl enable venya-executor.service tmp-venya_secrets.mount
-systemctl start venya-executor.service
+
+# Fresh-bytes sync (ticket installer-rerun-no-service-restart — same defect
+# class as the core installer: `systemctl start` is a no-op on a running unit,
+# leaving the re-run's verification probing stale in-memory imports).
+touch "$INSTALL_DIR/.deploy-stamp"
+venya_service_sync venya-executor "$INSTALL_DIR/.deploy-stamp"
 
 # --- Service retry ---
 venya_service_retry venya-executor
+venya_service_freshness venya-executor "$INSTALL_DIR/.deploy-stamp"
 
 # --- Verification ---
 venya_verify_install \
