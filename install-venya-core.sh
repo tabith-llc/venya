@@ -721,10 +721,17 @@ sed "s|VENYA_ENV_DIR=/opt/venya|VENYA_ENV_DIR=$INSTALL_DIR|" "$INSTALL_DIR/syste
 
 systemctl daemon-reload
 systemctl enable venya-core.service
-systemctl start venya-core.service
+
+# Fresh-bytes sync (ticket installer-rerun-no-service-restart): a re-run swaps
+# site-packages under the LIVE process and `systemctl start` is a no-op on a
+# running unit — detection (start-time vs deploy stamp) + restart with a loud
+# notice, so verification below probes the NEW bytes, never the stale process.
+touch "$INSTALL_DIR/.deploy-stamp"
+venya_service_sync venya-core "$INSTALL_DIR/.deploy-stamp"
 
 # --- Service retry ---
 venya_service_retry venya-core
+venya_service_freshness venya-core "$INSTALL_DIR/.deploy-stamp"
 
 # --- Verification ---
 venya_verify_install \

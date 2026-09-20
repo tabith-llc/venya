@@ -135,12 +135,15 @@ results-file lineage carries them.)
   service must first prove the process runs the deployed bytes: either
   restart with start-timestamp > package file-write-time
   (`systemctl show -p MainPID` + `ps -o lstart=` vs `stat -c %y` on a changed
-  module), or a behavior probe only the new code exhibits. The core installer
-  re-run does NOT restart a running `venya-core` (ticket
-  `installer-rerun-no-service-restart`) — "Installation verified
-  successfully" can attest OLD bytes. Incident: a require_token probe hit a
-  90-minute-stale process, returned a false 201, and contaminated fleet
-  state.
+  module), or a behavior probe only the new code exhibits. Since the
+  `installer-rerun-no-service-restart` fix, both installers do this
+  themselves: a deploy stamp (`$INSTALL_DIR/.deploy-stamp`) is compared
+  against the service start time, a stale process is restarted with a loud
+  NOTICE, and verification prints a PROOF-OF-FRESH-BYTES line — check for it
+  in install transcripts before trusting any probe. Historical incident (the
+  reason the rule exists): a re-run left a 90-minute-stale `venya-core`
+  serving under "Installation verified successfully"; a require_token probe
+  returned a false 201 and contaminated fleet state.
 - **Registration rate limit.** `POST /executors/register` is dual-key
   throttled (per-IP AND per-executor-id, default 5/min, 429
   "Too many registration attempts" + Retry-After). A crash-looping daemon
