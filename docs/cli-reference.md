@@ -76,6 +76,7 @@ and exits `1`.
   - [`venya exec heartbeat`](#venya-exec-heartbeat)
   - [`venya exec audit`](#venya-exec-audit)
   - [`venya exec status`](#venya-exec-status)
+  - [`venya exec list`](#venya-exec-list)
 - [`venya config`](#venya-config) *(group)*
   - [`venya config show`](#venya-config-show)
   - [`venya config set-server`](#venya-config-set-server)
@@ -1031,6 +1032,7 @@ Subcommands:
 - [`venya exec heartbeat`](#venya-exec-heartbeat) — Send heartbeat to core
 - [`venya exec audit`](#venya-exec-audit) — View executor audit log
 - [`venya exec status`](#venya-exec-status) — Show executor registration status
+- [`venya exec list`](#venya-exec-list) — List registered executors with heartbeat-reported versions (admin)
 
 ### `venya exec register`
 
@@ -1186,6 +1188,25 @@ venya exec status
 
 ```bash
 venya exec status  # registration status of this executor
+```
+
+### `venya exec list`
+
+List registered executors with heartbeat-reported versions (admin)
+
+```
+venya exec list [OPTIONS]
+```
+
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `--json` | no | flag | false (flag) | Output raw JSON |
+
+**Examples**
+
+```bash
+venya exec list  # registered executors with heartbeat-reported versions (NULL renders 'unknown (pre-B daemon)')
+venya exec list --json  # same listing as raw JSON
 ```
 
 ## `venya config`

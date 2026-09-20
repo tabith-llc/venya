@@ -57,6 +57,7 @@ class TestListExecutors:
         mock_executor.enrolled_at = datetime.now(UTC) - timedelta(days=10)
         mock_executor.revoked_at = None
         mock_executor.status = "active"
+        mock_executor.version = None  # additive field (feature/version-surfaces)
         mock_query = MagicMock()
         mock_query.all.return_value = [mock_executor]
         mock_session.query.return_value = mock_query
@@ -91,6 +92,7 @@ class TestListExecutors:
         mock_executor.enrolled_at = datetime.now(UTC) - timedelta(days=5)
         mock_executor.revoked_at = None
         mock_executor.status = "active"
+        mock_executor.version = None  # additive field (feature/version-surfaces)
         mock_query = MagicMock()
         mock_query.all.return_value = [mock_executor]
         mock_session.query.return_value = mock_query
@@ -114,6 +116,7 @@ class TestListExecutors:
         mock_executor.enrolled_at = datetime.now(UTC) - timedelta(days=5)
         mock_executor.revoked_at = None
         mock_executor.status = "active"
+        mock_executor.version = None  # additive field (feature/version-surfaces)
         mock_query = MagicMock()
         mock_query.all.return_value = [mock_executor]
         mock_session.query.return_value = mock_query
@@ -137,6 +140,7 @@ class TestListExecutors:
         mock_executor.enrolled_at = datetime.now(UTC) - timedelta(days=10)
         mock_executor.revoked_at = datetime.now(UTC) - timedelta(hours=1)
         mock_executor.status = "active"
+        mock_executor.version = None  # additive field (feature/version-surfaces)
         mock_query = MagicMock()
         mock_query.all.return_value = [mock_executor]
         mock_session.query.return_value = mock_query
@@ -176,6 +180,7 @@ class TestListExecutors:
         mock_executor.enrolled_at = datetime.now(UTC) - timedelta(days=5)
         mock_executor.revoked_at = None
         mock_executor.status = "active"
+        mock_executor.version = None  # additive field (feature/version-surfaces)
         mock_query = MagicMock()
         mock_query.all.return_value = [mock_executor]
         mock_session.query.return_value = mock_query
@@ -305,7 +310,10 @@ class TestExecutorModelContract:
         from core.iam.models import Executor
 
         cols = {c.name: c for c in Executor.__table__.columns}
-        assert set(cols) == {"id", "hostname", "enrolled_at", "revoked_at", "last_heartbeat", "status"}
+        # "version" added by feature/version-surfaces (migration 029, same
+        # changeset — model/migration interlock); conscious contract update.
+        assert set(cols) == {"id", "hostname", "enrolled_at", "revoked_at", "last_heartbeat", "status", "version"}
+        assert cols["version"].nullable is True
 
         # hostname maps to the exact DB column name the migration writes.
         assert "hostname" in cols

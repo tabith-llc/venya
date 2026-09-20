@@ -61,6 +61,23 @@ logger = logging.getLogger("venya.executor.daemon")
 # LEGACY location honored until old installs are cut over.
 BOOTSTRAP_TOKEN_PATH = Path("/var/lib/venya/executor/bootstrap-token")
 
+
+def _dist_version() -> str:
+    """Single-sourced version (feature/version-surfaces condition 1): dist
+    metadata (pyproject) is the only truth — never a string literal. Missing
+    metadata yields "" (falsy → heartbeat omits the report; server leaves the
+    stored column untouched), never a guessed value."""
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        return _pkg_version("executor")
+    except PackageNotFoundError:
+        return ""
+
+
+_EXECUTOR_VERSION = _dist_version()
+
 CLOCK_SKEW_TOLERANCE = timedelta(seconds=300)
 
 
@@ -1172,6 +1189,11 @@ class ExecutorDaemon:
                 json={
                     "executor_id": self.state.executor_id,
                     "cert_fingerprint": fingerprint,
+                    # Additive wire field (feature/version-surfaces): the
+                    # server stores it only when non-empty — old servers
+                    # ignore the unknown key (pydantic default), old daemons
+                    # simply omit it.
+                    "version": _EXECUTOR_VERSION,
                 },
                 timeout=self.config.network.request_timeout_seconds,
             )
@@ -1248,6 +1270,11 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Venya Executor Daemon")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"venya-executor {_EXECUTOR_VERSION or 'unknown'}",
+    )
     parser.add_argument(
         "--config",
         type=str,

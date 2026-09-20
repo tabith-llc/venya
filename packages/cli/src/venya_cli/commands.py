@@ -1641,7 +1641,7 @@ def cmd_exec_group(client: APIClient, args: Any) -> int:
     """Dispatch executor lifecycle subcommands."""
     exec_command = getattr(args, "exec_command", None)
     if exec_command is None:
-        print("Error: exec subcommand required (register, cert, heartbeat, audit, status)", file=sys.stderr)
+        print("Error: exec subcommand required (register, cert, heartbeat, audit, status, list)", file=sys.stderr)
         return 1
 
     if exec_command == "register":
@@ -1654,8 +1654,59 @@ def cmd_exec_group(client: APIClient, args: Any) -> int:
         return executor_audit(client, args)
     elif exec_command == "status":
         return executor_status(args)
+    elif exec_command == "list":
+        return executor_list(client, args)
     else:
         print(f"Unknown exec command: {exec_command}", file=sys.stderr)
+        return 1
+
+
+def executor_list(client: APIClient, args: Any) -> int:
+    """List registered executors with their heartbeat-reported build versions.
+
+    Version is the executor dist version the daemon reports on every
+    heartbeat (single-sourced from package metadata). NULL renders as
+    'unknown (pre-B daemon)' — the explicit "has not reported yet" signal,
+    never a blank cell (feature/version-surfaces condition 3). Observability
+    only: no version gating anywhere in this path (scope guard).
+    """
+    try:
+        result = client.get("/api/v1/admin/executors")
+        executors = result.get("executors", [])
+
+        if not executors:
+            print("No executors found.")
+            return 0
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        headers = ["EXECUTOR_ID", "SERIAL", "NOT_AFTER", "VERSION"]
+        rows = []
+        for e in executors:
+            rows.append(
+                [
+                    e.get("executor_id", ""),
+                    (e.get("serial_number") or "")[:16],
+                    e.get("not_after") or "-",
+                    e.get("version") or "unknown (pre-B daemon)",
+                ]
+            )
+
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(cell))
+
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        print(fmt.format(*headers))
+        print(fmt.format(*["-" * w for w in widths]))
+        for row in rows:
+            print(fmt.format(*row))
+        return 0
+    except Exception as e:
+        print(f"List failed: {e}", file=sys.stderr)
         return 1
 
 

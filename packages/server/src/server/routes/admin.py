@@ -214,6 +214,7 @@ class AdminExecutorInfo(BaseModel):
     fingerprint: str
     not_before: datetime
     not_after: datetime
+    version: str | None = None
 
 
 class AdminExecutorListResponse(BaseModel):
@@ -975,11 +976,15 @@ async def admin_list_executors(
     Executors are deduplicated by executor_id — only the most recent
     active cert per executor is returned.
     """
-    from core.iam.models import ExecutorCert
+    from core.iam.models import Executor, ExecutorCert
 
     from ..revocation import executor_revocation_state
 
     certs = db.query(ExecutorCert).order_by(ExecutorCert.created_at.desc()).all()
+
+    # Heartbeat-reported build per executor (feature/version-surfaces);
+    # NULL = daemon predates version reporting — passthrough, never defaulted.
+    versions = {row.id: row.version for row in db.query(Executor).all()}
 
     # Deduplicate: keep latest cert per executor_id
     latest: dict[str, ExecutorCert] = {}
@@ -1003,6 +1008,7 @@ async def admin_list_executors(
                 "fingerprint": c.fingerprint,
                 "not_before": c.not_before,
                 "not_after": c.not_after,
+                "version": versions.get(c.executor_id),
             }
         )
 
