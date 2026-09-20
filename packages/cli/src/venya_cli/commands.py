@@ -763,13 +763,28 @@ def cmd_admin_revoke_executor(client: APIClient, args: Any) -> int:
     return executor_cert_revoke(_RevokeArgs(), client=client)
 
 
+# CA source paths for the executor-enroll --output-dir bundle. Module-level
+# constants = test seam (monkeypatchable); the bundle copies these into the
+# output dir for offline/air-gapped executor installs.
+_BUNDLE_CORE_CA = Path("/var/lib/venya/ca/ca.crt")
+_BUNDLE_ADMIN_CA = Path("/var/lib/venya/ca/admin-ca/admin-ca.crt")
+
+
 def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
     """Generate an enrollment token for executor bootstrap registration."""
     try:
+        output_dir = getattr(args, "output_dir", None)
+        if output_dir:
+            # Stale-token defense BEFORE the mint (ticket
+            # cli-executor-enroll-token-ux): a failed POST must never leave a
+            # previous run's dead token on disk for `test -s` to trust.
+            # Removal AFTER the POST would resurrect the bug on a crash
+            # between the two.
+            (Path(output_dir) / "token").unlink(missing_ok=True)
+
         result = client.post(f"/api/v1/admin/executors/{args.executor_id}/enroll")
         token = result.get("enrollment_token", "")
         expires_in = result.get("expires_in_seconds", 900)
-        output_dir = getattr(args, "output_dir", None)
 
         if output_dir:
             import hashlib as hashlib_mod
@@ -781,17 +796,15 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
             token_path.write_text(token)
 
             core_ca_path = output_path / "core-server-ca.crt"
-            venya_ca_path = Path("/var/lib/venya/ca/ca.crt")
-            if venya_ca_path.exists():
-                core_ca_path.write_bytes(venya_ca_path.read_bytes())
+            if _BUNDLE_CORE_CA.exists():
+                core_ca_path.write_bytes(_BUNDLE_CORE_CA.read_bytes())
                 core_ca_written = True
             else:
                 core_ca_written = False
 
             admin_ca_path = output_path / "admin-ca.crt"
-            admin_ca_dir = Path("/var/lib/venya/ca/admin-ca")
-            if (admin_ca_dir / "admin-ca.crt").exists():
-                admin_ca_path.write_bytes((admin_ca_dir / "admin-ca.crt").read_bytes())
+            if _BUNDLE_ADMIN_CA.exists():
+                admin_ca_path.write_bytes(_BUNDLE_ADMIN_CA.read_bytes())
                 admin_ca_written = True
             else:
                 admin_ca_written = False
@@ -813,18 +826,23 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
                 print(f"  {admin_ca_path}")
             else:
                 print(f"  {admin_ca_path} (NOT FOUND)")
+            if not core_ca_written:
+                print()
+                print("WARNING: core CA missing — bundle INCOMPLETE for offline/air-gapped install.")
+                print("         Online installs fetch the CA from the server; offline installs need it pre-copied.")
             print()
             print("Bundle fingerprint (verify before copying to executor):")
             print(f"  SHA256: {bundle_hash}")
             print()
             print("To install on executor VM:")
-            print(f"  scp -r {output_dir} bot@venya-exec-1:/tmp/")
+            print(f"  scp -r {output_dir} bot@{args.executor_id}:/tmp/")
             print()
             print("  curl -fsSL http://.../install-venya-executor.sh | \\")
-            print("    sudo VENYA_SERVER_URL=https://venya-core-1 \\")
+            print(f"    sudo VENYA_SERVER_URL={client.config.server_url} \\")
             print(f"         VENYA_EXECUTOR_ID={args.executor_id} \\")
             print(f"         VENYA_EXECUTOR_ENROLLMENT_TOKEN=$(cat {token_path}) \\")
-            print(f"         VENYA_VENYA_CA_FILE={core_ca_path} \\")
+            if core_ca_written:
+                print(f"         VENYA_VENYA_CA_FILE={core_ca_path} \\")
             print("         bash -s")
             print()
             print(f"Note: This bundle is valid for {expires_in // 60} minutes.")
