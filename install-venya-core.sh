@@ -254,6 +254,37 @@ info "Server will bind to: $BIND_ADDRESS (Nginx handles TLS)"
 # written (core-server-toml-inert).
 mkdir -p /etc/venya
 
+# --- Root/executor CA key passphrase (VENYA_CA_KEY_PASSPHRASE) ---
+# The root CA signs executor certs, so its key must be encrypted at rest
+# (SEC-001 invariant; sibling of the admin-CA fix 3667c6e). Same acquisition +
+# re-run-idempotency precedence as the admin CA: explicit env (operator
+# override; a WRONG value fails loudly downstream at decrypt) > stored in the
+# EnvironmentFile (re-run reuse -- the encrypted ca.key is PRESERVED by the
+# CA-gen guard below, so regenerating the passphrase would make it undecryptable)
+# > TTY prompt > strong random. Generated BEFORE the EnvironmentFile write so it
+# can be delivered there and used by the CA-gen + openssl signing below.
+CA_KEY_PASSPHRASE="${VENYA_CA_KEY_PASSPHRASE:-}"
+if [ -z "$CA_KEY_PASSPHRASE" ] && [ -f /etc/venya/venya-core.env ]; then
+    CA_KEY_PASSPHRASE=$(sed -n 's/^VENYA_CA_KEY_PASSPHRASE=//p' /etc/venya/venya-core.env | head -n1)
+    if [ -n "$CA_KEY_PASSPHRASE" ]; then
+        info "Existing install: reusing stored root CA passphrase from /etc/venya/venya-core.env."
+    fi
+fi
+if [ -z "$CA_KEY_PASSPHRASE" ]; then
+    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+        while :; do
+            echo -n "Root CA key passphrase: "
+            IFS= read -rs CA_KEY_PASSPHRASE
+            echo ""
+            [ -n "$CA_KEY_PASSPHRASE" ] && break
+            warn "Passphrase cannot be empty."
+        done
+    else
+        CA_KEY_PASSPHRASE=$(openssl rand -base64 32)
+        info "Unattended install: generated a random root CA passphrase."
+    fi
+fi
+
 # --- Write .env (core-specific) ---
 cat > "$INSTALL_DIR/.env" << EOF
 VENYA_HOST=127.0.0.1
@@ -267,27 +298,33 @@ VENYA_RECOVERY_CODE_PEPPER=$RECOVERY_PEPPER
 EOF
 
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
-    # NOTE: the passphrase is NOT written here. pydantic reads .env into the
-    # settings object, not into os.environ — and ca.py/app.py read os.environ.
-    # The passphrase reaches the daemon via the 0640 EnvironmentFile below.
+    # NOTE: the admin passphrase is NOT written to .env. pydantic reads .env into
+    # the settings object, not into os.environ — and ca.py/app.py read os.environ.
+    # Passphrases reach the daemon via the 0640 EnvironmentFile below.
     cat >> "$INSTALL_DIR/.env" << EOF
 VENYA_ADMIN_MTLS__ENABLED=true
 VENYA_ADMIN_MTLS__CA_CERT="$ADMIN_CA_DIR/admin-ca.crt"
 VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS=["$ADMIN_IDENTITY"]
 EOF
-
-    # Runtime passphrase delivery: a 0640 root:venya EnvironmentFile that
-    # systemd (PID1, as root) reads into the service's os.environ — the only
-    # thing ca.py reads. Replaces the old inline Environment= injection into
-    # the 0644 unit (which leaked the secret to every local user). Value is
-    # unquoted base64: systemd strips quotes but unquoted avoids any
-    # version-dependent ambiguity, and base64 has no systemd-special chars.
-    cat > /etc/venya/venya-core.env << EOF
-VENYA_ADMIN_CA_KEY_PASSPHRASE=$ADMIN_CA_PASSPHRASE
-EOF
-    chown root:venya /etc/venya/venya-core.env
-    chmod 0640 /etc/venya/venya-core.env
 fi
+
+# Runtime passphrase delivery: a 0640 root:venya EnvironmentFile that systemd
+# (PID1, as root) reads into the service's os.environ — the only thing ca.py
+# reads. Replaces the old inline Environment= injection into the 0644 unit (which
+# leaked the secret to every local user). Values are unquoted base64: systemd
+# strips quotes but unquoted avoids any version-dependent ambiguity, and base64
+# has no systemd-special chars. The ROOT CA passphrase is ALWAYS delivered (the
+# root CA is generated unconditionally and signs executor certs at runtime); the
+# ADMIN CA passphrase is appended only when admin mTLS is enabled. Written before
+# the CA-gen/openssl-signing below so a re-run can reuse it (idempotency above).
+cat > /etc/venya/venya-core.env << EOF
+VENYA_CA_KEY_PASSPHRASE=$CA_KEY_PASSPHRASE
+EOF
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    echo "VENYA_ADMIN_CA_KEY_PASSPHRASE=$ADMIN_CA_PASSPHRASE" >> /etc/venya/venya-core.env
+fi
+chown root:venya /etc/venya/venya-core.env
+chmod 0640 /etc/venya/venya-core.env
 
 # .env holds the DB password + passphrase — always root/venya-only, even without mTLS.
 chmod 600 "$INSTALL_DIR/.env"
@@ -304,6 +341,7 @@ chown venya:venya /etc/venya/tls
 sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" \
     python -c "
 import os
+import sys
 from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -319,8 +357,11 @@ ca_key_path = ca_dir / 'ca.key'
 ca_cert_path = ca_dir / 'ca.crt'
 
 if not ca_key_path.exists():
+    passphrase = sys.stdin.readline().rstrip(chr(10)).encode()
+    if not passphrase:
+        raise SystemExit('VENYA_CA_KEY_PASSPHRASE empty - refusing to write a plaintext CA key')
     ca_key = ec.generate_private_key(ec.SECP256R1())
-    ca_key_path.write_bytes(ca_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    ca_key_path.write_bytes(ca_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.BestAvailableEncryption(passphrase)))
     ca_key_path.chmod(0o600)
     now = datetime.now(UTC)
     subject = issuer = x509.Name([
@@ -343,10 +384,10 @@ if not ca_key_path.exists():
     ca_cert = builder.sign(ca_key, hashes.SHA256())
     ca_cert_path.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
     ca_cert_path.chmod(0o644)
-    print('CA generated')
+    print('CA generated (key encrypted)')
 else:
-    print('CA already exists')
-"
+    print('CA already exists - preserved')
+" <<<"$CA_KEY_PASSPHRASE"
 
 # Sign server cert with openssl CLI (cryptography 50.0.1 Rust backend bug:
 # builder.sign() rejects valid ECPrivateKey from _rust.openssl.ec module)
@@ -357,8 +398,9 @@ chmod 600 /etc/venya/tls/server.key
 openssl req -new -key /etc/venya/tls/server.key -out /tmp/server.csr \
     -subj "/O=Venya/CN=$CORE_HOSTNAME"
 
-openssl x509 -req -in /tmp/server.csr \
+VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/server.csr \
     -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
+    -passin env:VENYA_CA_KEY_PASSPHRASE \
     -CAcreateserial -out /etc/venya/tls/server.crt -days 365 \
     -extfile <(echo "subjectAltName=DNS:$CORE_HOSTNAME")
 
@@ -372,9 +414,11 @@ info "Server TLS certificate signed with Venya CA"
 # The core presents this client cert when calling the executor relay listener.
 # CN="${CORE_HOSTNAME}-relay" is the canonical relay identity; the executor
 # installer derives the same value for relay_client_ids.
-# CA premise (guarded, not asserted): the CA above is generated UNENCRYPTED
-# (NoEncryption() in the CA block), so openssl signs without -passin. If the
-# CA is missing, fail the install here — not at the physical e2e.
+# The CA key is ENCRYPTED (BestAvailableEncryption, VENYA_CA_KEY_PASSPHRASE), so
+# openssl signs with -passin env:VENYA_CA_KEY_PASSPHRASE — the value travels in
+# the process environment (root-readable /proc/PID/environ), NEVER on argv
+# (/proc/*/cmdline is world-readable). If the CA is missing, fail the install
+# here — not at the physical e2e.
 if [ ! -f /var/lib/venya/ca/ca.crt ] || [ ! -f /var/lib/venya/ca/ca.key ]; then
     error "Venya CA missing at /var/lib/venya/ca (ca.crt/ca.key) — cannot sign relay client cert"
     exit 1
@@ -397,8 +441,9 @@ openssl req -new -key "$RELAY_DIR/relay-client.key" \
 # Authority Key Identifier (33bc4b4); a lenient s_client smoke masks the
 # absence. EKU is clientAuth-only: the core relay cert never serves a server
 # role (the executor leaf is dual-purpose by design — do not "unify").
-openssl x509 -req -in /tmp/relay-client.csr \
+VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/relay-client.csr \
     -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
+    -passin env:VENYA_CA_KEY_PASSPHRASE \
     -CAcreateserial -out "$RELAY_DIR/relay-client.crt" -days 365 \
     -extfile <(printf 'extendedKeyUsage=clientAuth\nsubjectAltName=DNS:%s-relay\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n' "${CORE_HOSTNAME}")
 
