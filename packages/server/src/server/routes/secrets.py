@@ -175,6 +175,7 @@ async def secrets_create(
         # Caller's ACTUAL role names, fresh from the DB (NOT user_info["roles"]
         # — that carries role IDs; same wiring as the injection path in
         # executors.py). Visibility context for the upsert resolve.
+        from core.engine.core import CoreAccessError
         from core.iam.role_manager import RoleManager
 
         rm = RoleManager(db)
@@ -190,10 +191,16 @@ async def secrets_create(
             meta=meta,
             caller_roles=caller_roles,
         )
-    except Exception as e:
+    except CoreAccessError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+    except Exception:
+        logger.exception("Secret creation failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Secret creation failed",
         )
 
     return SecretCreateResponse(
@@ -230,6 +237,8 @@ async def secrets_get(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Core not initialized",
         )
+
+    from core.engine.core import CoreAccessError
 
     # For browser users requesting unmask, validate elevation token
     if caller == "human" and unmask and elevation_token:
@@ -284,10 +293,16 @@ async def secrets_get(
                 return SecretGetResponse(key=key, value=value, masked=False)
             except HTTPException:
                 raise
-            except Exception as e:
+            except CoreAccessError as e:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=str(e),
+                )
+            except Exception:
+                logger.exception("Secret retrieval failed (elevated)")
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Secret retrieval failed",
                 )
 
         except HTTPException:
@@ -305,10 +320,16 @@ async def secrets_get(
             unmask=unmask,
             user_id=user_info.get("user_id"),
         )
-    except Exception as e:
+    except CoreAccessError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e),
+        )
+    except Exception:
+        logger.exception("Secret retrieval failed")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Secret retrieval failed",
         )
 
     return SecretGetResponse(key=key, value=value, masked=caller == "human" and not unmask)

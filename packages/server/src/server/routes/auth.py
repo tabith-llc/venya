@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from .. import metrics
 from ..dependencies import get_db
 from ..fido2.browser_adapter import base64url_encode
+from ..fido2.manager import WebAuthnError
 
 logger = logging.getLogger("venya.server")
 
@@ -126,11 +127,17 @@ async def auth_registration_complete(
 
     try:
         cred = fido2_manager.finish_registration(req.challenge_id, req.response)
-    except ValueError as e:
+    except WebAuthnError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         ) from e
+    except ValueError:
+        logger.exception("Registration verification failed (internal)")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Registration verification failed",
+        ) from None
 
     try:
         from core.iam.models import WebAuthnCredential
@@ -203,12 +210,19 @@ async def auth_login_complete(
 
     try:
         result = fido2_manager.finish_authentication(req.challenge_id, req.response)
-    except ValueError as e:
+    except WebAuthnError as e:
         metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="failure").inc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
         ) from e
+    except ValueError:
+        metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="failure").inc()
+        logger.exception("Login verification failed (internal)")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login verification failed",
+        ) from None
 
     # Create session and issue token
     from datetime import timedelta

@@ -283,10 +283,11 @@ async def admin_enroll(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("Enrollment failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Enrollment failed",
         )
 
 
@@ -363,10 +364,11 @@ async def admin_create_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("User creation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="User creation failed",
         )
 
 
@@ -407,10 +409,11 @@ async def admin_remove(
         return AdminRemoveResponse(removed=True, user_id=user_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("User removal failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="User removal failed",
         )
 
 
@@ -475,10 +478,11 @@ async def admin_configure_user(
         return AdminConfigureUserResponse(configured=True, user_id=user_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("User configuration failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="User configuration failed",
         )
 
 
@@ -579,10 +583,11 @@ async def admin_key_version_rotate(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Key rotation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Key rotation failed",
         )
 
     logger.info(
@@ -695,10 +700,11 @@ async def admin_key_version_rollback(
         restored = _rollback_key_rotation(db, req.job_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Key rotation rollback failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Key rotation rollback failed",
         )
     return AdminKeyVersionRollbackResponse(
         rolled_back=True,
@@ -743,10 +749,11 @@ async def admin_set_command_policy(
             preset=req.preset,
             updated=True,
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("Command policy update failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Command policy update failed",
         )
 
 
@@ -783,10 +790,11 @@ async def admin_add_allowed_command(
 
         db.commit()
         return AdminAddAllowedCommandResponse(added=True, command_path=req.command_path)
-    except Exception as e:
+    except Exception:
+        logger.exception("Allowed-command update failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Allowed-command update failed",
         )
 
 
@@ -825,10 +833,11 @@ async def admin_key_version_deactivate(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Key version deactivation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Key version deactivation failed",
         )
 
 
@@ -876,10 +885,11 @@ async def admin_key_version_revoke(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Key version revocation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Key version revocation failed",
         )
 
 
@@ -938,10 +948,11 @@ async def admin_key_rotation_job_rollback(
         restored = _rollback_key_rotation(db, job_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Key rotation rollback failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Key rotation rollback failed",
         )
     return AdminKeyRotationJobRollbackResponse(
         rolled_back=True,
@@ -1171,7 +1182,10 @@ async def admin_enroll_executor(
         }
         core = getattr(request.app.state, "core", None)
         if core is None:
-            raise RuntimeError("Core not initialized — cannot encrypt admin metadata")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Core not initialized — cannot encrypt admin metadata",
+            )
         wrapped_dek, nonce, ciphertext = core.encrypt(json.dumps(meta_dict).encode("utf-8"))
         token.admin_meta_wrapped_dek = wrapped_dek
         token.admin_meta_nonce = nonce
@@ -1213,10 +1227,11 @@ async def admin_enroll_executor(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Executor enrollment failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Executor enrollment failed",
         )
 
 
@@ -1302,10 +1317,11 @@ async def admin_re_enroll(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("Re-enrollment failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Re-enrollment failed",
         )
 
 
@@ -1401,10 +1417,11 @@ async def admin_create_user_token(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Token creation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Token creation failed",
         )
 
 
@@ -1431,10 +1448,11 @@ async def admin_revoke_token(
             metrics.TOKEN_REVOKED.labels(reason="admin_revoked").inc()
 
         return AdminTokenRevokeResponse(revoked=revoked, token_id=token_id)
-    except Exception as e:
+    except Exception:
+        logger.exception("Token revocation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Token revocation failed",
         )
 
 

@@ -24,6 +24,7 @@ from ..fido2.browser_adapter import (
     browser_registration_to_fido2,
     challenge_to_browser_registration_options,
 )
+from ..fido2.manager import WebAuthnError
 from ..utils.time import effective_expiry_check_time
 
 logger = logging.getLogger("venya.server")
@@ -225,11 +226,17 @@ async def credentials_add_complete(
                 req.challenge_id,
                 fido2_response,
             )
-        except ValueError as e:
+        except WebAuthnError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
             ) from e
+        except ValueError:
+            logger.exception("Credential registration verification failed (internal)")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Credential registration verification failed",
+            ) from None
 
         # Store WebAuthn credential
         from core.iam.models import WebAuthnCredential
@@ -335,10 +342,11 @@ async def credentials_remove(
         return CredentialRemoveResponse(removed=True, credential_id=credential_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Credential removal failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Credential removal failed",
         )
 
 

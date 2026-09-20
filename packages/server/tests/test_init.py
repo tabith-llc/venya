@@ -75,7 +75,9 @@ class MockFido2Manager:
     def finish_registration(self, challenge_id, response):
         stored = self._challenges.pop(challenge_id, None)
         if stored is None:
-            raise ValueError("Challenge not found or expired")
+            from server.fido2.manager import WebAuthnError
+
+            raise WebAuthnError("Challenge not found or expired")
         from server.fido2.manager import StoredCredential
 
         return StoredCredential(

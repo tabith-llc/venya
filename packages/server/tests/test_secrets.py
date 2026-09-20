@@ -9,6 +9,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from core.engine.core import CoreAccessError
 from fastapi import FastAPI
 from server.dependencies import get_current_user
 from server.routes import secrets as secrets_routes
@@ -284,7 +285,7 @@ class TestSecretsCreate:
     def test_create_core_error(self):
         """POST /secrets should return 400 on core error."""
         core = MagicMock()
-        core.put.side_effect = Exception("Role not found: invalid-role")
+        core.put.side_effect = CoreAccessError("Role not found: invalid-role")
         app = _create_test_app(core=core)
         client = TestClient(app, raise_server_exceptions=False)
 
@@ -299,6 +300,27 @@ class TestSecretsCreate:
         )
         assert resp.status_code == 400
         assert "Role not found" in resp.json()["detail"]
+
+    def test_create_internal_error_not_leaked(self):
+        """A non-CoreAccessError exception gets the static detail — internals never echoed."""
+        core = MagicMock()
+        core.put.side_effect = RuntimeError("connection postgresql://user:pass@db-host/venya refused")
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "db-password",
+                "value": "secret",
+                "roles": ["invalid-role"],
+                "key_version_id": "v1",
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Secret creation failed"
+        assert "postgresql://" not in resp.text
+        assert "db-host" not in resp.text
 
 
 class TestSecretsGet:

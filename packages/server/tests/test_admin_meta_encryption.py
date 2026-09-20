@@ -99,8 +99,8 @@ class TestAdminMetaEncryption:
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/admin/executors/test-exec/enroll")
-        # RuntimeError caught by generic handler → 400 with clear message
-        assert resp.status_code == 400
+        # Authored HTTPException passes through the generic handler → 503
+        assert resp.status_code == 503
         assert "Core not initialized" in resp.json()["detail"]
 
     def test_encrypted_columns_set_on_token(self):
