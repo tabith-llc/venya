@@ -26,6 +26,16 @@ from .browser_adapter import base64url_encode
 logger = logging.getLogger(__name__)
 
 
+class WebAuthnError(ValueError):
+    """User-facing WebAuthn validation failure.
+
+    Messages are literal, operator-authored, and safe to return verbatim in
+    HTTP error detail. Routes forward ``str(WebAuthnError)`` to clients but
+    must NOT forward stray ``ValueError`` from library internals — those get
+    a static public message and are logged server-side instead.
+    """
+
+
 def _b64_decode(s: str) -> bytes:
     """Decode base64 or base64url, padded or not. Alphabets are
     distinguished by charset: '-_' never appears in standard,
@@ -213,11 +223,11 @@ class Fido2Manager:
         """
         stored = self.store.get_challenge(challenge_id)
         if stored is None:
-            raise ValueError("Challenge not found or expired")
+            raise WebAuthnError("Challenge not found or expired")
 
         credential_id = _b64_decode(response.get("id", ""))
         if not credential_id:
-            raise ValueError("Missing credential ID in response")
+            raise WebAuthnError("Missing credential ID in response")
 
         # Extract attestationObject — try browser shape first, then CLI shape
         resp = response.get("response", {})
@@ -232,7 +242,7 @@ class Fido2Manager:
                 attestation_object_b64 = resp.get("attestationObject")
 
         if not attestation_object_b64:
-            raise ValueError("Missing attestationObject in response")
+            raise WebAuthnError("Missing attestationObject in response")
 
         attestation_bytes = _b64_decode(attestation_object_b64)
 
@@ -242,11 +252,12 @@ class Fido2Manager:
         try:
             ao = AttestationObject(attestation_bytes)
         except Exception as e:
-            raise ValueError(f"Failed to parse attestation object: {e}") from e
+            logger.warning("Attestation object parse failed: %s", e)
+            raise WebAuthnError("Failed to parse attestation object") from e
 
         auth_data = ao.auth_data
         if auth_data.credential_data is None:
-            raise ValueError("No attested credential data in attestation")
+            raise WebAuthnError("No attested credential data in attestation")
 
         cose_key = auth_data.credential_data.public_key
         public_key_bytes = fido2_cbor.encode(dict(cose_key))
@@ -334,11 +345,11 @@ class Fido2Manager:
         # This prevents replay and oracle probing.
         stored = self.store.get_challenge(challenge_id)
         if stored is None:
-            raise ValueError("Challenge not found or expired")
+            raise WebAuthnError("Challenge not found or expired")
 
         raw_id = _b64_decode(response.get("id", ""))
         if not raw_id:
-            raise ValueError("Missing credential ID in response")
+            raise WebAuthnError("Missing credential ID in response")
 
         # Find matching credential
         credential = None
@@ -355,20 +366,20 @@ class Fido2Manager:
                     break
 
         if credential is None:
-            raise ValueError("Credential not found")
+            raise WebAuthnError("Credential not found")
 
         # Extract assertion components
         resp = response.get("response", {})
         if not isinstance(resp, dict):
             # ValueError is the 401 contract for all callers; TypeError would 500
-            raise ValueError("Malformed assertion response")  # noqa: TRY004
+            raise WebAuthnError("Malformed assertion response")
 
         client_data_json_b64 = resp.get("clientDataJSON", "")
         auth_data_b64 = resp.get("authenticatorData", "")
         signature_b64 = resp.get("signature", "")
 
         if not all([client_data_json_b64, auth_data_b64, signature_b64]):
-            raise ValueError("Missing assertion components (clientDataJSON, authenticatorData, or signature)")
+            raise WebAuthnError("Missing assertion components (clientDataJSON, authenticatorData, or signature)")
 
         client_data_json_bytes = _b64_decode(client_data_json_b64)
         auth_data_bytes = _b64_decode(auth_data_b64)
@@ -378,13 +389,13 @@ class Fido2Manager:
         try:
             client_data = json.loads(client_data_json_bytes)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            raise ValueError("Malformed clientDataJSON") from e
+            raise WebAuthnError("Malformed clientDataJSON") from e
 
         challenge_b64url = client_data.get("challenge", "")
         challenge_bytes = _b64_decode(challenge_b64url)
         stored_challenge = stored.data.get("raw_challenge", b"")
         if challenge_bytes != stored_challenge:
-            raise ValueError("Challenge mismatch: assertion does not answer the issued challenge")
+            raise WebAuthnError("Challenge mismatch: assertion does not answer the issued challenge")
 
         # Parse authenticator data
         from fido2.webauthn import AuthenticatorData
@@ -392,21 +403,22 @@ class Fido2Manager:
         try:
             auth_data = AuthenticatorData(auth_data_bytes)
         except Exception as e:
-            raise ValueError(f"Failed to parse authenticator data: {e}") from e
+            logger.warning("Authenticator data parse failed: %s", e)
+            raise WebAuthnError("Failed to parse authenticator data") from e
 
         # rpIdHash check
         expected_rp_id_hash = hashlib.sha256(self.rp_id.encode()).digest()
         if auth_data.rp_id_hash != expected_rp_id_hash:
-            raise ValueError("RP ID hash mismatch: authenticator registered under different RP ID")
+            raise WebAuthnError("RP ID hash mismatch: authenticator registered under different RP ID")
 
         # UP flag (user presence) — always required
         if not auth_data.is_user_present():
-            raise ValueError("User presence flag not set")
+            raise WebAuthnError("User presence flag not set")
 
         # UV flag — only enforced when the challenge negotiated "required"
         uv_required = stored.data.get("user_verification") == "required"
         if uv_required and not auth_data.is_user_verified():
-            raise ValueError("User verification flag not set (required for this challenge)")
+            raise WebAuthnError("User verification flag not set (required for this challenge)")
 
         # Signature verification: ECDSA/RSASSA over authData || SHA-256(clientDataJSON)
         from fido2 import cbor as fido2_cbor
@@ -415,7 +427,12 @@ class Fido2Manager:
         try:
             cose_key = CoseKey.parse(fido2_cbor.decode(credential.public_key))
         except Exception as e:
-            raise ValueError(f"Failed to parse stored public key: {e}") from e
+            logger.error(
+                "Stored public key parse failed for credential %s: %s",
+                credential.credential_id.hex(),
+                e,
+            )
+            raise WebAuthnError("Failed to parse stored public key") from e
 
         client_data_hash = hashlib.sha256(client_data_json_bytes).digest()
         message = auth_data_bytes + client_data_hash
@@ -423,11 +440,11 @@ class Fido2Manager:
         try:
             cose_key.verify(message, signature)
         except Exception as e:
-            raise ValueError("Signature verification failed") from e
+            raise WebAuthnError("Signature verification failed") from e
 
         # Counter check (clone detection) — only active for keys that report non-zero counters
         if credential.sign_count > 0 and auth_data.counter < credential.sign_count:
-            raise ValueError("Signature counter regression: possible credential clone")
+            raise WebAuthnError("Signature counter regression: possible credential clone")
 
         # Update sign count in memory
         credential.sign_count = auth_data.counter
@@ -457,9 +474,9 @@ class Fido2Manager:
                     )
                 except Exception:
                     logger.exception("credential active-state check failed; rejecting auth (fail-closed)")
-                    raise ValueError("Credential not found") from None
+                    raise WebAuthnError("Credential not found") from None
                 if db_cred is None or not db_cred.is_active:
-                    raise ValueError("Credential not found")
+                    raise WebAuthnError("Credential not found")
                 try:
                     db_cred.sign_count = auth_data.counter
                     db_cred.last_used_at = datetime.now(UTC)

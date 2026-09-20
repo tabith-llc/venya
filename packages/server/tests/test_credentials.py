@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
+from server.fido2.manager import WebAuthnError
 from server.routes import credentials
 from starlette.testclient import TestClient
 
@@ -329,7 +330,7 @@ class TestCredentialAddComplete:
         backend.get_session.return_value = db
 
         fido2 = MagicMock()
-        fido2.finish_registration.side_effect = ValueError("Challenge not found or expired")
+        fido2.finish_registration.side_effect = WebAuthnError("Challenge not found or expired")
 
         app = _create_test_app(fido2_manager=fido2, backend=backend, auth_user="user1")
 
@@ -345,6 +346,32 @@ class TestCredentialAddComplete:
         )
         assert resp.status_code == 400
         assert "Challenge not found or expired" in resp.json()["detail"]
+
+    def test_add_complete_stray_valueerror_not_leaked(self):
+        """A library-internal ValueError gets the static detail — internals never echoed."""
+        db = _make_valid_elevation_db()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        fido2 = MagicMock()
+        fido2.finish_registration.side_effect = ValueError("cbor decode failed at offset 42: 0xdeadbeef")
+
+        app = _create_test_app(fido2_manager=fido2, backend=backend, auth_user="user1")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/credentials/add/browser/complete",
+            json={
+                "challenge_id": "expired-challenge",
+                "response": {"id": "dGVzdA==", "response": {}},
+                "label": "Backup key",
+            },
+            headers={"X-Elevation-Token": "elev-token-123"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Credential registration verification failed"
+        assert "cbor" not in resp.text
+        assert "0xdeadbeef" not in resp.text
 
     def test_add_complete_stores_credential_correctly(self):
         """Should create WebAuthnCredential with correct fields."""

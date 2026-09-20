@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
 from ..fido2.browser_adapter import challenge_to_browser_options
+from ..fido2.manager import WebAuthnError
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -325,7 +326,7 @@ async def init_complete(
         # Verify FIDO2 attestation
         try:
             cred = fido2_manager.finish_registration(req.challenge_id, fido2_response)
-        except ValueError as e:
+        except WebAuthnError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),

@@ -302,11 +302,12 @@ async def register_executor(
     # Parse the CSR
     try:
         csr = x509.load_pem_x509_csr(req.csr_pem.strip().encode())
-    except Exception as e:
+    except Exception:
         metrics.EXECUTOR_REGISTERED.labels(result="invalid_csr").inc()
+        logger.exception("CSR parse failed for executor registration")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid CSR: {e}",
+            detail="Invalid CSR",
         )
 
     # Validate key strength — reject weak keys before any CA/DB work
@@ -497,9 +498,10 @@ async def register_executor(
         metrics.CA_SIGNED_TOTAL.labels(cert_type="executor").inc()
     except RuntimeError as e:
         metrics.EXECUTOR_REGISTERED.labels(result="ca_error").inc()
+        logger.error("CA signing failed for %s: %s", resolved_executor_id, e)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(e),
+            detail="Certificate signing unavailable",
         )
 
     # Store certificate metadata
@@ -1098,7 +1100,8 @@ async def execute_command_on_executor(
         logger.warning("Executor connection lost mid-response for session %s: %s", session.id, e)
         raise HTTPException(status_code=503, detail="Executor unreachable (connection lost mid-response)")
     except httpx2.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+        logger.warning("Executor returned HTTP %d for session %s: %s", e.response.status_code, session.id, e)
+        raise HTTPException(status_code=e.response.status_code, detail="Executor returned an error")
 
     # Validate executor response shape before any field access
     try:

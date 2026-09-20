@@ -16,6 +16,7 @@ work identically for CLI clients.
 """
 
 import hashlib
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 
@@ -25,6 +26,9 @@ from sqlalchemy.orm import Session
 
 from ..dependencies import get_current_user, get_db
 from ..fido2.browser_adapter import browser_assertion_to_fido2, challenge_to_browser_options
+from ..fido2.manager import WebAuthnError
+
+logger = logging.getLogger("venya.server")
 
 router = APIRouter()
 
@@ -162,11 +166,17 @@ async def elevate_assert(
             req.challenge_id,
             fido2_response,
         )
-    except ValueError as e:
+    except WebAuthnError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
         ) from e
+    except ValueError:
+        logger.exception("Elevation assertion verification failed (internal)")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Elevation verification failed",
+        ) from None
 
     # Create elevation token
     elevation_token = secrets.token_urlsafe(32)
