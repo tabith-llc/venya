@@ -30,6 +30,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from venya_contract import RelayRequest, RelayResponse, RelaySecret
 
 from .. import metrics
 from ..ca import CAManager
@@ -201,19 +202,21 @@ class SessionCreateResponse(BaseModel):
 
 
 class ExecuteRequest(BaseModel):
-    """Request body for executing a command on an executor."""
+    """Request body for executing a command on an executor.
+
+    This is the CLIENT -> SERVER inbound model (the FastAPI request body), a
+    distinct contract from the server -> executor relay wire. It stays local by
+    ruling (refactor-2): the relay wire shape lives in ``venya_contract`` and
+    additionally carries the ``secrets`` list the server loads from the session.
+    """
 
     session_id: str = Field(..., description="Execution session ID")
     command: str = Field(..., description="Shell command to execute")
 
 
-class ExecuteResponse(BaseModel):
-    """Response from command execution."""
-
-    exit_code: int
-    stdout: str
-    stderr: str
-    masked_count: int = Field(default=0, description="Number of [REDACTED:...] markers in output")
+# The relay response shape (executor -> server, and server -> client) is owned by
+# venya_contract.RelayResponse — the previous local ExecuteResponse was a duplicate
+# copy of that field set and is removed (refactor-2: no local re-declaration).
 
 
 # --- Helpers ---
@@ -1007,7 +1010,7 @@ async def create_execution_session(
 
 @router.post(
     "/executors/{id}/execute",
-    response_model=ExecuteResponse,
+    response_model=RelayResponse,
     status_code=status.HTTP_200_OK,
 )
 async def execute_command_on_executor(
@@ -1016,7 +1019,7 @@ async def execute_command_on_executor(
     request: Request,
     db: Session = Depends(get_db),
     auth_user: dict = Depends(require_role("read-write")),
-) -> ExecuteResponse:
+) -> RelayResponse:
     """Relay command to executor over mTLS.
 
     1. Verify session exists and is not expired
@@ -1060,12 +1063,14 @@ async def execute_command_on_executor(
     # Load wrapped secrets from session
     secrets = db.query(SessionSecret).filter(SessionSecret.session_id == session.id).all()
 
-    # Build request payload
-    payload = {
-        "session_id": session.id,
-        "command": req.command,
-        "secrets": [{"secret_id": s.secret_id, "wrapped_value": s.wrapped_value} for s in secrets],
-    }
+    # Build request payload via the frozen relay contract (venya_contract) — the
+    # server and executor both import these models, so a one-sided field change is
+    # an import/type error here, not a runtime 500 at the executor boundary.
+    payload = RelayRequest(
+        session_id=session.id,
+        command=req.command,
+        secrets=[RelaySecret(secret_id=s.secret_id, wrapped_value=s.wrapped_value) for s in secrets],
+    ).model_dump()
 
     # Construct executor URL from hostname
     executor_url = f"https://{executor.hostname}:8443/execute"
@@ -1121,7 +1126,7 @@ async def execute_command_on_executor(
 
     # Validate executor response shape before any field access
     try:
-        result = ExecuteResponse(**result).model_dump()
+        result = RelayResponse(**result).model_dump()
     except ValidationError as e:
         logger.warning("Invalid executor response for session %s: %s", session.id, e)
         raise HTTPException(status_code=502, detail="Invalid response from executor")
@@ -1150,4 +1155,4 @@ async def execute_command_on_executor(
     session.stderr = result["stderr"]
     db.commit()
 
-    return ExecuteResponse(**result)
+    return RelayResponse(**result)
