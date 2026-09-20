@@ -619,6 +619,18 @@ server {
     ssl_client_certificate /etc/nginx/ssl/client-ca-bundle.crt;
     ssl_verify_client optional;
 
+    # The relay execute hop (POST /api/v1/executors/{id}/execute) can legitimately run
+    # up to the server's 300s executor-relay timeout — a cold sbx agent-template pull
+    # alone is ~65s. nginx's default proxy_read_timeout (60s) 504s before the server
+    # responds even though the executor succeeds, so the client sees a gateway timeout
+    # for a command that actually ran (and may retry -> double execution). 330s = the
+    # 300s relay ceiling + 30s margin, so the server's own clean 503 "Executor timed
+    # out" surfaces rather than an nginx 504 at the boundary. Set at server level so it
+    # covers every proxied location without duplicating the X-Client-* headers below
+    # (ticket relay-cold-start-nginx-proxy-timeout).
+    proxy_read_timeout 330s;
+    proxy_send_timeout 330s;
+
     location /.well-known/venya-ca.crt {
         alias /var/www/.well-known/venya-ca.crt;
         default_type application/x-x509-ca-cert;
