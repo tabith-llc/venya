@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from core.iam.enrollment_manager import EnrollmentManager
 
 from core.engine.backend import Backend, BackendConfig
-from core.engine.core import Caller
 from core.iam.models import Session as SessionModel
 from core.iam.role_manager import RoleManager
 
@@ -258,26 +257,6 @@ def require_role(permission: str):
 
     _checker._venya_guard = permission  # type: ignore[attr-defined]
     return _checker
-
-
-def get_caller(request: Request) -> str:
-    """Determine the caller type from the request.
-
-    mTLS requests come from executor (caller=executor).
-    Bearer token requests come from human (caller=human).
-
-    Args:
-        request: The FastAPI request.
-
-    Returns:
-        Caller enum value.
-    """
-    # Check if request has mTLS client cert (executor)
-    if getattr(request, "client_cert", None) is not None:
-        return Caller.EXECUTOR
-
-    # Otherwise human (CLI)
-    return Caller.HUMAN
 
 
 def require_admin(

@@ -312,9 +312,16 @@ def cmd_store(client: APIClient, args: Any) -> int:
 def cmd_get(client: APIClient, args: Any) -> int:
     """Retrieve a secret."""
     try:
+        params: dict[str, Any] = {"unmask": args.unmask}
+        if args.unmask:
+            # Unmask is elevation-gated server-side (ticket
+            # sec-secret-caller-param-plaintext-bypass): re-authenticate with
+            # the security key first, same ceremony as credential add.
+            print("Re-authenticating with security key for elevation...")
+            params["elevation_token"] = _elevate(client)
         result = client.get(
             f"/api/v1/secrets/{args.key}",
-            params={"unmask": args.unmask},
+            params=params,
         )
         if args.unmask:
             print(result.get("value", ""))
