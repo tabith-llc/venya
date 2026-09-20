@@ -616,12 +616,17 @@ class TestValidateCommandStructure:
             _validate_command_structure("   ")
 
 
-class TestStage2SendsHashes:
-    """Tests for H-44: Stage 2 sends hashes, not plaintext values."""
+class TestStage2NoSecretMaterial:
+    """Stage-2 payload carries NO secret material at all.
 
-    def test_send_to_stage2_sends_hashes_not_values(self, executor: Executor, mock_http_client: httpx2.Client):
-        """_send_to_stage2 sends secret hashes, not plaintext values."""
+    Supersedes TestStage2SendsHashes (H-44): the `secrets` field (ids +
+    sha256 hashes) was DEAD WIRE — server FilterRequest never declared it
+    and pydantic dropped it. Ruling 2026-09-20 (ticket
+    executor-stage2-plaintext-signoff): deleted; hashes of low-entropy
+    secrets no longer cross the wire for no consumer.
+    """
 
+    def test_send_to_stage2_payload_has_no_secrets_field(self, executor: Executor, mock_http_client: httpx2.Client):
         executor.http_client = mock_http_client
 
         response = MagicMock()
@@ -633,25 +638,13 @@ class TestStage2SendsHashes:
         response.raise_for_status.return_value = None
         mock_http_client.post.return_value = response
 
-        from executor.bundles import SecretBundle
+        executor._send_to_stage2(b"output", b"")
 
-        bundle = SecretBundle(
-            secret_id="test-secret",
-            value=b"plaintext-secret-value",
-            wrapped_value=b"wrapped",
-            hash="abc123def456",
-        )
-
-        # Pass only the fields that _send_to_stage2 would send (secret_id + hash)
-        secret_dict = {"secret_id": bundle.secret_id, "hash": bundle.hash}
-        executor._send_to_stage2(b"output", b"", [secret_dict])
-
-        # Verify the call was made with hash, not value
         call_args = mock_http_client.post.call_args
         payload = call_args.kwargs["json"] if call_args.kwargs else call_args[1]["json"]
-        assert "secrets" in payload
-        assert payload["secrets"][0]["hash"] == "abc123def456"
-        assert "value" not in payload["secrets"][0]
+        # Truth table (ruling): payload keys are EXACTLY the output pair —
+        # no secrets field, no hashes, no values.
+        assert set(payload) == {"stdout", "stderr"}
 
 
 class TestTruncatedAudit:
