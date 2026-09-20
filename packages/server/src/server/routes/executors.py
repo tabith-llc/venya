@@ -134,6 +134,15 @@ class HeartbeatRequest(BaseModel):
         max_length=64,
     )
     cert_fingerprint: str = Field(default="", description="Certificate fingerprint")
+    version: str = Field(
+        default="",
+        max_length=64,
+        description=(
+            "Executor dist version (ADDITIVE field, wire-compatible: missing or "
+            "empty leaves the stored column untouched — pre-version daemons "
+            "keep NULL, meaning 'has not reported yet')"
+        ),
+    )
 
 
 class HeartbeatResponse(BaseModel):
@@ -152,6 +161,7 @@ class ExecutorInfo(BaseModel):
     last_heartbeat: datetime | None
     enrolled_at: datetime | None
     status: str
+    version: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -773,6 +783,11 @@ async def heartbeat(
         if executor_row is not None:
             executor_row.last_heartbeat = datetime.now(UTC)
             executor_row.status = "active"
+            # Additive wire field (feature/version-surfaces): only a non-empty
+            # report touches the column — absence/empty NEVER overwrites or
+            # NULLs a previously reported version (pre-version daemons keep NULL).
+            if req.version:
+                executor_row.version = req.version
             db.commit()
 
     metrics.EXECUTOR_HEARTBEAT_TOTAL.inc()
@@ -830,6 +845,7 @@ async def list_executors(
                 last_heartbeat=exec_rec.last_heartbeat,
                 enrolled_at=exec_rec.enrolled_at,
                 status=status,
+                version=exec_rec.version,
             )
         )
 

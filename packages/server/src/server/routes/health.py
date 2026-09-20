@@ -8,6 +8,8 @@
 
 import logging
 import time
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
@@ -16,6 +18,19 @@ from fastapi.responses import JSONResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _dist_version() -> str:
+    """Single-sourced version (feature/version-surfaces condition 1): dist
+    metadata (pyproject) is the only truth — never a string literal. Missing
+    metadata yields the honest signal "unknown", never a guessed value."""
+    try:
+        return _pkg_version("server")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+_SERVER_VERSION = _dist_version()
 
 # Module-level cache for CA key checks — avoids decrypting passphrase-protected
 # keys on every LB probe. 15s TTL balances freshness against disk I/O cost.
@@ -104,6 +119,10 @@ async def health_check(request: Request) -> JSONResponse:
     Results are cached for 15 seconds to avoid decrypting passphrase-protected
     keys on every probe.
 
+    The ``version`` field is fenced to the server package version only
+    (single-sourced from dist metadata) — it must never grow into an
+    environment/config dump on this unauthenticated surface.
+
     No authentication required. Not rate-limited.
     """
     checks: dict[str, str] = {}
@@ -127,7 +146,7 @@ async def health_check(request: Request) -> JSONResponse:
 
     status, http_status = _determine_status(checks)
     return JSONResponse(
-        content={"status": status, "checks": checks},
+        content={"status": status, "version": _SERVER_VERSION, "checks": checks},
         status_code=http_status,
     )
 

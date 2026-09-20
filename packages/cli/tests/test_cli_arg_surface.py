@@ -76,8 +76,17 @@ ALL_PATHS = [path for path, _ in PARSERS]
 
 
 def _arg_actions(parser: argparse.ArgumentParser) -> list[argparse.Action]:
-    """Every argument action on `parser` except help and subparser dispatch."""
-    return [a for a in parser._actions if a.dest != "help" and not isinstance(a, argparse._SubParsersAction)]
+    """Every argument action on `parser` except help, version, and subparser dispatch.
+
+    `--version` (argparse._VersionAction, feature/version-surfaces) prints and
+    exits 0 — a special shape like REMAINDER, pinned explicitly in
+    tests/test_cli_version.py; the generic parse/default matrix does not apply.
+    """
+    return [
+        a
+        for a in parser._actions
+        if a.dest != "help" and not isinstance(a, (argparse._SubParsersAction, argparse._VersionAction))
+    ]
 
 
 def _is_remainder(action: argparse.Action) -> bool:
@@ -250,7 +259,10 @@ EXPECTED_SUBCOMMAND_COUNTS: dict[tuple[str, ...], int] = {
     ("admin",): 23,
     ("admin", "key-version"): 5,
     ("role",): 7,
-    ("exec",): 5,
+    # exec 5→6: `exec list` added by feature/version-surfaces (ruling
+    # condition 6 — deliberate interlock update, cli-reference regenerated
+    # in the same commit).
+    ("exec",): 6,
     ("exec", "cert"): 3,
     ("config",): 3,
     ("credential",): 3,

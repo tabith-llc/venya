@@ -81,10 +81,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     if config is None:
         config = ServerConfig()
 
+    # Single-sourced version (feature/version-surfaces condition 1): the
+    # former hardcoded literal could silently disagree with the dist.
+    from .routes.health import _dist_version
+
     app = FastAPI(
         title="Venya",
         description="A secrets broker system for LLMs",
-        version="0.1.0",
+        version=_dist_version(),
         lifespan=lifespan,
         proxy_headers=True,
         forwarded_allow_ips=config.trusted_proxies,
