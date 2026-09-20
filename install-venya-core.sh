@@ -20,7 +20,9 @@ set -euo pipefail
 # Environment variables:
 #   VENYA_INSTALL_DIR   - Install location (default: /opt/venya)
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
-#   VENYA_DB_PASSWORD   - PostgreSQL venya user password (prompts if unset)
+#   VENYA_DB_PASSWORD   - PostgreSQL venya user password (prompts if unset;
+#                         on re-run an explicit value must MATCH the password
+#                         stored in .env's VENYA_DB_URL or the install aborts)
 #   VENYA_DB_PASSPHRASE - Server encryption passphrase — NO DEFAULT. Re-run:
 #                         reused from $INSTALL_DIR/.env (an explicit env value
 #                         must MATCH the stored one or the install aborts).
@@ -131,6 +133,46 @@ if [ -n "$STORED_RECOVERY_PEPPER" ]; then
 elif [ -z "$RECOVERY_PEPPER" ]; then
     RECOVERY_PEPPER=$(openssl rand -base64 32)
     info "Fresh install: generated a random recovery pepper."
+fi
+
+# --- PostgreSQL role password (VENYA_DB_PASSWORD) ---
+# Fresh install: prompted (interactive) or required (unattended) — the
+# exists-guarded CREATE USER below makes the explicit env the initial
+# password, nothing to compare against. Re-run: an explicit env that
+# DISAGREES with the password stored in .env's VENYA_DB_URL aborts loudly
+# with state intact, BEFORE any mutation — the CREATE USER exists-guard
+# would otherwise leave the PG role on the old password while .env gets the
+# new one, diverging server DB auth into a boot loop (ticket
+# installer-db-password-rerun-mismatch). Same no-silent-rotation semantics
+# as the passphrase/pepper guards above; rotation is a deliberate manual act
+# named in the abort message. Raw-string comparison matches the raw URL
+# write below — passwords containing @ or : break the URL at write time
+# regardless (pre-existing wart, recorded in the ticket, NOT fixed here).
+if [ -z "$VENYA_DB_PASSWORD" ]; then
+    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+        while :; do
+            echo -n "Enter PostgreSQL password for venya user: "
+            IFS= read -rs VENYA_DB_PASSWORD
+            echo ""
+            [ -n "$VENYA_DB_PASSWORD" ] && break
+            warn "Password cannot be empty."
+        done
+    else
+        error "VENYA_DB_PASSWORD is required for unattended install (stdin is not a TTY)."
+        exit 1
+    fi
+elif [ -f "$STORED_ENV_FILE" ]; then
+    STORED_DB_PASSWORD=$(sed -n 's|^VENYA_DB_URL=postgresql://venya:\(.*\)@localhost/venya$|\1|p' "$STORED_ENV_FILE" | head -n1)
+    if [ -n "$STORED_DB_PASSWORD" ] && [ "$VENYA_DB_PASSWORD" != "$STORED_DB_PASSWORD" ]; then
+        error "VENYA_DB_PASSWORD does not match the password stored in $STORED_ENV_FILE (VENYA_DB_URL)."
+        error "The PostgreSQL role keeps its original password on re-run; proceeding would"
+        error "diverge .env from the role and break server DB auth. Aborting — no changes made."
+        error "To continue, either:"
+        error "  1. Re-run with the stored password (see VENYA_DB_URL in $STORED_ENV_FILE), or"
+        error "  2. Rotate deliberately: sudo -u postgres psql -c \"ALTER USER venya WITH PASSWORD '<new>'\""
+        error "     then re-run the installer with VENYA_DB_PASSWORD='<new>'."
+        exit 1
+    fi
 fi
 
 # --- Create venya service account (no password, nologin, locked) ---
@@ -273,23 +315,10 @@ print(\"Admin cert generated for $3\")
 fi
 
 # --- Install and setup PostgreSQL (core-specific) ---
+# VENYA_DB_PASSWORD acquired in the secrets zone above (pre-mutation, with
+# the re-run mismatch guard).
 info "Installing PostgreSQL..."
 apt-get install -y -qq postgresql > /dev/null 2>&1
-
-if [ -z "$VENYA_DB_PASSWORD" ]; then
-    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
-        while :; do
-            echo -n "Enter PostgreSQL password for venya user: "
-            IFS= read -rs VENYA_DB_PASSWORD
-            echo ""
-            [ -n "$VENYA_DB_PASSWORD" ] && break
-            warn "Password cannot be empty."
-        done
-    else
-        error "VENYA_DB_PASSWORD is required for unattended install (stdin is not a TTY)."
-        exit 1
-    fi
-fi
 
 info "Setting up PostgreSQL..."
 systemctl start postgresql
