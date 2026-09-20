@@ -26,6 +26,10 @@ def _create_test_app(backend=None):
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
+            # The real SessionMiddleware grants this only after verifying the
+            # executor mTLS identity (sec-executor-session-path-no-auth); the
+            # route-level caller check below is defense-in-depth.
+            request.state.auth_user = {"caller": "executor", "executor_id": "venya-exec-1"}
             return await call_next(request)
 
     app.add_middleware(AuthMiddleware)
@@ -483,3 +487,61 @@ class TestFilterSessionOutput:
         assert data["stdout"] == stdout
         assert data["stderr"] == stderr
         assert "no secret bindings" in caplog.text
+
+
+class TestFilterRouteCallerCheck:
+    """Route-level caller check (defense-in-depth, mirrors secrets.py revoke).
+
+    Paired negative for sec-executor-session-path-no-auth: without the
+    executor caller state the route must 403 BEFORE any secret is decrypted
+    or hash-compared — no pre-auth oracle even if the middleware gate is
+    ever bypassed or misconfigured.
+    """
+
+    def _create_app(self, auth_user=None):
+        from starlette.middleware.base import BaseHTTPMiddleware
+        from starlette.requests import Request
+
+        app = FastAPI()
+        app.include_router(filter_routes.router, prefix="/api/v1")
+
+        class AuthMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request: Request, call_next):
+                if auth_user is not None:
+                    request.state.auth_user = auth_user
+                return await call_next(request)
+
+        app.add_middleware(AuthMiddleware)
+        return app
+
+    def test_no_caller_state_rejected_403_before_secret_queries(self):
+        """No auth_user state → 403 before any secret query/decryption.
+
+        (get_db opens a session during dependency resolution — the no-DB-touch
+        guarantee lives at the middleware gate; here we pin that no secret
+        lookup runs, i.e. no pre-auth oracle at the route level either.)
+        """
+        backend = MagicMock()
+        db = backend.get_session.return_value
+        app = self._create_app(auth_user=None)
+        app.state.backend = backend
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/sessions/123/filter",
+            json={"stdout": "aGk=", "stderr": ""},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Executor mTLS authentication required"
+        db.query.assert_not_called()
+
+    def test_human_caller_rejected_403(self):
+        """Bearer-authenticated human caller is NOT an executor → 403."""
+        backend = MagicMock()
+        app = self._create_app(auth_user={"caller": "human", "user_id": "u1"})
+        app.state.backend = backend
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/sessions/123/filter",
+            json={"stdout": "aGk=", "stderr": ""},
+        )
+        assert resp.status_code == 403

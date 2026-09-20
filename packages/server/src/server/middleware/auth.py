@@ -230,14 +230,15 @@ class SessionMiddleware(BaseHTTPMiddleware):
         if any(path.startswith(prefix) for prefix in self.PUBLIC_PREFIXES):
             return await call_next(request)
 
-        # Skip mTLS paths (executor)
-        if self._is_mtls_request(request):
-            request.state.auth_user = {"caller": "executor"}  # type: ignore[attr-defined]
-            return await call_next(request)
-
-        # Skip executor session paths (mTLS auth, not bearer token)
+        # Executor session paths (filter / secrets-revoke): require a verified
+        # executor mTLS identity (ticket sec-executor-session-path-no-auth —
+        # the URL regex alone used to grant caller=executor with no credential
+        # check, an anonymous secret-confirmation oracle + audit-forgery hole).
         if self._is_executor_session_path(request.url.path):
-            request.state.auth_user = {"caller": "executor"}  # type: ignore[attr-defined]
+            executor_result = await self._validate_executor_mtls(request)
+            if executor_result is not None:
+                return executor_result
+            # auth_user set by _validate_executor_mtls
             return await call_next(request)
 
         # Admin mTLS validation (before bearer token auth)
@@ -276,11 +277,98 @@ class SessionMiddleware(BaseHTTPMiddleware):
         request.state.auth_user = user_info  # type: ignore[attr-defined]
         return await call_next(request)
 
-    def _is_mtls_request(self, request: Request) -> bool:
-        """Check if request was authenticated via mTLS."""
-        # mTLS client cert info would be available via ASGI scope
-        client_cert = request.scope.get("client_cert")
-        return client_cert is not None
+    async def _validate_executor_mtls(self, request: Request) -> JSONResponse | None:
+        """Validate executor mTLS identity for executor session paths.
+
+        Grants ``caller=executor`` ONLY on a verified client cert whose CN is
+        a registered, non-revoked executor. Trust model mirrors
+        ``_validate_admin_mtls``: nginx terminates TLS (``ssl_verify_client
+        optional`` against the Root+Admin CA bundle) and OVERWRITES the
+        X-Client-* headers via ``proxy_set_header``; the app binds
+        loopback-only (installer ``BIND_ADDRESS=127.0.0.1``), so nginx is the
+        only ingress and the headers cannot be client-spoofed. That loopback
+        bind is a SHARED DEPLOYMENT INVARIANT with the admin-mTLS path —
+        exposing the app port directly defeats both gates.
+
+        Serial handling (deliberate, named decision): X-Client-Serial is
+        passed through when present. When absent/empty (e.g. an nginx config
+        predating the Phase-2 header addition), ``executor_revocation_state``
+        falls back to the current ExecutorCert record serial per its ruled
+        semantics — identity-flag and current-credential serial revocations
+        still apply; only a rotated-away predecessor serial needs the
+        presented header. Missing serial never fails open past those.
+
+        Args:
+            request: The FastAPI request.
+
+        Returns:
+            JSONResponse (401/403) on failure, None if all checks pass
+            (auth_user set with caller + executor_id).
+        """
+        detail = "Executor mTLS authentication required"
+        path = request.url.path
+
+        # Step 1: nginx TLS-layer verification sentinel
+        verified = request.headers.get("x-client-verified")
+        if verified != "SUCCESS":
+            logger.warning("Executor session path %s: X-Client-Verified missing or not SUCCESS", path)
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": detail},
+            )
+
+        # Step 2: executor identity = CN of the verified client cert
+        subject_dn = request.headers.get("x-client-subject", "")
+        executor_id = _extract_identity_from_subject(subject_dn)
+        if not executor_id:
+            logger.warning("Executor session path %s: could not extract CN from X-Client-Subject", path)
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": detail},
+            )
+
+        # Step 3+4: allowlist (registered Executor row) + revocation, routed
+        # through the single revocation source (server/revocation.py contract)
+        backend = getattr(request.app.state, "backend", None)
+        if backend is None:
+            logger.warning("Executor session path %s: backend unavailable — failing closed", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": detail},
+            )
+
+        db = backend.get_session()
+        try:
+            from core.iam.models import Executor
+
+            from ..revocation import executor_revocation_state
+
+            row = db.query(Executor).filter(Executor.id == executor_id).first()
+            if row is None:
+                logger.warning("Executor session path %s: CN '%s' is not a registered executor", path, executor_id)
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": detail},
+                )
+
+            presented_serial = request.headers.get("x-client-serial") or None
+            rev = executor_revocation_state(db, executor_id, presented_serial=presented_serial, executor_row=row)
+            if rev.revoked:
+                logger.warning(
+                    "Executor session path %s: CN '%s' revoked (%s)",
+                    path,
+                    executor_id,
+                    rev.reason,
+                )
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": detail},
+                )
+
+            request.state.auth_user = {"caller": "executor", "executor_id": executor_id}  # type: ignore[attr-defined]
+            return None
+        finally:
+            db.close()
 
     def _is_executor_session_path(self, path: str) -> bool:
         """Check if path is an executor session endpoint.

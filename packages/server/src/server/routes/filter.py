@@ -11,7 +11,7 @@ import hashlib
 import logging
 
 from core.engine.backend import Backend
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -141,6 +141,7 @@ def filter_output(
 async def filter_session_output(
     session_id: str,
     req: FilterRequest,
+    request: Request,
     db: Session = Depends(get_db),
     backend: Backend = Depends(get_backend),
 ) -> FilterResponse:
@@ -151,12 +152,25 @@ async def filter_session_output(
     Args:
         session_id: The executor session ID.
         req: Base64-encoded stdout/stderr to filter.
+        request: The FastAPI request (mTLS caller state).
 
     Returns:
         Sanitized output with masked secrets.
     """
     from core.iam.models import Secret
     from core.iam.models import Session as SessionModel
+
+    # Verify caller is executor (mTLS) — mirrors routes/secrets.py revoke.
+    # The middleware is the choke point that VERIFIES the identity
+    # (sec-executor-session-path-no-auth); this check is defense-in-depth so
+    # the route is never naked if mounted without the middleware, and it runs
+    # BEFORE any secret is decrypted or hash-compared (no pre-auth oracle).
+    caller = getattr(request.state, "auth_user", {})
+    if caller.get("caller") != "executor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Executor mTLS authentication required",
+        )
 
     # Look up session to find injected secrets
     try:
