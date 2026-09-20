@@ -21,7 +21,12 @@ set -euo pipefail
 #   VENYA_INSTALL_DIR   - Install location (default: /opt/venya)
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
 #   VENYA_DB_PASSWORD   - PostgreSQL venya user password (prompts if unset)
-#   VENYA_DB_PASSPHRASE - Server passphrase (default: venya_test_passphrase_2024)
+#   VENYA_DB_PASSPHRASE - Server encryption passphrase — NO DEFAULT. Re-run:
+#                         reused from $INSTALL_DIR/.env (an explicit env value
+#                         must MATCH the stored one or the install aborts).
+#                         Fresh install: prompted (interactive) or required (unattended).
+#   VENYA_RECOVERY_PEPPER - Recovery-code pepper — reused from .env on re-run;
+#                         strong random when unset on a fresh install.
 #   VENYA_TARBALL       - Tarball URL (default: latest GitHub release asset —
 #                         https://github.com/tabith-llc/venya/releases/latest/download/venya-core-install.tar.gz)
 #   VENYA_TARBALL_SHA256 - Pin the expected sha256 (recommended: strict integrity).
@@ -32,8 +37,8 @@ set -euo pipefail
 ###############################################################################
 
 # --- Defaults ---
-# NOTE: This is a development-only default. Production must override via VENYA_DB_PASSPHRASE.
-DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-venya_test_passphrase_2024}"
+# DB_PASSPHRASE and RECOVERY_PEPPER deliberately have NO defaults — they are
+# acquired below (stored-reuse on re-run > explicit env > prompt/random).
 TARBALL_URL="${VENYA_TARBALL:-https://github.com/tabith-llc/venya/releases/latest/download/venya-core-install.tar.gz}"
 CORE_HOSTNAME="${CORE_HOSTNAME:-$(hostname)}"
 TLS_MODE="${TLS_MODE:-internal}"
@@ -42,9 +47,6 @@ TLS_MODE="${TLS_MODE:-internal}"
 ADMIN_MTLS_ENABLED="${VENYA_ADMIN_MTLS_ENABLED:-true}"
 ADMIN_IDENTITY="${VENYA_ADMIN_IDENTITY:-}"
 ADMIN_CA_PASSPHRASE="${VENYA_ADMIN_CA_PASSPHRASE:-}"
-
-# Recovery code pepper — random secret used to derive recovery code hashes
-RECOVERY_PEPPER="${VENYA_RECOVERY_PEPPER:-$(openssl rand -base64 32)}"
 
 # --- Source common library ---
 # Direct execution: the library sits next to the script. Piped execution
@@ -71,6 +73,65 @@ info "Installing Venya Core to $INSTALL_DIR"
 # reinstall gate (venya_check_existing), so an aborted install leaves it in place.
 # The server reads /opt/venya/.env, never this file (core-server-toml-inert).
 rm -f /etc/venya/server.toml
+
+# --- Server encryption passphrase (VENYA_DB_PASSPHRASE) — NO DEFAULT ---
+# The KEK protecting every encrypted DB secret derives from this value (the
+# server fails fast at boot when it is missing). A published default would be
+# a published KEK, and silently rotating it on re-run would orphan every
+# encrypted row — so precedence is: stored value from .env wins on re-run (an
+# explicit env that DISAGREES aborts loudly with state intact) > explicit env
+# > TTY prompt > error when unattended. Runs before any system mutation.
+DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-}"
+STORED_ENV_FILE="$INSTALL_DIR/.env"
+STORED_DB_PASSPHRASE=""
+if [ -f "$STORED_ENV_FILE" ]; then
+    STORED_DB_PASSPHRASE=$(sed -n 's/^VENYA_DB__PASSPHRASE=//p' "$STORED_ENV_FILE" | head -n1)
+fi
+if [ -n "$STORED_DB_PASSPHRASE" ]; then
+    if [ -n "$DB_PASSPHRASE" ] && [ "$DB_PASSPHRASE" != "$STORED_DB_PASSPHRASE" ]; then
+        error "VENYA_DB_PASSPHRASE does not match the stored value in $STORED_ENV_FILE."
+        error "Rotating it would make existing encrypted DB secrets undecryptable."
+        error "Aborting — no changes made."
+        exit 1
+    fi
+    DB_PASSPHRASE="$STORED_DB_PASSPHRASE"
+    info "Existing install: reusing stored server passphrase from $STORED_ENV_FILE."
+elif [ -z "$DB_PASSPHRASE" ]; then
+    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+        while :; do
+            echo -n "Enter server encryption passphrase: "
+            IFS= read -rs DB_PASSPHRASE
+            echo ""
+            [ -n "$DB_PASSPHRASE" ] && break
+            warn "Passphrase cannot be empty."
+        done
+    else
+        error "VENYA_DB_PASSPHRASE is required for unattended install (stdin is not a TTY)."
+        exit 1
+    fi
+fi
+
+# --- Recovery-code pepper — same stored-reuse rule: rotating it on re-run
+# would silently invalidate every issued recovery code. Fresh install:
+# explicit env > strong random (never human-memorized, like the CA passphrases).
+RECOVERY_PEPPER="${VENYA_RECOVERY_PEPPER:-}"
+STORED_RECOVERY_PEPPER=""
+if [ -f "$STORED_ENV_FILE" ]; then
+    STORED_RECOVERY_PEPPER=$(sed -n 's/^VENYA_RECOVERY_CODE_PEPPER=//p' "$STORED_ENV_FILE" | head -n1)
+fi
+if [ -n "$STORED_RECOVERY_PEPPER" ]; then
+    if [ -n "$RECOVERY_PEPPER" ] && [ "$RECOVERY_PEPPER" != "$STORED_RECOVERY_PEPPER" ]; then
+        error "VENYA_RECOVERY_PEPPER does not match the stored value in $STORED_ENV_FILE."
+        error "Rotating it would invalidate all issued recovery codes."
+        error "Aborting — no changes made."
+        exit 1
+    fi
+    RECOVERY_PEPPER="$STORED_RECOVERY_PEPPER"
+    info "Existing install: reusing stored recovery pepper from $STORED_ENV_FILE."
+elif [ -z "$RECOVERY_PEPPER" ]; then
+    RECOVERY_PEPPER=$(openssl rand -base64 32)
+    info "Fresh install: generated a random recovery pepper."
+fi
 
 # --- Create venya service account (no password, nologin, locked) ---
 venya_create_user
