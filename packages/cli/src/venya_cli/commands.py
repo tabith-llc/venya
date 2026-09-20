@@ -36,7 +36,12 @@ def run_command(args: Any) -> int:
     Returns:
         Exit code (0 for success, 1 for error).
     """
-    server_url = getattr(args, "server_url", None)
+    # Server URL precedence (matches the --server-url help text and the
+    # revoke-admin-cert handler): explicit flag > VENYA_SERVER_URL env >
+    # config.json (APIClient fallback). Empty env falls through (ticket
+    # cli-server-url-env-ignored: headless guidance drove the CLI by env only,
+    # which silently hit the localhost:8000 default -> Errno 111).
+    server_url = getattr(args, "server_url", None) or os.environ.get("VENYA_SERVER_URL") or None
     client = APIClient(server_url=server_url)
 
     # Authenticate if no token is available (init, enroll, login, recovery,
