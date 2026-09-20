@@ -15,7 +15,6 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from core.utils.sensitive_log import token as sensitive_token
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID, NameOID
@@ -261,13 +260,6 @@ class SessionMiddleware(BaseHTTPMiddleware):
             auth_header = request.headers.get("authorization", "")
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]
-
-        logger.info(
-            "AUTH DEBUG: cookies=%s, ACCESS_TOKEN_COOKIE=%s, token=%s",
-            dict(request.cookies),
-            self.ACCESS_TOKEN_COOKIE,
-            sensitive_token(token, "ACCESS") if token else "None",
-        )
 
         if not token:
             return JSONResponse(
