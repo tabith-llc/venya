@@ -469,3 +469,69 @@ class TestRealSessionCommitLifecycle:
         # New window → its own bucket.
         assert mw._increment_counter(s2, "1.2.3.4", "auth", now + timedelta(minutes=1)) == 1
         s2.close()
+
+
+class TestRetryAfterHeader:
+    """Every middleware 429 carries Retry-After (ticket delta-b-run-low-bundle O2).
+
+    Paired cells per the truth-table rule: one positive per 429 path (header
+    present, delta-seconds integer, bounded by the path's window/cap) and the
+    negative half (non-429 responses never gain the header). Pre-fix, all four
+    paths emitted 429 with NO Retry-After (physically observed: header None at
+    the auth tier) — client backoff was guesswork.
+    """
+
+    def test_auth_tier_429_carries_retry_after(self):
+        client = TestClient(_create_test_app(auth_requests_per_minute=2))
+        for _ in range(2):
+            assert client.get("/api/v1/auth/login").status_code == 200
+        resp = client.get("/api/v1/auth/login")
+        assert resp.status_code == 429
+        retry = resp.headers.get("Retry-After")
+        assert retry is not None, "auth-tier 429 must carry Retry-After"
+        assert retry.isdigit()
+        assert 1 <= int(retry) <= 60  # 1-minute window
+
+    def test_generic_tier_429_carries_retry_after(self):
+        client = TestClient(_create_test_app(requests_per_minute=2))
+        for _ in range(2):
+            assert client.get("/api/v1/health").status_code == 200
+        resp = client.get("/api/v1/health")
+        assert resp.status_code == 429
+        retry = resp.headers.get("Retry-After")
+        assert retry is not None, "generic-tier 429 must carry Retry-After"
+        assert retry.isdigit()
+        assert 1 <= int(retry) <= 60  # 1-minute window
+
+    def test_break_glass_hourly_429_carries_retry_after(self):
+        client = TestClient(_create_test_app(break_glass_per_hour=2))
+        for _ in range(2):
+            assert client.post("/api/v1/recovery").status_code == 200
+        resp = client.post("/api/v1/recovery")
+        assert resp.status_code == 429
+        retry = resp.headers.get("Retry-After")
+        assert retry is not None, "break-glass hourly 429 must carry Retry-After"
+        assert retry.isdigit()
+        assert 1 <= int(retry) <= 3600  # 1-hour window
+
+    def test_backoff_429_carries_retry_after_within_cap(self):
+        client = TestClient(_create_test_app_with_401())
+        first = client.post("/api/v1/recovery")
+        assert first.status_code == 401  # failure recorded → 1s backoff armed
+        resp = client.post("/api/v1/recovery")
+        assert resp.status_code == 429
+        assert "too many recent failures" in resp.json()["detail"]
+        retry = resp.headers.get("Retry-After")
+        assert retry is not None, "backoff 429 must carry Retry-After"
+        assert retry.isdigit()
+        assert 1 <= int(retry) <= 16  # backoff cap
+
+    def test_non_429_responses_have_no_retry_after(self):
+        client = TestClient(_create_test_app())
+        for resp in (
+            client.get("/api/v1/health"),
+            client.get("/api/v1/auth/login"),
+            client.post("/api/v1/recovery"),
+        ):
+            assert resp.status_code == 200
+            assert "Retry-After" not in resp.headers

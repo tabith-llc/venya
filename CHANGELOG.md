@@ -4,14 +4,15 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
-> **Backfill note (recorded late):** every entry in this section shipped in
-> `v0.1.0alpha12` but was absent from its CHANGELOG section — the
+> **Backfill note (recorded late):** every UNMARKED entry in this section
+> shipped in `v0.1.0alpha12` but was absent from its CHANGELOG section — the
 > squash-at-tag-cut flow only collects what merges had already added to
 > `[Unreleased]`, and these merges shipped code without an entry. Found by the
 > completeness audit of `v0.1.0-alpha.11..v0.1.0alpha12` (51 merges classified
 > covered / entry-not-required / gap — ticket
 > `changelog-alpha12-completeness-gap`). The published `[0.1.0alpha12]` section
-> is immutable and is NOT edited.
+> is immutable and is NOT edited. Entries added after the backfill are marked
+> *(post-alpha12)*.
 
 ### Security
 
@@ -75,6 +76,12 @@ Notable changes to Venya will be documented in this file.
 
 ### Fixed
 
+- *(post-alpha12)* Rate-limit `429`s now carry `Retry-After` (delta-seconds) on
+  all four middleware paths — auth tier, generic tier, break-glass hourly, and
+  the break-glass failure backoff (seconds until the window resets / the
+  backoff expires). Previously only the route-level registration and
+  token-generation limiters set the header; middleware 429s left client backoff
+  as guesswork.
 - Alpha-QA sweep bundle (shipped in `v0.1.0alpha12`, recorded late; per-item
   detail via `git log --merges v0.1.0-alpha.11..v0.1.0alpha12`): the broken
   `venya fido2 enroll` command was deleted; credential removal now evicts

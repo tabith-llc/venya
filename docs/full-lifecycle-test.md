@@ -447,6 +447,23 @@ echo | openssl s_client -connect $CORE_HOST:443 2>/dev/null | \
 # The CA's SubjectKeyIdentifier must equal the leaf's AuthorityKeyIdentifier.
 ```
 
+**Harness note (O4, ticket `delta-b-run-low-bundle`):** on some workstations
+`openssl s_client` **hangs** (rc 124, zero bytes) against healthy venya TLS
+services — observed on montana while curl and python-ssl reached the same
+service fine. Never diagnose a server fault from a hung `s_client` alone:
+second-probe with `curl --cacert /tmp/venya-ca.crt
+https://$CORE_HOST/api/v1/health`, and fetch the leaf via python instead:
+
+```bash
+python3 -c "
+import ssl, socket
+ctx = ssl.create_default_context(cafile='/tmp/venya-ca.crt')
+ctx.check_hostname = False  # chain still verified vs the fetched CA; SKI==AKI below IS the identity check
+with socket.create_connection(('$CORE_HOST', 443)) as s, ctx.wrap_socket(s) as t:
+    print(ssl.DER_cert_to_PEM_cert(t.getpeercert(True)))
+" | openssl x509 -noout -ext authorityKeyIdentifier
+```
+
 ### C.1 Sync the admin mTLS cert pair (**mandatory after any core reinstall**)
 
 Each core install mints a **new** Admin CA and client pair; the workstation
