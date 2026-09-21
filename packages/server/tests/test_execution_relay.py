@@ -1061,6 +1061,40 @@ class TestMalformedExecutorResponse:
                 )
         assert resp.status_code == 502
 
+    def test_malformed_response_log_carries_no_body_fragments(self, caplog):
+        """#11 regression (sec-secret-redaction-log-leaks): the relay-response
+        hop must NEVER put body content in the journal. Pre-fix, logging the
+        ValidationError embedded input_value= fragments of the response body
+        (prefixless — RedactingFormatter layer-2 cannot catch them), violating
+        the Stage-2 sign-off invariant. Post-fix only field names + error
+        types are logged."""
+        import logging
+
+        body_marker = "RELAY-BODY-MARKER-DO-NOT-LOG"
+        app, _backend, mock_client, mock_ssl_ctx = self._setup_db(
+            MagicMock(),
+            {
+                "exit_code": 0,
+                "stdout": body_marker,
+                "stderr": "",
+                "masked_count": 0,
+                "rogue_field": body_marker,
+            },
+        )
+        with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
+            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+                client = TestClient(app, raise_server_exceptions=False)
+                with caplog.at_level(logging.WARNING):
+                    resp = client.post(
+                        "/api/v1/executors/exec-1/execute",
+                        json={"session_id": "sess-1", "command": "echo hello"},
+                    )
+        assert resp.status_code == 502
+        # paired truth table: body content absent, scrubbed field summary present
+        assert body_marker not in caplog.text
+        assert "input_value" not in caplog.text
+        assert "rogue_field" in caplog.text  # offending field IS named (diagnosability kept)
+
 
 # --- TLS misconfiguration tests (M2) ---
 

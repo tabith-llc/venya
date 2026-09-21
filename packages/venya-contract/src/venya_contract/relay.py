@@ -20,10 +20,16 @@ class RelaySecret(BaseModel):
     ``secret_id`` is the integer primary key of the ``secrets`` table
     (``core.iam.models.Secret.id`` / ``SessionSecret.secret_id``, both
     ``Column(Integer)``) — the server relays it as a JSON number, so it is typed
-    ``int`` here, not ``str``. ``wrapped_value`` is the sentinel-wrapped ciphertext
-    string (``SessionSecret.wrapped_value``, ``Column(Text)``); never plaintext,
-    never logged (see the Stage-2 sign-off invariant). The executor encodes it to
-    bytes for the engine's ``strip_sentinel()`` — that str->bytes mapping is an
+    ``int`` here, not ``str``. ``wrapped_value`` is the sentinel-wrapped string
+    ``[VENYA:<hash8>]base64(plaintext)[/VENYA]`` (``SessionSecret.wrapped_value``,
+    ``Column(Text)``). HONESTY NOTE (ticket sec-secret-redaction-log-leaks #10 —
+    the former docstring claimed "ciphertext ... never plaintext", which was
+    FALSE): base64 is PLAINTEXT-EQUIVALENT, not encryption. Confidentiality at
+    rest and on this hop rests on the surrounding controls — the mTLS-only
+    relay transport, the 10-minute TTL purge of ``execution_session_secrets``,
+    and host disk protections — NEVER on the encoding. Never logged (see the
+    Stage-2 sign-off invariant). The executor encodes it to bytes for the
+    engine's ``strip_sentinel()`` — that str->bytes mapping is an
     executor-internal concern, not part of the wire shape.
     """
 

@@ -6,6 +6,19 @@ Notable changes to Venya will be documented in this file.
 
 ### Security
 
+- Executor audit spool (`~/.venya/audit-spool.jsonl` — holds full command
+  lines) is now created 0600, and a legacy world-readable spool (pre-fix
+  default umask, typically 0644) is repaired at daemon startup.
+- A malformed relay response no longer leaks response-body fragments into
+  the server journal: the validation error is logged as offending field
+  names + error types only (the pydantic repr embedded `input_value=`
+  body content, which the redacting log formatter cannot catch — the
+  relay hop must never reach a logger by design).
+- Contract honesty: the relay wire docstring no longer claims
+  `wrapped_value` is ciphertext — it is sentinel-wrapped base64 of the
+  plaintext (plaintext-equivalent); confidentiality rests on the mTLS
+  transport, the 10-minute session-secret purge, and host disk
+  protections, never on the encoding.
 - WebAuthn registration ceremonies are now verified: `finish_registration`
   validates the `clientDataJSON` (type `webauthn.create`, issued-challenge
   binding, RP origin), the RP ID hash in the authenticator data, and the

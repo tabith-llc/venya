@@ -1175,7 +1175,14 @@ async def execute_command_on_executor(
     try:
         result = RelayResponse(**result).model_dump()
     except ValidationError as e:
-        logger.warning("Invalid executor response for session %s: %s", session.id, e)
+        # Body-fragment-free log (sec-secret-redaction-log-leaks #11): the
+        # ValidationError repr embeds input_value= fragments of the relay
+        # RESPONSE body — this hop must never reach a logger (Stage-2 sign-off
+        # invariant), and prefixless content is invisible to the
+        # RedactingFormatter layer-2. Log the offending field names + error
+        # types only (diagnosability kept, body dropped).
+        scrubbed = ", ".join(f"{'.'.join(str(p) for p in err['loc'])}: {err['type']}" for err in e.errors())
+        logger.warning("Invalid executor response for session %s (fields: %s)", session.id, scrubbed)
         raise HTTPException(status_code=502, detail="Invalid response from executor")
 
     # AUDIT EVENT: Command executed
