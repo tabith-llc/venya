@@ -61,6 +61,15 @@ class RateLimitConfig(BaseModel):
         default=1000,
         description="Maximum requests per IP per minute",
     )
+    auth_requests_per_minute: int = Field(
+        default=20,
+        description=(
+            "Maximum auth-endpoint requests per IP per minute (tighter tier — "
+            "was silently collapsed into ip_rate_limit; ticket "
+            "sec-endpoint-ratelimit-hardening #8). Env override: "
+            "VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE"
+        ),
+    )
     break_glass_requests_per_hour: int = Field(
         default=5,
         description="Maximum break-glass (recovery) requests per IP per hour",

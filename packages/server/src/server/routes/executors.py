@@ -782,6 +782,7 @@ async def get_crl(
 )
 async def heartbeat(
     req: HeartbeatRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> HeartbeatResponse:
     """Receive heartbeat from executor.
@@ -789,13 +790,40 @@ async def heartbeat(
     Executors POST to this endpoint every 30s to signal liveness.
     The server responds with revocation status and cert rotation hint.
 
-    Public endpoint — no authentication required. It only liveness-stamps
-    the executor (drives the advisory "online" flag on GET /api/v1/executors).
+    Executor-mTLS gated (ticket sec-endpoint-ratelimit-hardening #7 — was
+    PUBLIC: an unauthenticated caller could liveness-stamp any executor row
+    and read the fleet revocation/rotation oracle). The middleware verifies
+    the client cert (registered, chain-valid CN); this route binds the body
+    executor_id to the cert CN so an executor can only stamp ITS OWN row.
     The `revoked` flag is computed from the SHARED revocation state and is a
-    fast cooperative stop signal; the enforcing control is the dial-gate
-    refusal in create_execution_session/execute (ruling 4).
+    fast cooperative stop signal (F3 ride-along — a revoked executor still
+    gets its 200 {revoked:true}, the middleware passes it through with
+    reject_revoked=False); the enforcing control is the dial-gate refusal in
+    create_execution_session/execute (ruling 4).
     """
     from core.iam.models import ExecutorCert
+
+    # Defense-in-depth (mirrors routes/filter.py): the middleware is the choke
+    # point that VERIFIES the executor mTLS identity; this check keeps the
+    # route from being naked if mounted without it.
+    caller = getattr(request.state, "auth_user", {})
+    if caller.get("caller") != "executor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Executor mTLS authentication required",
+        )
+    # Identity binding: the beat must describe the CERT holder, not an
+    # arbitrary row (closes the forged-liveness oracle).
+    if req.executor_id != caller.get("executor_id"):
+        logger.warning(
+            "Heartbeat body executor_id '%s' does not match cert CN '%s' — rejecting",
+            req.executor_id,
+            caller.get("executor_id"),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="executor_id does not match client certificate",
+        )
 
     executor_id = req.executor_id
     revoked = False
@@ -823,7 +851,14 @@ async def heartbeat(
 
     # Liveness timestamp for GET /api/v1/executors — only when the executor row
     # already exists (registration creates it; heartbeats never create rows).
-    if executor_id:
+    # REVOKED-WRITE GUARD (user ruling 2026-09-20, ticket
+    # sec-endpoint-ratelimit-hardening B1): a revoked executor gets its
+    # advisory 200 {revoked:true} but writes NOTHING — a body-driven
+    # status="active" stamp from a revoked identity could overwrite or race
+    # the revoked presentation in list_executors, resurrecting exactly the
+    # confusion the identity-revocation work ended. The row is about to die
+    # administratively anyway.
+    if executor_id and not revoked:
         executor_row = db.query(Executor).filter(Executor.id == executor_id).first()
         if executor_row is not None:
             executor_row.last_heartbeat = datetime.now(UTC)
@@ -895,36 +930,6 @@ async def list_executors(
         )
 
     return ExecutorsListResponse(executors=result)
-
-
-@router.post(
-    "/executors/{id}/heartbeat",
-    status_code=status.HTTP_200_OK,
-)
-async def executor_heartbeat(
-    id: str,
-    db: Session = Depends(get_db),
-    auth_user: dict = Depends(require_role("none")),
-) -> Response:
-    """Called by executor daemon to report liveness.
-
-    Temporarily accepts any authenticated caller (auth_user required but not validated
-    against executor identity). For alpha only — harden to mTLS identity check in Phase 3
-    when executor daemon integration is complete.
-
-    State mutation is minimal: updates last_heartbeat timestamp only.
-    """
-    from core.iam.models import Executor
-
-    executor = db.query(Executor).filter(Executor.id == id).first()
-    if executor is None:
-        raise HTTPException(status_code=404, detail="Executor not found")
-
-    executor.last_heartbeat = datetime.now(UTC)
-    executor.status = "active"
-    db.commit()
-
-    return Response(status_code=200)
 
 
 @router.post(

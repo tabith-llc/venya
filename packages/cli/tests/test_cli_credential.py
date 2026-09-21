@@ -263,6 +263,97 @@ class TestCredentialAdd:
         client.close()
         config_file.unlink()
 
+    def test_add_credential_elevates_twice_single_use_tokens(self):
+        """#6 option (a) ruling: elevation tokens are single-use (server burns
+        on verify), so credential-add elevates ONCE PER CALL — start and
+        complete each consume their own token (1 assertion = 1 token)."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        start_resp.raise_for_status.return_value = None
+        complete_resp = _make_mock_response(status_code=200, json_data={"status": "ok"})
+        complete_resp.raise_for_status.return_value = None
+        mock_http.request.side_effect = [start_resp, complete_resp]
+        client._http = mock_http
+
+        mock_credential = self._make_mock_credential()
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz") as mock_elev:
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2:
+                    mock_instance = MagicMock()
+                    mock_fido2.return_value = mock_instance
+                    mock_instance.make_credential.return_value = mock_credential
+                    args = MagicMock()
+                    args.label = "YubiKey 2"
+                    args.json = False
+
+                    result = cmd_credential_add(client, args)
+                    assert result == 0
+                    assert mock_elev.call_count == 2
+
+        client.close()
+        config_file.unlink()
+
+    def test_add_credential_second_touch_cancel_clean_exit(self):
+        """User closed the FIDO2 prompt at the second elevation: clean error +
+        exit 1, complete endpoint never called, no stuck flow (interlock 6)."""
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        start_resp.raise_for_status.return_value = None
+        mock_http.request.side_effect = [start_resp]
+        client._http = mock_http
+
+        mock_credential = self._make_mock_credential()
+
+        with patch(
+            "venya_cli.commands._elevate",
+            side_effect=["elev_token_xyz", APIClientError("Please touch your security key")],
+        ):
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2:
+                    mock_instance = MagicMock()
+                    mock_fido2.return_value = mock_instance
+                    mock_instance.make_credential.return_value = mock_credential
+                    args = MagicMock()
+                    args.label = "YubiKey 2"
+                    args.json = False
+
+                    result = cmd_credential_add(client, args)
+                    assert result == 1
+
+        # Only the start call went out — complete never fired
+        assert mock_http.request.call_count == 1
+        client.close()
+        config_file.unlink()
+
     def test_add_credential_json_output(self):
         """Add credential with --json outputs raw JSON."""
         client, config_file = _make_client()

@@ -6,6 +6,53 @@ Notable changes to Venya will be documented in this file.
 
 ### Security
 
+- WebAuthn registration ceremonies are now verified: `finish_registration`
+  validates the `clientDataJSON` (type `webauthn.create`, issued-challenge
+  binding, RP origin), the RP ID hash in the authenticator data, and the
+  user-presence flag — previously any parseable attestationObject was
+  accepted for an issued challenge id without these WebAuthn spec checks.
+  The three registration routes (user enrollment, installation init,
+  credential add) additionally reject credentials minted from a DIFFERENT
+  user's challenge (challenge↔user binding). Registration deliberately
+  enforces a stricter RP context (origin) than the authentication side;
+  the divergence is documented in code, not an inconsistency.
+- Elevation tokens are single-use and user-bound on every surface: the
+  credential endpoints now consume the token with an atomic conditional
+  update bound to the calling user (previously any valid token from ANY
+  user could be replayed within its 60-second TTL). `venya credential add`
+  correspondingly performs a second security-key touch for the completion
+  step. Secret-unmasking elevation tokens move from a URL query parameter —
+  which persisted tokens in nginx/uvicorn access logs — to the
+  `X-Elevation-Token` header, matching the credential endpoints and the
+  CLI. Breaking: `GET /api/v1/secrets/{key}?elevation_token=…` no longer
+  elevates (transport standardized in coordination with the concurrent
+  elevation-gate hardening, sec-secret-caller-param-plaintext-bypass).
+- Disabled users lose access immediately: session validation re-checks user
+  status on every request through one central predicate, so a disabled
+  user's EXISTING sessions die at their next API call instead of surviving
+  until idle expiry (15 minutes by default) or the 4-hour hard cap. Session
+  issuance was already gated.
+- Secret metadata updates (`PATCH /api/v1/secrets/{key}/metadata`) enforce
+  the same role-scope visibility as every other secret read, routed through
+  the core single enforcement point — previously any read-write role member
+  could rewrite metadata on ANY secret, including secrets scoped to roles
+  they do not hold (IDOR). Scoped-out secrets stay indistinguishable from
+  nonexistent ones (404, no mutation).
+- Executor heartbeat (`POST /api/v1/heartbeat`) is no longer public: it
+  requires a verified executor mTLS identity (registered, non-spoofable CN)
+  and binds the reported `executor_id` to the client certificate. Previously
+  any unauthenticated caller could liveness-stamp any executor row and read
+  the fleet revocation/rotation state as an oracle. A revoked executor still
+  receives its advisory `200 {revoked: true}` (the cooperative-stop channel
+  is preserved) but no longer writes to its row. The dead alpha-only
+  `POST /api/v1/executors/{id}/heartbeat` variant was removed.
+- Per-IP rate limits now key on the trustworthy RIGHTMOST `X-Forwarded-For`
+  entry (the one our own nginx appends) instead of the attacker-controlled
+  leftmost entry — one spoofed header previously reset the bucket on every
+  request, bypassing the break-glass 5/hr limit, the auth tier, and the
+  failure backoff. Rests on the existing loopback-only-backend deployment
+  invariant (exactly one trusted proxy hop), now shared with the X-Client-*
+  mTLS header chain.
 - Executor revocation is now identity-based (hybrid model): `venya admin
   revoke-executor <id>` terminally revokes the IDENTITY (`Executor.revoked_at`,
   previously a dead-wired column) — command routing refuses revoked executors
@@ -29,6 +76,13 @@ Notable changes to Venya will be documented in this file.
 
 ### Changed
 
+- The auth-endpoint rate-limit tier is now actually enforced: 20 requests/min
+  per IP (previously silently collapsed into the generic 1000/min limit — the
+  middleware constructor overwrote it). Scripted login/enrollment loops that
+  never hit a limit before will now see `429` on `/api/v1/auth/*` and
+  `/api/v1/enrollment/*`. Diagnosis + override:
+  `VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE` (e2e scaffolds should set this
+  explicitly rather than discover the tier nondeterministically).
 - The core installer now encrypts the root CA private key at rest and delivers
   its passphrase through a restricted systemd EnvironmentFile, matching the
   existing admin CA key handling.

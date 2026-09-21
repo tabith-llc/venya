@@ -42,6 +42,21 @@ class UserNotActiveError(SessionError):
         super().__init__(f"User '{user_id}' is not active (status={status!r})")
 
 
+def is_user_active(user: User | None) -> bool:
+    """Central predicate: may this user hold a live session?
+
+    Single semantic source for the 'active' status gate (pattern: central
+    check, distributed callers — cf. server/revocation.py for executors).
+    Consumers: ``create_session`` (issuance gate, ticket
+    sec-unauth-webauthn-registration-takeover) and the server auth middleware
+    ``_validate_token`` (surviving-session gate, ticket
+    sec-auth-elevation-authz-hardening #9 — a disabled user's EXISTING
+    sessions die on the next request, not at idle expiry). A second
+    status-literal comparison anywhere is a divergence bug.
+    """
+    return user is not None and user.status == "active"
+
+
 # Default clock skew tolerance for core-side checks
 _DEFAULT_CLOCK_SKEW_SECONDS = 60
 
@@ -116,7 +131,7 @@ class SessionManager:
         # transaction; SQLAlchemy autoflush makes that pending UPDATE visible
         # to this SELECT (ordering pinned by test in test_auth_status_gate.py).
         user = self.db.query(User).filter(User.user_id == user_id).first()
-        if user is None or user.status != "active":
+        if not is_user_active(user):
             raise UserNotActiveError(user_id, None if user is None else user.status)
 
         now = datetime.now(UTC)

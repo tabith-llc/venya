@@ -78,14 +78,25 @@ class TestAppVersion:
 # ---------------------------------------------------------------------------
 
 
-def _heartbeat_app(db):
+def _heartbeat_app(db, auth_executor_id="web-server-3"):
     from server.routes import executors as executors_routes
+    from starlette.middleware.base import BaseHTTPMiddleware
 
     app = FastAPI()
     app.state.backend = MagicMock()
     app.state.backend.get_session.return_value = db
     app.state.ca_manager = MagicMock()
     app.include_router(executors_routes.router, prefix="/api/v1")
+
+    # Middleware-shaped executor auth (ticket
+    # sec-endpoint-ratelimit-hardening #7); every cell here beats as
+    # web-server-3.
+    class _ExecAuth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.auth_user = {"caller": "executor", "executor_id": auth_executor_id}
+            return await call_next(request)
+
+    app.add_middleware(_ExecAuth)
     return app
 
 

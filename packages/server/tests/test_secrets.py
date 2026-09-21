@@ -447,7 +447,8 @@ class TestSecretsGet:
 
         resp = client.get(
             "/api/v1/secrets/db-password",
-            params={"unmask": True, "elevation_token": "elev-token-xyz"},
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-token-xyz"},  # header transport (#13)
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -474,7 +475,8 @@ class TestSecretsGet:
 
         resp = client.get(
             "/api/v1/secrets/db-password",
-            params={"unmask": True, "elevation_token": "stale-token"},
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "stale-token"},  # header transport (#13)
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -496,6 +498,50 @@ class TestSecretsGet:
 
         resp = client.get("/api/v1/secrets/missing-key")
         assert resp.status_code == 404
+
+    def test_get_unmask_header_elevation_consumes_token(self):
+        """#13: elevation rides the X-Elevation-Token HEADER and the token is
+        consumed via the atomic conditional UPDATE (rowcount 1 = burned)."""
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        app = _create_test_app(core=core)
+        db = app.state.backend.get_session.return_value
+        db.execute.return_value = MagicMock(rowcount=1)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "tok-header-123"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["masked"] is False
+        assert db.execute.call_count == 1  # the conditional burn ran
+        core.get.assert_called_once_with(
+            secret_key="db-password",
+            caller="human",
+            unmask=True,
+            user_id="test-user",
+        )
+
+    def test_get_elevation_query_param_is_dead_transport(self):
+        """#13 negative (merged with #3): elevation_token as a QUERY PARAM is
+        not a transport — it persisted tokens in nginx + uvicorn access logs.
+        Post-#3 the route is human-only and tokenless unmask is a loud 403
+        (sec-secret-caller-param-plaintext-bypass), so the query param now
+        lands in the 403 gate with no consume attempted."""
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        app = _create_test_app(core=core)
+        db = app.state.backend.get_session.return_value
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True, "elevation_token": "tok-query-123"},
+        )
+        assert resp.status_code == 403
+        db.execute.assert_not_called()  # no burn — query param is not a transport
 
 
 class TestSecretsList:
@@ -1060,6 +1106,41 @@ class TestSecretsMetadata:
         )
 
         assert resp.status_code == 404
+
+    def test_patch_metadata_scoped_out_idor_404_no_mutation(self):
+        """IDOR negative (sec-auth-elevation-authz-hardening #5, interlock 3):
+        scoped-out secret + valid read-write user → 404 indistinguishable from
+        nonexistent, and the metadata writer is NEVER touched (no Secret
+        query, no meta mutation, no commit) — enforce-first ordering."""
+        from core.engine.core import CoreAccessError
+
+        core = MagicMock()
+        core.get.side_effect = CoreAccessError("Secret not found: scoped-key")
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.meta = {"executor": "web-server-3"}
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_secret
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/scoped-key/metadata",
+            json={"metadata": {"purpose": "pwned"}},
+        )
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Secret not found"
+        # enforce-first: the metadata writer never ran (the role-resolution
+        # probe may query, but nothing is mutated or committed)
+        mock_session.commit.assert_not_called()
+        assert mock_secret.meta == {"executor": "web-server-3"}
+        # the visibility probe consulted the single enforcement point
+        assert core.get.call_count == 1
+        assert core.get.call_args.kwargs["secret_key"] == "scoped-key"  # pragma: allowlist secret
 
     def test_patch_metadata_db_error_returns_500(self):
         """PATCH triggering a DB failure → 500, not 'Secret not found'."""

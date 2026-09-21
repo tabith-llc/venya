@@ -87,3 +87,15 @@ def test_enroll_ordering_active_set_in_same_transaction(db):
     user.status = "active"  # dirty, uncommitted — exactly the enroll pattern
     session, _token = SessionManager(db, SessionConfig()).create_session("u1")
     assert session.user_id == "u1"
+
+
+def test_is_user_active_predicate():
+    """The central predicate behind the gate — single semantic source consumed
+    by create_session (issuance) AND the server middleware _validate_token
+    (surviving sessions, sec-auth-elevation-authz-hardening #9)."""
+    from core.iam.session_manager import is_user_active
+
+    assert is_user_active(User(user_id="x", status="active")) is True
+    assert is_user_active(User(user_id="x", status="disabled")) is False
+    assert is_user_active(User(user_id="x", status="pending_enrollment")) is False
+    assert is_user_active(None) is False

@@ -127,6 +127,21 @@ def env(tmp_path):
     app.dependency_overrides[get_backend] = lambda: backend
     app.dependency_overrides[get_current_user] = lambda: TEST_USER
     app.dependency_overrides[require_admin] = lambda: TEST_USER
+
+    # Executor auth state for the heartbeat route (ticket
+    # sec-endpoint-ratelimit-hardening #7): production sets this via
+    # _validate_executor_mtls; this bare app injects the same shape. Only the
+    # heartbeat cells read request.state directly — the bearer-flow tests use
+    # the dependency overrides above, which replace get_current_user entirely.
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    class _ExecAuth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.auth_user = {"caller": "executor", "executor_id": "exec-a"}
+            return await call_next(request)
+
+    app.add_middleware(_ExecAuth)
+
     app.include_router(executors_routes.router, prefix="/api/v1")
     app.include_router(admin_routes.router, prefix="/api/v1")
 
@@ -421,7 +436,22 @@ class TestHeartbeatRevokedFlag:
         client, SessionLocal = env
         _seed_executor(SessionLocal, revoked_at=datetime.now(UTC))
         _seed_cert(SessionLocal)
-        assert self._beat(client).json()["revoked"] is True
+        resp = self._beat(client)
+        assert resp.status_code == 200
+        assert resp.json()["revoked"] is True
+        # WRITE-GUARD PIN (ruling B1, ticket sec-endpoint-ratelimit-hardening):
+        # the revoked beat got its advisory 200 {revoked:true} (F3
+        # cooperative-stop channel preserved) but wrote NOTHING — a revoked
+        # identity cannot stamp last_heartbeat/status and race its own
+        # revoked presentation in list_executors.
+        from core.iam.models import Executor
+
+        s = SessionLocal()
+        try:
+            row = s.query(Executor).filter(Executor.id == "exec-a").first()
+            assert row.last_heartbeat is None
+        finally:
+            s.close()
 
     def test_record_serial_revoked_true(self, env):
         client, SessionLocal = env

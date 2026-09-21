@@ -1521,7 +1521,14 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
             raise APIClientError(f"FIDO2 error: {e}") from e
         cred_response = fido2._format_credential_response(credential)
 
-        # Step 5: Complete registration
+        # Step 5: Complete registration — with a FRESH elevation token:
+        # tokens are single-use (server burns on verify; #6 ruling option (a),
+        # sec-auth-elevation-authz-hardening) and the start call consumed the
+        # first one. A cancel/timeout inside _elevate raises APIClientError →
+        # clean exit via the handler below, no stuck flow; the server-side
+        # burn is idempotent (replay of a burned token = clean 401).
+        print("Re-authenticating with security key for elevation...")
+        elevation_token = _elevate(client)
         result = client.post(
             "/api/v1/credentials/add/browser/complete",
             json={

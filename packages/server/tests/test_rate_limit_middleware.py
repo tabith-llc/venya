@@ -36,6 +36,11 @@ def _create_test_app(
         clock_skew = MagicMock()
         clock_skew.token_tolerance_seconds = 60
 
+    # Set post-class: `x = x` inside a class body is a NameError (the RHS
+    # resolves class-local); the tier param must come from the enclosing
+    # function scope (ticket sec-endpoint-ratelimit-hardening #8).
+    MockConfig.auth_requests_per_minute = auth_requests_per_minute
+
     app.state.config = MockConfig()
 
     # Build a mock backend with a UPSERT that returns pre-configured counts
@@ -103,6 +108,11 @@ def _create_test_app_with_401(requests_per_minute=100, auth_requests_per_minute=
         clock_skew = MagicMock()
         clock_skew.token_tolerance_seconds = 60
 
+    # Set post-class: `x = x` inside a class body is a NameError (the RHS
+    # resolves class-local); the tier param must come from the enclosing
+    # function scope (ticket sec-endpoint-ratelimit-hardening #8).
+    MockConfig.auth_requests_per_minute = auth_requests_per_minute
+
     app.state.config = MockConfig()
 
     backend = MagicMock()
@@ -162,6 +172,13 @@ class TestRateLimitMiddleware:
             resp = client.get("/api/v1/auth/login")
             assert resp.status_code == 200
 
+        # TIER PIN (ticket sec-endpoint-ratelimit-hardening #8): the 4th
+        # request in the window 429s. Pre-fix the constructor collapsed the
+        # auth tier into ip_rate_limit (1000/min in production config), so
+        # the loop above passed while the tier itself was dead.
+        resp = client.get("/api/v1/auth/login")
+        assert resp.status_code == 429
+
     def test_recovery_endpoint_under_break_glass_limit(self):
         """Recovery endpoint uses break-glass limit, not auth limit."""
         app = _create_test_app(requests_per_minute=100, auth_requests_per_minute=2, break_glass_per_hour=5)
@@ -182,6 +199,9 @@ class TestRateLimitMiddleware:
         for _ in range(3):
             resp = client.get("/api/v1/enrollment/start")
             assert resp.status_code == 200
+
+        resp = client.get("/api/v1/enrollment/start")
+        assert resp.status_code == 429  # tier pin (see test_auth_endpoint_under_auth_limit)
 
 
 class TestBreakGlassRateLimit:
@@ -256,6 +276,28 @@ class TestRateLimitMultiWorker:
         resp = client.get("/api/v1/health", headers={"X-Forwarded-For": "10.0.0.2"})
         assert resp.status_code == 200
 
+    def test_xff_rightmost_entry_keys_the_limit(self):
+        """#8 BYPASS PIN (ticket sec-endpoint-ratelimit-hardening): the limit
+        keys on the RIGHTMOST XFF entry — the one our nginx appends
+        ($proxy_add_x_forwarded_for = "<client-sent>, <real peer>"). The
+        leftmost entry is attacker-controlled; pre-fix, rotating a spoofed
+        leftmost value gave every request a fresh bucket (break-glass 5/hr,
+        auth tier, and backoff all bypassable with one header)."""
+        app = _create_test_app(requests_per_minute=2)
+        client = TestClient(app)
+
+        # Same real IP behind three different spoofs → ONE bucket: 2 pass, 3rd 429
+        r1 = client.get("/api/v1/health", headers={"X-Forwarded-For": "1.1.1.1, 10.0.0.7"})
+        r2 = client.get("/api/v1/health", headers={"X-Forwarded-For": "2.2.2.2, 10.0.0.7"})
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        r3 = client.get("/api/v1/health", headers={"X-Forwarded-For": "3.3.3.3, 10.0.0.7"})
+        assert r3.status_code == 429  # spoof rotation does NOT reset the bucket
+
+        # A different REAL (rightmost) IP still has its own bucket
+        r4 = client.get("/api/v1/health", headers={"X-Forwarded-For": "1.1.1.1, 10.0.0.8"})
+        assert r4.status_code == 200
+
     def test_backend_unavailable_returns_503(self):
         """Rate limit check returns 503 if backend is not initialized."""
         app = FastAPI()
@@ -263,6 +305,7 @@ class TestRateLimitMultiWorker:
         class MockConfig:
             enforce = True
             ip_rate_limit = 100
+            auth_requests_per_minute = 20
             break_glass_requests_per_hour = 5
             clock_skew = MagicMock()
             clock_skew.token_tolerance_seconds = 60
@@ -287,6 +330,7 @@ class TestRateLimitMultiWorker:
         class MockConfig:
             enforce = False
             ip_rate_limit = 1
+            auth_requests_per_minute = 20
             break_glass_requests_per_hour = 1
             clock_skew = MagicMock()
             clock_skew.token_tolerance_seconds = 60

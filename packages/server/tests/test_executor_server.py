@@ -78,6 +78,25 @@ def signed_cert(ca_manager, executor_keypair):
 # ---------------------------------------------------------------------------
 
 
+def _add_executor_auth(app, executor_id):
+    """Inject middleware-shaped executor auth state.
+
+    The heartbeat route now requires request.state.auth_user ==
+    {"caller": "executor", "executor_id": CN} (production: set by
+    SessionMiddleware._validate_executor_mtls — ticket
+    sec-endpoint-ratelimit-hardening #7). Route-level test apps mount the
+    router without that middleware, so they inject the same shape.
+    """
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    class _ExecutorAuth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.auth_user = {"caller": "executor", "executor_id": executor_id}
+            return await call_next(request)
+
+    app.add_middleware(_ExecutorAuth)
+
+
 @dataclass
 class MockExecutorCert:
     executor_id: str
@@ -339,12 +358,14 @@ class TestExecutorRegistration:
 
         db.query.side_effect = q
 
-    def _create_app(self, ca_manager, db):
+    def _create_app(self, ca_manager, db, auth_executor_id=None):
         app = FastAPI()
         app.state.backend = MagicMock()
         app.state.backend.get_session.return_value = db
         app.state.ca_manager = ca_manager
         app.include_router(executors_routes.router, prefix="/api/v1")
+        if auth_executor_id is not None:
+            _add_executor_auth(app, auth_executor_id)
         return app
 
     def test_register_success(self, ca_manager, executor_csr, executor_keypair):
@@ -500,7 +521,7 @@ class TestExecutorRegistration:
         existing = Executor(id="web-server-3", hostname="venya-exec-1", status="active")
         db = _make_mock_db()
         self._make_db_with_executor(db, existing)
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="web-server-3")
         client = TestClient(app)
         resp = client.post("/api/v1/heartbeat", json={"executor_id": "web-server-3"})
         assert resp.status_code == 200
@@ -588,17 +609,19 @@ class TestRevocationList:
 class TestHeartbeat:
     """Tests for POST /heartbeat."""
 
-    def _create_app(self, ca_manager, db):
+    def _create_app(self, ca_manager, db, auth_executor_id=None):
         app = FastAPI()
         app.state.backend = MagicMock()
         app.state.backend.get_session.return_value = db
         app.state.ca_manager = ca_manager
         app.include_router(executors_routes.router, prefix="/api/v1")
+        if auth_executor_id is not None:
+            _add_executor_auth(app, auth_executor_id)
         return app
 
     def test_heartbeat_no_executor(self, ca_manager):
         db = _make_mock_db()
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="unknown-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -619,7 +642,7 @@ class TestHeartbeat:
         )
         revocation = MockExecutorCertRevocation(serial_number="abc123")
         db = _make_mock_db(executor_certs=[cert_record], revocations=[revocation])
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -638,7 +661,7 @@ class TestHeartbeat:
             not_after=datetime.now(UTC) + timedelta(days=1),
         )
         db = _make_mock_db(executor_certs=[cert_record])
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -657,7 +680,7 @@ class TestHeartbeat:
             not_after=datetime.now(UTC) + timedelta(days=20),
         )
         db = _make_mock_db(executor_certs=[cert_record])
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -689,7 +712,7 @@ class TestHeartbeat:
             return orig(model) if callable(orig) else MagicMock()
 
         db.query.side_effect = q
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -704,7 +727,7 @@ class TestHeartbeat:
     def test_heartbeat_no_row_is_noop(self, ca_manager):
         """F3: no Executor row -> no last_heartbeat write, no commit, still 200."""
         db = _make_mock_db()  # _make_mock_db yields None for Executor lookups
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="ghost-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -712,3 +735,40 @@ class TestHeartbeat:
         )
         assert resp.status_code == 200
         db.commit.assert_not_called()
+
+    def test_heartbeat_requires_executor_auth(self, ca_manager):
+        """#7 negative (route-level defense-in-depth): no executor auth state
+        → 403, no writes. Production: SessionMiddleware rejects with 401/403
+        BEFORE the route (no cert / unregistered CN)."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)  # no auth injected
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "test-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 403
+        db.commit.assert_not_called()
+
+    def test_heartbeat_binding_mismatch_403(self, ca_manager):
+        """#7 negative (CN binding): cert CN 'exec-a' cannot stamp row
+        'exec-b' — the forged-liveness oracle is closed."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db, auth_executor_id="exec-a")
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "exec-b", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 403
+        db.commit.assert_not_called()
+
+    def test_dead_alpha_id_heartbeat_route_removed(self, ca_manager):
+        """The dead alpha variant POST /executors/{id}/heartbeat
+        (require_role("none"), zero production callers — daemon AND CLI use
+        /api/v1/heartbeat with the executor cert) is GONE → 404."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/executors/test-exec/heartbeat")
+        assert resp.status_code == 404

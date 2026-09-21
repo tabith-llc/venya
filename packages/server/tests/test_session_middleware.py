@@ -46,11 +46,11 @@ def _create_test_app():
     return app
 
 
-def _make_session_mock(user_id="user1", expires_at=None, access_token_jti="token-123"):
+def _make_session_mock(user_id="user1", expires_at=None, access_token_jti="token-123", user_status="active"):
     """Create a mock session object."""
     if expires_at is None:
         expires_at = datetime.now(UTC) + timedelta(minutes=10)
-    user_mock = SimpleNamespace(user_id=user_id)
+    user_mock = SimpleNamespace(user_id=user_id, status=user_status)
     return SimpleNamespace(
         id=1,
         user_id=user_id,
@@ -324,6 +324,10 @@ class TestExecutorSessionPathAuth:
         def revoke_stub(request: Request):
             return {"user": getattr(request.state, "auth_user", None)}
 
+        @app.post("/api/v1/heartbeat")
+        def heartbeat_stub(request: Request):
+            return {"user": getattr(request.state, "auth_user", None)}
+
         return app
 
     def _make_executor_backend(self, executor_row=None, cert_row=None, crl_row=None):
@@ -535,14 +539,71 @@ class TestExecutorSessionPathAuth:
         as a second, dead grant path."""
         assert not hasattr(SessionMiddleware, "_is_mtls_request")
 
+    # --- Heartbeat gating (ticket sec-endpoint-ratelimit-hardening #7) ---
+
+    def test_heartbeat_no_cert_rejected_401(self):
+        """No X-Client-Verified → 401 BEFORE the route (the path was PUBLIC:
+        unauthenticated liveness stamping + revocation oracle)."""
+        executor_row, _, _ = self._rows()
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "venya-exec-1", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 401
+
+    def test_heartbeat_verified_registered_passes(self):
+        """Verified cert + registered CN → through to the route with the
+        middleware-set auth state (CN binding happens route-side)."""
+        executor_row, _, _ = self._rows()
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "venya-exec-1", "cert_fingerprint": "abc"},
+            headers={
+                "X-Client-Verified": "SUCCESS",
+                "X-Client-Subject": self.EXEC_SUBJECT,
+                "X-Client-Serial": "0000000000000001",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["user"] == {"caller": "executor", "executor_id": "venya-exec-1"}
+
+    def test_heartbeat_revoked_identity_passes_through_for_advisory(self):
+        """B1 RULING PIN: a revoked executor is NOT 403'd on the heartbeat
+        path (contrast test_identity_revoked_rejected_403 on the session
+        path) — it passes through for the advisory 200 {revoked:true} (F3
+        ride-along cooperative-stop channel); the route-side write-guard
+        skips the row stamp (pinned in test_executor_revocation_identity.py
+        ::test_identity_revoked_true)."""
+        executor_row, _, _ = self._rows(revoked_at=datetime.now(UTC))
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "venya-exec-1", "cert_fingerprint": "abc"},
+            headers={
+                "X-Client-Verified": "SUCCESS",
+                "X-Client-Subject": self.EXEC_SUBJECT,
+                "X-Client-Serial": "0000000000000001",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["user"]["caller"] == "executor"
+
 
 class TestSessionExtension:
     """Tests for middleware session extension (M-19 fix)."""
 
-    def _make_session(self, user_id="user1", expires_at=None, access_token="token-123"):
+    def _make_session(self, user_id="user1", expires_at=None, access_token="token-123", user_status="active"):
         if expires_at is None:
             expires_at = datetime.now(UTC) + timedelta(minutes=10)
-        user_mock = SimpleNamespace(user_id=user_id)
+        user_mock = SimpleNamespace(user_id=user_id, status=user_status)
         return SimpleNamespace(
             id=1,
             user_id=user_id,
@@ -664,3 +725,67 @@ class TestSessionExtension:
             assert resp.status_code == 401
 
             mock_sm.return_value.extend_session.assert_not_called()
+
+
+class TestDisabledUserSurvivingSession:
+    """Surviving-session status gate (sec-auth-elevation-authz-hardening #9).
+
+    Issuance is gated by create_session (UserNotActiveError, webauthn ticket);
+    this pins the OTHER half: a user disabled AFTER login loses access on the
+    next request — the session does not survive until idle expiry.
+    """
+
+    def test_disabled_user_live_session_rejected_401(self):
+        session = _make_session_mock(user_status="disabled")
+        backend = _make_backend(session)
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
+            mock_sm.return_value.check_expiry.return_value = True
+            mock_rm.return_value.get_user_roles.return_value = []
+
+            app = _create_test_app()
+            app.state.backend = backend
+
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/protected", headers={"authorization": "Bearer token-123"})
+            assert resp.status_code == 401
+            assert resp.json()["detail"] == "Invalid or expired token"
+
+    def test_pending_enrollment_user_live_session_rejected_401(self):
+        """Paired negative: any non-active status is refused, not just 'disabled'."""
+        session = _make_session_mock(user_status="pending_enrollment")
+        backend = _make_backend(session)
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
+            mock_sm.return_value.check_expiry.return_value = True
+            mock_rm.return_value.get_user_roles.return_value = []
+
+            app = _create_test_app()
+            app.state.backend = backend
+
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/protected", headers={"authorization": "Bearer token-123"})
+            assert resp.status_code == 401
+
+    def test_active_user_live_session_passes(self):
+        """Paired positive: the gate does not reject the normal case."""
+        session = _make_session_mock(user_status="active")
+        backend = _make_backend(session)
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
+            mock_sm.return_value.check_expiry.return_value = True
+            mock_rm.return_value.get_user_roles.return_value = []
+
+            app = _create_test_app()
+            app.state.backend = backend
+
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/protected", headers={"authorization": "Bearer token-123"})
+            assert resp.status_code == 200
+            assert resp.json()["user"]["user_id"] == "user1"

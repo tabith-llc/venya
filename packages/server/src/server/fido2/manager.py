@@ -259,6 +259,51 @@ class Fido2Manager:
         if auth_data.credential_data is None:
             raise WebAuthnError("No attested credential data in attestation")
 
+        # --- Ceremony verification (WebAuthn spec steps 5-7; ticket
+        # sec-auth-elevation-authz-hardening #4). Pre-fix, finish_registration
+        # never parsed clientDataJSON: ANY parseable attestationObject was
+        # accepted for an issued challenge — no challenge match, no origin, no
+        # type, no rpIdHash, no user-presence. finish_authentication has
+        # always verified its clientData; this mirrors that structure.
+        # DELIBERATE DIVERGENCE (user-ruled, documented): registration
+        # enforces a STRICTER RP context than authentication — origin is
+        # checked HERE; finish_authentication does not check origin.
+        client_data_json_b64 = None
+        if isinstance(resp, dict):
+            aar = resp.get("authenticatorAttestationResponse")
+            if isinstance(aar, dict):
+                client_data_json_b64 = aar.get("clientDataJSON")
+            if client_data_json_b64 is None:
+                client_data_json_b64 = resp.get("clientDataJSON")
+        if not client_data_json_b64:
+            raise WebAuthnError("Missing clientDataJSON in response")
+
+        client_data_bytes = _b64_decode(client_data_json_b64)
+        try:
+            client_data = json.loads(client_data_bytes)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise WebAuthnError("Malformed clientDataJSON") from e
+
+        if client_data.get("type") != "webauthn.create":
+            raise WebAuthnError("Wrong clientData type: expected webauthn.create")
+
+        challenge_bytes = _b64_decode(client_data.get("challenge", ""))
+        stored_challenge = stored.data.get("raw_challenge", b"")
+        if challenge_bytes != stored_challenge:
+            raise WebAuthnError("Challenge mismatch: attestation does not answer the issued challenge")
+
+        expected_origin = f"https://{self.rp_id}"
+        if client_data.get("origin") != expected_origin:
+            raise WebAuthnError("Origin mismatch: clientData origin is not this RP")
+
+        # rpIdHash + user presence (mirror of finish_authentication)
+        expected_rp_id_hash = hashlib.sha256(self.rp_id.encode()).digest()
+        if auth_data.rp_id_hash != expected_rp_id_hash:
+            raise WebAuthnError("RP ID hash mismatch: authenticator registered under different RP ID")
+
+        if not auth_data.is_user_present():
+            raise WebAuthnError("User presence flag not set")
+
         cose_key = auth_data.credential_data.public_key
         public_key_bytes = fido2_cbor.encode(dict(cose_key))
         sign_count = auth_data.counter

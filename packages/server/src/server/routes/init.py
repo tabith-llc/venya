@@ -326,6 +326,13 @@ async def init_complete(
         # Verify FIDO2 attestation
         try:
             cred = fido2_manager.finish_registration(req.challenge_id, fido2_response)
+            # Challenge<->user binding (sec-auth-elevation-authz-hardening #4):
+            # the credential must belong to the same user this init complete
+            # submission names — the challenge was bound to req.user_id at
+            # init step 1; a cross-user challenge_id would split identities
+            # between the in-memory store and the DB row.
+            if cred.user_id != req.user_id:
+                raise WebAuthnError("Registration challenge was issued for a different user")
         except WebAuthnError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

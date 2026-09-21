@@ -91,10 +91,17 @@ def _get_elevation_token(request: Request) -> str | None:
     return request.headers.get("X-Elevation-Token")
 
 
-def _verify_elevation(request: Request, db) -> bool:
-    """Verify elevation token is valid.
+def _verify_elevation(request: Request, db, user_id: str) -> None:
+    """Verify AND CONSUME the caller's elevation token (single-use).
 
-    Returns True if elevation is valid, raises HTTPException otherwise.
+    sec-auth-elevation-authz-hardening #6 (option (a) ruling: burn on every
+    verify — 1 assertion = 1 token, matching the issuance design). Atomic
+    conditional UPDATE mirrors the proven consume path in routes/secrets.py:
+    WHERE token_hash AND user_id == caller AND NOT used AND within expiry ->
+    SET used=True; rowcount 0 -> 401. Cross-user tokens and replays die
+    here. The burn COMMITS immediately so a later ceremony failure cannot
+    resurrect the token (a failed flow needs a fresh touch — deliberate;
+    idempotent: a replay of a burned token is a clean 401, never a 500).
     """
     token = _get_elevation_token(request)
     if not token:
@@ -103,9 +110,12 @@ def _verify_elevation(request: Request, db) -> bool:
             detail="Elevation token required. Touch your authenticator to proceed.",
         )
 
-    from core.iam.models import ElevationToken
+    import hashlib
 
-    token_hash = __import__("hashlib").sha256(token.encode()).hexdigest()
+    from core.iam.models import ElevationToken
+    from sqlalchemy import update
+
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
     server_config = getattr(request.app.state, "config", None)
     tolerance = (
         server_config.clock_skew.token_tolerance_seconds
@@ -113,23 +123,23 @@ def _verify_elevation(request: Request, db) -> bool:
         else 60
     )
     now_minus_tolerance = effective_expiry_check_time(tolerance)
-    elevation = (
-        db.query(ElevationToken)
-        .filter(
+    result = db.execute(
+        update(ElevationToken)
+        .where(
             ElevationToken.token_hash == token_hash,
+            ElevationToken.user_id == user_id,
             ElevationToken.used.is_(False),
             ElevationToken.expires_at > now_minus_tolerance,
         )
-        .first()
+        .values(used=True)
     )
+    db.commit()
 
-    if elevation is None:
+    if result.rowcount == 0:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired elevation token",
         )
-
-    return True
 
 
 # --- Endpoints ---
@@ -151,7 +161,7 @@ async def credentials_add_start(
     """
     try:
         user_id = _get_current_user_id(request)
-        _verify_elevation(request, db)
+        _verify_elevation(request, db, user_id)
 
         fido2_manager = getattr(request.app.state, "fido2_manager", None)
         if fido2_manager is None:
@@ -210,7 +220,7 @@ async def credentials_add_complete(
     """
     try:
         user_id = _get_current_user_id(request)
-        _verify_elevation(request, db)
+        _verify_elevation(request, db, user_id)
 
         fido2_manager = getattr(request.app.state, "fido2_manager", None)
         if fido2_manager is None:
@@ -226,6 +236,12 @@ async def credentials_add_complete(
                 req.challenge_id,
                 fido2_response,
             )
+            # Challenge<->user binding (sec-auth-elevation-authz-hardening #4):
+            # add_start bound the challenge to this session's user; refuse a
+            # credential minted from another user's challenge (identity split
+            # between the in-memory store and the DB row).
+            if cred.user_id != user_id:
+                raise WebAuthnError("Registration challenge was issued for a different user")
         except WebAuthnError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -286,7 +302,7 @@ async def credentials_remove(
     """
     try:
         user_id = _get_current_user_id(request)
-        _verify_elevation(request, db)
+        _verify_elevation(request, db, user_id)
 
         from core.iam.models import WebAuthnCredential
 
