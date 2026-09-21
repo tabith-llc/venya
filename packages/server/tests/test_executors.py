@@ -4,7 +4,16 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Tests for executor list and heartbeat endpoints."""
+"""Tests for executor list endpoints.
+
+(The POST /executors/{id}/heartbeat alpha variant and its four tests were
+REMOVED with the route — ticket sec-endpoint-ratelimit-hardening #7: it was
+require_role("none") residue with zero production callers; the real heartbeat
+is /api/v1/heartbeat, executor-mTLS gated, tested in test_executor_server.py.
+Note for the record: test_heartbeat_temporary_auth_accepted pinned the weak
+"any authenticated user" gate as DESIRED behavior — tests can institutionalize
+a vulnerability as confidently as they can catch one.)
+"""
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
@@ -209,92 +218,6 @@ class TestListExecutors:
             resp = client.get("/api/v1/executors")
 
         assert resp.status_code == 403
-
-
-class TestExecutorHeartbeat:
-    """Tests for POST /api/v1/executors/{id}/heartbeat endpoint."""
-
-    def test_heartbeat_updates_timestamp(self):
-        """POST /executors/{id}/heartbeat should update last_heartbeat."""
-        app, backend = _create_test_app()
-        mock_session = MagicMock()
-        mock_executor = MagicMock()
-        mock_executor.id = "web-server-3"
-        mock_executor.hostname = "10.27.28.14"
-        mock_executor.last_heartbeat = datetime.now(UTC) - timedelta(minutes=5)
-        mock_executor.status = "pending"
-        mock_executor_filter = MagicMock()
-        mock_executor_filter.first.return_value = mock_executor
-        mock_query = MagicMock()
-        mock_query.filter.return_value = mock_executor_filter
-        mock_session.query.return_value = mock_query
-        backend.get_session.return_value = mock_session
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/executors/web-server-3/heartbeat")
-
-        assert resp.status_code == 200
-        assert mock_executor.last_heartbeat > datetime.now(UTC) - timedelta(seconds=1)
-
-    def test_heartbeat_sets_status_active(self):
-        """POST /executors/{id}/heartbeat should set status to active."""
-        app, backend = _create_test_app()
-        mock_session = MagicMock()
-        mock_executor = MagicMock()
-        mock_executor.id = "web-server-3"
-        mock_executor.hostname = "10.27.28.14"
-        mock_executor.last_heartbeat = datetime.now(UTC) - timedelta(minutes=5)
-        mock_executor.status = "pending"
-        mock_executor_filter = MagicMock()
-        mock_executor_filter.first.return_value = mock_executor
-        mock_query = MagicMock()
-        mock_query.filter.return_value = mock_executor_filter
-        mock_session.query.return_value = mock_query
-        backend.get_session.return_value = mock_session
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/executors/web-server-3/heartbeat")
-
-        assert resp.status_code == 200
-        assert mock_executor.status == "active"
-
-    def test_heartbeat_not_found_404(self):
-        """POST /executors/{id}/heartbeat should return 404 for unknown executor."""
-        app, backend = _create_test_app()
-        mock_session = MagicMock()
-        mock_executor_filter = MagicMock()
-        mock_executor_filter.first.return_value = None
-        mock_query = MagicMock()
-        mock_query.filter.return_value = mock_executor_filter
-        mock_session.query.return_value = mock_query
-        backend.get_session.return_value = mock_session
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/executors/unknown-server/heartbeat")
-
-        assert resp.status_code == 404
-        assert "Executor not found" in resp.json()["detail"]
-
-    def test_heartbeat_temporary_auth_accepted(self):
-        """POST /executors/{id}/heartbeat should accept any authenticated user."""
-        app, backend = _create_test_app()
-        mock_session = MagicMock()
-        mock_executor = MagicMock()
-        mock_executor.id = "web-server-3"
-        mock_executor.hostname = "10.27.28.14"
-        mock_executor.last_heartbeat = None
-        mock_executor.status = "pending"
-        mock_executor_filter = MagicMock()
-        mock_executor_filter.first.return_value = mock_executor
-        mock_query = MagicMock()
-        mock_query.filter.return_value = mock_executor_filter
-        mock_session.query.return_value = mock_query
-        backend.get_session.return_value = mock_session
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/executors/web-server-3/heartbeat")
-
-        assert resp.status_code == 200
 
 
 class TestExecutorModelContract:

@@ -324,6 +324,10 @@ class TestExecutorSessionPathAuth:
         def revoke_stub(request: Request):
             return {"user": getattr(request.state, "auth_user", None)}
 
+        @app.post("/api/v1/heartbeat")
+        def heartbeat_stub(request: Request):
+            return {"user": getattr(request.state, "auth_user", None)}
+
         return app
 
     def _make_executor_backend(self, executor_row=None, cert_row=None, crl_row=None):
@@ -534,6 +538,63 @@ class TestExecutorSessionPathAuth:
         become live or be removed') — pin the removal so it cannot regress
         as a second, dead grant path."""
         assert not hasattr(SessionMiddleware, "_is_mtls_request")
+
+    # --- Heartbeat gating (ticket sec-endpoint-ratelimit-hardening #7) ---
+
+    def test_heartbeat_no_cert_rejected_401(self):
+        """No X-Client-Verified → 401 BEFORE the route (the path was PUBLIC:
+        unauthenticated liveness stamping + revocation oracle)."""
+        executor_row, _, _ = self._rows()
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "venya-exec-1", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 401
+
+    def test_heartbeat_verified_registered_passes(self):
+        """Verified cert + registered CN → through to the route with the
+        middleware-set auth state (CN binding happens route-side)."""
+        executor_row, _, _ = self._rows()
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "venya-exec-1", "cert_fingerprint": "abc"},
+            headers={
+                "X-Client-Verified": "SUCCESS",
+                "X-Client-Subject": self.EXEC_SUBJECT,
+                "X-Client-Serial": "0000000000000001",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["user"] == {"caller": "executor", "executor_id": "venya-exec-1"}
+
+    def test_heartbeat_revoked_identity_passes_through_for_advisory(self):
+        """B1 RULING PIN: a revoked executor is NOT 403'd on the heartbeat
+        path (contrast test_identity_revoked_rejected_403 on the session
+        path) — it passes through for the advisory 200 {revoked:true} (F3
+        ride-along cooperative-stop channel); the route-side write-guard
+        skips the row stamp (pinned in test_executor_revocation_identity.py
+        ::test_identity_revoked_true)."""
+        executor_row, _, _ = self._rows(revoked_at=datetime.now(UTC))
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "venya-exec-1", "cert_fingerprint": "abc"},
+            headers={
+                "X-Client-Verified": "SUCCESS",
+                "X-Client-Subject": self.EXEC_SUBJECT,
+                "X-Client-Serial": "0000000000000001",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["user"]["caller"] == "executor"
 
 
 class TestSessionExtension:

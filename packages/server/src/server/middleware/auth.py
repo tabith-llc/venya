@@ -118,7 +118,6 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/api/v1/executors/register",
             "/api/v1/executors/certs/revocation-list",
             "/api/v1/executors/certs/crl",
-            "/api/v1/heartbeat",
             "/api/v1/enroll/browser/start",
             "/api/v1/enroll/browser/complete",
             "/api/v1/enroll/browser",
@@ -333,6 +332,20 @@ class SessionMiddleware(BaseHTTPMiddleware):
             # auth_user set by _validate_executor_mtls
             return await call_next(request)
 
+        # Heartbeat: executor mTLS as well (ticket
+        # sec-endpoint-ratelimit-hardening #7 — was PUBLIC: unauthenticated
+        # fleet-liveness stamping + revocation/rotation oracle). Runs with
+        # reject_revoked=False: the F3 ride-along ruling makes the 200
+        # {revoked:true} RESPONSE the fast cooperative-stop channel — a 403
+        # here would kill it (user ruling B1 2026-09-20). The route binds
+        # body executor_id to the cert CN and skips the row write for
+        # revoked callers.
+        if request.url.path == "/api/v1/heartbeat":
+            executor_result = await self._validate_executor_mtls(request, reject_revoked=False)
+            if executor_result is not None:
+                return executor_result
+            return await call_next(request)
+
         # Admin mTLS validation (before bearer token auth)
         if (
             getattr(request.app.state, "config", None)
@@ -369,7 +382,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         request.state.auth_user = user_info  # type: ignore[attr-defined]
         return await call_next(request)
 
-    async def _validate_executor_mtls(self, request: Request) -> JSONResponse | None:
+    async def _validate_executor_mtls(self, request: Request, reject_revoked: bool = True) -> JSONResponse | None:
         """Validate executor mTLS identity for executor session paths.
 
         Grants ``caller=executor`` ONLY on a verified client cert whose CN is
@@ -392,6 +405,10 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         Args:
             request: The FastAPI request.
+            reject_revoked: True (session paths) → a revoked identity gets
+                403. False (heartbeat) → revocation is NOT rejected here; the
+                route returns the revoked flag in its 200 response (the F3
+                ride-along cooperative-stop channel) and skips the row write.
 
         Returns:
             JSONResponse (401/403) on failure, None if all checks pass
@@ -446,15 +463,25 @@ class SessionMiddleware(BaseHTTPMiddleware):
             presented_serial = request.headers.get("x-client-serial") or None
             rev = executor_revocation_state(db, executor_id, presented_serial=presented_serial, executor_row=row)
             if rev.revoked:
-                logger.warning(
-                    "Executor session path %s: CN '%s' revoked (%s)",
-                    path,
+                if reject_revoked:
+                    logger.warning(
+                        "Executor session path %s: CN '%s' revoked (%s)",
+                        path,
+                        executor_id,
+                        rev.reason,
+                    )
+                    return JSONResponse(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        content={"detail": detail},
+                    )
+                # reject_revoked=False (heartbeat path): identity stays
+                # verified; the ROUTE returns the revoked flag in its 200
+                # response (F3 cooperative-stop channel, ruling B1) and skips
+                # the row write for revoked callers.
+                logger.info(
+                    "Heartbeat from revoked executor CN '%s' (%s) — passing to route for the advisory flag",
                     executor_id,
                     rev.reason,
-                )
-                return JSONResponse(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    content={"detail": detail},
                 )
 
             request.state.auth_user = {"caller": "executor", "executor_id": executor_id}  # type: ignore[attr-defined]

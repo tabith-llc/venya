@@ -38,6 +38,21 @@ Notable changes to Venya will be documented in this file.
   could rewrite metadata on ANY secret, including secrets scoped to roles
   they do not hold (IDOR). Scoped-out secrets stay indistinguishable from
   nonexistent ones (404, no mutation).
+- Executor heartbeat (`POST /api/v1/heartbeat`) is no longer public: it
+  requires a verified executor mTLS identity (registered, non-spoofable CN)
+  and binds the reported `executor_id` to the client certificate. Previously
+  any unauthenticated caller could liveness-stamp any executor row and read
+  the fleet revocation/rotation state as an oracle. A revoked executor still
+  receives its advisory `200 {revoked: true}` (the cooperative-stop channel
+  is preserved) but no longer writes to its row. The dead alpha-only
+  `POST /api/v1/executors/{id}/heartbeat` variant was removed.
+- Per-IP rate limits now key on the trustworthy RIGHTMOST `X-Forwarded-For`
+  entry (the one our own nginx appends) instead of the attacker-controlled
+  leftmost entry — one spoofed header previously reset the bucket on every
+  request, bypassing the break-glass 5/hr limit, the auth tier, and the
+  failure backoff. Rests on the existing loopback-only-backend deployment
+  invariant (exactly one trusted proxy hop), now shared with the X-Client-*
+  mTLS header chain.
 - Executor revocation is now identity-based (hybrid model): `venya admin
   revoke-executor <id>` terminally revokes the IDENTITY (`Executor.revoked_at`,
   previously a dead-wired column) — command routing refuses revoked executors
@@ -61,6 +76,13 @@ Notable changes to Venya will be documented in this file.
 
 ### Changed
 
+- The auth-endpoint rate-limit tier is now actually enforced: 20 requests/min
+  per IP (previously silently collapsed into the generic 1000/min limit — the
+  middleware constructor overwrote it). Scripted login/enrollment loops that
+  never hit a limit before will now see `429` on `/api/v1/auth/*` and
+  `/api/v1/enrollment/*`. Diagnosis + override:
+  `VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE` (e2e scaffolds should set this
+  explicitly rather than discover the tier nondeterministically).
 - The core installer now encrypts the root CA private key at rest and delivers
   its passphrase through a restricted systemd EnvironmentFile, matching the
   existing admin CA key handling.
