@@ -159,9 +159,14 @@ class SessionMiddleware(BaseHTTPMiddleware):
         """Validate mTLS client certificate for admin routes.
 
         When admin_mtls is enabled and the path is an admin route, this
-        performs a 2-step validation chain:
+        performs a 3-step validation chain:
         1. Check X-Client-Verified sentinel header
-        2. Extract identity from X-Client-Subject DN, check against known_admin_ids
+        2. Extract identity from X-Client-Subject DN, check against
+           known_admin_ids — an EMPTY allowlist FAILS CLOSED (ticket
+           sec-admin-mtls-allowlist-revocation #15)
+        3. Check X-Client-Serial against AdminCertRevocation — in-process
+           revocation enforcement, fail-closed on missing serial / backend /
+           lookup error (ticket sec-admin-mtls-allowlist-revocation #16)
 
         Nginx verifies the cert chain and expiration at the TLS layer
         (verify_if_given/require_and_verify). This middleware checks identity.
@@ -206,12 +211,99 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Admin access requires valid client certificate"},
             )
 
+        # Allowlist FAILS CLOSED when empty (ticket
+        # sec-admin-mtls-allowlist-revocation #15): the nginx trust bundle
+        # carries Root CA + Admin CA — architecturally forced, the executor
+        # session path shares it — so an empty allowlist would admit ANY
+        # Root-CA cert (e.g. an executor cert) as caller=admin. The 403 detail
+        # stays generic here (the caller may be any cert holder); recovery
+        # guidance goes to the server-side log.
         known_ids = config.admin_mtls.known_admin_ids  # type: ignore[union-attr]
-        if known_ids and identity not in known_ids:
+        if not known_ids:
+            logger.warning(
+                "Admin route %s: known_admin_ids is EMPTY — failing closed. "
+                "Set VENYA_ADMIN_IDENTITY (the installer writes it); ticket "
+                "sec-admin-mtls-allowlist-revocation.",
+                path,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+        if identity not in known_ids:
             logger.warning("Admin route %s: identity '%s' not in known_admin_ids", path, identity)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        # Step 3: serial presentation + in-process revocation check (ticket
+        # sec-admin-mtls-allowlist-revocation #16). POST /admin/certs/revoke
+        # recorded AdminCertRevocation rows that nothing consulted in-process
+        # (CRL generation only; nginx has no ssl_crl). Missing serial FAILS
+        # CLOSED (user ruling 2026-09-20): warn-open would leave the
+        # revocation bypass alive on every pre-header nginx config, silently.
+        # The caller at this point is an allowlisted admin identity, so the
+        # detail carries the recovery path. Serial match is case-insensitive:
+        # legacy rows store the serial as-provided, nginx $ssl_client_serial
+        # is uppercase; new writes normalize at the storage boundary (admin.py).
+        presented_serial = (request.headers.get("x-client-serial") or "").strip()
+        if not presented_serial:
+            logger.warning(
+                "Admin route %s: X-Client-Serial missing — failing closed. "
+                "Recovery: re-run the core installer (idempotent) to regenerate "
+                "the nginx site config, then `systemctl restart venya-core` in "
+                "the SAME maintenance window and re-verify an admin mTLS call "
+                "(installer re-runs do NOT restart a running core — ticket "
+                "installer-rerun-no-service-restart).",
+                path,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "detail": "Admin mTLS misconfigured: certificate serial not presented. "
+                    "Recovery: re-run the core installer to regenerate the nginx site "
+                    "config, then restart venya-core and retry."
+                },
+            )
+
+        backend = getattr(request.app.state, "backend", None)
+        if backend is None:
+            logger.warning("Admin route %s: backend unavailable — failing closed", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        db = backend.get_session()
+        try:
+            from core.iam.models import AdminCertRevocation
+            from sqlalchemy import func
+
+            revoked = (
+                db.query(AdminCertRevocation)
+                .filter(func.upper(AdminCertRevocation.serial_number) == presented_serial.upper())
+                .first()
+            )
+        except Exception:
+            logger.exception("Admin route %s: revocation lookup failed — failing closed", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+        finally:
+            db.close()
+
+        if revoked is not None:
+            logger.warning(
+                "Admin route %s: certificate serial %s is revoked (reason: %s)",
+                path,
+                presented_serial,
+                revoked.reason,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin certificate revoked"},
             )
 
         # All checks passed

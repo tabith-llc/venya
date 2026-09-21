@@ -445,13 +445,59 @@ class TestExtractIdentity:
 # ---------------------------------------------------------------------------
 
 
+def _sqlite_revocation_backend(revocation_rows: list[tuple[str, str]] | None = None):
+    """Real in-memory SQLite backend holding the AdminCertRevocation table.
+
+    StaticPool pins ONE connection: a bare "sqlite://" memory database is
+    per-connection — without it the seeding session drops the tables when it
+    closes and the middleware's lookup sees "no such table" (caught by the
+    first run of the revocation cells). check_same_thread=False lets the
+    concurrency test's worker threads share the pinned connection.
+    """
+    from core.iam.models import AdminCertRevocation, Base
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    for serial_number, reason in revocation_rows or []:
+        seed.add(AdminCertRevocation(serial_number=serial_number, reason=reason))
+    seed.commit()
+    seed.close()
+
+    class _Backend:
+        def get_session(self):
+            return session_factory()
+
+    return _Backend()
+
+
 def _create_admin_mtls_app(
     admin_ca_dir: str,
     admin_identity: str = "dust@montana",
     known_admin_ids: list[str] | None = None,
     admin_mtls_enabled: bool = True,
+    revocation_rows: list[tuple[str, str]] | None = None,
+    with_backend: bool = True,
 ):
-    """Create a test app with admin mTLS middleware configured."""
+    """Create a test app with admin mTLS middleware configured.
+
+    Args:
+        revocation_rows: (serial_number, reason) pairs seeded into a REAL
+            SQLite AdminCertRevocation table — the middleware's revocation
+            lookup uses func.upper() SQL, which mocks cannot evaluate
+            (ticket sec-admin-mtls-allowlist-revocation; house precedent:
+            real-SQLite cells in test_session_manager_gate.py).
+        with_backend: False simulates backend-unavailable → the middleware
+            must fail closed.
+    """
     from server.config import AdminMTLSConfig, ServerConfig
 
     if known_admin_ids is None:
@@ -469,6 +515,9 @@ def _create_admin_mtls_app(
     app = FastAPI()
     app.add_middleware(SessionMiddleware)
     app.state.config = config
+
+    if with_backend:
+        app.state.backend = _sqlite_revocation_backend(revocation_rows)
 
     @app.get("/api/v1/admin/test")
     def admin_test(request: Request):
@@ -556,6 +605,7 @@ class TestAdminMTLSMiddleware:
             headers={
                 "X-Client-Subject": subject_dn,
                 "X-Client-Verified": "SUCCESS",
+                "X-Client-Serial": "1234123412341234",
             },
         )
         # mTLS passes → middleware sets auth_user → route handler returns 200
@@ -581,6 +631,7 @@ class TestAdminMTLSMiddleware:
             headers={
                 "X-Client-Subject": subject_dn,
                 "X-Client-Verified": "SUCCESS",
+                "X-Client-Serial": "1234123412341234",
             },
         )
         # mTLS passes → middleware sets auth_user → route handler returns 200
@@ -665,13 +716,20 @@ class TestAdminMTLSMiddleware:
             headers={
                 "X-Client-Subject": subject_dn,
                 "X-Client-Verified": "SUCCESS",
+                "X-Client-Serial": "1234123412341234",
             },
         )
         # Should pass because CN = "dust@montana" matches known_admin_ids
         assert resp.status_code == 200  # mTLS passes → auth_user set → route returns 200
 
-    def test_revoked_cert_rejected(self, admin_ca_dir, admin_ca_security):
-        """Server no longer checks revocation; this test verifies unknown identity rejection."""
+    def test_unknown_identity_rejected_signed_cert(self, admin_ca_dir, admin_ca_security):
+        """Unknown identity is rejected even with a CA-signed cert.
+
+        (Formerly misnamed test_revoked_cert_rejected with a docstring
+        claiming the server does not check revocation — it DOES now, via
+        X-Client-Serial vs AdminCertRevocation; see
+        TestAdminMtlsSerialRevocation. Ticket
+        sec-admin-mtls-allowlist-revocation.)"""
         os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
@@ -1114,22 +1172,26 @@ class TestRevokeAdminCertEndpoint:
     """Tests for POST /api/v1/admin/certs/revoke."""
 
     def test_revoke_admin_cert_endpoint(self):
-        """Valid revocation request should return 200."""
-        serial_hex = "01ab2c3d4e5f6789"
+        """Valid revocation request should return 200, serial normalized to
+        UPPERCASE at the storage boundary (user ruling B, ticket
+        sec-admin-mtls-allowlist-revocation — nginx $ssl_client_serial is
+        uppercase; mixed-case input is the legacy trap)."""
+        serial_input = "ab12ab12ab12ab12"
 
         app, _backend, revocations = _create_revoke_test_app()
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/admin/certs/revoke",
-            json={"serial": serial_hex, "reason": "test revocation"},
+            json={"serial": serial_input, "reason": "test revocation"},
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["serial"] == serial_hex
+        assert data["serial"] == "AB12AB12AB12AB12"
         assert data["revoked"] is True
         assert data["reason"] == "test revocation"
         assert len(revocations) == 1
+        assert revocations[0].serial_number == "AB12AB12AB12AB12"
 
     def test_revoke_admin_cert_already_revoked(self):
         """Revoking the same serial twice should return 200 (idempotent)."""
@@ -1205,6 +1267,7 @@ def _create_concurrent_test_app(admin_ca_dir: str):
     app = FastAPI()
     app.add_middleware(SessionMiddleware)
     app.state.config = config
+    app.state.backend = _sqlite_revocation_backend()
 
     @app.get("/api/v1/admin/test")
     def admin_test(request: Request):
@@ -1244,6 +1307,7 @@ class TestAdminMTLSConcurrency:
                 headers={
                     "X-Client-Subject": subject_dn,
                     "X-Client-Verified": "SUCCESS",
+                    "X-Client-Serial": "1234123412341234",
                 },
             )
             return resp.status_code
@@ -1289,6 +1353,7 @@ class TestAdminCARotation:
             headers={
                 "X-Client-Subject": "CN=dust@montana,OU=Admin,O=Venya",
                 "X-Client-Verified": "SUCCESS",
+                "X-Client-Serial": "1234123412341234",
             },
         )
         # mTLS passes → middleware sets auth_user → route handler returns 200
@@ -1310,4 +1375,104 @@ class TestAdminCARotation:
                 "X-Client-Verified": "SUCCESS",
             },
         )
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Tests: allowlist fail-closed + in-process serial revocation (ticket
+# sec-admin-mtls-allowlist-revocation)
+# ---------------------------------------------------------------------------
+
+_VALID_ADMIN_HEADERS = {
+    "X-Client-Subject": "CN=dust@montana,OU=Admin,O=Venya",
+    "X-Client-Verified": "SUCCESS",
+    "X-Client-Serial": "1234123412341234",
+}
+
+
+class TestAdminMtlsSerialRevocation:
+    """Truth table for the hardened admin-mTLS chain: allowlist fail-closed
+    (#15), serial presentation fail-closed + in-process revocation (#16).
+    Revocation cells run on REAL SQLite so the func.upper() SQL is actually
+    evaluated — mocks cannot model it (house precedent:
+    test_session_manager_gate.py)."""
+
+    def test_empty_allowlist_fails_closed(self, admin_ca_dir):
+        """#15 negative: empty known_admin_ids (the CONFIG DEFAULT) rejects
+        even a fully valid header set — formerly the CN check was skipped and
+        ANY Root-CA cert (e.g. an executor cert) passed as caller=admin."""
+        app = _create_admin_mtls_app(admin_ca_dir, known_admin_ids=[])
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=_VALID_ADMIN_HEADERS)
+        assert resp.status_code == 403
+
+    def test_executor_cn_rejected_by_allowlist(self, admin_ca_dir):
+        """#15 acceptance row: an executor cert's CN cannot authenticate as
+        admin under a populated allowlist."""
+        app = _create_admin_mtls_app(admin_ca_dir, known_admin_ids=["dust@montana"])
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={**_VALID_ADMIN_HEADERS, "X-Client-Subject": "CN=venya-exec-1,O=Venya"},
+        )
+        assert resp.status_code == 403
+
+    def test_revoked_serial_rejected(self, admin_ca_dir):
+        """#16 negative: a serial recorded via POST /admin/certs/revoke is
+        rejected IN-PROCESS (formerly recorded but consulted nowhere — the
+        old test even documented 'Server no longer checks revocation')."""
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            revocation_rows=[("1234123412341234", "compromised")],
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=_VALID_ADMIN_HEADERS)
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Admin certificate revoked"
+
+    def test_legacy_lowercase_row_matches_uppercase_presentation(self, admin_ca_dir):
+        """#16 format-trap pin (ruling B): a legacy as-provided (lowercase)
+        row still matches nginx's uppercase presentation via func.upper().
+        Write-side normalization makes mixed-case rows legacy-only."""
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            revocation_rows=[("abcd1234abcd1234", "legacy-lowercase")],
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={**_VALID_ADMIN_HEADERS, "X-Client-Serial": "ABCD1234ABCD1234"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Admin certificate revoked"
+
+    def test_unrevoked_serial_passes(self, admin_ca_dir):
+        """Positive half: allowlisted identity + presented, unrevoked serial
+        → 200, caller=admin."""
+        app = _create_admin_mtls_app(admin_ca_dir)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=_VALID_ADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert resp.json()["user"]["caller"] == "admin"
+
+    def test_missing_serial_fails_closed_with_recovery_detail(self, admin_ca_dir):
+        """#16 fail-closed (ruling 1): no X-Client-Serial → 403, and the
+        detail CARRIES THE RECOVERY PATH (installer re-run + venya-core
+        restart) — fail-loud includes telling the operator how to become
+        loud-ready. Safe to be specific: the caller already passed the
+        cert-verified + allowlist gates."""
+        app = _create_admin_mtls_app(admin_ca_dir)
+        client = TestClient(app, raise_server_exceptions=False)
+        headers = {k: v for k, v in _VALID_ADMIN_HEADERS.items() if k != "X-Client-Serial"}
+        resp = client.get("/api/v1/admin/test", headers=headers)
+        assert resp.status_code == 403
+        detail = resp.json()["detail"]
+        assert "installer" in detail
+        assert "restart venya-core" in detail
+
+    def test_backend_unavailable_fails_closed(self, admin_ca_dir):
+        """Backend absence fails closed (mirrors _validate_executor_mtls)."""
+        app = _create_admin_mtls_app(admin_ca_dir, with_backend=False)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=_VALID_ADMIN_HEADERS)
         assert resp.status_code == 403
