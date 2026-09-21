@@ -60,14 +60,30 @@ def _build_attestation_object(
     cose_key: dict,
     counter: int = 1,
     rp_id_hash: bytes = RP_ID_HASH,
+    flags: int = 0x45,
 ) -> bytes:
     """Build a CBOR-encoded attestation object with attested credential data."""
     aaguid = b"\x00" * 16
     cred_data = aaguid + struct.pack(">H", len(cred_id)) + cred_id + fido2_cbor.encode(cose_key)
-    # Flags: UP(0x01) | UV(0x04) | AT(0x40) = 0x45
-    auth_data = rp_id_hash + bytes([0x45]) + struct.pack(">I", counter) + cred_data
+    # Flags default: UP(0x01) | UV(0x04) | AT(0x40) = 0x45
+    auth_data = rp_id_hash + bytes([flags]) + struct.pack(">I", counter) + cred_data
     ao = fido2_cbor.encode({"fmt": "none", "authData": auth_data, "attStmt": {}})
     return bytes(ao)
+
+
+def _reg_client_data(manager, challenge_id, type_="webauthn.create", origin=None, challenge=None) -> str:
+    """Build b64url clientDataJSON answering the manager's issued challenge.
+
+    Reads the raw challenge from the store BEFORE finish_registration pops it.
+    """
+    raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+    data = {
+        "type": type_,
+        "challenge": _b64url(challenge if challenge is not None else raw),
+        "origin": origin if origin is not None else f"https://{RP_ID}",
+        "crossOrigin": False,
+    }
+    return _b64url(json.dumps(data, separators=(",", ":")).encode())
 
 
 def _build_auth_data(
@@ -117,7 +133,7 @@ class TestFinishRegistration:
             "id": _b64url(cred_id),
             "rawId": _b64url(cred_id),
             "response": {
-                "clientDataJSON": _b64url(b"{}"),
+                "clientDataJSON": _reg_client_data(manager, challenge_id),
                 "authenticatorAttestationResponse": {
                     "attestationObject": _b64url(ao),
                 },
@@ -142,7 +158,7 @@ class TestFinishRegistration:
             "id": _b64url(cred_id),
             "rawId": _b64url(cred_id),
             "response": {
-                "clientDataJSON": _b64url(b"{}"),
+                "clientDataJSON": _reg_client_data(manager, challenge_id),
                 "attestationObject": _b64url(ao),
                 "transports": [],
             },
@@ -163,6 +179,106 @@ class TestFinishRegistration:
         }
         with pytest.raises(ValueError, match="Missing attestationObject"):
             manager.finish_registration(challenge_id, response)
+
+
+class TestFinishRegistrationCeremony:
+    """Ceremony verification negatives (sec-auth-elevation-authz-hardening #4).
+
+    Pre-fix, finish_registration accepted ANY parseable attestationObject for
+    an issued challenge. Each cell here mutates exactly one clientData /
+    authData field and pins the rejection + that NO credential is stored.
+    """
+
+    def _base(self, manager, es256_keypair, cred_id=b"\xaa" * 32, ao_kwargs=None, cd_kwargs=None):
+        _, public_key = es256_keypair
+        cose = ES256.from_cryptography_key(public_key)
+        ao = _build_attestation_object(cred_id, dict(cose), counter=1, **(ao_kwargs or {}))
+        challenge_id, _ = manager.start_registration(user_id="u1", username="user1")
+        cd = _reg_client_data(manager, challenge_id, **(cd_kwargs or {}))
+        return challenge_id, {
+            "id": _b64url(cred_id),
+            "rawId": _b64url(cred_id),
+            "response": {
+                "clientDataJSON": cd,
+                "authenticatorAttestationResponse": {"attestationObject": _b64url(ao)},
+            },
+            "type": "public-key",
+        }
+
+    def test_challenge_mismatch_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair, cd_kwargs={"challenge": b"\x01" * 32})
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Challenge mismatch"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_wrong_type_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair, cd_kwargs={"type_": "webauthn.get"})
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Wrong clientData type"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_wrong_origin_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair, cd_kwargs={"origin": "https://evil.example"})
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Origin mismatch"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_missing_client_data_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair)
+        del response["response"]["clientDataJSON"]
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Missing clientDataJSON"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_malformed_client_data_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair)
+        response["response"]["clientDataJSON"] = _b64url(b"{not json")
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Malformed clientDataJSON"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_rp_id_hash_mismatch_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(
+            manager,
+            es256_keypair,
+            ao_kwargs={"rp_id_hash": hashlib.sha256(b"other-rp").digest()},
+        )
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="RP ID hash mismatch"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_user_presence_flag_unset_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair, ao_kwargs={"flags": 0x44})  # UV|AT, no UP
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="User presence flag not set"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_challenge_consumed_on_failed_ceremony(self, manager, es256_keypair):
+        """Pop-on-read holds for failures too: a rejected ceremony cannot be
+        retried with a corrected clientData against the same challenge_id."""
+        challenge_id, response = self._base(manager, es256_keypair, cd_kwargs={"origin": "https://evil.example"})
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Origin mismatch"):
+            manager.finish_registration(challenge_id, response)
+        # fix the origin, replay the same challenge_id -> challenge is gone
+        _, fixed = self._base(manager, es256_keypair)  # issues a NEW challenge
+        with pytest.raises(WebAuthnError, match="Challenge not found"):
+            manager.finish_registration(challenge_id, fixed)
 
 
 class TestCredentialIdEncodingBoundary:
