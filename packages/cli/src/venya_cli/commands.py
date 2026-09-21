@@ -2529,20 +2529,80 @@ def cmd_admin_export_ca_cert(args: Any) -> int:
     return 0
 
 
+# --- CA-key backup envelope (ticket fido2-device-layer-sweep-findings
+# finding 5, canonical-format ruling 2026-09-21) --------------------------
+# Canonical: b"VENYACA1" + PBKDF2 salt(16) + GCM nonce(12) + AES-256-GCM
+# ciphertext+tag; KDF = PBKDF2HMAC(SHA256, 32, salt, 600_000). Byte-identical
+# to the server ca.py envelope — the CLI has no `core` dependency, so the
+# implementations are ALIGNED COPIES pinned by the cross-compat contract
+# tests in tests/test_cli_ca_key_format.py (both directions).
+# Restore is a DUAL-FORMAT reader: canonical GCM primary + legacy alpha.11
+# CBC (salt16 + iv16 + PKCS7 ct) read-only (precedent: the bootstrap-token
+# dual-location reader) — no exported key material may be stranded.
+_CA_BLOB_MAGIC = b"VENYACA1"
+_CA_KDF_ITERATIONS = 600_000
+
+
+def _derive_ca_backup_key(salt: bytes, passphrase: str) -> bytes:
+    """PBKDF2-SHA256 key derivation for CA-key backup envelopes."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=_CA_KDF_ITERATIONS)
+    return kdf.derive(passphrase.encode())
+
+
+def _decrypt_ca_backup(data: bytes, passphrase: str) -> bytes:
+    """Decrypt a CA-key backup blob (canonical GCM primary, legacy CBC read-only).
+
+    Raises ValueError with an operator-actionable message on any format,
+    passphrase, or tamper failure — never returns suspect material. The
+    legacy CBC path runs FULL PKCS7 validation: the pre-fix check inspected
+    only the last padding byte's RANGE, so a wrong passphrase or tampered
+    blob could restore silently-corrupted key material (finding 5).
+    """
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives import ciphers
+    from cryptography.hazmat.primitives.ciphers import algorithms, modes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    if data.startswith(_CA_BLOB_MAGIC):
+        body = data[len(_CA_BLOB_MAGIC) :]
+        if len(body) < 16 + 12 + 16:  # salt + nonce + GCM tag minimum
+            raise ValueError("backup file too small (canonical GCM envelope)")
+        salt, nonce, ciphertext = body[:16], body[16:28], body[28:]
+        try:
+            return AESGCM(_derive_ca_backup_key(salt, passphrase)).decrypt(nonce, ciphertext, None)
+        except InvalidTag:
+            raise ValueError("invalid passphrase or corrupted backup (GCM authentication failed)") from None
+
+    # Legacy alpha.11 CBC envelope: salt(16) + iv(16) + PKCS7-padded ciphertext.
+    if len(data) < 16 + 16 + 16:
+        raise ValueError("backup file too small")
+    salt, iv, ciphertext = data[:16], data[16:32], data[32:]
+    try:
+        decryptor = ciphers.Cipher(algorithms.AES(_derive_ca_backup_key(salt, passphrase)), modes.CBC(iv)).decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+    except ValueError:
+        raise ValueError("invalid passphrase or corrupted backup (CBC)") from None
+    pad = padded[-1] if padded else 0
+    if pad < 1 or pad > 16 or pad > len(padded) or padded[-pad:] != bytes([pad]) * pad:
+        raise ValueError("invalid passphrase or corrupted backup (PKCS7 validation failed)")
+    return padded[:-pad]
+
+
 def cmd_admin_export_ca_key(args: Any) -> int:
     """Export the CA private key, encrypted with a passphrase.
 
-    Reads the CA private key from disk, encrypts it using AES-256-CBC
-    with a user-provided passphrase, and writes the encrypted blob to
-    the specified output file.
+    Reads the CA private key from disk, encrypts it using the canonical
+    VENYACA1 envelope (AES-256-GCM, authenticated — finding-5 ruling), and
+    writes the blob to the specified output file.
 
     The plaintext key is never written to disk or stdout.
     """
     from pathlib import Path
 
-    from cryptography.hazmat.primitives import ciphers, hashes
-    from cryptography.hazmat.primitives.ciphers import algorithms, modes
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     ca_dir = _resolve_ca_dir(args)
     ca_key_path = Path(ca_dir) / "ca.key"
@@ -2571,35 +2631,21 @@ def cmd_admin_export_ca_key(args: Any) -> int:
 
     # Derive encryption key from passphrase using PBKDF2
     salt = os.urandom(16)
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=600_000,
-    )
-    key = kdf.derive(passphrase1.encode())
+    key = _derive_ca_backup_key(salt, passphrase1)
 
-    # Encrypt with AES-256-CBC
-    iv = os.urandom(16)
-    cipher = ciphers.Cipher(
-        algorithms.AES(key),
-        modes.CBC(iv),
-    )
-    encryptor = cipher.encryptor()
+    # Encrypt with AES-256-GCM — canonical VENYACA1 envelope (finding-5
+    # ruling): authenticated encryption, so tampering and wrong passphrases
+    # fail LOUDLY at restore. The old CBC envelope validated only the last
+    # padding byte and could restore silently-corrupted key material.
+    nonce = os.urandom(12)
+    encrypted = AESGCM(key).encrypt(nonce, plaintext_key, None)
 
-    # PKCS7 padding
-    block_size = 16
-    padding_len = block_size - (len(plaintext_key) % block_size)
-    padded = plaintext_key + bytes([padding_len] * padding_len)
-
-    encrypted = encryptor.update(padded) + encryptor.finalize()
-
-    # Write: salt (16) + iv (16) + encrypted data
+    # Write: MAGIC(8) + salt(16) + nonce(12) + ciphertext+tag
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(salt + iv + encrypted)
+    output_path.write_bytes(_CA_BLOB_MAGIC + salt + nonce + encrypted)
     output_path.chmod(0o600)
 
-    print(f"CA key encrypted and exported to {output_path}")
+    print(f"CA key encrypted (AES-256-GCM) and exported to {output_path}")
     print("Store this file securely. It requires the passphrase to decrypt.")
     return 0
 
@@ -2654,7 +2700,10 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
 
     Two modes:
     - shares: Reconstruct using Shamir's Secret Sharing from N share files
-    - backup: Decrypt from a passphrase-encrypted backup file
+    - backup: Decrypt from a passphrase-encrypted backup file — DUAL-FORMAT
+      reader: canonical VENYACA1 GCM primary + legacy alpha.11 CBC read-only
+      with FULL PKCS7 validation (finding-5 ruling; no exported key material
+      is stranded)
     """
     from pathlib import Path
 
@@ -2717,40 +2766,13 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
             print(f"Error: backup file not found: {backup_path}", file=sys.stderr)
             return 1
 
-        from cryptography.hazmat.primitives import ciphers, hashes
-        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
         encrypted_data = backup_path.read_bytes()
-        if len(encrypted_data) < 32:
-            print("Error: backup file too small", file=sys.stderr)
-            return 1
-
-        salt = encrypted_data[:16]
-        iv = encrypted_data[16:32]
-        ciphertext = encrypted_data[32:]
-
         passphrase = getpass.getpass("Enter passphrase to decrypt backup: ")
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=600_000,
-        )
-        key = kdf.derive(passphrase.encode())
-
-        cipher = ciphers.Cipher(
-            ciphers.algorithms.AES(key),
-            ciphers.modes.CBC(iv),
-        )
-        decryptor = cipher.decryptor()
-        padded = decryptor.update(ciphertext) + decryptor.finalize()
-
-        # Remove PKCS7 padding
-        padding_len = padded[-1]
-        if padding_len < 1 or padding_len > 16:
-            print("Error: invalid passphrase or corrupted backup", file=sys.stderr)
+        try:
+            reconstructed = _decrypt_ca_backup(encrypted_data, passphrase)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
             return 1
-        reconstructed = padded[:-padding_len]
 
     else:
         print(f"Unknown restore mode: {mode}", file=sys.stderr)

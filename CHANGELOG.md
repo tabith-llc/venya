@@ -112,6 +112,18 @@ Notable changes to Venya will be documented in this file.
 
 ### Fixed
 
+- CA-key break-glass backups now use ONE canonical envelope — AES-256-GCM
+  (authenticated encryption) behind a versioned `VENYACA1` header — across the
+  CLI and the server. Previously the CLI wrote AES-256-CBC while the server
+  wrote headerless GCM: cross-format blobs could not read each other, and the
+  CLI restore validated only the last padding byte's range, so a wrong
+  passphrase or tampered CBC blob could restore silently-corrupted key
+  material. New exports are authenticated-encrypted (tampering and wrong
+  passphrases fail loudly). Break-glass backups exported by alpha.11
+  (`venya admin export-ca-key`, CBC) remain restorable: `venya admin
+  restore-ca-key` is a dual-format reader (canonical GCM primary, legacy CBC
+  read-only with full PKCS7 validation), and the server restore likewise
+  still reads its pre-magic GCM blobs. No exported key material is stranded.
 - Session token refresh now works as designed: `/api/v1/auth/refresh` is gated
   by the 4-hour hard cap ONLY, so idle-expired sessions (15-min idle window by
   default) renew without human intervention. Previously the refresh applied

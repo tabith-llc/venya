@@ -230,6 +230,42 @@ class TestCAManager:
         assert pem.startswith(b"-----BEGIN CERTIFICATE-----")
         assert pem.endswith(b"-----END CERTIFICATE-----\n")
 
+    def test_export_restore_canonical_envelope_roundtrip(self, ca_dir):
+        """Canonical VENYACA1 envelope (ticket fido2-device-layer-sweep-findings
+        finding 5, ruling 2026-09-21): export writes the versioned magic header;
+        restore round-trips it. Real crypto, no mocks. The headerless-GCM cells
+        below are the LEGACY read path pins (pre-canonical server exports must
+        never be stranded)."""
+        key_pem = b"-----BEGIN PRIVATE KEY-----\ncanonical-roundtrip\n-----END PRIVATE KEY-----\n"
+        Path(ca_dir, "ca.key").write_bytes(key_pem)
+        manager = CAManager(ca_dir)
+
+        blob = manager.export_ca_key("canon-pw")
+        assert blob.startswith(b"VENYACA1")
+        assert key_pem not in blob
+
+        Path(ca_dir, "ca.key").unlink()
+        manager.restore_ca_key(blob, "canon-pw")
+        assert Path(ca_dir, "ca.key").read_bytes() == key_pem
+
+    def test_restore_legacy_headerless_gcm_still_works(self, ca_dir):
+        """Paired legacy pin: a pre-canonical headerless GCM blob (salt16 +
+        nonce12 + ct, the alpha server format) still restores — the magic
+        header addition must not strand old server-side exports."""
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+        key_pem = b"-----BEGIN PRIVATE KEY-----\nlegacy-headerless\n-----END PRIVATE KEY-----\n"
+        salt = b"\x02" * 16
+        nonce = b"\x03" * 12
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600_000)
+        blob = salt + nonce + AESGCM(kdf.derive(b"legacy-pw")).encrypt(nonce, key_pem, None)
+
+        manager = CAManager(ca_dir)
+        manager.restore_ca_key(blob, "legacy-pw")
+        assert Path(ca_dir, "ca.key").read_bytes() == key_pem
+
     def test_restore_ca_key_rejects_corrupted_data(self, ca_dir):
         """restore_ca_key() should reject tampered or wrong-passphrase data (AES-GCM)."""
         from cryptography.hazmat.primitives import hashes
