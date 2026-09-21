@@ -1504,8 +1504,12 @@ async def admin_revoke_admin_cert(
 
     Admin only. Idempotent — revoking the same serial twice returns success.
     """
-    # Validate serial format
-    serial = req.serial.strip()
+    # Normalize at the STORAGE BOUNDARY (user ruling 2026-09-20, ticket
+    # sec-admin-mtls-allowlist-revocation): nginx $ssl_client_serial is
+    # UPPERCASE; storing the serial as-provided forced every reader to
+    # compensate case-insensitively forever. Legacy mixed-case rows stay
+    # matched via the middleware's func.upper() read.
+    serial = req.serial.strip().upper()
     try:
         int(serial, 16)
         if len(serial) > 16:
