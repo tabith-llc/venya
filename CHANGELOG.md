@@ -42,6 +42,25 @@ Notable changes to Venya will be documented in this file.
 
 ### Changed
 
+- *(post-alpha12)* **env-shape and askpass secrets now EXECUTE**: a secret
+  stored with `--shape env:NAME` has its value injected into the sandbox
+  environment as `NAME`, carried by a 0600 host-side env file passed via
+  `sbx exec --env-file` — values never ride host argv (the former `-e K=V`
+  transport exposed them in `/proc/<pid>/cmdline` for the command's duration
+  and is gone), and the file is zeroed the moment the command returns.
+  Consumption is via tools that read their environment IMPLICITLY (aws,
+  kubectl via `KUBECONFIG`, psql via `PGPASSFILE`, docker via
+  `DOCKER_CONFIG`): a command can never reference `$NAME` itself — `$` is a
+  blocked metacharacter. `--shape askpass` wires `GIT_ASKPASS`/`SSH_ASKPASS`
+  to a static in-sandbox helper that prints the injected credential file
+  (username comes from the `username` metadata). The relay wire gains
+  OPTIONAL `env`/`askpass_helper` fields (coordinated contract change): the
+  server version-gates on the executor's heartbeat-reported build — older
+  executors get an actionable 422 naming the upgrade instead of a mystery
+  502 — and regular (file-shape) traffic keeps the exact pre-env wire shape.
+  Multi-line values are rejected at store AND execute time (the env-file
+  format is line-based). `sudo-stdin` remains declarative-only pending its
+  gate work.
 - *(post-alpha12)* Secret **shape metadata**: `venya store` and
   `venya update-metadata` gain `--shape` and `--usage` flags (equivalently
   `-m shape=… -m usage=…`) declaring how a secret is meant to be consumed —
@@ -52,9 +71,12 @@ Notable changes to Venya will be documented in this file.
   (values in command text persist UNMASKED in the audit log); unknown shape
   names are accepted as CUSTOM shapes with a teaching warning; unknown
   placeholders warn. Shapes whose consumption mechanism has not shipped yet
-  (`env:NAME`, `askpass`, `sudo-stdin`) are accepted but answer with a
-  DECLARATIVE-ONLY warning that points at the file path that DOES work — a
-  label must never imply capability the product lacks. `venya list` shows the shape. MCP `list_secrets` and
+  are accepted but answer with a DECLARATIVE-ONLY warning that points at the
+  file path that DOES work — a label must never imply capability the product
+  lacks (that set was `env:NAME`, `askpass`, `sudo-stdin` when this entry was
+  first written; the env and askpass mechanisms ship in this same unreleased
+  train — see the entry above — leaving `sudo-stdin` as the only pending
+  label). `venya list` shows the shape. MCP `list_secrets` and
   `run_command` descriptions now teach agents the injected-file pattern
   (`/run/secrets/venya/<id>`) and usage templates — the previous
   `run_command` example showed a command that could not consume its bound

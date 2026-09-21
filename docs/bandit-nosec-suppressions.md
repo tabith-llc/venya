@@ -11,7 +11,7 @@ justification. Rows are keyed on file + line content (line numbers drift and are
 deliberately not recorded). Scope = `packages/*/src` — the same tree the pre-commit
 bandit hook scans (tests dirs are hook-excluded).
 
-**53 suppression lines across 17 files.**
+**58 suppression lines across 17 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -48,6 +48,11 @@ bandit hook scans (tests dirs are hook-excluded).
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `["sbx", "exec", "-i", sandbox_name, "tee", "/tmp/sshpass"],  # nosec B108` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `["sbx", "exec", sandbox_name, "chmod", "+x", "/tmp/sshpass"],  # nosec B108` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `mkdir_result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `chmod_result = subprocess.run(  # nosec` |
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `mkdir_result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `subprocess.run(  # nosec` |
