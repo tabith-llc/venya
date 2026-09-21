@@ -250,6 +250,54 @@ class TestInitComplete:
         assert "recovery_code" in data
         assert data["user_id"] == "alice"
 
+    def test_complete_cross_user_challenge_rejected(self):
+        """Binding guard (sec-auth-elevation-authz-hardening #4): a challenge
+        bound to a different user cannot complete this init -> 400, no
+        credential stored."""
+        fido2 = MockFido2Manager()
+        fido2.start_registration("alice", "alice")
+        # Simulate the challenge having been issued for a DIFFERENT user
+        fido2._challenges["test-challenge-id"]["user_id"] = "mallory"
+
+        admin_role = _make_role(role_id=1, name="admin")
+        pending_user = _make_user("alice", enrolled_at=None)
+
+        class MockQuery:
+            def __init__(self, model):
+                self._model = model
+
+            def join(self, *args, **kwargs):
+                return self
+
+            def filter(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                if self._model is not None and "Role" in str(self._model):
+                    return admin_role
+                return pending_user
+
+        db = MagicMock()
+        db.query.side_effect = lambda model: MockQuery(model)
+
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        app = _create_test_app(backend=backend, fido2_manager=fido2)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/init/complete",
+            json={
+                "user_id": "alice",
+                "challenge_id": "test-challenge-id",
+                "response": {"id": "test-cred-id", "rawId": "dGVzdC1jcmVk"},
+            },
+        )
+        assert resp.status_code == 400
+        assert "different user" in resp.json()["detail"]
+        db.add.assert_not_called()
+
     def test_complete_invalid_challenge(self):
         """Complete with invalid challenge returns 400."""
         db = MagicMock()

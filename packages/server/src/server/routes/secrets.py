@@ -220,14 +220,17 @@ async def secrets_get(
     key: str,
     request: Request,
     unmask: bool = False,
-    elevation_token: str | None = None,
     user_info: dict = Depends(require_role("read")),
     db: Session = Depends(get_db),
 ) -> SecretGetResponse:
     """Retrieve a secret value (HUMAN-ONLY route).
 
     Masked by default; unmask requires a valid, single-use elevation token
-    (WebAuthn re-auth) and is a loud 403 without one.
+    (WebAuthn re-auth) and is a loud 403 without one. The token rides the
+    X-Elevation-Token HEADER (sec-auth-elevation-authz-hardening #13: the
+    former query param persisted tokens in nginx + uvicorn access logs;
+    uvicorn.access has its own handler, so RedactingFormatter never saw it).
+    Header transport is the established convention (credentials routes, CLI).
 
     Ticket sec-secret-caller-param-plaintext-bypass: the former
     client-controlled `caller` query param (`?caller=executor` → plaintext)
@@ -239,6 +242,7 @@ async def secrets_get(
     ticket sec-executor-session-path-no-auth) and consume secrets via
     session injection (`core.get_for_injection`), never this endpoint.
     """
+    elevation_token = request.headers.get("X-Elevation-Token")
     core = getattr(request.app.state, "core", None)
     if core is None:
         raise HTTPException(
@@ -491,7 +495,32 @@ async def update_secret_metadata(
 
     db = backend.get_session()
     try:
+        # Visibility enforcement FIRST (sec-auth-elevation-authz-hardening #5,
+        # interlock 3): route through the core single enforcement point
+        # (_resolve_secret_in: visible iff caller-role in scope OR creator) so
+        # a scoped-out secret is 404-INDISTINGUISHABLE from a nonexistent one
+        # and the metadata writer below is NEVER touched — no existence leak,
+        # no mutation. Pre-fix this route queried bare Secret.key: any
+        # read-write member could rewrite metadata on ANY secret (IDOR).
+        from core.engine.core import CoreAccessError
         from core.iam.models import Secret
+        from core.iam.role_manager import RoleManager
+
+        rm = RoleManager(db)
+        caller_roles = [m.role.name for m in rm.get_user_roles(user_info["user_id"])]
+        try:
+            core.get(
+                secret_key=key,
+                caller="human",
+                unmask=False,
+                user_id=user_info["user_id"],
+                role_names=caller_roles,
+            )
+        except CoreAccessError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Secret not found",
+            ) from None
 
         secret = db.query(Secret).filter(Secret.key == key).first()
         if secret is None:

@@ -243,6 +243,13 @@ async def browser_enroll_complete(
                 req.challenge_id,
                 fido2_response,
             )
+            # Challenge<->user binding (sec-auth-elevation-authz-hardening #4):
+            # the credential must belong to the challenge's user, which must be
+            # the enrollment token's user. Without this, a challenge_id issued
+            # for user A completed with token B would bind the key material to
+            # A in the in-memory store but to B in the DB row (identity split).
+            if cred.user_id != str(token.user_id):
+                raise WebAuthnError("Registration challenge was issued for a different user")
         except WebAuthnError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

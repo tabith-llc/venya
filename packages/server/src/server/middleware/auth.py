@@ -498,7 +498,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
             from core.iam.models import Session as SessionModel
             from core.iam.session_manager import SessionConfig as CoreSessionConfig
-            from core.iam.session_manager import SessionManager
+            from core.iam.session_manager import SessionManager, is_user_active
 
             sc = request.app.state.config.session
             config = CoreSessionConfig(
@@ -519,6 +519,16 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
             # Get user info
             user = session.user
+
+            # Surviving-session status gate (sec-auth-elevation-authz-hardening
+            # #9): issuance is gated in create_session (UserNotActiveError),
+            # but WITHOUT this check a disabled user's EXISTING sessions keep
+            # full access until idle expiry / hard cap. Central predicate —
+            # is_user_active is the single semantic source (session_manager.py).
+            if not is_user_active(user):
+                logger.warning("Session for user %s rejected: user is not active", session.user_id)
+                return None
+
             user_info = {
                 "user_id": user.user_id,
                 "session_id": session.id,

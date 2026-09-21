@@ -46,11 +46,11 @@ def _create_test_app():
     return app
 
 
-def _make_session_mock(user_id="user1", expires_at=None, access_token_jti="token-123"):
+def _make_session_mock(user_id="user1", expires_at=None, access_token_jti="token-123", user_status="active"):
     """Create a mock session object."""
     if expires_at is None:
         expires_at = datetime.now(UTC) + timedelta(minutes=10)
-    user_mock = SimpleNamespace(user_id=user_id)
+    user_mock = SimpleNamespace(user_id=user_id, status=user_status)
     return SimpleNamespace(
         id=1,
         user_id=user_id,
@@ -539,10 +539,10 @@ class TestExecutorSessionPathAuth:
 class TestSessionExtension:
     """Tests for middleware session extension (M-19 fix)."""
 
-    def _make_session(self, user_id="user1", expires_at=None, access_token="token-123"):
+    def _make_session(self, user_id="user1", expires_at=None, access_token="token-123", user_status="active"):
         if expires_at is None:
             expires_at = datetime.now(UTC) + timedelta(minutes=10)
-        user_mock = SimpleNamespace(user_id=user_id)
+        user_mock = SimpleNamespace(user_id=user_id, status=user_status)
         return SimpleNamespace(
             id=1,
             user_id=user_id,
@@ -664,3 +664,67 @@ class TestSessionExtension:
             assert resp.status_code == 401
 
             mock_sm.return_value.extend_session.assert_not_called()
+
+
+class TestDisabledUserSurvivingSession:
+    """Surviving-session status gate (sec-auth-elevation-authz-hardening #9).
+
+    Issuance is gated by create_session (UserNotActiveError, webauthn ticket);
+    this pins the OTHER half: a user disabled AFTER login loses access on the
+    next request — the session does not survive until idle expiry.
+    """
+
+    def test_disabled_user_live_session_rejected_401(self):
+        session = _make_session_mock(user_status="disabled")
+        backend = _make_backend(session)
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
+            mock_sm.return_value.check_expiry.return_value = True
+            mock_rm.return_value.get_user_roles.return_value = []
+
+            app = _create_test_app()
+            app.state.backend = backend
+
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/protected", headers={"authorization": "Bearer token-123"})
+            assert resp.status_code == 401
+            assert resp.json()["detail"] == "Invalid or expired token"
+
+    def test_pending_enrollment_user_live_session_rejected_401(self):
+        """Paired negative: any non-active status is refused, not just 'disabled'."""
+        session = _make_session_mock(user_status="pending_enrollment")
+        backend = _make_backend(session)
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
+            mock_sm.return_value.check_expiry.return_value = True
+            mock_rm.return_value.get_user_roles.return_value = []
+
+            app = _create_test_app()
+            app.state.backend = backend
+
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/protected", headers={"authorization": "Bearer token-123"})
+            assert resp.status_code == 401
+
+    def test_active_user_live_session_passes(self):
+        """Paired positive: the gate does not reject the normal case."""
+        session = _make_session_mock(user_status="active")
+        backend = _make_backend(session)
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm, patch(
+            "core.iam.role_manager.RoleManager"
+        ) as mock_rm:
+            mock_sm.return_value.check_expiry.return_value = True
+            mock_rm.return_value.get_user_roles.return_value = []
+
+            app = _create_test_app()
+            app.state.backend = backend
+
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/protected", headers={"authorization": "Bearer token-123"})
+            assert resp.status_code == 200
+            assert resp.json()["user"]["user_id"] == "user1"

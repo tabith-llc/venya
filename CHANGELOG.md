@@ -6,6 +6,38 @@ Notable changes to Venya will be documented in this file.
 
 ### Security
 
+- WebAuthn registration ceremonies are now verified: `finish_registration`
+  validates the `clientDataJSON` (type `webauthn.create`, issued-challenge
+  binding, RP origin), the RP ID hash in the authenticator data, and the
+  user-presence flag — previously any parseable attestationObject was
+  accepted for an issued challenge id without these WebAuthn spec checks.
+  The three registration routes (user enrollment, installation init,
+  credential add) additionally reject credentials minted from a DIFFERENT
+  user's challenge (challenge↔user binding). Registration deliberately
+  enforces a stricter RP context (origin) than the authentication side;
+  the divergence is documented in code, not an inconsistency.
+- Elevation tokens are single-use and user-bound on every surface: the
+  credential endpoints now consume the token with an atomic conditional
+  update bound to the calling user (previously any valid token from ANY
+  user could be replayed within its 60-second TTL). `venya credential add`
+  correspondingly performs a second security-key touch for the completion
+  step. Secret-unmasking elevation tokens move from a URL query parameter —
+  which persisted tokens in nginx/uvicorn access logs — to the
+  `X-Elevation-Token` header, matching the credential endpoints and the
+  CLI. Breaking: `GET /api/v1/secrets/{key}?elevation_token=…` no longer
+  elevates (transport standardized in coordination with the concurrent
+  elevation-gate hardening, sec-secret-caller-param-plaintext-bypass).
+- Disabled users lose access immediately: session validation re-checks user
+  status on every request through one central predicate, so a disabled
+  user's EXISTING sessions die at their next API call instead of surviving
+  until idle expiry (15 minutes by default) or the 4-hour hard cap. Session
+  issuance was already gated.
+- Secret metadata updates (`PATCH /api/v1/secrets/{key}/metadata`) enforce
+  the same role-scope visibility as every other secret read, routed through
+  the core single enforcement point — previously any read-write role member
+  could rewrite metadata on ANY secret, including secrets scoped to roles
+  they do not hold (IDOR). Scoped-out secrets stay indistinguishable from
+  nonexistent ones (404, no mutation).
 - Executor revocation is now identity-based (hybrid model): `venya admin
   revoke-executor <id>` terminally revokes the IDENTITY (`Executor.revoked_at`,
   previously a dead-wired column) — command routing refuses revoked executors
