@@ -813,6 +813,13 @@ class Executor:
             json=payload,
             timeout=timeout,
         )
+        if response.status_code != 200:
+            # Explicit fail-closed (ticket stage2-filter-unknown-session-
+            # unmasked-passthrough): a 404 means the server has NO knowledge of
+            # this session (unknown or TTL-reaped mid-run) — the caller keeps
+            # the Stage-1 masked results instead of adopting an empty-knowledge
+            # passthrough. Named RuntimeError, not an accidental KeyError.
+            raise RuntimeError(f"Stage-2 filter returned {response.status_code}")
         data = response.json()
 
         filtered_stdout = base64.b64decode(data["stdout"])

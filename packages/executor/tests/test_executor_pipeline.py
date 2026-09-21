@@ -630,6 +630,7 @@ class TestStage2NoSecretMaterial:
         executor.http_client = mock_http_client
 
         response = MagicMock()
+        response.status_code = 200
         response.json.return_value = {
             "stdout": base64.b64encode(b"filtered\n").decode(),
             "stderr": base64.b64encode(b"").decode(),
