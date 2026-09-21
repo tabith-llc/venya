@@ -28,18 +28,29 @@ set -euo pipefail
 #   VENYA_SKIP_PROMPT - Set to "yes" to skip the confirmation prompt
 ###############################################################################
 
-# --- Source common library (same pattern as the installers) ---
-COMMON_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [ -f "$COMMON_DIR/venya-common.sh" ]; then
-    source "$COMMON_DIR/venya-common.sh"
-else
-    FETCH_ORIGIN="${VENYA_FETCH_ORIGIN:-http://10.27.27.35:8080}"
-    FETCH_DIR="$(mktemp -d)"
-    trap 'rm -rf "$FETCH_DIR"' EXIT
-    echo "Fetching shared installer library from $FETCH_ORIGIN/venya-common.sh" >&2
-    curl -fsSL "$FETCH_ORIGIN/venya-common.sh" -o "$FETCH_DIR/venya-common.sh" || exit 1
-    source "$FETCH_DIR/venya-common.sh"
-fi
+# --- Self-contained helpers (inlined from venya-common.sh, which stays the
+# source of truth — keep in sync if these ever change). NO fetch fallback by
+# design: an uninstaller must work with any origin down or air-gapped, and
+# fetch-and-source at root is a supply-chain surface this path does not need.
+# (Ticket uninstaller-fetch-origin-lan-default: the old fallback defaulted to
+# the dev LAN origin, breaking every piped customer uninstall.)
+venya_print_colors() {
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    NC='\033[0m'
+
+    info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
+    warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+    error() { echo -e "${RED}[ERROR]${NC} $*"; }
+}
+
+venya_check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        error "This script must be run as root (or with sudo)."
+        exit 1
+    fi
+}
 
 venya_print_colors
 venya_check_root
