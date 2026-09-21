@@ -106,12 +106,13 @@ USAGE_PLACEHOLDERS = frozenset({"secret_path", "secret_id", "host", "user"})
 # Shapes whose consumption MECHANISM has not shipped yet — declaring one is
 # allowed (forward-compat ruling) but must WARN: a label implying capability
 # the product lacks is a user-friendliness defect and a support-ticket
-# generator. (env:NAME and askpass SHIPPED in the same unreleased train —
-# tickets secret-shape-env-injection / secret-shape-askpass-helpers; they left
-# this set when their mechanisms landed.) File-arg shapes are NOT here: file
-# injection ships today, and tool availability inside the sandbox template is
-# a deployment property the server cannot know (documented per-shape).
-MECHANISM_PENDING_SHAPES = frozenset({"sudo-stdin"})
+# generator. Currently EMPTY: env:NAME + askpass shipped in the env-shape
+# train, sudo-stdin shipped via the narrow redirect allowance (ticket
+# secret-shape-sudo-remote option (a)). Re-add here ONLY with a ruling.
+# File-arg shapes are NOT here: file injection ships today, and tool
+# availability inside the sandbox template is a deployment property the
+# server cannot know (documented per-shape).
+MECHANISM_PENDING_SHAPES: frozenset[str] = frozenset()
 
 _VALUE_PLACEHOLDER_RE = re.compile(
     r"\{\s*(value|secret_value|secret|plaintext|password|pass|token|credential)\s*\}",
