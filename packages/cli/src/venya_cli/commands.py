@@ -283,23 +283,36 @@ def cmd_store(client: APIClient, args: Any) -> int:
             "key_version_id": key_version_id,
         }
 
-        # Parse metadata key=value pairs
-        metadata = getattr(args, "metadata", None)
-        if metadata:
-            meta_dict = {}
-            for item in metadata:
-                k, _, v = item.partition("=")
-                meta_dict[k] = v
+        # Parse metadata key=value pairs + --shape/--usage sugar
+        meta_dict: dict[str, str] = {}
+        for item in getattr(args, "metadata", None) or []:
+            k, _, v = item.partition("=")
+            meta_dict[k] = v
+        for flag, key in (("--shape", "shape"), ("--usage", "usage")):
+            val = getattr(args, key, None)
+            if val is not None:
+                if key in meta_dict and meta_dict[key] != val:
+                    print(
+                        f"Conflicting {key}: given both via '-m {key}=...' and {flag}. Use one form.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                meta_dict[key] = val
+        if meta_dict:
             payload["metadata"] = meta_dict
 
         resp = client.post(
             "/api/v1/secrets",
             json=payload,
         )
-        if isinstance(resp, dict) and resp.get("replaced"):
-            print(f"Secret '{args.key}' replaced existing (id {resp.get('id')}).")
-        else:
-            print(f"Secret '{args.key}' stored successfully.")
+        if isinstance(resp, dict):
+            for w in resp.get("metadata_warnings") or []:
+                print(f"warning: {w}", file=sys.stderr)
+            if resp.get("replaced"):
+                print(f"Secret '{args.key}' replaced existing (id {resp.get('id')}).")
+            else:
+                shape_suffix = f" (shape: {meta_dict['shape']})" if "shape" in meta_dict else ""
+                print(f"Secret '{args.key}' stored successfully{shape_suffix}.")
         return 0
     except APIClientError as e:
         print(f"Failed to store secret: {e}", file=sys.stderr)
@@ -366,6 +379,8 @@ def cmd_list(client: APIClient, args: Any) -> int:
             meta = secret.get("metadata")
             if meta:
                 parts = []
+                if meta.get("shape"):
+                    parts.append(f"shape={meta['shape']}")
                 if meta.get("executor"):
                     parts.append(f"executor={meta['executor']}")
                 if meta.get("purpose"):
@@ -401,12 +416,31 @@ def cmd_delete(client: APIClient, args: Any) -> int:
 def cmd_update_metadata(client: APIClient, args: Any) -> int:
     """Update metadata for a secret."""
     try:
-        meta_dict = {}
-        for item in args.metadata:
+        meta_dict: dict[str, str] = {}
+        for item in getattr(args, "metadata", None) or []:
             k, _, v = item.partition("=")
             meta_dict[k] = v
+        for flag, key in (("--shape", "shape"), ("--usage", "usage")):
+            val = getattr(args, key, None)
+            if val is not None:
+                if key in meta_dict and meta_dict[key] != val:
+                    print(
+                        f"Conflicting {key}: given both via '-m {key}=...' and {flag}. Use one form.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                meta_dict[key] = val
+        if not meta_dict:
+            print(
+                "Nothing to update: pass -m key=value, --shape, or --usage.",
+                file=sys.stderr,
+            )
+            return 1
 
-        client.patch(f"/api/v1/secrets/{args.key}/metadata", json={"metadata": meta_dict})
+        resp = client.patch(f"/api/v1/secrets/{args.key}/metadata", json={"metadata": meta_dict})
+        if isinstance(resp, dict):
+            for w in resp.get("metadata_warnings") or []:
+                print(f"warning: {w}", file=sys.stderr)
         print(f"Metadata updated for secret '{args.key}'.")
         return 0
     except APIClientError as e:

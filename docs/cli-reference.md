@@ -129,6 +129,8 @@ venya store <KEY> [VALUE] --roles ROLES [OPTIONS]
 | `--roles` | **yes** | repeatable/space-separated list | — | Role(s) to scope the secret to |
 | `--key-version` | no | string | — | Key version ID to encrypt with (default: server's active key version) |
 | `--metadata`, `-m` | no | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |
+| `--shape` | no | string | — | How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name) |
+| `--usage` | no | string | — | Command template for humans/agents; reference the secret only via {secret_path} (e.g. 'sshpass -f {secret_path} ssh user@host cmd') |
 
 **Examples**
 
@@ -205,13 +207,15 @@ venya delete db/password  # delete a secret (fails if still referenced by an exe
 Update metadata for a secret
 
 ```
-venya update-metadata <KEY> --metadata METADATA
+venya update-metadata <KEY> [OPTIONS]
 ```
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `KEY` (positional) | **yes** | string | — | Secret key to update |
-| `--metadata`, `-m` | **yes** | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |
+| `--metadata`, `-m` | no | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |
+| `--shape` | no | string | — | How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name) |
+| `--usage` | no | string | — | Command template for humans/agents; reference the secret only via {secret_path} (e.g. 'sshpass -f {secret_path} ssh user@host cmd') |
 
 **Examples**
 
