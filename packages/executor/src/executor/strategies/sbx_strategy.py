@@ -88,9 +88,17 @@ def sweep_workspace_base(base: str = WORKSPACE_BASE) -> int:
 # Askpass helper script (ticket secret-shape-askpass-helpers): git/ssh invoke
 # the file named by GIT_ASKPASS/SSH_ASKPASS with a prompt argument. It prints
 # the credential file named by VENYA_ASKPASS_SECRET; username prompts are
-# answered from VENYA_ASKPASS_USER when set. STATIC content — carries no
-# secret; written 0555 into the protected secrets dir at runtime.
+# answered from VENYA_ASKPASS_USER when set. The guard is load-bearing: an
+# unguarded `cat "$VAR"` with VAR unset becomes `cat` on stdin, which would
+# HANG until SBX_TIMEOUT (1h) instead of failing loudly (ticket acceptance:
+# "never empty-string success" — and never a silent hang either).
+# STATIC content — carries no secret; written 0555 into the protected secrets
+# dir at runtime.
 ASKPASS_HELPER_CONTENT = """#!/bin/sh
+if [ -z "${VENYA_ASKPASS_SECRET:-}" ] || [ ! -r "${VENYA_ASKPASS_SECRET:-}" ]; then
+    echo "venya-askpass: VENYA_ASKPASS_SECRET is unset or unreadable" >&2
+    exit 1
+fi
 case "${1:-}" in
     *sername*)
         if [ -n "${VENYA_ASKPASS_USER:-}" ]; then

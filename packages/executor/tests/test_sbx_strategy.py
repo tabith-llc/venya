@@ -15,7 +15,12 @@ import pytest
 from venya_contract import ASKPASS_HELPER_PATH
 
 from executor.bundles import SecretBundle
-from executor.strategies.sbx_strategy import SBX_CREATE_TIMEOUT, SbxStrategy, sweep_workspace_base
+from executor.strategies.sbx_strategy import (
+    ASKPASS_HELPER_CONTENT,
+    SBX_CREATE_TIMEOUT,
+    SbxStrategy,
+    sweep_workspace_base,
+)
 
 
 class TestSbxStrategyName:
@@ -642,6 +647,57 @@ class TestAskpassHelper:
     def test_no_sandbox_raises(self):
         with pytest.raises(RuntimeError, match="Sandbox not created yet"):
             SbxStrategy().write_askpass_helper()
+
+    def test_helper_guard_unset_secret_exits_nonzero(self, tmp_path):
+        """The guard is load-bearing: without it, `cat "$UNSET"` reads stdin
+        and hangs until SBX_TIMEOUT instead of failing loudly (defect found
+        by the ticket acceptance review — never empty-string success, never
+        a silent hang)."""
+        import subprocess
+
+        script = tmp_path / "helper.sh"
+        script.write_text(ASKPASS_HELPER_CONTENT)
+        r = subprocess.run(
+            ["sh", str(script), "Password for x"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        assert r.returncode == 1
+        assert "VENYA_ASKPASS_SECRET" in r.stderr
+
+    def test_helper_live_behavior_password_and_username_branches(self, tmp_path):
+        """Real sh execution of the helper content: password prompt -> the
+        credential file content; username prompt -> VENYA_ASKPASS_USER."""
+        import subprocess
+
+        cred = tmp_path / "cred"
+        cred.write_text("tok-value\n")
+        script = tmp_path / "helper.sh"
+        script.write_text(ASKPASS_HELPER_CONTENT)
+        base_env = {"PATH": "/usr/bin:/bin", "VENYA_ASKPASS_SECRET": str(cred)}
+        r = subprocess.run(
+            ["sh", str(script), "Password for 'https://git.example'"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=base_env,
+        )
+        assert r.returncode == 0
+        assert r.stdout == "tok-value\n"
+        r2 = subprocess.run(
+            ["sh", str(script), "Username for 'https://git.example'"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env={**base_env, "VENYA_ASKPASS_USER": "gituser"},
+        )
+        assert r2.returncode == 0
+        assert r2.stdout == "gituser\n"
 
 
 class TestCopySshpass:
