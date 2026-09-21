@@ -2307,17 +2307,26 @@ def executor_heartbeat(args: Any) -> int:
     executor_id = info["executor_id"]
     url = f"{server_url}/api/v1/heartbeat"
 
+    # Plaintext http:// is REJECTED (ticket sec-sweep-low-informational #17,
+    # user ruling 2026-09-21): this POST carries executor-identifying state,
+    # and silently disabling TLS for an http:// URL was the CLI's only
+    # non-knob TLS-off path. The sanctioned VENYA_TLS_VERIFY=false knob covers
+    # a DISTRUSTED CERT over https — it never means "no TLS".
+    if not server_url.startswith("https://"):
+        print(
+            f"Error: server URL must be https:// — got '{server_url}'. Plaintext http is "
+            "not supported for the executor heartbeat (ticket sec-sweep-low-informational #17).",
+            file=sys.stderr,
+        )
+        return 1
+
     # Build mTLS client
     try:
         ca_cert_path = str(Path(cert_path).parent / "ca.crt")
-        use_tls = server_url.startswith("https://")
-        if use_tls:
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.load_cert_chain(cert_path, key_path)
-            if Path(ca_cert_path).exists():
-                ssl_ctx.load_verify_locations(ca_cert_path)
-        else:
-            ssl_ctx = False  # type: ignore[assignment]
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.load_cert_chain(cert_path, key_path)
+        if Path(ca_cert_path).exists():
+            ssl_ctx.load_verify_locations(ca_cert_path)
         with httpx2.Client(
             verify=ssl_ctx,
             timeout=10.0,

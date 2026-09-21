@@ -554,6 +554,10 @@ class TestRevocationList:
         assert resp.status_code == 200
         data = resp.json()
         assert data["revoked_serials"] == []
+        # READ-ONLY pin (ticket sec-sweep-low-informational #23b): the public
+        # GET no longer purges (write-on-read at fleet_size x 2/min) — the
+        # purge is a maintenance-loop pass now.
+        ca_manager.purge_expired_revocations.assert_not_called()
 
     def test_revocation_list_with_entries(self, ca_manager):
         revocations = [

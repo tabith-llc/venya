@@ -122,13 +122,16 @@ def cleanup_rate_limit_counters(db: Session, *, hours: int = 1) -> int:
     return result.rowcount
 
 
-def run_maintenance(db: Session, config) -> None:
+def run_maintenance(db: Session, config, ca_manager) -> None:
     """Run all cleanup passes against ``db``.
 
     Args:
         db: The DB session (caller owns close/rollback).
         config: The ``ServerConfig`` (or ``None``). Missing fields fall back to
             the same defaults the inline loop used (900 / 14400 / 60).
+        ca_manager: The ``CAManager`` (or ``None`` in unit contexts) — REQUIRED
+            positional so a forgotten wiring fails loudly (TypeError) instead
+            of silently skipping the revocation purge (user ruling 2026-09-21).
     """
     session_timeout = getattr(getattr(config, "session", None), "session_timeout", 900)
     max_session_duration = getattr(getattr(config, "session", None), "max_session_duration", 14400)
@@ -170,3 +173,24 @@ def run_maintenance(db: Session, config) -> None:
     except Exception:
         db.rollback()
         logger.exception("Rate limit cleanup failed")
+
+    # Revocation-table purge — RELOCATED from the two public CRL GETs (ticket
+    # sec-sweep-low-informational #23b): unauthenticated write-on-read ran at
+    # fleet_size x 2/min; the table stays bounded on this 5-minute schedule
+    # instead. BOUNDARY (interactive ruling on the revocation rework, confirmed
+    # against ca.py purge_expired_revocations): SERIAL-level rows only
+    # (ExecutorCertRevocation kill-history, retention-bounded) — identity-level
+    # revocation (Executor.revoked_at) is TERMINAL and is never touched by the
+    # purge; the relocation does not widen purge semantics.
+    if ca_manager is not None:
+        try:
+            from . import metrics
+
+            retention_days = getattr(getattr(config, "crl", None), "crl_retention_days", 90)
+            purged = ca_manager.purge_expired_revocations(db, retention_days)
+            metrics.CA_REVOCATIONS_PURGED_TOTAL.inc()
+            if purged:
+                logger.info("Revocation purge: deleted %d expired serial-level revocations", purged)
+        except Exception:
+            db.rollback()
+            logger.exception("Revocation purge failed")

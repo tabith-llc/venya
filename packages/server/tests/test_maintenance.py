@@ -81,7 +81,7 @@ def test_cleanup_rate_limit_counters_runs_delete_and_commits():
 def test_run_maintenance_happy_path_runs_all_four():
     db = MagicMock()
     db.execute.return_value.rowcount = 0
-    run_maintenance(db, None)  # config=None → defaults, must not raise
+    run_maintenance(db, None, None)  # config=None → defaults, must not raise
     assert db.commit.call_count == 4
 
 
@@ -92,7 +92,7 @@ def test_run_maintenance_respects_config_values():
         session=SimpleNamespace(session_timeout=123, max_session_duration=456),
         clock_skew=SimpleNamespace(token_tolerance_seconds=7),
     )
-    run_maintenance(db, config)
+    run_maintenance(db, config, None)
     assert db.commit.call_count == 4
 
 
@@ -103,7 +103,7 @@ def test_run_maintenance_secondary_failure_is_isolated():
         "server.maintenance.purge_admin_identity_metadata",
         side_effect=RuntimeError("boom"),
     ):
-        run_maintenance(db, None)  # must NOT raise
+        run_maintenance(db, None, None)  # must NOT raise
     # sessions + execution-sessions + rate-limit commits; purge failed before its commit
     assert db.commit.call_count == 3
     db.rollback.assert_called_once()
@@ -113,6 +113,41 @@ def test_run_maintenance_primary_failure_propagates_no_rollback_here():
     db = MagicMock()
     db.execute.side_effect = RuntimeError("db down")
     with pytest.raises(RuntimeError):
-        run_maintenance(db, None)
+        run_maintenance(db, None, None)
     # Primary failure is rolled back by the caller (app.py loop), not run_maintenance.
     db.rollback.assert_not_called()
+
+
+def test_run_maintenance_revocation_purge_pass_runs():
+    """5th pass RUNS when ca_manager is wired (user ruling 2026-09-21: a
+    never-called pass with a defaulted-to-None manager is a quiet dead
+    feature — pinned with the real signature; relocated from the public CRL
+    GETs, ticket sec-sweep-low-informational #23b). Default retention 90."""
+    db = MagicMock()
+    db.execute.return_value.rowcount = 0
+    ca_manager = MagicMock()
+    ca_manager.purge_expired_revocations.return_value = 3
+    run_maintenance(db, None, ca_manager)
+    ca_manager.purge_expired_revocations.assert_called_once_with(db, 90)
+
+
+def test_run_maintenance_revocation_purge_retention_from_config():
+    """Retention days come from config.crl when present."""
+    db = MagicMock()
+    db.execute.return_value.rowcount = 0
+    config = SimpleNamespace(crl=SimpleNamespace(crl_retention_days=30))
+    ca_manager = MagicMock()
+    ca_manager.purge_expired_revocations.return_value = 0
+    run_maintenance(db, config, ca_manager)
+    ca_manager.purge_expired_revocations.assert_called_once_with(db, 30)
+
+
+def test_run_maintenance_purge_failure_is_isolated():
+    """A purge blowup rolls back and does not abort the run (isolated-pass
+    contract shared with the other secondary passes)."""
+    db = MagicMock()
+    db.execute.return_value.rowcount = 0
+    ca_manager = MagicMock()
+    ca_manager.purge_expired_revocations.side_effect = RuntimeError("boom")
+    run_maintenance(db, None, ca_manager)  # must not raise
+    db.rollback.assert_called()

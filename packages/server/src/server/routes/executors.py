@@ -678,13 +678,10 @@ async def get_revocation_list(
     """
     from core.iam.models import ExecutorCertRevocation
 
-    ca_manager = _get_ca_manager(request)
-    # Purge old entries to keep table bounded
-    server_config = getattr(request.app.state, "config", None)
-    retention_days = server_config.crl.crl_retention_days if server_config and hasattr(server_config, "crl") else 90
-    deleted_count = ca_manager.purge_expired_revocations(db, retention_days)
-    if deleted_count > 0:
-        logger.debug("Purged %d expired revocations (%d day retention)", deleted_count, retention_days)
+    # READ-ONLY (ticket sec-sweep-low-informational #23b): this public GET
+    # used to purge expired revocations on every poll (~30s x fleet) — an
+    # unauthenticated write-on-read. The purge now runs as a maintenance-loop
+    # pass (maintenance.run_maintenance, 5-minute schedule).
 
     # Fetch remaining revocations
     revocations = db.query(ExecutorCertRevocation).all()
@@ -717,18 +714,14 @@ async def get_crl(
 ) -> Response:
     """Get the signed Certificate Revocation List in DER format.
 
-    Public endpoint — no authentication required. Purges expired
-    revocation records before generating the CRL. Supports conditional
-    GET via ETag for caching.
+    Public endpoint — no authentication required. READ-ONLY: the expired-
+    revocation purge moved to the maintenance loop (ticket
+    sec-sweep-low-informational #23b — public GETs must not write).
+    Supports conditional GET via ETag for caching.
     """
     from core.iam.models import ExecutorCertRevocation
 
     ca_manager = _get_ca_manager(request)
-    server_config = getattr(request.app.state, "config", None)
-    retention_days = server_config.crl.crl_retention_days if server_config and hasattr(server_config, "crl") else 90
-
-    ca_manager.purge_expired_revocations(db, retention_days)
-    metrics.CA_REVOCATIONS_PURGED_TOTAL.inc()
     crl_der = ca_manager.generate_crl(db)
     metrics.CA_CRL_GENERATED_TOTAL.inc()
 
