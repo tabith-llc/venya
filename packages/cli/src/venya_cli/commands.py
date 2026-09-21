@@ -313,15 +313,20 @@ def cmd_get(client: APIClient, args: Any) -> int:
     """Retrieve a secret."""
     try:
         params: dict[str, Any] = {"unmask": args.unmask}
+        get_kwargs: dict[str, Any] = {"params": params}
         if args.unmask:
             # Unmask is elevation-gated server-side (ticket
             # sec-secret-caller-param-plaintext-bypass): re-authenticate with
             # the security key first, same ceremony as credential add.
+            # The token rides the X-Elevation-Token HEADER — the server
+            # deleted the query-param transport (sec-auth-elevation-authz-
+            # hardening #13) and a query token leaks into access logs
+            # (ticket cli-elevation-token-query-param-transport).
             print("Re-authenticating with security key for elevation...")
-            params["elevation_token"] = _elevate(client)
+            get_kwargs["extra_headers"] = {"X-Elevation-Token": _elevate(client)}
         result = client.get(
             f"/api/v1/secrets/{args.key}",
-            params=params,
+            **get_kwargs,
         )
         if args.unmask:
             print(result.get("value", ""))

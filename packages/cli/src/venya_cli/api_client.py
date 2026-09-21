@@ -381,9 +381,14 @@ class APIClient:
             return response.json()
         return {}
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Send a GET request."""
-        return self._request("GET", path, params=params)
+        return self._request("GET", path, params=params, extra_headers=extra_headers)
 
     def post(
         self,
