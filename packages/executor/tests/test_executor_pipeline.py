@@ -66,7 +66,7 @@ class TestExecute:
         """Mock _run_command_sbx to return a basic CommandResult."""
         import os
 
-        def mock_sbx_run(self, command, injections, env_override, cwd):
+        def mock_sbx_run(self, command, injections, env_override, cwd, askpass_helper=False):
             import subprocess as _real_subprocess
 
             try:

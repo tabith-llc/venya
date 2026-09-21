@@ -12,10 +12,11 @@ from unittest.mock import MagicMock, patch
 import httpx2
 import pytest
 
+from executor.bundles import SecretBundle
 from executor.command_validator import CommandValidator
 from executor.config import CertificateRotationConfig, ExecutorConfig, MtlsConfig, ReaperConfig
 from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop
-from executor.executor import Executor
+from executor.executor import Executor, _resolve_env_vars
 
 # --- Fixtures ---
 
@@ -573,3 +574,49 @@ class TestSbxTruncationAccounting:
         assert result.output_truncated is True
         assert result.original_stdout_size == MAX_OUTPUT_BYTES + 999
         assert result.original_stderr_size == 0
+
+
+class TestResolveEnvVars:
+    """_resolve_env_vars truth table (ticket secret-shape-env-injection):
+    secret_id -> unwrapped bundle value, literal -> verbatim, loud rejects.
+    Paired cells: every accept path has a reject twin."""
+
+    def _bundle(self, sid, value: bytes) -> SecretBundle:
+        return SecretBundle(secret_id=str(sid), value=value, wrapped_value=b"w")
+
+    def test_secret_id_resolves_against_bundles(self):
+        env = _resolve_env_vars([{"var_name": "TOKEN", "secret_id": 7}], [self._bundle(7, b"s3cret")], None)
+        assert env == {"TOKEN": "s3cret"}
+
+    def test_int_str_id_forms_both_resolve(self):
+        env = _resolve_env_vars([{"var_name": "T", "secret_id": "7"}], [self._bundle(7, b"v")], None)
+        assert env == {"T": "v"}
+
+    def test_literal_passes_verbatim(self):
+        env = _resolve_env_vars(
+            [{"var_name": "GIT_ASKPASS", "literal_value": "/run/secrets/venya/.venya-askpass"}], [], None
+        )
+        assert env == {"GIT_ASKPASS": "/run/secrets/venya/.venya-askpass"}
+
+    def test_legacy_override_merges_underneath(self):
+        env = _resolve_env_vars([{"var_name": "A", "literal_value": "new"}], [], {"A": "old", "B": "keep"})
+        assert env == {"A": "new", "B": "keep"}
+
+    def test_unbound_secret_id_rejected(self):
+        with pytest.raises(ValueError, match="not among the session's injected secrets"):
+            _resolve_env_vars([{"var_name": "T", "secret_id": 99}], [self._bundle(7, b"v")], None)
+
+    def test_newline_value_rejected(self):
+        with pytest.raises(ValueError, match="newline"):
+            _resolve_env_vars([{"var_name": "T", "secret_id": 7}], [self._bundle(7, b"a\nFORGED=1")], None)
+
+    def test_non_utf8_value_rejected(self):
+        with pytest.raises(ValueError, match="UTF-8"):
+            _resolve_env_vars([{"var_name": "T", "secret_id": 7}], [self._bundle(7, b"\xff\xfe")], None)
+
+    def test_missing_var_name_rejected(self):
+        with pytest.raises(ValueError, match="missing var_name"):
+            _resolve_env_vars([{"secret_id": 7}], [self._bundle(7, b"v")], None)
+
+    def test_none_spec_noop(self):
+        assert _resolve_env_vars(None, [], None) == {}

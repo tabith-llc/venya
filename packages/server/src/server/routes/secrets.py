@@ -106,10 +106,12 @@ USAGE_PLACEHOLDERS = frozenset({"secret_path", "secret_id", "host", "user"})
 # Shapes whose consumption MECHANISM has not shipped yet — declaring one is
 # allowed (forward-compat ruling) but must WARN: a label implying capability
 # the product lacks is a user-friendliness defect and a support-ticket
-# generator. File-arg shapes are NOT here: file injection ships today, and
-# tool availability inside the sandbox template is a deployment property the
-# server cannot know (documented per-shape, tickets secret-shape-*).
-MECHANISM_PENDING_SHAPES = frozenset({"askpass", "sudo-stdin"})
+# generator. (env:NAME and askpass SHIPPED in the same unreleased train —
+# tickets secret-shape-env-injection / secret-shape-askpass-helpers; they left
+# this set when their mechanisms landed.) File-arg shapes are NOT here: file
+# injection ships today, and tool availability inside the sandbox template is
+# a deployment property the server cannot know (documented per-shape).
+MECHANISM_PENDING_SHAPES = frozenset({"sudo-stdin"})
 
 _VALUE_PLACEHOLDER_RE = re.compile(
     r"\{\s*(value|secret_value|secret|plaintext|password|pass|token|credential)\s*\}",
@@ -144,10 +146,10 @@ def _validate_shape_metadata(meta: dict[str, Any]) -> list[str]:
                 f"shape '{shape}' is not built-in; treating it as a CUSTOM shape (allowed).{hint}"
                 f" Built-ins: {', '.join(sorted(BUILTIN_SHAPES))}, and env:NAME."
             )
-        if shape.startswith(ENV_SHAPE_PREFIX) or shape in MECHANISM_PENDING_SHAPES:
+        if shape in MECHANISM_PENDING_SHAPES:
             warnings.append(
                 f"shape '{shape}' is DECLARATIVE-ONLY in this release — its consumption mechanism"
-                " has not shipped yet (env injection / askpass helper / sudo-stdin are roadmap)."
+                " has not shipped yet (sudo-stdin awaits the secret-shape-sudo-remote work)."
                 " The secret IS still injected as a file at /run/secrets/venya/<id>, and any tool"
                 " that reads it from a file works today."
             )
@@ -281,6 +283,21 @@ async def secrets_create(
     # actionable 400 must not be swallowed by the generic except below.
     meta = req.metadata.model_dump(exclude_none=True) if req.metadata else {}
     meta_warnings = _validate_shape_metadata(meta)
+    # env shapes ride the line-based sandbox env-file format — catch multi-line
+    # values at authoring time (loudest, earliest point) instead of at execute.
+    shape_val = meta.get("shape")
+    if (
+        isinstance(shape_val, str)
+        and shape_val.startswith(ENV_SHAPE_PREFIX)
+        and ("\n" in req.value or "\r" in req.value)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "env-shape secrets must be single-line (the sandbox env-file format is line-based). "
+                "Store the value without embedded newlines, or use a file-based shape."
+            ),
+        )
 
     try:
         # Caller's ACTUAL role names, fresh from the DB (NOT user_info["roles"]

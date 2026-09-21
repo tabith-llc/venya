@@ -1403,22 +1403,38 @@ class TestShapeMetadata:
         assert resp.status_code == 201
         assert resp.json()["metadata_warnings"] == []
 
-    def test_env_shape_accepted_with_declarative_only_warning(self):
-        # env: names are forward-compat taxonomy, but the mechanism (relay env
-        # field) has NOT shipped — accepting the label silently would imply a
-        # capability the product lacks. The warning teaches what works today.
+    def test_env_shape_accepted_without_warning(self):
+        # env mechanism SHIPPED (secret-shape-env-injection): env: is a builtin
+        # taxonomy prefix — the former declarative-only warning left with it.
         resp = self._store({"shape": "env:AWS_SECRET_ACCESS_KEY"})
         assert resp.status_code == 201
-        warnings = resp.json()["metadata_warnings"]
-        assert len(warnings) == 1
-        assert "DECLARATIVE-ONLY" in warnings[0]
-        assert "/run/secrets/venya/" in warnings[0]  # the file path still works
+        assert resp.json()["metadata_warnings"] == []
 
     def test_mechanism_pending_shapes_warn(self):
-        for shape in ("askpass", "sudo-stdin"):
+        for shape in ("sudo-stdin",):
             resp = self._store({"shape": shape})
             assert resp.status_code == 201, shape
             assert any("DECLARATIVE-ONLY" in w for w in resp.json()["metadata_warnings"]), shape
+
+    def test_env_shape_multiline_value_rejected_400(self):
+        # The env-file format is line-based — catch multi-line values at
+        # authoring time (loudest, earliest point), before persistence.
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "multi",
+                "value": "line1\nline2",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": {"shape": "env:MY_TOKEN"},
+            },
+        )
+        assert resp.status_code == 400
+        assert "single-line" in resp.json()["detail"]
+        core.put.assert_not_called()  # rejected before persistence
 
     def test_file_arg_shapes_never_warn_mechanism(self):
         # File injection ships today; tool availability is a deployment
