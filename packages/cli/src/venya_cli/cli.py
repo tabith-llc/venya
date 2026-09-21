@@ -11,6 +11,18 @@ import sys
 from datetime import UTC
 
 
+def _cli_version() -> str:
+    """Single-sourced version (feature/version-surfaces condition 1): dist
+    metadata (pyproject) is the only truth — never a string literal."""
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        return _pkg_version("venya-cli")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def create_parser() -> argparse.ArgumentParser:
     """Create the main CLI argument parser.
 
@@ -39,6 +51,12 @@ def create_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="Enable verbose output",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"venya {_cli_version()}",
+        help="Print the CLI version and exit",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -243,6 +261,15 @@ def create_parser() -> argparse.ArgumentParser:
     # admin revoke-executor
     revoke_executor_parser = admin_sub.add_parser("revoke-executor", help="Revoke an executor certificate")
     revoke_executor_parser.add_argument("executor_id", help="Executor ID to revoke")
+    revoke_executor_parser.add_argument(
+        "--serial",
+        default=None,
+        help=(
+            "Revoke ONLY this certificate serial (hex, up to 16 chars) without revoking "
+            "the executor identity — for orphaned/predecessor credentials. Omit for the "
+            "identity form (terminal: re-enrollment then requires a NEW executor_id)."
+        ),
+    )
 
     # admin executor-enroll
     enroll_executor_parser = admin_sub.add_parser(
@@ -632,6 +659,12 @@ def create_parser() -> argparse.ArgumentParser:
 
     # exec status
     exec_subparsers.add_parser("status", help="Show executor registration status")
+
+    # exec list
+    exec_list_parser = exec_subparsers.add_parser(
+        "list", help="List registered executors with heartbeat-reported versions (admin)"
+    )
+    exec_list_parser.add_argument("--json", action="store_true", help="Output raw JSON")
 
     # config
     config_parser = subparsers.add_parser("config", help="Manage CLI configuration")

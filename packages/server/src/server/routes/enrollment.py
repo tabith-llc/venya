@@ -93,10 +93,11 @@ async def enrollment_create_token(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("Token creation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Token creation failed",
         )
 
 
@@ -165,8 +166,9 @@ async def enrollment_revoke_token(
         revoked = em.revoke_token(token_id)
         db.commit()
         return EnrollmentTokenRevokeResponse(revoked=revoked)
-    except Exception as e:
+    except Exception:
+        logger.exception("Token revocation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Token revocation failed",
         )

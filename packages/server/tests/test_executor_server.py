@@ -78,6 +78,25 @@ def signed_cert(ca_manager, executor_keypair):
 # ---------------------------------------------------------------------------
 
 
+def _add_executor_auth(app, executor_id):
+    """Inject middleware-shaped executor auth state.
+
+    The heartbeat route now requires request.state.auth_user ==
+    {"caller": "executor", "executor_id": CN} (production: set by
+    SessionMiddleware._validate_executor_mtls — ticket
+    sec-endpoint-ratelimit-hardening #7). Route-level test apps mount the
+    router without that middleware, so they inject the same shape.
+    """
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    class _ExecutorAuth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.auth_user = {"caller": "executor", "executor_id": executor_id}
+            return await call_next(request)
+
+    app.add_middleware(_ExecutorAuth)
+
+
 @dataclass
 class MockExecutorCert:
     executor_id: str
@@ -88,6 +107,9 @@ class MockExecutorCert:
 @dataclass
 class MockExecutorCertRevocation:
     serial_number: str
+    # updated: the shared revocation state (executor-revocation-by-identity)
+    # surfaces the row's revoked_at — mock models the full schema.
+    revoked_at: object = None
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +229,42 @@ class TestCAManager:
         pem = ca_manager.get_ca_cert_pem()
         assert pem.startswith(b"-----BEGIN CERTIFICATE-----")
         assert pem.endswith(b"-----END CERTIFICATE-----\n")
+
+    def test_export_restore_canonical_envelope_roundtrip(self, ca_dir):
+        """Canonical VENYACA1 envelope (ticket fido2-device-layer-sweep-findings
+        finding 5, ruling 2026-09-21): export writes the versioned magic header;
+        restore round-trips it. Real crypto, no mocks. The headerless-GCM cells
+        below are the LEGACY read path pins (pre-canonical server exports must
+        never be stranded)."""
+        key_pem = b"-----BEGIN PRIVATE KEY-----\ncanonical-roundtrip\n-----END PRIVATE KEY-----\n"
+        Path(ca_dir, "ca.key").write_bytes(key_pem)
+        manager = CAManager(ca_dir)
+
+        blob = manager.export_ca_key("canon-pw")
+        assert blob.startswith(b"VENYACA1")
+        assert key_pem not in blob
+
+        Path(ca_dir, "ca.key").unlink()
+        manager.restore_ca_key(blob, "canon-pw")
+        assert Path(ca_dir, "ca.key").read_bytes() == key_pem
+
+    def test_restore_legacy_headerless_gcm_still_works(self, ca_dir):
+        """Paired legacy pin: a pre-canonical headerless GCM blob (salt16 +
+        nonce12 + ct, the alpha server format) still restores — the magic
+        header addition must not strand old server-side exports."""
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+        key_pem = b"-----BEGIN PRIVATE KEY-----\nlegacy-headerless\n-----END PRIVATE KEY-----\n"
+        salt = b"\x02" * 16
+        nonce = b"\x03" * 12
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600_000)
+        blob = salt + nonce + AESGCM(kdf.derive(b"legacy-pw")).encrypt(nonce, key_pem, None)
+
+        manager = CAManager(ca_dir)
+        manager.restore_ca_key(blob, "legacy-pw")
+        assert Path(ca_dir, "ca.key").read_bytes() == key_pem
 
     def test_restore_ca_key_rejects_corrupted_data(self, ca_dir):
         """restore_ca_key() should reject tampered or wrong-passphrase data (AES-GCM)."""
@@ -336,12 +394,14 @@ class TestExecutorRegistration:
 
         db.query.side_effect = q
 
-    def _create_app(self, ca_manager, db):
+    def _create_app(self, ca_manager, db, auth_executor_id=None):
         app = FastAPI()
         app.state.backend = MagicMock()
         app.state.backend.get_session.return_value = db
         app.state.ca_manager = ca_manager
         app.include_router(executors_routes.router, prefix="/api/v1")
+        if auth_executor_id is not None:
+            _add_executor_auth(app, auth_executor_id)
         return app
 
     def test_register_success(self, ca_manager, executor_csr, executor_keypair):
@@ -497,7 +557,7 @@ class TestExecutorRegistration:
         existing = Executor(id="web-server-3", hostname="venya-exec-1", status="active")
         db = _make_mock_db()
         self._make_db_with_executor(db, existing)
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="web-server-3")
         client = TestClient(app)
         resp = client.post("/api/v1/heartbeat", json={"executor_id": "web-server-3"})
         assert resp.status_code == 200
@@ -530,6 +590,10 @@ class TestRevocationList:
         assert resp.status_code == 200
         data = resp.json()
         assert data["revoked_serials"] == []
+        # READ-ONLY pin (ticket sec-sweep-low-informational #23b): the public
+        # GET no longer purges (write-on-read at fleet_size x 2/min) — the
+        # purge is a maintenance-loop pass now.
+        ca_manager.purge_expired_revocations.assert_not_called()
 
     def test_revocation_list_with_entries(self, ca_manager):
         revocations = [
@@ -585,17 +649,19 @@ class TestRevocationList:
 class TestHeartbeat:
     """Tests for POST /heartbeat."""
 
-    def _create_app(self, ca_manager, db):
+    def _create_app(self, ca_manager, db, auth_executor_id=None):
         app = FastAPI()
         app.state.backend = MagicMock()
         app.state.backend.get_session.return_value = db
         app.state.ca_manager = ca_manager
         app.include_router(executors_routes.router, prefix="/api/v1")
+        if auth_executor_id is not None:
+            _add_executor_auth(app, auth_executor_id)
         return app
 
     def test_heartbeat_no_executor(self, ca_manager):
         db = _make_mock_db()
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="unknown-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -616,7 +682,7 @@ class TestHeartbeat:
         )
         revocation = MockExecutorCertRevocation(serial_number="abc123")
         db = _make_mock_db(executor_certs=[cert_record], revocations=[revocation])
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -635,7 +701,7 @@ class TestHeartbeat:
             not_after=datetime.now(UTC) + timedelta(days=1),
         )
         db = _make_mock_db(executor_certs=[cert_record])
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -654,7 +720,7 @@ class TestHeartbeat:
             not_after=datetime.now(UTC) + timedelta(days=20),
         )
         db = _make_mock_db(executor_certs=[cert_record])
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -686,7 +752,7 @@ class TestHeartbeat:
             return orig(model) if callable(orig) else MagicMock()
 
         db.query.side_effect = q
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -701,7 +767,7 @@ class TestHeartbeat:
     def test_heartbeat_no_row_is_noop(self, ca_manager):
         """F3: no Executor row -> no last_heartbeat write, no commit, still 200."""
         db = _make_mock_db()  # _make_mock_db yields None for Executor lookups
-        app = self._create_app(ca_manager, db)
+        app = self._create_app(ca_manager, db, auth_executor_id="ghost-exec")
         client = TestClient(app)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -709,3 +775,40 @@ class TestHeartbeat:
         )
         assert resp.status_code == 200
         db.commit.assert_not_called()
+
+    def test_heartbeat_requires_executor_auth(self, ca_manager):
+        """#7 negative (route-level defense-in-depth): no executor auth state
+        → 403, no writes. Production: SessionMiddleware rejects with 401/403
+        BEFORE the route (no cert / unregistered CN)."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)  # no auth injected
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "test-exec", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 403
+        db.commit.assert_not_called()
+
+    def test_heartbeat_binding_mismatch_403(self, ca_manager):
+        """#7 negative (CN binding): cert CN 'exec-a' cannot stamp row
+        'exec-b' — the forged-liveness oracle is closed."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db, auth_executor_id="exec-a")
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "exec-b", "cert_fingerprint": "abc"},
+        )
+        assert resp.status_code == 403
+        db.commit.assert_not_called()
+
+    def test_dead_alpha_id_heartbeat_route_removed(self, ca_manager):
+        """The dead alpha variant POST /executors/{id}/heartbeat
+        (require_role("none"), zero production callers — daemon AND CLI use
+        /api/v1/heartbeat with the executor cert) is GONE → 404."""
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/executors/test-exec/heartbeat")
+        assert resp.status_code == 404

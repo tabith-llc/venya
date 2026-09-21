@@ -119,14 +119,34 @@ venya_create_user() {
 
 # --- 6. Install system packages ---
 
+# apt-get wrapper: waits for the dpkg/apt lock via apt's NATIVE timeout (no
+# fuser/psmic bootstrap dependency — fuser is not guaranteed present at the
+# first apt call on a fresh cloud image) and surfaces the output tail on failure
+# instead of dying silently under `set -e`. Without this, an apt-daily /
+# unattended-upgrades lock race makes apt-get exit 100 pre-transaction with zero
+# diagnostics (ticket installer-apt-lock-silent-fail). On failure the log is kept
+# and its path printed. Override the wait with VENYA_APT_LOCK_TIMEOUT (seconds).
+venya_apt() {
+    local log rc=0
+    log=$(mktemp /tmp/venya-apt-XXXXXX.log)
+    apt-get -o DPkg::Lock::Timeout="${VENYA_APT_LOCK_TIMEOUT:-120}" "$@" > "$log" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        error "apt-get $* failed (exit $rc). Last 25 lines:"
+        tail -25 "$log" >&2
+        error "Full apt log: $log"
+        return "$rc"
+    fi
+    rm -f "$log"
+}
+
 venya_install_system_pkgs() {
     # Args: space-separated package names
     if [ $# -eq 0 ]; then
         return
     fi
     info "Installing system packages..."
-    apt-get update -qq
-    apt-get install -y -qq "$@" > /dev/null 2>&1
+    venya_apt update -qq
+    venya_apt install -y -qq "$@"
 }
 
 # --- 7. Install uv (root) ---
@@ -451,6 +471,67 @@ venya_service_retry() {
     fi
 
     info "${service_name}.service is running"
+}
+
+# --- 15b. Fresh-bytes service sync (ticket installer-rerun-no-service-restart) ---
+# Installer re-runs swap site-packages bytes while the long-lived Python
+# process keeps its old in-memory imports (Python never hot-reloads) and
+# `systemctl start` is a NO-OP on a running unit — verification then probes
+# the STALE process wearing a success stamp. These helpers compare the
+# service start time against a deploy stamp written by the installer and
+# restart-when-stale with a loud notice naming both timestamps (detection
+# PROOF, not a blind restart).
+
+venya_service_sync() {
+    # Args: $1 = service name (e.g. venya-core), $2 = deploy-stamp file
+    local service_name="${1:-}" stamp="${2:-}"
+    if [ -z "$service_name" ] || [ -z "$stamp" ]; then
+        error "venya_service_sync requires service_name and stamp arguments"
+        exit 1
+    fi
+
+    if systemctl is-failed --quiet "${service_name}.service" 2>/dev/null; then
+        warn "${service_name}.service is in failed state — resetting before start"
+        systemctl reset-failed "${service_name}.service" 2>/dev/null || true
+    fi
+
+    if ! systemctl is-active --quiet "${service_name}.service" 2>/dev/null; then
+        info "${service_name}.service is not running — starting"
+        systemctl start "${service_name}.service"
+        return 0
+    fi
+
+    local start_raw start_epoch stamp_epoch
+    start_raw="$(systemctl show -p ActiveEnterTimestamp --value "${service_name}.service")"
+    start_epoch="$(date -d "$start_raw" +%s 2>/dev/null || echo 0)"
+    stamp_epoch="$(stat -c %Y "$stamp" 2>/dev/null || echo 0)"
+    if [ "$start_epoch" -eq 0 ] || [ "$stamp_epoch" -eq 0 ]; then
+        warn "Cannot compare timestamps (start='$start_raw' stamp='$stamp') — restarting to be safe"
+        systemctl restart "${service_name}.service"
+    elif [ "$start_epoch" -le "$stamp_epoch" ]; then
+        warn "NOTICE: running ${service_name} process started ${start_raw} — BEFORE the bytes just deployed ($(date -d "@${stamp_epoch}"))"
+        warn "RESTARTING ${service_name}.service to load the new build (re-run swaps packages under the live process; Python does not hot-reload)"
+        systemctl restart "${service_name}.service"
+    else
+        info "${service_name}.service already runs bytes at least as new as this deploy (started ${start_raw}) — no restart needed"
+    fi
+}
+
+venya_service_freshness() {
+    # Args: $1 = service name, $2 = deploy-stamp file
+    # Post-start verification proof: the running process must be NEWER than
+    # the deployed bytes, so every probe that follows attests the new build
+    # (PROCESS RULE: proof-of-new-bytes before mutating probes).
+    local service_name="${1:-}" stamp="${2:-}"
+    local start_raw start_epoch stamp_epoch
+    start_raw="$(systemctl show -p ActiveEnterTimestamp --value "${service_name}.service" 2>/dev/null)"
+    start_epoch="$(date -d "$start_raw" +%s 2>/dev/null || echo 0)"
+    stamp_epoch="$(stat -c %Y "$stamp" 2>/dev/null || echo 0)"
+    if [ "$start_epoch" -gt 0 ] && [ "$start_epoch" -ge "$stamp_epoch" ]; then
+        info "PROOF-OF-FRESH-BYTES: ${service_name} started ${start_raw} >= deploy stamp $(date -d "@${stamp_epoch}") — verification probes the NEW process"
+    else
+        warn "PROOF-OF-FRESH-BYTES FAILED: ${service_name} start '${start_raw}' is not at/after the deploy stamp — do NOT trust verification probes"
+    fi
 }
 
 # --- 16. Verify installation ---

@@ -2,7 +2,162 @@
 
 Notable changes to Venya will be documented in this file.
 
-## [Unreleased]
+## [0.1.0alpha12] - 2026-09-21
+
+> **Operator-facing behavior changes in this release — failure signatures:**
+> - **Auth-endpoint rate limiting now actually fires.** More than 20 requests/min
+>   per IP to `/api/v1/auth/*` answers `429` with detail `Auth endpoint rate
+>   limited: too many requests per minute` (the tier was silently unenforced
+>   before). E2E scaffolds and scripts that hammer auth endpoints must pace
+>   themselves or set `VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE` explicitly.
+> - **Executor registration requires an enrollment token by default**
+>   (`executor_enrollment.require_token`): a tokenless `POST /executors/register`
+>   fails with an error naming the knob and the re-enrollment path. Deployments
+>   that relied on open registration must enroll with a token (recommended) or
+>   deliberately set the knob to `false`.
+> - **Secret unmasking and credential operations take the elevation token in the
+>   `X-Elevation-Token` header.** `GET /api/v1/secrets/{key}?elevation_token=…`
+>   answers `403 Elevation token required to unmask` — query-param transport is
+>   removed (tokens in URLs leaked into access logs).
+
+### Security
+
+- Per-IP rate-limit counters now persist: the counter increment previously ran
+  in a transaction that was rolled back on every request, so none of the
+  database-backed tiers (auth 20/min, generic, break-glass 5/hr) ever enforced
+  — only the in-memory break-glass failure backoff fired. The break-glass
+  hourly tier and the auth tier are now physically enforced and their
+  fixed-window counters survive across requests and restarts.
+- WebAuthn login is now refused when the signature-counter persist fails
+  (previously the login succeeded and the counter update was silently
+  lost, erasing a future clone-detection opportunity). Fail-closed,
+  consistent with the credential active-state check in the same path: a
+  database write failure during authentication yields an actionable error
+  and a retryable login, not a quiet degradation of clone detection.
+- Executor audit spool (`~/.venya/audit-spool.jsonl` — holds full command
+  lines) is now created 0600, and a legacy world-readable spool (pre-fix
+  default umask, typically 0644) is repaired at daemon startup.
+- A malformed relay response no longer leaks response-body fragments into
+  the server journal: the validation error is logged as offending field
+  names + error types only (the pydantic repr embedded `input_value=`
+  body content, which the redacting log formatter cannot catch — the
+  relay hop must never reach a logger by design).
+- Contract honesty: the relay wire docstring no longer claims
+  `wrapped_value` is ciphertext — it is sentinel-wrapped base64 of the
+  plaintext (plaintext-equivalent); confidentiality rests on the mTLS
+  transport, the 10-minute session-secret purge, and host disk
+  protections, never on the encoding.
+- WebAuthn registration ceremonies are now verified: `finish_registration`
+  validates the `clientDataJSON` (type `webauthn.create`, issued-challenge
+  binding, RP origin), the RP ID hash in the authenticator data, and the
+  user-presence flag — previously any parseable attestationObject was
+  accepted for an issued challenge id without these WebAuthn spec checks.
+  The three registration routes (user enrollment, installation init,
+  credential add) additionally reject credentials minted from a DIFFERENT
+  user's challenge (challenge↔user binding). Registration deliberately
+  enforces a stricter RP context (origin) than the authentication side;
+  the divergence is documented in code, not an inconsistency.
+- Elevation tokens are single-use and user-bound on every surface: the
+  credential endpoints now consume the token with an atomic conditional
+  update bound to the calling user (previously any valid token from ANY
+  user could be replayed within its 60-second TTL). `venya credential add`
+  correspondingly performs a second security-key touch for the completion
+  step. Secret-unmasking elevation tokens move from a URL query parameter —
+  which persisted tokens in nginx/uvicorn access logs — to the
+  `X-Elevation-Token` header, matching the credential endpoints and the
+  CLI. Breaking: `GET /api/v1/secrets/{key}?elevation_token=…` no longer
+  elevates (transport standardized in coordination with the concurrent
+  elevation-gate hardening, sec-secret-caller-param-plaintext-bypass).
+- Disabled users lose access immediately: session validation re-checks user
+  status on every request through one central predicate, so a disabled
+  user's EXISTING sessions die at their next API call instead of surviving
+  until idle expiry (15 minutes by default) or the 4-hour hard cap. Session
+  issuance was already gated.
+- Secret metadata updates (`PATCH /api/v1/secrets/{key}/metadata`) enforce
+  the same role-scope visibility as every other secret read, routed through
+  the core single enforcement point — previously any read-write role member
+  could rewrite metadata on ANY secret, including secrets scoped to roles
+  they do not hold (IDOR). Scoped-out secrets stay indistinguishable from
+  nonexistent ones (404, no mutation).
+- Executor heartbeat (`POST /api/v1/heartbeat`) is no longer public: it
+  requires a verified executor mTLS identity (registered, non-spoofable CN)
+  and binds the reported `executor_id` to the client certificate. Previously
+  any unauthenticated caller could liveness-stamp any executor row and read
+  the fleet revocation/rotation state as an oracle. A revoked executor still
+  receives its advisory `200 {revoked: true}` (the cooperative-stop channel
+  is preserved) but no longer writes to its row. The dead alpha-only
+  `POST /api/v1/executors/{id}/heartbeat` variant was removed.
+- Per-IP rate limits now key on the trustworthy RIGHTMOST `X-Forwarded-For`
+  entry (the one our own nginx appends) instead of the attacker-controlled
+  leftmost entry — one spoofed header previously reset the bucket on every
+  request, bypassing the break-glass 5/hr limit, the auth tier, and the
+  failure backoff. Rests on the existing loopback-only-backend deployment
+  invariant (exactly one trusted proxy hop), now shared with the X-Client-*
+  mTLS header chain.
+- Executor revocation is now identity-based (hybrid model): `venya admin
+  revoke-executor <id>` terminally revokes the IDENTITY (`Executor.revoked_at`,
+  previously a dead-wired column) — command routing refuses revoked executors
+  server-side, registration under a revoked identity is rejected even with a
+  valid token, and a restarted daemon on a diverged/stale certificate is caught
+  via the new `revoked_identities` list entries and the heartbeat `revoked`
+  flag. A `--serial` form kills one credential without touching the identity
+  (incident tool for orphans), and re-registration/rotation now auto-revokes
+  the replaced serial in the same transaction — normal operation no longer
+  leaves off-record, chain-valid predecessor certificates.
+- Executor registration now requires an enrollment token by default
+  (`executor_enrollment.require_token` — previously open: any host reaching the
+  core could enroll itself as an executor). Rejections carry an actionable error
+  naming the knob and the re-enrollment path. Breaking for deployments relying
+  on tokenless enrollment; `VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN=false`
+  restores the old behavior deliberately. Certificate auto-rotation keeps
+  working under the new default via the incumbent-mTLS exemption: a tokenless
+  rotation is accepted only from a verified client certificate whose
+  revocation state is clean and whose serial matches the current record
+  (see cert-rotation-runbook §1).
+
+### Changed
+
+- The auth-endpoint rate-limit tier is now actually enforced: 20 requests/min
+  per IP (previously silently collapsed into the generic 1000/min limit — the
+  middleware constructor overwrote it). Scripted login/enrollment loops that
+  never hit a limit before will now see `429` on `/api/v1/auth/*` and
+  `/api/v1/enrollment/*`. Diagnosis + override:
+  `VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE` (e2e scaffolds should set this
+  explicitly rather than discover the tier nondeterministically).
+- The core installer now encrypts the root CA private key at rest and delivers
+  its passphrase through a restricted systemd EnvironmentFile, matching the
+  existing admin CA key handling.
+- Preparing for beta: the core installer no longer carries a development
+  passphrase. `VENYA_DB_PASSPHRASE` is now always operator-provided — prompted
+  on interactive installs, required for unattended installs — and, together
+  with the recovery pepper, is safely reused across idempotent re-installs.
+
+### Fixed
+
+- CA-key break-glass backups now use ONE canonical envelope — AES-256-GCM
+  (authenticated encryption) behind a versioned `VENYACA1` header — across the
+  CLI and the server. Previously the CLI wrote AES-256-CBC while the server
+  wrote headerless GCM: cross-format blobs could not read each other, and the
+  CLI restore validated only the last padding byte's range, so a wrong
+  passphrase or tampered CBC blob could restore silently-corrupted key
+  material. New exports are authenticated-encrypted (tampering and wrong
+  passphrases fail loudly). Break-glass backups exported by alpha.11
+  (`venya admin export-ca-key`, CBC) remain restorable: `venya admin
+  restore-ca-key` is a dual-format reader (canonical GCM primary, legacy CBC
+  read-only with full PKCS7 validation), and the server restore likewise
+  still reads its pre-magic GCM blobs. No exported key material is stranded.
+- Session token refresh now works as designed: `/api/v1/auth/refresh` is gated
+  by the 4-hour hard cap ONLY, so idle-expired sessions (15-min idle window by
+  default) renew without human intervention. Previously the refresh applied
+  the same idle check as the API middleware — a session idle-expired at the
+  API could never be refreshed, making every client 401→refresh→retry recovery
+  path dead code. The hard cap stays non-negotiable: past it, FIDO2 re-auth is
+  required. Ruled trade-off (recorded): idle-expiry revival extends a stolen
+  token's renewable window to the hard cap; refresh rotates the token (old one
+  dies immediately), keeping a theft race detectable.
+- `venya` CLI now honors `VENYA_SERVER_URL` for every command; previously most
+  paths only accepted `--server-url` or a stored config, so headless,
+  env-driven invocations could fall back to the wrong default URL.
 
 ## [0.1.0-alpha.11] - 2026-09-19
 

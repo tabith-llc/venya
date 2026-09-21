@@ -46,7 +46,7 @@ class TestPassphraseStartupCheck:
         )
 
         # Replicate the exact check from app.py lifespan
-        if not config.debug and not config.db.passphrase:
+        if not config.db.passphrase:
             with pytest.raises(RuntimeError, match="VENYA_DB__PASSPHRASE is not set"):
                 raise RuntimeError(
                     "VENYA_DB__PASSPHRASE is not set. "
@@ -57,8 +57,14 @@ class TestPassphraseStartupCheck:
         else:
             pytest.fail("Expected RuntimeError was not raised")
 
-    def test_missing_passphrase_allowed_in_debug(self):
-        """No error when debug=True and passphrase is None (backward compat)."""
+    def test_missing_passphrase_fails_in_debug_too(self):
+        """The check is unconditional — debug mode gets no exemption.
+
+        The former exemption was a dead letter: init_db raises
+        BackendConfigurationError on passphrase=None before the lifespan
+        check ever ran, so debug boots never actually got unencrypted
+        storage — the exemption only hid the actionable message.
+        """
         config = ServerConfig(
             debug=True,
             db=DatabaseConfig(database_url="postgresql://test/test"),
@@ -66,9 +72,16 @@ class TestPassphraseStartupCheck:
         )
 
         # Replicate the exact check from app.py lifespan
-        if not config.debug and not config.db.passphrase:
-            pytest.fail("Should not raise in debug mode")
-        # If we get here, the check passed (no RuntimeError)
+        if not config.db.passphrase:
+            with pytest.raises(RuntimeError, match="VENYA_DB__PASSPHRASE is not set"):
+                raise RuntimeError(
+                    "VENYA_DB__PASSPHRASE is not set. "
+                    "Core secrets cannot be encrypted without a passphrase. "
+                    "Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart "
+                    "(installer input variable: VENYA_DB_PASSPHRASE)."
+                )
+        else:
+            pytest.fail("Expected RuntimeError was not raised")
 
     def test_passphrase_present_succeeds_in_production(self):
         """No error when passphrase is set in production."""
@@ -82,7 +95,7 @@ class TestPassphraseStartupCheck:
         )
 
         # Replicate the exact check from app.py lifespan
-        if not config.debug and not config.db.passphrase:
+        if not config.db.passphrase:
             pytest.fail("Should not raise when passphrase is set")
         # If we get here, the check passed (no RuntimeError)
 
@@ -98,7 +111,7 @@ class TestPassphraseStartupCheck:
         )
 
         # Empty string is falsy, so the check triggers
-        if not config.debug and not config.db.passphrase:
+        if not config.db.passphrase:
             with pytest.raises(RuntimeError, match="VENYA_DB__PASSPHRASE is not set"):
                 raise RuntimeError(
                     "VENYA_DB__PASSPHRASE is not set. "

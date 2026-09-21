@@ -66,7 +66,7 @@ The AI agent never touches plaintext credentials. Not in its context window. Not
 **No other product does this.** Existing secrets managers hand plaintext to the requesting process. Venya doesn't.
 
 ### FIDO2 Hardware Key Binding
-Every session begins with a physical security key press. The AI agent cannot initiate a session — only a human pressing a FIDO2 key can authorize access. Sessions expire after 4 hours. Token refresh happens automatically every 5 minutes, but the hard cap is non-negotiable. When the session expires, the AI gets an actionable error: *"Ask the user to re-authenticate."*
+Every session begins with a physical security key press. The AI agent cannot initiate a session — only a human pressing a FIDO2 key can authorize access. Sessions expire after 4 hours. Token refresh happens automatically, and an idle-expired session renews within the 4-hour hard cap — the cap is non-negotiable: past it, a human must re-authenticate with the FIDO2 key. When the session is past the cap, the AI gets an actionable error: *"Ask the user to re-authenticate."*
 
 ### mTLS Between Server and Executor
 The Venya server communicates with executor daemons over mutual TLS. Both sides verify each other's certificates. If an executor's certificate is revoked, the server refuses to relay commands. If someone spoofs an executor, the mTLS handshake fails before any secret is transmitted.
@@ -129,35 +129,43 @@ See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)**
 
 ### Full Installation
 
-Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Releases page](https://github.com/tabith-llc/venya/releases)**. Install one-liners (core/executor: Ubuntu 24.04; the Workstation CLI one-liner also runs on macOS):
+Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Releases page](https://github.com/tabith-llc/venya/releases)**. Install one-liners (core/executor: Ubuntu 24.04 only; the Workstation CLI additionally runs on Debian 13, macOS, and Windows):
 
 ```bash
 # Core server (root)
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
   VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=<strong-db-password> bash -s
 
-# Executor (root; enrollment token from the core admin; Docker credentials via stdin)
+# Executor (root; enrollment token from the core admin; a Docker account is REQUIRED — sbx pulls its agent template from Docker Hub; username + API key/access token via stdin)
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | sudo \
   VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> bash -s
 
-# Workstation CLI (non-root; Ubuntu 24.04 or macOS — verified on macOS 26.6.2 arm64)
+# Workstation CLI (non-root; Ubuntu 24.04, Debian 13, or macOS — verified on macOS 26.6.2 arm64 and Debian 13)
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-cli.sh | VENYA_SKIP_PROMPT=yes bash
+```
+
+```powershell
+# Workstation CLI (Windows) — machine-wide install, requires Administrator;
+# standard users run the CLI afterward. Interactive desktop only (headless unsupported).
+# Download install-venya-cli.ps1 from the Releases page, then run:
+powershell -ExecutionPolicy Bypass -File install-venya-cli.ps1
 ```
 
 Integrity: pin `VENYA_TARBALL_SHA256` (hashes on the release page) for strict verification; unset, the installer fetches the `.sha256` sidecar from the same origin as a corruption guardrail and fail-closes.
 
-Workstation CLI config file: `~/.config/venya/config.json` on Linux, `~/Library/Application Support/venya/config.json` on macOS. FIDO2 needs no extra setup on macOS (native IOKit HID transport, no root); on Linux the installer prints udev rules if `/dev/hidraw*` is not user-readable.
+Workstation CLI config file: `~/.config/venya/config.json` on Linux, `~/Library/Application Support/venya/config.json` on macOS, `%APPDATA%\venya\config.json` on Windows. FIDO2 needs no extra setup on macOS (native IOKit HID transport, no root) or Windows (platform WebAuthn API — standard-user capable, interactive desktop required); on Linux the installer prints udev rules if `/dev/hidraw*` is not user-readable.
 
 Production deployment guide: **[Installation Guide](docs/installation.md)**
 
 ### Prerequisites
 
-- Linux — Ubuntu 24.04 LTS (core/executor; tested target, installers assume it). Workstation CLI additionally supports macOS (verified macOS 26.6.2 arm64)
+- Linux — Ubuntu 24.04 LTS (core/executor; tested target, installers assume it). Workstation CLI additionally supports Debian 13 and macOS (verified macOS 26.6.2 arm64)
+- Windows — **Workstation CLI only** (core and executor are Linux). Machine-wide install via `install-venya-cli.ps1` requires Administrator; standard users run the CLI after install. FIDO2 ceremonies work for standard users via the platform WebAuthn API (verified Windows 11 25H2). Interactive desktop only — headless Windows is unsupported
 - PostgreSQL — installed automatically by the core installer (16 on Ubuntu 24.04)
 - Python 3.14 — pinned (`>=3.14,<3.15`); provisioned automatically via uv
 - FIDO2 security key (YubiKey, SoloKeys, etc.)
-- Docker Sandboxes (sbx) — installed automatically by the executor installer; a Docker account username + API key/access token is required at install time (agent-template pulls; stdin-only handling). **Executor hosts need hardware-virtualization access (`/dev/kvm`) — sbx runs microVMs; VM deployments require nested virtualization enabled**
+- Docker Sandboxes (sbx) — installed automatically by the executor installer; **a Docker account is required** (username + API key/access token at install time, stdin-only): sbx pulls its agent template from Docker Hub, so executor installs need a Docker account and outbound access to Docker Hub. **Executor hosts need hardware-virtualization access (`/dev/kvm`) — sbx runs microVMs; VM deployments require nested virtualization enabled**
 - MCP-compatible AI client (Claude Code, Cursor)
 
 ### Components
@@ -215,7 +223,7 @@ unit suites (cli / core / server / executor / mcp, Python 3.14) green at
 - **Run it yourself:** the [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md)
   is fully self-contained — commands, gates, failure modes, verification
   queries, results template — and ships with an
-  [interactive MCP driver](testing/mcp_manual_drive.py) so you can drive the
+  [interactive MCP driver](docs/mcp-manual-drive.py) so you can drive the
   tools by hand and see the redaction proof yourself.
 - **Verified MCP clients:** [opencode](https://opencode.com) and local LLMs
   via [omlx.ai](https://omlx.ai) — both drive `venya-mcp` as a stdio server.
@@ -293,6 +301,8 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [Installation Guide](docs/installation.md) | Full deployment instructions |
 | [CLI Reference](docs/cli-reference.md) | Every `venya` command and argument — generated from the parser, test-enforced against drift |
 | [Architecture](docs/architecture.md) | Technical deep dive |
+| [Firewall & Network Requirements](docs/FIREWALL.md) | Ports/protocols per host type — *(alpha, untested)* |
+| [Backup & Restore](docs/BACKUPS.md) | What to back up, the crypto pairings, restore + backup security — *(alpha, untested)* |
 | [FAQ](docs/faq.md) | Frequently asked questions |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy + safe harbor |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (incl. license terms for contributions) |

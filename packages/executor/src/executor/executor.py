@@ -613,7 +613,6 @@ class Executor:
                 stage2_stdout, stage2_stderr, stage2_masked_ids = self._send_to_stage2(
                     stdout,
                     stderr,
-                    [{"secret_id": s.secret_id, "hash": s.hash} for s in injections],
                 )
             except Exception:
                 logger.exception("Stage 2 filter failed — using Stage 1 results")
@@ -714,14 +713,24 @@ class Executor:
         self,
         stdout: bytes,
         stderr: bytes,
-        secret_entries: list[dict[str, Any]],
     ) -> tuple[bytes, bytes, list[str]]:
         """Send captured output to Stage 2 server-side filter.
+
+        SIGN-OFF INVARIANT (ticket executor-stage2-plaintext-signoff, ruling
+        2026-09-20): the body carries plaintext-equivalent (base64) UNFILTERED
+        command output BY DESIGN — Stage-2 is the definitive filter and must
+        see pre-Stage-1 bytes to be authoritative over Stage-1 misses.
+        Transport protection is mutual mTLS only; the body must NEVER be
+        logged on either side. Any future logger touching request/response
+        bodies at this hop is a REGRESSION.
+
+        No secret material is sent: the former `secrets` field (ids + sha256
+        hashes) was dead wire — the server's FilterRequest never declared it
+        and the handler reconstructs plaintext from its own DB via KEK.
 
         Args:
             stdout: Raw stdout bytes.
             stderr: Raw stderr bytes.
-            secret_entries: List of secret dicts for session context.
 
         Returns:
             Tuple of (filtered_stdout, filtered_stderr, masked_secret_ids).
@@ -732,7 +741,6 @@ class Executor:
         payload = {
             "stdout": base64.b64encode(stdout).decode(),
             "stderr": base64.b64encode(stderr).decode(),
-            "secrets": secret_entries,
         }
 
         timeout = self.config.network.request_timeout_seconds if self.config else 30

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
+from server.fido2.manager import WebAuthnError
 from server.routes import credentials
 from starlette.testclient import TestClient
 
@@ -38,7 +39,7 @@ def _create_test_app(fido2_manager=None, backend=None, auth_user=None):
 
 
 def _make_valid_elevation_db():
-    """Create a mock DB that returns a valid elevation token."""
+    """Create a mock DB whose conditional elevation burn consumes 1 row."""
     db = MagicMock()
 
     class MockQuery:
@@ -50,12 +51,15 @@ def _make_valid_elevation_db():
             return SimpleNamespace(id=1)
 
     db.query.return_value = MockQuery()
+    # _verify_elevation burns via an atomic conditional UPDATE (#6)
+    db.execute.return_value = SimpleNamespace(rowcount=1)
     return db
 
 
 def _make_invalid_elevation_db():
-    """Create a mock DB that returns no elevation token."""
+    """Create a mock DB whose conditional elevation burn matches 0 rows."""
     db = MagicMock()
+    db.execute.return_value = SimpleNamespace(rowcount=0)
 
     class MockQuery:
         def filter(self, *args, **kwargs):
@@ -212,6 +216,39 @@ class TestCredentialAddStart:
 class TestCredentialAddComplete:
     """Tests for POST /credentials/add/browser/complete."""
 
+    def test_add_complete_cross_user_challenge_rejected(self):
+        """Binding guard (sec-auth-elevation-authz-hardening #4): a credential
+        minted from ANOTHER user's challenge is refused, no DB mutation."""
+        mock_cred = SimpleNamespace(
+            user_id="user2",  # challenge was issued for user2, session is user1
+            credential_id=b"new-cred-123",
+            public_key=b"pub-key-data",
+            sign_count=42,
+        )
+
+        db = _make_valid_elevation_db()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        fido2 = MagicMock()
+        fido2.finish_registration.return_value = mock_cred
+
+        app = _create_test_app(fido2_manager=fido2, backend=backend, auth_user="user1")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/credentials/add/browser/complete",
+            json={
+                "challenge_id": "challenge-456",
+                "response": {"id": "dGVzdA==", "response": {}},
+                "label": "Backup key",
+            },
+            headers={"X-Elevation-Token": "elev-token-123"},
+        )
+        assert resp.status_code == 400
+        assert "different user" in resp.json()["detail"]
+        db.add.assert_not_called()
+
     def test_add_complete_success(self):
         """Should store credential, return status ok."""
         mock_cred = SimpleNamespace(
@@ -329,7 +366,7 @@ class TestCredentialAddComplete:
         backend.get_session.return_value = db
 
         fido2 = MagicMock()
-        fido2.finish_registration.side_effect = ValueError("Challenge not found or expired")
+        fido2.finish_registration.side_effect = WebAuthnError("Challenge not found or expired")
 
         app = _create_test_app(fido2_manager=fido2, backend=backend, auth_user="user1")
 
@@ -345,6 +382,32 @@ class TestCredentialAddComplete:
         )
         assert resp.status_code == 400
         assert "Challenge not found or expired" in resp.json()["detail"]
+
+    def test_add_complete_stray_valueerror_not_leaked(self):
+        """A library-internal ValueError gets the static detail — internals never echoed."""
+        db = _make_valid_elevation_db()
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        fido2 = MagicMock()
+        fido2.finish_registration.side_effect = ValueError("cbor decode failed at offset 42: 0xdeadbeef")
+
+        app = _create_test_app(fido2_manager=fido2, backend=backend, auth_user="user1")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/credentials/add/browser/complete",
+            json={
+                "challenge_id": "expired-challenge",
+                "response": {"id": "dGVzdA==", "response": {}},
+                "label": "Backup key",
+            },
+            headers={"X-Elevation-Token": "elev-token-123"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"] == "Credential registration verification failed"
+        assert "cbor" not in resp.text
+        assert "0xdeadbeef" not in resp.text
 
     def test_add_complete_stores_credential_correctly(self):
         """Should create WebAuthnCredential with correct fields."""
@@ -389,7 +452,7 @@ class TestCredentialRemove:
 
     def test_remove_success(self):
         """Should soft-delete credential and return removed=True."""
-        mock_cred = SimpleNamespace(id=5, is_active=True)
+        mock_cred = SimpleNamespace(id=5, is_active=True, credential_id=b"cred-5-bytes")
         active_creds = [SimpleNamespace(id=1, is_active=True), mock_cred]
 
         db = MagicMock()
@@ -470,19 +533,15 @@ class TestCredentialRemove:
     def test_remove_not_found(self):
         """Should return 404 if credential does not belong to user."""
         db = MagicMock()
-
-        query_num = [0]
+        # Elevation burn is an atomic conditional UPDATE (#6) — no query.
+        db.execute.return_value = SimpleNamespace(rowcount=1)
 
         class MockQuery:
             def filter(self, *args, **kwargs):
                 return self
 
             def first(self):
-                query_num[0] += 1
-                # First call is elevation token check (return valid)
-                if query_num[0] == 1:
-                    return SimpleNamespace(id=1)
-                # Second call is credential lookup (return None)
+                # Credential lookup: not found
                 return None
 
             def count(self):
@@ -539,7 +598,10 @@ class TestCredentialRemove:
         assert "Cannot remove the last active credential" in resp.json()["detail"]
         # Credential should NOT be deactivated (rejection happens before modification)
         assert mock_cred.is_active is True
-        assert not db.commit.called
+        # NOTE (#6 option (a), ruled): db.commit IS called — that commit is the
+        # elevation burn, which is deliberate and immediate even when the flow
+        # later rejects (a refused operation consumed the touch; retry needs a
+        # fresh token). The protected property is the credential state above.
 
 
 class TestCredentialList:
@@ -631,3 +693,142 @@ class TestCredentialList:
         assert resp.status_code == 200
         data = resp.json()
         assert data["credentials"] == []
+
+
+class TestCredentialRemoveEviction:
+    """DELETE /credentials/{id} must evict the credential from the in-memory auth
+    store. finish_authentication reads the per-process store (loaded once at
+    startup), NOT the DB, so a soft-delete alone leaves the removed credential
+    valid until a restart. Ticket credential-removal-store-eviction (fix A)."""
+
+    def test_remove_evicts_from_fido2_store(self):
+        from server.fido2.manager import Fido2Manager, StoredCredential
+
+        cred_bytes = b"\xaa" * 32
+        fm = Fido2Manager(rp_id="localhost", rp_name="Venya")
+        fm.store.store_credential(StoredCredential(user_id="user1", credential_id=cred_bytes, public_key=b"k"))
+        assert fm.store.get_credential(cred_bytes) is not None  # precondition
+
+        db = MagicMock()
+
+        def _query(model):
+            q = MagicMock()
+            if model.__name__ == "ElevationToken":
+                q.filter.return_value.first.return_value = SimpleNamespace(id=1)
+            else:  # WebAuthnCredential
+                q.filter.return_value.first.return_value = SimpleNamespace(
+                    id=1, user_id="user1", credential_id=cred_bytes, is_active=True
+                )
+                q.filter.return_value.with_for_update.return_value.all.return_value = [
+                    SimpleNamespace(id=1),
+                    SimpleNamespace(id=2),
+                ]
+            return q
+
+        db.query.side_effect = _query
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(fido2_manager=fm, backend=backend, auth_user="user1")
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.delete("/api/v1/credentials/1", headers={"X-Elevation-Token": "tok"})
+        assert resp.status_code == 200, resp.text
+        # THE FIX: store evicted, so the credential stops working immediately.
+        assert fm.store.get_credential(cred_bytes) is None
+
+
+class TestVerifyElevationBurn:
+    """Real-SQLite truth table for the single-use, user-bound elevation burn.
+
+    sec-auth-elevation-authz-hardening #6 (option (a) ruling): mock DBs cannot
+    model conditional-UPDATE semantics (house precedent) — these cells bind
+    the ACTUAL _verify_elevation helper to a real SQLite session.
+    """
+
+    def _db(self):
+        from core.iam.models import Base
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        return sessionmaker(bind=engine)()
+
+    def _request(self, token=None):
+        headers = {"X-Elevation-Token": token} if token else {}
+        return SimpleNamespace(headers=headers, app=SimpleNamespace(state=SimpleNamespace(config=None)))
+
+    def _mk_token(self, db, token, user_id="user1", expires_in=300, used=False):
+        import hashlib
+        from datetime import UTC, datetime, timedelta
+
+        from core.iam.models import ElevationToken
+
+        row = ElevationToken(
+            token_hash=hashlib.sha256(token.encode()).hexdigest(),
+            user_id=user_id,
+            expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
+            used=used,
+        )
+        db.add(row)
+        db.commit()
+        return row
+
+    def test_valid_token_burns_and_passes(self):
+        from server.routes.credentials import _verify_elevation
+
+        db = self._db()
+        row = self._mk_token(db, "tok-valid")
+        _verify_elevation(self._request("tok-valid"), db, "user1")  # no raise
+        db.refresh(row)
+        assert row.used is True  # burn committed
+
+    def test_replay_of_burned_token_rejected_401(self):
+        from fastapi import HTTPException
+        from server.routes.credentials import _verify_elevation
+
+        db = self._db()
+        self._mk_token(db, "tok-replay")
+        _verify_elevation(self._request("tok-replay"), db, "user1")
+        try:
+            _verify_elevation(self._request("tok-replay"), db, "user1")
+            raise AssertionError("replay must be rejected")
+        except HTTPException as e:
+            assert e.status_code == 401
+
+    def test_cross_user_token_rejected_401_and_not_burned(self):
+        from fastapi import HTTPException
+        from server.routes.credentials import _verify_elevation
+
+        db = self._db()
+        row = self._mk_token(db, "tok-cross", user_id="user2")
+        try:
+            _verify_elevation(self._request("tok-cross"), db, "user1")
+            raise AssertionError("cross-user token must be rejected")
+        except HTTPException as e:
+            assert e.status_code == 401
+        db.refresh(row)
+        assert row.used is False  # predicate missed — owner can still use it
+
+    def test_expired_token_rejected_401(self):
+        from fastapi import HTTPException
+        from server.routes.credentials import _verify_elevation
+
+        db = self._db()
+        self._mk_token(db, "tok-expired", expires_in=-300)  # beyond 60s tolerance
+        try:
+            _verify_elevation(self._request("tok-expired"), db, "user1")
+            raise AssertionError("expired token must be rejected")
+        except HTTPException as e:
+            assert e.status_code == 401
+
+    def test_missing_token_rejected_400(self):
+        from fastapi import HTTPException
+        from server.routes.credentials import _verify_elevation
+
+        db = self._db()
+        try:
+            _verify_elevation(self._request(None), db, "user1")
+            raise AssertionError("missing token must be rejected")
+        except HTTPException as e:
+            assert e.status_code == 400

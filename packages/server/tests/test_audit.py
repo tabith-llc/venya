@@ -19,6 +19,13 @@ from starlette.testclient import TestClient
 # Store the original _is_admin so we can restore it after monkeypatch.
 _ORIGINAL_IS_ADMIN = audit_routes._is_admin
 
+# updated (executor-revocation-by-identity session): patchers started by
+# _create_test_app were NEVER stopped — patch.object(RoleManager,
+# "get_user_permissions").start() leaked a class-level patch for the rest of
+# the pytest session, pinning require_role("read-write") to {1: "read"} in
+# EVERY later module (caught by the dial-gate truth cells). Track + stop them.
+_STARTED_PATCHERS: list = []
+
 
 @pytest.fixture(autouse=True)
 def _restore_is_admin():
@@ -27,6 +34,8 @@ def _restore_is_admin():
     into TestIsAdminHelper's direct unit tests of the real function."""
     yield
     audit_routes._is_admin = _ORIGINAL_IS_ADMIN
+    while _STARTED_PATCHERS:
+        _STARTED_PATCHERS.pop().stop()
 
 
 def _create_test_app(
@@ -57,7 +66,9 @@ def _create_test_app(
         audit_routes._is_admin = lambda db, uid: is_admin
         # require_role("read") calls RoleManager.get_user_permissions which
         # hits the mock db → empty list → empty dict → 403. Patch it away.
-        patch.object(RoleManager, "get_user_permissions", return_value={1: "read"}).start()
+        _p = patch.object(RoleManager, "get_user_permissions", return_value={1: "read"})
+        _p.start()
+        _STARTED_PATCHERS.append(_p)
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -581,6 +592,14 @@ class TestAuditNonAdmin:
         app.include_router(audit_routes.router, prefix="/api/v1")
         app.dependency_overrides[get_current_user] = lambda: {"user_id": user_id, "roles": [42]}
         audit_routes._is_admin = lambda db, uid: is_admin
+        # updated: this helper previously FREE-RODE the never-stopped
+        # RoleManager patch leaked by _create_test_app (order-dependent green).
+        # With the leak stopped per-test, patch explicitly via the tracked list.
+        from core.iam.role_manager import RoleManager
+
+        _p = patch.object(RoleManager, "get_user_permissions", return_value={1: "read"})
+        _p.start()
+        _STARTED_PATCHERS.append(_p)
 
         class AuthMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request, call_next):

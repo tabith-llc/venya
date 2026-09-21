@@ -69,6 +69,15 @@ Unknown `VENYA_*` names are silently ignored (`extra="ignore"`) — a misspelled
 | `session.session_timeout` | `VENYA_SESSION__SESSION_TIMEOUT` |
 | `fido2.enrollment_token_ttl` (minutes) | `VENYA_FIDO2__ENROLLMENT_TOKEN_TTL` |
 | `executor_enrollment.token_ttl_seconds` | `VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS` |
+| `executor_enrollment.require_token` | `VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN` |
+
+`executor_enrollment.require_token` defaults to **true** (ticket
+`executor-rotation-require-token-400`, 2026-09-20): `POST /api/v1/executors/register`
+without a valid enrollment token is rejected 400. Setting it `false` restores open
+enrollment — any host reaching the core can mint an executor identity (physically
+proven); do not disable outside deliberately open test networks. Rotation interaction:
+see `cert-rotation-runbook.md` §1 (tokenless `rotate()` is exempt for the verified
+incumbent credential — clean revocation state plus serial == current record).
 | `cors.origins` (JSON list) | `VENYA_CORS__ORIGINS` |
 
 Installer-level input variables (e.g. `VENYA_DB_PASSWORD`, `VENYA_DB_PASSPHRASE`, `VENYA_RECOVERY_PEPPER`, `CORE_HOSTNAME`) are consumed by `install-venya-core.sh`, which writes the correctly-named server variables into `/opt/venya/.env`. Setting an installer var in the server's environment does nothing.

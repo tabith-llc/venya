@@ -11,6 +11,7 @@ methods: _main_loop(), _send_heartbeat(), _handle_signal(), stop(),
 _write_pidfile(), _remove_pidfile().
 """
 
+import logging
 import os
 import signal
 import time
@@ -238,6 +239,102 @@ class TestSendHeartbeat:
         daemon.client.post.assert_called_once()
         payload = daemon.client.post.call_args[1]["json"]
         assert payload["cert_fingerprint"] == ""
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon._send_heartbeat — revoked-flag consumption
+# (executor-revocation-by-identity ruling 4, F3 ride-along)
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatRevokedFlag:
+    """The daemon CONSUMES the heartbeat response's revoked flag (previously
+    discarded): a fast cooperative stop between revocation-list polls. The
+    poll remains authoritative; a malformed body must never kill the beat."""
+
+    def _daemon(self, config, resp_json):
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        resp = MagicMock()
+        resp.json.return_value = resp_json
+        daemon.client.post.return_value = resp
+        return daemon
+
+    def test_revoked_flag_sets_state(self, config: ExecutorConfig):
+        daemon = self._daemon(config, {"revoked": True, "new_cert_required": False})
+        daemon._send_heartbeat()
+        assert daemon.state.revoked is True
+
+    def test_clean_flag_leaves_state(self, config: ExecutorConfig):
+        daemon = self._daemon(config, {"revoked": False, "new_cert_required": False})
+        daemon._send_heartbeat()
+        assert daemon.state.revoked is False
+
+    def test_malformed_body_never_kills_beat(self, config: ExecutorConfig):
+        daemon = self._daemon(config, None)
+        daemon.client.post.return_value.json.side_effect = ValueError("no json here")
+        daemon._send_heartbeat()  # must not raise
+        assert daemon.state.revoked is False
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon._submit_heartbeat (bounded-heartbeat backpressure guard)
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitHeartbeatBackpressure:
+    """_submit_heartbeat skips + warns when the prior beat is still in flight.
+
+    Ticket daemon-heartbeat-unbounded-queue: the heartbeat is fire-and-forget
+    into a 2-worker pool with an UNBOUNDED work queue. At default config the
+    per-request timeout (10s) is shorter than the ~30s cadence, so it self-limits
+    -- but if request_timeout_seconds is raised above the cadence AND the server
+    stalls the heartbeat POST, beats stack silently. The guard makes the bound
+    structural (at most one in flight) instead of timing-dependent, and fails
+    loudly on every skip.
+    """
+
+    def test_no_prior_future_submits(self, config: ExecutorConfig):
+        """First beat (no prior future) -> submitted, future recorded."""
+        daemon = ExecutorDaemon(config)
+        daemon._http_executor = MagicMock()
+        fut = MagicMock()
+        daemon._http_executor.submit.return_value = fut
+
+        daemon._submit_heartbeat()
+
+        daemon._http_executor.submit.assert_called_once()
+        assert daemon._heartbeat_future is fut
+
+    def test_prior_done_submits_again(self, config: ExecutorConfig):
+        """Prior beat completed -> next beat submitted normally (no false skip)."""
+        daemon = ExecutorDaemon(config)
+        daemon._http_executor = MagicMock()
+        prior = MagicMock()
+        prior.done.return_value = True
+        daemon._heartbeat_future = prior
+        new_fut = MagicMock()
+        daemon._http_executor.submit.return_value = new_fut
+
+        daemon._submit_heartbeat()
+
+        daemon._http_executor.submit.assert_called_once()
+        assert daemon._heartbeat_future is new_fut
+
+    def test_prior_in_flight_skips_and_warns(self, config: ExecutorConfig, caplog):
+        """LOAD-BEARING: prior beat still running -> skip (do NOT queue) + warn."""
+        daemon = ExecutorDaemon(config)
+        daemon._http_executor = MagicMock()
+        inflight = MagicMock()
+        inflight.done.return_value = False
+        daemon._heartbeat_future = inflight
+
+        with caplog.at_level(logging.WARNING):
+            daemon._submit_heartbeat()
+
+        daemon._http_executor.submit.assert_not_called()  # skipped, not queued
+        assert daemon._heartbeat_future is inflight  # unchanged
+        assert any("still in flight" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

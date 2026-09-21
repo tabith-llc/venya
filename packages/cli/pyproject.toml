@@ -1,6 +1,6 @@
 [project]
 name = "venya-cli"
-version = "0.1.0"
+version = "0.1.0alpha12"
 description = "Venya workstation CLI — admin, enrollment, and execution client"
 requires-python = ">=3.14,<3.15"
 dependencies = [

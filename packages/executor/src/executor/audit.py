@@ -18,6 +18,7 @@ Serialization failures are written as error-marker lines, never dropped.
 # stdlib zstd compression (Python 3.14+, PEP 784)
 import json
 import logging
+import os
 import threading
 import time
 from compression import zstd
@@ -93,6 +94,12 @@ class AuditLogger:
         self._shutdown = False
         self._spool_path = self._resolve_spool_path(config.spool_path)
         self._spool_path.parent.mkdir(parents=True, exist_ok=True)
+        # The spool holds FULL command lines (a caller inlining credentials
+        # puts plaintext here) — create it 0600 and REPAIR a legacy
+        # world-readable spool at startup. Pre-fix, .open("a") inherited the
+        # umask (typically 0644) — ticket sec-secret-redaction-log-leaks #19.
+        self._spool_path.touch(exist_ok=True)
+        os.chmod(self._spool_path, 0o600)
         self._forwarder = threading.Thread(target=self._forward_loop, daemon=True)
         self._forwarder.start()
 

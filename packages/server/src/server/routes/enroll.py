@@ -25,6 +25,7 @@ from ..fido2.browser_adapter import (
     browser_registration_to_fido2,
     challenge_to_browser_registration_options,
 )
+from ..fido2.manager import WebAuthnError
 from ..utils.time import is_expired
 from ..utils.token_binding import verify_binding_hash
 
@@ -242,11 +243,24 @@ async def browser_enroll_complete(
                 req.challenge_id,
                 fido2_response,
             )
-        except ValueError as e:
+            # Challenge<->user binding (sec-auth-elevation-authz-hardening #4):
+            # the credential must belong to the challenge's user, which must be
+            # the enrollment token's user. Without this, a challenge_id issued
+            # for user A completed with token B would bind the key material to
+            # A in the in-memory store but to B in the DB row (identity split).
+            if cred.user_id != str(token.user_id):
+                raise WebAuthnError("Registration challenge was issued for a different user")
+        except WebAuthnError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
             ) from e
+        except ValueError:
+            logger.exception("Enrollment verification failed (internal)")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Enrollment verification failed",
+            ) from None
 
         # Store WebAuthn credential
         user = db.query(User).filter(User.user_id == token.user_id).first()

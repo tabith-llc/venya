@@ -30,11 +30,14 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from venya_contract import RelayRequest, RelayResponse, RelaySecret
 
 from .. import metrics
 from ..ca import CAManager
 from ..dependencies import get_db, require_role
+from ..middleware.auth import _extract_identity_from_subject
 from ..rate_limit import rate_limit_registration
+from ..revocation import executor_revocation_state
 from ..utils.executor_id import EXECUTOR_ID_PATTERN
 from ..utils.time import effective_expiry_check_time, is_expired
 from .secrets import wrap_with_sentinel
@@ -112,6 +115,13 @@ class RevocationListResponse(BaseModel):
     """Response for revocation list polling."""
 
     revoked_serials: list[str] = Field(default_factory=list, description="List of revoked certificate serial numbers")
+    revoked_identities: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Executor IDs whose IDENTITY is revoked (terminal) — matches any serial. "
+            "Additive field (executor-revocation-by-identity); older daemons ignore it."
+        ),
+    )
 
 
 class HeartbeatRequest(BaseModel):
@@ -125,6 +135,15 @@ class HeartbeatRequest(BaseModel):
         max_length=64,
     )
     cert_fingerprint: str = Field(default="", description="Certificate fingerprint")
+    version: str = Field(
+        default="",
+        max_length=64,
+        description=(
+            "Executor dist version (ADDITIVE field, wire-compatible: missing or "
+            "empty leaves the stored column untouched — pre-version daemons "
+            "keep NULL, meaning 'has not reported yet')"
+        ),
+    )
 
 
 class HeartbeatResponse(BaseModel):
@@ -143,6 +162,7 @@ class ExecutorInfo(BaseModel):
     last_heartbeat: datetime | None
     enrolled_at: datetime | None
     status: str
+    version: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -182,19 +202,21 @@ class SessionCreateResponse(BaseModel):
 
 
 class ExecuteRequest(BaseModel):
-    """Request body for executing a command on an executor."""
+    """Request body for executing a command on an executor.
+
+    This is the CLIENT -> SERVER inbound model (the FastAPI request body), a
+    distinct contract from the server -> executor relay wire. It stays local by
+    ruling (refactor-2): the relay wire shape lives in ``venya_contract`` and
+    additionally carries the ``secrets`` list the server loads from the session.
+    """
 
     session_id: str = Field(..., description="Execution session ID")
     command: str = Field(..., description="Shell command to execute")
 
 
-class ExecuteResponse(BaseModel):
-    """Response from command execution."""
-
-    exit_code: int
-    stdout: str
-    stderr: str
-    masked_count: int = Field(default=0, description="Number of [REDACTED:...] markers in output")
+# The relay response shape (executor -> server, and server -> client) is owned by
+# venya_contract.RelayResponse — the previous local ExecuteResponse was a duplicate
+# copy of that field set and is removed (refactor-2: no local re-declaration).
 
 
 # --- Helpers ---
@@ -209,6 +231,48 @@ def _get_ca_manager(request: Request) -> CAManager:
             detail="CA not initialized",
         )
     return ca_manager
+
+
+def _mark_execution_session_completed(
+    db: Session,
+    session_id: str,
+    command: str,
+    completed_at: datetime,
+    result: dict,
+) -> None:
+    """Best-effort post-relay bookkeeping for an execution session.
+
+    Uses a bulk ``UPDATE ... WHERE id=`` rather than mutating the loaded ORM object:
+    a bulk UPDATE matching 0 rows is a silent no-op, whereas an ORM flush raises
+    ``StaleDataError`` if the row vanished mid-execute — e.g. the
+    ``cleanup_expired_execution_sessions`` maintenance pass deleting a session whose
+    10-min TTL lapsed during a long relay (ticket execute-stale-session-update-500).
+    The command already ran on the executor and the caller returns its result
+    regardless; the caller commits the audit event in the same transaction, so the
+    command stays audited even when this update no-ops.
+    """
+    res = db.execute(
+        text(
+            "UPDATE execution_sessions "
+            "SET command = :command, completed_at = :completed_at, exit_code = :exit_code, "
+            "stdout = :stdout, stderr = :stderr "
+            "WHERE id = :sid"
+        ),
+        {
+            "command": command,
+            "completed_at": completed_at,
+            "exit_code": result["exit_code"],
+            "stdout": result["stdout"],
+            "stderr": result["stderr"],
+            "sid": session_id,
+        },
+    )
+    if res.rowcount == 0:
+        logger.warning(
+            "Execution session %s vanished before post-relay bookkeeping (TTL cleanup "
+            "race); command result returned, session update skipped",
+            session_id,
+        )
 
 
 # --- Endpoints ---
@@ -226,6 +290,47 @@ def _dial_hostname_resolvable(hostname: str) -> bool:
         return True
     except socket.gaierror:
         return False
+
+
+def _verified_incumbent_serial(request: Request, executor_id: str) -> str | None:
+    """Extract the verified mTLS client-cert serial for the incumbent exemption.
+
+    Phase 2 (executor-rotation-require-token-400 ruling 2(a)). Trust boundary:
+    nginx verifies the client chain against client-ca-bundle.crt (Root CA +
+    Admin CA) and OVERWRITES X-Client-* from its own ssl variables — a
+    client-sent header of the same name never survives the proxy, and with no
+    (or an unverified) cert the serial variable is empty and nginx drops the
+    header. The CN match is a discriminator, not the authorization: an
+    Admin-CA cert CAN carry an executor-shaped CN, but only the true incumbent
+    can present the Root-CA-issued record serial (random 64-bit at signing,
+    no serial-chooser API exists). Returns the serial normalized to the
+    record format (lowercase, 16-hex zero-padded — nginx sends uppercase and
+    DER encoding may strip leading zero bytes), or None when no verified cert
+    for this executor_id was presented.
+    """
+    if request.headers.get("x-client-verified") != "SUCCESS":
+        return None
+    presented = request.headers.get("x-client-serial", "").strip()
+    if not presented:
+        return None
+    if _extract_identity_from_subject(request.headers.get("x-client-subject", "")) != executor_id:
+        return None
+    try:
+        return format(int(presented, 16), "016x")
+    except ValueError:
+        return None
+
+
+def _incumbent_exemption_applies(db: Session, executor_id: str, presented_serial: str) -> bool:
+    """Ruled exemption order (do not reorder): revocation state FIRST, then
+    presented == current record serial. executor_revocation_state is the ONE
+    revocation source (revocation.py contract names this consumer); a second
+    implementation here would be a rotation/revocation split-brain.
+    """
+    if executor_revocation_state(db, executor_id, presented_serial=presented_serial).revoked:
+        return False
+    cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
+    return cert is not None and (cert.serial_number or "").casefold() == presented_serial
 
 
 @router.post(
@@ -252,11 +357,12 @@ async def register_executor(
     # Parse the CSR
     try:
         csr = x509.load_pem_x509_csr(req.csr_pem.strip().encode())
-    except Exception as e:
+    except Exception:
         metrics.EXECUTOR_REGISTERED.labels(result="invalid_csr").inc()
+        logger.exception("CSR parse failed for executor registration")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid CSR: {e}",
+            detail="Invalid CSR",
         )
 
     # Validate key strength — reject weak keys before any CA/DB work
@@ -390,12 +496,38 @@ async def register_executor(
     else:
         server_config = getattr(request.app.state, "config", None)
         if server_config and server_config.executor_enrollment.require_token:
-            metrics.EXECUTOR_REGISTERED.labels(result="token_required").inc()
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Enrollment token required. Contact your administrator.",
-            )
-        token_audit_fields = {"with_token": False}
+            # Phase 2 incumbent exemption (ruling 2(a)): tokenless rotate is
+            # accepted ONLY from the verified current-record credential —
+            # revocation state first, then serial match (see helper).
+            incumbent_serial = _verified_incumbent_serial(request, req.executor_id)
+            if incumbent_serial is None or not _incumbent_exemption_applies(db, req.executor_id, incumbent_serial):
+                metrics.EXECUTOR_REGISTERED.labels(result="token_required").inc()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Enrollment token required. Contact your administrator.",
+                )
+            token_audit_fields = {"with_token": False, "incumbent_exempt": True}
+        else:
+            token_audit_fields = {"with_token": False}
+
+    # Terminal identity check (executor-revocation-by-identity, ruling 3/condition 4):
+    # a revoked identity can NEVER re-register — even with a valid fresh token,
+    # which by this point is already consumed by validation (recorded behavior:
+    # admin sees a consumed token + 403; re-enrollment requires a NEW
+    # executor_id). Fires before cert issuance and any identity DB write.
+    # Serial-history revocation does NOT block here: killing a credential must
+    # not kill re-enrollment (that is what the identity form is for).
+    _terminal = executor_revocation_state(db, resolved_executor_id)
+    if _terminal.reason == "identity":
+        metrics.EXECUTOR_REGISTERED.labels(result="identity_revoked").inc()
+        logger.warning("Registration rejected — executor identity revoked (terminal): %s", resolved_executor_id)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Executor identity '{resolved_executor_id}' is revoked (terminal). "
+                "Re-enroll under a NEW executor_id; this identity cannot be reused."
+            ),
+        )
 
     # Create executor user account if it doesn't exist
     existing_user = db.query(User).filter(User.user_id == resolved_executor_id).first()
@@ -421,9 +553,10 @@ async def register_executor(
         metrics.CA_SIGNED_TOTAL.labels(cert_type="executor").inc()
     except RuntimeError as e:
         metrics.EXECUTOR_REGISTERED.labels(result="ca_error").inc()
+        logger.error("CA signing failed for %s: %s", resolved_executor_id, e)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(e),
+            detail="Certificate signing unavailable",
         )
 
     # Store certificate metadata
@@ -441,6 +574,24 @@ async def register_executor(
     )
 
     if existing_cert:
+        # F6 auto-revoke (executor-revocation-by-identity ruling 1): the
+        # replaced predecessor serial is CRLed IN THE SAME TRANSACTION — normal
+        # operation must not mint off-record chain-valid orphans, and a diverged
+        # daemon still running the predecessor dies within one poll (fail-closed).
+        old_serial = (existing_cert.serial_number or "").casefold()
+        if old_serial and old_serial != serial_hex.casefold():
+            from core.iam.models import ExecutorCertRevocation
+
+            prior = db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == old_serial).first()
+            if prior is None:
+                db.add(
+                    ExecutorCertRevocation(
+                        serial_number=old_serial,
+                        executor_id=resolved_executor_id,
+                        revoked_at=datetime.now(UTC),
+                        reason="Replaced by re-registration/rotation",
+                    )
+                )
         # Update existing cert record
         existing_cert.serial_number = serial_hex
         existing_cert.not_before = cert.not_valid_before_utc
@@ -527,25 +678,25 @@ async def get_revocation_list(
     """
     from core.iam.models import ExecutorCertRevocation
 
-    ca_manager = _get_ca_manager(request)
-    # Purge old entries to keep table bounded
-    server_config = getattr(request.app.state, "config", None)
-    retention_days = server_config.crl.crl_retention_days if server_config and hasattr(server_config, "crl") else 90
-    deleted_count = ca_manager.purge_expired_revocations(db, retention_days)
-    if deleted_count > 0:
-        logger.debug("Purged %d expired revocations (%d day retention)", deleted_count, retention_days)
+    # READ-ONLY (ticket sec-sweep-low-informational #23b): this public GET
+    # used to purge expired revocations on every poll (~30s x fleet) — an
+    # unauthenticated write-on-read. The purge now runs as a maintenance-loop
+    # pass (maintenance.run_maintenance, 5-minute schedule).
 
     # Fetch remaining revocations
     revocations = db.query(ExecutorCertRevocation).all()
     serials = sorted([r.serial_number for r in revocations])
-    payload = json.dumps(serials, sort_keys=True).encode()
+    # Identity-level revocations (terminal flag on the Executor row) ride
+    # alongside the serial history — additive wire field, ETag covers BOTH.
+    identities = sorted(row[0] for row in db.query(Executor.id).filter(Executor.revoked_at.isnot(None)).all())
+    payload = json.dumps({"s": serials, "i": identities}, sort_keys=True).encode()
     etag = f'"{hashlib.sha256(payload).hexdigest()}"'
 
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers={"ETag": etag})
 
     return Response(
-        content=json.dumps({"revoked_serials": serials}).encode(),
+        content=json.dumps({"revoked_serials": serials, "revoked_identities": identities}).encode(),
         media_type="application/json",
         headers={
             "ETag": etag,
@@ -563,18 +714,14 @@ async def get_crl(
 ) -> Response:
     """Get the signed Certificate Revocation List in DER format.
 
-    Public endpoint — no authentication required. Purges expired
-    revocation records before generating the CRL. Supports conditional
-    GET via ETag for caching.
+    Public endpoint — no authentication required. READ-ONLY: the expired-
+    revocation purge moved to the maintenance loop (ticket
+    sec-sweep-low-informational #23b — public GETs must not write).
+    Supports conditional GET via ETag for caching.
     """
     from core.iam.models import ExecutorCertRevocation
 
     ca_manager = _get_ca_manager(request)
-    server_config = getattr(request.app.state, "config", None)
-    retention_days = server_config.crl.crl_retention_days if server_config and hasattr(server_config, "crl") else 90
-
-    ca_manager.purge_expired_revocations(db, retention_days)
-    metrics.CA_REVOCATIONS_PURGED_TOTAL.inc()
     crl_der = ca_manager.generate_crl(db)
     metrics.CA_CRL_GENERATED_TOTAL.inc()
 
@@ -628,6 +775,7 @@ async def get_crl(
 )
 async def heartbeat(
     req: HeartbeatRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> HeartbeatResponse:
     """Receive heartbeat from executor.
@@ -635,29 +783,55 @@ async def heartbeat(
     Executors POST to this endpoint every 30s to signal liveness.
     The server responds with revocation status and cert rotation hint.
 
-    Public endpoint — no authentication required. It only liveness-stamps the
-    executor (drives the advisory "online" flag on GET /api/v1/executors). That
-    status is informational, not access-enforcing: real availability is checked
-    at mTLS relay time, and revocation (a real control) rides the cert list.
+    Executor-mTLS gated (ticket sec-endpoint-ratelimit-hardening #7 — was
+    PUBLIC: an unauthenticated caller could liveness-stamp any executor row
+    and read the fleet revocation/rotation oracle). The middleware verifies
+    the client cert (registered, chain-valid CN); this route binds the body
+    executor_id to the cert CN so an executor can only stamp ITS OWN row.
+    The `revoked` flag is computed from the SHARED revocation state and is a
+    fast cooperative stop signal (F3 ride-along — a revoked executor still
+    gets its 200 {revoked:true}, the middleware passes it through with
+    reject_revoked=False); the enforcing control is the dial-gate refusal in
+    create_execution_session/execute (ruling 4).
     """
-    from core.iam.models import ExecutorCert, ExecutorCertRevocation
+    from core.iam.models import ExecutorCert
+
+    # Defense-in-depth (mirrors routes/filter.py): the middleware is the choke
+    # point that VERIFIES the executor mTLS identity; this check keeps the
+    # route from being naked if mounted without it.
+    caller = getattr(request.state, "auth_user", {})
+    if caller.get("caller") != "executor":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Executor mTLS authentication required",
+        )
+    # Identity binding: the beat must describe the CERT holder, not an
+    # arbitrary row (closes the forged-liveness oracle).
+    if req.executor_id != caller.get("executor_id"):
+        logger.warning(
+            "Heartbeat body executor_id '%s' does not match cert CN '%s' — rejecting",
+            req.executor_id,
+            caller.get("executor_id"),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="executor_id does not match client certificate",
+        )
 
     executor_id = req.executor_id
     revoked = False
     new_cert_required = False
 
     if executor_id:
-        # Check if executor's current cert is revoked
+        # Revoked-ness comes from the SHARED state (executor-revocation-by-identity
+        # condition 2 — this computation was a second, record-pointer-only
+        # implementation; the helper adds the identity flag).
+        revoked = executor_revocation_state(db, executor_id).revoked
+
+        # Rotation hint still reads the record's expiry
         current_cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
 
         if current_cert:
-            # Check revocation list
-            revoked = (
-                db.query(ExecutorCertRevocation)
-                .filter(ExecutorCertRevocation.serial_number == current_cert.serial_number)
-                .first()
-                is not None
-            )
 
             # Check if cert needs rotation (within 3 days of expiry)
             now = datetime.now(UTC)
@@ -670,11 +844,23 @@ async def heartbeat(
 
     # Liveness timestamp for GET /api/v1/executors — only when the executor row
     # already exists (registration creates it; heartbeats never create rows).
-    if executor_id:
+    # REVOKED-WRITE GUARD (user ruling 2026-09-20, ticket
+    # sec-endpoint-ratelimit-hardening B1): a revoked executor gets its
+    # advisory 200 {revoked:true} but writes NOTHING — a body-driven
+    # status="active" stamp from a revoked identity could overwrite or race
+    # the revoked presentation in list_executors, resurrecting exactly the
+    # confusion the identity-revocation work ended. The row is about to die
+    # administratively anyway.
+    if executor_id and not revoked:
         executor_row = db.query(Executor).filter(Executor.id == executor_id).first()
         if executor_row is not None:
             executor_row.last_heartbeat = datetime.now(UTC)
             executor_row.status = "active"
+            # Additive wire field (feature/version-surfaces): only a non-empty
+            # report touches the column — absence/empty NEVER overwrites or
+            # NULLs a previously reported version (pre-version daemons keep NULL).
+            if req.version:
+                executor_row.version = req.version
             db.commit()
 
     metrics.EXECUTOR_HEARTBEAT_TOTAL.inc()
@@ -712,7 +898,12 @@ async def list_executors(
             delta = now - exec_rec.last_heartbeat
             is_online = delta.total_seconds() < 60
 
-        if exec_rec.revoked_at:
+        # Status display is a CLIENT of the shared revocation state (condition 2
+        # — no second revoked-ness implementation). Note: this also surfaces
+        # serial-form revocation of the CURRENT record serial as "revoked",
+        # consistent with the dial refusal.
+        _rev = executor_revocation_state(db, exec_rec.id, executor_row=exec_rec)
+        if _rev.revoked:
             status = "revoked"
         elif exec_rec.enrolled_at:
             status = "active"
@@ -727,40 +918,11 @@ async def list_executors(
                 last_heartbeat=exec_rec.last_heartbeat,
                 enrolled_at=exec_rec.enrolled_at,
                 status=status,
+                version=exec_rec.version,
             )
         )
 
     return ExecutorsListResponse(executors=result)
-
-
-@router.post(
-    "/executors/{id}/heartbeat",
-    status_code=status.HTTP_200_OK,
-)
-async def executor_heartbeat(
-    id: str,
-    db: Session = Depends(get_db),
-    auth_user: dict = Depends(require_role("none")),
-) -> Response:
-    """Called by executor daemon to report liveness.
-
-    Temporarily accepts any authenticated caller (auth_user required but not validated
-    against executor identity). For alpha only — harden to mTLS identity check in Phase 3
-    when executor daemon integration is complete.
-
-    State mutation is minimal: updates last_heartbeat timestamp only.
-    """
-    from core.iam.models import Executor
-
-    executor = db.query(Executor).filter(Executor.id == id).first()
-    if executor is None:
-        raise HTTPException(status_code=404, detail="Executor not found")
-
-    executor.last_heartbeat = datetime.now(UTC)
-    executor.status = "active"
-    db.commit()
-
-    return Response(status_code=200)
 
 
 @router.post(
@@ -793,6 +955,17 @@ async def create_execution_session(
     executor = db.query(Executor).filter(Executor.id == req.executor_id).first()
     if executor is None:
         raise HTTPException(status_code=404, detail="Executor not found")
+
+    # Dial gate (executor-revocation-by-identity ruling 4 — the enforcement
+    # point that actually stops an uncooperative daemon): shared revocation
+    # state governs — identity flag OR current-record serial in the CRL
+    # (condition 1: a serial-form revocation of the record serial refuses too).
+    _rev = executor_revocation_state(db, req.executor_id, executor_row=executor)
+    if _rev.revoked:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Executor '{req.executor_id}' is revoked ({_rev.reason}) — refusing to route execution",
+        )
 
     # Create session with 10-minute TTL
     now = datetime.now(UTC)
@@ -877,7 +1050,7 @@ async def create_execution_session(
 
 @router.post(
     "/executors/{id}/execute",
-    response_model=ExecuteResponse,
+    response_model=RelayResponse,
     status_code=status.HTTP_200_OK,
 )
 async def execute_command_on_executor(
@@ -886,7 +1059,7 @@ async def execute_command_on_executor(
     request: Request,
     db: Session = Depends(get_db),
     auth_user: dict = Depends(require_role("read-write")),
-) -> ExecuteResponse:
+) -> RelayResponse:
     """Relay command to executor over mTLS.
 
     1. Verify session exists and is not expired
@@ -918,15 +1091,26 @@ async def execute_command_on_executor(
     if executor is None:
         raise HTTPException(status_code=404, detail="Executor not found")
 
+    # Dial gate #2 (execute): the session may predate the revocation — the
+    # shared state is re-checked at relay time, not only at session create.
+    _rev = executor_revocation_state(db, id, executor_row=executor)
+    if _rev.revoked:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Executor '{id}' is revoked ({_rev.reason}) — refusing to route execution",
+        )
+
     # Load wrapped secrets from session
     secrets = db.query(SessionSecret).filter(SessionSecret.session_id == session.id).all()
 
-    # Build request payload
-    payload = {
-        "session_id": session.id,
-        "command": req.command,
-        "secrets": [{"secret_id": s.secret_id, "wrapped_value": s.wrapped_value} for s in secrets],
-    }
+    # Build request payload via the frozen relay contract (venya_contract) — the
+    # server and executor both import these models, so a one-sided field change is
+    # an import/type error here, not a runtime 500 at the executor boundary.
+    payload = RelayRequest(
+        session_id=session.id,
+        command=req.command,
+        secrets=[RelaySecret(secret_id=s.secret_id, wrapped_value=s.wrapped_value) for s in secrets],
+    ).model_dump()
 
     # Construct executor URL from hostname
     executor_url = f"https://{executor.hostname}:8443/execute"
@@ -977,13 +1161,21 @@ async def execute_command_on_executor(
         logger.warning("Executor connection lost mid-response for session %s: %s", session.id, e)
         raise HTTPException(status_code=503, detail="Executor unreachable (connection lost mid-response)")
     except httpx2.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=str(e))
+        logger.warning("Executor returned HTTP %d for session %s: %s", e.response.status_code, session.id, e)
+        raise HTTPException(status_code=e.response.status_code, detail="Executor returned an error")
 
     # Validate executor response shape before any field access
     try:
-        result = ExecuteResponse(**result).model_dump()
+        result = RelayResponse(**result).model_dump()
     except ValidationError as e:
-        logger.warning("Invalid executor response for session %s: %s", session.id, e)
+        # Body-fragment-free log (sec-secret-redaction-log-leaks #11): the
+        # ValidationError repr embeds input_value= fragments of the relay
+        # RESPONSE body — this hop must never reach a logger (Stage-2 sign-off
+        # invariant), and prefixless content is invisible to the
+        # RedactingFormatter layer-2. Log the offending field names + error
+        # types only (diagnosability kept, body dropped).
+        scrubbed = ", ".join(f"{'.'.join(str(p) for p in err['loc'])}: {err['type']}" for err in e.errors())
+        logger.warning("Invalid executor response for session %s (fields: %s)", session.id, scrubbed)
         raise HTTPException(status_code=502, detail="Invalid response from executor")
 
     # AUDIT EVENT: Command executed
@@ -1002,12 +1194,11 @@ async def execute_command_on_executor(
     )
     db.add(audit_event)
 
-    # Mark session as completed
-    session.command = req.command
-    session.completed_at = now
-    session.exit_code = result["exit_code"]
-    session.stdout = result["stdout"]
-    session.stderr = result["stderr"]
+    # Mark session as completed via a bulk UPDATE that tolerates a row that vanished
+    # mid-execute (ticket execute-stale-session-update-500) — an ORM flush here raised
+    # StaleDataError -> 500 after the command already ran. The audit event above commits
+    # atomically in the same transaction.
+    _mark_execution_session_completed(db, session.id, req.command, now, result)
     db.commit()
 
-    return ExecuteResponse(**result)
+    return RelayResponse(**result)

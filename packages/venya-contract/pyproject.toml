@@ -1,0 +1,30 @@
+[project]
+name = "venya-contract"
+version = "0.1.0alpha12"
+description = "Venya relay wire contract — frozen request/response models shared by server and executor"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "pydantic>=2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/venya_contract"]
+
+[project.optional-dependencies]
+test = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pip-audit>=2.10.1",
+]

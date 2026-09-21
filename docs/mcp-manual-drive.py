@@ -6,13 +6,13 @@
 
 """Interactive MCP driver — operate venya-mcp by hand and SEE the proof.
 
-Companion to testing/test-plan.md Phase D. Spawns the real `venya-mcp` stdio
-server as a subprocess (exactly like an LLM client would), speaks the MCP
+Companion to docs/full-lifecycle-test.md Phase D. Spawns the real `venya-mcp`
+stdio server as a subprocess (exactly like an LLM client would), speaks the MCP
 protocol over stdio, and lets the operator call each tool interactively and
 see the raw results — including the redaction proof from run_command.
 
 Usage (from the workstation, plan D.4 Path 1):
-    $ADMIN_WS/.venv/bin/python testing/mcp_manual_drive.py \
+    $ADMIN_WS/.venv/bin/python docs/mcp-manual-drive.py \
         --mcp-bin $ADMIN_WS/.venv/bin/venya-mcp \
         --config  $ADMIN_WS/mcp/config.json \
         --ca      /tmp/venya-ca.crt

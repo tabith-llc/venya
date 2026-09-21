@@ -6,6 +6,7 @@
 
 """Tests for rate limiting middleware (PostgreSQL-backed)."""
 
+from datetime import UTC
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
@@ -35,6 +36,11 @@ def _create_test_app(
         break_glass_requests_per_hour = break_glass_per_hour
         clock_skew = MagicMock()
         clock_skew.token_tolerance_seconds = 60
+
+    # Set post-class: `x = x` inside a class body is a NameError (the RHS
+    # resolves class-local); the tier param must come from the enclosing
+    # function scope (ticket sec-endpoint-ratelimit-hardening #8).
+    MockConfig.auth_requests_per_minute = auth_requests_per_minute
 
     app.state.config = MockConfig()
 
@@ -103,6 +109,11 @@ def _create_test_app_with_401(requests_per_minute=100, auth_requests_per_minute=
         clock_skew = MagicMock()
         clock_skew.token_tolerance_seconds = 60
 
+    # Set post-class: `x = x` inside a class body is a NameError (the RHS
+    # resolves class-local); the tier param must come from the enclosing
+    # function scope (ticket sec-endpoint-ratelimit-hardening #8).
+    MockConfig.auth_requests_per_minute = auth_requests_per_minute
+
     app.state.config = MockConfig()
 
     backend = MagicMock()
@@ -162,6 +173,13 @@ class TestRateLimitMiddleware:
             resp = client.get("/api/v1/auth/login")
             assert resp.status_code == 200
 
+        # TIER PIN (ticket sec-endpoint-ratelimit-hardening #8): the 4th
+        # request in the window 429s. Pre-fix the constructor collapsed the
+        # auth tier into ip_rate_limit (1000/min in production config), so
+        # the loop above passed while the tier itself was dead.
+        resp = client.get("/api/v1/auth/login")
+        assert resp.status_code == 429
+
     def test_recovery_endpoint_under_break_glass_limit(self):
         """Recovery endpoint uses break-glass limit, not auth limit."""
         app = _create_test_app(requests_per_minute=100, auth_requests_per_minute=2, break_glass_per_hour=5)
@@ -182,6 +200,9 @@ class TestRateLimitMiddleware:
         for _ in range(3):
             resp = client.get("/api/v1/enrollment/start")
             assert resp.status_code == 200
+
+        resp = client.get("/api/v1/enrollment/start")
+        assert resp.status_code == 429  # tier pin (see test_auth_endpoint_under_auth_limit)
 
 
 class TestBreakGlassRateLimit:
@@ -256,6 +277,28 @@ class TestRateLimitMultiWorker:
         resp = client.get("/api/v1/health", headers={"X-Forwarded-For": "10.0.0.2"})
         assert resp.status_code == 200
 
+    def test_xff_rightmost_entry_keys_the_limit(self):
+        """#8 BYPASS PIN (ticket sec-endpoint-ratelimit-hardening): the limit
+        keys on the RIGHTMOST XFF entry — the one our nginx appends
+        ($proxy_add_x_forwarded_for = "<client-sent>, <real peer>"). The
+        leftmost entry is attacker-controlled; pre-fix, rotating a spoofed
+        leftmost value gave every request a fresh bucket (break-glass 5/hr,
+        auth tier, and backoff all bypassable with one header)."""
+        app = _create_test_app(requests_per_minute=2)
+        client = TestClient(app)
+
+        # Same real IP behind three different spoofs → ONE bucket: 2 pass, 3rd 429
+        r1 = client.get("/api/v1/health", headers={"X-Forwarded-For": "1.1.1.1, 10.0.0.7"})
+        r2 = client.get("/api/v1/health", headers={"X-Forwarded-For": "2.2.2.2, 10.0.0.7"})
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+        r3 = client.get("/api/v1/health", headers={"X-Forwarded-For": "3.3.3.3, 10.0.0.7"})
+        assert r3.status_code == 429  # spoof rotation does NOT reset the bucket
+
+        # A different REAL (rightmost) IP still has its own bucket
+        r4 = client.get("/api/v1/health", headers={"X-Forwarded-For": "1.1.1.1, 10.0.0.8"})
+        assert r4.status_code == 200
+
     def test_backend_unavailable_returns_503(self):
         """Rate limit check returns 503 if backend is not initialized."""
         app = FastAPI()
@@ -263,6 +306,7 @@ class TestRateLimitMultiWorker:
         class MockConfig:
             enforce = True
             ip_rate_limit = 100
+            auth_requests_per_minute = 20
             break_glass_requests_per_hour = 5
             clock_skew = MagicMock()
             clock_skew.token_tolerance_seconds = 60
@@ -287,6 +331,7 @@ class TestRateLimitMultiWorker:
         class MockConfig:
             enforce = False
             ip_rate_limit = 1
+            auth_requests_per_minute = 20
             break_glass_requests_per_hour = 1
             clock_skew = MagicMock()
             clock_skew.token_tolerance_seconds = 60
@@ -309,3 +354,118 @@ class TestRateLimitMultiWorker:
         for _ in range(5):
             resp = client.get("/api/v1/health")
             assert resp.status_code == 200
+
+
+def _create_real_db_app(
+    requests_per_minute=100,
+    auth_requests_per_minute=20,
+    break_glass_per_hour=5,
+):
+    """App wired to a REAL SQLite session factory with production lifecycle.
+
+    `backend.get_session()` returns a FRESH Session per call and the
+    middleware's `finally: db.close()` rolls back anything uncommitted —
+    exactly the deployed shape. The mock-backed cells above stub
+    `db.execute().scalar()` and therefore cannot see a missing COMMIT
+    (ticket ratelimit-counter-upsert-never-commits: the UPSERT counters
+    never persisted, so no DB-backed tier ever 429'd physically while the
+    suite stayed green).
+    """
+    from core.iam.models import RateLimitFailure
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    RateLimitFailure.__table__.create(engine)
+    factory = sessionmaker(bind=engine)
+
+    app = FastAPI()
+
+    class MockConfig:
+        enforce = True
+        ip_rate_limit = requests_per_minute
+        break_glass_requests_per_hour = break_glass_per_hour
+        clock_skew = MagicMock()
+        clock_skew.token_tolerance_seconds = 60
+
+    MockConfig.auth_requests_per_minute = auth_requests_per_minute
+    app.state.config = MockConfig()
+
+    backend = MagicMock()
+    backend.get_session.side_effect = lambda: factory()
+    app.state.backend = backend
+
+    app.add_middleware(RateLimitMiddleware, config=app.state.config)
+
+    @app.get("/api/v1/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.get("/api/v1/auth/login")
+    def auth_login():
+        return {"status": "login"}
+
+    @app.post("/api/v1/recovery")
+    def recovery():
+        return {"status": "recovery"}
+
+    return app, engine
+
+
+class TestRealSessionCommitLifecycle:
+    """Real-lifecycle truth table for the DB-backed rate-limit counters."""
+
+    def test_counter_rows_persist_across_fresh_sessions(self):
+        from sqlalchemy import text
+
+        app, engine = _create_real_db_app()
+        client = TestClient(app)
+        for _ in range(3):
+            assert client.get("/api/v1/health").status_code == 200
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT endpoint_type, count FROM rate_limit_failures")).fetchall()
+        # Pre-fix: zero rows — every UPSERT was rolled back by db.close().
+        assert rows == [("generic", 3)]
+
+    def test_auth_tier_429_with_real_sessions(self):
+        app, _ = _create_real_db_app(auth_requests_per_minute=2)
+        client = TestClient(app)
+        assert client.get("/api/v1/auth/login").status_code == 200
+        assert client.get("/api/v1/auth/login").status_code == 200
+        r3 = client.get("/api/v1/auth/login")
+        # Pre-fix: 200 — count was always 1 in its rolled-back transaction.
+        assert r3.status_code == 429
+        assert "Auth endpoint rate limited" in r3.json()["detail"]
+
+    def test_break_glass_hourly_429_with_real_sessions(self):
+        app, _ = _create_real_db_app(break_glass_per_hour=1)
+        client = TestClient(app)
+        assert client.post("/api/v1/recovery").status_code == 200
+        r2 = client.post("/api/v1/recovery")
+        assert r2.status_code == 429
+        assert "per hour" in r2.json()["detail"]
+
+    def test_window_rollover_uses_separate_buckets(self):
+        from datetime import datetime, timedelta
+
+        from server.middleware.rate_limit import RateLimitMiddleware
+
+        app, _engine = _create_real_db_app()
+        mw = RateLimitMiddleware(app=MagicMock(), config=None)
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
+        factory = app.state.backend.get_session
+        s1 = factory()
+        assert mw._increment_counter(s1, "1.2.3.4", "auth", now) == 1
+        assert mw._increment_counter(s1, "1.2.3.4", "auth", now) == 2
+        s1.close()
+        s2 = factory()
+        # A fresh session must SEE the committed count (pre-fix: rollback → 1).
+        assert mw._increment_counter(s2, "1.2.3.4", "auth", now) == 3
+        # New window → its own bucket.
+        assert mw._increment_counter(s2, "1.2.3.4", "auth", now + timedelta(minutes=1)) == 1
+        s2.close()

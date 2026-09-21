@@ -20,8 +20,15 @@ set -euo pipefail
 # Environment variables:
 #   VENYA_INSTALL_DIR   - Install location (default: /opt/venya)
 #   VENYA_SKIP_PROMPT   - Set to "yes" to skip the confirmation prompt
-#   VENYA_DB_PASSWORD   - PostgreSQL venya user password (prompts if unset)
-#   VENYA_DB_PASSPHRASE - Server passphrase (default: venya_test_passphrase_2024)
+#   VENYA_DB_PASSWORD   - PostgreSQL venya user password (prompts if unset;
+#                         on re-run an explicit value must MATCH the password
+#                         stored in .env's VENYA_DB_URL or the install aborts)
+#   VENYA_DB_PASSPHRASE - Server encryption passphrase — NO DEFAULT. Re-run:
+#                         reused from $INSTALL_DIR/.env (an explicit env value
+#                         must MATCH the stored one or the install aborts).
+#                         Fresh install: prompted (interactive) or required (unattended).
+#   VENYA_RECOVERY_PEPPER - Recovery-code pepper — reused from .env on re-run;
+#                         strong random when unset on a fresh install.
 #   VENYA_TARBALL       - Tarball URL (default: latest GitHub release asset —
 #                         https://github.com/tabith-llc/venya/releases/latest/download/venya-core-install.tar.gz)
 #   VENYA_TARBALL_SHA256 - Pin the expected sha256 (recommended: strict integrity).
@@ -32,8 +39,8 @@ set -euo pipefail
 ###############################################################################
 
 # --- Defaults ---
-# NOTE: This is a development-only default. Production must override via VENYA_DB_PASSPHRASE.
-DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-venya_test_passphrase_2024}"
+# DB_PASSPHRASE and RECOVERY_PEPPER deliberately have NO defaults — they are
+# acquired below (stored-reuse on re-run > explicit env > prompt/random).
 TARBALL_URL="${VENYA_TARBALL:-https://github.com/tabith-llc/venya/releases/latest/download/venya-core-install.tar.gz}"
 CORE_HOSTNAME="${CORE_HOSTNAME:-$(hostname)}"
 TLS_MODE="${TLS_MODE:-internal}"
@@ -42,9 +49,6 @@ TLS_MODE="${TLS_MODE:-internal}"
 ADMIN_MTLS_ENABLED="${VENYA_ADMIN_MTLS_ENABLED:-true}"
 ADMIN_IDENTITY="${VENYA_ADMIN_IDENTITY:-}"
 ADMIN_CA_PASSPHRASE="${VENYA_ADMIN_CA_PASSPHRASE:-}"
-
-# Recovery code pepper — random secret used to derive recovery code hashes
-RECOVERY_PEPPER="${VENYA_RECOVERY_PEPPER:-$(openssl rand -base64 32)}"
 
 # --- Source common library ---
 # Direct execution: the library sits next to the script. Piped execution
@@ -72,6 +76,105 @@ info "Installing Venya Core to $INSTALL_DIR"
 # The server reads /opt/venya/.env, never this file (core-server-toml-inert).
 rm -f /etc/venya/server.toml
 
+# --- Server encryption passphrase (VENYA_DB_PASSPHRASE) — NO DEFAULT ---
+# The KEK protecting every encrypted DB secret derives from this value (the
+# server fails fast at boot when it is missing). A published default would be
+# a published KEK, and silently rotating it on re-run would orphan every
+# encrypted row — so precedence is: stored value from .env wins on re-run (an
+# explicit env that DISAGREES aborts loudly with state intact) > explicit env
+# > TTY prompt > error when unattended. Runs before any system mutation.
+DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-}"
+STORED_ENV_FILE="$INSTALL_DIR/.env"
+STORED_DB_PASSPHRASE=""
+if [ -f "$STORED_ENV_FILE" ]; then
+    STORED_DB_PASSPHRASE=$(sed -n 's/^VENYA_DB__PASSPHRASE=//p' "$STORED_ENV_FILE" | head -n1)
+fi
+if [ -n "$STORED_DB_PASSPHRASE" ]; then
+    if [ -n "$DB_PASSPHRASE" ] && [ "$DB_PASSPHRASE" != "$STORED_DB_PASSPHRASE" ]; then
+        error "VENYA_DB_PASSPHRASE does not match the stored value in $STORED_ENV_FILE."
+        error "Rotating it would make existing encrypted DB secrets undecryptable."
+        error "Aborting — no changes made."
+        exit 1
+    fi
+    DB_PASSPHRASE="$STORED_DB_PASSPHRASE"
+    info "Existing install: reusing stored server passphrase from $STORED_ENV_FILE."
+elif [ -z "$DB_PASSPHRASE" ]; then
+    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+        while :; do
+            echo -n "Enter server encryption passphrase: "
+            IFS= read -rs DB_PASSPHRASE
+            echo ""
+            [ -n "$DB_PASSPHRASE" ] && break
+            warn "Passphrase cannot be empty."
+        done
+    else
+        error "VENYA_DB_PASSPHRASE is required for unattended install (stdin is not a TTY)."
+        exit 1
+    fi
+fi
+
+# --- Recovery-code pepper — same stored-reuse rule: rotating it on re-run
+# would silently invalidate every issued recovery code. Fresh install:
+# explicit env > strong random (never human-memorized, like the CA passphrases).
+RECOVERY_PEPPER="${VENYA_RECOVERY_PEPPER:-}"
+STORED_RECOVERY_PEPPER=""
+if [ -f "$STORED_ENV_FILE" ]; then
+    STORED_RECOVERY_PEPPER=$(sed -n 's/^VENYA_RECOVERY_CODE_PEPPER=//p' "$STORED_ENV_FILE" | head -n1)
+fi
+if [ -n "$STORED_RECOVERY_PEPPER" ]; then
+    if [ -n "$RECOVERY_PEPPER" ] && [ "$RECOVERY_PEPPER" != "$STORED_RECOVERY_PEPPER" ]; then
+        error "VENYA_RECOVERY_PEPPER does not match the stored value in $STORED_ENV_FILE."
+        error "Rotating it would invalidate all issued recovery codes."
+        error "Aborting — no changes made."
+        exit 1
+    fi
+    RECOVERY_PEPPER="$STORED_RECOVERY_PEPPER"
+    info "Existing install: reusing stored recovery pepper from $STORED_ENV_FILE."
+elif [ -z "$RECOVERY_PEPPER" ]; then
+    RECOVERY_PEPPER=$(openssl rand -base64 32)
+    info "Fresh install: generated a random recovery pepper."
+fi
+
+# --- PostgreSQL role password (VENYA_DB_PASSWORD) ---
+# Fresh install: prompted (interactive) or required (unattended) — the
+# exists-guarded CREATE USER below makes the explicit env the initial
+# password, nothing to compare against. Re-run: an explicit env that
+# DISAGREES with the password stored in .env's VENYA_DB_URL aborts loudly
+# with state intact, BEFORE any mutation — the CREATE USER exists-guard
+# would otherwise leave the PG role on the old password while .env gets the
+# new one, diverging server DB auth into a boot loop (ticket
+# installer-db-password-rerun-mismatch). Same no-silent-rotation semantics
+# as the passphrase/pepper guards above; rotation is a deliberate manual act
+# named in the abort message. Raw-string comparison matches the raw URL
+# write below — passwords containing @ or : break the URL at write time
+# regardless (pre-existing wart, recorded in the ticket, NOT fixed here).
+if [ -z "$VENYA_DB_PASSWORD" ]; then
+    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+        while :; do
+            echo -n "Enter PostgreSQL password for venya user: "
+            IFS= read -rs VENYA_DB_PASSWORD
+            echo ""
+            [ -n "$VENYA_DB_PASSWORD" ] && break
+            warn "Password cannot be empty."
+        done
+    else
+        error "VENYA_DB_PASSWORD is required for unattended install (stdin is not a TTY)."
+        exit 1
+    fi
+elif [ -f "$STORED_ENV_FILE" ]; then
+    STORED_DB_PASSWORD=$(sed -n 's|^VENYA_DB_URL=postgresql://venya:\(.*\)@localhost/venya$|\1|p' "$STORED_ENV_FILE" | head -n1)
+    if [ -n "$STORED_DB_PASSWORD" ] && [ "$VENYA_DB_PASSWORD" != "$STORED_DB_PASSWORD" ]; then
+        error "VENYA_DB_PASSWORD does not match the password stored in $STORED_ENV_FILE (VENYA_DB_URL)."
+        error "The PostgreSQL role keeps its original password on re-run; proceeding would"
+        error "diverge .env from the role and break server DB auth. Aborting — no changes made."
+        error "To continue, either:"
+        error "  1. Re-run with the stored password (see VENYA_DB_URL in $STORED_ENV_FILE), or"
+        error "  2. Rotate deliberately: sudo -u postgres psql -c \"ALTER USER venya WITH PASSWORD '<new>'\""
+        error "     then re-run the installer with VENYA_DB_PASSWORD='<new>'."
+        exit 1
+    fi
+fi
+
 # --- Create venya service account (no password, nologin, locked) ---
 venya_create_user
 
@@ -81,7 +184,7 @@ venya_install_system_pkgs curl sudo
 # --- Install Nginx (core-specific) ---
 info "Installing Nginx reverse proxy..."
 if ! command -v nginx &>/dev/null; then
-    apt-get install -y -qq nginx > /dev/null 2>&1
+    venya_apt install -y -qq nginx
     info "Nginx installed: $(nginx -v 2>&1)"
 else
     info "Nginx already installed: $(nginx -v 2>&1)"
@@ -212,23 +315,10 @@ print(\"Admin cert generated for $3\")
 fi
 
 # --- Install and setup PostgreSQL (core-specific) ---
+# VENYA_DB_PASSWORD acquired in the secrets zone above (pre-mutation, with
+# the re-run mismatch guard).
 info "Installing PostgreSQL..."
-apt-get install -y -qq postgresql > /dev/null 2>&1
-
-if [ -z "$VENYA_DB_PASSWORD" ]; then
-    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
-        while :; do
-            echo -n "Enter PostgreSQL password for venya user: "
-            IFS= read -rs VENYA_DB_PASSWORD
-            echo ""
-            [ -n "$VENYA_DB_PASSWORD" ] && break
-            warn "Password cannot be empty."
-        done
-    else
-        error "VENYA_DB_PASSWORD is required for unattended install (stdin is not a TTY)."
-        exit 1
-    fi
-fi
+venya_apt install -y -qq postgresql
 
 info "Setting up PostgreSQL..."
 systemctl start postgresql
@@ -254,6 +344,37 @@ info "Server will bind to: $BIND_ADDRESS (Nginx handles TLS)"
 # written (core-server-toml-inert).
 mkdir -p /etc/venya
 
+# --- Root/executor CA key passphrase (VENYA_CA_KEY_PASSPHRASE) ---
+# The root CA signs executor certs, so its key must be encrypted at rest
+# (SEC-001 invariant; sibling of the admin-CA fix 3667c6e). Same acquisition +
+# re-run-idempotency precedence as the admin CA: explicit env (operator
+# override; a WRONG value fails loudly downstream at decrypt) > stored in the
+# EnvironmentFile (re-run reuse -- the encrypted ca.key is PRESERVED by the
+# CA-gen guard below, so regenerating the passphrase would make it undecryptable)
+# > TTY prompt > strong random. Generated BEFORE the EnvironmentFile write so it
+# can be delivered there and used by the CA-gen + openssl signing below.
+CA_KEY_PASSPHRASE="${VENYA_CA_KEY_PASSPHRASE:-}"
+if [ -z "$CA_KEY_PASSPHRASE" ] && [ -f /etc/venya/venya-core.env ]; then
+    CA_KEY_PASSPHRASE=$(sed -n 's/^VENYA_CA_KEY_PASSPHRASE=//p' /etc/venya/venya-core.env | head -n1)
+    if [ -n "$CA_KEY_PASSPHRASE" ]; then
+        info "Existing install: reusing stored root CA passphrase from /etc/venya/venya-core.env."
+    fi
+fi
+if [ -z "$CA_KEY_PASSPHRASE" ]; then
+    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+        while :; do
+            echo -n "Root CA key passphrase: "
+            IFS= read -rs CA_KEY_PASSPHRASE
+            echo ""
+            [ -n "$CA_KEY_PASSPHRASE" ] && break
+            warn "Passphrase cannot be empty."
+        done
+    else
+        CA_KEY_PASSPHRASE=$(openssl rand -base64 32)
+        info "Unattended install: generated a random root CA passphrase."
+    fi
+fi
+
 # --- Write .env (core-specific) ---
 cat > "$INSTALL_DIR/.env" << EOF
 VENYA_HOST=127.0.0.1
@@ -267,27 +388,33 @@ VENYA_RECOVERY_CODE_PEPPER=$RECOVERY_PEPPER
 EOF
 
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
-    # NOTE: the passphrase is NOT written here. pydantic reads .env into the
-    # settings object, not into os.environ — and ca.py/app.py read os.environ.
-    # The passphrase reaches the daemon via the 0640 EnvironmentFile below.
+    # NOTE: the admin passphrase is NOT written to .env. pydantic reads .env into
+    # the settings object, not into os.environ — and ca.py/app.py read os.environ.
+    # Passphrases reach the daemon via the 0640 EnvironmentFile below.
     cat >> "$INSTALL_DIR/.env" << EOF
 VENYA_ADMIN_MTLS__ENABLED=true
 VENYA_ADMIN_MTLS__CA_CERT="$ADMIN_CA_DIR/admin-ca.crt"
 VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS=["$ADMIN_IDENTITY"]
 EOF
-
-    # Runtime passphrase delivery: a 0640 root:venya EnvironmentFile that
-    # systemd (PID1, as root) reads into the service's os.environ — the only
-    # thing ca.py reads. Replaces the old inline Environment= injection into
-    # the 0644 unit (which leaked the secret to every local user). Value is
-    # unquoted base64: systemd strips quotes but unquoted avoids any
-    # version-dependent ambiguity, and base64 has no systemd-special chars.
-    cat > /etc/venya/venya-core.env << EOF
-VENYA_ADMIN_CA_KEY_PASSPHRASE=$ADMIN_CA_PASSPHRASE
-EOF
-    chown root:venya /etc/venya/venya-core.env
-    chmod 0640 /etc/venya/venya-core.env
 fi
+
+# Runtime passphrase delivery: a 0640 root:venya EnvironmentFile that systemd
+# (PID1, as root) reads into the service's os.environ — the only thing ca.py
+# reads. Replaces the old inline Environment= injection into the 0644 unit (which
+# leaked the secret to every local user). Values are unquoted base64: systemd
+# strips quotes but unquoted avoids any version-dependent ambiguity, and base64
+# has no systemd-special chars. The ROOT CA passphrase is ALWAYS delivered (the
+# root CA is generated unconditionally and signs executor certs at runtime); the
+# ADMIN CA passphrase is appended only when admin mTLS is enabled. Written before
+# the CA-gen/openssl-signing below so a re-run can reuse it (idempotency above).
+cat > /etc/venya/venya-core.env << EOF
+VENYA_CA_KEY_PASSPHRASE=$CA_KEY_PASSPHRASE
+EOF
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    echo "VENYA_ADMIN_CA_KEY_PASSPHRASE=$ADMIN_CA_PASSPHRASE" >> /etc/venya/venya-core.env
+fi
+chown root:venya /etc/venya/venya-core.env
+chmod 0640 /etc/venya/venya-core.env
 
 # .env holds the DB password + passphrase — always root/venya-only, even without mTLS.
 chmod 600 "$INSTALL_DIR/.env"
@@ -304,6 +431,7 @@ chown venya:venya /etc/venya/tls
 sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" \
     python -c "
 import os
+import sys
 from pathlib import Path
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -319,8 +447,11 @@ ca_key_path = ca_dir / 'ca.key'
 ca_cert_path = ca_dir / 'ca.crt'
 
 if not ca_key_path.exists():
+    passphrase = sys.stdin.readline().rstrip(chr(10)).encode()
+    if not passphrase:
+        raise SystemExit('VENYA_CA_KEY_PASSPHRASE empty - refusing to write a plaintext CA key')
     ca_key = ec.generate_private_key(ec.SECP256R1())
-    ca_key_path.write_bytes(ca_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    ca_key_path.write_bytes(ca_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.BestAvailableEncryption(passphrase)))
     ca_key_path.chmod(0o600)
     now = datetime.now(UTC)
     subject = issuer = x509.Name([
@@ -343,10 +474,10 @@ if not ca_key_path.exists():
     ca_cert = builder.sign(ca_key, hashes.SHA256())
     ca_cert_path.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
     ca_cert_path.chmod(0o644)
-    print('CA generated')
+    print('CA generated (key encrypted)')
 else:
-    print('CA already exists')
-"
+    print('CA already exists - preserved')
+" <<<"$CA_KEY_PASSPHRASE"
 
 # Sign server cert with openssl CLI (cryptography 50.0.1 Rust backend bug:
 # builder.sign() rejects valid ECPrivateKey from _rust.openssl.ec module)
@@ -357,8 +488,9 @@ chmod 600 /etc/venya/tls/server.key
 openssl req -new -key /etc/venya/tls/server.key -out /tmp/server.csr \
     -subj "/O=Venya/CN=$CORE_HOSTNAME"
 
-openssl x509 -req -in /tmp/server.csr \
+VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/server.csr \
     -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
+    -passin env:VENYA_CA_KEY_PASSPHRASE \
     -CAcreateserial -out /etc/venya/tls/server.crt -days 365 \
     -extfile <(echo "subjectAltName=DNS:$CORE_HOSTNAME")
 
@@ -372,9 +504,11 @@ info "Server TLS certificate signed with Venya CA"
 # The core presents this client cert when calling the executor relay listener.
 # CN="${CORE_HOSTNAME}-relay" is the canonical relay identity; the executor
 # installer derives the same value for relay_client_ids.
-# CA premise (guarded, not asserted): the CA above is generated UNENCRYPTED
-# (NoEncryption() in the CA block), so openssl signs without -passin. If the
-# CA is missing, fail the install here — not at the physical e2e.
+# The CA key is ENCRYPTED (BestAvailableEncryption, VENYA_CA_KEY_PASSPHRASE), so
+# openssl signs with -passin env:VENYA_CA_KEY_PASSPHRASE — the value travels in
+# the process environment (root-readable /proc/PID/environ), NEVER on argv
+# (/proc/*/cmdline is world-readable). If the CA is missing, fail the install
+# here — not at the physical e2e.
 if [ ! -f /var/lib/venya/ca/ca.crt ] || [ ! -f /var/lib/venya/ca/ca.key ]; then
     error "Venya CA missing at /var/lib/venya/ca (ca.crt/ca.key) — cannot sign relay client cert"
     exit 1
@@ -397,8 +531,9 @@ openssl req -new -key "$RELAY_DIR/relay-client.key" \
 # Authority Key Identifier (33bc4b4); a lenient s_client smoke masks the
 # absence. EKU is clientAuth-only: the core relay cert never serves a server
 # role (the executor leaf is dual-purpose by design — do not "unify").
-openssl x509 -req -in /tmp/relay-client.csr \
+VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/relay-client.csr \
     -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
+    -passin env:VENYA_CA_KEY_PASSPHRASE \
     -CAcreateserial -out "$RELAY_DIR/relay-client.crt" -days 365 \
     -extfile <(printf 'extendedKeyUsage=clientAuth\nsubjectAltName=DNS:%s-relay\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n' "${CORE_HOSTNAME}")
 
@@ -477,11 +612,24 @@ cat > /etc/nginx/sites-available/venya << EOF
 server {
     listen 443 ssl;
     server_name $CORE_HOSTNAME;
+    server_tokens off;
 
     ssl_certificate /etc/venya/tls/server.crt;
     ssl_certificate_key /etc/venya/tls/server.key;
     ssl_client_certificate /etc/nginx/ssl/client-ca-bundle.crt;
     ssl_verify_client optional;
+
+    # The relay execute hop (POST /api/v1/executors/{id}/execute) can legitimately run
+    # up to the server's 300s executor-relay timeout — a cold sbx agent-template pull
+    # alone is ~65s. nginx's default proxy_read_timeout (60s) 504s before the server
+    # responds even though the executor succeeds, so the client sees a gateway timeout
+    # for a command that actually ran (and may retry -> double execution). 330s = the
+    # 300s relay ceiling + 30s margin, so the server's own clean 503 "Executor timed
+    # out" surfaces rather than an nginx 504 at the boundary. Set at server level so it
+    # covers every proxied location without duplicating the X-Client-* headers below
+    # (ticket relay-cold-start-nginx-proxy-timeout).
+    proxy_read_timeout 330s;
+    proxy_send_timeout 330s;
 
     location /.well-known/venya-ca.crt {
         alias /var/www/.well-known/venya-ca.crt;
@@ -496,6 +644,7 @@ server {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header X-Client-Verified \$ssl_client_verify;
         proxy_set_header X-Client-Subject \$ssl_client_s_dn;
+        proxy_set_header X-Client-Serial \$ssl_client_serial;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }
@@ -584,10 +733,17 @@ sed "s|VENYA_ENV_DIR=/opt/venya|VENYA_ENV_DIR=$INSTALL_DIR|" "$INSTALL_DIR/syste
 
 systemctl daemon-reload
 systemctl enable venya-core.service
-systemctl start venya-core.service
+
+# Fresh-bytes sync (ticket installer-rerun-no-service-restart): a re-run swaps
+# site-packages under the LIVE process and `systemctl start` is a no-op on a
+# running unit — detection (start-time vs deploy stamp) + restart with a loud
+# notice, so verification below probes the NEW bytes, never the stale process.
+touch "$INSTALL_DIR/.deploy-stamp"
+venya_service_sync venya-core "$INSTALL_DIR/.deploy-stamp"
 
 # --- Service retry ---
 venya_service_retry venya-core
+venya_service_freshness venya-core "$INSTALL_DIR/.deploy-stamp"
 
 # --- Verification ---
 venya_verify_install \

@@ -36,12 +36,26 @@ def run_command(args: Any) -> int:
     Returns:
         Exit code (0 for success, 1 for error).
     """
-    server_url = getattr(args, "server_url", None)
+    # Server URL precedence (matches the --server-url help text and the
+    # revoke-admin-cert handler): explicit flag > VENYA_SERVER_URL env >
+    # config.json (APIClient fallback). Empty env falls through (ticket
+    # cli-server-url-env-ignored: headless guidance drove the CLI by env only,
+    # which silently hit the localhost:8000 default -> Errno 111).
+    server_url = getattr(args, "server_url", None) or os.environ.get("VENYA_SERVER_URL") or None
     client = APIClient(server_url=server_url)
 
-    # Authenticate if no token is available (init, recovery, config, and exec are public)
+    # Authenticate if no token is available (init, enroll, login, recovery,
+    # config, exec are public). Headless admin exemption: `venya admin ...` with
+    # VENYA_ADMIN_CERT/KEY configured presents the mTLS client cert instead, and
+    # the server's require_admin cert-only shortcut is the authority (a bad cert
+    # surfaces as its 401/403). Scoped to command == "admin" ONLY -- role-gated
+    # commands (list/store/audit/...) still require FIDO2/token, matching the
+    # server, which 401s cert-only callers on require_role routes.
     command = args.command
-    if command not in ("init", "enroll", "login", "recovery", "config", "exec") and not client.config.access_token:
+    admin_mtls_exempt = command == "admin" and getattr(client, "has_admin_mtls", False)
+    if admin_mtls_exempt and not client.config.access_token:
+        print("Using admin mTLS certificate (VENYA_ADMIN_CERT) for authentication.")
+    elif command not in ("init", "enroll", "login", "recovery", "config", "exec") and not client.config.access_token:
         user_id = getattr(args, "user_id", None)
         try:
             print("Authenticating with security key...")
@@ -298,9 +312,21 @@ def cmd_store(client: APIClient, args: Any) -> int:
 def cmd_get(client: APIClient, args: Any) -> int:
     """Retrieve a secret."""
     try:
+        params: dict[str, Any] = {"unmask": args.unmask}
+        get_kwargs: dict[str, Any] = {"params": params}
+        if args.unmask:
+            # Unmask is elevation-gated server-side (ticket
+            # sec-secret-caller-param-plaintext-bypass): re-authenticate with
+            # the security key first, same ceremony as credential add.
+            # The token rides the X-Elevation-Token HEADER — the server
+            # deleted the query-param transport (sec-auth-elevation-authz-
+            # hardening #13) and a query token leaks into access logs
+            # (ticket cli-elevation-token-query-param-transport).
+            print("Re-authenticating with security key for elevation...")
+            get_kwargs["extra_headers"] = {"X-Elevation-Token": _elevate(client)}
         result = client.get(
             f"/api/v1/secrets/{args.key}",
-            params={"unmask": args.unmask},
+            **get_kwargs,
         )
         if args.unmask:
             print(result.get("value", ""))
@@ -745,17 +771,33 @@ def cmd_admin_revoke_executor(client: APIClient, args: Any) -> int:
     class _RevokeArgs:
         executor_id = args.executor_id
         cert_path = "/etc/venya/executor/executor.crt"
+        serial = getattr(args, "serial", None)
 
     return executor_cert_revoke(_RevokeArgs(), client=client)
+
+
+# CA source paths for the executor-enroll --output-dir bundle. Module-level
+# constants = test seam (monkeypatchable); the bundle copies these into the
+# output dir for offline/air-gapped executor installs.
+_BUNDLE_CORE_CA = Path("/var/lib/venya/ca/ca.crt")
+_BUNDLE_ADMIN_CA = Path("/var/lib/venya/ca/admin-ca/admin-ca.crt")
 
 
 def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
     """Generate an enrollment token for executor bootstrap registration."""
     try:
+        output_dir = getattr(args, "output_dir", None)
+        if output_dir:
+            # Stale-token defense BEFORE the mint (ticket
+            # cli-executor-enroll-token-ux): a failed POST must never leave a
+            # previous run's dead token on disk for `test -s` to trust.
+            # Removal AFTER the POST would resurrect the bug on a crash
+            # between the two.
+            (Path(output_dir) / "token").unlink(missing_ok=True)
+
         result = client.post(f"/api/v1/admin/executors/{args.executor_id}/enroll")
         token = result.get("enrollment_token", "")
         expires_in = result.get("expires_in_seconds", 900)
-        output_dir = getattr(args, "output_dir", None)
 
         if output_dir:
             import hashlib as hashlib_mod
@@ -767,17 +809,15 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
             token_path.write_text(token)
 
             core_ca_path = output_path / "core-server-ca.crt"
-            venya_ca_path = Path("/var/lib/venya/ca/ca.crt")
-            if venya_ca_path.exists():
-                core_ca_path.write_bytes(venya_ca_path.read_bytes())
+            if _BUNDLE_CORE_CA.exists():
+                core_ca_path.write_bytes(_BUNDLE_CORE_CA.read_bytes())
                 core_ca_written = True
             else:
                 core_ca_written = False
 
             admin_ca_path = output_path / "admin-ca.crt"
-            admin_ca_dir = Path("/var/lib/venya/ca/admin-ca")
-            if (admin_ca_dir / "admin-ca.crt").exists():
-                admin_ca_path.write_bytes((admin_ca_dir / "admin-ca.crt").read_bytes())
+            if _BUNDLE_ADMIN_CA.exists():
+                admin_ca_path.write_bytes(_BUNDLE_ADMIN_CA.read_bytes())
                 admin_ca_written = True
             else:
                 admin_ca_written = False
@@ -799,18 +839,23 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
                 print(f"  {admin_ca_path}")
             else:
                 print(f"  {admin_ca_path} (NOT FOUND)")
+            if not core_ca_written:
+                print()
+                print("WARNING: core CA missing — bundle INCOMPLETE for offline/air-gapped install.")
+                print("         Online installs fetch the CA from the server; offline installs need it pre-copied.")
             print()
             print("Bundle fingerprint (verify before copying to executor):")
             print(f"  SHA256: {bundle_hash}")
             print()
             print("To install on executor VM:")
-            print(f"  scp -r {output_dir} bot@venya-exec-1:/tmp/")
+            print(f"  scp -r {output_dir} bot@{args.executor_id}:/tmp/")
             print()
             print("  curl -fsSL http://.../install-venya-executor.sh | \\")
-            print("    sudo VENYA_SERVER_URL=https://venya-core-1 \\")
+            print(f"    sudo VENYA_SERVER_URL={client.config.server_url} \\")
             print(f"         VENYA_EXECUTOR_ID={args.executor_id} \\")
             print(f"         VENYA_EXECUTOR_ENROLLMENT_TOKEN=$(cat {token_path}) \\")
-            print(f"         VENYA_VENYA_CA_FILE={core_ca_path} \\")
+            if core_ca_written:
+                print(f"         VENYA_VENYA_CA_FILE={core_ca_path} \\")
             print("         bash -s")
             print()
             print(f"Note: This bundle is valid for {expires_in // 60} minutes.")
@@ -1481,7 +1526,14 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
             raise APIClientError(f"FIDO2 error: {e}") from e
         cred_response = fido2._format_credential_response(credential)
 
-        # Step 5: Complete registration
+        # Step 5: Complete registration — with a FRESH elevation token:
+        # tokens are single-use (server burns on verify; #6 ruling option (a),
+        # sec-auth-elevation-authz-hardening) and the start call consumed the
+        # first one. A cancel/timeout inside _elevate raises APIClientError →
+        # clean exit via the handler below, no stuck flow; the server-side
+        # burn is idempotent (replay of a burned token = clean 401).
+        print("Re-authenticating with security key for elevation...")
+        elevation_token = _elevate(client)
         result = client.post(
             "/api/v1/credentials/add/browser/complete",
             json={
@@ -1497,7 +1549,6 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
             return 0
 
         print("Credential added successfully.")
-        print(f"  Credential ID: {result.get('id', '')}")
         print(f"  Label: {result.get('label', label)}")
         print("  Status: ok")
         return 0
@@ -1609,7 +1660,7 @@ def cmd_exec_group(client: APIClient, args: Any) -> int:
     """Dispatch executor lifecycle subcommands."""
     exec_command = getattr(args, "exec_command", None)
     if exec_command is None:
-        print("Error: exec subcommand required (register, cert, heartbeat, audit, status)", file=sys.stderr)
+        print("Error: exec subcommand required (register, cert, heartbeat, audit, status, list)", file=sys.stderr)
         return 1
 
     if exec_command == "register":
@@ -1622,8 +1673,59 @@ def cmd_exec_group(client: APIClient, args: Any) -> int:
         return executor_audit(client, args)
     elif exec_command == "status":
         return executor_status(args)
+    elif exec_command == "list":
+        return executor_list(client, args)
     else:
         print(f"Unknown exec command: {exec_command}", file=sys.stderr)
+        return 1
+
+
+def executor_list(client: APIClient, args: Any) -> int:
+    """List registered executors with their heartbeat-reported build versions.
+
+    Version is the executor dist version the daemon reports on every
+    heartbeat (single-sourced from package metadata). NULL renders as
+    'unknown (pre-B daemon)' — the explicit "has not reported yet" signal,
+    never a blank cell (feature/version-surfaces condition 3). Observability
+    only: no version gating anywhere in this path (scope guard).
+    """
+    try:
+        result = client.get("/api/v1/admin/executors")
+        executors = result.get("executors", [])
+
+        if not executors:
+            print("No executors found.")
+            return 0
+
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
+
+        headers = ["EXECUTOR_ID", "SERIAL", "NOT_AFTER", "VERSION"]
+        rows = []
+        for e in executors:
+            rows.append(
+                [
+                    e.get("executor_id", ""),
+                    (e.get("serial_number") or "")[:16],
+                    e.get("not_after") or "-",
+                    e.get("version") or "unknown (pre-B daemon)",
+                ]
+            )
+
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for i, cell in enumerate(row):
+                widths[i] = max(widths[i], len(cell))
+
+        fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+        print(fmt.format(*headers))
+        print(fmt.format(*["-" * w for w in widths]))
+        for row in rows:
+            print(fmt.format(*row))
+        return 0
+    except Exception as e:
+        print(f"List failed: {e}", file=sys.stderr)
         return 1
 
 
@@ -2110,6 +2212,18 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
     """
     executor_id = getattr(args, "executor_id", None)
     cert_path = getattr(args, "cert_path", "/etc/venya/executor/executor.crt")
+    serial = getattr(args, "serial", None)
+    if serial is not None:
+        # Serial form (ticket executor-revocation-by-identity, ruling 1):
+        # kill ONE credential (e.g. an orphaned predecessor serial) WITHOUT
+        # revoking the executor identity. Incident-response tool.
+        try:
+            int(serial, 16)
+            if not 1 <= len(serial) <= 16:
+                raise ValueError("bad length")
+        except (ValueError, TypeError):
+            print(f"Error: --serial must be hex, 1-16 chars (got {serial!r})", file=sys.stderr)
+            return 1
 
     # Resolve executor_id: explicit arg > local cert CN
     if executor_id is None:
@@ -2125,10 +2239,20 @@ def executor_cert_revoke(args: Any, client: APIClient | None = None) -> int:
         client = APIClient()
 
     try:
-        result = client.post(f"/api/v1/admin/executors/{executor_id}/revoke")
+        result = client.post(
+            f"/api/v1/admin/executors/{executor_id}/revoke",
+            json={"serial": serial.casefold()} if serial else None,
+        )
         revoked = result.get("revoked", False) if result else False
-        print("Certificate revoked.")
-        print(f"  Executor ID:  {executor_id}")
+        if serial:
+            print("Certificate serial revoked (identity NOT revoked).")
+            print(f"  Executor ID:  {executor_id}")
+            print(f"  Serial:       {serial.casefold()}")
+        else:
+            print("Certificate revoked.")
+            print(f"  Executor ID:  {executor_id}")
+        if not serial and revoked:
+            print("  Identity:     REVOKED (terminal — re-enrollment requires a NEW executor_id)")
         print(f"  Revoked:      {'Yes' if revoked else 'No'}")
         return 0
     except APIClientAuthenticationError as e:
@@ -2170,11 +2294,17 @@ def executor_heartbeat(args: Any) -> int:
         print("Error: server URL not configured. Use --core-url or set config.", file=sys.stderr)
         return 1
 
-    # Compute SHA-256 fingerprint of the certificate
+    # Compute SHA-256 fingerprint of the certificate over its DER encoding --
+    # matching the server (ca.py compute_fingerprint) and executor (daemon.py)
+    # convention. Hashing the PEM bytes produced a value that could never match
+    # the admin-listing fingerprint for the same cert.
     try:
+        from cryptography.hazmat.primitives import serialization
+
         cert_pem = Path(cert_path).read_bytes()
-        x509.load_pem_x509_certificate(cert_pem)
-        fingerprint = hashlib.sha256(cert_pem).hexdigest()
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        der = cert.public_bytes(serialization.Encoding.DER)
+        fingerprint = hashlib.sha256(der).hexdigest()
     except Exception as e:
         print(f"Failed to compute certificate fingerprint: {e}", file=sys.stderr)
         return 1
@@ -2182,17 +2312,26 @@ def executor_heartbeat(args: Any) -> int:
     executor_id = info["executor_id"]
     url = f"{server_url}/api/v1/heartbeat"
 
+    # Plaintext http:// is REJECTED (ticket sec-sweep-low-informational #17,
+    # user ruling 2026-09-21): this POST carries executor-identifying state,
+    # and silently disabling TLS for an http:// URL was the CLI's only
+    # non-knob TLS-off path. The sanctioned VENYA_TLS_VERIFY=false knob covers
+    # a DISTRUSTED CERT over https — it never means "no TLS".
+    if not server_url.startswith("https://"):
+        print(
+            f"Error: server URL must be https:// — got '{server_url}'. Plaintext http is "
+            "not supported for the executor heartbeat (ticket sec-sweep-low-informational #17).",
+            file=sys.stderr,
+        )
+        return 1
+
     # Build mTLS client
     try:
         ca_cert_path = str(Path(cert_path).parent / "ca.crt")
-        use_tls = server_url.startswith("https://")
-        if use_tls:
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.load_cert_chain(cert_path, key_path)
-            if Path(ca_cert_path).exists():
-                ssl_ctx.load_verify_locations(ca_cert_path)
-        else:
-            ssl_ctx = False  # type: ignore[assignment]
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.load_cert_chain(cert_path, key_path)
+        if Path(ca_cert_path).exists():
+            ssl_ctx.load_verify_locations(ca_cert_path)
         with httpx2.Client(
             verify=ssl_ctx,
             timeout=10.0,
@@ -2395,20 +2534,80 @@ def cmd_admin_export_ca_cert(args: Any) -> int:
     return 0
 
 
+# --- CA-key backup envelope (ticket fido2-device-layer-sweep-findings
+# finding 5, canonical-format ruling 2026-09-21) --------------------------
+# Canonical: b"VENYACA1" + PBKDF2 salt(16) + GCM nonce(12) + AES-256-GCM
+# ciphertext+tag; KDF = PBKDF2HMAC(SHA256, 32, salt, 600_000). Byte-identical
+# to the server ca.py envelope — the CLI has no `core` dependency, so the
+# implementations are ALIGNED COPIES pinned by the cross-compat contract
+# tests in tests/test_cli_ca_key_format.py (both directions).
+# Restore is a DUAL-FORMAT reader: canonical GCM primary + legacy alpha.11
+# CBC (salt16 + iv16 + PKCS7 ct) read-only (precedent: the bootstrap-token
+# dual-location reader) — no exported key material may be stranded.
+_CA_BLOB_MAGIC = b"VENYACA1"
+_CA_KDF_ITERATIONS = 600_000
+
+
+def _derive_ca_backup_key(salt: bytes, passphrase: str) -> bytes:
+    """PBKDF2-SHA256 key derivation for CA-key backup envelopes."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=_CA_KDF_ITERATIONS)
+    return kdf.derive(passphrase.encode())
+
+
+def _decrypt_ca_backup(data: bytes, passphrase: str) -> bytes:
+    """Decrypt a CA-key backup blob (canonical GCM primary, legacy CBC read-only).
+
+    Raises ValueError with an operator-actionable message on any format,
+    passphrase, or tamper failure — never returns suspect material. The
+    legacy CBC path runs FULL PKCS7 validation: the pre-fix check inspected
+    only the last padding byte's RANGE, so a wrong passphrase or tampered
+    blob could restore silently-corrupted key material (finding 5).
+    """
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives import ciphers
+    from cryptography.hazmat.primitives.ciphers import algorithms, modes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    if data.startswith(_CA_BLOB_MAGIC):
+        body = data[len(_CA_BLOB_MAGIC) :]
+        if len(body) < 16 + 12 + 16:  # salt + nonce + GCM tag minimum
+            raise ValueError("backup file too small (canonical GCM envelope)")
+        salt, nonce, ciphertext = body[:16], body[16:28], body[28:]
+        try:
+            return AESGCM(_derive_ca_backup_key(salt, passphrase)).decrypt(nonce, ciphertext, None)
+        except InvalidTag:
+            raise ValueError("invalid passphrase or corrupted backup (GCM authentication failed)") from None
+
+    # Legacy alpha.11 CBC envelope: salt(16) + iv(16) + PKCS7-padded ciphertext.
+    if len(data) < 16 + 16 + 16:
+        raise ValueError("backup file too small")
+    salt, iv, ciphertext = data[:16], data[16:32], data[32:]
+    try:
+        decryptor = ciphers.Cipher(algorithms.AES(_derive_ca_backup_key(salt, passphrase)), modes.CBC(iv)).decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+    except ValueError:
+        raise ValueError("invalid passphrase or corrupted backup (CBC)") from None
+    pad = padded[-1] if padded else 0
+    if pad < 1 or pad > 16 or pad > len(padded) or padded[-pad:] != bytes([pad]) * pad:
+        raise ValueError("invalid passphrase or corrupted backup (PKCS7 validation failed)")
+    return padded[:-pad]
+
+
 def cmd_admin_export_ca_key(args: Any) -> int:
     """Export the CA private key, encrypted with a passphrase.
 
-    Reads the CA private key from disk, encrypts it using AES-256-CBC
-    with a user-provided passphrase, and writes the encrypted blob to
-    the specified output file.
+    Reads the CA private key from disk, encrypts it using the canonical
+    VENYACA1 envelope (AES-256-GCM, authenticated — finding-5 ruling), and
+    writes the blob to the specified output file.
 
     The plaintext key is never written to disk or stdout.
     """
     from pathlib import Path
 
-    from cryptography.hazmat.primitives import ciphers, hashes
-    from cryptography.hazmat.primitives.ciphers import algorithms, modes
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     ca_dir = _resolve_ca_dir(args)
     ca_key_path = Path(ca_dir) / "ca.key"
@@ -2437,35 +2636,21 @@ def cmd_admin_export_ca_key(args: Any) -> int:
 
     # Derive encryption key from passphrase using PBKDF2
     salt = os.urandom(16)
-    kdf = PBKDF2HMAC(
-        algorithm=hashes.SHA256(),
-        length=32,
-        salt=salt,
-        iterations=600_000,
-    )
-    key = kdf.derive(passphrase1.encode())
+    key = _derive_ca_backup_key(salt, passphrase1)
 
-    # Encrypt with AES-256-CBC
-    iv = os.urandom(16)
-    cipher = ciphers.Cipher(
-        algorithms.AES(key),
-        modes.CBC(iv),
-    )
-    encryptor = cipher.encryptor()
+    # Encrypt with AES-256-GCM — canonical VENYACA1 envelope (finding-5
+    # ruling): authenticated encryption, so tampering and wrong passphrases
+    # fail LOUDLY at restore. The old CBC envelope validated only the last
+    # padding byte and could restore silently-corrupted key material.
+    nonce = os.urandom(12)
+    encrypted = AESGCM(key).encrypt(nonce, plaintext_key, None)
 
-    # PKCS7 padding
-    block_size = 16
-    padding_len = block_size - (len(plaintext_key) % block_size)
-    padded = plaintext_key + bytes([padding_len] * padding_len)
-
-    encrypted = encryptor.update(padded) + encryptor.finalize()
-
-    # Write: salt (16) + iv (16) + encrypted data
+    # Write: MAGIC(8) + salt(16) + nonce(12) + ciphertext+tag
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(salt + iv + encrypted)
+    output_path.write_bytes(_CA_BLOB_MAGIC + salt + nonce + encrypted)
     output_path.chmod(0o600)
 
-    print(f"CA key encrypted and exported to {output_path}")
+    print(f"CA key encrypted (AES-256-GCM) and exported to {output_path}")
     print("Store this file securely. It requires the passphrase to decrypt.")
     return 0
 
@@ -2520,7 +2705,10 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
 
     Two modes:
     - shares: Reconstruct using Shamir's Secret Sharing from N share files
-    - backup: Decrypt from a passphrase-encrypted backup file
+    - backup: Decrypt from a passphrase-encrypted backup file — DUAL-FORMAT
+      reader: canonical VENYACA1 GCM primary + legacy alpha.11 CBC read-only
+      with FULL PKCS7 validation (finding-5 ruling; no exported key material
+      is stranded)
     """
     from pathlib import Path
 
@@ -2583,40 +2771,13 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
             print(f"Error: backup file not found: {backup_path}", file=sys.stderr)
             return 1
 
-        from cryptography.hazmat.primitives import ciphers, hashes
-        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
         encrypted_data = backup_path.read_bytes()
-        if len(encrypted_data) < 32:
-            print("Error: backup file too small", file=sys.stderr)
-            return 1
-
-        salt = encrypted_data[:16]
-        iv = encrypted_data[16:32]
-        ciphertext = encrypted_data[32:]
-
         passphrase = getpass.getpass("Enter passphrase to decrypt backup: ")
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=600_000,
-        )
-        key = kdf.derive(passphrase.encode())
-
-        cipher = ciphers.Cipher(
-            ciphers.algorithms.AES(key),
-            ciphers.modes.CBC(iv),
-        )
-        decryptor = cipher.decryptor()
-        padded = decryptor.update(ciphertext) + decryptor.finalize()
-
-        # Remove PKCS7 padding
-        padding_len = padded[-1]
-        if padding_len < 1 or padding_len > 16:
-            print("Error: invalid passphrase or corrupted backup", file=sys.stderr)
+        try:
+            reconstructed = _decrypt_ca_backup(encrypted_data, passphrase)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
             return 1
-        reconstructed = padded[:-padding_len]
 
     else:
         print(f"Unknown restore mode: {mode}", file=sys.stderr)

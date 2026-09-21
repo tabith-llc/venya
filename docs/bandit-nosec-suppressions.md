@@ -11,7 +11,7 @@ justification. Rows are keyed on file + line content (line numbers drift and are
 deliberately not recorded). Scope = `packages/*/src` — the same tree the pre-commit
 bandit hook scans (tests dirs are hook-excluded).
 
-**56 suppression lines across 19 files.**
+**53 suppression lines across 17 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -59,13 +59,10 @@ bandit hook scans (tests dirs are hook-excluded).
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/server/src/server/ca.py` | `self._key_passphrase_env = "VENYA_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/ca.py` | `self._key_passphrase_env = "VENYA_ADMIN_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
-| `packages/server/src/server/fido2/cli_enroll.py` | `except Exception:  # nosec B110  # noqa: S110 — skip devices that fail to open` |
 | `packages/server/src/server/fido2/manager.py` | `except Exception:  # nosec B110 — db cleanup in finally block, outer scope handles error  # noqa: S110` |
-| `packages/server/src/server/fido2/manager.py` | `except Exception:  # nosec B110` |
 | `packages/server/src/server/middleware/auth.py` | `ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort JSON parse, None falls through  # noqa: S110` |
 | `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort DB query, None falls through  # noqa: S110` |
-| `packages/server/src/server/routes/auth.py` | `pass  # nosec B110 — intentional, transaction rolled back by get_db finally` |
 | `packages/server/src/server/routes/auth_browser.py` | `except Exception:  # nosec B110 — rollback best-effort before raising HTTPException` |
 | `packages/server/src/server/utils/disk_encryption.py` | `import subprocess  # nosec B404 — disk encryption check requires subprocess for system commands` |
 | `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |

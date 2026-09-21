@@ -30,8 +30,6 @@ NO_ROLE_ROUTES = frozenset(
         # --- public / bootstrap: no authenticated session (or role) exists yet ---
         "/api/v1/health",  # liveness, no auth by design
         "/api/v1/ready",  # readiness, no auth by design
-        "/api/v1/auth/registration/start",  # auth flow — user does not exist yet
-        "/api/v1/auth/registration/complete",
         "/api/v1/auth/login/start",
         "/api/v1/auth/login/complete",
         "/api/v1/auth/refresh",  # rotates the caller's own token
@@ -41,7 +39,6 @@ NO_ROLE_ROUTES = frozenset(
         "/api/v1/auth/logout/browser",  # browser logout
         "/api/v1/auth/elevate/browser/challenge",  # elevation challenge
         "/api/v1/auth/elevate/browser/assert",  # elevation assertion
-        "/api/v1/auth/debug/cookie",  # debug endpoint (dev only)
         "/api/v1/auth/me",  # returns caller's own identity (bearer auth)
         "/api/v1/enroll/browser",  # alias for /enroll/browser/start
         "/api/v1/enroll/browser/start",  # self-registration via issuance token

@@ -317,8 +317,11 @@ class MockExecutorCert:
 class MockExecutorCertRevocation:
     """Mock ExecutorCertRevocation DB record."""
 
-    def __init__(self, serial_number: str):
+    def __init__(self, serial_number: str, revoked_at=None):
         self.serial_number = serial_number
+        # updated: the shared revocation state (executor-revocation-by-identity)
+        # surfaces the row's revoked_at — mock models the full schema.
+        self.revoked_at = revoked_at
 
 
 class MockUser:
