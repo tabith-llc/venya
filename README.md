@@ -223,7 +223,7 @@ unit suites (cli / core / server / executor / mcp, Python 3.14) green at
 - **Run it yourself:** the [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md)
   is fully self-contained — commands, gates, failure modes, verification
   queries, results template — and ships with an
-  [interactive MCP driver](testing/mcp_manual_drive.py) so you can drive the
+  [interactive MCP driver](docs/mcp-manual-drive.py) so you can drive the
   tools by hand and see the redaction proof yourself.
 - **Verified MCP clients:** [opencode](https://opencode.com) and local LLMs
   via [omlx.ai](https://omlx.ai) — both drive `venya-mcp` as a stdio server.
