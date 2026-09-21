@@ -42,6 +42,23 @@ Notable changes to Venya will be documented in this file.
 
 ### Changed
 
+- *(post-alpha12)* Secret **shape metadata**: `venya store` and
+  `venya update-metadata` gain `--shape` and `--usage` flags (equivalently
+  `-m shape=… -m usage=…`) declaring how a secret is meant to be consumed —
+  e.g. `--shape ssh-key --usage 'ssh -i {secret_path} -o IdentitiesOnly=yes
+  {user}@{host} <cmd>'`. The server validates the convention at store and
+  metadata-update: usage templates interpolating the secret VALUE (`{value}`
+  and friends) are rejected with a 400 that names the path-only rule and why
+  (values in command text persist UNMASKED in the audit log); unknown shape
+  names are accepted as CUSTOM shapes with a teaching warning; unknown
+  placeholders warn. Shapes whose consumption mechanism has not shipped yet
+  (`env:NAME`, `askpass`, `sudo-stdin`) are accepted but answer with a
+  DECLARATIVE-ONLY warning that points at the file path that DOES work — a
+  label must never imply capability the product lacks. `venya list` shows the shape. MCP `list_secrets` and
+  `run_command` descriptions now teach agents the injected-file pattern
+  (`/run/secrets/venya/<id>`) and usage templates — the previous
+  `run_command` example showed a command that could not consume its bound
+  secret at all.
 - nginx relay timeouts raised to 330s at the server level of the core site
   config (the 300s server→executor relay ceiling + 30s margin): a cold-sandbox
   command taking >60s previously answered an nginx 504 while the command still

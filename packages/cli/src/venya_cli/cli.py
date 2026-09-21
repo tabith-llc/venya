@@ -101,6 +101,16 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="Metadata key=value pair (can be specified multiple times)",
     )
+    store_parser.add_argument(
+        "--shape",
+        default=None,
+        help="How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name)",
+    )
+    store_parser.add_argument(
+        "--usage",
+        default=None,
+        help="Command template for humans/agents; reference the secret only via {secret_path} (e.g. 'sshpass -f {secret_path} ssh user@host cmd')",
+    )
 
     # get
     get_parser = subparsers.add_parser("get", help="Retrieve a secret")
@@ -146,8 +156,18 @@ def create_parser() -> argparse.ArgumentParser:
         "--metadata",
         "-m",
         action="append",
-        required=True,
+        default=None,
         help="Metadata key=value pair (can be specified multiple times)",
+    )
+    update_meta_parser.add_argument(
+        "--shape",
+        default=None,
+        help="How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name)",
+    )
+    update_meta_parser.add_argument(
+        "--usage",
+        default=None,
+        help="Command template for humans/agents; reference the secret only via {secret_path} (e.g. 'sshpass -f {secret_path} ssh user@host cmd')",
     )
 
     # audit

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import httpx2
 from venya_cli.api_client import APIClient
-from venya_cli.commands import cmd_store
+from venya_cli.commands import cmd_store, cmd_update_metadata
 
 
 def _make_mock_response(status_code=200, json_data=None):
@@ -54,6 +54,8 @@ def _make_args(**overrides):
     args.roles = ["admin"]
     args.metadata = None
     args.key_version = None
+    args.shape = None
+    args.usage = None
     for k, v in overrides.items():
         setattr(args, k, v)
     return args
@@ -282,6 +284,141 @@ class TestCmdStoreReplacedMessage:
             out = capsys.readouterr().out
             assert "stored successfully" in out
             assert "replaced" not in out
+        finally:
+            client.close()
+            config_file.unlink()
+
+
+class TestStoreShapeFlags:
+    """--shape/--usage sugar + server warning surfacing (ticket secret-shape-metadata)."""
+
+    def test_flags_fold_into_metadata_payload(self):
+        client, config_file = _make_client()
+        try:
+            mock_http = MagicMock()
+            mock_http.request.return_value = _make_mock_response(
+                201, {"id": 3, "key": "mykey", "role_names": ["admin"], "metadata_warnings": []}
+            )
+            client._http = mock_http
+            result = cmd_store(
+                client,
+                _make_args(key_version="v1", shape="ssh-key", usage="ssh -i {secret_path} {user}@{host} cmd"),
+            )
+            assert result == 0
+            payload = _post_payload(mock_http)
+            assert payload["metadata"] == {
+                "shape": "ssh-key",
+                "usage": "ssh -i {secret_path} {user}@{host} cmd",
+            }
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_m_and_flag_conflict_fails_before_any_request(self, capsys):
+        client, config_file = _make_client()
+        try:
+            mock_http = MagicMock()
+            client._http = mock_http
+            result = cmd_store(
+                client,
+                _make_args(key_version="v1", metadata=["shape=ssh-key"], shape="ssh-password"),
+            )
+            assert result == 1
+            assert mock_http.request.call_count == 0
+            assert "Conflicting shape" in capsys.readouterr().err
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_warnings_surfaced_and_success_names_shape(self, capsys):
+        client, config_file = _make_client()
+        try:
+            mock_http = MagicMock()
+            mock_http.request.return_value = _make_mock_response(
+                201,
+                {
+                    "id": 4,
+                    "key": "mykey",
+                    "role_names": ["admin"],
+                    "metadata_warnings": ["shape 'x' is not built-in; treating it as a CUSTOM shape (allowed)."],
+                },
+            )
+            client._http = mock_http
+            result = cmd_store(client, _make_args(key_version="v1", shape="x"))
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "warning: shape 'x' is not built-in" in captured.err
+            assert "(shape: x)" in captured.out
+        finally:
+            client.close()
+            config_file.unlink()
+
+
+class TestUpdateMetadataShapeFlags:
+    """update-metadata grows the same flags; loud on empty/conflict."""
+
+    def test_flags_fold_into_patch_payload(self):
+        client, config_file = _make_client()
+        try:
+            mock_http = MagicMock()
+            mock_http.request.return_value = _make_mock_response(
+                200, {"id": 1, "key": "mykey", "role_names": [], "metadata_warnings": []}
+            )
+            client._http = mock_http
+            args = MagicMock()
+            args.key = "mykey"
+            args.metadata = None
+            args.shape = "ssh-key"
+            args.usage = "ssh -i {secret_path} {user}@{host} cmd"
+            result = cmd_update_metadata(client, args)
+            assert result == 0
+            calls = [c for c in mock_http.request.call_args_list if c[0][0] == "PATCH"]
+            assert len(calls) == 1
+            assert calls[0][1]["json"] == {
+                "metadata": {"shape": "ssh-key", "usage": "ssh -i {secret_path} {user}@{host} cmd"}
+            }
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_nothing_to_update_fails_loudly(self, capsys):
+        client, config_file = _make_client()
+        try:
+            mock_http = MagicMock()
+            client._http = mock_http
+            args = MagicMock()
+            args.key = "mykey"
+            args.metadata = None
+            args.shape = None
+            args.usage = None
+            assert cmd_update_metadata(client, args) == 1
+            assert "Nothing to update" in capsys.readouterr().err
+            assert mock_http.request.call_count == 0
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_warnings_from_patch_surfaced(self, capsys):
+        client, config_file = _make_client()
+        try:
+            mock_http = MagicMock()
+            mock_http.request.return_value = _make_mock_response(
+                200,
+                {
+                    "id": 1,
+                    "key": "mykey",
+                    "role_names": [],
+                    "metadata_warnings": ["usage template has unknown placeholder '{port}'"],
+                },
+            )
+            client._http = mock_http
+            args = MagicMock()
+            args.key = "mykey"
+            args.metadata = ["usage=tool -f {secret_path} --port {port}"]
+            args.shape = None
+            args.usage = None
+            assert cmd_update_metadata(client, args) == 0
+            assert "warning: usage template has unknown placeholder" in capsys.readouterr().err
         finally:
             client.close()
             config_file.unlink()
