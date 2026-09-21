@@ -7,6 +7,7 @@
 """Tests for AuditLogger (durable spool + asynchronous forwarder)."""
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -350,3 +351,26 @@ class TestForwarderThread:
         finally:
             log.shutdown()
         assert read_spool(spool_dir) == []
+
+
+class TestSpoolPermissions:
+    """Spool must be 0600 (ticket sec-secret-redaction-log-leaks #19): it
+    holds FULL command lines; pre-fix .open("a") inherited the umask
+    (typically 0644 = world-readable audit trail)."""
+
+    def test_spool_created_0600_on_init(self, spool_dir: Path):
+        AuditLogger(make_config(spool_dir), session_id="perm-test")
+        mode = (spool_dir / "spool.jsonl").stat().st_mode & 0o777
+        assert mode == 0o600
+
+    def test_legacy_world_readable_spool_repaired_on_init(self, spool_dir: Path):
+        p = spool_dir / "spool.jsonl"
+        p.write_text('{"event_type": "legacy"}\n', encoding="utf-8")
+        os.chmod(p, 0o644)
+        log = AuditLogger(make_config(spool_dir), session_id="perm-test")
+        assert (p.stat().st_mode & 0o777) == 0o600
+        # legacy content preserved, appends still work post-repair
+        log.emit("credential_injected", strategy="memfd", fd_count=1)
+        lines = read_spool(spool_dir)
+        assert lines[0]["event_type"] == "legacy"
+        assert len(lines) == 2

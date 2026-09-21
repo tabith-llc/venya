@@ -93,6 +93,13 @@ requires commands to resolve into trusted directories (absolute paths like
 are rejected by design; the sandbox template must contain the tools you
 invoke (`sshpass` etc.).
 
+**Secret-handling rule for agents and operators:** reference secrets ONLY
+via the injected file (`sshpass -f /run/secrets/venya/<id> …`), NEVER
+inline in the command text (`sshpass -p …`, `--password=…`). Command lines
+persist UNMASKED in audit sinks (output masking does not cover them) and
+leak via `/proc/<pid>/cmdline` + shell history on the target — see
+[architecture.md §Secret lifecycle](architecture.md#secret-lifecycle-zero-knowledge-injection).
+
 ## What you just proved
 
 | Claim | Where |
