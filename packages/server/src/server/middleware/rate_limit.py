@@ -177,7 +177,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 "window_start": window_start,
             },
         )
-        return result.scalar()
+        count = result.scalar()
+        # The dispatch `finally: db.close()` rolls back anything uncommitted;
+        # without this commit every request saw count=1 and no DB-backed tier
+        # ever enforced (ticket ratelimit-counter-upsert-never-commits).
+        db.commit()
+        return count
 
     def _check_break_glass_backoff(self, ip: str) -> bool:
         """Check exponential backoff for break-glass failures.
