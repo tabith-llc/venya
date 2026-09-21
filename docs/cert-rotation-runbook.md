@@ -201,6 +201,14 @@ the CRL retention purge. The CRL table (`crl_retention_days`, default 90) is
 append-only serial history + advisory broadcast; purge-dropped serial rows are
 expected, not a bug (the identity flag is the enforcement truth).
 
+**Admin client-cert revocation** (separate table, `admin_cert_revocations`):
+the supported path is `venya admin revoke-admin-cert <serial>` (ORM — sets
+`revoked_at` automatically). The table has NO server-side default for
+`revoked_at` (Python-side lambda only): a raw-SQL INSERT omitting the column
+violates NOT NULL — supply `revoked_at` explicitly (e.g. `now()`) in any
+manual insert (ticket delta-b-run-low-bundle O6; ruled runbook-note, not
+migration — raw SQL is not a supported revocation path).
+
 ## 5. Root CA backup and restore (break-glass)
 
 The CLI's `--ca-dir` defaults to `/var/lib/venya/ca` (matches the server; fixed 2026-09-19
