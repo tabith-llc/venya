@@ -96,9 +96,9 @@ non-interactive SSH does not load `~/bin` into `PATH`):
   self-filter matrix (MCP criterion #5) and the FIDO2 security negatives
   (sign-count persistence, wrong-key rejection, challenge-replay rejection).
 
-**Suite health gate (before any VM work):** from `$VENYA_SRC`, all five package
-suites must be green — `cli`, `core`, `server`, `executor`, `mcp`
-(`uv run -p 3.14 --directory packages/<pkg> pytest tests/`). Record the counts
+**Suite health gate (before any VM work):** from `$VENYA_SRC`, all six package
+suites must be green — `cli`, `core`, `server`, `executor`, `mcp`,
+`venya-contract` (`uv run -p 3.14 --directory packages/<pkg> pytest tests/`). Record the counts
 in the run's results file; an unexplained delta versus the previous recorded
 run — **including any shrinkage** — is a stop-condition to investigate before
 provisioning. (Absolute reference counts deliberately do not live in this
@@ -839,7 +839,7 @@ available:
 real `venya-mcp` exactly like a client would and hands you a menu:
 
 ```bash
-$ADMIN_WS/.venv/bin/python testing/mcp_manual_drive.py \
+$ADMIN_WS/.venv/bin/python docs/mcp-manual-drive.py \
     --mcp-bin $ADMIN_WS/.venv/bin/venya-mcp \
     --config  $ADMIN_WS/mcp/config.json \
     --ca      /tmp/venya-ca.crt
