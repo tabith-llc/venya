@@ -25,7 +25,16 @@ def _args(key="db/password", unmask=False):
 
 class TestSecretGetUnmaskElevation:
     def test_unmask_elevates_and_passes_token(self):
-        """Positive: --unmask re-authenticates and sends the token."""
+        """Positive: --unmask re-authenticates and sends the token via the
+        X-Elevation-Token HEADER — never the query string.
+
+        REWRITTEN (ticket cli-elevation-token-query-param-transport): this
+        cell formerly PINNED `params={"unmask": True, "elevation_token": …}`
+        as desired — the 5th instance of a test institutionalizing a bypass
+        the server had already removed (`9732ee7` header-only transport).
+        The pinned query param physically 403'd AND leaked the single-use
+        token into the server access log (results-2026-09-21-0400 D2).
+        """
         client = MagicMock()
         client.get.return_value = {"value": "plaintext-secret"}
         with patch("venya_cli.commands._elevate", return_value="elev_token_xyz") as mock_elev:
@@ -34,8 +43,11 @@ class TestSecretGetUnmaskElevation:
         mock_elev.assert_called_once_with(client)
         client.get.assert_called_once_with(
             "/api/v1/secrets/db/password",
-            params={"unmask": True, "elevation_token": "elev_token_xyz"},
+            params={"unmask": True},
+            extra_headers={"X-Elevation-Token": "elev_token_xyz"},
         )
+        # Token must never ride the query string (access-log leak).
+        assert "elevation_token" not in client.get.call_args.kwargs["params"]
 
     def test_no_unmask_no_elevation(self):
         """Paired negative: masked get never touches the security key."""
@@ -60,3 +72,13 @@ class TestSecretGetUnmaskElevation:
             rc = cmd_get(client, _args(unmask=True))
         assert rc == 1
         client.get.assert_not_called()
+
+    def test_get_forwards_extra_headers_to_request(self):
+        """Wire shape: APIClient.get() must forward extra_headers to _request
+        (the cmd_get fix depends on it; post() already had this parameter)."""
+        from venya_cli.api_client import APIClient
+
+        client = APIClient.__new__(APIClient)  # no __init__ (no config/HTTP needed)
+        with patch.object(APIClient, "_request", return_value={}) as mock_req:
+            client.get("/p", params={"a": 1}, extra_headers={"X-Elevation-Token": "t"})
+        mock_req.assert_called_once_with("GET", "/p", params={"a": 1}, extra_headers={"X-Elevation-Token": "t"})
