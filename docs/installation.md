@@ -306,6 +306,13 @@ don't type `/list_secrets`. On 401/expired: `venya login <user-id>` (key
 touch) and retry — the MCP server reads the refreshed token from the same
 `VENYA_CONFIG` file.
 
+### Next: create a secret and prove the redaction path
+
+With the client wired, run the 5-minute end-to-end demo —
+[alpha-demo.md](alpha-demo.md): `venya store` a secret, consume it with a
+masked `run_command` (`[REDACTED:…]` in the output), verify the audit trail,
+then drive the same flow from your MCP client.
+
 ## Uninstalling
 
 One uninstaller per artifact, published alongside the installers:
