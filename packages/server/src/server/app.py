@@ -304,7 +304,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
             try:
                 db = backend.get_session()
                 try:
-                    run_maintenance(db, config)
+                    run_maintenance(db, config, ca_manager)
                 except Exception:
                     db.rollback()
                     logger.exception("Session cleanup failed")

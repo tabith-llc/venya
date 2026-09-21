@@ -539,6 +539,12 @@ class TestExecutorSessionPathAuth:
         as a second, dead grant path."""
         assert not hasattr(SessionMiddleware, "_is_mtls_request")
 
+    def test_dead_enrollment_confirm_entry_removed(self):
+        """#23c pin (ticket sec-sweep-low-informational): the PUBLIC_PATHS
+        allowlist entry for /api/v1/enrollment/confirm matched NO route —
+        dead allowlist entries are how 'unmounted' paths stay mounted."""
+        assert "/api/v1/enrollment/confirm" not in SessionMiddleware.PUBLIC_PATHS
+
     # --- Heartbeat gating (ticket sec-endpoint-ratelimit-hardening #7) ---
 
     def test_heartbeat_no_cert_rejected_401(self):

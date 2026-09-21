@@ -110,7 +110,6 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/api/v1/auth/login/browser/challenge",
             "/api/v1/auth/login/browser/assert",
             "/api/v1/auth/refresh",
-            "/api/v1/enrollment/confirm",
             "/api/v1/init",
             "/api/v1/init/complete",
             "/api/v1/init/reset",
