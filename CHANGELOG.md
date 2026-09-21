@@ -2,10 +2,32 @@
 
 Notable changes to Venya will be documented in this file.
 
-## [Unreleased]
+## [0.1.0alpha12] - 2026-09-21
+
+> **Operator-facing behavior changes in this release — failure signatures:**
+> - **Auth-endpoint rate limiting now actually fires.** More than 20 requests/min
+>   per IP to `/api/v1/auth/*` answers `429` with detail `Auth endpoint rate
+>   limited: too many requests per minute` (the tier was silently unenforced
+>   before). E2E scaffolds and scripts that hammer auth endpoints must pace
+>   themselves or set `VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE` explicitly.
+> - **Executor registration requires an enrollment token by default**
+>   (`executor_enrollment.require_token`): a tokenless `POST /executors/register`
+>   fails with an error naming the knob and the re-enrollment path. Deployments
+>   that relied on open registration must enroll with a token (recommended) or
+>   deliberately set the knob to `false`.
+> - **Secret unmasking and credential operations take the elevation token in the
+>   `X-Elevation-Token` header.** `GET /api/v1/secrets/{key}?elevation_token=…`
+>   answers `403 Elevation token required to unmask` — query-param transport is
+>   removed (tokens in URLs leaked into access logs).
 
 ### Security
 
+- Per-IP rate-limit counters now persist: the counter increment previously ran
+  in a transaction that was rolled back on every request, so none of the
+  database-backed tiers (auth 20/min, generic, break-glass 5/hr) ever enforced
+  — only the in-memory break-glass failure backoff fired. The break-glass
+  hourly tier and the auth tier are now physically enforced and their
+  fixed-window counters survive across requests and restarts.
 - WebAuthn login is now refused when the signature-counter persist fails
   (previously the login succeeded and the counter update was silently
   lost, erasing a future clone-detection opportunity). Fail-closed,
