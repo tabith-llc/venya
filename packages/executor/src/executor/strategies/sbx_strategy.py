@@ -234,10 +234,18 @@ class SbxStrategy(InjectionStrategy):
         self._copy_sshpass(sandbox_name)
 
     def _copy_sshpass(self, sandbox_name: str) -> None:
-        """Copy sshpass binary into the sandbox (no-op if not on host)."""
+        """Copy sshpass binary into the sandbox (warns if not on host)."""
         host_sshpass = shutil.which("sshpass")
         if not host_sshpass:
-            logger.debug("sshpass not found on host; skipping sandbox copy")
+            # WARNING, not debug (ticket executor-installer-missing-sshpass):
+            # the installer apt list carries sshpass, so this only fires on
+            # out-of-band hosts — where it used to be invisible until the
+            # ssh-password shape died 127 in-sandbox.
+            logger.warning(
+                "sshpass not found on host; skipping sandbox copy — ssh-password "
+                "command shapes will fail 127 in-sandbox. Install sshpass on the "
+                "executor host (apt install sshpass)."
+            )
             return
         result = subprocess.run(  # nosec
             ["sbx", "cp", host_sshpass, f"{sandbox_name}:/usr/bin/sshpass"],

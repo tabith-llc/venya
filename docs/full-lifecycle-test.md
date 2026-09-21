@@ -96,9 +96,9 @@ non-interactive SSH does not load `~/bin` into `PATH`):
   self-filter matrix (MCP criterion #5) and the FIDO2 security negatives
   (sign-count persistence, wrong-key rejection, challenge-replay rejection).
 
-**Suite health gate (before any VM work):** from `$VENYA_SRC`, all five package
-suites must be green — `cli`, `core`, `server`, `executor`, `mcp`
-(`uv run -p 3.14 --directory packages/<pkg> pytest tests/`). Record the counts
+**Suite health gate (before any VM work):** from `$VENYA_SRC`, all six package
+suites must be green — `cli`, `core`, `server`, `executor`, `mcp`,
+`venya-contract` (`uv run -p 3.14 --directory packages/<pkg> pytest tests/`). Record the counts
 in the run's results file; an unexplained delta versus the previous recorded
 run — **including any shrinkage** — is a stop-condition to investigate before
 provisioning. (Absolute reference counts deliberately do not live in this
@@ -126,10 +126,30 @@ results-file lineage carries them.)
   `--show-sensitive` flag was removed — passing it is now an argparse error).
   Treat terminal scrollback and run logs accordingly: never paste tokens into
   committed files.
-- **CA key at rest:** the admin CA key is encrypted at rest by default
-  (passphrase delivered to the daemon via `/etc/venya/venya-core.env`). The
-  root/executor CA key is still plaintext at rest (0600) — known limitation,
-  fix deferred.
+- **CA keys at rest:** BOTH CA private keys are encrypted at rest — the admin
+  CA key (passphrase via `/etc/venya/venya-core.env`, 0640 root:venya) and,
+  since fix `4218ec1` (UNRELEASED, physically accepted 2026-09-20), the
+  root/executor `ca.key` (`VENYA_CA_KEY_PASSPHRASE`, same EnvironmentFile).
+- **Proof-of-new-bytes before mutating probes (PROCESS RULE, user-ordered
+  2026-09-20).** Any acceptance probe that mutates state against a live
+  service must first prove the process runs the deployed bytes: either
+  restart with start-timestamp > package file-write-time
+  (`systemctl show -p MainPID` + `ps -o lstart=` vs `stat -c %y` on a changed
+  module), or a behavior probe only the new code exhibits. Since the
+  `installer-rerun-no-service-restart` fix, both installers do this
+  themselves: a deploy stamp (`$INSTALL_DIR/.deploy-stamp`) is compared
+  against the service start time, a stale process is restarted with a loud
+  NOTICE, and verification prints a PROOF-OF-FRESH-BYTES line — check for it
+  in install transcripts before trusting any probe. Historical incident (the
+  reason the rule exists): a re-run left a 90-minute-stale `venya-core`
+  serving under "Installation verified successfully"; a require_token probe
+  returned a false 201 and contaminated fleet state.
+- **Registration rate limit.** `POST /executors/register` is dual-key
+  throttled (per-IP AND per-executor-id, default 5/min, 429
+  "Too many registration attempts" + Retry-After). A crash-looping daemon
+  burns its IP+id window in seconds — after any install failure, wait out the
+  window before the token retry or the retry 429s (observed physically
+  2026-09-20).
 - **`venya store` key-version resolution.** Migration 027 seeds one active
   `v1` at install, so the automatic active-version lookup succeeds and
   `--key-version` is optional. On installs predating 027 the lookup 503s and
@@ -819,7 +839,7 @@ available:
 real `venya-mcp` exactly like a client would and hands you a menu:
 
 ```bash
-$ADMIN_WS/.venv/bin/python testing/mcp_manual_drive.py \
+$ADMIN_WS/.venv/bin/python docs/mcp-manual-drive.py \
     --mcp-bin $ADMIN_WS/.venv/bin/venya-mcp \
     --config  $ADMIN_WS/mcp/config.json \
     --ca      /tmp/venya-ca.crt

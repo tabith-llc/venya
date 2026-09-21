@@ -67,7 +67,29 @@ def _build_attestation_object(cred_id: bytes, cose_key: dict, counter: int = 0) 
     return bytes(fido2_cbor.encode({"fmt": "none", "authData": auth_data, "attStmt": {}}))
 
 
-def _browser_registration_response(cred_id: bytes, private_key) -> dict:
+def _reg_client_data_json(manager, challenge_id: str) -> str:
+    """Real webauthn.create clientDataJSON answering the issued challenge.
+
+    Server-side ceremony verification (sec-auth-elevation-authz-hardening #4)
+    rejects the formerly-forged empty {} — registration now proves
+    type/challenge/origin exactly like the authentication side always did.
+    Reads the raw challenge from the store BEFORE finish pops it.
+    """
+    raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+    return _b64url(
+        json.dumps(
+            {
+                "type": "webauthn.create",
+                "challenge": _b64url(raw),
+                "origin": f"https://{RP_ID}",
+                "crossOrigin": False,
+            },
+            separators=(",", ":"),
+        ).encode()
+    )
+
+
+def _browser_registration_response(cred_id: bytes, private_key, manager, challenge_id: str) -> dict:
     """Browser-shaped registration response accepted by init/complete."""
     cose = ES256.from_cryptography_key(private_key.public_key())
     ao = _build_attestation_object(cred_id, dict(cose))
@@ -75,7 +97,7 @@ def _browser_registration_response(cred_id: bytes, private_key) -> dict:
         "id": _b64url(cred_id),
         "rawId": _b64url(cred_id),
         "response": {
-            "clientDataJSON": _b64url(b"{}"),
+            "clientDataJSON": _reg_client_data_json(manager, challenge_id),
             "authenticatorAttestationResponse": {
                 "attestationObject": _b64url(ao),
             },
@@ -84,15 +106,15 @@ def _browser_registration_response(cred_id: bytes, private_key) -> dict:
     }
 
 
-def _cli_registration_response(cred_id: bytes, private_key) -> dict:
-    """CLI-shaped registration response accepted by /auth/registration/complete."""
+def _cli_registration_response(cred_id: bytes, private_key, manager, challenge_id: str) -> dict:
+    """CLI-shaped WebAuthn registration (attestation) response."""
     cose = ES256.from_cryptography_key(private_key.public_key())
     ao = _build_attestation_object(cred_id, dict(cose))
     return {
         "id": _b64url(cred_id),
         "rawId": _b64url(cred_id),
         "response": {
-            "clientDataJSON": _b64url(b"{}"),
+            "clientDataJSON": _reg_client_data_json(manager, challenge_id),
             "attestationObject": _b64url(ao),
             "transports": [],
         },
@@ -203,7 +225,7 @@ def test_recovery_e2e_full_loop(tmp_path):
         json={
             "user_id": "oldadmin",
             "challenge_id": challenge_id,
-            "response": _browser_registration_response(b"\xaa" * 32, key_a),
+            "response": _browser_registration_response(b"\xaa" * 32, key_a, app.state.fido2_manager, challenge_id),
         },
     )
     assert resp.status_code == 201, resp.text
@@ -270,11 +292,12 @@ def test_recovery_e2e_full_loop(tmp_path):
 
     # --- Step 5: recovered admin enrolls a FIDO2 key and authenticates ---
     # Enrollment goes through the real Fido2Manager (real attestation crypto)
-    # plus the same WebAuthnCredential row /auth/registration/complete would
-    # write. That HTTP route is bypassed deliberately: it 500s on real binary
-    # credential IDs (latent bytes-vs-str response-model bug, no production
-    # caller — ticket auth-registration-complete-bytes-500). The proof this
-    # step owes is the assertion over real HTTP below, not the enroll route.
+    # plus a directly-written WebAuthnCredential row. The legacy public
+    # /auth/registration/complete route this once mirrored was REMOVED
+    # (ticket sec-unauth-webauthn-registration-takeover — unauthenticated
+    # credential binding); production enrollment is the token-bound
+    # /enroll/browser flow. The proof this step owes is the assertion over
+    # real HTTP below, not the enroll route.
     from core.iam.models import WebAuthnCredential
 
     key_b = ec.generate_private_key(ec.SECP256R1())
@@ -284,7 +307,7 @@ def test_recovery_e2e_full_loop(tmp_path):
     )
     cred_b = app.state.fido2_manager.finish_registration(
         reg_challenge,
-        _cli_registration_response(b"\xbb" * 32, key_b),
+        _cli_registration_response(b"\xbb" * 32, key_b, app.state.fido2_manager, reg_challenge),
     )
     db = backend.get_session()
     try:
@@ -297,6 +320,13 @@ def test_recovery_e2e_full_loop(tmp_path):
                 is_active=True,
             )
         )
+        # Mirror the production enroll activation (routes/enroll.py:280): the
+        # session gate (ticket sec-unauth-webauthn-registration-takeover) only
+        # issues sessions for status='active' users, and POST /recovery creates
+        # newadmin as 'pending_enrollment'. The direct credential write above
+        # stands in for the enroll route, so it must carry the activation too.
+        newadmin = db.query(User).filter(User.user_id == "newadmin").first()
+        newadmin.status = "active"
         db.commit()
     finally:
         db.close()

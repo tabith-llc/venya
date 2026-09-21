@@ -57,11 +57,37 @@ Watch for the historical failure signature on un-upgraded hosts:
 sudo journalctl -u venya-executor | grep -i "rotation failed"
 ```
 
-Residual structural note (ticket `executor-revocation-by-identity`): if a write fails
-between the register POST and persistence (e.g. ENOSPC), the server record and the
-on-disk cert still diverge — revocation matching is serial-based and can miss the
-running identity. The pre-check narrows this window; closing it structurally is tracked
-separately.
+Residual structural note (ticket `executor-revocation-by-identity` — CLOSED by
+the hybrid identity model): if a write fails between the register POST and
+persistence (e.g. ENOSPC), the server record and the on-disk cert diverge.
+Since the identity rulings (2026-09-20) this no longer defeats revocation:
+replacing the record serial AUTO-REVOKES the predecessor in the same
+transaction (the diverged daemon dies within one poll), identity-level
+revocation matches regardless of which serial the daemon presents, and the
+dial gates refuse a revoked identity/record-serial server-side. The pre-check
+from the EROFS fix remains as the availability narrowing.
+
+**require_token (default TRUE since ticket `executor-rotation-require-token-400`,
+Phases 1+2, 2026-09-20):** the register endpoint rejects tokenless POSTs by default.
+Since Phase 2, `rotate()` is EXEMPT: a tokenless rotation is accepted only if the caller
+presents a verified mTLS client cert whose revocation state is clean (the shared
+`executor_revocation_state` — identity flag first, then serial history) AND whose serial
+equals the current `ExecutorCert` record serial for that executor_id (ruled order:
+revocation check FIRST). New identities and bootstrap installs still require a token. A
+rotation 400 under the exemption means the presented cert is not the record credential
+(revoked, diverged, or replaced) — re-register with a fresh token per §3 before expiry.
+**Trust boundary:** the exemption consumes the nginx-forwarded `X-Client-Verified` /
+`X-Client-Subject` / `X-Client-Serial` headers; nginx verifies the client chain against
+`/etc/nginx/ssl/client-ca-bundle.crt` (Root CA + Admin CA) and OVERWRITES these headers
+with its own TLS-layer values — client-sent headers of the same name never survive the
+proxy, and with no client cert the serial header is absent. The CN match is a
+discriminator, not the authorization: the authorization is the Root-CA-issued record
+serial (random 64-bit at signing, no serial-chooser API exists), which an Admin-CA cert
+— even one shaped with an executor CN — cannot carry. Both phases ship in the same
+release (tag-cut gate); never run Phase-1-only bytes in production past a 30-day cert
+lifetime. Do NOT set `VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN=false` in production
+(open enrollment — physically proven to mint executor identities from ANY host reaching
+the core).
 
 ## 2. Manual executor cert operations (working path)
 
@@ -90,8 +116,20 @@ sudo /opt/venya/.venv/bin/venya exec cert revoke --executor-id <executor-id>
 
 ## 3. Re-registering an executor (lost/expired cert, or after CA rotation)
 
+**Terminal identities:** if the executor was revoked with the IDENTITY form
+(`revoke-executor <id>`, no `--serial`), it can NEVER re-register — even with a
+valid fresh token (the 403 fires after token validation; the token's
+consumption rolls back with the request, so it expires unused rather than
+burning). Re-enroll under a NEW executor_id. Serial-form revocation does not
+block re-registration (it kills one credential, not the identity).
+
 Runtime (daemon-side) registration cannot write `/etc/venya/executor` either
-(`daemon.py:118-136` fails closed; empty-token installs crash-loop — ticket
+(`daemon.py:118-136` fails closed), and since ticket
+`executor-rotation-require-token-400` Phase 1 the server additionally rejects
+tokenless registration by default (bootstrap/new identities — incumbent
+rotation is exempt, §1) — an empty-token install now exits 1 at boot
+with an actionable journal error naming `executor_enrollment.require_token`
+(no crash-loop; the historical EROFS variant is ticket
 `executor-ero-fs-crash-loop-on-empty-token`). The supported path is install-time
 registration with a bootstrap token:
 
@@ -115,21 +153,53 @@ registers at install time (`:416-474`). The SSH user on provisioned hosts is `bo
 (there are no `venya-executor`/`venya-core` user accounts; the service account is
 `venya`, nologin).
 
-## 4. Revocation behavior (what an executor does when revoked)
+## 4. Revocation behavior (identity + serial, hybrid model)
 
-- `venya admin revoke-executor <id>` adds the current cert SERIAL to the revocation
-  list (`server/routes/admin.py:985-1030`).
-- Executors poll the public list every main-loop iteration (~30 s —
-  `daemon.py:948,977`; the formerly-dead `revocation_poll_seconds` config field was
-  REMOVED 2026-09-19, ticket `executor-dead-rotation-config`). Endpoint (no auth): 
-  `curl -sk https://<core-host>/api/v1/executors/certs/revocation-list`
-- On detection: the daemon logs, sets `revoked`, and performs an ORDERLY stop
-  (`daemon.py:950-953,1004-1020`) — in-flight commands are NOT force-aborted and
-  injected secrets are NOT immediately zeroed by this path; the tmpfs reaper (TTL,
-  default 300 s) and the next daemon start's sweep clean up (`daemon.py:614-688,858-862`).
+Revocation state has ONE source (`server/revocation.py`,
+`executor_revocation_state`): the IDENTITY flag (`Executor.revoked_at`) is
+checked FIRST, then serial history (presented serial, else the current
+`ExecutorCert` record serial).
+
+**Two admin forms** (`venya admin revoke-executor <id> [--serial <hex>]`):
+
+- **Identity form** (no `--serial`): sets `revoked_at` — **TERMINAL for alpha**
+  (no un-revoke exists; re-enrollment requires a NEW executor_id, §3) — and
+  CRLs the current record serial. Dial gates
+  (`create_execution_session`/`execute`) refuse immediately with 403 — this is
+  the control that stops an UNCOOPERATIVE daemon (command routing is
+  core→executor push; nothing else can). Registration under a revoked identity
+  403s even with a valid fresh token (the token is NOT burned — the 403 rolls
+  back its consumption; it expires unused).
+- **Serial form** (`--serial <hex>`): CRLs ONE credential without touching the
+  identity — the incident tool for orphaned/predecessor serials (e.g. a serial
+  replaced by an admin-side re-register). A serial form on the CURRENT RECORD
+  SERIAL also refuses dial (the shared state checks the record serial when none
+  is presented); a serial form on a stale/off-record serial does not.
+
+**Auto-revoke on replacement:** every re-registration/rotation CRLs the
+REPLACED serial in the same transaction — normal operation no longer mints
+off-record chain-valid orphans, and a daemon diverged onto a predecessor cert
+dies within one poll.
+
+**Executor-side detection:**
+- Poll of the public list every main-loop iteration (~30 s): matches own
+  serial (`revoked_serials`) OR own executor_id (`revoked_identities` —
+  distinct TERMINAL warning naming the new-executor_id remedy). Endpoint (no
+  auth): `curl -sk https://<core-host>/api/v1/executors/certs/revocation-list`
+- Heartbeat response `revoked` flag is consumed too (fast stop between polls;
+  advisory — the poll stays authoritative).
+- On detection: the daemon logs, sets `revoked`, and performs an ORDERLY stop —
+  in-flight commands are NOT force-aborted and injected secrets are NOT
+  immediately zeroed by this path; the tmpfs reaper (TTL, default 300 s) and
+  the next daemon start's sweep clean up.
 - Fail-loud: 3 consecutive unreachable-server revocation checks
-  (`max_revocation_failures`, `config.py:42-45`) → the executor self-revokes and stops
-  (`daemon.py:963-971`).
+  (`max_revocation_failures`, `config.py:42-45`) → the executor self-revokes
+  and stops.
+
+**Lifecycle:** the identity flag dies only with the Executor row — never via
+the CRL retention purge. The CRL table (`crl_retention_days`, default 90) is
+append-only serial history + advisory broadcast; purge-dropped serial rows are
+expected, not a bug (the identity flag is the enforcement truth).
 
 ## 5. Root CA backup and restore (break-glass)
 

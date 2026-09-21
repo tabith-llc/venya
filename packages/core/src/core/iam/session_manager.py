@@ -20,10 +20,41 @@ from sqlalchemy.orm import Session
 from core.utils.entropy import get_secure_token
 
 from .models import Session as SessionModel
+from .models import User
 
 
 class SessionError(Exception):
     """Session error."""
+
+
+class UserNotActiveError(SessionError):
+    """Raised when a session is requested for a user that is not 'active'.
+
+    Single enforcement point for the login status gate (ticket
+    sec-unauth-webauthn-registration-takeover): disabled / pending_enrollment /
+    unknown users cannot be issued a session. Subclasses SessionError so any
+    pre-existing `except SessionError` still catches it.
+    """
+
+    def __init__(self, user_id: str, status: str | None) -> None:
+        self.user_id = user_id
+        self.status = status
+        super().__init__(f"User '{user_id}' is not active (status={status!r})")
+
+
+def is_user_active(user: User | None) -> bool:
+    """Central predicate: may this user hold a live session?
+
+    Single semantic source for the 'active' status gate (pattern: central
+    check, distributed callers — cf. server/revocation.py for executors).
+    Consumers: ``create_session`` (issuance gate, ticket
+    sec-unauth-webauthn-registration-takeover) and the server auth middleware
+    ``_validate_token`` (surviving-session gate, ticket
+    sec-auth-elevation-authz-hardening #9 — a disabled user's EXISTING
+    sessions die on the next request, not at idle expiry). A second
+    status-literal comparison anywhere is a divergence bug.
+    """
+    return user is not None and user.status == "active"
 
 
 # Default clock skew tolerance for core-side checks
@@ -88,7 +119,21 @@ class SessionManager:
 
         Returns:
             Tuple of (Session, AccessToken).
+
+        Raises:
+            UserNotActiveError: If the user row is missing or its status is not
+                'active' — disabled / pending_enrollment users cannot be issued
+                a session (ticket sec-unauth-webauthn-registration-takeover).
         """
+        # Status gate: no session for a non-active user. Single choke point —
+        # every login path (webauthn, browser) issues through here. The enroll
+        # path sets status='active' and calls create_session in the SAME
+        # transaction; SQLAlchemy autoflush makes that pending UPDATE visible
+        # to this SELECT (ordering pinned by test in test_auth_status_gate.py).
+        user = self.db.query(User).filter(User.user_id == user_id).first()
+        if not is_user_active(user):
+            raise UserNotActiveError(user_id, None if user is None else user.status)
+
         now = datetime.now(UTC)
         expires_at = now + self.config.session_timeout
 
@@ -152,21 +197,41 @@ class SessionManager:
         self.db.flush()
         return True
 
+    def check_refresh_window(self, session: SessionModel) -> bool:
+        """Refresh gate: HARD CAP only (mcp-refresh-path-unreachable Option A,
+        user ruling 2026-09-20).
+
+        Idle-expired sessions remain refreshable until ``created_at +
+        max_session_duration``; past that, refresh dies and re-auth (FIDO2) is
+        required. Deliberate ruled trade-off: revival widens the stolen-token
+        renewal window from idle-timeout to hard-cap; the token rotation in
+        ``refresh_token`` (old token invalidated on success) keeps a theft race
+        detectable. The middleware's ``check_expiry`` (idle + hard cap) stays
+        UNCHANGED — API calls from idle-expired sessions still 401, and that
+        401 is what triggers the client refresh path.
+        """
+        return session.created_at + self.config.max_session_duration >= datetime.now(UTC)
+
     def refresh_token(self, access_token: str) -> AccessToken | None:
-        """Refresh an access token within an active session.
+        """Refresh an access token within the hard-cap window.
+
+        Idle-expired sessions are revived (Option A ruling 2026-09-20 — the
+        former validate_session gate made every refresh of an idle-expired
+        session fail: the mcp-refresh-path-unreachable dead-path root cause).
 
         Args:
             access_token: The current access token string.
 
         Returns:
-            New AccessToken if successful, None if session expired or max cap reached.
+            New AccessToken if successful, None if unknown token or the
+            session is past max_session_duration (re-auth required).
         """
         # Find session by access token
         session = self.db.query(SessionModel).filter(SessionModel.access_token == access_token).first()
         if session is None:
             return None
 
-        if not self.validate_session(session.id):
+        if not self.check_refresh_window(session):
             return None
 
         # Extend session

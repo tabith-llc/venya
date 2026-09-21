@@ -23,7 +23,7 @@ import signal
 import ssl
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,31 @@ from .strategies.sbx_strategy import SECRET_TMPFS_BASE, SbxStrategy, sweep_works
 
 logger = logging.getLogger("venya.executor.daemon")
 
+# Canonical bootstrap enrollment-token storage (ticket
+# daemon-bootstrap-token-clear-erofs): /etc/venya is ReadOnlyPaths for the
+# daemon, so a token kept in executor.toml could never be cleared after use —
+# the cleanup itself crash-looped the daemon. This path sits under the unit's
+# ReadWritePaths; the toml [bootstrap] section remains a read-only-to-daemon
+# LEGACY location honored until old installs are cut over.
+BOOTSTRAP_TOKEN_PATH = Path("/var/lib/venya/executor/bootstrap-token")
+
+
+def _dist_version() -> str:
+    """Single-sourced version (feature/version-surfaces condition 1): dist
+    metadata (pyproject) is the only truth — never a string literal. Missing
+    metadata yields "" (falsy → heartbeat omits the report; server leaves the
+    stored column untouched), never a guessed value."""
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        return _pkg_version("executor")
+    except PackageNotFoundError:
+        return ""
+
+
+_EXECUTOR_VERSION = _dist_version()
+
 CLOCK_SKEW_TOLERANCE = timedelta(seconds=300)
 
 
@@ -71,6 +96,46 @@ class DaemonState:
         self.cert_serial: str | None = None
         self.cert_not_after: datetime | None = None
         self._consecutive_revocation_failures: int = 0
+
+
+def _token_required_error(exc: httpx2.HTTPStatusError, *, rotation: bool = False) -> RuntimeError | None:
+    """Convert a 400 'Enrollment token required' registration response into an
+    actionable RuntimeError; return None for any other error (caller re-raises).
+
+    Ticket executor-rotation-require-token-400 Phase 1: a bare `400 Bad Request`
+    in the journal is how the day-30 rotation death spiral gets discovered at
+    day 30 instead of day 0. Both the bootstrap register() and the periodic
+    rotate() paths carry the SAME actionable identifiers (knob name +
+    re-enrollment path); only the rotation variant references the
+    incumbent-mTLS exemption (Phase 2, landed). Defensive on non-HTTP responses
+    (test doubles): anything but a real 400 with the token-required detail
+    falls through unchanged.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None or getattr(resp, "status_code", None) != 400:
+        return None
+    try:
+        detail = str(resp.json().get("detail", ""))
+    except Exception:
+        return None
+    if "Enrollment token required" not in detail:
+        return None
+    msg = (
+        "Registration rejected: the server requires an enrollment token "
+        "(server config executor_enrollment.require_token — enforced by default). "
+        "An admin must mint one (`venya admin executor-enroll <executor-id>`) and "
+        "registration re-run with VENYA_EXECUTOR_ENROLLMENT_TOKEN set "
+        "(re-run the executor installer)."
+    )
+    if rotation:
+        msg += (
+            " Certificate rotation IS accepted from the verified incumbent mTLS "
+            "serial (ticket executor-rotation-require-token-400 Phase 2): this "
+            "error during rotation means the presented cert is NOT the current "
+            "record credential (revoked, diverged, or replaced) — mint a fresh "
+            "token and re-register before the current cert expires (~30 days)."
+        )
+    return RuntimeError(msg)
 
 
 class CertificateManager:
@@ -176,6 +241,13 @@ class CertificateManager:
             with httpx2.Client(verify=verify_param, timeout=self.config.network.registration_timeout_seconds) as client:
                 response = client.post(url, json=payload)
             response.raise_for_status()
+        except httpx2.HTTPStatusError as e:
+            # Token-required 400 becomes an actionable named error; the boot
+            # path lets it propagate → exit 1 (ero-fs fail-fast semantics).
+            actionable = _token_required_error(e)
+            if actionable is not None:
+                raise actionable from e
+            raise
         except httpx2.ConnectError as e:
             # Log full traceback in debug mode for deep diagnostics
             if os.environ.get("VENYA_DEBUG"):
@@ -306,7 +378,18 @@ class CertificateManager:
             },
             timeout=self.config.network.registration_timeout_seconds,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx2.HTTPStatusError as e:
+            # Runtime-tolerant: _main_loop's except-Exception logs this and the
+            # executor keeps running until the cert actually nears expiry —
+            # a transient server error must not kill a mid-loop executor
+            # (refactor-1 ruling). The actionable text names the knob, the
+            # re-enrollment path, and the Phase-2 incumbent exemption.
+            actionable = _token_required_error(e, rotation=True)
+            if actionable is not None:
+                raise actionable from e
+            raise
         data = response.json()
 
         cert_pem = data["cert_pem"].encode()
@@ -395,6 +478,22 @@ class CertificateManager:
             self._last_revocation_etag = response.headers.get("etag")
 
             data = response.json()
+            # Identity-level revocation FIRST (ticket executor-revocation-by-identity,
+            # ruling 2): the server revoked the whole executor_id — terminal, matches
+            # ANY serial. This is what catches a restarted daemon on a diverged
+            # (stale) cert that the serial-only list can never match, and it lets the
+            # cooperative daemon distinguish "my credential was killed" from "my
+            # identity was killed" and fail loudly with the right remedy.
+            revoked_identities = set(data.get("revoked_identities", []))
+            if self.config.executor_id in revoked_identities:
+                logger.warning(
+                    "Executor IDENTITY revoked server-side (executor_id=%s) — TERMINAL: "
+                    "the whole identity was revoked by an admin, not just a serial. "
+                    "This identity cannot be re-registered; re-enroll as a NEW "
+                    "executor_id. Shutting down.",
+                    self.config.executor_id,
+                )
+                return True
             revoked_serials = set(data.get("revoked_serials", []))
             is_revoked = self.serial in revoked_serials
 
@@ -749,6 +848,7 @@ class ExecutorDaemon:
 
         self.config = config
         self._config_path = self.config.config_path or Path("/etc/venya/executor.toml")
+        self._bootstrap_token_path = BOOTSTRAP_TOKEN_PATH
         self.state = DaemonState()
         self.state.executor_id = config.executor_id
 
@@ -778,6 +878,12 @@ class ExecutorDaemon:
 
         # HTTP thread pool — keeps network calls off the main loop
         self._http_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="http")
+
+        # Bounded-heartbeat guard: last submitted heartbeat future.
+        # _submit_heartbeat skips a tick if this is still in flight, so the
+        # pool's unbounded work queue cannot grow when request_timeout_seconds
+        # is raised above the ~30s loop cadence.
+        self._heartbeat_future: Future[None] | None = None
 
         # HTTP client — initialized in start() after registration
         self.client: httpx2.Client | None = None
@@ -809,13 +915,54 @@ class ExecutorDaemon:
             timeout=self.config.network.request_timeout_seconds,
         )
 
-    def _clear_enrollment_token(self) -> None:
-        """Remove the consumed enrollment token from the config file.
+    def _resolve_bootstrap_token(self) -> str | None:
+        """Resolve the bootstrap enrollment token from both storage locations.
 
-        The token should only be on disk for the one-time registration.
-        After registration, it's cleared to prevent exposure.
+        Canonical file wins over the legacy toml [bootstrap] section (dual-
+        location reader until legacy installs are cut over — ticket
+        daemon-bootstrap-token-clear-erofs). Called ONCE from start(); the
+        resolved value is never re-read per loop iteration.
+        """
+        token_path = self._bootstrap_token_path
+        if token_path.exists():
+            try:
+                token = token_path.read_text().strip()
+            except OSError as e:
+                logger.error("Bootstrap token file %s unreadable: %s — ignoring", token_path, e)
+                return self.config.bootstrap.enrollment_token
+            if token:
+                return token
+            logger.warning("Bootstrap token file %s is empty — falling back to config", token_path)
+        return self.config.bootstrap.enrollment_token
+
+    def _clear_bootstrap_token(self) -> None:
+        """Remove the consumed bootstrap token from BOTH storage locations.
+
+        The token is server-side single-use and already consumed by the time
+        this runs — what gets deleted is spent residue, not a live credential.
+        The canonical file lives under the unit's ReadWritePaths, so its
+        removal is clean. The legacy executor.toml section sits under
+        ReadOnlyPaths=/etc/venya: the rewrite fails EROFS on hardened units.
+        That failure must NOT kill the daemon (the uncaught-OSError crash-loop
+        is exactly the ticket harm, and exit-1 would reinstate it for the
+        legacy population least able to self-heal) — ruling 2026-09-20:
+        loud actionable ERROR + proceed, grace strictly scoped to the legacy
+        location.
         """
         import tomllib
+
+        token_path = self._bootstrap_token_path
+        if token_path.exists():
+            try:
+                token_path.unlink()
+                logger.info("Cleared bootstrap token file %s", token_path)
+            except OSError as e:
+                logger.error(
+                    "Could not remove bootstrap token file %s: %s — remove it manually "
+                    "(token already consumed server-side)",
+                    token_path,
+                    e,
+                )
 
         config_path = self._config_path
         if not config_path.exists():
@@ -835,11 +982,22 @@ class ExecutorDaemon:
             if not data["bootstrap"]:
                 del data["bootstrap"]
 
-            path = Path(config_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(config_path, "w") as f:
-                tomli_w.dump(data, f)
-            logger.info("Cleared enrollment token from config")
+            try:
+                # tomli_w.dump requires BINARY mode — the pre-fix text-mode
+                # open was a latent TypeError on every successful clear
+                # (masked in production: hardened units hit EROFS first and
+                # installer-flow clears the toml as root before daemon boot).
+                with open(config_path, "wb") as f:
+                    tomli_w.dump(data, f)
+                logger.info("Cleared enrollment token from config")
+            except OSError as e:
+                logger.error(
+                    "Config file %s is not writable (%s) — remove the [bootstrap] section "
+                    "manually; the enrollment token is already consumed server-side and "
+                    "the residue is a spent credential only",
+                    config_path,
+                    e,
+                )
 
     def create_executor(self, session_id: str) -> Executor:
         """Create an Executor instance with mTLS client.
@@ -888,12 +1046,13 @@ class ExecutorDaemon:
         # Register with server (creates cert/key if not present)
         # register() uses throwaway httpx2.Client instances internally —
         # never self.client. After registration, certs are on disk.
-        enrollment_token = self.config.bootstrap.enrollment_token
+        enrollment_token = self._resolve_bootstrap_token()
         self.cert_manager.register(self.state.executor_id, enrollment_token=enrollment_token)
 
-        # Clear enrollment token from config after successful registration
+        # Clear the consumed bootstrap token (both locations) after successful
+        # registration — once per start(), never per loop iteration.
         if enrollment_token:
-            self._clear_enrollment_token()
+            self._clear_bootstrap_token()
 
         # Create mTLS client — takes over for all subsequent communication.
         # Startup refusal: without a working control channel the daemon is
@@ -994,11 +1153,29 @@ class ExecutorDaemon:
                 self.state.revoked = True
                 break
 
-            # Heartbeat — fire and forget in thread pool
-            self._http_executor.submit(self._send_heartbeat)
+            # Heartbeat — fire and forget, but bounded (skip+warn if prior in flight)
+            self._submit_heartbeat()
 
             # Wait before next iteration (interruptible by signals)
             self._shutdown_event.wait(30.0)
+
+    def _submit_heartbeat(self) -> None:
+        """Submit a heartbeat unless the previous one is still in flight.
+
+        Fire-and-forget into the 2-worker pool, but bounded: if the prior
+        heartbeat hasn't completed (server slow/hung so the request outlives the
+        ~30s loop cadence — possible when request_timeout_seconds is raised above
+        it), skip this tick and warn. Without the guard the pool's unbounded work
+        queue grows silently. Fails loudly on every skip so a backlog can never
+        accumulate unnoticed.
+        """
+        if self._heartbeat_future is not None and not self._heartbeat_future.done():
+            logger.warning(
+                "Heartbeat skipped — previous still in flight (server slow or hung); "
+                "backpressure guard tripped, not a normal state"
+            )
+            return
+        self._heartbeat_future = self._http_executor.submit(self._send_heartbeat)
 
     def _send_heartbeat(self) -> None:
         """Send heartbeat to server.
@@ -1007,14 +1184,34 @@ class ExecutorDaemon:
         """
         try:
             fingerprint = self.cert_manager.get_fingerprint()
-            self.client.post(  # type: ignore[union-attr]
+            resp = self.client.post(  # type: ignore[union-attr]
                 "/api/v1/heartbeat",
                 json={
                     "executor_id": self.state.executor_id,
                     "cert_fingerprint": fingerprint,
+                    # Additive wire field (feature/version-surfaces): the
+                    # server stores it only when non-empty — old servers
+                    # ignore the unknown key (pydantic default), old daemons
+                    # simply omit it.
+                    "version": _EXECUTOR_VERSION,
                 },
                 timeout=self.config.network.request_timeout_seconds,
             )
+            # The server's revoked flag rides the heartbeat response (ruling 4
+            # F3 ride-along — the daemon previously discarded it): a fast
+            # cooperative stop between revocation-list polls. Advisory channel:
+            # a malformed body never kills the beat; the poll stays the
+            # authoritative stop signal.
+            try:
+                if resp.json().get("revoked"):
+                    logger.warning(
+                        "Heartbeat reports this executor REVOKED — shutting down "
+                        "(server-side revocation state; identity or current serial "
+                        "was revoked — see the revocation list for detail)."
+                    )
+                    self.state.revoked = True
+            except ValueError:
+                pass
         except httpx2.RequestError:
             logger.debug("Heartbeat failed (server unreachable)")
 
@@ -1073,6 +1270,11 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Venya Executor Daemon")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"venya-executor {_EXECUTOR_VERSION or 'unknown'}",
+    )
     parser.add_argument(
         "--config",
         type=str,

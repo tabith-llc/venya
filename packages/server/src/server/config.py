@@ -61,6 +61,15 @@ class RateLimitConfig(BaseModel):
         default=1000,
         description="Maximum requests per IP per minute",
     )
+    auth_requests_per_minute: int = Field(
+        default=20,
+        description=(
+            "Maximum auth-endpoint requests per IP per minute (tighter tier — "
+            "was silently collapsed into ip_rate_limit; ticket "
+            "sec-endpoint-ratelimit-hardening #8). Env override: "
+            "VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE"
+        ),
+    )
     break_glass_requests_per_hour: int = Field(
         default=5,
         description="Maximum break-glass (recovery) requests per IP per hour",
@@ -137,8 +146,14 @@ class ExecutorEnrollmentConfig(BaseModel):
 
     # Authorization
     require_token: bool = Field(
-        default=False,
-        description="Reject executor registrations without a valid enrollment token",
+        default=True,
+        description=(
+            "Reject executor registrations without a valid enrollment token. "
+            "Default TRUE (ticket executor-rotation-require-token-400, user ruling "
+            "2026-09-20): tokenless registration physically proven to mint full "
+            "executor identities from any host reaching the core. Set false only "
+            "for deliberately open enrollment."
+        ),
     )
 
     # Rate limiting

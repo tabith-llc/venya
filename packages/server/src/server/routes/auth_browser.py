@@ -18,7 +18,6 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from core.utils.sensitive_log import token as sensitive_token
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -29,6 +28,7 @@ from ..fido2.browser_adapter import (
     browser_assertion_to_fido2,
     challenge_to_browser_options,
 )
+from ..fido2.manager import WebAuthnError
 
 logger = logging.getLogger("venya.server")
 
@@ -124,7 +124,6 @@ def _get_session_from_cookie(
     backend = get_backend(request)
     token = request.cookies.get(COOKIE_NAME)
     if not token:
-        logger.info("GET_SESSION DEBUG: no token in cookie")
         return None
 
     db = backend.get_session()
@@ -142,18 +141,10 @@ def _get_session_from_cookie(
         manager = SessionManager(db, session_config)
 
         session = db.query(SessionModel).filter(SessionModel.access_token == token).first()
-        logger.info(
-            "GET_SESSION DEBUG: token=%s, session=%s",
-            sensitive_token(token, "ACCESS") if token else "None",
-            session.id if session else "None",
-        )
-
         if session is None:
-            logger.info("GET_SESSION DEBUG: session not found in DB")
             return None
 
         if not manager.check_expiry(session):
-            logger.info("GET_SESSION DEBUG: session expired, expires_at=%s", session.expires_at)
             return None
 
         user = session.user
@@ -233,12 +224,19 @@ async def browser_login_assert(
             req.challenge_id,
             fido2_response,
         )
-    except ValueError as e:
+    except WebAuthnError as e:
         metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
         ) from e
+    except ValueError:
+        metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
+        logger.exception("Browser login verification failed (internal)")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login verification failed",
+        ) from None
 
     backend = getattr(request.app.state, "backend", None)
     if backend is None:
@@ -250,7 +248,7 @@ async def browser_login_assert(
     db = backend.get_session()
     try:
         from core.iam.role_manager import RoleManager
-        from core.iam.session_manager import SessionConfig, SessionManager
+        from core.iam.session_manager import SessionConfig, SessionManager, UserNotActiveError
 
         sc = request.app.state.config.session
         session_config = SessionConfig(
@@ -274,6 +272,16 @@ async def browser_login_assert(
         response = JSONResponse(content={"status": "ok"})
         _set_session_cookie(response, access_token.token)
         return response
+    except UserNotActiveError:
+        # Status gate refused (ticket sec-unauth-webauthn-registration-takeover).
+        # Uniform 401 — account state not disclosed; true reason logged only.
+        metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
+        logger.warning("Browser login refused for user_id=%s: session gate (not active)", result["user_id"])
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Login verification failed",
+        ) from None
     except Exception:
         metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
         import traceback
@@ -301,9 +309,7 @@ async def browser_refresh(
     Validates the existing session cookie and issues a new
     access token cookie with a fresh expiry.
     """
-    logger.info("REFRESH DEBUG: cookies=%s", dict(request.cookies))
     if session is None:
-        logger.info("REFRESH DEBUG: session not found")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
@@ -545,11 +551,17 @@ async def browser_elevate_assert(
                 req.challenge_id,
                 fido2_response,
             )
-        except ValueError as e:
+        except WebAuthnError as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=str(e),
             ) from e
+        except ValueError:
+            logger.exception("Elevation assertion verification failed (internal)")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Elevation verification failed",
+            ) from None
 
         # Clean up the challenge
         del elevation_challenges[req.challenge_id]
@@ -596,13 +608,6 @@ async def browser_elevate_assert(
         db.close()
 
 
-@router.get("/auth/debug/cookie")
-async def debug_cookie(request: Request) -> dict:
-    """Debug endpoint to check current cookie state."""
-    cookie = request.cookies.get(COOKIE_NAME, "NONE")
-    return {"cookie": cookie[:30] + "..." if len(cookie) > 30 else cookie}
-
-
 @router.get(
     "/auth/me",
     response_model=AuthMeResponse,
@@ -617,15 +622,11 @@ async def auth_me(request: Request) -> AuthMeResponse:
     """
     result = _get_session_from_cookie(request)
     if result is None:
-        logger.info("AUTH_ME DEBUG: _get_session_from_cookie returned None")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
         )
 
-    logger.info(
-        "AUTH_ME DEBUG: got session, user_id=%s", result[1].user_id if result and len(result) > 1 else "unknown"
-    )
     db, session, user_info = result
     try:
         from core.iam.models import User

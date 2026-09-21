@@ -23,6 +23,13 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+# Canonical CA-key backup envelope magic (ticket fido2-device-layer-sweep-findings
+# finding 5, canonical-format ruling 2026-09-21): VENYACA1 + PBKDF2 salt(16) +
+# GCM nonce(12) + AES-256-GCM ciphertext+tag. Byte-identical to the CLI envelope
+# (the CLI has no `core` dependency — aligned implementations, pinned by the
+# cross-compat contract tests in packages/cli/tests/test_cli_ca_key_format.py).
+_CA_BLOB_MAGIC = b"VENYACA1"
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.serialization import (
     BestAvailableEncryption,
@@ -404,7 +411,9 @@ class CAManager:
             passphrase: The passphrase to encrypt with.
 
         Returns:
-            Encrypted key bytes: salt (16) + nonce (12) + encrypted data (GCM tag appended).
+            Encrypted key bytes: b"VENYACA1" magic + salt (16) + nonce (12) +
+            encrypted data (GCM tag appended) — the canonical envelope shared
+            with the CLI (finding-5 ruling).
         """
         private_key_pem = self.ca_key_path.read_bytes()
 
@@ -431,7 +440,7 @@ class CAManager:
         private_key_pem = b"\x00" * len(private_key_pem)
         del private_key_pem
 
-        return salt + nonce + encrypted
+        return _CA_BLOB_MAGIC + salt + nonce + encrypted
 
     def restore_ca_key(self, encrypted_key: bytes, passphrase: str) -> None:
         """Restore the CA private key from encrypted data.
@@ -440,12 +449,18 @@ class CAManager:
         with restrictive permissions (0600).
 
         Args:
-            encrypted_key: Encrypted key bytes (salt + nonce + ciphertext).
+            encrypted_key: Canonical envelope (VENYACA1 magic + salt + nonce +
+                ciphertext). A pre-canonical HEADERLESS GCM blob (salt + nonce +
+                ciphertext — the alpha server format) is also accepted so old
+                exports are never stranded. Legacy CLI CBC blobs are NOT read
+                here — the CLI restore is the dual-format reader for those.
             passphrase: The passphrase used to encrypt the key.
         """
         from cryptography.exceptions import InvalidTag
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+        encrypted_key = encrypted_key.removeprefix(_CA_BLOB_MAGIC)
 
         if len(encrypted_key) < 29:
             raise ValueError("Encrypted key data too small")

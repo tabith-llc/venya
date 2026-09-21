@@ -6,6 +6,7 @@
 
 """Tests for Docker Sandboxes (sbx) injection strategy."""
 
+import logging
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -563,3 +564,37 @@ class TestSbxStrategyExecuteEnvCwd:
         assert "TRICKY=v; touch /tmp/pwned" in argv
         token = argv[argv.index("-e") + 1]
         assert token == "TRICKY=v; touch /tmp/pwned"
+
+
+class TestCopySshpass:
+    """Truth table for _copy_sshpass (ticket executor-installer-missing-sshpass).
+
+    The host-missing case was DEBUG-only — silent on any host installed
+    out-of-band — while ssh-password command shapes die 127 in-sandbox.
+    The installer apt list now carries sshpass; this warning is the tripwire
+    for hosts that lack it anyway.
+    """
+
+    def test_missing_host_sshpass_warns_actionably(self, caplog):
+        """THE FIX: host without sshpass -> loud WARNING naming the 127 failure
+        mode, no copy attempted."""
+        strategy = SbxStrategy()
+        with (
+            patch("shutil.which", return_value=None),
+            patch("subprocess.run") as mock_run,
+            caplog.at_level(logging.DEBUG, logger="executor.strategies.sbx_strategy"),
+        ):
+            strategy._copy_sshpass("venya-test123")
+        mock_run.assert_not_called()
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING and "sshpass" in r.getMessage()]
+        assert warns, "host-missing sshpass must log at WARNING, not DEBUG"
+        assert "ssh-password command shapes will fail 127" in warns[0].getMessage()
+
+    def test_present_host_sshpass_copies_into_sandbox(self):
+        """Positive half: host binary found -> sbx cp into the sandbox /usr/bin."""
+        strategy = SbxStrategy()
+        with patch("shutil.which", return_value="/usr/bin/sshpass"), patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy._copy_sshpass("venya-test123")
+        call_args = mock_run.call_args[0][0]
+        assert call_args == ["sbx", "cp", "/usr/bin/sshpass", "venya-test123:/usr/bin/sshpass"]

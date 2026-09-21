@@ -228,6 +228,71 @@ class TestBrowserEnrollComplete:
                         set_cookie = resp.headers.get("set-cookie", "")
                         assert "venya_access_token" in set_cookie
 
+    def test_enroll_complete_cross_user_challenge_rejected(self):
+        """Binding guard (sec-auth-elevation-authz-hardening #4): challenge_id
+        issued for user A completed with user B's enrollment token -> 400,
+        no credential stored, user not activated."""
+        from core.iam.enrollment_manager import EnrollmentManager
+
+        mock_token = SimpleNamespace(
+            user_id=1,
+            state="in_progress",
+            token_hash="test-token-hash-00000000000000000000000000000000000000000000000000000000000000000000000",
+            binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        )
+        mock_user = SimpleNamespace(
+            id=1,
+            user_id="newuser",
+            status="pending_enrollment",
+            display_name="New User",
+            roles=[],
+        )
+        mock_cred = SimpleNamespace(
+            user_id="999",  # challenge was issued for a DIFFERENT user
+            credential_id=b"cred-123",
+            public_key=b"pub-key",
+            sign_count=0,
+        )
+
+        mock_em = MagicMock()
+        mock_em.get_token_by_plaintext.return_value = mock_token
+        mock_em.complete_enrollment.return_value = None
+
+        mock_filter = MagicMock()
+        mock_filter.first.return_value = mock_user
+        mock_filter.filter.return_value.first.return_value = mock_user
+        db = MagicMock()
+        db.query.return_value = mock_filter
+
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        fido2 = MagicMock()
+        fido2.finish_registration.return_value = mock_cred
+
+        app = _create_test_app(fido2_manager=fido2, backend=backend)
+
+        with patch("server.routes.enroll.verify_binding_hash", return_value=True):
+            with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
+                with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
+                    with patch.object(EnrollmentManager, "complete_enrollment", mock_em.complete_enrollment):
+                        client = TestClient(app, raise_server_exceptions=False)
+                        resp = client.post(
+                            "/api/v1/enroll/browser/complete",
+                            json={
+                                "enrollment_token": "test-token",
+                                "challenge_id": "challenge-123",
+                                "response": {"id": "dGVzdA==", "response": {}},
+                                "label": "Primary key",
+                            },
+                        )
+                        assert resp.status_code == 400
+                        assert "different user" in resp.json()["detail"]
+                        db.add.assert_not_called()
+                        assert mock_user.status == "pending_enrollment"  # never activated
+                        mock_em.complete_enrollment.assert_not_called()
+
     def test_enroll_complete_invalid_challenge(self):
         """Should return 400 for invalid WebAuthn challenge."""
         from core.iam.enrollment_manager import EnrollmentManager

@@ -64,7 +64,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if config is not None:
             self.enforce = config.enforce
             self.requests_per_minute = config.ip_rate_limit
-            self.auth_requests_per_minute = config.ip_rate_limit
+            # Was `config.ip_rate_limit` — the intended 20/min auth tier was
+            # silently collapsed into the 1000/min generic limit (ticket
+            # sec-endpoint-ratelimit-hardening #8). The dedicated field
+            # restores it; env override VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE.
+            self.auth_requests_per_minute = config.auth_requests_per_minute
             self.break_glass_per_hour = config.break_glass_requests_per_hour
         else:
             self.enforce = True
@@ -173,7 +177,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 "window_start": window_start,
             },
         )
-        return result.scalar()
+        count = result.scalar()
+        # The dispatch `finally: db.close()` rolls back anything uncommitted;
+        # without this commit every request saw count=1 and no DB-backed tier
+        # ever enforced (ticket ratelimit-counter-upsert-never-commits).
+        db.commit()
+        return count
 
     def _check_break_glass_backoff(self, ip: str) -> bool:
         """Check exponential backoff for break-glass failures.
@@ -209,10 +218,27 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._break_glass_failures[ip].append(now)
 
     def _get_client_ip(self, request: Request) -> str:
-        """Extract client IP from request, checking X-Forwarded-For first."""
+        """Extract the client IP for rate-limit keying.
+
+        Trusts the RIGHTMOST X-Forwarded-For entry — the one appended by our
+        own nginx (`$proxy_add_x_forwarded_for` = "<client-sent>, <real
+        peer>") — NOT the leftmost, which is attacker-controlled: one spoofed
+        header used to bypass every per-IP limit (break-glass 5/hr, auth tier,
+        failure backoff). Ticket sec-endpoint-ratelimit-hardening #8.
+
+        INVARIANT (named, shared): rightmost is trustworthy IFF the app is
+        reachable through EXACTLY ONE trusted appending proxy hop — the same
+        loopback-only-backend deployment invariant the X-Client-* mTLS header
+        chain rests on (installer BIND_ADDRESS=127.0.0.1; see the
+        _validate_admin_mtls / _validate_executor_mtls docstrings — two
+        controls now share this invariant). A client hitting the app port
+        directly spoofs rightmost trivially; a SECOND proxy layer silently
+        invalidates it. Do not change the topology without changing this
+        function.
+        """
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
-            return forwarded.split(",")[0].strip()
+            return forwarded.split(",")[-1].strip()
         client = request.scope.get("client")
         if client:
             return client[0]

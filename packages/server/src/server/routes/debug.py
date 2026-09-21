@@ -201,8 +201,12 @@ async def get_asyncio_state(
 
     Protected by:
     1. mTLS client certificate verification (nginx, /api/v1/admin/* path)
-    2. Bearer token validation (auth middleware)
-    3. RBAC admin role requirement (this endpoint)
+    2. RBAC admin role requirement (this endpoint, require_admin)
+
+    Note: with admin_mtls enabled the middleware short-circuits admin paths
+    on the verified client cert — bearer validation does NOT run for this
+    route (the old item-2 claim was false; ticket sec-sweep-low-
+    informational #24).
 
     Returns:
         Dict with task list, event loop info, DB pool stats

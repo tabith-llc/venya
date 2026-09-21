@@ -215,6 +215,9 @@ class TestCounterIncrements:
             "ca_error",
             "db_error",
             "token_required",
+            # updated: executor-revocation-by-identity — terminal registration
+            # refusal under a revoked identity
+            "identity_revoked",
         }
         for key in c._metrics:
             assert key[0] in valid_results, f"Unexpected result label: {key[0]}"

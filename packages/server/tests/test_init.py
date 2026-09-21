@@ -75,7 +75,9 @@ class MockFido2Manager:
     def finish_registration(self, challenge_id, response):
         stored = self._challenges.pop(challenge_id, None)
         if stored is None:
-            raise ValueError("Challenge not found or expired")
+            from server.fido2.manager import WebAuthnError
+
+            raise WebAuthnError("Challenge not found or expired")
         from server.fido2.manager import StoredCredential
 
         return StoredCredential(
@@ -248,6 +250,54 @@ class TestInitComplete:
         assert "recovery_code" in data
         assert data["user_id"] == "alice"
 
+    def test_complete_cross_user_challenge_rejected(self):
+        """Binding guard (sec-auth-elevation-authz-hardening #4): a challenge
+        bound to a different user cannot complete this init -> 400, no
+        credential stored."""
+        fido2 = MockFido2Manager()
+        fido2.start_registration("alice", "alice")
+        # Simulate the challenge having been issued for a DIFFERENT user
+        fido2._challenges["test-challenge-id"]["user_id"] = "mallory"
+
+        admin_role = _make_role(role_id=1, name="admin")
+        pending_user = _make_user("alice", enrolled_at=None)
+
+        class MockQuery:
+            def __init__(self, model):
+                self._model = model
+
+            def join(self, *args, **kwargs):
+                return self
+
+            def filter(self, *args, **kwargs):
+                return self
+
+            def first(self):
+                if self._model is not None and "Role" in str(self._model):
+                    return admin_role
+                return pending_user
+
+        db = MagicMock()
+        db.query.side_effect = lambda model: MockQuery(model)
+
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        app = _create_test_app(backend=backend, fido2_manager=fido2)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/init/complete",
+            json={
+                "user_id": "alice",
+                "challenge_id": "test-challenge-id",
+                "response": {"id": "test-cred-id", "rawId": "dGVzdC1jcmVk"},
+            },
+        )
+        assert resp.status_code == 400
+        assert "different user" in resp.json()["detail"]
+        db.add.assert_not_called()
+
     def test_complete_invalid_challenge(self):
         """Complete with invalid challenge returns 400."""
         db = MagicMock()
@@ -331,3 +381,89 @@ class TestRecoveryCodeHelpers:
         hash1 = init_routes._hash_recovery_code(code, "pepper1")
         hash2 = init_routes._hash_recovery_code(code, "pepper2")
         assert hash1 != hash2
+
+
+def _build_real_init_app(tmp_path, *, seed_roles=False, seed_user_id=None):
+    """Real Backend over SQLite for init_core — real unique constraints, zero
+    mocks in the DB path. The mock-backed init tests above cannot raise a real
+    IntegrityError, which is exactly how the stale-roles 500 + raw-SQL leak
+    shipped (ticket init-stale-roles-raw-uniqueviolation).
+
+    seed_roles: pre-create admin/user roles — the re-enrollment wipe recipe
+        leaves roles intact (the stale-roles trigger).
+    seed_user_id: pre-create a bare user (NO admin membership) so init_core's
+        409 guard passes but the User insert collides on users.user_id — the
+        adjacent stale-user trigger the error-hardening must not leak.
+    """
+    from core.engine.backend import Backend, BackendConfig
+    from core.engine.encryption import KEK_SIZE
+    from core.iam.models import Base, Role, User
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    db_path = tmp_path / "init.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+
+    s = SessionLocal()
+    if seed_roles:
+        s.add_all(
+            [
+                Role(name="admin", permissions="read-write", description="System administrator — full access"),
+                Role(name="user", permissions="read", description="Regular user — read-only access"),
+            ]
+        )
+    if seed_user_id:
+        s.add(User(user_id=seed_user_id, auth_mode="security-key"))
+    s.commit()
+    s.close()
+
+    backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=b"k" * KEK_SIZE))
+    backend._engine = engine
+    backend._session_factory = SessionLocal
+    app = _create_test_app(backend=backend, fido2_manager=MockFido2Manager())
+    return TestClient(app, raise_server_exceptions=False), SessionLocal
+
+
+class TestInitCoreRealDB:
+    """Real-SQLite truth table for idempotent role seeding (option a) + the
+    init error-hardening (no raw SQL/schema to the client)."""
+
+    def test_fresh_db_seeds_both_roles(self, tmp_path):
+        """Fresh DB: get-or-create seeds admin + user, returns 201."""
+        from core.iam.models import Role
+
+        client, SessionLocal = _build_real_init_app(tmp_path)
+        resp = client.post("/api/v1/init", json={"user_id": "alice"})
+        assert resp.status_code == 201, resp.text
+        with SessionLocal() as s:
+            assert {r.name for r in s.query(Role).all()} == {"admin", "user"}
+
+    def test_roles_present_proceeds_no_violation(self, tmp_path):
+        """THE FIX (option a): a roles-intact DB (re-enrollment wipe leaves
+        roles) must get-or-create, not die with uq_roles_name UniqueViolation."""
+        from core.iam.models import Role
+
+        client, SessionLocal = _build_real_init_app(tmp_path, seed_roles=True)
+        resp = client.post("/api/v1/init", json={"user_id": "alice"})
+        assert resp.status_code == 201, resp.text  # pre-fix: 500 UniqueViolation
+        with SessionLocal() as s:
+            # get-or-create reused the seeded roles — no duplicates
+            assert s.query(Role).filter(Role.name == "admin").count() == 1
+            assert s.query(Role).filter(Role.name == "user").count() == 1
+
+    def test_stale_user_500_hides_sql(self, tmp_path):
+        """PAIRED NEGATIVE for the hardening — the case option (a) alone leaves
+        exposed: a stale users.user_id collision still 500s, but the client
+        detail is generic (no SQL/schema/params)."""
+        client, _ = _build_real_init_app(tmp_path, seed_roles=True, seed_user_id="hopper")
+        resp = client.post("/api/v1/init", json={"user_id": "hopper"})
+        assert resp.status_code == 500, resp.text
+        detail = resp.json()["detail"]
+        assert detail == "Initialization failed"
+        low = detail.lower()
+        assert not any(
+            tok in low
+            for tok in ("insert", "select", "unique", "users", "roles", "constraint", "sql", "psycopg", "parameters")
+        )

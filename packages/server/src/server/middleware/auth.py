@@ -15,7 +15,6 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from core.utils.sensitive_log import token as sensitive_token
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID, NameOID
@@ -106,14 +105,11 @@ class SessionMiddleware(BaseHTTPMiddleware):
         {
             "/api/v1/health",
             "/api/v1/ready",
-            "/api/v1/auth/registration/start",
-            "/api/v1/auth/registration/complete",
             "/api/v1/auth/login/start",
             "/api/v1/auth/login/complete",
             "/api/v1/auth/login/browser/challenge",
             "/api/v1/auth/login/browser/assert",
             "/api/v1/auth/refresh",
-            "/api/v1/enrollment/confirm",
             "/api/v1/init",
             "/api/v1/init/complete",
             "/api/v1/init/reset",
@@ -121,7 +117,6 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/api/v1/executors/register",
             "/api/v1/executors/certs/revocation-list",
             "/api/v1/executors/certs/crl",
-            "/api/v1/heartbeat",
             "/api/v1/enroll/browser/start",
             "/api/v1/enroll/browser/complete",
             "/api/v1/enroll/browser",
@@ -162,9 +157,14 @@ class SessionMiddleware(BaseHTTPMiddleware):
         """Validate mTLS client certificate for admin routes.
 
         When admin_mtls is enabled and the path is an admin route, this
-        performs a 2-step validation chain:
+        performs a 3-step validation chain:
         1. Check X-Client-Verified sentinel header
-        2. Extract identity from X-Client-Subject DN, check against known_admin_ids
+        2. Extract identity from X-Client-Subject DN, check against
+           known_admin_ids — an EMPTY allowlist FAILS CLOSED (ticket
+           sec-admin-mtls-allowlist-revocation #15)
+        3. Check X-Client-Serial against AdminCertRevocation — in-process
+           revocation enforcement, fail-closed on missing serial / backend /
+           lookup error (ticket sec-admin-mtls-allowlist-revocation #16)
 
         Nginx verifies the cert chain and expiration at the TLS layer
         (verify_if_given/require_and_verify). This middleware checks identity.
@@ -209,12 +209,99 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Admin access requires valid client certificate"},
             )
 
+        # Allowlist FAILS CLOSED when empty (ticket
+        # sec-admin-mtls-allowlist-revocation #15): the nginx trust bundle
+        # carries Root CA + Admin CA — architecturally forced, the executor
+        # session path shares it — so an empty allowlist would admit ANY
+        # Root-CA cert (e.g. an executor cert) as caller=admin. The 403 detail
+        # stays generic here (the caller may be any cert holder); recovery
+        # guidance goes to the server-side log.
         known_ids = config.admin_mtls.known_admin_ids  # type: ignore[union-attr]
-        if known_ids and identity not in known_ids:
+        if not known_ids:
+            logger.warning(
+                "Admin route %s: known_admin_ids is EMPTY — failing closed. "
+                "Set VENYA_ADMIN_IDENTITY (the installer writes it); ticket "
+                "sec-admin-mtls-allowlist-revocation.",
+                path,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+        if identity not in known_ids:
             logger.warning("Admin route %s: identity '%s' not in known_admin_ids", path, identity)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        # Step 3: serial presentation + in-process revocation check (ticket
+        # sec-admin-mtls-allowlist-revocation #16). POST /admin/certs/revoke
+        # recorded AdminCertRevocation rows that nothing consulted in-process
+        # (CRL generation only; nginx has no ssl_crl). Missing serial FAILS
+        # CLOSED (user ruling 2026-09-20): warn-open would leave the
+        # revocation bypass alive on every pre-header nginx config, silently.
+        # The caller at this point is an allowlisted admin identity, so the
+        # detail carries the recovery path. Serial match is case-insensitive:
+        # legacy rows store the serial as-provided, nginx $ssl_client_serial
+        # is uppercase; new writes normalize at the storage boundary (admin.py).
+        presented_serial = (request.headers.get("x-client-serial") or "").strip()
+        if not presented_serial:
+            logger.warning(
+                "Admin route %s: X-Client-Serial missing — failing closed. "
+                "Recovery: re-run the core installer (idempotent) to regenerate "
+                "the nginx site config, then `systemctl restart venya-core` in "
+                "the SAME maintenance window and re-verify an admin mTLS call "
+                "(installer re-runs do NOT restart a running core — ticket "
+                "installer-rerun-no-service-restart).",
+                path,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "detail": "Admin mTLS misconfigured: certificate serial not presented. "
+                    "Recovery: re-run the core installer to regenerate the nginx site "
+                    "config, then restart venya-core and retry."
+                },
+            )
+
+        backend = getattr(request.app.state, "backend", None)
+        if backend is None:
+            logger.warning("Admin route %s: backend unavailable — failing closed", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+
+        db = backend.get_session()
+        try:
+            from core.iam.models import AdminCertRevocation
+            from sqlalchemy import func
+
+            revoked = (
+                db.query(AdminCertRevocation)
+                .filter(func.upper(AdminCertRevocation.serial_number) == presented_serial.upper())
+                .first()
+            )
+        except Exception:
+            logger.exception("Admin route %s: revocation lookup failed — failing closed", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin access requires valid client certificate"},
+            )
+        finally:
+            db.close()
+
+        if revoked is not None:
+            logger.warning(
+                "Admin route %s: certificate serial %s is revoked (reason: %s)",
+                path,
+                presented_serial,
+                revoked.reason,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Admin certificate revoked"},
             )
 
         # All checks passed
@@ -233,14 +320,29 @@ class SessionMiddleware(BaseHTTPMiddleware):
         if any(path.startswith(prefix) for prefix in self.PUBLIC_PREFIXES):
             return await call_next(request)
 
-        # Skip mTLS paths (executor)
-        if self._is_mtls_request(request):
-            request.state.auth_user = {"caller": "executor"}  # type: ignore[attr-defined]
+        # Executor session paths (filter / secrets-revoke): require a verified
+        # executor mTLS identity (ticket sec-executor-session-path-no-auth —
+        # the URL regex alone used to grant caller=executor with no credential
+        # check, an anonymous secret-confirmation oracle + audit-forgery hole).
+        if self._is_executor_session_path(request.url.path):
+            executor_result = await self._validate_executor_mtls(request)
+            if executor_result is not None:
+                return executor_result
+            # auth_user set by _validate_executor_mtls
             return await call_next(request)
 
-        # Skip executor session paths (mTLS auth, not bearer token)
-        if self._is_executor_session_path(request.url.path):
-            request.state.auth_user = {"caller": "executor"}  # type: ignore[attr-defined]
+        # Heartbeat: executor mTLS as well (ticket
+        # sec-endpoint-ratelimit-hardening #7 — was PUBLIC: unauthenticated
+        # fleet-liveness stamping + revocation/rotation oracle). Runs with
+        # reject_revoked=False: the F3 ride-along ruling makes the 200
+        # {revoked:true} RESPONSE the fast cooperative-stop channel — a 403
+        # here would kill it (user ruling B1 2026-09-20). The route binds
+        # body executor_id to the cert CN and skips the row write for
+        # revoked callers.
+        if request.url.path == "/api/v1/heartbeat":
+            executor_result = await self._validate_executor_mtls(request, reject_revoked=False)
+            if executor_result is not None:
+                return executor_result
             return await call_next(request)
 
         # Admin mTLS validation (before bearer token auth)
@@ -262,13 +364,6 @@ class SessionMiddleware(BaseHTTPMiddleware):
             if auth_header.startswith("Bearer "):
                 token = auth_header[7:]
 
-        logger.info(
-            "AUTH DEBUG: cookies=%s, ACCESS_TOKEN_COOKIE=%s, token=%s",
-            dict(request.cookies),
-            self.ACCESS_TOKEN_COOKIE,
-            sensitive_token(token, "ACCESS") if token else "None",
-        )
-
         if not token:
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -286,11 +381,112 @@ class SessionMiddleware(BaseHTTPMiddleware):
         request.state.auth_user = user_info  # type: ignore[attr-defined]
         return await call_next(request)
 
-    def _is_mtls_request(self, request: Request) -> bool:
-        """Check if request was authenticated via mTLS."""
-        # mTLS client cert info would be available via ASGI scope
-        client_cert = request.scope.get("client_cert")
-        return client_cert is not None
+    async def _validate_executor_mtls(self, request: Request, reject_revoked: bool = True) -> JSONResponse | None:
+        """Validate executor mTLS identity for executor session paths.
+
+        Grants ``caller=executor`` ONLY on a verified client cert whose CN is
+        a registered, non-revoked executor. Trust model mirrors
+        ``_validate_admin_mtls``: nginx terminates TLS (``ssl_verify_client
+        optional`` against the Root+Admin CA bundle) and OVERWRITES the
+        X-Client-* headers via ``proxy_set_header``; the app binds
+        loopback-only (installer ``BIND_ADDRESS=127.0.0.1``), so nginx is the
+        only ingress and the headers cannot be client-spoofed. That loopback
+        bind is a SHARED DEPLOYMENT INVARIANT with the admin-mTLS path —
+        exposing the app port directly defeats both gates.
+
+        Serial handling (deliberate, named decision): X-Client-Serial is
+        passed through when present. When absent/empty (e.g. an nginx config
+        predating the Phase-2 header addition), ``executor_revocation_state``
+        falls back to the current ExecutorCert record serial per its ruled
+        semantics — identity-flag and current-credential serial revocations
+        still apply; only a rotated-away predecessor serial needs the
+        presented header. Missing serial never fails open past those.
+
+        Args:
+            request: The FastAPI request.
+            reject_revoked: True (session paths) → a revoked identity gets
+                403. False (heartbeat) → revocation is NOT rejected here; the
+                route returns the revoked flag in its 200 response (the F3
+                ride-along cooperative-stop channel) and skips the row write.
+
+        Returns:
+            JSONResponse (401/403) on failure, None if all checks pass
+            (auth_user set with caller + executor_id).
+        """
+        detail = "Executor mTLS authentication required"
+        path = request.url.path
+
+        # Step 1: nginx TLS-layer verification sentinel
+        verified = request.headers.get("x-client-verified")
+        if verified != "SUCCESS":
+            logger.warning("Executor session path %s: X-Client-Verified missing or not SUCCESS", path)
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": detail},
+            )
+
+        # Step 2: executor identity = CN of the verified client cert
+        subject_dn = request.headers.get("x-client-subject", "")
+        executor_id = _extract_identity_from_subject(subject_dn)
+        if not executor_id:
+            logger.warning("Executor session path %s: could not extract CN from X-Client-Subject", path)
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": detail},
+            )
+
+        # Step 3+4: allowlist (registered Executor row) + revocation, routed
+        # through the single revocation source (server/revocation.py contract)
+        backend = getattr(request.app.state, "backend", None)
+        if backend is None:
+            logger.warning("Executor session path %s: backend unavailable — failing closed", path)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": detail},
+            )
+
+        db = backend.get_session()
+        try:
+            from core.iam.models import Executor
+
+            from ..revocation import executor_revocation_state
+
+            row = db.query(Executor).filter(Executor.id == executor_id).first()
+            if row is None:
+                logger.warning("Executor session path %s: CN '%s' is not a registered executor", path, executor_id)
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": detail},
+                )
+
+            presented_serial = request.headers.get("x-client-serial") or None
+            rev = executor_revocation_state(db, executor_id, presented_serial=presented_serial, executor_row=row)
+            if rev.revoked:
+                if reject_revoked:
+                    logger.warning(
+                        "Executor session path %s: CN '%s' revoked (%s)",
+                        path,
+                        executor_id,
+                        rev.reason,
+                    )
+                    return JSONResponse(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        content={"detail": detail},
+                    )
+                # reject_revoked=False (heartbeat path): identity stays
+                # verified; the ROUTE returns the revoked flag in its 200
+                # response (F3 cooperative-stop channel, ruling B1) and skips
+                # the row write for revoked callers.
+                logger.info(
+                    "Heartbeat from revoked executor CN '%s' (%s) — passing to route for the advisory flag",
+                    executor_id,
+                    rev.reason,
+                )
+
+            request.state.auth_user = {"caller": "executor", "executor_id": executor_id}  # type: ignore[attr-defined]
+            return None
+        finally:
+            db.close()
 
     def _is_executor_session_path(self, path: str) -> bool:
         """Check if path is an executor session endpoint.
@@ -328,7 +524,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
             from core.iam.models import Session as SessionModel
             from core.iam.session_manager import SessionConfig as CoreSessionConfig
-            from core.iam.session_manager import SessionManager
+            from core.iam.session_manager import SessionManager, is_user_active
 
             sc = request.app.state.config.session
             config = CoreSessionConfig(
@@ -349,6 +545,16 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
             # Get user info
             user = session.user
+
+            # Surviving-session status gate (sec-auth-elevation-authz-hardening
+            # #9): issuance is gated in create_session (UserNotActiveError),
+            # but WITHOUT this check a disabled user's EXISTING sessions keep
+            # full access until idle expiry / hard cap. Central predicate —
+            # is_user_active is the single semantic source (session_manager.py).
+            if not is_user_active(user):
+                logger.warning("Session for user %s rejected: user is not active", session.user_id)
+                return None
+
             user_info = {
                 "user_id": user.user_id,
                 "session_id": session.id,

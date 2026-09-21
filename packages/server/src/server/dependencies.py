@@ -6,7 +6,6 @@
 
 """Database session + auth dependencies for FastAPI."""
 
-import logging
 from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -18,13 +17,9 @@ from sqlalchemy.orm import Session
 if TYPE_CHECKING:
     from core.iam.enrollment_manager import EnrollmentManager
 
-logger = logging.getLogger("venya.server")
-
 from core.engine.backend import Backend, BackendConfig
-from core.engine.core import Caller
 from core.iam.models import Session as SessionModel
 from core.iam.role_manager import RoleManager
-from core.utils.sensitive_log import token as sensitive_token
 
 from .utils.time import is_expired
 
@@ -126,14 +121,10 @@ def get_current_session(
     """
     token = request.cookies.get("venya_access_token")
     if not token:
-        logger.info("GET_SESSION DEBUG: no token in cookie")
         return None
 
     session = db.query(SessionModel).filter(SessionModel.access_token == token).first()
     if session is None:
-        logger.info(
-            "GET_SESSION DEBUG: token %s not found in DB", sensitive_token(token, "ACCESS") if token else "None"
-        )
         return None
 
     # Check expiry
@@ -154,17 +145,10 @@ def get_current_session(
     now = datetime.now(UTC)
     session_created_at = session.created_at
     if session_created_at + max_session_duration < now:
-        logger.info(
-            "GET_SESSION DEBUG: session %s over max cap, created_at=%s, now=%s", session.id, session_created_at, now
-        )
         return None
     if is_expired(session.expires_at, tolerance):
-        logger.info("GET_SESSION DEBUG: session %s expired, expires_at=%s, now=%s", session.id, session.expires_at, now)
         return None
 
-    logger.info(
-        "GET_SESSION DEBUG: token=%s, session=%s", sensitive_token(token, "ACCESS") if token else "None", session.id
-    )
     return (db, session)
 
 
@@ -273,26 +257,6 @@ def require_role(permission: str):
 
     _checker._venya_guard = permission  # type: ignore[attr-defined]
     return _checker
-
-
-def get_caller(request: Request) -> str:
-    """Determine the caller type from the request.
-
-    mTLS requests come from executor (caller=executor).
-    Bearer token requests come from human (caller=human).
-
-    Args:
-        request: The FastAPI request.
-
-    Returns:
-        Caller enum value.
-    """
-    # Check if request has mTLS client cert (executor)
-    if getattr(request, "client_cert", None) is not None:
-        return Caller.EXECUTOR
-
-    # Otherwise human (CLI)
-    return Caller.HUMAN
 
 
 def require_admin(

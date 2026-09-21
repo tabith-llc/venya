@@ -60,14 +60,30 @@ def _build_attestation_object(
     cose_key: dict,
     counter: int = 1,
     rp_id_hash: bytes = RP_ID_HASH,
+    flags: int = 0x45,
 ) -> bytes:
     """Build a CBOR-encoded attestation object with attested credential data."""
     aaguid = b"\x00" * 16
     cred_data = aaguid + struct.pack(">H", len(cred_id)) + cred_id + fido2_cbor.encode(cose_key)
-    # Flags: UP(0x01) | UV(0x04) | AT(0x40) = 0x45
-    auth_data = rp_id_hash + bytes([0x45]) + struct.pack(">I", counter) + cred_data
+    # Flags default: UP(0x01) | UV(0x04) | AT(0x40) = 0x45
+    auth_data = rp_id_hash + bytes([flags]) + struct.pack(">I", counter) + cred_data
     ao = fido2_cbor.encode({"fmt": "none", "authData": auth_data, "attStmt": {}})
     return bytes(ao)
+
+
+def _reg_client_data(manager, challenge_id, type_="webauthn.create", origin=None, challenge=None) -> str:
+    """Build b64url clientDataJSON answering the manager's issued challenge.
+
+    Reads the raw challenge from the store BEFORE finish_registration pops it.
+    """
+    raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+    data = {
+        "type": type_,
+        "challenge": _b64url(challenge if challenge is not None else raw),
+        "origin": origin if origin is not None else f"https://{RP_ID}",
+        "crossOrigin": False,
+    }
+    return _b64url(json.dumps(data, separators=(",", ":")).encode())
 
 
 def _build_auth_data(
@@ -117,7 +133,7 @@ class TestFinishRegistration:
             "id": _b64url(cred_id),
             "rawId": _b64url(cred_id),
             "response": {
-                "clientDataJSON": _b64url(b"{}"),
+                "clientDataJSON": _reg_client_data(manager, challenge_id),
                 "authenticatorAttestationResponse": {
                     "attestationObject": _b64url(ao),
                 },
@@ -142,7 +158,7 @@ class TestFinishRegistration:
             "id": _b64url(cred_id),
             "rawId": _b64url(cred_id),
             "response": {
-                "clientDataJSON": _b64url(b"{}"),
+                "clientDataJSON": _reg_client_data(manager, challenge_id),
                 "attestationObject": _b64url(ao),
                 "transports": [],
             },
@@ -163,6 +179,129 @@ class TestFinishRegistration:
         }
         with pytest.raises(ValueError, match="Missing attestationObject"):
             manager.finish_registration(challenge_id, response)
+
+
+class TestFinishRegistrationCeremony:
+    """Ceremony verification negatives (sec-auth-elevation-authz-hardening #4).
+
+    Pre-fix, finish_registration accepted ANY parseable attestationObject for
+    an issued challenge. Each cell here mutates exactly one clientData /
+    authData field and pins the rejection + that NO credential is stored.
+    """
+
+    def _base(self, manager, es256_keypair, cred_id=b"\xaa" * 32, ao_kwargs=None, cd_kwargs=None):
+        _, public_key = es256_keypair
+        cose = ES256.from_cryptography_key(public_key)
+        ao = _build_attestation_object(cred_id, dict(cose), counter=1, **(ao_kwargs or {}))
+        challenge_id, _ = manager.start_registration(user_id="u1", username="user1")
+        cd = _reg_client_data(manager, challenge_id, **(cd_kwargs or {}))
+        return challenge_id, {
+            "id": _b64url(cred_id),
+            "rawId": _b64url(cred_id),
+            "response": {
+                "clientDataJSON": cd,
+                "authenticatorAttestationResponse": {"attestationObject": _b64url(ao)},
+            },
+            "type": "public-key",
+        }
+
+    def test_challenge_mismatch_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair, cd_kwargs={"challenge": b"\x01" * 32})
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Challenge mismatch"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_wrong_type_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair, cd_kwargs={"type_": "webauthn.get"})
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Wrong clientData type"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_wrong_origin_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair, cd_kwargs={"origin": "https://evil.example"})
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Origin mismatch"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_missing_client_data_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair)
+        del response["response"]["clientDataJSON"]
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Missing clientDataJSON"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_malformed_client_data_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair)
+        response["response"]["clientDataJSON"] = _b64url(b"{not json")
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Malformed clientDataJSON"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_rp_id_hash_mismatch_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(
+            manager,
+            es256_keypair,
+            ao_kwargs={"rp_id_hash": hashlib.sha256(b"other-rp").digest()},
+        )
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="RP ID hash mismatch"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_user_presence_flag_unset_rejected(self, manager, es256_keypair):
+        challenge_id, response = self._base(manager, es256_keypair, ao_kwargs={"flags": 0x44})  # UV|AT, no UP
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="User presence flag not set"):
+            manager.finish_registration(challenge_id, response)
+        assert manager.store._credentials == {}
+
+    def test_challenge_consumed_on_failed_ceremony(self, manager, es256_keypair):
+        """Pop-on-read holds for failures too: a rejected ceremony cannot be
+        retried with a corrected clientData against the same challenge_id."""
+        challenge_id, response = self._base(manager, es256_keypair, cd_kwargs={"origin": "https://evil.example"})
+        from server.fido2.manager import WebAuthnError
+
+        with pytest.raises(WebAuthnError, match="Origin mismatch"):
+            manager.finish_registration(challenge_id, response)
+        # fix the origin, replay the same challenge_id -> challenge is gone
+        _, fixed = self._base(manager, es256_keypair)  # issues a NEW challenge
+        with pytest.raises(WebAuthnError, match="Challenge not found"):
+            manager.finish_registration(challenge_id, fixed)
+
+
+class TestCredentialIdEncodingBoundary:
+    """The base64url flip is scoped to venya API-response credential_id fields.
+
+    WebAuthn WIRE fields (excludeCredentials/allowCredentials id, challenge)
+    stay standard base64 — browser_adapter converts them for browsers and the
+    CLI decodes them leniently. This guard proves the response-channel change
+    did NOT touch the wire channel, so the encoding fix and the separate
+    registration/start type-mismatch defect stay decoupled in the record.
+    """
+
+    def test_start_registration_exclude_stays_standard_b64(self, manager):
+        cred_id = bytes([0xFB, 0xEF, 0xBE, 0xFF] * 8)  # std b64 contains '+' and '/'
+        _, options = manager.start_registration(
+            user_id="u1",
+            username="user1",
+            existing_credential_ids=[cred_id],
+        )
+        exclude_id = options["excludeCredentials"][0]["id"]
+        # wire field UNCHANGED: standard base64, padding intact, +// still present
+        assert exclude_id == _b64std(cred_id)
+        assert "+" in exclude_id and "/" in exclude_id and exclude_id.endswith("=")
 
 
 # ---------------------------------------------------------------------------
@@ -228,12 +367,33 @@ class TestFinishAuthentication:
         result = manager.finish_authentication(challenge_id, response)
 
         assert result["user_id"] == "u1"
-        assert result["credential_id"] == _b64std(cred_id)
+        assert result["credential_id"] == _b64url(cred_id)
 
         # sign_count updated in memory
         stored_cred = manager.store.get_credential(cred_id)
         assert stored_cred is not None
         assert stored_cred.sign_count == 1
+
+    def test_credential_id_emitted_as_base64url(self, manager, es256_keypair, cose_key_bytes):
+        """finish_authentication's credential_id is base64url (no '+', '/', or '=').
+
+        This is the manager-level source of /auth/login/complete's credential_id
+        (auth.py routes result["credential_id"] straight into the response), so
+        it is the second venya emission site flipped by the base64url sweep.
+        """
+        private_key, _ = es256_keypair
+        cred_id = bytes([0xFB, 0xEF, 0xBE, 0xFF] * 8)  # std b64 would contain + and /
+        assert "+" in _b64std(cred_id) and "/" in _b64std(cred_id)
+        _store_credential(manager, "u1", cred_id, cose_key_bytes, sign_count=0)
+
+        challenge_id, _ = manager.start_authentication(user_id="u1")
+        raw_challenge = manager.store._challenges[challenge_id].data["raw_challenge"]
+        response = _build_assertion_response(cred_id, private_key, raw_challenge, counter=1)
+        result = manager.finish_authentication(challenge_id, response)
+
+        cid = result["credential_id"]
+        assert cid == _b64url(cred_id)
+        assert not any(ch in cid for ch in "+/=")
 
     def test_tampered_signature_rejected(self, manager, es256_keypair, cose_key_bytes):
         """Tampered signature → ValueError with 'Signature verification failed'."""
@@ -360,3 +520,102 @@ class TestB64Decode:
             _b64_decode("QQ!QQ")
         with pytest.raises(ValueError):
             _b64_decode("QQ!Q")
+
+
+class TestFinishAuthenticationActiveGate:
+    """Fix B: the DB is authoritative for is_active. A credential soft-deleted in
+    the DB must NOT authenticate even while still cached in the per-process
+    in-memory store (the stale-cache scenario; also the future-HA case where a
+    DELETE lands on another core). FAIL-CLOSED gate. The sign_count persist is
+    fail-closed TOO (fido2-counter-persist-fail-closed ruling 2026-09-21 —
+    see test_sign_count_persist_failure_refuses_login below).
+    Real SQLite -- a mock DB read for an authz gate would be circular."""
+
+    def _real_manager(self, tmp_path, cred_id, cose_key_bytes):
+        from core.engine.backend import Backend, BackendConfig
+        from core.engine.encryption import KEK_SIZE
+        from core.iam.models import Base, WebAuthnCredential
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        db_path = tmp_path / "fido2.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(bind=engine)
+        s = SessionLocal()
+        s.add(
+            WebAuthnCredential(
+                user_id="u1", credential_id=cred_id, public_key=cose_key_bytes, sign_count=0, is_active=True
+            )
+        )
+        s.commit()
+        s.close()
+        backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=b"k" * KEK_SIZE))
+        backend._engine = engine
+        backend._session_factory = SessionLocal
+        manager = Fido2Manager(rp_id=RP_ID, rp_name="Venya", backend=backend)
+        return manager, SessionLocal
+
+    def test_active_credential_authenticates(self, tmp_path, es256_keypair, cose_key_bytes):
+        private_key, _ = es256_keypair
+        cred_id = b"\xdd" * 32
+        manager, _ = self._real_manager(tmp_path, cred_id, cose_key_bytes)
+        challenge_id, _ = manager.start_authentication(user_id="u1")
+        raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+        response = _build_assertion_response(cred_id, private_key, raw, counter=1)
+        result = manager.finish_authentication(challenge_id, response)
+        assert result["user_id"] == "u1"
+
+    def test_db_inactive_credential_rejected_even_if_cached(self, tmp_path, es256_keypair, cose_key_bytes):
+        from core.iam.models import WebAuthnCredential
+
+        private_key, _ = es256_keypair
+        cred_id = b"\xdd" * 32
+        manager, SessionLocal = self._real_manager(tmp_path, cred_id, cose_key_bytes)
+        # Simulate a DELETE that soft-deactivated the DB row but did NOT evict the
+        # per-process store (fix A's job; B is the authoritative belt-and-suspenders).
+        s = SessionLocal()
+        row = s.query(WebAuthnCredential).filter(WebAuthnCredential.credential_id == cred_id).one()
+        row.is_active = False
+        s.commit()
+        s.close()
+        assert manager.store.get_credential(cred_id) is not None  # still cached
+
+        challenge_id, _ = manager.start_authentication(user_id="u1")
+        raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+        response = _build_assertion_response(cred_id, private_key, raw, counter=1)
+        with pytest.raises(ValueError, match="Credential not found"):
+            manager.finish_authentication(challenge_id, response)
+
+    def test_sign_count_persist_failure_refuses_login(self, tmp_path, es256_keypair, cose_key_bytes):
+        """Ruling 2026-09-21 (fido2-counter-persist-fail-closed): FAIL-CLOSED.
+
+        A commit failure after a successful active-state check refuses the
+        login with an actionable error — the pre-ruling fail-open swallowed it
+        (login succeeded, counter update silently lost, one future
+        clone-detection opportunity erased). Paired positive is
+        test_active_credential_authenticates (persist path healthy -> login OK).
+        """
+        private_key, _ = es256_keypair
+        cred_id = b"\xdd" * 32
+        manager, _ = self._real_manager(tmp_path, cred_id, cose_key_bytes)
+
+        # Reads stay real (active-state check passes); only the WRITE fails.
+        original_get_session = manager.backend.get_session
+
+        def broken_commit_get_session():
+            s = original_get_session()
+
+            def boom():
+                raise RuntimeError("simulated DB write failure")
+
+            s.commit = boom
+            return s
+
+        manager.backend.get_session = broken_commit_get_session
+
+        challenge_id, _ = manager.start_authentication(user_id="u1")
+        raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+        response = _build_assertion_response(cred_id, private_key, raw, counter=1)
+        with pytest.raises(ValueError, match="Sign-count persistence failed"):
+            manager.finish_authentication(challenge_id, response)

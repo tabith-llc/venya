@@ -391,6 +391,15 @@ class Executor(Base):
     revoked_at = Column(DateTime(timezone=True), nullable=True)
     last_heartbeat = Column(DateTime(timezone=True), nullable=True)
     status = Column(String, nullable=False, default="pending", server_default="pending")
+    version = Column(
+        String,
+        nullable=True,
+        comment=(
+            "Executor dist version reported via heartbeat (additive field). "
+            "NULL = daemon predates version reporting — a distinct honest "
+            "signal, never backfilled; populates on the next heartbeat."
+        ),
+    )
 
 
 class ExecutionSession(Base):

@@ -200,6 +200,14 @@ class TestHeartbeatSuccess:
         assert "cert_fingerprint" in json_payload
         assert isinstance(json_payload["cert_fingerprint"], str)
         assert len(json_payload["cert_fingerprint"]) == 64  # SHA-256 hex digest
+        # The fingerprint must be over the DER encoding (matching server ca.py
+        # compute_fingerprint + executor daemon.py), NOT the PEM bytes -- so it
+        # matches the admin-listing fingerprint for the same cert.
+        import hashlib
+
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+        expected = hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+        assert json_payload["cert_fingerprint"] == expected
 
 
 # ---------------------------------------------------------------------------
@@ -690,3 +698,46 @@ class TestHeartbeatOutput:
         captured = capsys.readouterr()
         assert "Executor ID:     my-executor" in captured.out
         assert "Heartbeat Response" in captured.out
+
+
+class TestHeartbeatTlsRequired:
+    """#17 pin (ticket sec-sweep-low-informational, user ruling: REJECT not
+    warn): an http:// server URL is refused BEFORE any request is built —
+    plaintext heartbeat was the CLI's only non-knob TLS-off path, and the
+    POST carries executor-identifying state."""
+
+    def test_http_url_rejected_no_request(self, tmp_path, capsys):
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "http://venya-core"
+
+        mock_client = _make_mock_client()
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as mock_ctor:
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+        mock_ctor.assert_not_called()  # no transport built at all
+        captured = capsys.readouterr()
+        assert "https://" in captured.err
+        assert "sec-sweep-low-informational" in captured.err
+
+    def test_https_url_still_works(self, tmp_path):
+        """Paired positive: the rejection is scheme-specific, not a lockdown."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+
+        mock_client = _make_mock_client(response_data={"revoked": False, "new_cert_required": False})
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+        assert result == 0

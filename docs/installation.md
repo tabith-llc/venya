@@ -23,7 +23,9 @@ etc.) for every human operator. **Executor hosts additionally require
 hardware-virtualization access (`/dev/kvm`, `kvm` group)** — sbx runs each
 command in a microVM. If the executor itself is a virtual machine, nested
 virtualization must be enabled in the hypervisor; without it the install
-completes but every sandboxed execution fails.
+completes but every sandboxed execution fails. Executor hosts also need a few
+GiB free on the state volume before the first `sbx create` — the agent-template
+pull fails below ~3.5 GiB (observed floor).
 
 ## 1. Install the core server
 
@@ -55,7 +57,7 @@ Key environment variables (all optional):
 |---|---|---|
 | `VENYA_TARBALL_SHA256` | (sidecar fetch) | integrity gate — recommended; if unset, the installer fetches the `.sha256` sidecar from the same origin and aborts on fetch failure or mismatch |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL password |
-| `VENYA_DB_PASSPHRASE` | dev default | server encryption passphrase — set a strong one in any real deployment |
+| `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-20); on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts |
 | `CORE_HOSTNAME` | `$(hostname)` | TLS cert SAN and relay CN base |
 | `VENYA_ADMIN_MTLS_ENABLED` | `true` | admin client-cert enforcement |
 | `VENYA_ADMIN_CA_PASSPHRASE` | auto-generated | stored in `/etc/venya/venya-core.env` (0640) |
@@ -66,6 +68,16 @@ Verify:
 curl -sk https://<core-host>/api/v1/health
 # {"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}
 ```
+
+**Re-runs are the idempotency contract.** Re-running an installer on a live
+host reuses stored secrets (`.env` stays byte-identical; an explicitly passed
+passphrase must MATCH the stored one or the install aborts), redeploys the
+packages, and **restarts the running service when the process predates the
+new bytes** — a loud NOTICE names both timestamps and a PROOF-OF-FRESH-BYTES
+line attests the verification probed the new process (ticket
+`installer-rerun-no-service-restart`). No manual `systemctl restart` is
+needed after a re-run; check for the PROOF line in the transcript before
+trusting any acceptance probe.
 
 ## 2. Bootstrap the first admin (workstation, FIDO2)
 
@@ -94,18 +106,34 @@ chmod 600 admin-cert/admin.key
 
 Executors need a single-use enrollment token minted by an admin. With admin
 mTLS enabled (the default), the admin client cert alone authorizes these
-operations — no FIDO2 touch needed — and the cert pair lives on the core
-(`/etc/venya/admin/`), so minting can run on the headless core itself (the
-installer's completion banner shows the exact command) or from any
-workstation holding the cert:
+operations **server-side** — from any workstation holding the cert
+(`VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`). Both headless paths below work on a
+core with no browser (CLI gate fix `d59a068` + `VENYA_SERVER_URL` resolution
+fix `3f3ed1b`, dev/unreleased; physically verified 2026-09-20):
+
+- The **CLI** (installer-banner shape) — note `VENYA_SERVER_URL` is required
+  unless a stored config names the server:
 
 ```bash
-SSL_CERT_FILE=~/.config/venya-ca.crt \
-VENYA_ADMIN_CERT=admin-cert/admin.crt VENYA_ADMIN_KEY=admin-cert/admin.key \
+SSL_CERT_FILE=/var/lib/venya/ca/ca.crt \
+VENYA_SERVER_URL=https://<core-host> \
+VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
 venya admin executor-enroll <executor-id>
 ```
 
-The token expires in ~30 minutes and is consumed on first use.
+- Or the cert-only API path directly:
+
+```bash
+sudo -u venya curl -sk -X POST \
+  --cert /etc/venya/admin/admin.crt --key /etc/venya/admin/admin.key \
+  https://<core-host>/api/v1/admin/executors/<executor-id>/enroll
+# → {"enrollment_token": "enrl_exec_...", "expires_in_seconds": 1800, ...}
+```
+
+The token expires in ~30 minutes and is consumed on first use. The core
+**requires a token for executor registration by default**
+(`executor_enrollment.require_token`, enforced since 2026-09-20) — tokenless
+registration attempts are rejected 400 with an actionable error.
 **`<executor-id>` is a contract**: it becomes the client-certificate SAN and
 the hostname cores dial for relay calls — it must resolve from every core,
 and must match the pattern `^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`.
@@ -120,6 +148,23 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
   bash -s
 ```
+
+**Deferred registration (bootstrap token file).** If install-time registration
+does not run (core unreachable → CA not installed), the installer writes the
+token to `/var/lib/venya/executor/bootstrap-token` (0600 venya:venya) — the
+canonical bootstrap location, inside the daemon unit's `ReadWritePaths`
+(`/etc/venya` itself is read-only to the daemon). The daemon registers
+automatically at service start once the core is reachable, then deletes the
+token file. Retry at any time: `sudo systemctl restart venya-executor`.
+
+**Legacy `[bootstrap]` recovery (runbook).** Pre-migration installs kept the
+token in a `[bootstrap]` section of `/etc/venya/executor.toml`. The daemon
+still READS that location but cannot rewrite the read-only config: after a
+successful daemon-side registration it logs `remove the [bootstrap] section
+manually; the enrollment token is already consumed server-side` and continues
+— no crash-loop. Operator recovery: as root, delete the `[bootstrap]` section
+from `/etc/venya/executor.toml`. The residue is a spent single-use token only,
+but remove it as hygiene.
 
 **Docker account credentials are required.** The sbx sandbox runtime pulls
 its agent template from Docker: the installer prompts for a Docker username
@@ -136,6 +181,12 @@ The installer also starts `venya-sandboxd.service` (the sbx daemon,
 persistent across reboots, ordered before `venya-executor.service`) and
 initializes the sbx global network policy to **deny-all** (per-sandbox
 allow rules come from the egress allowlist at execution time).
+
+The installer's apt list includes `sshpass`: sandbox ssh-password injection
+shapes (`sshpass -f <secret-file> ssh ...`) need it inside the sandbox, and
+the executor copies the host binary in at sandbox create. Hosts provisioned
+out-of-band without it get a loud WARNING at sandbox create and those shapes
+fail 127 in-sandbox.
 
 Hostname resolution: the installer uses the provisioned `/etc/hosts` entry
 for the core if present, else DNS. If the core hostname resolves neither way,

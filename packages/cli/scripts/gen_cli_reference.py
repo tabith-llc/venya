@@ -281,6 +281,13 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
     ("exec", "status"): [
         (["exec", "status"], "registration status of this executor"),
     ],
+    ("exec", "list"): [
+        (
+            ["exec", "list"],
+            "registered executors with heartbeat-reported versions (NULL renders 'unknown (pre-B daemon)')",
+        ),
+        (["exec", "list", "--json"], "same listing as raw JSON"),
+    ],
     ("config", "show"): [
         (["config", "show"], "current CLI config (server URL, stored token state)"),
     ],

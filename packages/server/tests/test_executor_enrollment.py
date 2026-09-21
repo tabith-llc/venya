@@ -82,11 +82,20 @@ def _create_test_app(backend=None, auth_user=None, require_token=False, ca_manag
 
     from server.config import ExecutorEnrollmentConfig, ServerConfig
 
-    if require_token:
+    if require_token is True:
         app.state.config = ServerConfig(
             executor_enrollment=ExecutorEnrollmentConfig(require_token=True), recovery_code_pepper=pepper
         )
+    elif require_token is False:
+        # updated: require_token default flip (executor-rotation-require-token-400
+        # Phase 1) — the builder pins the knob EXPLICITLY so these tests exercise
+        # route logic under the permissive mode, not the shipped default. The
+        # default itself is pinned by test_default_config_rejects_tokenless_registration.
+        app.state.config = ServerConfig(
+            executor_enrollment=ExecutorEnrollmentConfig(require_token=False), recovery_code_pepper=pepper
+        )
     else:
+        # require_token=None: pure shipped defaults (no executor_enrollment override)
         app.state.config = ServerConfig(recovery_code_pepper=pepper)
 
     if ca_manager is not None:
@@ -524,8 +533,12 @@ class TestRegisterEndpointWithToken:
         assert response.status_code == 401
         assert "consumed by a different executor" in response.json()["detail"]
 
-    def test_no_token_backward_compatible(self):
-        """Without token, uses executor_id from request body."""
+    def test_no_token_allowed_when_require_token_false(self):
+        """updated: require_token default flip (executor-rotation-require-token-400
+        Phase 1) — formerly test_no_token_backward_compatible, which asserted the
+        INSECURE DEFAULT as expected behavior. Now pins the explicit knob-OFF mode
+        only (builder passes require_token=False); the shipped default is enforcement,
+        pinned by test_default_config_rejects_tokenless_registration."""
         mock_db = MagicMock()
         backend = MagicMock()
         backend.get_session.return_value = mock_db
@@ -557,6 +570,42 @@ class TestRegisterEndpointWithToken:
         user_query = MagicMock()
         user_query.filter.return_value.first.return_value = None
 
+        mock_db.query.side_effect = lambda model: user_query
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "test-1",
+                "csr_pem": _generate_test_csr(),
+            },
+        )
+        assert response.status_code == 400
+        assert "Enrollment token required" in response.json()["detail"]
+
+    def test_config_default_require_token_true(self):
+        """updated: require_token default flip — the SHIPPED DEFAULT is enforcement
+        (executor-rotation-require-token-400 Phase 1, user ruling 2026-09-20 after
+        the physical tokenless-registration exploit on exec-2)."""
+        from server.config import ServerConfig
+
+        # pepper is the only required field (fail-loud design); executor_enrollment
+        # left to defaults — that default is what this pins.
+        assert ServerConfig(recovery_code_pepper="test-pepper").executor_enrollment.require_token is True
+
+    def test_default_config_rejects_tokenless_registration(self):
+        """updated: require_token default flip — tokenless registration dies under
+        the DEFAULT config (was: 201 from any host reaching the core, physically
+        proven 2026-09-20). Paired with the knob-OFF positive
+        (test_no_token_allowed_when_require_token_false) and the explicit-True
+        negative (test_no_token_when_required_returns_400)."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(backend=backend, require_token=None, ca_manager=_make_mock_ca())
+
+        user_query = MagicMock()
+        user_query.filter.return_value.first.return_value = None
         mock_db.query.side_effect = lambda model: user_query
 
         client = TestClient(app, raise_server_exceptions=False)

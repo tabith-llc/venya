@@ -8,12 +8,15 @@
 
 Tests cover:
 - BootstrapConfig loading from TOML
-- _clear_enrollment_token() removes token from config
+- Dual-location bootstrap token: canonical file (RW) + legacy toml (RO grace)
+- _clear_bootstrap_token() truth table incl. read-only-config non-fatal ERROR
 - TLS verification behavior in CertificateManager.register()
 - VENYA_TLS_VERIFY environment variable handling
 - Network error handling in CertificateManager.register()
 """
 
+import logging
+import os
 import ssl
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -51,104 +54,144 @@ class TestBootstrapConfig:
         assert config.tls_verify is False
 
 
-class TestClearEnrollmentToken:
-    """Tests for _clear_enrollment_token()."""
+class TestBootstrapTokenDualLocation:
+    """Truth table for the dual-location bootstrap token.
 
-    def test_clears_token_from_config(self, tmp_path: Path):
-        """Token is removed from executor.toml and empty bootstrap section is deleted."""
-        config_file = tmp_path / "executor.toml"
-        config_file.write_text(
-            """
+    Canonical: /var/lib/venya/executor/bootstrap-token (RW under the hardened
+    unit). Legacy: [bootstrap] enrollment_token in executor.toml (RO to the
+    daemon — ReadOnlyPaths=/etc/venya). Ticket daemon-bootstrap-token-clear-erofs:
+    the legacy clear crashed the daemon (EROFS, uncaught) → crash-loop; the
+    file location makes the clear clean and the legacy clear non-fatal-loud.
+
+    Replaces the former TestClearEnrollmentToken logic-replica tests (they
+    exercised hand-copied dict surgery, never the daemon method).
+    """
+
+    TOML_WITH_TOKEN = """
 server_url = "https://venya-core"
-executor_id = "jump-1"
+executor_id = "test-executor"
 
 [bootstrap]
-enrollment_token = "enrl_exec_abc123"
+enrollment_token = "enrl_exec_toml_legacy"
 """
+
+    def _daemon(self, tmp_path: Path, toml_text: str | None = None, toml_token: str | None = None):
+        """toml_token models what ExecutorConfig.from_file parses from toml_text
+        in production (main() loads the config FROM the file; the legacy
+        resolver fallback reads config.bootstrap.enrollment_token)."""
+        from executor.daemon import ExecutorDaemon
+
+        config_file = tmp_path / "executor.toml"
+        if toml_text is not None:
+            config_file.write_text(toml_text)
+        config = ExecutorConfig(
+            server_url="https://example.com",
+            executor_id="test-executor",
+            bootstrap=BootstrapConfig(enrollment_token=toml_token),
+            config_path=config_file,
+            relay_client_ids=["core-relay"],
         )
+        daemon = ExecutorDaemon(config)
+        daemon._bootstrap_token_path = tmp_path / "bootstrap-token"
+        return daemon
+
+    def test_token_file_resolves_and_clear_unlinks(self, tmp_path: Path):
+        """Cell 1: canonical file present → resolved; clear unlinks it."""
+        daemon = self._daemon(tmp_path)
+        daemon._bootstrap_token_path.write_text("enrl_exec_file_canonical\n")
+
+        assert daemon._resolve_bootstrap_token() == "enrl_exec_file_canonical"
+
+        daemon._clear_bootstrap_token()
+        assert not daemon._bootstrap_token_path.exists()
+
+    def test_toml_legacy_resolves_and_clear_rewrites(self, tmp_path: Path):
+        """Cell 2: legacy toml + writable → resolved; clear removes the section."""
         import tomllib
 
-        import tomli_w
+        daemon = self._daemon(tmp_path, toml_text=self.TOML_WITH_TOKEN, toml_token="enrl_exec_toml_legacy")
 
-        with open(config_file, "rb") as f:
+        assert daemon._resolve_bootstrap_token() == "enrl_exec_toml_legacy"
+
+        daemon._clear_bootstrap_token()
+        with open(tmp_path / "executor.toml", "rb") as f:
             data = tomllib.load(f)
-        assert "bootstrap" in data
-        assert data["bootstrap"]["enrollment_token"] == "enrl_exec_abc123"
-
-        # Clear it (mimics _clear_enrollment_token logic)
-        del data["bootstrap"]["enrollment_token"]
-        if not data["bootstrap"]:
-            del data["bootstrap"]
-
         assert "bootstrap" not in data
+        assert data["server_url"] == "https://venya-core"  # rest of config intact
 
-        # Write back and verify
-        with open(config_file, "wb") as f:
-            tomli_w.dump(data, f)
-
-        with open(config_file, "rb") as f:
-            data2 = tomllib.load(f)
-        assert "bootstrap" not in data2
-
-    def test_removes_empty_bootstrap_section(self, tmp_path: Path):
-        """When only enrollment_token is in bootstrap, entire section is removed."""
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions; physical cell 2 is authoritative")
+    def test_toml_readonly_clear_errors_loudly_and_proceeds(self, tmp_path: Path, caplog):
+        """Cell 3 (ruling b, BOTH halves): RO toml → exact actionable ERROR logged AND no raise."""
+        daemon = self._daemon(tmp_path, toml_text=self.TOML_WITH_TOKEN, toml_token="enrl_exec_toml_legacy")
         config_file = tmp_path / "executor.toml"
-        config_file.write_text(
-            """
-server_url = "https://venya-core"
-executor_id = "jump-1"
+        config_file.chmod(0o444)
+        try:
+            assert daemon._resolve_bootstrap_token() == "enrl_exec_toml_legacy"
 
-[bootstrap]
-enrollment_token = "enrl_exec_abc123"
-"""
-        )
+            with caplog.at_level(logging.ERROR):
+                daemon._clear_bootstrap_token()  # must NOT raise (crash-loop was the harm)
+
+            assert "remove the [bootstrap] section manually" in caplog.text
+            assert "already consumed server-side" in caplog.text
+            # section residue remains (documented legacy grace — spent token only)
+            assert "[bootstrap]" in config_file.read_text()
+        finally:
+            config_file.chmod(0o644)
+
+    def test_absent_resolves_none(self, tmp_path: Path):
+        """Cell 4: neither location → None (require_token registration path unchanged)."""
+        daemon = self._daemon(tmp_path, toml_text='server_url = "https://venya-core"\n')
+        assert daemon._resolve_bootstrap_token() is None
+
+    def test_both_locations_file_wins_and_both_cleared(self, tmp_path: Path):
+        """Cell 5: file takes precedence; clear removes BOTH residues."""
         import tomllib
 
-        import tomli_w
+        daemon = self._daemon(tmp_path, toml_text=self.TOML_WITH_TOKEN, toml_token="enrl_exec_toml_legacy")
+        daemon._bootstrap_token_path.write_text("enrl_exec_file_canonical")
 
-        with open(config_file, "rb") as f:
-            data = tomllib.load(f)
-        del data["bootstrap"]["enrollment_token"]
-        if not data["bootstrap"]:
-            del data["bootstrap"]
-        with open(config_file, "wb") as f:
-            tomli_w.dump(data, f)
+        assert daemon._resolve_bootstrap_token() == "enrl_exec_file_canonical"
 
-        with open(config_file, "rb") as f:
-            data2 = tomllib.load(f)
-        assert "bootstrap" not in data2
+        daemon._clear_bootstrap_token()
+        assert not daemon._bootstrap_token_path.exists()
+        with open(tmp_path / "executor.toml", "rb") as f:
+            assert "bootstrap" not in tomllib.load(f)
 
-    def test_skips_when_no_config_file(self, tmp_path: Path):
-        """If config file doesn't exist, _clear_enrollment_token returns early."""
-        config_file = tmp_path / "nonexistent.toml"
-        assert not config_file.exists()
-        # _clear_enrollment_token checks config_path.exists() first
-        # If file doesn't exist, it returns without error
-
-    def test_skips_when_no_enrollment_token(self, tmp_path: Path):
-        """If bootstrap section has no enrollment_token, nothing is removed."""
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions; physical cell 2 is authoritative")
+    def test_start_clears_exactly_once_with_readonly_toml(self, tmp_path: Path, caplog):
+        """Ruling pin: clear runs once at registration — an RO failure never recurs per-loop."""
+        daemon = self._daemon(tmp_path, toml_text=self.TOML_WITH_TOKEN, toml_token="enrl_exec_toml_legacy")
+        daemon._bootstrap_token_path.write_text("enrl_exec_file_canonical")
         config_file = tmp_path / "executor.toml"
-        config_file.write_text(
-            """
-server_url = "https://venya-core"
+        config_file.chmod(0o444)
 
-[bootstrap]
-tls_verify = false
-"""
-        )
-        import tomllib
+        daemon.cert_manager = MagicMock()
+        daemon._create_mtls_client = MagicMock(return_value=MagicMock())
+        daemon.reaper = MagicMock()
+        daemon.relay = MagicMock()
+        daemon.relay.active = True
+        daemon._write_pidfile = MagicMock()
+        daemon._main_loop = MagicMock()
+        daemon.stop = MagicMock()
 
-        with open(config_file, "rb") as f:
-            data = tomllib.load(f)
-        # No enrollment_token to clear
-        if "bootstrap" in data and "enrollment_token" in data["bootstrap"]:
-            del data["bootstrap"]["enrollment_token"]
-            if not data["bootstrap"]:
-                del data["bootstrap"]
+        try:
+            with (
+                patch("executor.daemon.sweep_workspace_base", return_value=0),
+                caplog.at_level(logging.ERROR),
+            ):
+                daemon.start()  # must complete — no crash, loop entered
 
-        # bootstrap section should remain since tls_verify is still there
-        assert "bootstrap" in data
-        assert data["bootstrap"]["tls_verify"] is False
+            # register got the FILE token (precedence) exactly once
+            daemon.cert_manager.register.assert_called_once_with(
+                "test-executor", enrollment_token="enrl_exec_file_canonical"
+            )
+            # legacy RO failure logged exactly once — not per-iteration, never fatal
+            ro_errors = [r for r in caplog.records if "remove the [bootstrap] section manually" in r.getMessage()]
+            assert len(ro_errors) == 1
+            daemon._main_loop.assert_called_once()
+            assert not daemon._bootstrap_token_path.exists()  # canonical half cleaned
+        finally:
+            config_file.chmod(0o644)
 
 
 class TestDaemonRegistrationTLSVerification:

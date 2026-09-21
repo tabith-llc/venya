@@ -114,6 +114,18 @@ unauthenticated transport.
    secret ids (never values), and timestamps. Non-admin users querying
    `get_audit` see only their own events (enforced server-side).
 
+**Operator rule (load-bearing).** Step 4's masking covers **stdout/stderr
+only** — the command string itself persists UNMASKED by design (step 5:
+audit events, the executor spool, server journals, and the
+`execution_sessions` row all carry it). **Never inline a secret in command
+text** (`sshpass -p <pw>`, `--password=…`, `echo <token> | …`): it lands in
+those sinks, and on the target it is exposed via `/proc/<pid>/cmdline` and
+shell history. The blessed shape is file injection —
+`sshpass -f /run/secrets/venya/<id> ssh …` — which keeps the secret off
+every command-line surface. Operator behavior is the primary control here;
+post-beta hardening may additionally scrub the command string against known
+secret values (ticket sec-secret-redaction-log-leaks #14).
+
 ## Sandbox and egress
 
 Commands run in sbx (Docker Sandboxes) microVMs. Networking is

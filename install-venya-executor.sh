@@ -81,7 +81,7 @@ info "Installing Venya Executor to $INSTALL_DIR"
 venya_create_user
 
 # --- Install system packages ---
-venya_install_system_pkgs curl sudo build-essential
+venya_install_system_pkgs curl sudo build-essential sshpass
 
 # --- Install Rust for venya user ---
 SU_CARGO="/home/venya/.cargo/bin/cargo"
@@ -207,9 +207,14 @@ info "Installing Docker Sandboxes (sbx) CLI..."
 if ! command -v sbx &>/dev/null; then
     SBX_SCRIPT=$(mktemp /tmp/docker-sbx-install-XXXXXX.sh)
     curl -fsSL https://get.docker.com -o "$SBX_SCRIPT"
-    REPO_ONLY=1 sh "$SBX_SCRIPT" > /dev/null 2>&1
+    if ! REPO_ONLY=1 sh "$SBX_SCRIPT" > /tmp/venya-sbx-repo.log 2>&1; then
+        error "Docker sbx apt-repo setup failed; last 25 lines:"
+        tail -25 /tmp/venya-sbx-repo.log >&2
+        rm -f "$SBX_SCRIPT"
+        exit 1
+    fi
     rm -f "$SBX_SCRIPT"
-    apt-get install -y -qq docker-sbx > /dev/null 2>&1
+    venya_apt install -y -qq docker-sbx
     usermod -aG kvm venya 2>/dev/null || true
     info "sbx CLI installed. venya user added to kvm group."
 else
@@ -463,30 +468,36 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
     else
         warn "Venya CA not installed — skipping cert registration"
         echo ""
-        echo "  Run this after core is reachable:"
-        echo "    $INSTALL_DIR/.venv/bin/venya exec register \\"
-        echo "      --executor-id $EXECUTOR_ID \\"
-        echo "      --core-url $SERVER_URL \\"
-        echo "      --output-dir /etc/venya/executor \\"
-        echo "      --enrollment-token '${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}'"
+        echo "  The enrollment token will be written to:"
+        echo "    /var/lib/venya/executor/bootstrap-token   (0600 venya:venya)"
+        echo "  The daemon registers automatically at service start once the core"
+        echo "  is reachable, and clears the token file after success."
+        echo "  Retry at any time with: sudo systemctl restart venya-executor"
         echo ""
     fi
+else
+    warn "mTLS registration SKIPPED — VENYA_EXECUTOR_ENROLLMENT_TOKEN is empty."
+    warn "The server rejects tokenless registration (executor_enrollment.require_token, enforced by default); the daemon will exit 1 on boot with an actionable error."
+    warn "Re-run the installer with VENYA_EXECUTOR_ENROLLMENT_TOKEN set (admin mints one: venya admin executor-enroll <executor-id>)."
 fi
 
-# --- Write bootstrap config (enrollment token for heartbeat) ---
-if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
-    cat >> /etc/venya/executor.toml << EOF
-
-[bootstrap]
-enrollment_token = "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}"
-tls_verify = true
-EOF
-    info "Bootstrap enrollment token configured"
-    # Clear enrollment token from config — daemon runs with ReadOnlyPaths=/etc/venya
-    # and cannot write to clear it at startup. Root clears it here after registration.
-    sed -i '/^\[bootstrap\]/,/^$/d' /etc/venya/executor.toml
-    sed -i '/^enrollment_token = /d' /etc/venya/executor.toml
-    sed -i '/^tls_verify = /d' /etc/venya/executor.toml
+# --- Deferred daemon-side registration: persist the token where the daemon
+# can CLEAR it (ticket daemon-bootstrap-token-clear-erofs). /etc/venya is
+# ReadOnlyPaths for the daemon; /var/lib/venya/executor is in its
+# ReadWritePaths. Written ONLY when install-time registration did not run —
+# a completed registration consumed the token, so nothing is persisted.
+# The legacy [bootstrap] section in executor.toml is NEVER written by this
+# installer: the daemon can read but not clear it (EROFS), which used to
+# crash-loop the boot. The daemon still honors a hand-placed legacy section
+# (loud non-fatal clear failure) until old installs are cut over.
+if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ] && [ "$CA_INSTALLED" != true ]; then
+    install -d -m 0755 -o venya -g venya /var/lib/venya/executor
+    printf '%s\n' "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" > /var/lib/venya/executor/bootstrap-token
+    chown venya:venya /var/lib/venya/executor/bootstrap-token
+    chmod 600 /var/lib/venya/executor/bootstrap-token
+    info "Bootstrap token written to /var/lib/venya/executor/bootstrap-token (0600 venya:venya)"
+    info "The daemon clears it automatically after successful registration;"
+    info "trigger/retry registration with: sudo systemctl restart venya-executor"
 fi
 
 # --- Harden executor credentials (executor-specific) ---
@@ -509,10 +520,16 @@ cp "$INSTALL_DIR/systemd/tmp-venya_secrets.mount" "$SYSTEMD_DIR/"
 cp "$INSTALL_DIR/systemd/venya-executor.seccomp" "$SYSTEMD_DIR/"
 systemctl daemon-reload
 systemctl enable venya-executor.service tmp-venya_secrets.mount
-systemctl start venya-executor.service
+
+# Fresh-bytes sync (ticket installer-rerun-no-service-restart — same defect
+# class as the core installer: `systemctl start` is a no-op on a running unit,
+# leaving the re-run's verification probing stale in-memory imports).
+touch "$INSTALL_DIR/.deploy-stamp"
+venya_service_sync venya-executor "$INSTALL_DIR/.deploy-stamp"
 
 # --- Service retry ---
 venya_service_retry venya-executor
+venya_service_freshness venya-executor "$INSTALL_DIR/.deploy-stamp"
 
 # --- Verification ---
 venya_verify_install \

@@ -9,6 +9,7 @@
 import logging
 from typing import Literal
 
+from core.iam.role_manager import RoleManagerError
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -106,10 +107,16 @@ async def roles_create(
             description=req.description,
         )
         db.commit()
-    except Exception as e:
+    except RoleManagerError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+    except Exception:
+        logger.exception("Role creation failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Role creation failed",
         )
 
     return RoleCreateResponse(
@@ -212,10 +219,16 @@ async def roles_update(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except RoleManagerError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+    except Exception:
+        logger.exception("Role update failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Role update failed",
         )
 
 
@@ -254,10 +267,16 @@ async def roles_delete(
         return RoleDeleteResponse(deleted=True, name=name)
     except HTTPException:
         raise
-    except Exception as e:
+    except RoleManagerError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+    except Exception:
+        logger.exception("Role deletion failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Role deletion failed",
         )
 
 
@@ -310,10 +329,16 @@ async def role_member_add(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except RoleManagerError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+    except Exception:
+        logger.exception("Role member add failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Role member add failed",
         )
 
 
@@ -349,8 +374,14 @@ async def role_member_remove(
         return RoleMemberRemoveResponse(removed=True, user_id=user_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except RoleManagerError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
+        )
+    except Exception:
+        logger.exception("Role member removal failed")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Role member removal failed",
         )

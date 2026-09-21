@@ -108,13 +108,34 @@ def _make_mock_db(executor_certs=None, revocations=None):
     return db
 
 
-def _create_test_app(ca_manager, db):
+def _add_executor_auth(app, executor_id):
+    """Inject middleware-shaped executor auth state.
+
+    The heartbeat route requires request.state.auth_user ==
+    {"caller": "executor", "executor_id": CN} (production: set by
+    SessionMiddleware._validate_executor_mtls — ticket
+    sec-endpoint-ratelimit-hardening #7). Bare route-level apps inject the
+    same shape.
+    """
+    from starlette.middleware.base import BaseHTTPMiddleware
+
+    class _ExecutorAuth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            request.state.auth_user = {"caller": "executor", "executor_id": executor_id}
+            return await call_next(request)
+
+    app.add_middleware(_ExecutorAuth)
+
+
+def _create_test_app(ca_manager, db, auth_executor_id=None):
     """Create a FastAPI app with executor routes and mock DB."""
     app = FastAPI()
     app.state.backend = MagicMock()
     app.state.backend.get_session.return_value = db
     app.state.ca_manager = ca_manager
     app.include_router(executors_routes.router, prefix="/api/v1")
+    if auth_executor_id is not None:
+        _add_executor_auth(app, auth_executor_id)
     return app
 
 
@@ -497,7 +518,7 @@ class TestRevocation:
         revocation = MockExecutorCertRevocation(serial_number=serial_hex)
         db = _make_mock_db(executor_certs=[cert_record], revocations=[revocation])
 
-        app = _create_test_app(ca_manager, db)
+        app = _create_test_app(ca_manager, db, auth_executor_id="test-executor")
         test_client = TestClient(app)
 
         fp = hashlib.sha256(executor_cert.public_bytes(serialization.Encoding.DER)).hexdigest()
@@ -525,7 +546,7 @@ class TestRevocation:
         # No revocation records
         db = _make_mock_db(executor_certs=[cert_record], revocations=[])
 
-        app = _create_test_app(ca_manager, db)
+        app = _create_test_app(ca_manager, db, auth_executor_id="test-executor")
         test_client = TestClient(app)
 
         resp = test_client.post(
@@ -539,7 +560,7 @@ class TestRevocation:
     def test_revocation_unknown_executor(self, ca_manager):
         """Heartbeat returns revoked=False for unknown executor IDs."""
         db = _make_mock_db()
-        app = _create_test_app(ca_manager, db)
+        app = _create_test_app(ca_manager, db, auth_executor_id="nonexistent")
         test_client = TestClient(app)
 
         resp = test_client.post(

@@ -13,7 +13,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from core.utils.entropy import get_secure_token
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -183,9 +183,22 @@ class AdminKeyRotationJobRollbackResponse(BaseModel):
     restored_secrets_count: int
 
 
+class AdminRevokeExecutorRequest(BaseModel):
+    """Optional body for the serial form of executor revocation."""
+
+    serial: str | None = Field(
+        default=None,
+        description=(
+            "Specific certificate serial (hex) to revoke WITHOUT revoking the "
+            "executor identity. Omit for the identity form (terminal)."
+        ),
+    )
+
+
 class AdminRevokeExecutorResponse(BaseModel):
     revoked: bool
     executor_id: str
+    serial_number: str | None = None
 
 
 class AdminEnrollExecutorResponse(BaseModel):
@@ -201,6 +214,7 @@ class AdminExecutorInfo(BaseModel):
     fingerprint: str
     not_before: datetime
     not_after: datetime
+    version: str | None = None
 
 
 class AdminExecutorListResponse(BaseModel):
@@ -270,10 +284,11 @@ async def admin_enroll(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("Enrollment failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Enrollment failed",
         )
 
 
@@ -350,10 +365,11 @@ async def admin_create_user(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("User creation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="User creation failed",
         )
 
 
@@ -394,10 +410,11 @@ async def admin_remove(
         return AdminRemoveResponse(removed=True, user_id=user_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("User removal failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="User removal failed",
         )
 
 
@@ -462,10 +479,11 @@ async def admin_configure_user(
         return AdminConfigureUserResponse(configured=True, user_id=user_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("User configuration failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="User configuration failed",
         )
 
 
@@ -566,10 +584,11 @@ async def admin_key_version_rotate(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Key rotation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Key rotation failed",
         )
 
     logger.info(
@@ -682,10 +701,11 @@ async def admin_key_version_rollback(
         restored = _rollback_key_rotation(db, req.job_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Key rotation rollback failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Key rotation rollback failed",
         )
     return AdminKeyVersionRollbackResponse(
         rolled_back=True,
@@ -730,10 +750,11 @@ async def admin_set_command_policy(
             preset=req.preset,
             updated=True,
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("Command policy update failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Command policy update failed",
         )
 
 
@@ -770,10 +791,11 @@ async def admin_add_allowed_command(
 
         db.commit()
         return AdminAddAllowedCommandResponse(added=True, command_path=req.command_path)
-    except Exception as e:
+    except Exception:
+        logger.exception("Allowed-command update failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Allowed-command update failed",
         )
 
 
@@ -812,10 +834,11 @@ async def admin_key_version_deactivate(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Key version deactivation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Key version deactivation failed",
         )
 
 
@@ -863,10 +886,11 @@ async def admin_key_version_revoke(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Key version revocation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Key version revocation failed",
         )
 
 
@@ -925,10 +949,11 @@ async def admin_key_rotation_job_rollback(
         restored = _rollback_key_rotation(db, job_id)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Key rotation rollback failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Key rotation rollback failed",
         )
     return AdminKeyRotationJobRollbackResponse(
         rolled_back=True,
@@ -951,16 +976,15 @@ async def admin_list_executors(
     Executors are deduplicated by executor_id — only the most recent
     active cert per executor is returned.
     """
-    from core.iam.models import ExecutorCert, ExecutorCertRevocation
+    from core.iam.models import Executor, ExecutorCert
 
-    revoked_serials = {r.serial_number for r in db.query(ExecutorCertRevocation.serial_number).all()}
+    from ..revocation import executor_revocation_state
 
-    certs = (
-        db.query(ExecutorCert)
-        .filter(~ExecutorCert.serial_number.in_(revoked_serials))
-        .order_by(ExecutorCert.created_at.desc())
-        .all()
-    )
+    certs = db.query(ExecutorCert).order_by(ExecutorCert.created_at.desc()).all()
+
+    # Heartbeat-reported build per executor (feature/version-surfaces);
+    # NULL = daemon predates version reporting — passthrough, never defaulted.
+    versions = {row.id: row.version for row in db.query(Executor).all()}
 
     # Deduplicate: keep latest cert per executor_id
     latest: dict[str, ExecutorCert] = {}
@@ -968,16 +992,25 @@ async def admin_list_executors(
         if cert.executor_id not in latest:
             latest[cert.executor_id] = cert
 
-    result = [
-        {
-            "executor_id": c.executor_id,
-            "serial_number": c.serial_number,
-            "fingerprint": c.fingerprint,
-            "not_before": c.not_before,
-            "not_after": c.not_after,
-        }
-        for c in latest.values()
-    ]
+    # Condition 2 (executor-revocation-by-identity): revoked-ness has exactly
+    # ONE source — the shared state, consulted per candidate cert with the
+    # listed serial as the presented serial (identity flag first, then serial
+    # history). The former batch `serial NOT IN (CRL)` filter was a second
+    # implementation, blind to the identity flag.
+    result = []
+    for c in latest.values():
+        if executor_revocation_state(db, c.executor_id, presented_serial=c.serial_number).revoked:
+            continue
+        result.append(
+            {
+                "executor_id": c.executor_id,
+                "serial_number": c.serial_number,
+                "fingerprint": c.fingerprint,
+                "not_before": c.not_before,
+                "not_after": c.not_after,
+                "version": versions.get(c.executor_id),
+            }
+        )
 
     return AdminExecutorListResponse(executors=result)
 
@@ -989,52 +1022,98 @@ async def admin_list_executors(
 )
 async def admin_revoke_executor(
     executor_id: str,
+    req: AdminRevokeExecutorRequest | None = Body(default=None),
     _: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminRevokeExecutorResponse:
-    """Revoke an executor certificate (admin only).
+    """Revoke an executor certificate or identity (admin only).
 
-    Adds the executor's certificate serial number to the revocation list.
-    The executor will be rejected on next revocation check (polls ~every 30s).
+    Two forms (ticket executor-revocation-by-identity, ruling 1):
+
+    - IDENTITY form (no body serial): sets Executor.revoked_at — TERMINAL for
+      alpha (no un-revoke; re-enrollment requires a NEW executor_id) — and
+      adds the current record serial to the revocation list. Dial gates refuse
+      immediately; a cooperative daemon self-terminates on next poll (~30s).
+    - SERIAL form (body {"serial": "<hex>"}): kills ONE credential without
+      touching the identity — for incident response (e.g. an orphaned
+      predecessor serial whose record pointer has moved on). Note: a serial
+      form on the CURRENT record serial also refuses dial (the shared
+      revocation state checks the record serial when none is presented).
     """
-    from datetime import datetime
+    from core.iam.models import Executor, ExecutorCert, ExecutorCertRevocation
 
-    from core.iam.models import ExecutorCert, ExecutorCertRevocation
+    now = datetime.now(UTC)
+    serial_arg = req.serial if req is not None else None
 
-    # Look up the executor's current certificate
+    if serial_arg is not None:
+        # --- Serial form: credential-only, identity untouched ---
+        try:
+            int(serial_arg, 16)
+            if len(serial_arg) > 16 or len(serial_arg) == 0:
+                raise ValueError("bad length")
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="serial must be hex, 1-16 chars",
+            )
+        serial_arg = serial_arg.casefold()
+        existing = db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == serial_arg).first()
+        if existing is not None:
+            return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=serial_arg)
+        db.add(
+            ExecutorCertRevocation(
+                serial_number=serial_arg,
+                executor_id=executor_id,
+                revoked_at=now,
+                reason="Admin revocation (serial form)",
+            )
+        )
+        db.commit()
+        metrics.TOKEN_REVOKED.labels(reason="executor_serial_revoked").inc()
+        logger.info(
+            "Revoked executor cert serial (identity NOT revoked): executor_id=%s, serial=%s",
+            executor_id,
+            serial_arg,
+        )
+        return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id, serial_number=serial_arg)
+
+    # --- Identity form: terminal flag + current record serial ---
     cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
-
     if cert is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Executor not found: {executor_id}",
         )
 
-    # Check if already revoked
+    executor_row = db.query(Executor).filter(Executor.id == executor_id).first()
+    already = executor_row is not None and executor_row.revoked_at is not None
+    if not already and executor_row is not None:
+        executor_row.revoked_at = now
+
     existing_revocation = (
         db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == cert.serial_number).first()
     )
-
-    if existing_revocation is not None:
-        return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id)
-
-    # Add to revocation list
-    revocation = ExecutorCertRevocation(
-        serial_number=cert.serial_number,
-        executor_id=executor_id,
-        revoked_at=datetime.now(UTC),
-        reason="Admin revocation",
-    )
-    db.add(revocation)
+    if existing_revocation is None:
+        db.add(
+            ExecutorCertRevocation(
+                serial_number=cert.serial_number,
+                executor_id=executor_id,
+                revoked_at=now,
+                reason="Admin revocation",
+            )
+        )
     db.commit()
-    metrics.TOKEN_REVOKED.labels(reason="executor_revoked").inc()
 
+    if already and existing_revocation is not None:
+        return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=cert.serial_number)
+
+    metrics.TOKEN_REVOKED.labels(reason="executor_revoked").inc()
     logger.info(
-        "Revoked executor cert: executor_id=%s, serial=%s",
+        "Revoked executor identity (TERMINAL): executor_id=%s, record serial=%s",
         executor_id,
         cert.serial_number,
     )
-    return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id)
+    return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id, serial_number=cert.serial_number)
 
 
 @router.post(
@@ -1109,7 +1188,10 @@ async def admin_enroll_executor(
         }
         core = getattr(request.app.state, "core", None)
         if core is None:
-            raise RuntimeError("Core not initialized — cannot encrypt admin metadata")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Core not initialized — cannot encrypt admin metadata",
+            )
         wrapped_dek, nonce, ciphertext = core.encrypt(json.dumps(meta_dict).encode("utf-8"))
         token.admin_meta_wrapped_dek = wrapped_dek
         token.admin_meta_nonce = nonce
@@ -1151,10 +1233,11 @@ async def admin_enroll_executor(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Executor enrollment failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Executor enrollment failed",
         )
 
 
@@ -1240,10 +1323,11 @@ async def admin_re_enroll(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    except Exception as e:
+    except Exception:
+        logger.exception("Re-enrollment failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Re-enrollment failed",
         )
 
 
@@ -1339,10 +1423,11 @@ async def admin_create_user_token(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Token creation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Token creation failed",
         )
 
 
@@ -1369,10 +1454,11 @@ async def admin_revoke_token(
             metrics.TOKEN_REVOKED.labels(reason="admin_revoked").inc()
 
         return AdminTokenRevokeResponse(revoked=revoked, token_id=token_id)
-    except Exception as e:
+    except Exception:
+        logger.exception("Token revocation failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Token revocation failed",
         )
 
 
@@ -1418,8 +1504,12 @@ async def admin_revoke_admin_cert(
 
     Admin only. Idempotent — revoking the same serial twice returns success.
     """
-    # Validate serial format
-    serial = req.serial.strip()
+    # Normalize at the STORAGE BOUNDARY (user ruling 2026-09-20, ticket
+    # sec-admin-mtls-allowlist-revocation): nginx $ssl_client_serial is
+    # UPPERCASE; storing the serial as-provided forced every reader to
+    # compensate case-insensitively forever. Legacy mixed-case rows stay
+    # matched via the middleware's func.upper() read.
+    serial = req.serial.strip().upper()
     try:
         int(serial, 16)
         if len(serial) > 16:

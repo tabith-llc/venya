@@ -1,6 +1,6 @@
 [project]
 name = "venya"
-version = "0.1.0"
+version = "0.1.0alpha12"
 description = "A secrets broker system for LLMs"
 requires-python = ">=3.14,<3.15"
 dependencies = [
@@ -24,6 +24,7 @@ core = { workspace = true }
 server = { workspace = true }
 executor = { workspace = true }
 venya-cli = { workspace = true }
+venya-contract = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["packages/core/tests"]

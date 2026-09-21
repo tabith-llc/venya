@@ -142,8 +142,9 @@ async def recovery(
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
+        logger.exception("Recovery failed")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Recovery failed",
         )

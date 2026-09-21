@@ -6,4 +6,8 @@
 
 """Venya core package."""
 
-__version__ = "0.1.0"
+from importlib.metadata import version as _dist_version
+
+# Single-sourced from the installed distribution metadata (RELEASES.md §1 —
+# kills the last non-derived version literal; surfaces read this string).
+__version__ = _dist_version("core")

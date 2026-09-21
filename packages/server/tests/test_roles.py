@@ -9,6 +9,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from core.iam.role_manager import RoleManagerError
 from fastapi import FastAPI
 from server.dependencies import get_current_user, require_admin
 from server.routes import roles as roles_routes
@@ -119,7 +120,7 @@ class TestRolesCreate:
 
     def test_create_duplicate(self):
         """POST /roles should return 400 for duplicate role name."""
-        rm = _make_mock_role_manager(error=Exception("Role 'dev' already exists"))
+        rm = _make_mock_role_manager(error=RoleManagerError("Role 'dev' already exists"))
         backend = MagicMock()
         session = MagicMock()
         backend.get_session.return_value = session
@@ -261,7 +262,7 @@ class TestRolesUpdate:
     def test_update_not_found(self):
         """PUT /roles/{id} should return 404 for missing role."""
         rm = _make_mock_role_manager()
-        rm.update_role.side_effect = Exception("Role 999 not found")
+        rm.update_role.side_effect = RoleManagerError("Role 999 not found")
         backend = MagicMock()
         session = MagicMock()
         backend.get_session.return_value = session
@@ -278,10 +279,32 @@ class TestRolesUpdate:
             assert resp.status_code == 400
             assert "not found" in resp.json()["detail"]
 
+    def test_update_internal_error_not_leaked(self):
+        """A non-RoleManagerError exception gets the static detail — internals never echoed."""
+        rm = _make_mock_role_manager()
+        rm.update_role.side_effect = RuntimeError('(psycopg2.errors.UndefinedColumn) column "x" does not exist')
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.put(
+                "/api/v1/roles/1",
+                json={"name": "new-name"},
+            )
+            assert resp.status_code == 400
+            assert resp.json()["detail"] == "Role update failed"
+            assert "psycopg2" not in resp.text
+            assert "UndefinedColumn" not in resp.text
+
     def test_update_duplicate_name(self):
         """PUT /roles/{id} should return 400 if new name already exists."""
         rm = _make_mock_role_manager()
-        rm.update_role.side_effect = Exception("Role 'dev' already exists")
+        rm.update_role.side_effect = RoleManagerError("Role 'dev' already exists")
         backend = MagicMock()
         session = MagicMock()
         backend.get_session.return_value = session
@@ -440,7 +463,7 @@ class TestRoleMemberAdd:
     def test_add_member_duplicate(self):
         """POST /roles/{id}/members should return 400 for duplicate membership."""
         rm = _make_mock_role_manager()
-        rm.add_member.side_effect = Exception("User 'user1' is already a member of role 1")
+        rm.add_member.side_effect = RoleManagerError("User 'user1' is already a member of role 1")
         backend = MagicMock()
         session = MagicMock()
         backend.get_session.return_value = session
@@ -460,7 +483,7 @@ class TestRoleMemberAdd:
     def test_add_member_user_not_found(self):
         """POST /roles/{id}/members should return 400 if user doesn't exist."""
         rm = _make_mock_role_manager()
-        rm.add_member.side_effect = Exception("User 'nonexistent' not found")
+        rm.add_member.side_effect = RoleManagerError("User 'nonexistent' not found")
         backend = MagicMock()
         session = MagicMock()
         backend.get_session.return_value = session
