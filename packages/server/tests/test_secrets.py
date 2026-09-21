@@ -1410,11 +1410,20 @@ class TestShapeMetadata:
         assert resp.status_code == 201
         assert resp.json()["metadata_warnings"] == []
 
-    def test_mechanism_pending_shapes_warn(self):
-        for shape in ("sudo-stdin",):
-            resp = self._store({"shape": shape})
-            assert resp.status_code == 201, shape
-            assert any("DECLARATIVE-ONLY" in w for w in resp.json()["metadata_warnings"]), shape
+    def test_sudo_stdin_shape_accepted_without_warning(self):
+        # Mechanism SHIPPED (narrow redirect allowance, ticket
+        # secret-shape-sudo-remote option (a)) — the declarative-only warning
+        # left with the last MECHANISM_PENDING_SHAPES member.
+        resp = self._store({"shape": "sudo-stdin"})
+        assert resp.status_code == 201
+        assert resp.json()["metadata_warnings"] == []
+
+    def test_mechanism_pending_set_is_empty_pinned(self):
+        # Deliberate pin: the pending set is EMPTY — re-adding a shape to it
+        # requires a ruling (comment at MECHANISM_PENDING_SHAPES).
+        from server.routes.secrets import MECHANISM_PENDING_SHAPES
+
+        assert MECHANISM_PENDING_SHAPES == frozenset()
 
     def test_env_shape_multiline_value_rejected_400(self):
         # The env-file format is line-based — catch multi-line values at

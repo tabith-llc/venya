@@ -52,6 +52,18 @@ Notable changes to Venya will be documented in this file.
 
 ### Changed
 
+- *(post-alpha12)* **Remote sudo with a password** is now a runnable shape
+  (user-ruled: corporate targets almost never grant NOPASSWD sudo). The
+  structural gate gains ONE narrow exception: a standalone `<` token
+  immediately followed by an exactly-matching session-bound secret path
+  (`/run/secrets/venya/<id>`) is permitted, so the password can flow over ssh
+  stdin to a remote `sudo -S`. Every other `<` form (`<<`, `<>`, `<&`, fused,
+  quoted, trailing), unbound/prefix-trick/relative targets, and every other
+  metacharacter remain rejected whole-string (the 2026-09-16
+  unconditional-gate ruling is intact; full truth table re-run). Canonical
+  shape: `sshpass -f /run/secrets/venya/<id1> ssh <user>@<target> sudo -S
+  -p '' <cmd> < /run/secrets/venya/<id2>`. `shape=sudo-stdin` loses its
+  declarative-only warning (mechanism shipped; the pending set is now empty).
 - *(post-alpha12)* **env-shape and askpass secrets now EXECUTE**: a secret
   stored with `--shape env:NAME` has its value injected into the sandbox
   environment as `NAME`, carried by a 0600 host-side env file passed via

@@ -76,11 +76,22 @@ SBX_TIMEOUT = 3600  # 1 hour max
 SHELL_METACHARS = set("|;&$`(){}<>!*?\n\r")
 
 
-def _validate_command_structure(command: str) -> list[str]:
+def _validate_command_structure(command: str, allowed_redirect_paths: frozenset[str] = frozenset()) -> list[str]:
     """Split command into arguments and reject shell metacharacters.
 
+    NARROW REDIRECT ALLOWANCE (ticket secret-shape-sudo-remote, option (a),
+    user ruling 2026-09-21 — corporate targets almost never grant NOPASSWD
+    sudo, so a password must reach remote `sudo -S` over ssh stdin): `<` is
+    permitted ONLY as a standalone whitespace-delimited token immediately
+    followed by a token EXACTLY equal to a session-bound secret path
+    (`/run/secrets/venya/<id>` for an id in `allowed_redirect_paths`). Every
+    other `<` form (`<<`, `<>`, `<&`, fused `a<b`, quoted, trailing) and
+    every other metacharacter remains rejected whole-string — the 2026-09-16
+    unconditional-gate ruling is intact; this is one named, bounded exception.
+
     Args:
-        command: The command string to validate and split.
+        command: The command string to validate.
+        allowed_redirect_paths: exact secret-file paths bound to this session.
 
     Returns:
         List of command arguments from shlex.split().
@@ -91,7 +102,25 @@ def _validate_command_structure(command: str) -> list[str]:
     if not command or not command.strip():
         raise ValueError("Empty command")
 
-    if any(c in command for c in SHELL_METACHARS):
+    # '<' handled per-token (standalone + session-bound target only); every
+    # other metacharacter keeps the unconditional whole-string rejection.
+    tokens = command.split()
+    for i, tok in enumerate(tokens):
+        if "<" in tok:
+            if tok != "<":
+                raise ValueError(
+                    "Shell metacharacters are not permitted. "
+                    "Wrap complex commands in a script file and execute that instead."
+                )
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+            if nxt is None or nxt not in allowed_redirect_paths:
+                raise ValueError(
+                    "Redirect '<' is only permitted when immediately followed by a "
+                    "SESSION-BOUND secret path (/run/secrets/venya/<id> for a secret "
+                    "injected in this session). Any other redirect target is rejected."
+                )
+
+    if any(c in command for c in SHELL_METACHARS - {"<"}):
         raise ValueError(
             "Shell metacharacters are not permitted. "
             "Wrap complex commands in a script file and execute that instead."
@@ -218,8 +247,11 @@ class Executor:
         # parsing cannot soundly distinguish local vs remote interpretation
         # here; the sandbox shell sees the whole string. Shell features must
         # use the script-file path.
+        # Session-bound secret paths are the ONLY legal redirect targets
+        # (ticket secret-shape-sudo-remote option (a)).
+        allowed_redirects = frozenset(f"/run/secrets/venya/{s['secret_id']}" for s in secrets if "secret_id" in s)
         try:
-            _validate_command_structure(command)
+            _validate_command_structure(command, allowed_redirects)
         except ValueError as exc:
             if self.audit_logger:
                 self.audit_logger.emit("command_rejected", command=command, reason=str(exc))
