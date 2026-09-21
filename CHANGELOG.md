@@ -2,6 +2,93 @@
 
 Notable changes to Venya will be documented in this file.
 
+## [Unreleased]
+
+> **Backfill note (recorded late):** every entry in this section shipped in
+> `v0.1.0alpha12` but was absent from its CHANGELOG section — the
+> squash-at-tag-cut flow only collects what merges had already added to
+> `[Unreleased]`, and these merges shipped code without an entry. Found by the
+> completeness audit of `v0.1.0-alpha.11..v0.1.0alpha12` (51 merges classified
+> covered / entry-not-required / gap — ticket
+> `changelog-alpha12-completeness-gap`). The published `[0.1.0alpha12]` section
+> is immutable and is NOT edited.
+
+### Security
+
+- Executor session endpoints (`/api/v1/sessions/{id}/filter`, session-secret
+  revoke) now require a verified executor mTLS identity — client certificate
+  checked against the registration record and revocation state — instead of
+  granting executor context from the URL path with no credential check. Audit
+  events on these paths carry the executor identity.
+- Admin mTLS hardening: the admin-certificate allowlist fails closed (an empty
+  allowlist no longer means "allow"), and admin-certificate revocation is
+  checked in-process — a revoked admin serial answers 403 "Admin certificate
+  revoked".
+- The CLI's executor-heartbeat transport rejects `http://` server URLs outright
+  (exit 1 with the named requirement, before any transport is built):
+  executor-identifying state no longer POSTs in plaintext. `VENYA_TLS_VERIFY`
+  covers distrusted certificates over https — it never means "no TLS".
+- The public revocation endpoints (revocation-list and CRL GETs) are now
+  read-only — they previously purged expired entries on read (a write-on-read
+  path on unauthenticated endpoints); the purge moved into the authenticated
+  maintenance loop.
+- Exception-detail leaks eliminated: client-visible error details are limited
+  to audited exception classes (internals go to the journal only), the
+  dead-letter debug exemption was removed from the DB-passphrase boot check,
+  and nginx now runs `server_tokens off` (no version disclosure in the
+  `Server` header).
+- Removed debug log scaffolding that leaked raw session cookies to the journal.
+
+### Changed
+
+- nginx relay timeouts raised to 330s at the server level of the core site
+  config (the 300s server→executor relay ceiling + 30s margin): a cold-sandbox
+  command taking >60s previously answered an nginx 504 while the command still
+  succeeded executor-side (a client retry meant double execution); now the
+  server's clean `503 "Executor timed out"` wins at the boundary. Existing
+  cores need an installer re-run to regenerate the site config.
+- Execution-session lifecycle: the 10-minute TTL is now actually reaped (every
+  5-minute maintenance pass, FK-ordered deletes), and post-relay bookkeeping
+  tolerates a session row that vanished mid-execute (bulk UPDATE no-op +
+  WARNING instead of `StaleDataError` → 500 after the command already ran).
+- Installer re-runs now restart stale services: a running process older than
+  the just-deployed bytes is detected (both timestamps printed as a NOTICE),
+  restarted, and proven with a PROOF-OF-FRESH-BYTES line — absence of the
+  proof means do not trust the install. Previously a re-run swapped packages
+  under the live process and "verified" the OLD bytes.
+- Installer hardening: apt steps wait for the dpkg lock natively
+  (`DPkg::Lock::Timeout`, default 120s, override `VENYA_APT_LOCK_TIMEOUT`) and
+  surface the error tail + keep the log on failure instead of dying silently;
+  host Python requirements are pinned to `uv.lock` (regenerate:
+  `scripts/pin-requirements.sh`, enforced by pre-commit) so installed
+  dependency versions can no longer drift from the lockfile.
+- Version surfaces single-sourced: `venya --version`, the health endpoint
+  `"version"`, FastAPI/openapi, `venya-executor --version`, and the
+  heartbeat-reported `executors.version` column all read package metadata via
+  `importlib.metadata` — no independent version literals left to drift, and
+  per-executor build drift is fleet-visible without SSH.
+- The executor bootstrap enrollment token moved to a read-write canonical path
+  (`/var/lib/venya/executor/bootstrap-token`), out of the read-only-hardened
+  `/etc/venya` tree — daemon-side deferred registration no longer bricks on
+  token cleanup (EROFS). The legacy `executor.toml [bootstrap]` location is
+  still read-honored; a failure to clear is a loud ERROR + PROCEED.
+
+### Fixed
+
+- Alpha-QA sweep bundle (shipped in `v0.1.0alpha12`, recorded late; per-item
+  detail via `git log --merges v0.1.0-alpha.11..v0.1.0alpha12`): the broken
+  `venya fido2 enroll` command was deleted; credential removal now evicts
+  stored sessions; registration 500s fixed (PIN-only authenticator
+  attestation; registration-start with an existing credential); `venya init`
+  is idempotent over existing roles (no raw UniqueViolation, no leaked SQL);
+  the daemon heartbeat queue gained a backpressure guard; the CLI gained a
+  headless admin-mTLS gate; WebAuthn credential IDs are consistently
+  base64url-encoded; CLI enroll token-output bundling; core-installer
+  DB-password guard; executor-installer sshpass provisioning; the executor
+  installer's empty-token warning now names the real rejection mechanism; the
+  admin executor listing reads revocation from the single authoritative
+  source.
+
 ## [0.1.0alpha12] - 2026-09-21
 
 > **Operator-facing behavior changes in this release — failure signatures:**
