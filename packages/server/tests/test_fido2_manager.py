@@ -526,8 +526,9 @@ class TestFinishAuthenticationActiveGate:
     """Fix B: the DB is authoritative for is_active. A credential soft-deleted in
     the DB must NOT authenticate even while still cached in the per-process
     in-memory store (the stale-cache scenario; also the future-HA case where a
-    DELETE lands on another core). FAIL-CLOSED gate. The sign_count persist stays
-    fail-open (separate deferred fido2-counter-persist-fail-closed decision).
+    DELETE lands on another core). FAIL-CLOSED gate. The sign_count persist is
+    fail-closed TOO (fido2-counter-persist-fail-closed ruling 2026-09-21 —
+    see test_sign_count_persist_failure_refuses_login below).
     Real SQLite -- a mock DB read for an authz gate would be circular."""
 
     def _real_manager(self, tmp_path, cred_id, cose_key_bytes):
@@ -584,4 +585,37 @@ class TestFinishAuthenticationActiveGate:
         raw = manager.store._challenges[challenge_id].data["raw_challenge"]
         response = _build_assertion_response(cred_id, private_key, raw, counter=1)
         with pytest.raises(ValueError, match="Credential not found"):
+            manager.finish_authentication(challenge_id, response)
+
+    def test_sign_count_persist_failure_refuses_login(self, tmp_path, es256_keypair, cose_key_bytes):
+        """Ruling 2026-09-21 (fido2-counter-persist-fail-closed): FAIL-CLOSED.
+
+        A commit failure after a successful active-state check refuses the
+        login with an actionable error — the pre-ruling fail-open swallowed it
+        (login succeeded, counter update silently lost, one future
+        clone-detection opportunity erased). Paired positive is
+        test_active_credential_authenticates (persist path healthy -> login OK).
+        """
+        private_key, _ = es256_keypair
+        cred_id = b"\xdd" * 32
+        manager, _ = self._real_manager(tmp_path, cred_id, cose_key_bytes)
+
+        # Reads stay real (active-state check passes); only the WRITE fails.
+        original_get_session = manager.backend.get_session
+
+        def broken_commit_get_session():
+            s = original_get_session()
+
+            def boom():
+                raise RuntimeError("simulated DB write failure")
+
+            s.commit = boom
+            return s
+
+        manager.backend.get_session = broken_commit_get_session
+
+        challenge_id, _ = manager.start_authentication(user_id="u1")
+        raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+        response = _build_assertion_response(cred_id, private_key, raw, counter=1)
+        with pytest.raises(ValueError, match="Sign-count persistence failed"):
             manager.finish_authentication(challenge_id, response)

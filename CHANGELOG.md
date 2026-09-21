@@ -6,6 +6,12 @@ Notable changes to Venya will be documented in this file.
 
 ### Security
 
+- WebAuthn login is now refused when the signature-counter persist fails
+  (previously the login succeeded and the counter update was silently
+  lost, erasing a future clone-detection opportunity). Fail-closed,
+  consistent with the credential active-state check in the same path: a
+  database write failure during authentication yields an actionable error
+  and a retryable login, not a quiet degradation of clone detection.
 - Executor audit spool (`~/.venya/audit-spool.jsonl` — holds full command
   lines) is now created 0600, and a legacy world-readable spool (pre-fix
   default umask, typically 0644) is repaired at daemon startup.
