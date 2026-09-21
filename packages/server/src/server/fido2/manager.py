@@ -494,16 +494,23 @@ class Fido2Manager:
         # Update sign count in memory
         credential.sign_count = auth_data.counter
 
-        # Authoritative active-state gate (FAIL-CLOSED) + sign_count persist.
-        # The in-memory store is a per-process startup cache; the DB decides
-        # whether a credential is still active (it may have been soft-deleted via
-        # DELETE /credentials/{id}, possibly on another core under future HA). A
-        # removed/unknown credential must never authenticate: reject if the row is
-        # missing/inactive OR if the check itself cannot run. Availability tradeoff
-        # (DB outage -> auth outage) is deliberate and recorded in the ticket. The
-        # sign_count WRITE below stays FAIL-OPEN (a persist failure after a
-        # successful active-check does not block login) -- that is the separate,
-        # still-deferred fido2-counter-persist-fail-closed decision, unchanged.
+        # Authoritative active-state gate + sign_count persist — BOTH
+        # FAIL-CLOSED. The in-memory store is a per-process startup cache; the
+        # DB decides whether a credential is still active (it may have been
+        # soft-deleted via DELETE /credentials/{id}, possibly on another core
+        # under future HA). A removed/unknown credential must never
+        # authenticate: reject if the row is missing/inactive OR if the check
+        # itself cannot run. Availability tradeoff (DB outage -> auth outage)
+        # is deliberate and recorded in the ticket. The sign_count WRITE is
+        # fail-closed TOO (ticket fido2-counter-persist-fail-closed, ruling
+        # 2026-09-21): a lost counter update silently erases a future
+        # clone-detection opportunity — a quiet degradation of a security
+        # control — and the read side of this same block already accepts the
+        # DB-outage tradeoff, so failing open on the write was an
+        # inconsistency, not a safety margin. Real-world availability cost is
+        # small: the DB is local PostgreSQL (writes failing while reads work
+        # is rare/transient), a full outage already denies auth at session
+        # validation, and a refused login is retryable.
         if self.backend is not None:
             from datetime import UTC, datetime
 
@@ -526,8 +533,11 @@ class Fido2Manager:
                     db_cred.sign_count = auth_data.counter
                     db_cred.last_used_at = datetime.now(UTC)
                     db.commit()
-                except Exception:  # nosec B110
-                    logger.exception("sign_count persist failed; login succeeded, counter update lost")
+                except Exception:
+                    logger.exception("sign_count persist failed; refusing login (fail-closed)")
+                    raise WebAuthnError(
+                        "Sign-count persistence failed; login refused — retry, and check server database health"
+                    ) from None
             finally:
                 db.close()
 
