@@ -6,6 +6,7 @@
 
 """Tests for rate limiting middleware (PostgreSQL-backed)."""
 
+from datetime import UTC
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI
@@ -353,3 +354,118 @@ class TestRateLimitMultiWorker:
         for _ in range(5):
             resp = client.get("/api/v1/health")
             assert resp.status_code == 200
+
+
+def _create_real_db_app(
+    requests_per_minute=100,
+    auth_requests_per_minute=20,
+    break_glass_per_hour=5,
+):
+    """App wired to a REAL SQLite session factory with production lifecycle.
+
+    `backend.get_session()` returns a FRESH Session per call and the
+    middleware's `finally: db.close()` rolls back anything uncommitted —
+    exactly the deployed shape. The mock-backed cells above stub
+    `db.execute().scalar()` and therefore cannot see a missing COMMIT
+    (ticket ratelimit-counter-upsert-never-commits: the UPSERT counters
+    never persisted, so no DB-backed tier ever 429'd physically while the
+    suite stayed green).
+    """
+    from core.iam.models import RateLimitFailure
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    RateLimitFailure.__table__.create(engine)
+    factory = sessionmaker(bind=engine)
+
+    app = FastAPI()
+
+    class MockConfig:
+        enforce = True
+        ip_rate_limit = requests_per_minute
+        break_glass_requests_per_hour = break_glass_per_hour
+        clock_skew = MagicMock()
+        clock_skew.token_tolerance_seconds = 60
+
+    MockConfig.auth_requests_per_minute = auth_requests_per_minute
+    app.state.config = MockConfig()
+
+    backend = MagicMock()
+    backend.get_session.side_effect = lambda: factory()
+    app.state.backend = backend
+
+    app.add_middleware(RateLimitMiddleware, config=app.state.config)
+
+    @app.get("/api/v1/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.get("/api/v1/auth/login")
+    def auth_login():
+        return {"status": "login"}
+
+    @app.post("/api/v1/recovery")
+    def recovery():
+        return {"status": "recovery"}
+
+    return app, engine
+
+
+class TestRealSessionCommitLifecycle:
+    """Real-lifecycle truth table for the DB-backed rate-limit counters."""
+
+    def test_counter_rows_persist_across_fresh_sessions(self):
+        from sqlalchemy import text
+
+        app, engine = _create_real_db_app()
+        client = TestClient(app)
+        for _ in range(3):
+            assert client.get("/api/v1/health").status_code == 200
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT endpoint_type, count FROM rate_limit_failures")).fetchall()
+        # Pre-fix: zero rows — every UPSERT was rolled back by db.close().
+        assert rows == [("generic", 3)]
+
+    def test_auth_tier_429_with_real_sessions(self):
+        app, _ = _create_real_db_app(auth_requests_per_minute=2)
+        client = TestClient(app)
+        assert client.get("/api/v1/auth/login").status_code == 200
+        assert client.get("/api/v1/auth/login").status_code == 200
+        r3 = client.get("/api/v1/auth/login")
+        # Pre-fix: 200 — count was always 1 in its rolled-back transaction.
+        assert r3.status_code == 429
+        assert "Auth endpoint rate limited" in r3.json()["detail"]
+
+    def test_break_glass_hourly_429_with_real_sessions(self):
+        app, _ = _create_real_db_app(break_glass_per_hour=1)
+        client = TestClient(app)
+        assert client.post("/api/v1/recovery").status_code == 200
+        r2 = client.post("/api/v1/recovery")
+        assert r2.status_code == 429
+        assert "per hour" in r2.json()["detail"]
+
+    def test_window_rollover_uses_separate_buckets(self):
+        from datetime import datetime, timedelta
+
+        from server.middleware.rate_limit import RateLimitMiddleware
+
+        app, _engine = _create_real_db_app()
+        mw = RateLimitMiddleware(app=MagicMock(), config=None)
+        now = datetime.now(UTC).replace(second=0, microsecond=0)
+        factory = app.state.backend.get_session
+        s1 = factory()
+        assert mw._increment_counter(s1, "1.2.3.4", "auth", now) == 1
+        assert mw._increment_counter(s1, "1.2.3.4", "auth", now) == 2
+        s1.close()
+        s2 = factory()
+        # A fresh session must SEE the committed count (pre-fix: rollback → 1).
+        assert mw._increment_counter(s2, "1.2.3.4", "auth", now) == 3
+        # New window → its own bucket.
+        assert mw._increment_counter(s2, "1.2.3.4", "auth", now + timedelta(minutes=1)) == 1
+        s2.close()
