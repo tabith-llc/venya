@@ -51,7 +51,10 @@ Notable changes to Venya will be documented in this file.
   and friends) are rejected with a 400 that names the path-only rule and why
   (values in command text persist UNMASKED in the audit log); unknown shape
   names are accepted as CUSTOM shapes with a teaching warning; unknown
-  placeholders warn. `venya list` shows the shape. MCP `list_secrets` and
+  placeholders warn. Shapes whose consumption mechanism has not shipped yet
+  (`env:NAME`, `askpass`, `sudo-stdin`) are accepted but answer with a
+  DECLARATIVE-ONLY warning that points at the file path that DOES work — a
+  label must never imply capability the product lacks. `venya list` shows the shape. MCP `list_secrets` and
   `run_command` descriptions now teach agents the injected-file pattern
   (`/run/secrets/venya/<id>`) and usage templates — the previous
   `run_command` example showed a command that could not consume its bound

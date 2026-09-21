@@ -103,6 +103,14 @@ BUILTIN_SHAPES = frozenset(
 ENV_SHAPE_PREFIX = "env:"
 USAGE_PLACEHOLDERS = frozenset({"secret_path", "secret_id", "host", "user"})
 
+# Shapes whose consumption MECHANISM has not shipped yet — declaring one is
+# allowed (forward-compat ruling) but must WARN: a label implying capability
+# the product lacks is a user-friendliness defect and a support-ticket
+# generator. File-arg shapes are NOT here: file injection ships today, and
+# tool availability inside the sandbox template is a deployment property the
+# server cannot know (documented per-shape, tickets secret-shape-*).
+MECHANISM_PENDING_SHAPES = frozenset({"askpass", "sudo-stdin"})
+
 _VALUE_PLACEHOLDER_RE = re.compile(
     r"\{\s*(value|secret_value|secret|plaintext|password|pass|token|credential)\s*\}",
     re.IGNORECASE,
@@ -135,6 +143,13 @@ def _validate_shape_metadata(meta: dict[str, Any]) -> list[str]:
             warnings.append(
                 f"shape '{shape}' is not built-in; treating it as a CUSTOM shape (allowed).{hint}"
                 f" Built-ins: {', '.join(sorted(BUILTIN_SHAPES))}, and env:NAME."
+            )
+        if shape.startswith(ENV_SHAPE_PREFIX) or shape in MECHANISM_PENDING_SHAPES:
+            warnings.append(
+                f"shape '{shape}' is DECLARATIVE-ONLY in this release — its consumption mechanism"
+                " has not shipped yet (env injection / askpass helper / sudo-stdin are roadmap)."
+                " The secret IS still injected as a file at /run/secrets/venya/<id>, and any tool"
+                " that reads it from a file works today."
             )
 
     usage = meta.get("usage")

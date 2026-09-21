@@ -1403,10 +1403,38 @@ class TestShapeMetadata:
         assert resp.status_code == 201
         assert resp.json()["metadata_warnings"] == []
 
-    def test_env_shape_prefix_accepted(self):
+    def test_env_shape_accepted_with_declarative_only_warning(self):
+        # env: names are forward-compat taxonomy, but the mechanism (relay env
+        # field) has NOT shipped — accepting the label silently would imply a
+        # capability the product lacks. The warning teaches what works today.
         resp = self._store({"shape": "env:AWS_SECRET_ACCESS_KEY"})
         assert resp.status_code == 201
-        assert resp.json()["metadata_warnings"] == []
+        warnings = resp.json()["metadata_warnings"]
+        assert len(warnings) == 1
+        assert "DECLARATIVE-ONLY" in warnings[0]
+        assert "/run/secrets/venya/" in warnings[0]  # the file path still works
+
+    def test_mechanism_pending_shapes_warn(self):
+        for shape in ("askpass", "sudo-stdin"):
+            resp = self._store({"shape": shape})
+            assert resp.status_code == 201, shape
+            assert any("DECLARATIVE-ONLY" in w for w in resp.json()["metadata_warnings"]), shape
+
+    def test_file_arg_shapes_never_warn_mechanism(self):
+        # File injection ships today; tool availability is a deployment
+        # property (sandbox template) the server cannot know — file shapes
+        # must stay warning-free.
+        for shape in (
+            "ssh-password",
+            "ssh-key",
+            "http-netrc",
+            "http-header-file",
+            "mysql-defaults",
+            "ipmi-passfile",
+        ):
+            resp = self._store({"shape": shape})
+            assert resp.status_code == 201, shape
+            assert resp.json()["metadata_warnings"] == [], shape
 
     def test_custom_shape_accepted_with_teaching_warning(self):
         resp = self._store({"shape": "internal-vault-cli"})
