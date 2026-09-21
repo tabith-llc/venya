@@ -275,6 +275,7 @@ class TestSendToStage2:
         import base64
 
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {
             "stdout": base64.b64encode(b"output").decode(),
             "stderr": base64.b64encode(b"error").decode(),
@@ -294,6 +295,7 @@ class TestSendToStage2:
         import base64
 
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {
             "stdout": base64.b64encode(b"output").decode(),
             "stderr": base64.b64encode(b"").decode(),
@@ -350,6 +352,7 @@ class TestRunCommandStage2:
                     with patch("executor.executor.set_cloexec"):
                         with patch("executor.executor.verify_fd_whitelist", return_value=[]):
                             mock_response = MagicMock()
+                            mock_response.status_code = 200
                             mock_response.json.return_value = {
                                 "stdout": base64.b64encode(stage2_stdout).decode(),
                                 "stderr": base64.b64encode(b"").decode(),
@@ -620,3 +623,28 @@ class TestResolveEnvVars:
 
     def test_none_spec_noop(self):
         assert _resolve_env_vars(None, [], None) == {}
+
+
+class TestSendToStage2FailClosed:
+    """Non-200 from the definitive masker raises a NAMED RuntimeError — the
+    caller's except-fallback keeps the Stage-1 masked results instead of
+    adopting an empty-knowledge passthrough (ticket
+    stage2-filter-unknown-session-unmasked-passthrough; 404 = unknown or
+    TTL-reaped session)."""
+
+    def test_404_raises_named_error(self, executor: Executor, mock_http_client):
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.json.return_value = {"detail": "Session not found"}
+        mock_http_client.post.return_value = resp
+        executor.http_client = mock_http_client
+        with pytest.raises(RuntimeError, match="Stage-2 filter returned 404"):
+            executor._send_to_stage2(b"out", b"err")
+
+    def test_500_also_raises_named_error(self, executor: Executor, mock_http_client):
+        resp = MagicMock()
+        resp.status_code = 500
+        mock_http_client.post.return_value = resp
+        executor.http_client = mock_http_client
+        with pytest.raises(RuntimeError, match="Stage-2 filter returned 500"):
+            executor._send_to_stage2(b"out", b"err")

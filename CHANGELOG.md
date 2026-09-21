@@ -16,6 +16,16 @@ Notable changes to Venya will be documented in this file.
 
 ### Security
 
+- *(post-alpha12)* The Stage-2 output filter (the definitive masker) no longer
+  answers `200` with unmasked output for unknown or vanished sessions. The
+  executor treats the Stage-2 response as authoritative over its own local
+  masking, so an empty-knowledge passthrough could discard Stage-1
+  `[REDACTED:…]` masking and return plaintext secret values to the caller —
+  reachable through a proven race (the 10-minute TTL reaper deletes session
+  rows while a long command is still running). Unknown sessions now answer
+  `404` and the executor falls back to its own masked result: masking can
+  degrade to one stage, never to zero. Sessions that exist with zero bound
+  secrets still answer `200` (legitimately nothing to mask).
 - Executor session endpoints (`/api/v1/sessions/{id}/filter`, session-secret
   revoke) now require a verified executor mTLS identity — client certificate
   checked against the registration record and revocation state — instead of
