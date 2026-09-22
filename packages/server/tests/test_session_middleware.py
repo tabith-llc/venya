@@ -603,6 +603,49 @@ class TestExecutorSessionPathAuth:
         assert resp.json()["user"]["caller"] == "executor"
 
 
+class TestBareHealthAlias:
+    """Truth table for the bare /health alias (ticket
+    health-probe-401-installer-diagnostics scope a): the alias reuses the
+    canonical handler (identical payload), is public via EXACT-path
+    membership, and the addition widens nothing — unknown and prefixed
+    paths still get the uniform 401 (info-hiding intact)."""
+
+    def _create_full_app(self):
+        from server.app import create_app
+        from server.config import RateLimitConfig, ServerConfig
+
+        config = ServerConfig(
+            recovery_code_pepper="test-pepper-unused",
+            rate_limit=RateLimitConfig(enforce=False),
+        )
+        return create_app(config).app
+
+    def test_bare_health_public_200_identical_payload(self):
+        """Positive: unauthenticated GET /health → 200, payload IDENTICAL to
+        the canonical /api/v1/health (same handler, same disclosure)."""
+        client = TestClient(self._create_full_app(), raise_server_exceptions=False)
+        bare = client.get("/health")
+        canon = client.get("/api/v1/health")
+        assert bare.status_code == 200
+        assert canon.status_code == 200
+        assert bare.json() == canon.json()
+
+    def test_nonexistent_path_still_401(self):
+        """Paired negative: the PUBLIC_PATHS addition must not leak — an
+        unknown path unauthenticated is STILL the uniform 401, not 404."""
+        client = TestClient(self._create_full_app(), raise_server_exceptions=False)
+        resp = client.get("/nonexistent")
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Missing authentication token"
+
+    def test_public_entry_is_exact_not_prefix(self):
+        """Paired negative: exact frozenset membership only — paths that
+        merely START with /health do not bypass auth."""
+        client = TestClient(self._create_full_app(), raise_server_exceptions=False)
+        assert client.get("/healthz").status_code == 401
+        assert client.get("/health/deeper").status_code == 401
+
+
 class TestSessionExtension:
     """Tests for middleware session extension (M-19 fix)."""
 

@@ -164,6 +164,24 @@ class TestRateLimitMiddleware:
             resp = client.get("/api/v1/health")
             assert resp.status_code == 200
 
+    def test_bare_health_alias_generic_tier_parity(self):
+        """Bare /health classifies into the SAME generic tier as the canonical
+        /api/v1/health (ticket health-probe-401-installer-diagnostics scope a):
+        neither auth-tier nor break-glass, so both share the one per-IP generic
+        bucket and limit — mixed traffic 429s together, no path gets a
+        different (or unlimited) tier."""
+        app = _create_test_app(requests_per_minute=5, auth_requests_per_minute=20)
+
+        @app.get("/health")
+        def bare_health():
+            return {"status": "ok"}
+
+        client = TestClient(app)
+        for path in ("/api/v1/health", "/health", "/api/v1/health", "/health", "/api/v1/health"):
+            assert client.get(path).status_code == 200
+        assert client.get("/health").status_code == 429
+        assert client.get("/api/v1/health").status_code == 429
+
     def test_auth_endpoint_under_auth_limit(self):
         """Auth endpoints use the stricter auth rate limit."""
         app = _create_test_app(requests_per_minute=100, auth_requests_per_minute=3)
