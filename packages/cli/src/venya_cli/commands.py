@@ -1863,6 +1863,11 @@ def executor_list(client: APIClient, args: Any) -> int:
         return 1
 
 
+# Test seam + single source of truth for the executor host-config path
+# (installer writes it; register/URL fallbacks read it).
+EXECUTOR_TOML_PATH = "/etc/venya/executor.toml"
+
+
 def executor_register(client: APIClient, args: Any) -> int:
     """Register this machine as an executor with the core.
 
@@ -1882,26 +1887,50 @@ def executor_register(client: APIClient, args: Any) -> int:
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import NameOID
 
-    executor_id = getattr(args, "executor_id", "venya-exec")
+    executor_id = getattr(args, "executor_id", None)
     output_dir = getattr(args, "output_dir", "/etc/venya")
     core_url = getattr(args, "core_url", None)
-    enrollment_token = getattr(args, "enrollment_token", None)
+    # flag > env VENYA_EXECUTOR_ENROLLMENT_TOKEN; empty string counts as unset,
+    # matching the installer's ${VAR:-} semantics (ticket
+    # cli-exec-register-token-env-unsupported — the env contract every
+    # generated instruction names was silently ignored here).
+    enrollment_token = (
+        getattr(args, "enrollment_token", None) or os.environ.get("VENYA_EXECUTOR_ENROLLMENT_TOKEN") or None
+    )
     ca_bundle = getattr(args, "ca_bundle", None)
     if ca_bundle is not None and not isinstance(ca_bundle, str):
         ca_bundle = None
 
-    # Fall back to executor config ca_bundle if not passed via CLI
-    if ca_bundle is None:
-        executor_config_path = Path("/etc/venya/executor.toml")
+    # Single executor.toml read serving BOTH fallbacks (ticket
+    # cli-exec-register-ignores-config-executor-id): resolution is
+    # flag → toml → FAIL-LOUD. The former hardcoded 'venya-exec' default
+    # silently minted a wrong-identity cert (CSR CN) on hosts whose toml
+    # carried the real id; a made-up id on a toml-less machine is the
+    # phantom-registration trap, so missing id is a hard error, and a
+    # malformed toml fails loudly instead of parse-silently falling through.
+    toml_data: dict[str, Any] | None = None
+    if executor_id is None or ca_bundle is None:
+        executor_config_path = Path(EXECUTOR_TOML_PATH)
         if executor_config_path.exists():
             try:
                 import tomllib
 
                 with open(executor_config_path, "rb") as f:
-                    config_data = tomllib.load(f)
-                ca_bundle = config_data.get("ca_bundle")
-            except Exception:  # nosec B110  # noqa: S110 — ignore optional config parse errors
-                pass
+                    toml_data = tomllib.load(f)
+            except Exception as e:
+                print(f"Error: failed to parse {EXECUTOR_TOML_PATH}: {e}", file=sys.stderr)
+                return 1
+
+    if executor_id is None and toml_data is not None:
+        executor_id = toml_data.get("executor_id")
+    if executor_id is None:
+        print(
+            f"Error: executor_id required: pass --executor-id or set executor_id in {EXECUTOR_TOML_PATH}",
+            file=sys.stderr,
+        )
+        return 1
+    if ca_bundle is None and toml_data is not None:
+        ca_bundle = toml_data.get("ca_bundle")
 
     # Validate executor_id format before any operations
     try:
@@ -1919,7 +1948,8 @@ def executor_register(client: APIClient, args: Any) -> int:
         server_url = client.config.server_url.rstrip("/")
     else:
         print(
-            f"Error: core URL required. Set it in config ({DEFAULT_CONFIG_FILE}) or pass --core-url",
+            f"Error: server URL required. Pass --server-url (alias: --core-url), set it in config "
+            f"({DEFAULT_CONFIG_FILE}), or set VENYA_SERVER_URL",
             file=sys.stderr,
         )
         return 1
@@ -2081,17 +2111,24 @@ def _parse_executor_cert(cert_path: str) -> dict[str, Any] | None:
 
 
 def _get_server_url(args: Any) -> str:
-    """Resolve server URL from args, config, or executor.toml.
+    """Resolve server URL from args, env, config, or executor.toml.
 
-    Fallback chain:
-    1. --core-url arg
-    2. config.json via Config() (default: ~/.config/venya on Linux,
+    Fallback chain (aligned with the run_command chokepoint precedence —
+    flag > env > config, ticket cli-core-url-server-url-naming-split /
+    cli-server-url-env-ignored fix 3f3ed1b):
+    1. --core-url / --server-url arg (dest=core_url)
+    2. VENYA_SERVER_URL env (empty = unset)
+    3. config.json via Config() (default: ~/.config/venya on Linux,
        ~/Library/Application Support/venya on macOS)
-    3. /etc/venya/executor.toml via tomllib
-    4. "unknown" as last resort
+    4. /etc/venya/executor.toml via tomllib
+    5. "unknown" as last resort
     """
     if getattr(args, "core_url", None):
         return args.core_url
+
+    env_url = os.environ.get("VENYA_SERVER_URL")
+    if env_url:
+        return env_url
 
     try:
         from .api_client import Config as CLIConfig

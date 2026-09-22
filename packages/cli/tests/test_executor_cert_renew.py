@@ -18,6 +18,7 @@ Tests cover:
 """
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -173,6 +174,31 @@ class TestRenewSuccess:
         # Verify CA cert was saved
         ca_cert_path = tmp_path / "ca.crt"
         assert ca_cert_path.exists()
+
+    def test_renew_env_server_url_honored(self, tmp_path, capsys):
+        """Per-command env cell (ticket cli-core-url-server-url-naming-split):
+        renew POSTs to the VENYA_SERVER_URL-resolved server when no
+        --core-url/--server-url flag is given (was: env silently skipped,
+        'unknown' gate or config-only chain)."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = None
+
+        mock_client = _make_mock_httpx_client()
+
+        with (
+            patch.dict(os.environ, {"VENYA_SERVER_URL": "https://env-core.example.com"}),
+            patch("venya_cli.commands.httpx2.Client", return_value=mock_client),
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            result = executor_cert_renew(args)
+
+        assert result == 0
+        assert mock_client.post.call_args[0][0] == "https://env-core.example.com/api/v1/executors/register"
 
     def test_renew_success_with_custom_paths(self, tmp_path, capsys):
         """Renewal respects custom --cert-path and --key-path for output."""

@@ -1049,10 +1049,10 @@ venya exec register [OPTIONS]
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
-| `--executor-id` | no | string | `venya-exec` | Executor ID (default: venya-exec) |
-| `--core-url` | no | string | — | Core server URL (default: from config) |
+| `--executor-id` | no | string | — | Executor ID (default: executor_id from /etc/venya/executor.toml) |
+| `--core-url`, `--server-url` | no | string | — | Core server URL (default: from config or VENYA_SERVER_URL) |
 | `--output-dir` | no | string | `/etc/venya/executor` | Directory to save cert and key (default: /etc/venya/executor) |
-| `--enrollment-token` | no | string | — | Enrollment token for bootstrap registration (from admin executor-enroll) |
+| `--enrollment-token` | no | string | — | Enrollment token for bootstrap registration (from admin executor-enroll; falls back to VENYA_EXECUTOR_ENROLLMENT_TOKEN env) |
 | `--ca-bundle` | no | string | — | Path to CA bundle for verifying core server TLS |
 
 **Examples**
@@ -1144,7 +1144,7 @@ venya exec heartbeat [OPTIONS]
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
-| `--core-url` | no | string | — | Core server URL (default: from config) |
+| `--core-url`, `--server-url` | no | string | — | Core server URL (default: from config or VENYA_SERVER_URL) |
 | `--cert-path` | no | string | `/etc/venya/executor/executor.crt` | Path to executor certificate (default: /etc/venya/executor/executor.crt) |
 | `--key-path` | no | string | — | Path to executor private key (default: derive from --cert-path) |
 

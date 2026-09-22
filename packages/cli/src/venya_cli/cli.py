@@ -550,12 +550,14 @@ def create_parser() -> argparse.ArgumentParser:
     register_parser = exec_subparsers.add_parser("register", help="Register this machine as an executor with the core")
     register_parser.add_argument(
         "--executor-id",
-        default="venya-exec",
-        help="Executor ID (default: venya-exec)",
+        default=None,
+        help="Executor ID (default: executor_id from /etc/venya/executor.toml)",
     )
     register_parser.add_argument(
         "--core-url",
-        help="Core server URL (default: from config)",
+        "--server-url",
+        dest="core_url",
+        help="Core server URL (default: from config or VENYA_SERVER_URL)",
     )
     register_parser.add_argument(
         "--output-dir",
@@ -566,7 +568,8 @@ def create_parser() -> argparse.ArgumentParser:
         "--enrollment-token",
         dest="enrollment_token",
         default=None,
-        help="Enrollment token for bootstrap registration (from admin executor-enroll)",
+        help="Enrollment token for bootstrap registration (from admin executor-enroll; "
+        "falls back to VENYA_EXECUTOR_ENROLLMENT_TOKEN env)",
     )
     register_parser.add_argument(
         "--ca-bundle",
@@ -620,7 +623,9 @@ def create_parser() -> argparse.ArgumentParser:
     heartbeat_parser = exec_subparsers.add_parser("heartbeat", help="Send heartbeat to core")
     heartbeat_parser.add_argument(
         "--core-url",
-        help="Core server URL (default: from config)",
+        "--server-url",
+        dest="core_url",
+        help="Core server URL (default: from config or VENYA_SERVER_URL)",
     )
     heartbeat_parser.add_argument(
         "--cert-path",

@@ -21,6 +21,7 @@ Tests cover:
 """
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -461,6 +462,32 @@ class TestHeartbeatServerUrl:
 
         captured = capsys.readouterr()
         assert "server URL not configured" in captured.err
+
+    def test_heartbeat_env_server_url_honored(self, tmp_path):
+        """Per-command env cell (ticket cli-core-url-server-url-naming-split):
+        VENYA_SERVER_URL passes the unknown-gate and becomes the POST base URL
+        when no --core-url/--server-url flag is given."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+
+        from venya_cli.commands import executor_heartbeat
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(key_path)
+        args.core_url = None
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with (
+            patch.dict(os.environ, {"VENYA_SERVER_URL": "https://env-core.example.com"}),
+            patch("venya_cli.commands.httpx2.Client", return_value=mock_client),
+        ):
+            result = executor_heartbeat(args)
+
+        assert result == 0
+        assert mock_client.post.call_args[0][0] == "https://env-core.example.com/api/v1/heartbeat"
 
 
 # ---------------------------------------------------------------------------
