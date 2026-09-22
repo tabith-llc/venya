@@ -55,7 +55,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"venya {_cli_version()}",
+        version=f"{_cli_version()}",
         help="Print the CLI version and exit",
     )
 
