@@ -123,7 +123,9 @@ async def health_check(request: Request) -> JSONResponse:
     (single-sourced from dist metadata) — it must never grow into an
     environment/config dump on this unauthenticated surface.
 
-    No authentication required. Not rate-limited.
+    No authentication required. Rate-limited under the generic per-IP tier
+    (no health exemption in RateLimitMiddleware — same tier as any non-auth
+    route; the bare /health alias shares the same bucket).
     """
     checks: dict[str, str] = {}
 
