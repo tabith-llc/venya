@@ -69,6 +69,8 @@ curl -sk https://<core-host>/api/v1/health
 # {"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}
 ```
 
+`/api/v1/health` is the canonical liveness endpoint (public, unauthenticated, version-only — it must never grow into a config dump). Bare `/health` is served as an alias returning the identical payload, for monitoring tools and load balancers that probe `/health` by convention. Both are unauthenticated and counted under the generic per-IP rate-limit tier (no health-specific exemption); every other unknown path still returns 401, so route existence is not disclosed to unauthenticated callers.
+
 **Re-runs are the idempotency contract.** Re-running an installer on a live
 host reuses stored secrets (`.env` stays byte-identical; an explicitly passed
 passphrase must MATCH the stored one or the install aborts), redeploys the
