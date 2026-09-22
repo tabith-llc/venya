@@ -119,6 +119,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     from .routes import static as static_routes
 
     app.include_router(health.router, prefix="/api/v1")
+    # Bare /health alias (ticket health-probe-401-installer-diagnostics scope a):
+    # LB/installer probes hitting the host root reuse the SAME handler as the
+    # canonical /api/v1/health — identical payload, zero new disclosure. Hidden
+    # from OpenAPI; the canonical path stays the only documented surface.
+    app.add_api_route("/health", health.health_check, methods=["GET"], include_in_schema=False)
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(auth_browser.router, prefix="/api/v1")
     app.include_router(auth_elevation.router, prefix="/api/v1")
