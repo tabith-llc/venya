@@ -64,6 +64,7 @@ fi
 
 venya_print_colors
 venya_check_root
+venya_check_no_colocation executor
 venya_determine_install_dir /opt/venya
 venya_check_existing
 
