@@ -143,11 +143,12 @@ else
     fi
 fi
 
-# Platform-appropriate default CA cert location (instructional, not enforced)
+# Platform-appropriate config dir (instructional, not enforced) — `venya setup`
+# installs the core CA cert here as ca.crt
 if [ "$(uname -s)" = "Darwin" ]; then
-    CA_CERT="$HOME/Library/Application Support/venya/venya-ca.crt"
+    VENYA_CONFIG_DIR="$HOME/Library/Application Support/venya"
 else
-    CA_CERT="$HOME/.config/venya-ca.crt"
+    VENYA_CONFIG_DIR="$HOME/.config/venya"
 fi
 
 echo ""
@@ -156,14 +157,13 @@ echo "  Venya CLI installed for $(id -un)"
 echo "============================================"
 echo ""
 echo "Day-one commands:"
-echo "  venya config set-server https://<core-host>"
-echo "  curl -sk https://<core-host>/.well-known/venya-ca.crt -o $CA_CERT"
-echo "  SSL_CERT_FILE=$CA_CERT venya init <user-id>    # create the first admin account (FIDO2 key required)"
-echo "  SSL_CERT_FILE=$CA_CERT venya login <user-id>"
+echo "  venya setup <core-host>    # save the server URL + install the core CA cert (fingerprint printed for verification)"
+echo "  venya init <user-id>       # create the first admin account (FIDO2 key required)"
+echo "  venya login <user-id>"
 if [ "$INSTALL_MCP" != "no" ]; then
     echo ""
     echo "MCP (LLM clients) — point the client at the venya-mcp shim and provide:"
-    echo "  VENYA_CONFIG=<path>/config.json  (server_url + access_token from venya login)"
-    echo "  VENYA_CA_CERT=$CA_CERT  (required at startup)"
+    echo "  VENYA_CONFIG=$VENYA_CONFIG_DIR/config.json  (server_url + access_token from venya login)"
+    echo "  VENYA_CA_CERT=$VENYA_CONFIG_DIR/ca.crt  (installed by venya setup; required at startup)"
 fi
 echo ""

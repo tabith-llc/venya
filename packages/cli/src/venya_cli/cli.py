@@ -27,6 +27,7 @@ def create_parser() -> argparse.ArgumentParser:
     """Create the main CLI argument parser.
 
     Commands:
+        venya setup <corename>                  # Save server URL + install core CA cert
         venya init <user_id>                    # Bootstrap
         venya store <key> [value]               # Store a secret
         venya get <key>                         # Retrieve a secret
@@ -735,6 +736,15 @@ def create_parser() -> argparse.ArgumentParser:
     login_parser = subparsers.add_parser("login", help="Authenticate with a security key")
     login_parser.add_argument("user_id", help="User ID to authenticate as")
     login_parser.add_argument("--json", action="store_true")
+
+    # setup
+    setup_parser = subparsers.add_parser("setup", help="Save the server URL and install the core's CA certificate")
+    setup_parser.add_argument("corename", help="Core server hostname or full URL (e.g. venya-core-1)")
+    setup_parser.add_argument(
+        "--ca-sha256",
+        default=None,
+        help="Pin the expected CA SHA-256 fingerprint (hex; colons, spaces, and case are ignored)",
+    )
 
     return parser
 

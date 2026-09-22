@@ -124,6 +124,11 @@ class Config:
             self._data.pop("access_token", None)
         self.save()
 
+    @property
+    def ca_path(self) -> Path:
+        """CA certificate installed by `venya setup`, beside config.json."""
+        return self.config_file.parent / "ca.crt"
+
 
 # Lazy import json at module level when needed
 import json
@@ -198,6 +203,14 @@ class APIClient:
                         "Copy the admin cert/key from the core (see installer banner) and retry."
                     )
             http_kwargs["cert"] = (cert_path, key_path)
+        # Server-TLS verification precedence: SSL_CERT_FILE env wins (Python's
+        # ssl module honors it natively — the full-lifecycle-test.md and
+        # cert-rotation-runbook flows drive the CLI that way); then the CA
+        # installed by `venya setup` beside config.json; then system trust.
+        if not os.environ.get("SSL_CERT_FILE"):
+            ca_path = self.config.ca_path
+            if ca_path.exists():
+                http_kwargs["verify"] = str(ca_path)
         self._http = httpx2.Client(**http_kwargs)
 
     def _get_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -310,7 +323,9 @@ class APIClient:
             Fido2UserInteractionRequiredError,
         )
 
-        fido2 = Fido2Auth(self.config.server_url)
+        # Pass the setup-installed CA so the FIDO2 ceremony endpoints are
+        # verified against it too (same precedence as the client above).
+        fido2 = Fido2Auth(self.config.server_url, ca_path=self.config.ca_path)
 
         try:
             result = fido2.authenticate(user_id=user_id, timeout=timeout)

@@ -78,7 +78,7 @@ executor-ID validator is the only shared logic (see
 
 | CA / cert | Location | Purpose |
 |---|---|---|
-| Venya root CA | core: `/var/lib/venya/ca/` | signs server TLS certs, relay client certs; distributed to clients via `/.well-known/venya-ca.crt` and installed into VM trust stores |
+| Venya root CA | core: `/var/lib/venya/ca/` | signs server TLS certs, relay client certs; distributed to clients via `/.well-known/venya-ca.crt` (workstations: `venya setup` installs it beside `config.json`) and installed into VM trust stores |
 | Server TLS cert | core: `/etc/venya/tls/` | nginx termination for `<core-host>` |
 | Relay client cert | core: `/etc/venya/relay/` | CN `<core-host>-relay`; presented when the core dials an executor's relay listener |
 | Admin CA | core: `/var/lib/venya/ca/admin-ca/` (key encrypted) | admin mTLS client certs |

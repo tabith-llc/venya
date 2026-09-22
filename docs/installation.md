@@ -84,10 +84,16 @@ trusting any acceptance probe.
 Install the workstation bundle first (section 4), then:
 
 ```bash
-curl -sk https://<core-host>/.well-known/venya-ca.crt -o ~/.config/venya-ca.crt
-venya config set-server https://<core-host>
-SSL_CERT_FILE=~/.config/venya-ca.crt venya init <admin-user-id>
+venya setup <core-host>
+venya init <admin-user-id>
 ```
+
+`venya setup` saves the server URL and installs the core's CA certificate
+(fetched from `/.well-known/venya-ca.crt`, written 0600 beside `config.json`,
+SHA-256 fingerprint printed for out-of-band verification). All later CLI
+commands then verify TLS against it automatically — no `SSL_CERT_FILE`
+needed. `venya config set-server <url>` remains for the offline case
+(URL only, no cert fetch).
 
 Touch the security key when prompted. A **recovery code is printed once** —
 store it securely; it is the only way back if the key is lost. Migrations
@@ -243,14 +249,13 @@ the mac already resolves. Do NOT disable verification.
 Day-one:
 
 ```bash
-venya config set-server https://<core-host>
-SSL_CERT_FILE=~/.config/venya-ca.crt venya login <user-id>
+venya setup <core-host>
+venya login <user-id>
 ```
 
 ## 5. Enroll regular users
 
 ```bash
-SSL_CERT_FILE=~/.config/venya-ca.crt \
 VENYA_ADMIN_CERT=admin-cert/admin.crt VENYA_ADMIN_KEY=admin-cert/admin.key \
 venya admin create-user <user-id> --roles user
 ```
@@ -267,7 +272,7 @@ The response carries a 15-minute single-use enrollment token; the user runs
       "command": "venya-mcp",
       "env": {
         "VENYA_CONFIG": "/home/you/.config/venya/config.json",
-        "VENYA_CA_CERT": "/home/you/.config/venya-ca.crt"
+        "VENYA_CA_CERT": "/home/you/.config/venya/ca.crt"
       }
     }
   }
@@ -275,7 +280,8 @@ The response carries a 15-minute single-use enrollment token; the user runs
 ```
 
 `VENYA_CA_CERT` is required at startup (fail-closed TLS; the internal CA is
-not in the system trust store).
+not in the system trust store). It is the file `venya setup` installs beside
+`config.json`.
 
 ### opencode
 
@@ -291,10 +297,10 @@ does not use the `mcpServers` convention:
       "type": "local",
       "command": ["/home/you/.local/bin/venya-mcp"],
       "enabled": true,
-      "environment": {
-        "VENYA_CONFIG": "/home/you/.config/venya/config.json",
-        "VENYA_CA_CERT": "/home/you/.config/venya-ca.crt"
-      }
+        "environment": {
+          "VENYA_CONFIG": "/home/you/.config/venya/config.json",
+          "VENYA_CA_CERT": "/home/you/.config/venya/ca.crt"
+        }
     }
   }
 }
@@ -360,8 +366,9 @@ procedure exists but is not yet packaged.
   separator on `venya run` is consumed by the CLI (not sent to the
   executor) and is safe to pass.
 - `Host key verification failed` / TLS failures between components: the CA
-  must be provisioned, never verification disabled. Re-fetch
-  `/.well-known/venya-ca.crt` after any core reinstall (the CA is
+  must be provisioned, never verification disabled. Re-run
+  `venya setup <core-host>` on each workstation after any core reinstall —
+  it re-fetches `/.well-known/venya-ca.crt` over the wire (the CA is
   regenerated only if absent — an uninstall or a fresh machine mints a new
   one; a plain reinstall reuses the existing CA but re-signs the server
   leaf cert).

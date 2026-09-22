@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -187,14 +188,19 @@ class Fido2Auth:
         # result = {"user_id": "...", "session_token": "..."}
     """
 
-    def __init__(self, server_url: str = "http://localhost:8000") -> None:
+    def __init__(self, server_url: str = "http://localhost:8000", ca_path: Path | None = None) -> None:
         self.server_url = server_url.rstrip("/")
+        # Same server-TLS precedence as APIClient: SSL_CERT_FILE env wins,
+        # then the CA installed by `venya setup`, then system trust.
+        self._verify: str | bool = True
+        if ca_path is not None and ca_path.exists() and not os.environ.get("SSL_CERT_FILE"):
+            self._verify = str(ca_path)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Simple GET request."""
         url = self.server_url + path
         try:
-            with httpx2.Client() as client:
+            with httpx2.Client(verify=self._verify) as client:
                 resp = client.get(url, params=params, timeout=30.0)
                 resp.raise_for_status()
                 return resp.json() if resp.content else {}
@@ -213,7 +219,7 @@ class Fido2Auth:
         """Simple POST request."""
         url = self.server_url + path
         try:
-            with httpx2.Client() as client:
+            with httpx2.Client(verify=self._verify) as client:
                 resp = client.post(
                     url,
                     json=json_data,

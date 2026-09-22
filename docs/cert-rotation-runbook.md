@@ -107,7 +107,6 @@ instead (§3).
 Revoke (admin action, from a workstation holding the admin mTLS cert, or on the core):
 
 ```bash
-SSL_CERT_FILE=~/.config/venya-ca.crt \
 VENYA_ADMIN_CERT=admin-cert/admin.crt VENYA_ADMIN_KEY=admin-cert/admin.key \
   venya admin revoke-executor <executor-id>
 # or, targeting the executor's own cert from the executor host:
@@ -318,11 +317,11 @@ curl -sk https://<core-host>/api/v1/health
 #        is not possible (read-only /etc/venya).
 
 # --- 6. Every workstation: refresh CA + admin cert copies, then re-login:
-curl -sk https://<core-host>/.well-known/venya-ca.crt -o ~/.config/venya-ca.crt
+venya setup <core-host>    # re-fetch the NEW CA (fingerprint printed for out-of-band verification)
 ssh <core-host> "sudo cat /etc/venya/admin/admin.crt" > admin-cert/admin.crt
 ssh <core-host> "sudo cat /etc/venya/admin/admin.key" > admin-cert/admin.key
 chmod 600 admin-cert/admin.key
-SSL_CERT_FILE=~/.config/venya-ca.crt venya login <user-id>   # FIDO2 touch
+venya login <user-id>   # FIDO2 touch
 
 # --- 7. Smoke-test end to end:
 venya run --executor-id <executor-id> -- /usr/bin/true
