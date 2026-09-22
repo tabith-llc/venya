@@ -66,7 +66,7 @@ venya_determine_install_dir() {
 
     if [ -z "$INSTALL_DIR" ]; then
         echo -n "Install to $default_dir? [Y/n] "
-        if [ "$VENYA_SKIP_PROMPT" = "yes" ]; then
+        if [ "${VENYA_SKIP_PROMPT:-}" = "yes" ]; then
             echo ""
             reply="y"
         else
@@ -90,7 +90,7 @@ venya_check_existing() {
     if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/pyproject.toml" ]; then
         warn "Existing installation found at $INSTALL_DIR"
         echo -n "Reinstall? [y/N] "
-        if [ "$VENYA_SKIP_PROMPT" = "yes" ]; then
+        if [ "${VENYA_SKIP_PROMPT:-}" = "yes" ]; then
             echo ""
             reply="y"
         else
