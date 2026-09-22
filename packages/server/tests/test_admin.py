@@ -452,6 +452,90 @@ class TestAdminAddAllowedCommand:
         assert resp.status_code == 200
         assert resp.json()["added"] is True
 
+    def test_get_policy_unset_defaults(self):
+        """GET /admin/command-policy with no stored row -> built-in defaults, configured=False, never mutates."""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/command-policy")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["policy_name"] == "default"
+        assert body["preset"] == "balanced"
+        assert body["allowed_commands"] == []
+        assert body["dangerous_patterns"] == []
+        assert body["configured"] is False
+        assert body["updated_at"] is None
+        db.add.assert_not_called()
+        db.commit.assert_not_called()
+
+    def test_get_policy_stored_row(self):
+        """GET reflects the stored row: preset + parsed JSON lists + configured=True."""
+        policy = SimpleNamespace(
+            policy_name="default",
+            preset="strict",
+            allowed_commands='["/bin/ls", "/usr/bin/cat"]',
+            dangerous_patterns='["rm -rf"]',
+            updated_at=None,
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = policy
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/command-policy")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["preset"] == "strict"
+        assert body["allowed_commands"] == ["/bin/ls", "/usr/bin/cat"]
+        assert body["dangerous_patterns"] == ["rm -rf"]
+        assert body["configured"] is True
+
+    def test_get_policy_malformed_json_fails_loudly(self):
+        """Corrupt stored JSON -> 500 named detail, never a silent empty list."""
+        policy = SimpleNamespace(
+            policy_name="default",
+            preset="strict",
+            allowed_commands="{not json",
+            dangerous_patterns=None,
+            updated_at=None,
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = policy
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/command-policy")
+        assert resp.status_code == 500
+        assert "malformed" in resp.json()["detail"].lower()
+
+    def test_get_policy_rejects_executor_caller(self):
+        """Paired negative: executor mTLS caller -> 403 (require_admin denies executors before any role lookup)."""
+        app = _create_test_app(auth_user={"caller": "executor", "executor_id": "venya-exec-1"})
+        del app.dependency_overrides[require_admin]
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/command-policy")
+        assert resp.status_code == 403
+
+    def test_get_policy_unauthenticated_401(self):
+        """Paired negative: no mTLS identity and no bearer token -> 401."""
+        app = _create_test_app()
+        del app.dependency_overrides[require_admin]
+        del app.dependency_overrides[get_current_user]
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/command-policy")
+        assert resp.status_code == 401
+
 
 class TestAdminKeyVersionDeactivate:
     """Tests for admin key version deactivation endpoint."""
