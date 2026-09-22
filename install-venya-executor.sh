@@ -436,12 +436,15 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
         # substitution in an assignment kills the script at the assignment,
         # making the handler below unreachable and swallowing REG_OUTPUT
         # (observed live 2026-09-17: bad token → silent exit, no error shown).
+        # Token passes via ENV, not argv (ticket cli-exec-register-token-env-unsupported):
+        # --enrollment-token exposed the live token in /proc/*/cmdline to any
+        # local user during the install window (Docker-API-key stdin-only precedent).
         REG_EXIT=0
-        REG_OUTPUT=$("$INSTALL_DIR/.venv/bin/venya" exec register \
+        REG_OUTPUT=$(VENYA_EXECUTOR_ENROLLMENT_TOKEN="${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" \
+            "$INSTALL_DIR/.venv/bin/venya" exec register \
             --executor-id "$EXECUTOR_ID" \
             --core-url "$SERVER_URL" \
             --output-dir /etc/venya/executor \
-            --enrollment-token "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" \
             2>&1) || REG_EXIT=$?
         echo "$REG_OUTPUT"
 

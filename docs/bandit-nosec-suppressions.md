@@ -11,7 +11,7 @@ justification. Rows are keyed on file + line content (line numbers drift and are
 deliberately not recorded). Scope = `packages/*/src` — the same tree the pre-commit
 bandit hook scans (tests dirs are hook-excluded).
 
-**59 suppression lines across 17 files.**
+**58 suppression lines across 17 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -19,7 +19,6 @@ bandit hook scans (tests dirs are hook-excluded).
 | `packages/cli/src/venya_cli/cli.py` | `except Exception:  # noqa: S110  # nosec B110` |
 | `packages/cli/src/venya_cli/cli.py` | `except Exception:  # nosec B110 — unwritable config dir must not break the CLI` |
 | `packages/cli/src/venya_cli/commands.py` | `resp = httpx2.get(url, verify=False, timeout=5.0)  # nosec B403 -- scoped TOFU bootstrap; see docstring` |
-| `packages/cli/src/venya_cli/commands.py` | `except Exception:  # nosec B110  # noqa: S110 — ignore optional config parse errors` |
 | `packages/cli/src/venya_cli/commands.py` | `except Exception:  # nosec B110  # noqa: S110` |
 | `packages/cli/src/venya_cli/fido2_client.py` | `except Exception:  # noqa: S110  # nosec B110 — deliberate: parse failure keeps raw status text` |
 | `packages/cli/src/venya_cli/webauthn.py` | `except Exception:  # nosec B110  # noqa: S110` |
