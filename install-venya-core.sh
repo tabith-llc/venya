@@ -149,7 +149,7 @@ fi
 # named in the abort message. Raw-string comparison matches the raw URL
 # write below — passwords containing @ or : break the URL at write time
 # regardless (pre-existing wart, recorded in the ticket, NOT fixed here).
-if [ -z "$VENYA_DB_PASSWORD" ]; then
+if [ -z "${VENYA_DB_PASSWORD:-}" ]; then
     if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
         while :; do
             echo -n "Enter PostgreSQL password for venya user: "
