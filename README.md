@@ -10,6 +10,28 @@ Venya is the first platform that lets AI agents execute commands on remote infra
 
 ---
 
+## Host Trust Model
+
+Venya's components carry deliberately different trust postures:
+
+- **The core server is the trust anchor — give it its own protected host.**
+  Firewalled, minimally exposed, reachable only by its executors (mTLS) and
+  administrators. It holds the CA keys, the encrypted secret store, and the
+  audit log.
+- **Executor hosts are treated as compromised by design.** Agents run arbitrary
+  commands on them, so Venya assumes an attacker may own the machine: secrets
+  are injected only inside sandboxed microVMs, egress is deny-by-default,
+  output is filtered, and executor identity is mTLS-bound and revocable. An
+  executor breach must never become a core breach.
+
+**Never install core and executor on the same machine.** Co-location merges the
+trust anchor into the assume-compromised zone and voids the isolation above —
+both services would run as the same OS user, letting a compromised executor
+reach the core's key material. On a single physical machine, run the core and
+each executor as separate virtual machines.
+
+---
+
 ## The Problem
 
 Infrastructure teams are adopting AI agents (Claude Code, Cursor, autonomous coding assistants) to manage servers, deploy applications, and troubleshoot incidents. But these agents need credentials to do their work — SSH keys, API tokens, database passwords.
@@ -153,6 +175,8 @@ powershell -ExecutionPolicy Bypass -File install-venya-cli.ps1
 ```
 
 Integrity: pin `VENYA_TARBALL_SHA256` (hashes on the release page) for strict verification; unset, the installer fetches the `.sha256` sidecar from the same origin as a corruption guardrail and fail-closes.
+
+Core and executor must run on separate hosts (or separate VMs on one physical machine) — see [Host Trust Model](#host-trust-model).
 
 Workstation CLI config file: `~/.config/venya/config.json` on Linux, `~/Library/Application Support/venya/config.json` on macOS, `%APPDATA%\venya\config.json` on Windows. FIDO2 needs no extra setup on macOS (native IOKit HID transport, no root) or Windows (platform WebAuthn API — standard-user capable, interactive desktop required); on Linux the installer prints udev rules if `/dev/hidraw*` is not user-readable.
 
