@@ -2234,7 +2234,10 @@ def executor_cert_renew(args: Any) -> int:
     # Build mTLS client with current cert
     server_url = _get_server_url(args)
     if server_url == "unknown":
-        print("Error: server URL not configured. Use --core-url or set config.", file=sys.stderr)
+        print(
+            "Error: server URL not configured. Pass --server-url (alias: --core-url) or set VENYA_SERVER_URL.",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -2462,7 +2465,10 @@ def executor_heartbeat(args: Any) -> int:
 
     server_url = _get_server_url(args)
     if server_url == "unknown":
-        print("Error: server URL not configured. Use --core-url or set config.", file=sys.stderr)
+        print(
+            "Error: server URL not configured. Pass --server-url (alias: --core-url) or set VENYA_SERVER_URL.",
+            file=sys.stderr,
+        )
         return 1
 
     # Compute SHA-256 fingerprint of the certificate over its DER encoding --
