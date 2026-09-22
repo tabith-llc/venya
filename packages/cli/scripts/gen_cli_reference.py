@@ -95,6 +95,16 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
         (["login", "jsmith"], "authenticate with your security key; stores a session token"),
         (["login", "jsmith", "--json"], "machine-readable result"),
     ],
+    ("setup",): [
+        (
+            ["setup", "venya-core-1"],
+            "save the server URL and install the core's CA certificate (one-command workstation bootstrap)",
+        ),
+        (
+            ["setup", "venya-core-1", "--ca-sha256", "AA:BB:CC"],
+            "strictly pin the expected CA SHA-256 fingerprint (hex; colons/spaces/case ignored)",
+        ),
+    ],
     ("admin", "enroll"): [
         (["admin", "enroll", "jsmith"], "issue an enrollment token for a new user (security-key mode)"),
         (

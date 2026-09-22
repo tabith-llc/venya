@@ -416,7 +416,10 @@ Every CLI command in this phase runs from the workstation with:
 - `VENYA_CONFIG=<workstation>/config.json` (isolates workstations — the
   binaries are identical; an unannounced swap silently targets the wrong
   workstation, so **state which workstation each physical step uses**),
-- `SSL_CERT_FILE=/tmp/venya-ca.crt` (the server's private CA),
+- `SSL_CERT_FILE=/tmp/venya-ca.crt` (the server's private CA — the harness
+  deliberately drives the CLI through the env-precedence path with a per-run
+  /tmp CA pin rather than `venya setup`; the same file feeds the
+  openssl/python probes below),
 - for `admin …` subcommands: `VENYA_ADMIN_CERT` / `VENYA_ADMIN_KEY` (mTLS).
 
 Workstation layout:

@@ -12,12 +12,14 @@ import json
 import os
 import ssl
 import sys
+import tempfile
 from datetime import UTC
 from pathlib import Path
 from typing import Any
 
 import httpx2
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes
 
 from .api_client import (
     DEFAULT_CONFIG_FILE,
@@ -44,18 +46,23 @@ def run_command(args: Any) -> int:
     server_url = getattr(args, "server_url", None) or os.environ.get("VENYA_SERVER_URL") or None
     client = APIClient(server_url=server_url)
 
-    # Authenticate if no token is available (init, enroll, login, recovery,
-    # config, exec are public). Headless admin exemption: `venya admin ...` with
-    # VENYA_ADMIN_CERT/KEY configured presents the mTLS client cert instead, and
-    # the server's require_admin cert-only shortcut is the authority (a bad cert
-    # surfaces as its 401/403). Scoped to command == "admin" ONLY -- role-gated
-    # commands (list/store/audit/...) still require FIDO2/token, matching the
-    # server, which 401s cert-only callers on require_role routes.
+    # Authenticate if no token is available (init, setup, enroll, login,
+    # recovery, config, exec are public — setup is pre-bootstrap: it exists to
+    # make the first authenticated call possible). Headless admin exemption:
+    # `venya admin ...` with VENYA_ADMIN_CERT/KEY configured presents the mTLS
+    # client cert instead, and the server's require_admin cert-only shortcut is
+    # the authority (a bad cert surfaces as its 401/403). Scoped to command ==
+    # "admin" ONLY -- role-gated commands (list/store/audit/...) still require
+    # FIDO2/token, matching the server, which 401s cert-only callers on
+    # require_role routes.
     command = args.command
     admin_mtls_exempt = command == "admin" and getattr(client, "has_admin_mtls", False)
     if admin_mtls_exempt and not client.config.access_token:
         print("Using admin mTLS certificate (VENYA_ADMIN_CERT) for authentication.")
-    elif command not in ("init", "enroll", "login", "recovery", "config", "exec") and not client.config.access_token:
+    elif (
+        command not in ("init", "setup", "enroll", "login", "recovery", "config", "exec")
+        and not client.config.access_token
+    ):
         user_id = getattr(args, "user_id", None)
         try:
             print("Authenticating with security key...")
@@ -97,6 +104,8 @@ def run_command(args: Any) -> int:
             return cmd_login(client, args)
         elif command == "recovery":
             return cmd_recovery(client, args)
+        elif command == "setup":
+            return cmd_setup(client, args)
         elif command == "run":
             return cmd_run(client, args)
         elif command == "exec":
@@ -184,7 +193,7 @@ def cmd_init(client: APIClient, args: Any) -> int:
         )
 
     try:
-        fido2 = Fido2Auth(client.config.server_url)
+        fido2 = Fido2Auth(client.config.server_url, ca_path=client.config.ca_path)
 
         print(f"Starting core initialization for user '{args.user_id}'...")
         print("Please insert your security key when prompted.\n")
@@ -1281,6 +1290,88 @@ def cmd_run(client: APIClient, args: Any) -> int:
         return 1
 
 
+def cmd_setup(client: APIClient, args: Any) -> int:
+    """Save the server URL and install the core's CA certificate.
+
+    Workstation bootstrap in one command: normalize <corename> to an https
+    URL, save it, fetch /.well-known/venya-ca.crt, validate it as X.509 PEM,
+    and write it beside config.json as ca.crt (0600, atomic). APIClient and
+    Fido2Auth then verify core TLS against it automatically — no
+    SSL_CERT_FILE incantation needed for any later command.
+
+    The fetch is a scoped, unverified GET (trust-on-first-use): the cert it
+    returns becomes the verification anchor, and its subject + SHA-256
+    fingerprint are printed so the operator can confirm them out-of-band.
+    No subsequent call reuses that unverified client.
+    """
+    core = args.corename
+    if not core.startswith(("http://", "https://")):
+        core = "https://" + core
+    client.config.server_url = core
+
+    url = f"{core}/.well-known/venya-ca.crt"
+    try:
+        resp = httpx2.get(url, verify=False, timeout=5.0)  # nosec B403 -- scoped TOFU bootstrap; see docstring
+    except httpx2.HTTPError as e:
+        print(f"setup incomplete: cannot fetch CA certificate from {url}: {e}", file=sys.stderr)
+        print(f"Server URL saved: {core} — re-run 'venya setup {args.corename}' to retry", file=sys.stderr)
+        return 1
+    if resp.status_code == 404:
+        print(f"setup incomplete: {url} not found — is {core} a venya core?", file=sys.stderr)
+        return 1
+    if resp.status_code != 200:
+        print(f"setup incomplete: GET {url} returned HTTP {resp.status_code}", file=sys.stderr)
+        return 1
+
+    try:
+        cert = x509.load_pem_x509_certificate(resp.content)
+    except ValueError:
+        print(f"setup incomplete: response from {url} is not a PEM X.509 certificate", file=sys.stderr)
+        return 1
+
+    fingerprint = cert.fingerprint(hashes.SHA256()).hex()
+    if args.ca_sha256 is not None:
+        # Normalize colons/spaces/case; anything else is a mismatch (fail loud).
+        pin = "".join(args.ca_sha256.split()).replace(":", "").lower()
+        if pin != fingerprint:
+            print(
+                f"setup incomplete: CA fingerprint mismatch — pin {pin}, fetched {fingerprint}; nothing written",
+                file=sys.stderr,
+            )
+            return 1
+
+    ca_path = client.config.ca_path
+    try:
+        ca_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=ca_path.parent, prefix=".venya-ca-", delete=False) as fd:
+                tmp_path = fd.name
+                fd.write(resp.content)
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o600)
+            os.replace(tmp_path, ca_path)
+        except BaseException:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise
+    except OSError as e:
+        print(f"setup incomplete: cannot write {ca_path}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Server URL saved: {core}")
+    print(f"CA certificate subject: {cert.subject}")
+    print(f"CA certificate SHA-256: {fingerprint}")
+    print(f"CA certificate saved to: {ca_path}")
+    print(
+        "Next: run 'venya init <user-id>' to bootstrap the core (or 'venya login <user-id>' if it is already initialized)."
+    )
+    return 0
+
+
 def cmd_config(client: APIClient, args: Any) -> int:
     """Manage CLI configuration."""
     config_command = getattr(args, "config_command", None)
@@ -1308,6 +1399,15 @@ def cmd_config_show(client: APIClient) -> int:
         print("  Access Token: [set] (expires soon — run 'venya run' to refresh)")
     else:
         print("  Access Token: [not set]")
+    ca_path = config.ca_path
+    if ca_path.exists():
+        try:
+            cert = x509.load_pem_x509_certificate(ca_path.read_bytes())
+            print(f"  CA: {ca_path} [SHA-256 {cert.fingerprint(hashes.SHA256()).hex()[:16]}]")
+        except (ValueError, OSError):
+            print(f"  CA: {ca_path} [unreadable]")
+    else:
+        print("  CA: [not set]")
     print(f"  Config File: {config.config_file}")
     return 0
 
@@ -1429,7 +1529,7 @@ def _elevate(client: APIClient) -> str:
     from .webauthn import b64_decode_id
 
     # Use the production normalizer (single source of truth for server JSON shape)
-    fido2 = Fido2Auth(client.config.server_url)
+    fido2 = Fido2Auth(client.config.server_url, ca_path=client.config.ca_path)
     norm = fido2.normalize_webauthn_options(options)
     challenge = b64_decode_id(norm["challenge"])
 
@@ -1552,7 +1652,7 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
         # win11) — deleted, not patched (option-B ruling 2026-09-19).
         from .fido2_client import Fido2Auth, Fido2ClientError
 
-        fido2 = Fido2Auth(client.config.server_url)
+        fido2 = Fido2Auth(client.config.server_url, ca_path=client.config.ca_path)
         try:
             request_options = fido2._build_registration_options(options)
             credential = fido2._get_credential(request_options, timeout=60.0)
@@ -1635,7 +1735,7 @@ def cmd_enroll(client: APIClient, args: Any) -> int:
     token = args.token
     label = getattr(args, "label", None)
     try:
-        fido2 = Fido2Auth(client.config.server_url)
+        fido2 = Fido2Auth(client.config.server_url, ca_path=client.config.ca_path)
         print("Starting enrollment...")
         print("Please insert/touch your security key when prompted.\n")
         _hint = _win_ceremony_hint("registration")

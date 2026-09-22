@@ -87,6 +87,7 @@ and exits `1`.
   - [`venya credential remove`](#venya-credential-remove)
 - [`venya enroll`](#venya-enroll)
 - [`venya login`](#venya-login)
+- [`venya setup`](#venya-setup)
 
 ---
 
@@ -1385,4 +1386,24 @@ venya login <USER_ID> [OPTIONS]
 ```bash
 venya login jsmith  # authenticate with your security key; stores a session token
 venya login jsmith --json  # machine-readable result
+```
+
+## `venya setup`
+
+Save the server URL and install the core's CA certificate
+
+```
+venya setup <CORENAME> [OPTIONS]
+```
+
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `CORENAME` (positional) | **yes** | string | — | Core server hostname or full URL (e.g. venya-core-1) |
+| `--ca-sha256` | no | string | — | Pin the expected CA SHA-256 fingerprint (hex; colons, spaces, and case are ignored) |
+
+**Examples**
+
+```bash
+venya setup venya-core-1  # save the server URL and install the core's CA certificate (one-command workstation bootstrap)
+venya setup venya-core-1 --ca-sha256 AA:BB:CC  # strictly pin the expected CA SHA-256 fingerprint (hex; colons/spaces/case ignored)
 ```

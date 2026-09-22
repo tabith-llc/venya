@@ -504,7 +504,9 @@ class TestCredentialAdd:
                 result = cmd_credential_add(client, args)
 
         assert result == 0
-        mock_auth_cls.assert_called_once_with("https://venya-core-1")
+        # ca_path rides along since feature/cli-setup-command (ceremony flows
+        # verify the core TLS against the setup-installed CA).
+        mock_auth_cls.assert_called_once_with("https://venya-core-1", ca_path=client.config.ca_path)
         mock_auth._build_registration_options.assert_called_once()
         client.close()
         config_file.unlink()
