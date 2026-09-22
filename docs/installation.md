@@ -136,13 +136,55 @@ sudo -u venya curl -sk -X POST \
 # → {"enrollment_token": "enrl_exec_...", "expires_in_seconds": 1800, ...}
 ```
 
-The token expires in ~30 minutes and is consumed on first use. The core
+The token expires in ~30 minutes and is consumed on first **successful**
+registration — a rejected attempt (expired, invalid, revoked, bound to a
+different id, unresolvable executor-id) consumes nothing; what a failing
+install burns is the **wall clock** (apt/Docker/sbx steps run before
+registration). The TTL is server-configurable:
+`executor_enrollment.token_ttl_seconds` (raise it for slow or air-gapped
+installs). If the token expires, re-mint and re-run — the installer re-run is
+fast (idempotent: apt/Docker/sbx steps skip or cache):
+
+```bash
+# re-mint on a core (admin mTLS), then re-run the executor installer with the fresh token
+venya admin executor-enroll <executor-id>          # add --bundle for offline/air-gapped CA copy
+```
+
+The core
 **requires a token for executor registration by default**
 (`executor_enrollment.require_token`, enforced since 2026-09-20) — tokenless
 registration attempts are rejected 400 with an actionable error.
 **`<executor-id>` is a contract**: it becomes the client-certificate SAN and
 the hostname cores dial for relay calls — it must resolve from every core,
 and must match the pattern `^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`.
+
+**Hostname strategy (executor-id resolution).** Resolution is checked
+**from each core** at registration (the server rejects unresolvable ids 400 —
+before the token gate, so a rejection burns nothing) and used at every relay
+dial. Two sanctioned strategies:
+
+- **DNS**: a record for `<executor-id>` pointing at the executor's IP — the
+  clean option wherever DNS exists.
+- **Core-side `/etc/hosts`** (the dev fleet's recipe — no DNS needed): on
+  **every core host**:
+
+  ```bash
+  echo "<executor-ip> <executor-id>" >> /etc/hosts
+  ```
+
+  **Minimal alpha recipe (one core host + one executor VM, no DNS):** pick a
+  dedicated executor-id — not the executor's own hostname (Ubuntu's
+  `127.0.1.1 <hostname>` self-entry makes the installer's local pre-check pass
+  trivially while saying nothing about the core's view) — and map it to the
+  executor VM's real IP **on the core side**:
+
+  ```bash
+  echo "192.168.1.50 venya-exec-1" >> /etc/hosts    # ON THE CORE; executor's real IP, never a loopback variant
+  ```
+
+The executor installer pre-checks local resolvability of the id and prints
+this remedy, but local resolution is only a proxy — the authoritative view is
+each core's.
 
 Then on the executor VM (root):
 
