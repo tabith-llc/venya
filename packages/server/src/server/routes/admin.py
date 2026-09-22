@@ -157,6 +157,15 @@ class AdminAddAllowedCommandResponse(BaseModel):
     command_path: str
 
 
+class AdminGetCommandPolicyResponse(BaseModel):
+    policy_name: str
+    preset: str
+    allowed_commands: list[str]
+    dangerous_patterns: list[str]
+    configured: bool
+    updated_at: datetime | None = None
+
+
 class AdminKeyVersionDeactivateResponse(BaseModel):
     deactivated: bool
     version_id: int
@@ -756,6 +765,62 @@ async def admin_set_command_policy(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Command policy update failed",
         )
+
+
+@router.get(
+    "/admin/command-policy",
+    response_model=AdminGetCommandPolicyResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_get_command_policy(
+    _: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminGetCommandPolicyResponse:
+    """Read the server-stored executor command policy (admin only).
+
+    Read-only counterpart of POST /admin/command-policy — the CLI's
+    `venya admin get-command-policy` always answered 405 because only the
+    POST method was ever registered (ticket admin-get-command-policy-405).
+
+    Semantics (deliberately honest):
+    - Reports what the admin API STORED. An unconfigured policy (no row)
+      answers the built-in default shape (preset "balanced", empty custom
+      lists, configured=False); GET never mutates.
+    - The executor's EFFECTIVE policy is derived from the executor's own
+      config (executor.toml `command_validator` section →
+      build_command_policy); server→executor propagation is not wired
+      (recorded as an adjacent gap on the ticket). This route reports
+      server state, not remote executor state.
+    """
+    from core.iam.models import CommandPolicy
+
+    policy = db.query(CommandPolicy).filter(CommandPolicy.policy_name == "default").first()
+    if policy is None:
+        return AdminGetCommandPolicyResponse(
+            policy_name="default",
+            preset="balanced",
+            allowed_commands=[],
+            dangerous_patterns=[],
+            configured=False,
+            updated_at=None,
+        )
+    try:
+        allowed = json.loads(policy.allowed_commands) if policy.allowed_commands else []
+        patterns = json.loads(policy.dangerous_patterns) if policy.dangerous_patterns else []
+    except (ValueError, TypeError):
+        logger.exception("Stored command policy contains malformed JSON")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Stored command policy is malformed",
+        )
+    return AdminGetCommandPolicyResponse(
+        policy_name=policy.policy_name,
+        preset=policy.preset,
+        allowed_commands=allowed,
+        dangerous_patterns=patterns,
+        configured=True,
+        updated_at=policy.updated_at,
+    )
 
 
 @router.post(
