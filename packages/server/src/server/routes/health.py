@@ -157,7 +157,9 @@ async def health_check(request: Request) -> JSONResponse:
 async def readiness_check(request: Request) -> dict:
     """Readiness probe — is the server ready to serve traffic?
 
-    Checks database connectivity. No authentication required. Not rate-limited.
+    Checks database connectivity. No authentication required. Rate-limited
+    under the generic per-IP tier (no /ready exemption in RateLimitMiddleware —
+    same bucket as any non-auth route).
     """
     from sqlalchemy import text
 
