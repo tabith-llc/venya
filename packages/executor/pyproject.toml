@@ -1,6 +1,6 @@
 [project]
 name = "executor"
-version = "0.1.0alpha13"
+version = "0.1.0alpha14"
 description = "Venya jump host executor daemon and credential injector"
 requires-python = ">=3.14,<3.15"
 dependencies = [

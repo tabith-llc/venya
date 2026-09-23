@@ -1,6 +1,6 @@
 [project]
 name = "venya-mcp"
-version = "0.1.0alpha13"
+version = "0.1.0alpha14"
 description = "Venya MCP server — lets an LLM drive Venya via MCP tools"
 requires-python = ">=3.14,<3.15"
 dependencies = [
