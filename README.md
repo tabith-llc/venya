@@ -32,7 +32,7 @@ each executor as separate virtual machines.
 
 ---
 
-## Planned for Future Releases
+## Coming Soon
 
 The following are planned for future releases:
 
