@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -42,7 +43,7 @@ def server_url():
     url = os.environ.get("VENYA_TEST_SERVER_URL")
     if not url:
         pytest.exit(
-            "VENYA_TEST_SERVER_URL not set. " "Example: https://venya-core-1 or https://10.27.28.11",
+            "VENYA_TEST_SERVER_URL not set. Example: https://venya-core-1",
         )
     return url
 
@@ -55,20 +56,23 @@ def e2e_test_setup(server_url):
     API refuses reset due to existing credentials.
     """
     # Clean stale known_hosts entries before any SSH connections
+    known_hosts = str(Path.home() / ".ssh" / "known_hosts")
     subprocess.run(
-        ["ssh-keygen", "-f", "/home/dust/.ssh/known_hosts", "-R", "venya-core-1"],
+        ["ssh-keygen", "-f", known_hosts, "-R", "venya-core-1"],
         capture_output=True,
         text=True,
         timeout=5,
         check=False,
     )
-    subprocess.run(
-        ["ssh-keygen", "-f", "/home/dust/.ssh/known_hosts", "-R", "10.27.28.11"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
+    core_ip = os.environ.get("VENYA_TEST_CORE_IP")
+    if core_ip:
+        subprocess.run(
+            ["ssh-keygen", "-f", known_hosts, "-R", core_ip],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
 
     reset_sql = (
         "DELETE FROM webauthn_credentials; "
