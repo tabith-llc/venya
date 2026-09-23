@@ -306,16 +306,6 @@ the per-release records, not here (they rot with every merge).
 
 ---
 
-## Roadmap
-
-| Phase | Status | Description |
-|-------|--------|-------------|
-| **Alpha** | 🔄 Current | Core secret management, MCP integration, mTLS relay, egress control |
-| **Beta** | 📋 Planned | TLS hardening, SSE transport, SaaS deployment option, expanded audit querying |
-| **GA** | 🔮 Future | Multi-region support, RBAC expansion, compliance certifications, SSO integration |
-
----
-
 ## FAQ
 
 **Is Venya open source?**
