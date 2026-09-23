@@ -1,12 +1,12 @@
 # Venya
 
-> **AI agents:** if you are an LLM agent that retrieved this README, start at **[docs/agents.md](docs/agents.md)** — how to wire up, operate safely, and what never to attempt. Humans: that file is the brief your agent should be handed.
+> **AI agents:** start at **[docs/agents.md](docs/agents.md)** — how to install, configure, and operate
 
 ### AI agents manage infrastructure securely.
 
 Venya is the first platform that lets AI agents execute commands on remote infrastructure using stored credentials **without ever seeing those credentials**. The LLM discovers what secrets exist, constructs the command, and the executor injects the credential into a sandboxed environment. Output is filtered. Every action is audited. A human authorized the session with a physical security key.
 
-**This doesn't exist anywhere else.** Traditional secrets managers (HashiCorp Vault, CyberArk, cloud-native stores) store credentials — but they hand the plaintext to whatever process requests it. If you give an AI agent a Vault token, the agent can read every secret in plain text. Venya's zero-knowledge injection model means the agent never sees, handles, or can leak the credential value. It sees the result of the command — and nothing more.
+**This doesn't exist anywhere else.** Traditional secrets managers (HashiCorp Vault, CyberArk, cloud-native stores) store credentials — but they hand the plaintext to whatever process requests it. If you give an AI agent a Vault token, the agent can read every secret in plain text. Venya's zero-knowledge injection model means the agent never sees, handles, or can leak the credential value. It sees the result of the command — and nothing more. The same holds for the humans operating Venya: frontline operators authorize sessions, run commands, and read filtered output without ever seeing the credential values doing the work. Disclosure is a separate, deliberate act — FIDO2-elevated, single-use, audited — never part of normal operation.
 
 ---
 
@@ -32,6 +32,38 @@ each executor as separate virtual machines.
 
 ---
 
+## Coming Soon
+
+The following are planned for future releases:
+
+- **Single sign-on (SSO).** Enterprise directory authentication (LDAP first)
+  hybridized with WebAuthn hardware-key binding — passwords for identity,
+  physical keys for privileged operations.
+- **FIDO2 hardware attestation.** At enrollment, verify that security keys are
+  genuine FIDO2-certified authenticators (attestation checked against trusted
+  metadata) — not merely holders of a registered credential.
+- **High-availability core.** Multi-node core deployment for availability
+  without changing the trust-anchor model.
+- **Tested backup and disaster recovery.** A documented backup set (encrypted
+  CA material, database, server configuration) with a tested, step-by-step
+  restore procedure — not just a doc that claims to work.
+- **A pure auditor role.** Read-only access to audit logs and metadata with an
+  affirmative deny on secret values.
+- **More secret shapes.** Beyond the shipped stack (env injection, askpass,
+  sudo-stdin, sshpass): a custom shape registry so teams can define their own
+  consumption patterns safely.
+- **Offline-capable installation.** Self-contained install — vendored
+  dependencies and locally seeded sandbox images; no internet access required
+  from core or executor hosts at install or run time.
+- **Fully air-gapped deployment.** Including guidance for local inference
+  stacks — on the roadmap, behind the offline-capable tier.
+- **TPM credential sealing.** Bind core service credentials to the host TPM so
+  a stolen disk image alone cannot yield key material.
+- **Audit export / SIEM integration.** Forward the append-only audit trail to
+  external collectors (SIEM) for long-term retention and correlation.
+
+---
+
 ## The Problem
 
 Infrastructure teams are adopting AI agents (Claude Code, Cursor, autonomous coding assistants) to manage servers, deploy applications, and troubleshoot incidents. But these agents need credentials to do their work — SSH keys, API tokens, database passwords.
@@ -51,7 +83,7 @@ Every approach either exposes credentials or blocks AI adoption. Venya is the fo
 ## How Venya Works
 
 ```
-Human: "Install apache2 on web-server-3"
+Human: "The Reston datacenter NAS appears to be offline."
           │
           ▼
 ┌──────────────────┐     ┌───────────────────┐     ┌────────────────────┐
@@ -67,23 +99,25 @@ Human: "Install apache2 on web-server-3"
 └──────────────────┘     └───────────────────┘     └────────────────────┘
 ```
 
-1. **The human asks the AI to do something** — e.g., "Install apache2 on web-server-3"
+1. **The human asks the AI to do something** — e.g., "The Reston datacenter NAS appears to be offline."
 2. **The AI discovers available resources** — calls Venya's MCP tools to list executors and secrets (metadata only, never values)
-3. **The AI constructs the command** — e.g., `ssh bot@web-server-3 sudo apt install -y apache2`
+3. **The AI constructs the command** — e.g., `sshpass -f /run/secrets/venya/12 ssh nas-admin@192.0.2.40 get-volume-status reston-data-01` — the stored password is consumed as a file inside the sandbox, never pasted into the command
 4. **Venya handles the rest:**
    - Server decrypts the secret and wraps it with cryptographic sentinel markers
    - Server relays the command + wrapped secret to the executor over mutual TLS
-   - Executor unwraps the secret inside an isolated sbx microVM and injects it into the command
-   - A Rust-based output filter scans stdout/stderr for any leaked secret values and replaces them with `[REDACTED]` markers before the AI ever sees it
-5. **The AI reads the filtered output** — it sees the command succeeded, sees the package installation logs, but never sees the password
+   - Executor materializes the secret as a read-only file inside the isolated sbx microVM (`/run/secrets/venya/<id>`, mode 0400) — the command consumes it there; it never exists outside the sandbox
+   - A Rust-based output filter scans stdout/stderr for any leaked secret values and replaces them with `[REDACTED:<id>]` markers before the AI ever sees it
+5. **The AI reads the filtered output** — it sees the command succeeded, sees the volume-status report, but never sees the password
 6. **Every step is logged** — the audit trail records who authorized the session, what command ran, on which executor, and when
+
+When the first probe fails, the agent adapts — switches executors, escalates, triggers a controlled failover — and every step lands in the audit trail, still without touching a credential value. **See how it ends: the full narrated incident, every call and its exact output → [docs/example-workflow.md](docs/example-workflow.md)**
 
 ---
 
 ## Why Venya Is Different
 
 ### Zero-Knowledge Secret Injection
-The AI agent never touches plaintext credentials. Not in its context window. Not in transit. Not in output. The secret is decrypted server-side, wrapped with sentinel markers, relayed over mTLS, and unwrapped only inside the executor's sandboxed process. The Rust filter ensures that even if a command accidentally echoes a credential in its output, it's replaced with `[REDACTED]` before the AI ever sees it.
+The AI agent never touches plaintext credentials. Not in its context window. Not in transit. Not in output. The secret is decrypted server-side, wrapped with sentinel markers, relayed over mTLS, and unwrapped only inside the executor's sandboxed process. The Rust filter ensures that even if a command accidentally echoes a credential in its output, it's replaced with `[REDACTED:<id>]` before the AI ever sees it.
 
 **No other product does this.** Existing secrets managers hand plaintext to the requesting process. Venya doesn't.
 
@@ -147,7 +181,7 @@ Venya is currently in **alpha** — early access for teams who want to shape the
 
 ### Quick Start (5-Minute Demo)
 
-See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)**
+See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)** — hands-on in 5 minutes, or the **[narrated incident walkthrough](docs/example-workflow.md)** — what an agent session looks like start to finish.
 
 ### Full Installation
 
@@ -205,6 +239,7 @@ Production deployment guide: **[Installation Guide](docs/installation.md)**
 | `packages/executor` | Remote daemon — sandboxed execution, secret injection, redaction |
 | `packages/cli` | Workstation CLI (`venya`) — admin, enrollment, execution client |
 | `packages/mcp` | MCP server (`venya-mcp`) — exposes Venya tools to LLM clients |
+| `packages/venya-contract` | Frozen relay wire contract — shared request/response models (`extra="forbid"`) that prevent silent field drift between core and executor |
 | Rust filter extension | Output redaction (`[REDACTED:...]` markers) before return |
 | Installer / uninstaller scripts | `install-venya-{core,executor,cli}.sh` + matching `uninstall-venya-*.sh` (see `install-scripts-README.md`) |
 
@@ -244,7 +279,8 @@ Full A-Z testing is ongoing. Venya is validated end-to-end from a clean
 hypervisor: VM provision → core/executor/CLI install from hash-verified
 tarballs → FIDO2 identity bootstrap (with wrong-key and replay negatives) →
 secret creation → an MCP `run_command` that consumes the secret with the value
-redacted from all output. Two live full-lifecycle runs passed on 2026-09-17;
+redacted from all output. Live full-lifecycle runs are re-verified against
+each release's bytes (evidence in the per-release records);
 the unit suites across all six packages (cli / core / server / executor / mcp /
 venya-contract, Python 3.14) are green — absolute counts deliberately live in
 the per-release records, not here (they rot with every merge).
@@ -258,7 +294,7 @@ the per-release records, not here (they rot with every merge).
   via [omlx.ai](https://omlx.ai) — both drive `venya-mcp` as a stdio server.
 - **Hardware:** FIDO2 ceremonies verified with the Yubico **Security Key C
   NFC** — Basic Compatibility, MFA security key and passkey, USB-C or NFC,
-  FIDO Certified — $29 on Amazon.
+  FIDO Certified.
 - **Longer timeouts for testing:** default session idle is 15 min and executor
   enrollment tokens expire in 30 min. For relaxed test runs, append to
   `/opt/venya/.env` on the core, restart, and **re-login** (existing sessions
@@ -269,16 +305,6 @@ the per-release records, not here (they rot with every merge).
   echo 'VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS=14400' | sudo tee -a /opt/venya/.env
   sudo systemctl restart venya-core
   ```
-
----
-
-## Roadmap
-
-| Phase | Status | Description |
-|-------|--------|-------------|
-| **Alpha** | 🔄 Current | Core secret management, MCP integration, mTLS relay, egress control |
-| **Beta** | 📋 Planned | TLS hardening, SSE transport, SaaS deployment option, expanded audit querying |
-| **GA** | 🔮 Future | Multi-region support, RBAC expansion, compliance certifications, SSO integration |
 
 ---
 
@@ -294,7 +320,7 @@ This is the same licensing model used by HashiCorp (Vault, Terraform).
 
 **Can the AI agent extract secrets by crafting clever commands?**
 
-No. The agent never receives plaintext: the secret is injected only inside the sandbox — a per-session tmpfs file at `/run/secrets/venya/<id>` (0400, zeroed after the run; the env/askpass/sudo consumption shapes ride the same file-mediated transport) — and every byte of stdout/stderr passes two redaction stages (the executor's Rust filter, then the server-side definitive filter, which fails closed) that replace secret values with `[REDACTED]` markers before the output returns. A command that `cat`s the secret demonstrates the filter, not a bypass. Network exfiltration is blocked by deny-by-default egress allowlisting; the sandbox boundary is the containment — see the [full FAQ](docs/faq.md).
+No. The agent never receives plaintext: the secret is injected only inside the sandbox — a per-session tmpfs file at `/run/secrets/venya/<id>` (0400, zeroed after the run; the env/askpass/sudo consumption shapes ride the same file-mediated transport) — and every byte of stdout/stderr passes two redaction stages (the executor's Rust filter, then the server-side definitive filter, which fails closed) that replace secret values with `[REDACTED:<id>]` markers before the output returns. A command that `cat`s the secret demonstrates the filter, not a bypass. Network exfiltration is blocked by deny-by-default egress allowlisting; the sandbox boundary is the containment — see the [full FAQ](docs/faq.md).
 
 **What if the AI agent goes rogue?**
 
@@ -326,10 +352,13 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | Document | Description |
 |----------|-------------|
 | [Alpha Demo Guide](docs/alpha-demo.md) | 5-minute end-to-end demo |
+| [Example Workflow](docs/example-workflow.md) | Narrated incident-response walkthrough — every MCP call and its exact output |
 | [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md) | A-Z validation from clean hypervisor to MCP use-a-secret proof |
 | [Installation Guide](docs/installation.md) | Full deployment instructions |
 | [CLI Reference](docs/cli-reference.md) | Every `venya` command and argument — generated from the parser, test-enforced against drift |
 | [Architecture](docs/architecture.md) | Technical deep dive |
+| [Deployment Configuration](docs/deployment-config.md) | Required config fields, env-var mapping, validation timing |
+| [Cert & Key Rotation Runbook](docs/cert-rotation-runbook.md) | Rotation procedures for every certificate and key, source-cited |
 | [Firewall & Network Requirements](docs/FIREWALL.md) | Ports/protocols per host type — *(alpha, untested)* |
 | [Backup & Restore](docs/BACKUPS.md) | What to back up, the crypto pairings, restore + backup security — *(alpha, untested)* |
 | [FAQ](docs/faq.md) | Frequently asked questions |
