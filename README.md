@@ -60,9 +60,8 @@ committed, dates not. This list is not complete.
   stacks — on the roadmap, behind the offline-capable tier.
 - **TPM credential sealing.** Bind core service credentials to the host TPM so
   a stolen disk image alone cannot yield key material.
-- **Platform authenticators.** Built-in biometrics alongside physical security
-  keys: Apple Touch ID, Windows Hello, and Linux fingerprint readers (WebAuthn
-  platform authenticators).
+- **Platform authenticators.** Built-in biometrics: Apple Touch ID, Windows
+  Hello, and Linux fingerprint readers (WebAuthn platform authenticators).
 
 ---
 
