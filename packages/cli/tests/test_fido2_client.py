@@ -24,22 +24,33 @@ class TestFido2ClientInstantiation:
     @patch("venya_cli.fido2_client.list_devices")
     @patch("venya_cli.fido2_client.Fido2Client")
     @patch("venya_cli.fido2_client.DefaultClientDataCollector")
-    def test_get_credential_uses_fido2_client(
+    @patch("venya_cli.fido2_client.Ctap2")
+    def test_get_credential_uses_fido2_client_for_uv_key(
         self,
+        mock_ctap2_cls,
         mock_collector_cls,
         mock_fido2_client_cls,
         mock_list_devices,
         mock_httpx2,
     ):
-        """_get_credential creates Fido2Client with device and collector."""
+        """_get_credential uses the high-level Fido2Client for a key with built-in
+        uv (info.options['uv'] truthy). Paired negative to
+        test_get_credential_pin_only_key_dispatches_to_raw_path below.
+
+        Updated for Fix 1 (init-pin-invalid-after-installation-reset):
+        _get_credential now info-dispatches like _get_assertion, so the
+        high-level path is reached only for uv keys — Ctap2 must be mocked.
+        """
         mock_list_devices.return_value = ["fake_device"]
+        mock_ctap2 = MagicMock()
+        mock_ctap2_cls.return_value = mock_ctap2
+        mock_ctap2.info.options = {"uv": True, "up": True, "rk": True}
         mock_collector = MagicMock()
         mock_collector_cls.return_value = mock_collector
         mock_client_instance = MagicMock()
         mock_fido2_client_cls.return_value = mock_client_instance
 
         auth = Fido2Auth(server_url="https://venya-core-1")
-        # _build_registration_options returns a mock options object
         options = auth._build_registration_options(
             {
                 "challenge": "dGVzdC1jaGFsbGVuZ2U=",
@@ -52,11 +63,62 @@ class TestFido2ClientInstantiation:
 
         auth._get_credential(options, timeout=10.0)
 
-        # Verify Fido2Client was instantiated with device and collector
+        # uv key → high-level Fido2Client(device, collector, user_interaction=…)
         mock_fido2_client_cls.assert_called_once()
         call_args = mock_fido2_client_cls.call_args
         assert call_args[0][0] == "fake_device"  # device
         assert call_args[0][1] is mock_collector  # collector
+        mock_ctap2_cls.assert_called_once_with("fake_device")
+
+    @patch("venya_cli.fido2_client.httpx2")
+    @patch.object(Fido2Auth, "_get_credential_pin_only")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.Ctap2")
+    def test_get_credential_pin_only_key_dispatches_to_raw_path(
+        self,
+        mock_ctap2_cls,
+        mock_collector_cls,
+        mock_fido2_client_cls,
+        mock_list_devices,
+        mock_pin_only,
+        mock_httpx2,
+    ):
+        """Fix 1 (init-pin-invalid-after-installation-reset): a clientPin-only key
+        (clientPin:true, NO built-in uv — the makeCredUvNotRqd TrustKey-class shape
+        that returned off-spec 0x31) is dispatched STRAIGHT to the raw
+        _get_credential_pin_only path. The high-level Fido2Client.make_credential
+        (which mishandles such keys and burns a PIN-retry per failure) is NOT used.
+        Mirror of TestPinOnlyKeyDispatch for the assertion/login path.
+        """
+        mock_list_devices.return_value = ["fake_device"]
+        mock_ctap2 = MagicMock()
+        mock_ctap2_cls.return_value = mock_ctap2
+        mock_ctap2.info.options = {"clientPin": True, "up": True, "rk": True}  # no uv
+        mock_collector_cls.return_value = MagicMock()
+        sentinel = MagicMock()
+        mock_pin_only.return_value = sentinel
+
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = auth._build_registration_options(
+            {
+                "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                "rp": {"name": "Venya"},
+                "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                "timeout": 60000,
+            }
+        )
+
+        result = auth._get_credential(options, timeout=10.0)
+
+        assert result is sentinel
+        mock_pin_only.assert_called_once()
+        # raw path received the Ctap2 instance built from the enumerated device
+        assert mock_pin_only.call_args[0][0] is mock_ctap2
+        # high-level path NOT used for a clientPin-only key
+        mock_fido2_client_cls.assert_not_called()
 
     @patch("venya_cli.fido2_client.httpx2")
     @patch("venya_cli.fido2_client.list_devices")
@@ -267,6 +329,75 @@ class TestAuthenticateErrorHandling:
         except ClientError:
             assert False, "Should have unwrapped to CtapError, not re-raised ClientError wrapper"
         assert mock_get.call_count == 1
+
+
+class TestRegisterErrorHandling:
+    """Fix 2 (init-pin-invalid-after-installation-reset): register() must unwrap
+    ClientError→CtapError exactly like authenticate() does. da2c09a restored the
+    unwrap for the assertion twin; register() was missed, so a high-level
+    make_credential ClientError(PIN_INVALID) escaped as a raw tuple with no retry
+    — the 'Initialization failed: (<ERR.BAD_REQUEST: 2>, CtapError(0x31)>)' the
+    ticket captured. These mirror TestAuthenticateErrorHandling."""
+
+    @patch.object(Fido2Auth, "_get_credential")
+    @patch.object(Fido2Auth, "_post")
+    def test_wrapped_pin_invalid_retries_three_times_then_fails(self, mock_post, mock_get_cred):
+        """ClientError(CtapError PIN_INVALID) → unwrap → retry 3× → 'PIN incorrect after 3'."""
+        from fido2.client import ClientError
+        from fido2.ctap import CtapError
+        from venya_cli.fido2_client import Fido2ClientError
+
+        mock_post.side_effect = [
+            {
+                "challenge_id": "ch1",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "alice", "displayName": "alice"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        ]
+        wrapped = ClientError.ERR.BAD_REQUEST(CtapError(CtapError.ERR.PIN_INVALID))
+        mock_get_cred.side_effect = [wrapped, wrapped, wrapped]
+
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        try:
+            auth.register(user_id="alice")
+            assert False, "Expected Fido2ClientError"
+        except Fido2ClientError as exc:
+            assert "PIN incorrect after 3" in str(exc)
+        assert mock_get_cred.call_count == 3
+
+    @patch.object(Fido2Auth, "_get_credential")
+    @patch.object(Fido2Auth, "_post")
+    def test_bare_non_pin_ctap_error_no_retry(self, mock_post, mock_get_cred):
+        """PAIRED NEGATIVE: a non-PIN CtapError is NOT retried (exactly 1 call)
+        and re-raises as CtapError — not swallowed, not infinite-looped."""
+        from fido2.ctap import CtapError
+
+        mock_post.side_effect = [
+            {
+                "challenge_id": "ch1",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "alice", "displayName": "alice"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        ]
+        mock_get_cred.side_effect = CtapError(CtapError.ERR.TIMEOUT)
+
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        try:
+            auth.register(user_id="alice")
+            assert False, "Expected CtapError"
+        except CtapError:
+            pass
+        assert mock_get_cred.call_count == 1
 
 
 class TestPinOnlyKeyDispatch:
