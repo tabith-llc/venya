@@ -4,6 +4,16 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+- **CLI: `venya admin enroll --mode` and `venya admin configure-user --mode`
+  removed.** The flag advertised a platform-authenticator enrollment mode
+  (e.g. Windows Hello) that did nothing: no authentication path ever read the
+  stored `auth_mode` value, and enrollment completion overwrote it to
+  `webauthn` regardless. Platform authenticators are not offered at this time.
+  The server API is unchanged (the `auth_mode` field and its default remain;
+  `venya admin list` still displays stored values). Scripts passing `--mode` —
+  including the former default `security-key` — now fail with a usage error
+  instead of silently doing nothing.
+
 - **Installer: fresh executor installs no longer seed the development fleet's
   subnet into the sandbox egress allowlist.** `/etc/venya/egress-allowlist.txt`
   is now written empty by design (fail-closed: all sandbox egress blocked

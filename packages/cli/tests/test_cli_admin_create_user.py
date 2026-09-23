@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import httpx2
 from venya_cli.api_client import APIClient
-from venya_cli.commands import cmd_admin_create_user, cmd_admin_list
+from venya_cli.commands import cmd_admin_configure, cmd_admin_create_user, cmd_admin_enroll, cmd_admin_list
 
 
 def _make_mock_response(status_code=200, json_data=None):
@@ -418,5 +418,64 @@ class TestAdminList:
         assert result == 0
         output = f.getvalue()
         assert "-" in output
+        client.close()
+        config_file.unlink()
+
+
+# ---------------------------------------------------------------------------
+# cmd_admin_enroll / cmd_admin_configure — no auth_mode on the wire
+# ---------------------------------------------------------------------------
+
+
+class TestAdminEnrollConfigureNoModeSurface:
+    """b1 hard removal (ticket cli-admin-enroll-platform-mode-surface, owner
+    ruling 2026-09-23): the CLI advertised `--mode {security-key,platform}`
+    that was stored-but-inert end-to-end. The payloads must carry NO
+    auth_mode — exact-dict asserts, so a MagicMock args.mode can never ride
+    along silently. The server's auth_mode field/default is untouched.
+    """
+
+    def test_enroll_payload_has_no_auth_mode(self):
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(
+            status_code=200,
+            json_data={"user_id": "jsmith", "enrollment_token": "tok_abc123"},
+        )
+        mock_response.raise_for_status.return_value = None
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        args = MagicMock()
+        args.user_id = "jsmith"
+
+        result = cmd_admin_enroll(client, args)
+        assert result == 0
+
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "POST"
+        assert call_args[0][1] == "/api/v1/admin/enroll"
+        assert call_args[1]["json"] == {"user_id": "jsmith"}
+        client.close()
+        config_file.unlink()
+
+    def test_configure_payload_has_no_auth_mode(self):
+        client, config_file = _make_client()
+        mock_http = MagicMock()
+        mock_response = _make_mock_response(status_code=200, json_data={"configured": True})
+        mock_response.raise_for_status.return_value = None
+        mock_http.request.return_value = mock_response
+        client._http = mock_http
+
+        args = MagicMock()
+        args.user_id = "jsmith"
+        args.timeout = 1800
+
+        result = cmd_admin_configure(client, args)
+        assert result == 0
+
+        call_args = mock_http.request.call_args
+        assert call_args[0][0] == "PUT"
+        assert call_args[1]["json"] == {"session_timeout": 1800}
         client.close()
         config_file.unlink()
