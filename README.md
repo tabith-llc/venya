@@ -279,7 +279,8 @@ Full A-Z testing is ongoing. Venya is validated end-to-end from a clean
 hypervisor: VM provision → core/executor/CLI install from hash-verified
 tarballs → FIDO2 identity bootstrap (with wrong-key and replay negatives) →
 secret creation → an MCP `run_command` that consumes the secret with the value
-redacted from all output. Two live full-lifecycle runs passed on 2026-09-17;
+redacted from all output. Live full-lifecycle runs are re-verified against
+each release's bytes (evidence in the per-release records);
 the unit suites across all six packages (cli / core / server / executor / mcp /
 venya-contract, Python 3.14) are green — absolute counts deliberately live in
 the per-release records, not here (they rot with every merge).
