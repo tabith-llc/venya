@@ -1,0 +1,22 @@
+agent -> core: "run_command(storage-01,\nsshpass -f /run/secrets/venya/12 …,\nsecret_keys=[reston_nas_admin_creds])"
+core -> core: "decrypt · wrap in sentinel markers"
+core -> exec: "wrapped secret — server → executor,\nnever through the caller" {
+  style.stroke: "#c62828"
+  style.bold: true
+}
+exec -> exec: "unwrap host-side → tmpfs 0400"
+exec -> sbx: "expose at /run/secrets/venya/12"
+sbx -> nas: "sshpass -f … get-volume-status"
+nas -> sbx: "DEGRADED — and echoes its own\nreplication credential in the output" {
+  style.stroke: "#c62828"
+}
+sbx -> exec: "raw stdout — still carries the value"
+exec -> exec: "Stage 1 — Rust filter → [REDACTED:12]"
+exec -> core: "Stage 2 — unfiltered bytes re-screened\nagainst the vault (executor mTLS)" {
+  style.stroke: "#c62828"
+  style.stroke-dash: 3
+}
+core -> exec: "definitive verdict — fails closed\n(404 ⇒ Stage 1 masking stands)"
+exec -> core: "masked output — verdict adopted"
+core -> agent: "DEGRADED · Replication peer auth: [REDACTED:12]\n(1 secret(s) masked in output)"
+exec -> exec: "zero the tmpfs file"
