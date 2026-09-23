@@ -4,6 +4,19 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+- **Installer: fresh executor installs no longer seed the development fleet's
+  subnet into the sandbox egress allowlist.** `/etc/venya/egress-allowlist.txt`
+  is now written empty by design (fail-closed: all sandbox egress blocked
+  except DNS) with in-file guidance, and can be seeded explicitly at install
+  time with `VENYA_EGRESS_ALLOW` (comma/space-separated IPs, CIDRs, hostnames;
+  any invalid entry aborts the install loudly — a partially applied allowlist
+  is never written). A standing interlock test fails if a private-range
+  literal returns to any shipped installer script. **Installed a release
+  before this fix?** Check `/etc/venya/egress-allowlist.txt`: releases through
+  `v0.1.0alpha14` seeded `10.27.28.0/24` — a development-fleet subnet that is
+  not yours. Delete it or replace it with your own target ranges; the file is
+  read at sandbox creation, so no restart is needed.
+
 ## [0.1.0alpha14] - 2026-09-23
 
 - **Supersede of `v0.1.0alpha13` (packaging defect — product code IDENTICAL;
