@@ -35,7 +35,14 @@ again.
 
 ## What actually happens behind the scenes
 
+![Overview: the whole incident as one swimlane sequence](diagrams/workflow.svg)
+
+*Lanes are the real components (see [architecture.md](architecture.md)). Each
+step below carries its own frame of this diagram.*
+
 ### Step 1 — Discover what exists
+
+![Step diagram](diagrams/frames/s1.svg)
 
 The agent calls `list_executors()`. Real rendering:
 
@@ -47,6 +54,8 @@ Registered executors:
 ```
 
 ### Step 2 — Find relevant secrets
+
+![Step diagram](diagrams/frames/s2.svg)
 
 The agent calls `list_secrets()`. Keys and metadata only — values are never
 returned, to anyone, ever:
@@ -61,6 +70,8 @@ The agent will request only the secret its commands actually consume — the
 monitoring API key stays untouched this whole incident.
 
 ### Step 3 — First probe from the network executor (fails)
+
+![Step diagram](diagrams/frames/s3.svg)
 
 Reachability first. No credential is needed to learn a host is unreachable, so
 the agent requests no secret (`secret_keys=[]` is valid — a session with zero
@@ -85,6 +96,8 @@ The network path from that segment is dead. A lesser tool retries blindly;
 the agent adapts instead.
 
 ### Step 4 — Escalate to the storage executor
+
+![Step diagram](diagrams/frames/s4.svg)
 
 The storage executor sits on a segment that can reach the NAS. Now the
 credential is needed — and it is consumed **as a file inside the sandbox**
@@ -115,14 +128,25 @@ Volume reston-data-01 status: DEGRADED
 ```
 
 Note what happened at `Replication peer auth:` — the NAS dumped its stored
-replication credential (the same password) into its own status output. The
-Rust filter caught it inside the executor and replaced the value with
-`[REDACTED:12]` **before the output ever left the sandbox**. The agent never
-saw the password; an accidental echo by a third-party tool became a
-non-event. That is the difference between redaction as a feature and
+replication credential (the same password) into its own status output. Masking
+then runs in two stages. **Stage 1** is the executor's Rust filter, which
+replaces the value with `[REDACTED:12]` inside the executor, before the output
+leaves the sandbox. **Stage 2** is the definitive one: the executor ships the
+*unfiltered* bytes to the core over its mTLS channel
+(`POST /api/v1/sessions/{id}/filter`), the vault re-screens them against what
+it actually knows, and its answer is adopted. Stage 2 fails **closed** — an
+unknown or TTL-reaped session returns 404 and the executor keeps the
+Stage-1-masked output, so a filter failure can never return raw bytes. Those
+unfiltered bytes reach only the core, which already holds the secret and is
+the system's trust anchor; they never reach the agent or the human.
+
+The agent never saw the password; an accidental echo by a third-party tool
+became a non-event. That is the difference between redaction as a feature and
 redaction as a guarantee.
 
 ### Step 5 — Initiate controlled remediation
+
+![Step diagram](diagrams/frames/s5.svg)
 
 The volume is in read-only protection with a dying disk and a healthy DR
 peer. The agent triggers the failover — same secret, same file mechanism:
@@ -152,6 +176,8 @@ this session with a physical key, the executor's command policy bounds what
 can run at all, and every invocation below is permanently attributed.
 
 ### Step 6 — Document the event
+
+![Step diagram](diagrams/frames/s6.svg)
 
 The agent calls `get_audit(limit=5)`:
 
@@ -230,7 +256,12 @@ CLI and its outputs, failover IDs, and timestamps are illustrative fiction.
 The tool names and call signatures, output renderings, `[REDACTED:<id>]`
 marker format, masked-count line, secret-file mechanism
 (`/run/secrets/venya/<id>`, 0400, zeroed after run), audit attribution, and
-session/TTL rules are real and source-matched.*
+session/TTL rules are real and source-matched. The diagrams carry the same
+split: their lanes and mechanisms come from
+[architecture.md](architecture.md), while the host names, addresses and NAS
+output in them are the illustrative fiction described above. They are
+generated from `docs/diagrams/` via `scripts/render-diagrams.sh` — edit the
+sources there, not the SVGs.*
 
 **See also:** [alpha-demo.md](alpha-demo.md) — run the real thing yourself in
 5 minutes · [agents.md](agents.md) — the operating brief for your agent ·
