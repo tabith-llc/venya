@@ -6,7 +6,7 @@
 
 Venya is the first platform that lets AI agents execute commands on remote infrastructure using stored credentials **without ever seeing those credentials**. The LLM discovers what secrets exist, constructs the command, and the executor injects the credential into a sandboxed environment. Output is filtered. Every action is audited. A human authorized the session with a physical security key.
 
-**This doesn't exist anywhere else.** Traditional secrets managers (HashiCorp Vault, CyberArk, cloud-native stores) store credentials — but they hand the plaintext to whatever process requests it. If you give an AI agent a Vault token, the agent can read every secret in plain text. Venya's zero-knowledge injection model means the agent never sees, handles, or can leak the credential value. It sees the result of the command — and nothing more.
+**This doesn't exist anywhere else.** Traditional secrets managers (HashiCorp Vault, CyberArk, cloud-native stores) store credentials — but they hand the plaintext to whatever process requests it. If you give an AI agent a Vault token, the agent can read every secret in plain text. Venya's zero-knowledge injection model means the agent never sees, handles, or can leak the credential value. It sees the result of the command — and nothing more. The same holds for the humans operating Venya: frontline operators authorize sessions, run commands, and read filtered output without ever seeing the credential values doing the work. Disclosure is a separate, deliberate act — FIDO2-elevated, single-use, audited — never part of normal operation.
 
 ---
 
