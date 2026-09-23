@@ -1008,7 +1008,10 @@ class ExecutorDaemon:
         Returns:
             Configured Executor instance with HTTP client for server API calls.
         """
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(
+            dns_resolver=self.config.dns_resolver,
+            egress_allowlist_path=self.config.egress_allowlist_path,
+        )
         audit_logger = AuditLogger(self.config.audit, session_id)
         return Executor(
             command_validator=self.command_validator,

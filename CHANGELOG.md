@@ -14,6 +14,12 @@ Notable changes to Venya will be documented in this file.
   including the former default `security-key` — now fail with a usage error
   instead of silently doing nothing.
 
+- **Executor: `dns_resolver` and `egress_allowlist_path` config knobs now take
+  effect.** Both were loadable from `/etc/venya/executor.toml` (or the
+  `VENYA_EXECUTOR_DNS_RESOLVER` / `VENYA_EXECUTOR_EGRESS_ALLOWLIST_PATH` env
+  keys) but had no readers — the sandbox network policy used hardcoded values.
+  Defaults are unchanged; operator overrides are now honored.
+
 - **Installer: fresh executor installs no longer seed the development fleet's
   subnet into the sandbox egress allowlist.** `/etc/venya/egress-allowlist.txt`
   is now written empty by design (fail-closed: all sandbox egress blocked
