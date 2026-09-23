@@ -148,9 +148,10 @@ async def init_core(
     in pending state (not enrolled), then returns a FIDO2 registration
     challenge for the CLI to present to the security key.
 
-    If admin role already exists with enrolled members → 409.
-    If admin role exists but has no enrolled members → resume mode,
-    returns a fresh challenge for the pending user.
+        If admin role already exists with enrolled members → 409.
+        If admin role exists but has no enrolled members → supersede any
+        abandoned PENDING enrollment and return a fresh challenge (Finding B:
+        a device-less failed ceremony must not brick retry behind a reset).
     """
 
     from core.iam.models import Role, RoleMember, User
@@ -182,16 +183,28 @@ async def init_core(
                     ),
                 )
 
-            # A pending enrollment exists — reject, force reset
-            pending_user = db.query(User).join(RoleMember).filter(RoleMember.role_id == admin_role.id).first()
-
-            if pending_user is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=(
-                        f"A pending enrollment exists for '{pending_user.user_id}'. "
-                        "Use --installation-reset to clear it and start over."
-                    ),
+            # Finding B (init-pin-invalid-after-installation-reset): a PENDING
+            # (unenrolled, no stored credential) admin is residue from a failed
+            # ceremony — e.g. `venya init` with no key inserted commits this row
+            # below, then raises Fido2NotFoundError before any authenticator
+            # interaction. Rejecting here forced --installation-reset for a
+            # harmless abandoned row. Only a COMPLETED enrollment is protected
+            # (enrolled_count > 0, handled above); supersede the pending one(s)
+            # and fall through to re-create with a fresh challenge.
+            stale_pending = (
+                db.query(User)
+                .join(RoleMember, RoleMember.user_id == User.user_id)
+                .filter(RoleMember.role_id == admin_role.id, User.enrolled_at.is_(None))
+                .all()
+            )
+            for stale in stale_pending:
+                db.query(RoleMember).filter(RoleMember.user_id == stale.user_id).delete()
+                db.query(User).filter(User.user_id == stale.user_id).delete()
+            if stale_pending:
+                db.commit()
+                logger.info(
+                    "Init step 1: superseded %d abandoned pending enrollment(s)",
+                    len(stale_pending),
                 )
 
         # Fresh init: create admin role, CA, and pending user

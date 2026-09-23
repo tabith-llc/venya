@@ -156,47 +156,6 @@ class TestInitCore:
         assert resp.status_code == 409
         assert "already initialized" in resp.json()["detail"]
 
-    def test_init_pending_enrollment_rejected(self):
-        """Init with pending enrollment returns 409, forces reset."""
-        admin_role = _make_role()
-        pending_user = _make_user("alice", enrolled_at=None)
-
-        class MockQuery:
-            def __init__(self, model):
-                self._model = model
-                self._call_count = 0
-
-            def filter(self, *args, **kwargs):
-                return self
-
-            def join(self, *model):
-                return self
-
-            def first(self):
-                self._call_count += 1
-                if self._call_count == 1:
-                    return admin_role
-                return pending_user
-
-            def count(self):
-                return 0
-
-        db = MagicMock()
-        db.query.return_value = MockQuery(None)
-
-        backend = MagicMock()
-        backend.get_session.return_value = db
-        app = _create_test_app(backend=backend, fido2_manager=MockFido2Manager())
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/init",
-            json={"user_id": "alice"},
-        )
-        assert resp.status_code == 409
-        data = resp.json()
-        assert "pending enrollment exists" in data["detail"].lower()
-
 
 class TestInitComplete:
     """Tests for POST /init/complete endpoint."""
@@ -467,3 +426,54 @@ class TestInitCoreRealDB:
             tok in low
             for tok in ("insert", "select", "unique", "users", "roles", "constraint", "sql", "psycopg", "parameters")
         )
+
+    def test_pending_enrollment_superseded(self, tmp_path):
+        """Fix 3 / Finding B (init-pin-invalid-after-installation-reset): an
+        abandoned PENDING (unenrolled) admin enrollment is SUPERSEDED by a fresh
+        init — 201 + fresh challenge, NOT the old 409 that forced
+        --installation-reset. A device-less `venya init <user>` failure strands
+        exactly this row; retrying the same user must just work. Real-SQLite:
+        exercises the actual join/filter/delete + fall-through re-create.
+        """
+        from core.iam.models import Role, RoleMember, User
+
+        client, SessionLocal = _build_real_init_app(tmp_path, seed_roles=True)
+        # Seed an abandoned PENDING admin (enrolled_at=None) + membership, as a
+        # device-less failed ceremony leaves behind.
+        with SessionLocal() as s:
+            admin_role = s.query(Role).filter(Role.name == "admin").first()
+            s.add(User(user_id="dusty", auth_mode="security-key", enrolled_at=None))
+            s.add(RoleMember(user_id="dusty", role_id=admin_role.id))
+            s.commit()
+
+        resp = client.post("/api/v1/init", json={"user_id": "dusty"})
+        assert resp.status_code == 201, resp.text  # pre-fix: 409 "pending enrollment exists"
+        assert "challenge_id" in resp.json()
+
+        with SessionLocal() as s:
+            # superseded, not duplicated: exactly one pending 'dusty' admin remains
+            assert s.query(User).filter(User.user_id == "dusty").count() == 1
+            assert s.query(RoleMember).filter(RoleMember.user_id == "dusty").count() == 1
+            assert s.query(User).filter(User.user_id == "dusty").first().enrolled_at is None
+
+    def test_completed_admin_still_409(self, tmp_path):
+        """PAIRED NEGATIVE for Fix 3: supersede only touches UNENROLLED pending
+        rows. A COMPLETED (enrolled_at set) admin is protected — init still 409s
+        'already initialized' and does NOT supersede the real admin."""
+        from datetime import UTC, datetime
+
+        from core.iam.models import Role, RoleMember, User
+
+        client, SessionLocal = _build_real_init_app(tmp_path, seed_roles=True)
+        with SessionLocal() as s:
+            admin_role = s.query(Role).filter(Role.name == "admin").first()
+            s.add(User(user_id="dusty", auth_mode="security-key", enrolled_at=datetime.now(UTC)))
+            s.add(RoleMember(user_id="dusty", role_id=admin_role.id))
+            s.commit()
+
+        resp = client.post("/api/v1/init", json={"user_id": "mallory"})
+        assert resp.status_code == 409, resp.text
+        assert "already initialized" in resp.json()["detail"]
+        with SessionLocal() as s:
+            # the real (enrolled) admin was NOT superseded
+            assert s.query(User).filter(User.user_id == "dusty").count() == 1
