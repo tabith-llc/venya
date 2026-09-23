@@ -239,6 +239,7 @@ Production deployment guide: **[Installation Guide](docs/installation.md)**
 | `packages/executor` | Remote daemon — sandboxed execution, secret injection, redaction |
 | `packages/cli` | Workstation CLI (`venya`) — admin, enrollment, execution client |
 | `packages/mcp` | MCP server (`venya-mcp`) — exposes Venya tools to LLM clients |
+| `packages/venya-contract` | Frozen relay wire contract — shared request/response models (`extra="forbid"`) that prevent silent field drift between core and executor |
 | Rust filter extension | Output redaction (`[REDACTED:...]` markers) before return |
 | Installer / uninstaller scripts | `install-venya-{core,executor,cli}.sh` + matching `uninstall-venya-*.sh` (see `install-scripts-README.md`) |
 
