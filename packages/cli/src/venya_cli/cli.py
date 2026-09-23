@@ -27,6 +27,7 @@ def create_parser() -> argparse.ArgumentParser:
     """Create the main CLI argument parser.
 
     Commands:
+        venya setup <corename>                  # Save server URL + install core CA cert
         venya init <user_id>                    # Bootstrap
         venya store <key> [value]               # Store a secret
         venya get <key>                         # Retrieve a secret
@@ -55,7 +56,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"venya {_cli_version()}",
+        version=f"{_cli_version()}",
         help="Print the CLI version and exit",
     )
 
@@ -100,6 +101,16 @@ def create_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help="Metadata key=value pair (can be specified multiple times)",
+    )
+    store_parser.add_argument(
+        "--shape",
+        default=None,
+        help="How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name)",
+    )
+    store_parser.add_argument(
+        "--usage",
+        default=None,
+        help="Command template for humans/agents; reference the secret only via {secret_path} (e.g. 'sshpass -f {secret_path} ssh user@host cmd')",
     )
 
     # get
@@ -146,8 +157,18 @@ def create_parser() -> argparse.ArgumentParser:
         "--metadata",
         "-m",
         action="append",
-        required=True,
+        default=None,
         help="Metadata key=value pair (can be specified multiple times)",
+    )
+    update_meta_parser.add_argument(
+        "--shape",
+        default=None,
+        help="How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name)",
+    )
+    update_meta_parser.add_argument(
+        "--usage",
+        default=None,
+        help="Command template for humans/agents; reference the secret only via {secret_path} (e.g. 'sshpass -f {secret_path} ssh user@host cmd')",
     )
 
     # audit
@@ -529,12 +550,14 @@ def create_parser() -> argparse.ArgumentParser:
     register_parser = exec_subparsers.add_parser("register", help="Register this machine as an executor with the core")
     register_parser.add_argument(
         "--executor-id",
-        default="venya-exec",
-        help="Executor ID (default: venya-exec)",
+        default=None,
+        help="Executor ID (default: executor_id from /etc/venya/executor.toml)",
     )
     register_parser.add_argument(
         "--core-url",
-        help="Core server URL (default: from config)",
+        "--server-url",
+        dest="core_url",
+        help="Core server URL (default: from config or VENYA_SERVER_URL)",
     )
     register_parser.add_argument(
         "--output-dir",
@@ -545,7 +568,8 @@ def create_parser() -> argparse.ArgumentParser:
         "--enrollment-token",
         dest="enrollment_token",
         default=None,
-        help="Enrollment token for bootstrap registration (from admin executor-enroll)",
+        help="Enrollment token for bootstrap registration (from admin executor-enroll; "
+        "falls back to VENYA_EXECUTOR_ENROLLMENT_TOKEN env)",
     )
     register_parser.add_argument(
         "--ca-bundle",
@@ -599,7 +623,9 @@ def create_parser() -> argparse.ArgumentParser:
     heartbeat_parser = exec_subparsers.add_parser("heartbeat", help="Send heartbeat to core")
     heartbeat_parser.add_argument(
         "--core-url",
-        help="Core server URL (default: from config)",
+        "--server-url",
+        dest="core_url",
+        help="Core server URL (default: from config or VENYA_SERVER_URL)",
     )
     heartbeat_parser.add_argument(
         "--cert-path",
@@ -715,6 +741,15 @@ def create_parser() -> argparse.ArgumentParser:
     login_parser = subparsers.add_parser("login", help="Authenticate with a security key")
     login_parser.add_argument("user_id", help="User ID to authenticate as")
     login_parser.add_argument("--json", action="store_true")
+
+    # setup
+    setup_parser = subparsers.add_parser("setup", help="Save the server URL and install the core's CA certificate")
+    setup_parser.add_argument("corename", help="Core server hostname or full URL (e.g. venya-core-1)")
+    setup_parser.add_argument(
+        "--ca-sha256",
+        default=None,
+        help="Pin the expected CA SHA-256 fingerprint (hex; colons, spaces, and case are ignored)",
+    )
 
     return parser
 

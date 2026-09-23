@@ -1349,3 +1349,180 @@ class TestSecretUpsertRoute:
             rows = s.query(Secret).filter(Secret.key == "rotating-pw").order_by(Secret.id).all()
             assert len(rows) == 2
             assert decrypt_secret(kek, rows[0].wrapped_dek, rows[0].nonce, rows[0].encrypted_value) == b"owner-value"
+
+
+class TestShapeMetadata:
+    """shape/usage metadata convention (ticket secret-shape-metadata).
+
+    Paired cells per the truth-table rule: every accept has a reject twin.
+    The reject half is the security-bearing one — a usage template that
+    interpolates the secret VALUE must die at authoring time with an
+    actionable 400 (institutionalization rule: never bless a bypass shape).
+    Warnings are loud-not-fatal (forward-compat for custom shapes).
+    """
+
+    def _store(self, metadata):
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+        return client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "shaped-secret",
+                "value": "secret",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": metadata,
+            },
+        )
+
+    def _patch_client(self):
+        core = MagicMock()
+        core.get.return_value = "\u2022" * 8
+        backend = MagicMock()
+        mock_session = MagicMock()
+        mock_secret = MagicMock()
+        mock_secret.id = 1
+        mock_secret.key = "db-password"
+        mock_secret.meta = {"executor": "web-server-3"}
+        mock_secret.roles = []
+        mock_query = MagicMock()
+        mock_query.filter.return_value.first.return_value = mock_secret
+        mock_session.query.return_value = mock_query
+        app = _create_test_app(core=core, backend=backend)
+        backend.get_session.return_value = mock_session
+        return TestClient(app, raise_server_exceptions=False), mock_secret, mock_session
+
+    def test_builtin_shape_and_usage_accepted_without_warnings(self):
+        resp = self._store(
+            {
+                "shape": "ssh-password",
+                "usage": "sshpass -f {secret_path} ssh {user}@{host} systemctl restart httpd",
+            }
+        )
+        assert resp.status_code == 201
+        assert resp.json()["metadata_warnings"] == []
+
+    def test_env_shape_accepted_without_warning(self):
+        # env mechanism SHIPPED (secret-shape-env-injection): env: is a builtin
+        # taxonomy prefix — the former declarative-only warning left with it.
+        resp = self._store({"shape": "env:AWS_SECRET_ACCESS_KEY"})
+        assert resp.status_code == 201
+        assert resp.json()["metadata_warnings"] == []
+
+    def test_sudo_stdin_shape_accepted_without_warning(self):
+        # Mechanism SHIPPED (narrow redirect allowance, ticket
+        # secret-shape-sudo-remote option (a)) — the declarative-only warning
+        # left with the last MECHANISM_PENDING_SHAPES member.
+        resp = self._store({"shape": "sudo-stdin"})
+        assert resp.status_code == 201
+        assert resp.json()["metadata_warnings"] == []
+
+    def test_mechanism_pending_set_is_empty_pinned(self):
+        # Deliberate pin: the pending set is EMPTY — re-adding a shape to it
+        # requires a ruling (comment at MECHANISM_PENDING_SHAPES).
+        from server.routes.secrets import MECHANISM_PENDING_SHAPES
+
+        assert MECHANISM_PENDING_SHAPES == frozenset()
+
+    def test_env_shape_multiline_value_rejected_400(self):
+        # The env-file format is line-based — catch multi-line values at
+        # authoring time (loudest, earliest point), before persistence.
+        core = _make_mock_core()
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/secrets",
+            json={
+                "key": "multi",
+                "value": "line1\nline2",
+                "roles": ["dev"],
+                "key_version_id": "v1",
+                "metadata": {"shape": "env:MY_TOKEN"},
+            },
+        )
+        assert resp.status_code == 400
+        assert "single-line" in resp.json()["detail"]
+        core.put.assert_not_called()  # rejected before persistence
+
+    def test_file_arg_shapes_never_warn_mechanism(self):
+        # File injection ships today; tool availability is a deployment
+        # property (sandbox template) the server cannot know — file shapes
+        # must stay warning-free.
+        for shape in (
+            "ssh-password",
+            "ssh-key",
+            "http-netrc",
+            "http-header-file",
+            "mysql-defaults",
+            "ipmi-passfile",
+        ):
+            resp = self._store({"shape": shape})
+            assert resp.status_code == 201, shape
+            assert resp.json()["metadata_warnings"] == [], shape
+
+    def test_custom_shape_accepted_with_teaching_warning(self):
+        resp = self._store({"shape": "internal-vault-cli"})
+        assert resp.status_code == 201
+        warnings = resp.json()["metadata_warnings"]
+        assert len(warnings) == 1
+        assert "CUSTOM shape" in warnings[0]
+        # the warning teaches the fix: add a usage template
+        assert "usage" in warnings[0] and "{secret_path}" in warnings[0]
+
+    def test_custom_shape_with_usage_omits_the_nag(self):
+        resp = self._store({"shape": "internal-vault-cli", "usage": "vaulttool --cred-file {secret_path} run"})
+        assert resp.status_code == 201
+        warnings = resp.json()["metadata_warnings"]
+        assert len(warnings) == 1
+        assert "Add 'usage'" not in warnings[0]
+
+    def test_value_placeholder_rejected_400_with_actionable_detail(self):
+        for bad in ("{value}", "{secret_value}", "{plaintext}", "{password}", "{token}", "{credential}"):
+            resp = self._store({"shape": "ssh-password", "usage": f"tool --pass {bad} run"})
+            assert resp.status_code == 400, bad
+            detail = resp.json()["detail"]
+            assert "{secret_path}" in detail  # names the right way
+            assert "UNMASKED" in detail  # names the WHY
+
+    def test_unknown_placeholder_warns_not_fails(self):
+        resp = self._store({"shape": "ssh-password", "usage": "tool -f {secret_path} --port {port}"})
+        assert resp.status_code == 201
+        assert any("{port}" in w for w in resp.json()["metadata_warnings"])
+
+    def test_non_string_shape_rejected_400(self):
+        resp = self._store({"shape": 42})
+        assert resp.status_code == 400
+        assert "non-empty string" in resp.json()["detail"]
+
+    def test_no_shape_keys_unchanged_behavior(self):
+        resp = self._store({"executor": "web-server-3"})
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["metadata"] == {"executor": "web-server-3"}
+        assert data["metadata_warnings"] == []
+
+    def test_patch_value_placeholder_rejected_before_mutation(self):
+        client, mock_secret, mock_session = self._patch_client()
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"usage": "tool --pass {value} run"}},
+        )
+        assert resp.status_code == 400
+        assert "{secret_path}" in resp.json()["detail"]
+        # enforce-before-mutate: the row is untouched and nothing committed
+        assert mock_secret.meta == {"executor": "web-server-3"}
+        mock_session.commit.assert_not_called()
+
+    def test_patch_custom_shape_warns_and_merges(self):
+        client, *_ = self._patch_client()
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"shape": "internal-vault-cli", "usage": "vaulttool -f {secret_path}"}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["metadata"]["shape"] == "internal-vault-cli"
+        assert data["metadata"]["executor"] == "web-server-3"  # merge preserved
+        assert len(data["metadata_warnings"]) == 1
+        assert "CUSTOM shape" in data["metadata_warnings"][0]

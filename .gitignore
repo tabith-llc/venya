@@ -9,8 +9,7 @@ dist/
 build/
 *.whl
 
-# uv
-uv.lock
+# uv — uv.lock is VERSIONED on purpose (application repo; keeps scripts/pin-requirements.sh --check reproducible from a clean checkout — ticket installer-deps-not-lock-pinned). Do NOT re-ignore.
 .pyenv/
 
 # Virtual environments

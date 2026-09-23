@@ -9,6 +9,7 @@
 import base64
 import hashlib
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -42,6 +43,7 @@ class SecretCreateResponse(BaseModel):
     role_names: list[str]
     metadata: dict[str, Any] | None = None
     replaced: bool = False  # True when the store replaced a visible existing row (upsert)
+    metadata_warnings: list[str] = Field(default_factory=list)  # loud-not-fatal shape-convention warnings
 
 
 class SecretMetadata(BaseModel):
@@ -73,6 +75,113 @@ class SecretMetadata(BaseModel):
     )
 
     model_config = {"extra": "allow"}
+
+
+# --- Shape metadata (ticket secret-shape-metadata) -------------------------
+# A "shape" = how a secret is consumed (which tool, which flag, which file
+# format). Shapes are a CONVENTION over the free-form metadata column
+# (SecretMetadata extra="allow") — zero schema change. The taxonomy below is
+# the blessed set; unknown names are CUSTOM shapes (warn-not-fail, forward
+# compatible). Usage templates reference the injected sandbox file via
+# {secret_path} (= /run/secrets/venya/<id>) and NEVER the value: a value in
+# command text persists UNMASKED in the audit log and /proc (the operator
+# rule from architecture.md §Secret lifecycle, enforced here at authoring
+# time — institutionalization rule: never bless a bypass shape).
+
+BUILTIN_SHAPES = frozenset(
+    {
+        "ssh-password",
+        "ssh-key",
+        "http-netrc",
+        "http-header-file",
+        "mysql-defaults",
+        "ipmi-passfile",
+        "askpass",
+        "sudo-stdin",
+    }
+)
+ENV_SHAPE_PREFIX = "env:"
+USAGE_PLACEHOLDERS = frozenset({"secret_path", "secret_id", "host", "user"})
+
+# Shapes whose consumption MECHANISM has not shipped yet — declaring one is
+# allowed (forward-compat ruling) but must WARN: a label implying capability
+# the product lacks is a user-friendliness defect and a support-ticket
+# generator. Currently EMPTY: env:NAME + askpass shipped in the env-shape
+# train, sudo-stdin shipped via the narrow redirect allowance (ticket
+# secret-shape-sudo-remote option (a)). Re-add here ONLY with a ruling.
+# File-arg shapes are NOT here: file injection ships today, and tool
+# availability inside the sandbox template is a deployment property the
+# server cannot know (documented per-shape).
+MECHANISM_PENDING_SHAPES: frozenset[str] = frozenset()
+
+_VALUE_PLACEHOLDER_RE = re.compile(
+    r"\{\s*(value|secret_value|secret|plaintext|password|pass|token|credential)\s*\}",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _validate_shape_metadata(meta: dict[str, Any]) -> list[str]:
+    """Validate the shape/usage convention keys. Returns user-facing warnings.
+
+    Warnings are loud, never fatal (forward-compat ruling). The security half
+    RAISES 400 with an actionable message: usage templates interpolating the
+    secret value, or non-string shape/usage.
+    """
+    warnings: list[str] = []
+
+    shape = meta.get("shape")
+    if shape is not None:
+        if not isinstance(shape, str) or not shape.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="'shape' metadata must be a non-empty string (e.g. shape=ssh-key).",
+            )
+        if not (shape in BUILTIN_SHAPES or shape.startswith(ENV_SHAPE_PREFIX)):
+            hint = (
+                ""
+                if meta.get("usage")
+                else " Add 'usage' metadata — a command template with {secret_path} — so agents know how to consume it."
+            )
+            warnings.append(
+                f"shape '{shape}' is not built-in; treating it as a CUSTOM shape (allowed).{hint}"
+                f" Built-ins: {', '.join(sorted(BUILTIN_SHAPES))}, and env:NAME."
+            )
+        if shape in MECHANISM_PENDING_SHAPES:
+            warnings.append(
+                f"shape '{shape}' is DECLARATIVE-ONLY in this release — its consumption mechanism"
+                " has not shipped yet (sudo-stdin awaits the secret-shape-sudo-remote work)."
+                " The secret IS still injected as a file at /run/secrets/venya/<id>, and any tool"
+                " that reads it from a file works today."
+            )
+
+    usage = meta.get("usage")
+    if usage is not None:
+        if not isinstance(usage, str) or not usage.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="'usage' metadata must be a non-empty command-template string.",
+            )
+        m = _VALUE_PLACEHOLDER_RE.search(usage)
+        if m:
+            allowed = ", ".join("{" + p + "}" for p in sorted(USAGE_PLACEHOLDERS))
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"usage template interpolates the secret value ('{m.group(0)}') — rejected."
+                    " Reference the secret only by path: {secret_path} (the injected sandbox"
+                    " file /run/secrets/venya/<id>). A value in command text persists UNMASKED"
+                    f" in the audit log and /proc. Allowed placeholders: {allowed}."
+                ),
+            )
+        for name in _PLACEHOLDER_RE.findall(usage):
+            if name not in USAGE_PLACEHOLDERS:
+                warnings.append(
+                    f"usage template has unknown placeholder '{{{name}}}' — agents may not know"
+                    " how to substitute it. Canonical: {secret_path} = /run/secrets/venya/<id>."
+                )
+
+    return warnings
 
 
 class SecretUpdateRequest(BaseModel):
@@ -171,6 +280,26 @@ async def secrets_create(
             detail="Core not initialized",
         )
 
+    # Shape-metadata build + validation BEFORE the try: the validator's
+    # actionable 400 must not be swallowed by the generic except below.
+    meta = req.metadata.model_dump(exclude_none=True) if req.metadata else {}
+    meta_warnings = _validate_shape_metadata(meta)
+    # env shapes ride the line-based sandbox env-file format — catch multi-line
+    # values at authoring time (loudest, earliest point) instead of at execute.
+    shape_val = meta.get("shape")
+    if (
+        isinstance(shape_val, str)
+        and shape_val.startswith(ENV_SHAPE_PREFIX)
+        and ("\n" in req.value or "\r" in req.value)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "env-shape secrets must be single-line (the sandbox env-file format is line-based). "
+                "Store the value without embedded newlines, or use a file-based shape."
+            ),
+        )
+
     try:
         # Caller's ACTUAL role names, fresh from the DB (NOT user_info["roles"]
         # — that carries role IDs; same wiring as the injection path in
@@ -181,7 +310,6 @@ async def secrets_create(
         rm = RoleManager(db)
         caller_roles = [m.role.name for m in rm.get_user_roles(user_info["user_id"])]
 
-        meta = req.metadata.model_dump(exclude_none=True) if req.metadata else {}
         record = core.put(
             key=req.key,
             value=req.value.encode("utf-8"),
@@ -209,6 +337,7 @@ async def secrets_create(
         role_names=req.roles,
         metadata=meta if meta else {},
         replaced=record.replaced,
+        metadata_warnings=meta_warnings,
     )
 
 
@@ -529,6 +658,9 @@ async def update_secret_metadata(
         # Merge: existing fields preserved, new fields overwrite
         existing_meta = secret.meta or {}
         new_meta = req.metadata.model_dump(exclude_none=True) if req.metadata else {}
+        # Enforce-before-mutate (same ordering principle as the IDOR fix above):
+        # a rejected usage template must not touch the row.
+        meta_warnings = _validate_shape_metadata(new_meta)
         merged_meta = {**existing_meta, **new_meta}
 
         secret.meta = merged_meta
@@ -539,6 +671,7 @@ async def update_secret_metadata(
             key=secret.key,
             role_names=[r.role.name for r in secret.roles] if secret.roles else [],
             metadata=merged_meta,
+            metadata_warnings=meta_warnings,
         )
     finally:
         db.close()

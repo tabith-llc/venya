@@ -104,6 +104,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
     PUBLIC_PATHS = frozenset(
         {
             "/api/v1/health",
+            "/health",  # bare alias of /api/v1/health (same handler, same payload)
             "/api/v1/ready",
             "/api/v1/auth/login/start",
             "/api/v1/auth/login/complete",

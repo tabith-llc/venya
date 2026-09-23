@@ -21,6 +21,7 @@ import stat
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from cryptography import x509
@@ -164,15 +165,29 @@ class TestCLIParsing:
         assert args.exec_command == "register"
 
     def test_exec_register_defaults(self):
-        """exec register has correct default values."""
+        """exec register has correct default values.
+
+        executor_id default is None (ticket cli-exec-register-ignores-config-
+        executor-id): the hardcoded 'venya-exec' default was deleted —
+        resolution is flag → /etc/venya/executor.toml → fail-loud.
+        """
         from venya_cli.cli import create_parser
 
         parser = create_parser()
         args = parser.parse_args(["exec", "register"])
         assert args.exec_command == "register"
-        assert args.executor_id == "venya-exec"
+        assert args.executor_id is None
         assert args.output_dir == "/etc/venya/executor"
         assert args.core_url is None
+
+    def test_exec_register_server_url_alias(self):
+        """--server-url parses into the same dest as --core-url (ticket
+        cli-core-url-server-url-naming-split — recovery terminology parity)."""
+        from venya_cli.cli import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["exec", "register", "--server-url", "https://core.example.com"])
+        assert args.core_url == "https://core.example.com"
 
     def test_exec_register_custom_params(self):
         """exec register accepts custom --executor-id, --core-url, --output-dir."""
@@ -246,6 +261,14 @@ class TestCLIParsing:
         parser = create_parser()
         args = parser.parse_args(["exec", "heartbeat"])
         assert args.exec_command == "heartbeat"
+
+    def test_exec_heartbeat_server_url_alias(self):
+        """heartbeat accepts --server-url too (same dest as --core-url)."""
+        from venya_cli.cli import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["exec", "heartbeat", "--server-url", "https://core.example.com"])
+        assert args.core_url == "https://core.example.com"
 
     def test_exec_audit(self):
         """exec audit is available."""
@@ -560,6 +583,221 @@ class TestExecutorRegister:
             finally:
                 client.close()
         config_file.unlink()
+
+
+# ---------------------------------------------------------------------------
+# executor_id / enrollment-token resolution truth tables
+# (tickets cli-exec-register-ignores-config-executor-id [Gavin #3],
+#  cli-exec-register-token-env-unsupported [Gavin #4],
+#  cli-core-url-server-url-naming-split [Gavin #5])
+# ---------------------------------------------------------------------------
+
+
+def _mock_register_client():
+    """MagicMock APIClient whose register_executor returns a real cert PEM."""
+    private_key = _generate_test_keypair()
+    cert = _generate_test_cert(private_key, "returned-exec", validity_days=30)
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+    client = MagicMock()
+    client.config.server_url = "https://core.example.com"
+    client.register_executor.return_value = {
+        "cert_pem": cert_pem,
+        "ca_cert_pem": cert_pem,
+        "serial_number": "01:23:45",
+        "not_after": "2026-09-13T00:00:00+00:00",
+    }
+    return client
+
+
+def _register_args(
+    tmp_path, executor_id=None, core_url="https://core.example.com", enrollment_token=None, ca_bundle=None
+):
+    """Precise Namespace args (no MagicMock auto-attrs leaking into resolution)."""
+    return SimpleNamespace(
+        executor_id=executor_id,
+        core_url=core_url,
+        output_dir=str(tmp_path / "certs"),
+        enrollment_token=enrollment_token,
+        ca_bundle=ca_bundle,
+    )
+
+
+def _csr_cn(csr_pem: str) -> str:
+    csr = x509.load_pem_x509_csr(csr_pem.encode())
+    return csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+
+
+class TestExecutorIdResolution:
+    """Gavin #3: flag → executor.toml → FAIL-LOUD. The hardcoded 'venya-exec'
+    default is deleted — it silently minted wrong-identity certs (CSR CN) on
+    hosts whose toml carried the real id, and phantom registrations on
+    toml-less hosts."""
+
+    def test_flag_wins_over_toml(self, tmp_path):
+        """Paired negative protecting the installer-style invocation:
+        --executor-id beats a present toml id (byte-identical flag path)."""
+        from venya_cli.commands import executor_register
+
+        toml = tmp_path / "executor.toml"
+        toml.write_text('executor_id = "toml-exec"')
+        client = _mock_register_client()
+        args = _register_args(tmp_path, executor_id="flag-exec")
+
+        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)):
+            assert executor_register(client, args) == 0
+        kwargs = client.register_executor.call_args.kwargs
+        assert kwargs["executor_id"] == "flag-exec"
+        assert _csr_cn(kwargs["csr_pem"]) == "flag-exec"
+
+    def test_toml_used_when_no_flag(self, tmp_path):
+        """Gavin's cell: flagless register on a provisioned host uses the toml
+        identity — CSR CN == venya-exec-1, NOT the old 'venya-exec' default."""
+        from venya_cli.commands import executor_register
+
+        toml = tmp_path / "executor.toml"
+        toml.write_text('executor_id = "venya-exec-1"')
+        client = _mock_register_client()
+        args = _register_args(tmp_path)
+
+        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)):
+            assert executor_register(client, args) == 0
+        kwargs = client.register_executor.call_args.kwargs
+        assert kwargs["executor_id"] == "venya-exec-1"
+        assert _csr_cn(kwargs["csr_pem"]) == "venya-exec-1"
+
+    def test_no_flag_no_toml_fails_loud(self, tmp_path, capsys):
+        """No flag + no toml → rc=1 actionable error BEFORE any keypair or
+        register call (fail at the right layer, no phantom registration)."""
+        from venya_cli.commands import executor_register
+
+        client = _mock_register_client()
+        args = _register_args(tmp_path)
+
+        # Absent file, real name — the error message interpolates the path.
+        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(tmp_path / "absent-dir" / "executor.toml")):
+            assert executor_register(client, args) == 1
+        client.register_executor.assert_not_called()
+        assert not (tmp_path / "certs").exists()  # no keypair/cert artifacts written
+        captured = capsys.readouterr()
+        assert "Generating ECDSA" not in captured.out  # never reached step 1
+        assert "executor_id required" in captured.err
+        assert "--executor-id" in captured.err
+        assert "executor.toml" in captured.err
+
+    def test_toml_without_executor_id_key_fails_loud(self, tmp_path, capsys):
+        """Toml exists but lacks the executor_id key → same fail-loud path."""
+        from venya_cli.commands import executor_register
+
+        toml = tmp_path / "executor.toml"
+        toml.write_text('ca_bundle = "/etc/venya/executor/ca.crt"')
+        client = _mock_register_client()
+        args = _register_args(tmp_path)
+
+        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)):
+            assert executor_register(client, args) == 1
+        client.register_executor.assert_not_called()
+        assert "executor_id required" in capsys.readouterr().err
+
+    def test_malformed_toml_fails_loud(self, tmp_path, capsys):
+        """Paired negative against the OLD silent B110 ignore: a malformed
+        toml is a loud parse error on the register path, never a fallthrough
+        to a made-up default."""
+        from venya_cli.commands import executor_register
+
+        toml = tmp_path / "executor.toml"
+        toml.write_text("this is not [valid toml")
+        client = _mock_register_client()
+        args = _register_args(tmp_path)
+
+        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)):
+            assert executor_register(client, args) == 1
+        client.register_executor.assert_not_called()
+        err = capsys.readouterr().err
+        assert "failed to parse" in err
+        assert str(toml) in err
+
+    def test_ca_bundle_flag_beats_toml(self, tmp_path):
+        """Existing behavior preserved: --ca-bundle wins over toml ca_bundle."""
+        from venya_cli.commands import executor_register
+
+        toml = tmp_path / "executor.toml"
+        toml.write_text('executor_id = "toml-exec"\nca_bundle = "/toml/ca.crt"')
+        client = _mock_register_client()
+        args = _register_args(tmp_path, executor_id="flag-exec", ca_bundle="/flag/ca.crt")
+
+        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)):
+            assert executor_register(client, args) == 0
+        assert client.register_executor.call_args.kwargs["ca_bundle"] == "/flag/ca.crt"
+
+    def test_ca_bundle_toml_fallback_preserved(self, tmp_path):
+        """Existing behavior preserved: toml ca_bundle used when flag absent."""
+        from venya_cli.commands import executor_register
+
+        toml = tmp_path / "executor.toml"
+        toml.write_text('executor_id = "toml-exec"\nca_bundle = "/toml/ca.crt"')
+        client = _mock_register_client()
+        args = _register_args(tmp_path)
+
+        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)):
+            assert executor_register(client, args) == 0
+        assert client.register_executor.call_args.kwargs["ca_bundle"] == "/toml/ca.crt"
+
+
+class TestEnrollmentTokenEnv:
+    """Gavin #4: flag > env VENYA_EXECUTOR_ENROLLMENT_TOKEN; empty = unset
+    (installer ${VAR:-} semantics). The documented env contract now reaches
+    the manual register path."""
+
+    def _resolve_token(self, tmp_path, flag, env):
+        from venya_cli.commands import executor_register
+
+        client = _mock_register_client()
+        args = _register_args(tmp_path, executor_id="test-exec", enrollment_token=flag)
+        environ = {} if env is None else {"VENYA_EXECUTOR_ENROLLMENT_TOKEN": env}
+        with (
+            patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(tmp_path / "absent.toml")),
+            patch.dict(os.environ, environ),
+        ):
+            assert executor_register(client, args) == 0
+        return client.register_executor.call_args.kwargs["enrollment_token"]
+
+    def test_flag_beats_env(self, tmp_path):
+        """Paired negative (precedence protection): explicit flag wins."""
+        assert self._resolve_token(tmp_path, "flag-tok", "env-tok") == "flag-tok"
+
+    def test_env_used_when_no_flag(self, tmp_path):
+        """Gavin's cell: env-only invocation carries the token."""
+        assert self._resolve_token(tmp_path, None, "env-tok") == "env-tok"
+
+    def test_empty_env_treated_as_unset(self, tmp_path):
+        """VENYA_EXECUTOR_ENROLLMENT_TOKEN='' must not become the token."""
+        assert self._resolve_token(tmp_path, None, "") is None
+
+    def test_neither_passes_none(self, tmp_path):
+        """Paired negative protecting require_token enforcement: tokenless
+        registration still reaches the server as None — the 400 path and the
+        daemon.py guidance are unchanged."""
+        assert self._resolve_token(tmp_path, None, None) is None
+
+
+class TestRegisterUrlErrorMessage:
+    """Gavin #5: the register 'URL required' error names both flag spellings
+    and the env var (was: --core-url only, no env mention)."""
+
+    def test_url_error_names_both_spellings_and_env(self, tmp_path, capsys):
+        from venya_cli.commands import executor_register
+
+        client = MagicMock()
+        client.config.server_url = "http://localhost:8000"  # sentinel default → rejected
+        args = _register_args(tmp_path, executor_id="test-exec", core_url=None)
+
+        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(tmp_path / "absent.toml")):
+            assert executor_register(client, args) == 1
+        client.register_executor.assert_not_called()
+        err = capsys.readouterr().err
+        assert "--server-url" in err
+        assert "--core-url" in err
+        assert "VENYA_SERVER_URL" in err
 
 
 # ---------------------------------------------------------------------------

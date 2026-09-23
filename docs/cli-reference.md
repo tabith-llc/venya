@@ -87,6 +87,7 @@ and exits `1`.
   - [`venya credential remove`](#venya-credential-remove)
 - [`venya enroll`](#venya-enroll)
 - [`venya login`](#venya-login)
+- [`venya setup`](#venya-setup)
 
 ---
 
@@ -129,6 +130,8 @@ venya store <KEY> [VALUE] --roles ROLES [OPTIONS]
 | `--roles` | **yes** | repeatable/space-separated list | — | Role(s) to scope the secret to |
 | `--key-version` | no | string | — | Key version ID to encrypt with (default: server's active key version) |
 | `--metadata`, `-m` | no | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |
+| `--shape` | no | string | — | How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name) |
+| `--usage` | no | string | — | Command template for humans/agents; reference the secret only via {secret_path} (e.g. 'sshpass -f {secret_path} ssh user@host cmd') |
 
 **Examples**
 
@@ -205,13 +208,15 @@ venya delete db/password  # delete a secret (fails if still referenced by an exe
 Update metadata for a secret
 
 ```
-venya update-metadata <KEY> --metadata METADATA
+venya update-metadata <KEY> [OPTIONS]
 ```
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `KEY` (positional) | **yes** | string | — | Secret key to update |
-| `--metadata`, `-m` | **yes** | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |
+| `--metadata`, `-m` | no | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |
+| `--shape` | no | string | — | How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name) |
+| `--usage` | no | string | — | Command template for humans/agents; reference the secret only via {secret_path} (e.g. 'sshpass -f {secret_path} ssh user@host cmd') |
 
 **Examples**
 
@@ -1044,10 +1049,10 @@ venya exec register [OPTIONS]
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
-| `--executor-id` | no | string | `venya-exec` | Executor ID (default: venya-exec) |
-| `--core-url` | no | string | — | Core server URL (default: from config) |
+| `--executor-id` | no | string | — | Executor ID (default: executor_id from /etc/venya/executor.toml) |
+| `--core-url`, `--server-url` | no | string | — | Core server URL (default: from config or VENYA_SERVER_URL) |
 | `--output-dir` | no | string | `/etc/venya/executor` | Directory to save cert and key (default: /etc/venya/executor) |
-| `--enrollment-token` | no | string | — | Enrollment token for bootstrap registration (from admin executor-enroll) |
+| `--enrollment-token` | no | string | — | Enrollment token for bootstrap registration (from admin executor-enroll; falls back to VENYA_EXECUTOR_ENROLLMENT_TOKEN env) |
 | `--ca-bundle` | no | string | — | Path to CA bundle for verifying core server TLS |
 
 **Examples**
@@ -1139,7 +1144,7 @@ venya exec heartbeat [OPTIONS]
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
-| `--core-url` | no | string | — | Core server URL (default: from config) |
+| `--core-url`, `--server-url` | no | string | — | Core server URL (default: from config or VENYA_SERVER_URL) |
 | `--cert-path` | no | string | `/etc/venya/executor/executor.crt` | Path to executor certificate (default: /etc/venya/executor/executor.crt) |
 | `--key-path` | no | string | — | Path to executor private key (default: derive from --cert-path) |
 
@@ -1381,4 +1386,24 @@ venya login <USER_ID> [OPTIONS]
 ```bash
 venya login jsmith  # authenticate with your security key; stores a session token
 venya login jsmith --json  # machine-readable result
+```
+
+## `venya setup`
+
+Save the server URL and install the core's CA certificate
+
+```
+venya setup <CORENAME> [OPTIONS]
+```
+
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `CORENAME` (positional) | **yes** | string | — | Core server hostname or full URL (e.g. venya-core-1) |
+| `--ca-sha256` | no | string | — | Pin the expected CA SHA-256 fingerprint (hex; colons, spaces, and case are ignored) |
+
+**Examples**
+
+```bash
+venya setup venya-core-1  # save the server URL and install the core's CA certificate (one-command workstation bootstrap)
+venya setup venya-core-1 --ca-sha256 AA:BB:CC  # strictly pin the expected CA SHA-256 fingerprint (hex; colons/spaces/case ignored)
 ```

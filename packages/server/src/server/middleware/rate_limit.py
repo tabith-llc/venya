@@ -11,6 +11,7 @@ Uses PostgreSQL fixed-window counters for multi-worker safety.
 """
 
 import logging
+import math
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -39,6 +40,16 @@ def _truncate_to_window(dt: datetime, window: timedelta) -> datetime:
     elif window == _BREAK_GLASS_WINDOW:
         return dt.replace(minute=0, second=0, microsecond=0)
     return dt.replace(second=0, microsecond=0)
+
+
+def _window_retry_after(now: datetime, window_start: datetime, window: timedelta) -> int:
+    """Seconds until the fixed-window bucket resets (always >= 1).
+
+    Retry-After contract (ticket delta-b-run-low-bundle O2): EVERY 429 this
+    middleware emits carries the header — client backoff without it is
+    guesswork. Delta-seconds form (RFC 9110 §10.2.3), never HTTP-date.
+    """
+    return max(1, math.ceil((window_start + window - now).total_seconds()))
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -102,11 +113,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             window = _GENERIC_WINDOW
 
         # Check break-glass backoff before processing
-        if endpoint_type == "break_glass" and self._check_break_glass_backoff(ip):
-            return JSONResponse(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                content={"detail": "Break-glass endpoint rate limited: too many recent failures"},
-            )
+        if endpoint_type == "break_glass":
+            backoff_remaining = self._check_break_glass_backoff(ip)
+            if backoff_remaining > 0:
+                return JSONResponse(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    content={"detail": "Break-glass endpoint rate limited: too many recent failures"},
+                    headers={"Retry-After": str(backoff_remaining)},
+                )
 
         # UPSERT: atomic increment, returns new count
         now = datetime.now(UTC)
@@ -126,20 +140,24 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
             if count > limit:
                 metrics.RATE_LIMIT_HIT_TOTAL.labels(limit_type=endpoint_type).inc()
+                retry_after = {"Retry-After": str(_window_retry_after(now, window_start, window))}
                 if endpoint_type == "break_glass":
                     return JSONResponse(
                         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                         content={"detail": "Break-glass endpoint rate limited: too many requests per hour"},
+                        headers=retry_after,
                     )
                 elif endpoint_type == "auth":
                     return JSONResponse(
                         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                         content={"detail": "Auth endpoint rate limited: too many requests per minute"},
+                        headers=retry_after,
                     )
                 else:
                     return JSONResponse(
                         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                         content={"detail": "Rate limited: too many requests per minute"},
+                        headers=retry_after,
                     )
         finally:
             if db is not None:
@@ -184,11 +202,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         db.commit()
         return count
 
-    def _check_break_glass_backoff(self, ip: str) -> bool:
+    def _check_break_glass_backoff(self, ip: str) -> int:
         """Check exponential backoff for break-glass failures.
 
-        Returns True if the client should be delayed/blocked.
-        Backoff: 1s, 2s, 4s, 8s, 16s (capped at 16s).
+        Returns the REMAINING backoff seconds (> 0 = blocked, 0 = pass) — the
+        caller turns it into the 429's Retry-After header (ticket
+        delta-b-run-low-bundle O2). Truthiness-compatible with the old bool
+        contract. Backoff: 1s, 2s, 4s, 8s, 16s (capped at 16s).
         """
         now = time.time()
         failures = self._break_glass_failures.get(ip, [])
@@ -196,7 +216,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # Only keep failures within the last hour
         failures = [t for t in failures if now - t < 3600]
         if not failures:
-            return False
+            return 0
 
         attempt_count = len(failures)
         backoff_seconds = min(2 ** (attempt_count - 1), 16)
@@ -206,9 +226,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         if elapsed < backoff_seconds:
             metrics.RATE_LIMIT_HIT_TOTAL.labels(limit_type="break_glass_backoff").inc()
-            return True
+            return max(1, math.ceil(backoff_seconds - elapsed))
 
-        return False
+        return 0
 
     def _record_break_glass_failure(self, ip: str) -> None:
         """Record a break-glass failure for exponential backoff."""

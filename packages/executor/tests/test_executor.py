@@ -12,10 +12,11 @@ from unittest.mock import MagicMock, patch
 import httpx2
 import pytest
 
+from executor.bundles import SecretBundle
 from executor.command_validator import CommandValidator
 from executor.config import CertificateRotationConfig, ExecutorConfig, MtlsConfig, ReaperConfig
 from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop
-from executor.executor import Executor
+from executor.executor import Executor, _resolve_env_vars
 
 # --- Fixtures ---
 
@@ -274,6 +275,7 @@ class TestSendToStage2:
         import base64
 
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {
             "stdout": base64.b64encode(b"output").decode(),
             "stderr": base64.b64encode(b"error").decode(),
@@ -293,6 +295,7 @@ class TestSendToStage2:
         import base64
 
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {
             "stdout": base64.b64encode(b"output").decode(),
             "stderr": base64.b64encode(b"").decode(),
@@ -349,6 +352,7 @@ class TestRunCommandStage2:
                     with patch("executor.executor.set_cloexec"):
                         with patch("executor.executor.verify_fd_whitelist", return_value=[]):
                             mock_response = MagicMock()
+                            mock_response.status_code = 200
                             mock_response.json.return_value = {
                                 "stdout": base64.b64encode(stage2_stdout).decode(),
                                 "stderr": base64.b64encode(b"").decode(),
@@ -573,3 +577,74 @@ class TestSbxTruncationAccounting:
         assert result.output_truncated is True
         assert result.original_stdout_size == MAX_OUTPUT_BYTES + 999
         assert result.original_stderr_size == 0
+
+
+class TestResolveEnvVars:
+    """_resolve_env_vars truth table (ticket secret-shape-env-injection):
+    secret_id -> unwrapped bundle value, literal -> verbatim, loud rejects.
+    Paired cells: every accept path has a reject twin."""
+
+    def _bundle(self, sid, value: bytes) -> SecretBundle:
+        return SecretBundle(secret_id=str(sid), value=value, wrapped_value=b"w")
+
+    def test_secret_id_resolves_against_bundles(self):
+        env = _resolve_env_vars([{"var_name": "TOKEN", "secret_id": 7}], [self._bundle(7, b"s3cret")], None)
+        assert env == {"TOKEN": "s3cret"}
+
+    def test_int_str_id_forms_both_resolve(self):
+        env = _resolve_env_vars([{"var_name": "T", "secret_id": "7"}], [self._bundle(7, b"v")], None)
+        assert env == {"T": "v"}
+
+    def test_literal_passes_verbatim(self):
+        env = _resolve_env_vars(
+            [{"var_name": "GIT_ASKPASS", "literal_value": "/run/secrets/venya/.venya-askpass"}], [], None
+        )
+        assert env == {"GIT_ASKPASS": "/run/secrets/venya/.venya-askpass"}
+
+    def test_legacy_override_merges_underneath(self):
+        env = _resolve_env_vars([{"var_name": "A", "literal_value": "new"}], [], {"A": "old", "B": "keep"})
+        assert env == {"A": "new", "B": "keep"}
+
+    def test_unbound_secret_id_rejected(self):
+        with pytest.raises(ValueError, match="not among the session's injected secrets"):
+            _resolve_env_vars([{"var_name": "T", "secret_id": 99}], [self._bundle(7, b"v")], None)
+
+    def test_newline_value_rejected(self):
+        with pytest.raises(ValueError, match="newline"):
+            _resolve_env_vars([{"var_name": "T", "secret_id": 7}], [self._bundle(7, b"a\nFORGED=1")], None)
+
+    def test_non_utf8_value_rejected(self):
+        with pytest.raises(ValueError, match="UTF-8"):
+            _resolve_env_vars([{"var_name": "T", "secret_id": 7}], [self._bundle(7, b"\xff\xfe")], None)
+
+    def test_missing_var_name_rejected(self):
+        with pytest.raises(ValueError, match="missing var_name"):
+            _resolve_env_vars([{"secret_id": 7}], [self._bundle(7, b"v")], None)
+
+    def test_none_spec_noop(self):
+        assert _resolve_env_vars(None, [], None) == {}
+
+
+class TestSendToStage2FailClosed:
+    """Non-200 from the definitive masker raises a NAMED RuntimeError — the
+    caller's except-fallback keeps the Stage-1 masked results instead of
+    adopting an empty-knowledge passthrough (ticket
+    stage2-filter-unknown-session-unmasked-passthrough; 404 = unknown or
+    TTL-reaped session)."""
+
+    def test_404_raises_named_error(self, executor: Executor, mock_http_client):
+        resp = MagicMock()
+        resp.status_code = 404
+        resp.json.return_value = {"detail": "Session not found"}
+        mock_http_client.post.return_value = resp
+        executor.http_client = mock_http_client
+        with pytest.raises(RuntimeError, match="Stage-2 filter returned 404"):
+            executor._send_to_stage2(b"out", b"err")
+
+    def test_500_also_raises_named_error(self, executor: Executor, mock_http_client):
+        resp = MagicMock()
+        resp.status_code = 500
+        mock_http_client.post.return_value = resp
+        executor.http_client = mock_http_client
+        with pytest.raises(RuntimeError, match="Stage-2 filter returned 500"):
+            executor._send_to_stage2(b"out", b"err")
