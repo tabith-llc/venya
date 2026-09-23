@@ -71,7 +71,7 @@ venya_check_existing
 # --- Require VENYA_SERVER_URL (no default — server hostname is unknown) ---
 if [ -z "${VENYA_SERVER_URL:-}" ]; then
     error "VENYA_SERVER_URL is required."
-    error "Set it to your core server URL, e.g.: https://venya-core or https://10.0.1.50"
+    error "Set it to your core server URL, e.g.: https://venya-core or https://198.51.100.50"
     exit 1
 fi
 SERVER_URL="$VENYA_SERVER_URL"
