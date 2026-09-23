@@ -34,8 +34,7 @@ each executor as separate virtual machines.
 
 ## Planned for Future Releases
 
-Venya is in alpha. The following are planned for future releases — direction
-committed, dates not. This list is not complete.
+The following are planned for future releases:
 
 - **Single sign-on (SSO).** Enterprise directory authentication (LDAP first)
   hybridized with WebAuthn hardware-key binding — passwords for identity,
@@ -60,8 +59,6 @@ committed, dates not. This list is not complete.
   stacks — on the roadmap, behind the offline-capable tier.
 - **TPM credential sealing.** Bind core service credentials to the host TPM so
   a stolen disk image alone cannot yield key material.
-- **Platform authenticators.** Built-in biometrics: Apple Touch ID, Windows
-  Hello, and Linux fingerprint readers (WebAuthn platform authenticators).
 - **Audit export / SIEM integration.** Forward the append-only audit trail to
   external collectors (SIEM) for long-term retention and correlation.
 
