@@ -32,6 +32,35 @@ each executor as separate virtual machines.
 
 ---
 
+## Planned for Future Releases
+
+Venya is in alpha (`0.1.0alpha14` at the time of writing). The following are
+planned for future releases — direction committed, dates not. This list is not
+complete.
+
+- **Single sign-on (SSO).** Enterprise directory authentication (LDAP first)
+  hybridized with WebAuthn hardware-key binding — passwords for identity,
+  physical keys for privileged operations.
+- **High-availability core.** Multi-node core deployment for availability
+  without changing the trust-anchor model.
+- **Tested backup and disaster recovery.** A documented backup set (encrypted
+  CA material, database, server configuration) with a tested, step-by-step
+  restore procedure — not just a doc that claims to work.
+- **A pure auditor role.** Read-only access to audit logs and metadata with an
+  affirmative deny on secret values.
+- **More secret shapes.** Beyond the shipped stack (env injection, askpass,
+  sudo-stdin, sshpass): a custom shape registry so teams can define their own
+  consumption patterns safely.
+- **Offline-capable installation.** Self-contained install — vendored
+  dependencies and locally seeded sandbox images; no internet access required
+  from core or executor hosts at install or run time.
+- **Fully air-gapped deployment.** Including guidance for local inference
+  stacks — on the roadmap, behind the offline-capable tier.
+- **TPM credential sealing.** Bind core service credentials to the host TPM so
+  a stolen disk image alone cannot yield key material.
+
+---
+
 ## The Problem
 
 Infrastructure teams are adopting AI agents (Claude Code, Cursor, autonomous coding assistants) to manage servers, deploy applications, and troubleshoot incidents. But these agents need credentials to do their work — SSH keys, API tokens, database passwords.
