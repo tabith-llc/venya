@@ -101,6 +101,10 @@ persist UNMASKED in audit sinks (output masking does not cover them) and
 leak via `/proc/<pid>/cmdline` + shell history on the target — see
 [architecture.md §Secret lifecycle](architecture.md#secret-lifecycle-zero-knowledge-injection).
 
+For a narrated multi-executor incident-response walkthrough — every tool call
+and its exact output, start to finish — see
+[example-workflow.md](example-workflow.md).
+
 ## What you just proved
 
 | Claim | Where |

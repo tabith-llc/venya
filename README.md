@@ -83,7 +83,7 @@ Every approach either exposes credentials or blocks AI adoption. Venya is the fo
 ## How Venya Works
 
 ```
-Human: "Install apache2 on web-server-3"
+Human: "The Reston datacenter NAS appears to be offline."
           │
           ▼
 ┌──────────────────┐     ┌───────────────────┐     ┌────────────────────┐
@@ -99,23 +99,25 @@ Human: "Install apache2 on web-server-3"
 └──────────────────┘     └───────────────────┘     └────────────────────┘
 ```
 
-1. **The human asks the AI to do something** — e.g., "Install apache2 on web-server-3"
+1. **The human asks the AI to do something** — e.g., "The Reston datacenter NAS appears to be offline."
 2. **The AI discovers available resources** — calls Venya's MCP tools to list executors and secrets (metadata only, never values)
-3. **The AI constructs the command** — e.g., `ssh bot@web-server-3 sudo apt install -y apache2`
+3. **The AI constructs the command** — e.g., `sshpass -f /run/secrets/venya/12 ssh nas-admin@192.0.2.40 get-volume-status reston-data-01` — the stored password is consumed as a file inside the sandbox, never pasted into the command
 4. **Venya handles the rest:**
    - Server decrypts the secret and wraps it with cryptographic sentinel markers
    - Server relays the command + wrapped secret to the executor over mutual TLS
    - Executor materializes the secret as a read-only file inside the isolated sbx microVM (`/run/secrets/venya/<id>`, mode 0400) — the command consumes it there; it never exists outside the sandbox
    - A Rust-based output filter scans stdout/stderr for any leaked secret values and replaces them with `[REDACTED:<id>]` markers before the AI ever sees it
-5. **The AI reads the filtered output** — it sees the command succeeded, sees the package installation logs, but never sees the password
+5. **The AI reads the filtered output** — it sees the command succeeded, sees the volume-status report, but never sees the password
 6. **Every step is logged** — the audit trail records who authorized the session, what command ran, on which executor, and when
+
+When the first probe fails, the agent adapts — switches executors, escalates, triggers a controlled failover — and every step lands in the audit trail, still without touching a credential value. **See how it ends: the full narrated incident, every call and its exact output → [docs/example-workflow.md](docs/example-workflow.md)**
 
 ---
 
 ## Why Venya Is Different
 
 ### Zero-Knowledge Secret Injection
-The AI agent never touches plaintext credentials. Not in its context window. Not in transit. Not in output. The secret is decrypted server-side, wrapped with sentinel markers, relayed over mTLS, and unwrapped only inside the executor's sandboxed process. The Rust filter ensures that even if a command accidentally echoes a credential in its output, it's replaced with `[REDACTED]` before the AI ever sees it.
+The AI agent never touches plaintext credentials. Not in its context window. Not in transit. Not in output. The secret is decrypted server-side, wrapped with sentinel markers, relayed over mTLS, and unwrapped only inside the executor's sandboxed process. The Rust filter ensures that even if a command accidentally echoes a credential in its output, it's replaced with `[REDACTED:<id>]` before the AI ever sees it.
 
 **No other product does this.** Existing secrets managers hand plaintext to the requesting process. Venya doesn't.
 
