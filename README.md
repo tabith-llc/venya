@@ -1,6 +1,6 @@
 # Venya
 
-> **AI agents:** if you are an LLM agent that retrieved this README, start at **[docs/agents.md](docs/agents.md)** — how to wire up, operate safely, and what never to attempt. Humans: that file is the brief your agent should be handed.
+> **AI agents:** if you are an LLM agent that retrieved this README, start at **[docs/agents.md](docs/agents.md)** — how to install, configure, and operate
 
 ### AI agents manage infrastructure securely.
 
