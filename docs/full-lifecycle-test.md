@@ -515,7 +515,9 @@ current PIN) instead.
 > `ClientError code=3 (CONFIGURATION_UNSUPPORTED) — User verification not
 > configured/supported`. A factory reset (`ykman fido reset` / `fido2-token
 > -R`) **wipes the PIN** — always follow it with `change-pin` / `-S` before
-> the ceremony.
+> the ceremony. Keys that HAVE a PIN but no built-in UV (clientPin-only,
+> TrustKey class) ARE supported — registration takes the raw clientPin path
+> (fix `init-pin-invalid-after-installation-reset`, dev since fc94308).
 
 **Windows variant (ruling 2026-09-18, ticket `windows-fido2-requires-elevation`):**
 C.2 reset + PIN management are **the operator's/customer IT's responsibility,
@@ -550,18 +552,22 @@ ADMIN_TOKEN=$(python3 -c "import json; print(json.load(open('$ADMIN_WS/config.js
 echo "Admin token: ${ADMIN_TOKEN:0:20}..."          # prefix only — never log the full token
 ```
 
-**409 on retry:** if FIDO2 registration failed *after* the server committed a
-pending user row (e.g. key not attached → `No FIDO2 devices found`), retrying
-`init` returns **409**. The CLI carries the server `detail` and prints an
-actionable hint (`Use --installation-reset to clear it`). Reset, then re-init:
+**Retry after a failed ceremony:** if FIDO2 registration failed *after* the
+server committed a pending user row (e.g. key not attached → `No FIDO2 devices
+found`), just **re-run `init`** — the server supersedes abandoned PENDING
+(unenrolled) rows automatically and returns 201 with a fresh challenge (fix
+`init-pin-invalid-after-installation-reset`, dev since fc94308). A **409** now
+means a COMPLETED admin enrollment exists — protection, not residue: use a
+different user id, or only deliberately reset (allowed only while no user is
+fully enrolled; pre-fix/legacy servers still 409 on pending rows, and the CLI
+prints the reset hint there):
 
 ```bash
 VENYA_CONFIG=$ADMIN_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt \
   $ADMIN_WS/.venv/bin/venya init $ADMIN_USER --installation-reset
 ```
 
-(The reset is allowed only while no user is fully enrolled.) Confirm the stuck
-state from the core if needed: `journalctl -u venya-core` or
+Confirm the stuck state from the core if needed: `journalctl -u venya-core` or
 `SELECT user_id, status FROM users;`.
 
 **Windows workstation variant (ticket `windows-fido2-requires-elevation`):**
@@ -968,9 +974,9 @@ injected secret file**, uses it, and the returned output has the value
 
 | Symptom | Cause | Recovery |
 |---------|-------|----------|
-| `venya init`/`enroll` 409 | partial pending row committed | CLI prints the server detail + hint; `venya init <u> --installation-reset`, re-run (C.3) |
+| `venya init`/`enroll` 409 | a COMPLETED admin enrollment exists (abandoned PENDING rows are auto-superseded since `init-pin-invalid-after-installation-reset`, dev fc94308) | use a different user id; `--installation-reset` only deliberately (allowed only while no user is fully enrolled). Pre-fix/legacy servers still 409 on pending rows → CLI prints the reset hint there (C.3) |
 | Pasted block did nothing after the ssh banner | paste race: lines typed while ssh connects are consumed by the local terminal buffer (observed twice, 2026-09-17) | verify remote state before rerunning (`ls /tmp/...`, `ls /opt/venya`); use single-line commands or paste only after the remote prompt |
-| `ClientError code=3 CONFIGURATION_UNSUPPORTED` on init/enroll/login | key has no PIN (UV impossible) | set the PIN (C.2), re-run; 409 afterwards → `--installation-reset` |
+| `ClientError code=3 CONFIGURATION_UNSUPPORTED` on init/enroll/login | key has NO PIN (UV impossible). Keys WITH a PIN but no built-in UV (clientPin-only, TrustKey class) are supported since fc94308 — raw clientPin registration path | set the PIN (C.2), re-run — on current servers the retry needs no `--installation-reset` (pending rows auto-superseded) |
 | CLI 409 message unclear | stale CLI predating detail-carrying fix | update the workstation venv/install (B.3); state also visible via `journalctl -u venya-core` or the `users` table |
 | `admin …` 403 | admin mTLS client cert stale/missing | re-sync C.1; do not sudo-curl around it |
 | `venya store` fails: "No active key version configured" | pre-027 install with no active key version (503) — post-027 fresh installs seed `v1`; if seen there, check `alembic_version` | pass `--key-version v1` (pre-027 installs only) |

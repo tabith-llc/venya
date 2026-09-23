@@ -335,7 +335,7 @@ preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scop
 
 | Check | Command | Expected |
 |---|---|---|
-| Core health | `curl -sk https://<core-host>/api/v1/health` | `{"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}` |
+| Core health | `curl -sk https://<core-host>/api/v1/health` | `{"status":"ok","version":"<server-version>","checks":{"ca":"ok","admin_ca":"ok"}}` |
 | Revocation list reachable | `curl -sk https://<core-host>/api/v1/executors/certs/revocation-list` | JSON list (public endpoint) |
 | Executor cert expiry | `sudo /opt/venya/.venv/bin/venya exec cert status` (on executor) | remaining days > 3 |
 | Executor registered/ONLINE | `venya admin list` / `venya exec status` | executor ONLINE |

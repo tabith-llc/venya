@@ -27,6 +27,13 @@ completes but every sandboxed execution fails. Executor hosts also need a few
 GiB free on the state volume before the first `sbx create` — the agent-template
 pull fails below ~3.5 GiB (observed floor).
 
+**Host separation is enforced, not advisory.** Each installer detects the
+OTHER component system-wide and **refuses (exit 1) before any prompt or
+change** — `VENYA_SKIP_PROMPT=yes` does not bypass it. Co-location would merge
+the trust anchor into the treated-as-compromised zone (both services run as
+the same `venya` user; see the README's Host Trust Model). Same-component
+re-runs remain supported (the idempotency contract, §1).
+
 ## 1. Install the core server
 
 On the core VM (root):
@@ -35,8 +42,14 @@ On the core VM (root):
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
   VENYA_SKIP_PROMPT=yes \
   VENYA_DB_PASSWORD=<strong-db-password> \
+  VENYA_DB_PASSPHRASE=<server-encryption-passphrase> \
   bash -s
 ```
+
+`VENYA_DB_PASSPHRASE` has NO default and is **required for unattended
+(piped) installs** — the installer aborts with an actionable error without it
+(interactive runs are prompted; re-runs reuse the stored value and an explicit
+value must MATCH it).
 
 The installer is SHA-256-gated and fail-closed: with `VENYA_TARBALL_SHA256`
 set it verifies against that pin (strict integrity — recommended); unset, it
@@ -66,7 +79,7 @@ Verify:
 
 ```bash
 curl -sk https://<core-host>/api/v1/health
-# {"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}
+# {"status":"ok","version":"<server-version>","checks":{"ca":"ok","admin_ca":"ok"}}
 ```
 
 `/api/v1/health` is the canonical liveness endpoint (public, unauthenticated, version-only — it must never grow into a config dump). Bare `/health` is served as an alias returning the identical payload, for monitoring tools and load balancers that probe `/health` by convention. Both are unauthenticated and counted under the generic per-IP rate-limit tier (no health-specific exemption); every other unknown path still returns 401, so route existence is not disclosed to unauthenticated callers.
@@ -197,6 +210,9 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
   VENYA_EXECUTOR_ID=<executor-id> \
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
   bash -s
+# Docker credentials are REQUIRED for sandbox execution — see "Docker account
+# credentials" below (piped installs: VENYA_DOCKER_USERNAME/VENYA_DOCKER_API_KEY,
+# or run the downloaded script interactively for the hidden prompt).
 ```
 
 **Deferred registration (bootstrap token file).** If install-time registration
@@ -378,7 +394,9 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstal
 
 The core uninstaller also drops the PostgreSQL database and role. Shared
 infrastructure (nginx/postgres/sbx packages) is kept; revoking a removed
-executor's certificate is a core-side admin operation.
+executor's certificate is a core-side admin operation. Uninstallers are
+**self-contained** — they embed their own helpers and fetch nothing at runtime,
+so they work offline and after the serving origin is gone.
 
 ## Air-gapped networks
 
