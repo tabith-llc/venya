@@ -181,7 +181,7 @@ Venya is currently in **alpha** — early access for teams who want to shape the
 
 ### Quick Start (5-Minute Demo)
 
-See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)**
+See Venya in action: **[Alpha Demo Guide](docs/alpha-demo.md)** — hands-on in 5 minutes, or the **[narrated incident walkthrough](docs/example-workflow.md)** — what an agent session looks like start to finish.
 
 ### Full Installation
 
@@ -294,7 +294,7 @@ the per-release records, not here (they rot with every merge).
   via [omlx.ai](https://omlx.ai) — both drive `venya-mcp` as a stdio server.
 - **Hardware:** FIDO2 ceremonies verified with the Yubico **Security Key C
   NFC** — Basic Compatibility, MFA security key and passkey, USB-C or NFC,
-  FIDO Certified — $29 on Amazon.
+  FIDO Certified.
 - **Longer timeouts for testing:** default session idle is 15 min and executor
   enrollment tokens expire in 30 min. For relaxed test runs, append to
   `/opt/venya/.env` on the core, restart, and **re-login** (existing sessions
