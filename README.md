@@ -62,6 +62,8 @@ committed, dates not. This list is not complete.
   a stolen disk image alone cannot yield key material.
 - **Platform authenticators.** Built-in biometrics: Apple Touch ID, Windows
   Hello, and Linux fingerprint readers (WebAuthn platform authenticators).
+- **Audit export / SIEM integration.** Forward the append-only audit trail to
+  external collectors (SIEM) for long-term retention and correlation.
 
 ---
 
