@@ -105,8 +105,8 @@ Human: "Install apache2 on web-server-3"
 4. **Venya handles the rest:**
    - Server decrypts the secret and wraps it with cryptographic sentinel markers
    - Server relays the command + wrapped secret to the executor over mutual TLS
-   - Executor unwraps the secret inside an isolated sbx microVM and injects it into the command
-   - A Rust-based output filter scans stdout/stderr for any leaked secret values and replaces them with `[REDACTED]` markers before the AI ever sees it
+   - Executor materializes the secret as a read-only file inside the isolated sbx microVM (`/run/secrets/venya/<id>`, mode 0400) — the command consumes it there; it never exists outside the sandbox
+   - A Rust-based output filter scans stdout/stderr for any leaked secret values and replaces them with `[REDACTED:<id>]` markers before the AI ever sees it
 5. **The AI reads the filtered output** — it sees the command succeeded, sees the package installation logs, but never sees the password
 6. **Every step is logged** — the audit trail records who authorized the session, what command ran, on which executor, and when
 
