@@ -26,6 +26,7 @@ from .api_client import (
     APIClient,
     APIClientAuthenticationError,
     APIClientError,
+    execution_timeout,
 )
 
 
@@ -1265,6 +1266,11 @@ def cmd_run(client: APIClient, args: Any) -> int:
                 "session_id": session_id,
                 "command": command,
             },
+            # Last-fuse read timeout (relay 300s < nginx 330s < 340s default):
+            # a cold-sandbox run (~65s template pull) must not be abandoned
+            # client-side while the server completes it — ticket
+            # cli-execution-timeout-cold-start-default.
+            timeout=execution_timeout(),
         )
         exit_code = exec_result.get("exit_code", 0)
         stdout = exec_result.get("stdout", "")

@@ -80,6 +80,15 @@ def _resolve_ca_cert() -> str | None:
     return None
 
 
+# Last-fuse read timeout for the long-running execute call: server→executor
+# relay 300s < nginx proxy_read_timeout 330s < 340s here, so a clean upstream
+# error always reaches the agent before this client gives up. The former 30s
+# client default abandoned cold-sandbox runs (~65s template pull) the server
+# was still completing (ticket cli-execution-timeout-cold-start-default; the
+# CLI twin exposes this default as VENYA_EXECUTION_TIMEOUT).
+_EXECUTE_TIMEOUT_SECONDS = 340.0
+
+
 class VenyaClient:
     """Async HTTP client for the Venya API.
 
@@ -156,21 +165,29 @@ class VenyaClient:
         path: str,
         json_body: dict | None = None,
         params: dict | None = None,
+        timeout: float | None = None,
     ) -> dict:
         """Make an authenticated request with automatic refresh on 401.
 
         Every Venya endpoint returns a JSON object (envelope), never a bare
         array, so this is always a dict.
+
+        timeout: per-request override (seconds); None keeps the client default.
+        Only the execute call passes one (_EXECUTE_TIMEOUT_SECONDS) — httpx
+        treats an explicit None as "no timeout", so it must not be forwarded.
         """
         url = f"{self.config.server_url}{path}"
+        extra: dict = {"timeout": timeout} if timeout is not None else {}
 
-        resp = await self._http.request(method, url, json=json_body, params=params, headers=self._headers())
+        resp = await self._http.request(method, url, json=json_body, params=params, headers=self._headers(), **extra)
 
         # 401 → try refresh, then retry once
         if resp.status_code == 401:
             logger.info("Got 401, attempting token refresh...")
             if await self._refresh():
-                resp = await self._http.request(method, url, json=json_body, params=params, headers=self._headers())
+                resp = await self._http.request(
+                    method, url, json=json_body, params=params, headers=self._headers(), **extra
+                )
             else:
                 raise SessionExpiredError(
                     "Venya session expired and could not be renewed. "
@@ -245,7 +262,8 @@ class VenyaClient:
         )
         session_id = session_resp["session_id"]
 
-        # Step 2: Execute command
+        # Step 2: Execute command — long-running: last-fuse timeout (ticket
+        # cli-execution-timeout-cold-start-default).
         result = await self._request(
             "POST",
             f"/api/v1/executors/{executor_id}/execute",
@@ -253,6 +271,7 @@ class VenyaClient:
                 "session_id": session_id,
                 "command": command,
             },
+            timeout=_EXECUTE_TIMEOUT_SECONDS,
         )
 
         return result

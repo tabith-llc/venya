@@ -137,6 +137,17 @@ Notable changes to Venya will be documented in this file.
 
 ### Fixed
 
+- *(post-alpha12)* **`venya run` / MCP `run_command` no longer abandon long
+  sandbox runs at 30s**: the execute call's read timeout now defaults to
+  **340s**, keeping the client the LAST fuse in the chain (server→executor
+  relay 300s < nginx 330s < client 340s) so a clean upstream error always
+  beats a local timeout. The first run on a fresh executor (~65s cold sbx
+  template pull) previously died client-side as `Request timed out` while the
+  server completed it correctly — and the natural retry executed the command a
+  second time. `VENYA_EXECUTION_TIMEOUT` (positive integer seconds) overrides
+  and is now actually wired to the execute path — it was previously read only
+  by the executor-register transport, where it did nothing for runs (register
+  keeps a fixed 30s).
 - *(post-alpha12)* Rate-limit `429`s now carry `Retry-After` (delta-seconds) on
   all four middleware paths — auth tier, generic tier, break-glass hourly, and
   the break-glass failure backoff (seconds until the window resets / the
