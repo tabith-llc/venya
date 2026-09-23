@@ -1,0 +1,13 @@
+agent -> core: "run_command(network-01, …, secret_keys=[])"
+core -> exec: "dispatch over mTLS relay — no secret"
+exec -> sbx: "spawn sandbox"
+sbx -> nas: "ssh 192.0.2.40:22"
+nas -> sbx: "no route — connection timed out" {
+  style.stroke: "#c62828"
+  style.stroke-dash: 3
+}
+sbx -> exec: "exit 255"
+exec -> core: "exit 255 · connection timed out"
+core -> agent: "exit 255 · connection timed out" {
+  style.stroke: "#c62828"
+}
