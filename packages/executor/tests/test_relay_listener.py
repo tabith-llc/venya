@@ -176,10 +176,20 @@ class _FakeExec:
         self._exc = exc
         self.command: str | None = None
         self.secrets: object = None
+        self.env_vars: object = "UNSET"
+        self.askpass_helper: object = "UNSET"
 
-    def execute(self, command: str, secrets: list) -> CommandResult:
+    def execute(
+        self,
+        command: str,
+        secrets: list,
+        env_vars: list | None = None,
+        askpass_helper: bool = False,
+    ) -> CommandResult:
         self.command = command
         self.secrets = secrets
+        self.env_vars = env_vars
+        self.askpass_helper = askpass_helper
         if self._exc is not None:
             raise self._exc
         assert self._result is not None
@@ -518,3 +528,40 @@ class TestRelayBodyCapAndTimeout:
             resp = client.post(_url(listener), json={"session_id": "s1", "command": "true", "secrets": []})
         assert resp.status_code == 200
         assert sessions == ["s1"]
+
+
+# --- env/askpass wire pass-through (ticket secret-shape-env-injection) -------
+
+
+def test_env_and_askpass_pass_through_to_engine(started):
+    """The listener forwards env specs + the askpass flag untouched — it never
+    resolves plaintext (that happens in execute() against the bundles)."""
+    listener, pk, fake, _sessions = started
+    body = json.dumps(
+        {
+            "session_id": "s-env",
+            "command": "printenv TOKEN",
+            "secrets": [{"secret_id": 7, "wrapped_value": "[VENYA:abcd1234]cHc=[/VENYA]"}],
+            "env": [{"var_name": "TOKEN", "secret_id": 7}],
+            "askpass_helper": True,
+        }
+    ).encode()
+    with _client(pk.ca_a, pk.c_ok) as client:
+        resp = client.post(_url(listener), content=body, headers={"Content-Type": "application/json"})
+    assert resp.status_code == 200
+    assert fake.command == "printenv TOKEN"
+    assert fake.secrets[0]["secret_id"] == 7
+    assert fake.env_vars == [{"var_name": "TOKEN", "secret_id": 7, "literal_value": None}]
+    assert fake.askpass_helper is True
+
+
+def test_old_wire_payload_reaches_engine_without_env(started):
+    """Compat direction 2: an OLD server's payload (no env/askpass keys)
+    reaches execute() as env_vars=None / askpass_helper=False."""
+    listener, pk, fake, _sessions = started
+    body = json.dumps({"session_id": "s-old", "command": "echo hi", "secrets": []}).encode()
+    with _client(pk.ca_a, pk.c_ok) as client:
+        resp = client.post(_url(listener), content=body, headers={"Content-Type": "application/json"})
+    assert resp.status_code == 200
+    assert fake.env_vars is None
+    assert fake.askpass_helper is False

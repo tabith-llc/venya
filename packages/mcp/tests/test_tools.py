@@ -297,3 +297,26 @@ async def test_run_command_stderr_rendered() -> None:
         )
     assert "permission denied" in result[0].text
     assert "Command exited with code 1" in result[0].text
+
+
+def test_tool_descriptions_teach_shape_and_file_path() -> None:
+    """Pinned: the tool descriptions teach the file-path consumption pattern
+    and the usage-template metadata (ticket secret-shape-metadata). The
+    pre-fix run_command example ('ssh bot@web-server-3 …' with a password
+    secret bound) could not consume the injected secret at all — that shape
+    of misleading example must never return."""
+    import asyncio
+
+    from venya_mcp.server import list_tools
+
+    tools = asyncio.run(list_tools())
+    by_name = {t.name: t for t in tools}
+
+    ls_desc = by_name["list_secrets"].description
+    assert "usage" in ls_desc
+    assert "{secret_path}" in ls_desc
+    assert "/run/secrets/venya/" in ls_desc
+
+    rc_desc = by_name["run_command"].description
+    assert "sshpass -f /run/secrets/venya/" in rc_desc
+    assert "'usage' template" in rc_desc

@@ -107,7 +107,6 @@ instead (§3).
 Revoke (admin action, from a workstation holding the admin mTLS cert, or on the core):
 
 ```bash
-SSL_CERT_FILE=~/.config/venya-ca.crt \
 VENYA_ADMIN_CERT=admin-cert/admin.crt VENYA_ADMIN_KEY=admin-cert/admin.key \
   venya admin revoke-executor <executor-id>
 # or, targeting the executor's own cert from the executor host:
@@ -200,6 +199,14 @@ dies within one poll.
 the CRL retention purge. The CRL table (`crl_retention_days`, default 90) is
 append-only serial history + advisory broadcast; purge-dropped serial rows are
 expected, not a bug (the identity flag is the enforcement truth).
+
+**Admin client-cert revocation** (separate table, `admin_cert_revocations`):
+the supported path is `venya admin revoke-admin-cert <serial>` (ORM — sets
+`revoked_at` automatically). The table has NO server-side default for
+`revoked_at` (Python-side lambda only): a raw-SQL INSERT omitting the column
+violates NOT NULL — supply `revoked_at` explicitly (e.g. `now()`) in any
+manual insert (ticket delta-b-run-low-bundle O6; ruled runbook-note, not
+migration — raw SQL is not a supported revocation path).
 
 ## 5. Root CA backup and restore (break-glass)
 
@@ -310,11 +317,11 @@ curl -sk https://<core-host>/api/v1/health
 #        is not possible (read-only /etc/venya).
 
 # --- 6. Every workstation: refresh CA + admin cert copies, then re-login:
-curl -sk https://<core-host>/.well-known/venya-ca.crt -o ~/.config/venya-ca.crt
+venya setup <core-host>    # re-fetch the NEW CA (fingerprint printed for out-of-band verification)
 ssh <core-host> "sudo cat /etc/venya/admin/admin.crt" > admin-cert/admin.crt
 ssh <core-host> "sudo cat /etc/venya/admin/admin.key" > admin-cert/admin.key
 chmod 600 admin-cert/admin.key
-SSL_CERT_FILE=~/.config/venya-ca.crt venya login <user-id>   # FIDO2 touch
+venya login <user-id>   # FIDO2 touch
 
 # --- 7. Smoke-test end to end:
 venya run --executor-id <executor-id> -- /usr/bin/true
@@ -328,7 +335,7 @@ preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scop
 
 | Check | Command | Expected |
 |---|---|---|
-| Core health | `curl -sk https://<core-host>/api/v1/health` | `{"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}` |
+| Core health | `curl -sk https://<core-host>/api/v1/health` | `{"status":"ok","version":"<server-version>","checks":{"ca":"ok","admin_ca":"ok"}}` |
 | Revocation list reachable | `curl -sk https://<core-host>/api/v1/executors/certs/revocation-list` | JSON list (public endpoint) |
 | Executor cert expiry | `sudo /opt/venya/.venv/bin/venya exec cert status` (on executor) | remaining days > 3 |
 | Executor registered/ONLINE | `venya admin list` / `venya exec status` | executor ONLINE |

@@ -12,18 +12,21 @@ import json
 import os
 import ssl
 import sys
+import tempfile
 from datetime import UTC
 from pathlib import Path
 from typing import Any
 
 import httpx2
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes
 
 from .api_client import (
     DEFAULT_CONFIG_FILE,
     APIClient,
     APIClientAuthenticationError,
     APIClientError,
+    execution_timeout,
 )
 
 
@@ -44,18 +47,23 @@ def run_command(args: Any) -> int:
     server_url = getattr(args, "server_url", None) or os.environ.get("VENYA_SERVER_URL") or None
     client = APIClient(server_url=server_url)
 
-    # Authenticate if no token is available (init, enroll, login, recovery,
-    # config, exec are public). Headless admin exemption: `venya admin ...` with
-    # VENYA_ADMIN_CERT/KEY configured presents the mTLS client cert instead, and
-    # the server's require_admin cert-only shortcut is the authority (a bad cert
-    # surfaces as its 401/403). Scoped to command == "admin" ONLY -- role-gated
-    # commands (list/store/audit/...) still require FIDO2/token, matching the
-    # server, which 401s cert-only callers on require_role routes.
+    # Authenticate if no token is available (init, setup, enroll, login,
+    # recovery, config, exec are public — setup is pre-bootstrap: it exists to
+    # make the first authenticated call possible). Headless admin exemption:
+    # `venya admin ...` with VENYA_ADMIN_CERT/KEY configured presents the mTLS
+    # client cert instead, and the server's require_admin cert-only shortcut is
+    # the authority (a bad cert surfaces as its 401/403). Scoped to command ==
+    # "admin" ONLY -- role-gated commands (list/store/audit/...) still require
+    # FIDO2/token, matching the server, which 401s cert-only callers on
+    # require_role routes.
     command = args.command
     admin_mtls_exempt = command == "admin" and getattr(client, "has_admin_mtls", False)
     if admin_mtls_exempt and not client.config.access_token:
         print("Using admin mTLS certificate (VENYA_ADMIN_CERT) for authentication.")
-    elif command not in ("init", "enroll", "login", "recovery", "config", "exec") and not client.config.access_token:
+    elif (
+        command not in ("init", "setup", "enroll", "login", "recovery", "config", "exec")
+        and not client.config.access_token
+    ):
         user_id = getattr(args, "user_id", None)
         try:
             print("Authenticating with security key...")
@@ -97,6 +105,8 @@ def run_command(args: Any) -> int:
             return cmd_login(client, args)
         elif command == "recovery":
             return cmd_recovery(client, args)
+        elif command == "setup":
+            return cmd_setup(client, args)
         elif command == "run":
             return cmd_run(client, args)
         elif command == "exec":
@@ -184,7 +194,7 @@ def cmd_init(client: APIClient, args: Any) -> int:
         )
 
     try:
-        fido2 = Fido2Auth(client.config.server_url)
+        fido2 = Fido2Auth(client.config.server_url, ca_path=client.config.ca_path)
 
         print(f"Starting core initialization for user '{args.user_id}'...")
         print("Please insert your security key when prompted.\n")
@@ -283,23 +293,36 @@ def cmd_store(client: APIClient, args: Any) -> int:
             "key_version_id": key_version_id,
         }
 
-        # Parse metadata key=value pairs
-        metadata = getattr(args, "metadata", None)
-        if metadata:
-            meta_dict = {}
-            for item in metadata:
-                k, _, v = item.partition("=")
-                meta_dict[k] = v
+        # Parse metadata key=value pairs + --shape/--usage sugar
+        meta_dict: dict[str, str] = {}
+        for item in getattr(args, "metadata", None) or []:
+            k, _, v = item.partition("=")
+            meta_dict[k] = v
+        for flag, key in (("--shape", "shape"), ("--usage", "usage")):
+            val = getattr(args, key, None)
+            if val is not None:
+                if key in meta_dict and meta_dict[key] != val:
+                    print(
+                        f"Conflicting {key}: given both via '-m {key}=...' and {flag}. Use one form.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                meta_dict[key] = val
+        if meta_dict:
             payload["metadata"] = meta_dict
 
         resp = client.post(
             "/api/v1/secrets",
             json=payload,
         )
-        if isinstance(resp, dict) and resp.get("replaced"):
-            print(f"Secret '{args.key}' replaced existing (id {resp.get('id')}).")
-        else:
-            print(f"Secret '{args.key}' stored successfully.")
+        if isinstance(resp, dict):
+            for w in resp.get("metadata_warnings") or []:
+                print(f"warning: {w}", file=sys.stderr)
+            if resp.get("replaced"):
+                print(f"Secret '{args.key}' replaced existing (id {resp.get('id')}).")
+            else:
+                shape_suffix = f" (shape: {meta_dict['shape']})" if "shape" in meta_dict else ""
+                print(f"Secret '{args.key}' stored successfully{shape_suffix}.")
         return 0
     except APIClientError as e:
         print(f"Failed to store secret: {e}", file=sys.stderr)
@@ -366,6 +389,8 @@ def cmd_list(client: APIClient, args: Any) -> int:
             meta = secret.get("metadata")
             if meta:
                 parts = []
+                if meta.get("shape"):
+                    parts.append(f"shape={meta['shape']}")
                 if meta.get("executor"):
                     parts.append(f"executor={meta['executor']}")
                 if meta.get("purpose"):
@@ -401,12 +426,31 @@ def cmd_delete(client: APIClient, args: Any) -> int:
 def cmd_update_metadata(client: APIClient, args: Any) -> int:
     """Update metadata for a secret."""
     try:
-        meta_dict = {}
-        for item in args.metadata:
+        meta_dict: dict[str, str] = {}
+        for item in getattr(args, "metadata", None) or []:
             k, _, v = item.partition("=")
             meta_dict[k] = v
+        for flag, key in (("--shape", "shape"), ("--usage", "usage")):
+            val = getattr(args, key, None)
+            if val is not None:
+                if key in meta_dict and meta_dict[key] != val:
+                    print(
+                        f"Conflicting {key}: given both via '-m {key}=...' and {flag}. Use one form.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                meta_dict[key] = val
+        if not meta_dict:
+            print(
+                "Nothing to update: pass -m key=value, --shape, or --usage.",
+                file=sys.stderr,
+            )
+            return 1
 
-        client.patch(f"/api/v1/secrets/{args.key}/metadata", json={"metadata": meta_dict})
+        resp = client.patch(f"/api/v1/secrets/{args.key}/metadata", json={"metadata": meta_dict})
+        if isinstance(resp, dict):
+            for w in resp.get("metadata_warnings") or []:
+                print(f"warning: {w}", file=sys.stderr)
         print(f"Metadata updated for secret '{args.key}'.")
         return 0
     except APIClientError as e:
@@ -1222,6 +1266,11 @@ def cmd_run(client: APIClient, args: Any) -> int:
                 "session_id": session_id,
                 "command": command,
             },
+            # Last-fuse read timeout (relay 300s < nginx 330s < 340s default):
+            # a cold-sandbox run (~65s template pull) must not be abandoned
+            # client-side while the server completes it — ticket
+            # cli-execution-timeout-cold-start-default.
+            timeout=execution_timeout(),
         )
         exit_code = exec_result.get("exit_code", 0)
         stdout = exec_result.get("stdout", "")
@@ -1245,6 +1294,88 @@ def cmd_run(client: APIClient, args: Any) -> int:
     except Exception as e:
         print(f"Execution failed: {e}", file=sys.stderr)
         return 1
+
+
+def cmd_setup(client: APIClient, args: Any) -> int:
+    """Save the server URL and install the core's CA certificate.
+
+    Workstation bootstrap in one command: normalize <corename> to an https
+    URL, save it, fetch /.well-known/venya-ca.crt, validate it as X.509 PEM,
+    and write it beside config.json as ca.crt (0600, atomic). APIClient and
+    Fido2Auth then verify core TLS against it automatically — no
+    SSL_CERT_FILE incantation needed for any later command.
+
+    The fetch is a scoped, unverified GET (trust-on-first-use): the cert it
+    returns becomes the verification anchor, and its subject + SHA-256
+    fingerprint are printed so the operator can confirm them out-of-band.
+    No subsequent call reuses that unverified client.
+    """
+    core = args.corename
+    if not core.startswith(("http://", "https://")):
+        core = "https://" + core
+    client.config.server_url = core
+
+    url = f"{core}/.well-known/venya-ca.crt"
+    try:
+        resp = httpx2.get(url, verify=False, timeout=5.0)  # nosec B403 -- scoped TOFU bootstrap; see docstring
+    except httpx2.HTTPError as e:
+        print(f"setup incomplete: cannot fetch CA certificate from {url}: {e}", file=sys.stderr)
+        print(f"Server URL saved: {core} — re-run 'venya setup {args.corename}' to retry", file=sys.stderr)
+        return 1
+    if resp.status_code == 404:
+        print(f"setup incomplete: {url} not found — is {core} a venya core?", file=sys.stderr)
+        return 1
+    if resp.status_code != 200:
+        print(f"setup incomplete: GET {url} returned HTTP {resp.status_code}", file=sys.stderr)
+        return 1
+
+    try:
+        cert = x509.load_pem_x509_certificate(resp.content)
+    except ValueError:
+        print(f"setup incomplete: response from {url} is not a PEM X.509 certificate", file=sys.stderr)
+        return 1
+
+    fingerprint = cert.fingerprint(hashes.SHA256()).hex()
+    if args.ca_sha256 is not None:
+        # Normalize colons/spaces/case; anything else is a mismatch (fail loud).
+        pin = "".join(args.ca_sha256.split()).replace(":", "").lower()
+        if pin != fingerprint:
+            print(
+                f"setup incomplete: CA fingerprint mismatch — pin {pin}, fetched {fingerprint}; nothing written",
+                file=sys.stderr,
+            )
+            return 1
+
+    ca_path = client.config.ca_path
+    try:
+        ca_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=ca_path.parent, prefix=".venya-ca-", delete=False) as fd:
+                tmp_path = fd.name
+                fd.write(resp.content)
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o600)
+            os.replace(tmp_path, ca_path)
+        except BaseException:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise
+    except OSError as e:
+        print(f"setup incomplete: cannot write {ca_path}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Server URL saved: {core}")
+    print(f"CA certificate subject: {cert.subject}")
+    print(f"CA certificate SHA-256: {fingerprint}")
+    print(f"CA certificate saved to: {ca_path}")
+    print(
+        "Next: run 'venya init <user-id>' to bootstrap the core (or 'venya login <user-id>' if it is already initialized)."
+    )
+    return 0
 
 
 def cmd_config(client: APIClient, args: Any) -> int:
@@ -1274,6 +1405,15 @@ def cmd_config_show(client: APIClient) -> int:
         print("  Access Token: [set] (expires soon — run 'venya run' to refresh)")
     else:
         print("  Access Token: [not set]")
+    ca_path = config.ca_path
+    if ca_path.exists():
+        try:
+            cert = x509.load_pem_x509_certificate(ca_path.read_bytes())
+            print(f"  CA: {ca_path} [SHA-256 {cert.fingerprint(hashes.SHA256()).hex()[:16]}]")
+        except (ValueError, OSError):
+            print(f"  CA: {ca_path} [unreadable]")
+    else:
+        print("  CA: [not set]")
     print(f"  Config File: {config.config_file}")
     return 0
 
@@ -1395,7 +1535,7 @@ def _elevate(client: APIClient) -> str:
     from .webauthn import b64_decode_id
 
     # Use the production normalizer (single source of truth for server JSON shape)
-    fido2 = Fido2Auth(client.config.server_url)
+    fido2 = Fido2Auth(client.config.server_url, ca_path=client.config.ca_path)
     norm = fido2.normalize_webauthn_options(options)
     challenge = b64_decode_id(norm["challenge"])
 
@@ -1518,7 +1658,7 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
         # win11) — deleted, not patched (option-B ruling 2026-09-19).
         from .fido2_client import Fido2Auth, Fido2ClientError
 
-        fido2 = Fido2Auth(client.config.server_url)
+        fido2 = Fido2Auth(client.config.server_url, ca_path=client.config.ca_path)
         try:
             request_options = fido2._build_registration_options(options)
             credential = fido2._get_credential(request_options, timeout=60.0)
@@ -1601,7 +1741,7 @@ def cmd_enroll(client: APIClient, args: Any) -> int:
     token = args.token
     label = getattr(args, "label", None)
     try:
-        fido2 = Fido2Auth(client.config.server_url)
+        fido2 = Fido2Auth(client.config.server_url, ca_path=client.config.ca_path)
         print("Starting enrollment...")
         print("Please insert/touch your security key when prompted.\n")
         _hint = _win_ceremony_hint("registration")
@@ -1729,6 +1869,11 @@ def executor_list(client: APIClient, args: Any) -> int:
         return 1
 
 
+# Test seam + single source of truth for the executor host-config path
+# (installer writes it; register/URL fallbacks read it).
+EXECUTOR_TOML_PATH = "/etc/venya/executor.toml"
+
+
 def executor_register(client: APIClient, args: Any) -> int:
     """Register this machine as an executor with the core.
 
@@ -1748,26 +1893,50 @@ def executor_register(client: APIClient, args: Any) -> int:
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import NameOID
 
-    executor_id = getattr(args, "executor_id", "venya-exec")
+    executor_id = getattr(args, "executor_id", None)
     output_dir = getattr(args, "output_dir", "/etc/venya")
     core_url = getattr(args, "core_url", None)
-    enrollment_token = getattr(args, "enrollment_token", None)
+    # flag > env VENYA_EXECUTOR_ENROLLMENT_TOKEN; empty string counts as unset,
+    # matching the installer's ${VAR:-} semantics (ticket
+    # cli-exec-register-token-env-unsupported — the env contract every
+    # generated instruction names was silently ignored here).
+    enrollment_token = (
+        getattr(args, "enrollment_token", None) or os.environ.get("VENYA_EXECUTOR_ENROLLMENT_TOKEN") or None
+    )
     ca_bundle = getattr(args, "ca_bundle", None)
     if ca_bundle is not None and not isinstance(ca_bundle, str):
         ca_bundle = None
 
-    # Fall back to executor config ca_bundle if not passed via CLI
-    if ca_bundle is None:
-        executor_config_path = Path("/etc/venya/executor.toml")
+    # Single executor.toml read serving BOTH fallbacks (ticket
+    # cli-exec-register-ignores-config-executor-id): resolution is
+    # flag → toml → FAIL-LOUD. The former hardcoded 'venya-exec' default
+    # silently minted a wrong-identity cert (CSR CN) on hosts whose toml
+    # carried the real id; a made-up id on a toml-less machine is the
+    # phantom-registration trap, so missing id is a hard error, and a
+    # malformed toml fails loudly instead of parse-silently falling through.
+    toml_data: dict[str, Any] | None = None
+    if executor_id is None or ca_bundle is None:
+        executor_config_path = Path(EXECUTOR_TOML_PATH)
         if executor_config_path.exists():
             try:
                 import tomllib
 
                 with open(executor_config_path, "rb") as f:
-                    config_data = tomllib.load(f)
-                ca_bundle = config_data.get("ca_bundle")
-            except Exception:  # nosec B110  # noqa: S110 — ignore optional config parse errors
-                pass
+                    toml_data = tomllib.load(f)
+            except Exception as e:
+                print(f"Error: failed to parse {EXECUTOR_TOML_PATH}: {e}", file=sys.stderr)
+                return 1
+
+    if executor_id is None and toml_data is not None:
+        executor_id = toml_data.get("executor_id")
+    if executor_id is None:
+        print(
+            f"Error: executor_id required: pass --executor-id or set executor_id in {EXECUTOR_TOML_PATH}",
+            file=sys.stderr,
+        )
+        return 1
+    if ca_bundle is None and toml_data is not None:
+        ca_bundle = toml_data.get("ca_bundle")
 
     # Validate executor_id format before any operations
     try:
@@ -1785,7 +1954,8 @@ def executor_register(client: APIClient, args: Any) -> int:
         server_url = client.config.server_url.rstrip("/")
     else:
         print(
-            f"Error: core URL required. Set it in config ({DEFAULT_CONFIG_FILE}) or pass --core-url",
+            f"Error: server URL required. Pass --server-url (alias: --core-url), set it in config "
+            f"({DEFAULT_CONFIG_FILE}), or set VENYA_SERVER_URL",
             file=sys.stderr,
         )
         return 1
@@ -1947,17 +2117,24 @@ def _parse_executor_cert(cert_path: str) -> dict[str, Any] | None:
 
 
 def _get_server_url(args: Any) -> str:
-    """Resolve server URL from args, config, or executor.toml.
+    """Resolve server URL from args, env, config, or executor.toml.
 
-    Fallback chain:
-    1. --core-url arg
-    2. config.json via Config() (default: ~/.config/venya on Linux,
+    Fallback chain (aligned with the run_command chokepoint precedence —
+    flag > env > config, ticket cli-core-url-server-url-naming-split /
+    cli-server-url-env-ignored fix 3f3ed1b):
+    1. --core-url / --server-url arg (dest=core_url)
+    2. VENYA_SERVER_URL env (empty = unset)
+    3. config.json via Config() (default: ~/.config/venya on Linux,
        ~/Library/Application Support/venya on macOS)
-    3. /etc/venya/executor.toml via tomllib
-    4. "unknown" as last resort
+    4. /etc/venya/executor.toml via tomllib
+    5. "unknown" as last resort
     """
     if getattr(args, "core_url", None):
         return args.core_url
+
+    env_url = os.environ.get("VENYA_SERVER_URL")
+    if env_url:
+        return env_url
 
     try:
         from .api_client import Config as CLIConfig
@@ -2063,7 +2240,10 @@ def executor_cert_renew(args: Any) -> int:
     # Build mTLS client with current cert
     server_url = _get_server_url(args)
     if server_url == "unknown":
-        print("Error: server URL not configured. Use --core-url or set config.", file=sys.stderr)
+        print(
+            "Error: server URL not configured. Pass --server-url (alias: --core-url) or set VENYA_SERVER_URL.",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -2291,7 +2471,10 @@ def executor_heartbeat(args: Any) -> int:
 
     server_url = _get_server_url(args)
     if server_url == "unknown":
-        print("Error: server URL not configured. Use --core-url or set config.", file=sys.stderr)
+        print(
+            "Error: server URL not configured. Pass --server-url (alias: --core-url) or set VENYA_SERVER_URL.",
+            file=sys.stderr,
+        )
         return 1
 
     # Compute SHA-256 fingerprint of the certificate over its DER encoding --

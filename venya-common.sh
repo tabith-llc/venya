@@ -20,6 +20,7 @@
 #   venya_check_root            # Exit if not root
 #   venya_determine_install_dir # Set INSTALL_DIR interactively or from var
 #   venya_check_existing        # Prompt to reinstall if exists
+#   venya_check_no_colocation   # HARD STOP if the other component is installed
 #   venya_create_user           # Create locked nologin service account (no password)
 #   venya_install_system_pkgs   # apt-get install (pkg list as args)
 #   venya_install_uv            # Install uv for root
@@ -65,7 +66,7 @@ venya_determine_install_dir() {
 
     if [ -z "$INSTALL_DIR" ]; then
         echo -n "Install to $default_dir? [Y/n] "
-        if [ "$VENYA_SKIP_PROMPT" = "yes" ]; then
+        if [ "${VENYA_SKIP_PROMPT:-}" = "yes" ]; then
             echo ""
             reply="y"
         else
@@ -89,7 +90,7 @@ venya_check_existing() {
     if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/pyproject.toml" ]; then
         warn "Existing installation found at $INSTALL_DIR"
         echo -n "Reinstall? [y/N] "
-        if [ "$VENYA_SKIP_PROMPT" = "yes" ]; then
+        if [ "${VENYA_SKIP_PROMPT:-}" = "yes" ]; then
             echo ""
             reply="y"
         else
@@ -100,6 +101,69 @@ venya_check_existing() {
             exit 0
         fi
     fi
+}
+
+# --- 4b. Co-location guard (ticket installer-colocation-silent-core-kill) ---
+#
+# Venya's trust model puts the core (CA keys, encrypted secret store, audit DB)
+# on its own protected host and treats executors as COMPROMISED by design. Both
+# services run as the same `venya` uid and share /etc/venya + /opt/venya, so a
+# co-located box makes executor-compromise == core-compromise by construction.
+# Worse, each installer rebuilds the venv with UV_VENV_CLEAR=1
+# (venya_create_venv), which deletes the OTHER component's binary
+# (bin/venya-server or bin/venya-executor) and kills its service with systemd
+# 203/EXEC -- silently, under the documented unattended VENYA_SKIP_PROMPT=yes
+# path. Co-location is design-REJECTED, not a packaging gap.
+#
+# This is a HARD STOP, not a confirmation prompt: VENYA_SKIP_PROMPT=yes must NOT
+# bypass it (it enforces a design boundary, not an "are you sure"). Detection is
+# SYSTEM-WIDE (systemd units / config files) and NEVER keyed on $INSTALL_DIR, so
+# a custom VENYA_INSTALL_DIR cannot sneak past (that knob is broken for custom
+# paths anyway -- never recommend it here). Same-component re-runs are allowed:
+# only the OTHER component triggers refusal, preserving installer idempotency
+# (installer-rerun-no-service-restart behavior unchanged).
+#
+# Args: $1 = component being installed ("core" or "executor")
+venya_check_no_colocation() {
+    local this_component="${1:-}"
+    local core_present=0 executor_present=0
+
+    if [ -f /etc/systemd/system/venya-core.service ] \
+        || systemctl cat venya-core.service >/dev/null 2>&1; then
+        core_present=1
+    fi
+    if [ -f /etc/systemd/system/venya-executor.service ] \
+        || [ -f /etc/venya/executor.toml ]; then
+        executor_present=1
+    fi
+
+    local other=""
+    if [ "$this_component" = "executor" ] && [ "$core_present" -eq 1 ]; then
+        other="core"
+    elif [ "$this_component" = "core" ] && [ "$executor_present" -eq 1 ]; then
+        other="executor"
+    else
+        # No cross-component collision (includes the same-component re-run path).
+        return 0
+    fi
+
+    error "REFUSING TO INSTALL: detected a venya ${other} installation on this host."
+    cat >&2 <<EOF
+
+  Venya core and executor must run on SEPARATE hosts; co-location is not supported.
+
+  Why: the core is the trust anchor (CA keys, encrypted secret store, audit DB) and
+  must run on its own protected host. Executors are treated as COMPROMISED by design.
+  Both run as the same 'venya' user and share /etc/venya and /opt/venya, so on one
+  box an executor compromise equals a core compromise -- and installing the
+  ${this_component} here would wipe the live ${other} venv and kill it (systemd 203/EXEC).
+
+  What to do: install the ${this_component} on its OWN machine. On a single physical
+  host, run separate VMs -- one for core, one for the executor. A single-node
+  co-located mode is not offered.
+
+EOF
+    exit 1
 }
 
 # --- 5. Create venya user ---

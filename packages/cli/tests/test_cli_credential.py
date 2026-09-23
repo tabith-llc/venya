@@ -246,7 +246,13 @@ class TestCredentialAdd:
 
         with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
             with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
-                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2:
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2, patch(
+                    "venya_cli.fido2_client.Ctap2"
+                ) as mock_ctap2:
+                    # Fix 1 (init-pin-invalid-after-installation-reset): _get_credential
+                    # now reads key info via Ctap2 to dispatch; uv:true → the high-level
+                    # Fido2Client path this test asserts.
+                    mock_ctap2.return_value.info.options = {"uv": True}
                     mock_instance = MagicMock()
                     mock_fido2.return_value = mock_instance
                     mock_instance.make_credential.return_value = mock_credential
@@ -293,7 +299,13 @@ class TestCredentialAdd:
 
         with patch("venya_cli.commands._elevate", return_value="elev_token_xyz") as mock_elev:
             with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
-                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2:
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2, patch(
+                    "venya_cli.fido2_client.Ctap2"
+                ) as mock_ctap2:
+                    # Fix 1 (init-pin-invalid-after-installation-reset): _get_credential
+                    # now reads key info via Ctap2 to dispatch; uv:true → the high-level
+                    # Fido2Client path this test asserts.
+                    mock_ctap2.return_value.info.options = {"uv": True}
                     mock_instance = MagicMock()
                     mock_fido2.return_value = mock_instance
                     mock_instance.make_credential.return_value = mock_credential
@@ -338,7 +350,13 @@ class TestCredentialAdd:
             side_effect=["elev_token_xyz", APIClientError("Please touch your security key")],
         ):
             with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
-                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2:
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2, patch(
+                    "venya_cli.fido2_client.Ctap2"
+                ) as mock_ctap2:
+                    # Fix 1 (init-pin-invalid-after-installation-reset): _get_credential
+                    # now reads key info via Ctap2 to dispatch; uv:true → the high-level
+                    # Fido2Client path this test asserts.
+                    mock_ctap2.return_value.info.options = {"uv": True}
                     mock_instance = MagicMock()
                     mock_fido2.return_value = mock_instance
                     mock_instance.make_credential.return_value = mock_credential
@@ -391,7 +409,13 @@ class TestCredentialAdd:
 
         with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
             with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
-                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2:
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2, patch(
+                    "venya_cli.fido2_client.Ctap2"
+                ) as mock_ctap2:
+                    # Fix 1 (init-pin-invalid-after-installation-reset): _get_credential
+                    # now reads key info via Ctap2 to dispatch; uv:true → the high-level
+                    # Fido2Client path this test asserts.
+                    mock_ctap2.return_value.info.options = {"uv": True}
                     mock_instance = MagicMock()
                     mock_fido2.return_value = mock_instance
                     mock_instance.make_credential.return_value = mock_credential
@@ -504,7 +528,9 @@ class TestCredentialAdd:
                 result = cmd_credential_add(client, args)
 
         assert result == 0
-        mock_auth_cls.assert_called_once_with("https://venya-core-1")
+        # ca_path rides along since feature/cli-setup-command (ceremony flows
+        # verify the core TLS against the setup-installed CA).
+        mock_auth_cls.assert_called_once_with("https://venya-core-1", ca_path=client.config.ca_path)
         mock_auth._build_registration_options.assert_called_once()
         client.close()
         config_file.unlink()

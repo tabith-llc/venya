@@ -255,7 +255,9 @@ def test_help_exits_zero(path):
 # Deliberate drift tripwire per ticket: a dropped/added/renamed-nested level
 # changes a count or the key set and fails loudly, forcing a conscious update.
 EXPECTED_SUBCOMMAND_COUNTS: dict[tuple[str, ...], int] = {
-    (): 16,
+    # top 16→17: `setup` added by feature/cli-setup-command (deliberate
+    # interlock update, cli-reference regenerated in the same commit).
+    (): 17,
     ("admin",): 23,
     ("admin", "key-version"): 5,
     ("role",): 7,

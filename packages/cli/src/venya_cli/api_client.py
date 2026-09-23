@@ -48,6 +48,38 @@ DEFAULT_CONFIG_DIR = default_config_dir()
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
 
 
+def execution_timeout() -> float:
+    """Read-timeout (seconds) for the long-running command-execute call.
+
+    Fuse ordering (source-verified 2026-09-23, ticket
+    cli-execution-timeout-cold-start-default): server→executor relay 300s
+    (executors.py `AsyncClient(verify=…, timeout=300)`) < nginx
+    proxy_read_timeout 330s (installer site template) < this 340s default.
+    The client must be the LAST fuse so the clean upstream error (relay 503
+    "Executor timed out", nginx 504) reaches the operator instead of a local
+    read timeout. The former 30s client default aborted the first cold-sandbox
+    run (~65s sbx template pull) client-side while the server was still
+    completing it correctly — and the natural retry meant a second full
+    execution.
+
+    Override: VENYA_EXECUTION_TIMEOUT (positive integer seconds). The knob was
+    previously mis-wired to the executor-register transport and did nothing
+    for `venya run`.
+    """
+    raw = os.environ.get("VENYA_EXECUTION_TIMEOUT", "340")
+    try:
+        value = int(raw)
+    except ValueError:
+        raise APIClientError(
+            f"Invalid VENYA_EXECUTION_TIMEOUT value: '{raw}'. Must be a positive integer number of seconds."
+        ) from None
+    if value <= 0:
+        raise APIClientError(
+            f"Invalid VENYA_EXECUTION_TIMEOUT value: '{raw}'. Must be a positive integer number of seconds."
+        )
+    return float(value)
+
+
 class APIClientError(Exception):
     """API client error."""
 
@@ -124,6 +156,11 @@ class Config:
             self._data.pop("access_token", None)
         self.save()
 
+    @property
+    def ca_path(self) -> Path:
+        """CA certificate installed by `venya setup`, beside config.json."""
+        return self.config_file.parent / "ca.crt"
+
 
 # Lazy import json at module level when needed
 import json
@@ -198,6 +235,14 @@ class APIClient:
                         "Copy the admin cert/key from the core (see installer banner) and retry."
                     )
             http_kwargs["cert"] = (cert_path, key_path)
+        # Server-TLS verification precedence: SSL_CERT_FILE env wins (Python's
+        # ssl module honors it natively — the full-lifecycle-test.md and
+        # cert-rotation-runbook flows drive the CLI that way); then the CA
+        # installed by `venya setup` beside config.json; then system trust.
+        if not os.environ.get("SSL_CERT_FILE"):
+            ca_path = self.config.ca_path
+            if ca_path.exists():
+                http_kwargs["verify"] = str(ca_path)
         self._http = httpx2.Client(**http_kwargs)
 
     def _get_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -220,6 +265,7 @@ class APIClient:
         json_data: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Make an HTTP request to the server.
 
@@ -231,6 +277,9 @@ class APIClient:
             path: API path.
             json_data: Optional JSON body.
             params: Optional query parameters.
+            timeout: Optional per-request timeout override (seconds); None
+                keeps the client default (30s). The execute call passes
+                execution_timeout() (cli-execution-timeout-cold-start-default).
 
         Returns:
             Parsed JSON response.
@@ -240,6 +289,9 @@ class APIClient:
             APIClientAuthenticationError: On auth failure.
         """
         headers = self._get_headers(extra_headers)
+        # httpx treats an explicit timeout=None as "no timeout" — only pass the
+        # override when set, so every other call keeps the client default (30s).
+        request_kwargs: dict[str, Any] = {"timeout": timeout} if timeout is not None else {}
 
         try:
             response = self._http.request(
@@ -248,6 +300,7 @@ class APIClient:
                 json=json_data,
                 params=params,
                 headers=headers,
+                **request_kwargs,
             )
             response.raise_for_status()
         except httpx2.HTTPStatusError as e:
@@ -270,6 +323,7 @@ class APIClient:
                             json=json_data,
                             params=params,
                             headers=headers,
+                            **request_kwargs,
                         )
                         response.raise_for_status()
                         return response.json() if response.content else {}
@@ -310,7 +364,9 @@ class APIClient:
             Fido2UserInteractionRequiredError,
         )
 
-        fido2 = Fido2Auth(self.config.server_url)
+        # Pass the setup-installed CA so the FIDO2 ceremony endpoints are
+        # verified against it too (same precedence as the client above).
+        fido2 = Fido2Auth(self.config.server_url, ca_path=self.config.ca_path)
 
         try:
             result = fido2.authenticate(user_id=user_id, timeout=timeout)
@@ -396,9 +452,10 @@ class APIClient:
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Send a POST request."""
-        return self._request("POST", path, json_data=json, params=params, extra_headers=extra_headers)
+        """Send a POST request (timeout: per-request override, seconds)."""
+        return self._request("POST", path, json_data=json, params=params, extra_headers=extra_headers, timeout=timeout)
 
     def put(
         self,
@@ -484,7 +541,11 @@ class APIClient:
             raise APIClientError(f"Invalid VENYA_TLS_VERIFY value: '{tls_verify_env}'. " "Must be 'true' or 'false'.")
 
         try:
-            timeout = int(os.environ.get("VENYA_EXECUTION_TIMEOUT", "30"))
+            # Fixed 30s: registration is one fast CSR POST. The
+            # VENYA_EXECUTION_TIMEOUT knob belongs to the execute path
+            # (execution_timeout()) — it was mis-wired here and did nothing
+            # for `venya run` (ticket cli-execution-timeout-cold-start-default).
+            timeout = 30
             if tls_verify and ca_bundle:
                 verify_param: str | bool = str(ca_bundle)
             elif tls_verify:

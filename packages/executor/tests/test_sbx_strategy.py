@@ -12,9 +12,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from venya_contract import ASKPASS_HELPER_PATH
 
 from executor.bundles import SecretBundle
-from executor.strategies.sbx_strategy import SBX_CREATE_TIMEOUT, SbxStrategy, sweep_workspace_base
+from executor.strategies.sbx_strategy import (
+    ASKPASS_HELPER_CONTENT,
+    SBX_CREATE_TIMEOUT,
+    SbxStrategy,
+    sweep_workspace_base,
+)
 
 
 class TestSbxStrategyName:
@@ -504,18 +510,21 @@ class TestSbxStrategyStoreHttpSecret:
 
 
 class TestSbxStrategyExecuteEnvCwd:
-    """env_override/cwd thread-through (ticket executor-env-override-cwd-sbx-noop).
-
-    Physically probed on the deployed sbx (exec-1, 2026-09-18): -e/-w are
-    docker-exec semantics; env values stay data (metachar-laden value never
-    shell-parsed, no /tmp/pwned); -w overrides the workspace-mount default
-    pwd per command without conflicting with the mount. These tests pin the
-    argv contract the probe verified live.
+    """env/cwd thread-through (ticket executor-env-override-cwd-sbx-noop;
+    transport REPLACED per secret-shape-env-injection option (ii), spike-ruled
+    2026-09-21: `sbx exec --env-file` (native flag) fed from a 0600 host-tmpfs
+    file. The former `-e K=V` argv transport exposed values in host
+    /proc/<pid>/cmdline for the command's duration — the old argv-pinning
+    cells were REWRITTEN by that ruling (institutionalization rule: the
+    rewrite is recorded here + on the ticket). The 2026-09-18 physical-probe
+    fact (env values stay DATA, never shell-parsed) holds a fortiori: values
+    now never appear in argv at all.
     """
 
-    def _strategy(self):
+    def _strategy(self, tmp_path):
         strategy = SbxStrategy()
         strategy._sandbox_name = "venya-test123"
+        strategy._session_dir = str(tmp_path)
         return strategy
 
     def _run(self, strategy, **kwargs):
@@ -524,46 +533,171 @@ class TestSbxStrategyExecuteEnvCwd:
             strategy.execute_command("cmd", **kwargs)
             return mock_run.call_args[0][0]
 
-    def test_env_only_argv(self):
-        argv = self._run(self._strategy(), env_override={"A": "1"})
-        assert argv == ["sbx", "exec", "-e", "A=1", "venya-test123", "sh", "-c", "cmd"]
+    def test_env_only_uses_env_file_never_argv(self, tmp_path):
+        strategy = self._strategy(tmp_path)
+        with patch.object(SbxStrategy, "_destroy_env_file") as destroy:
+            argv = self._run(strategy, env_override={"A": "1"})
+        assert "-e" not in argv
+        assert not any("A=1" in tok for tok in argv)  # value NEVER rides argv
+        env_file = argv[argv.index("--env-file") + 1]
+        assert env_file == str(tmp_path / "venya-env")
+        assert argv[-4:] == ["venya-test123", "sh", "-c", "cmd"]
+        f = tmp_path / "venya-env"
+        assert f.read_text() == "A=1\n"
+        assert oct(f.stat().st_mode & 0o777) == "0o600"
+        destroy.assert_called_once_with(env_file)
 
-    def test_cwd_only_argv(self):
-        argv = self._run(self._strategy(), cwd="/work")
+    def test_env_file_destroyed_after_exec(self, tmp_path):
+        self._run(self._strategy(tmp_path), env_override={"A": "1"})
+        assert not (tmp_path / "venya-env").exists()  # zeroed+unlinked in finally
+
+    def test_env_file_destroyed_even_on_exec_failure(self, tmp_path):
+        strategy = self._strategy(tmp_path)
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = OSError("boom")
+            with pytest.raises(OSError):
+                strategy.execute_command("cmd", env_override={"A": "1"})
+        assert not (tmp_path / "venya-env").exists()
+
+    def test_cwd_only_argv(self, tmp_path):
+        argv = self._run(self._strategy(tmp_path), cwd="/work")
         assert argv == ["sbx", "exec", "-w", "/work", "venya-test123", "sh", "-c", "cmd"]
 
-    def test_env_and_cwd_combined_argv(self):
-        argv = self._run(self._strategy(), env_override={"A": "1", "B": "2"}, cwd="/work")
-        assert argv == [
-            "sbx",
-            "exec",
-            "-e",
-            "A=1",
-            "-e",
-            "B=2",
-            "-w",
-            "/work",
-            "venya-test123",
-            "sh",
-            "-c",
-            "cmd",
-        ]
+    def test_env_and_cwd_combined_argv(self, tmp_path):
+        strategy = self._strategy(tmp_path)
+        with patch.object(SbxStrategy, "_destroy_env_file"):
+            argv = self._run(strategy, env_override={"A": "1", "B": "2"}, cwd="/work")
+        assert argv[:2] == ["sbx", "exec"]
+        assert argv[2] == "--env-file"
+        assert argv[4:] == ["-w", "/work", "venya-test123", "sh", "-c", "cmd"]
+        assert (tmp_path / "venya-env").read_text() == "A=1\nB=2\n"
 
-    def test_neither_backward_compatible_argv(self):
-        """Legacy contract unchanged when neither parameter is supplied."""
-        argv = self._run(self._strategy())
+    def test_neither_backward_compatible_argv(self, tmp_path):
+        """Legacy contract unchanged when neither parameter is supplied — no
+        --env-file, no file written."""
+        argv = self._run(self._strategy(tmp_path))
         assert argv == ["sbx", "exec", "venya-test123", "sh", "-c", "cmd"]
-        argv2 = self._run(self._strategy(), env_override={}, cwd=None)
+        argv2 = self._run(self._strategy(tmp_path), env_override={}, cwd=None)
         assert argv2 == argv
+        assert not (tmp_path / "venya-env").exists()
 
-    def test_metachar_env_value_stays_single_token(self):
-        """Injection safety: the value is ONE argv token — data, not command
-        text (matches the physical probe: printenv echoes it literally and
-        the embedded `touch` never runs)."""
-        argv = self._run(self._strategy(), env_override={"TRICKY": "v; touch /tmp/pwned"})
-        assert "TRICKY=v; touch /tmp/pwned" in argv
-        token = argv[argv.index("-e") + 1]
-        assert token == "TRICKY=v; touch /tmp/pwned"
+    def test_metachar_env_value_stays_data_in_file(self, tmp_path):
+        """Injection safety (the 2026-09-18 probe cell, file transport): the
+        metachar-laden value is ONE line of DATA in the env file and appears
+        nowhere in argv."""
+        strategy = self._strategy(tmp_path)
+        with patch.object(SbxStrategy, "_destroy_env_file"):
+            argv = self._run(strategy, env_override={"TRICKY": "v; touch /tmp/pwned"})
+        assert (tmp_path / "venya-env").read_text() == "TRICKY=v; touch /tmp/pwned\n"
+        assert not any("TRICKY" in tok or "pwned" in tok for tok in argv)
+
+    def test_invalid_env_name_rejected(self, tmp_path):
+        """A crafted name can never forge an env-file line."""
+        strategy = self._strategy(tmp_path)
+        with pytest.raises(ValueError, match="invalid env var name"):
+            strategy.execute_command("cmd", env_override={"BAD NAME": "1"})
+        with pytest.raises(ValueError, match="invalid env var name"):
+            strategy.execute_command("cmd", env_override={"A\nFORGED=1": "x"})
+        assert not (tmp_path / "venya-env").exists()
+
+    def test_multiline_env_value_rejected(self, tmp_path):
+        strategy = self._strategy(tmp_path)
+        with pytest.raises(ValueError, match="multi-line"):
+            strategy.execute_command("cmd", env_override={"A": "x\nFORGED=1"})
+        assert not (tmp_path / "venya-env").exists()
+
+
+class TestAskpassHelper:
+    """write_askpass_helper (ticket secret-shape-askpass-helpers): static 0555
+    script at the contract path; fail-closed on any failed step."""
+
+    def _strategy(self):
+        s = SbxStrategy()
+        s._sandbox_name = "venya-test123"
+        return s
+
+    def test_helper_written_555_at_contract_path(self):
+        s = self._strategy()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            s.write_askpass_helper()
+        calls = [c[0][0] for c in mock_run.call_args_list]
+        assert calls[0][:4] == ["sbx", "exec", "venya-test123", "mkdir"]
+        tee = calls[1]
+        assert tee[:3] == ["sbx", "exec", "-i"]
+        assert tee[-2:] == ["tee", ASKPASS_HELPER_PATH]
+        chmod = calls[2]
+        assert chmod[-3:] == ["chmod", "555", ASKPASS_HELPER_PATH]
+        stdin = mock_run.call_args_list[1][1]["input"].decode()
+        assert stdin.startswith("#!/bin/sh")
+        assert 'cat "$VENYA_ASKPASS_SECRET"' in stdin
+        assert "VENYA_ASKPASS_USER" in stdin
+
+    def test_helper_write_failure_removes_partial_and_raises(self):
+        s = self._strategy()
+        with patch("subprocess.run") as mock_run:
+            ok = MagicMock(returncode=0, stdout="", stderr="")
+            fail = MagicMock(returncode=1, stdout="", stderr=b"tee: error")
+            mock_run.side_effect = [ok, fail, ok]  # mkdir OK, tee FAIL, rm cleanup
+            with pytest.raises(RuntimeError, match="askpass helper"):
+                s.write_askpass_helper()
+        rm_call = mock_run.call_args_list[2][0][0]
+        assert rm_call[-3:] == ["rm", "-f", ASKPASS_HELPER_PATH]
+
+    def test_no_sandbox_raises(self):
+        with pytest.raises(RuntimeError, match="Sandbox not created yet"):
+            SbxStrategy().write_askpass_helper()
+
+    def test_helper_guard_unset_secret_exits_nonzero(self, tmp_path):
+        """The guard is load-bearing: without it, `cat "$UNSET"` reads stdin
+        and hangs until SBX_TIMEOUT instead of failing loudly (defect found
+        by the ticket acceptance review — never empty-string success, never
+        a silent hang)."""
+        import subprocess
+
+        script = tmp_path / "helper.sh"
+        script.write_text(ASKPASS_HELPER_CONTENT)
+        r = subprocess.run(
+            ["sh", str(script), "Password for x"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+        assert r.returncode == 1
+        assert "VENYA_ASKPASS_SECRET" in r.stderr
+
+    def test_helper_live_behavior_password_and_username_branches(self, tmp_path):
+        """Real sh execution of the helper content: password prompt -> the
+        credential file content; username prompt -> VENYA_ASKPASS_USER."""
+        import subprocess
+
+        cred = tmp_path / "cred"
+        cred.write_text("tok-value\n")
+        script = tmp_path / "helper.sh"
+        script.write_text(ASKPASS_HELPER_CONTENT)
+        base_env = {"PATH": "/usr/bin:/bin", "VENYA_ASKPASS_SECRET": str(cred)}
+        r = subprocess.run(
+            ["sh", str(script), "Password for 'https://git.example'"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=base_env,
+        )
+        assert r.returncode == 0
+        assert r.stdout == "tok-value\n"
+        r2 = subprocess.run(
+            ["sh", str(script), "Username for 'https://git.example'"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env={**base_env, "VENYA_ASKPASS_USER": "gituser"},
+        )
+        assert r2.returncode == 0
+        assert r2.stdout == "gituser\n"
 
 
 class TestCopySshpass:

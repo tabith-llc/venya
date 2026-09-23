@@ -139,8 +139,15 @@ class ExecuteHandler(BaseHTTPRequestHandler):
         # Per the plan's failure-mode table, any execution failure is a flat 503
         # (no retry), which also covers sandbox/subprocess timeouts surfacing as
         # exceptions from the engine.
+        # env/askpass specs (ticket secret-shape-env-injection) pass through
+        # as plain dicts; secret_id -> plaintext resolution happens inside
+        # execute() where the unwrapped bundles live — the listener never
+        # touches plaintext.
+        env_vars = [e.model_dump() for e in req.env] if req.env else None
         try:
-            result = self.server.executor_factory(session_id).execute(command, secrets)  # type: ignore[attr-defined]
+            result = self.server.executor_factory(session_id).execute(  # type: ignore[attr-defined]
+                command, secrets, env_vars=env_vars, askpass_helper=req.askpass_helper
+            )
         except Exception:
             logger.exception("Relay /execute failed for session %s", session_id)
             self._reply(503, {"detail": "execution failed"})

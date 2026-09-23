@@ -23,7 +23,7 @@ Three disjoint failure modes, per the refactor-2 acceptance:
 
 import pytest
 from pydantic import ValidationError
-from venya_contract import RelayRequest, RelayResponse, RelaySecret
+from venya_contract import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, RelayResponse, RelaySecret
 
 
 def test_identity_server_and_executor_share_the_same_model_objects():
@@ -97,3 +97,56 @@ def test_request_secrets_default_empty():
 def test_response_masked_count_defaults_zero():
     r = RelayResponse(exit_code=0, stdout="ok", stderr="")
     assert r.masked_count == 0
+
+
+# --- env/askpass additions (ticket secret-shape-env-injection) --------------
+# Coordinated contract change: both directions of the compatibility matrix are
+# pinned (ca-key-export cross-compat precedent).
+
+
+def test_old_wire_payload_parses_with_env_defaults():
+    """Compat direction 1: an OLD server's payload (exactly the three pre-env
+    keys) parses on the NEW model with inert defaults."""
+    old_payload = {"session_id": "s1", "command": "echo hi", "secrets": []}
+    req = RelayRequest(**old_payload)
+    assert req.env == []
+    assert req.askpass_helper is False
+
+
+def test_env_var_requires_exactly_one_source():
+    with pytest.raises(ValidationError):
+        RelayEnvVar(var_name="A")  # neither source
+    with pytest.raises(ValidationError):
+        RelayEnvVar(var_name="A", secret_id=1, literal_value="x")  # both
+
+
+def test_env_var_name_pattern_pinned():
+    """A crafted var_name must never be able to forge env-file lines."""
+    for bad in ("BAD NAME", "1LEADING", "A\nB", "A=B", ""):
+        with pytest.raises(ValidationError):
+            RelayEnvVar(var_name=bad, literal_value="x")
+    for good in ("GOOD_1", "_x", "AWS_SECRET_ACCESS_KEY"):
+        RelayEnvVar(var_name=good, literal_value="x")
+
+
+def test_env_var_forbids_extra_field():
+    with pytest.raises(ValidationError):
+        RelayEnvVar(var_name="A", literal_value="x", surprise=1)
+
+
+def test_request_round_trip_with_env():
+    req = RelayRequest(
+        session_id="s1",
+        command="printenv TOKEN",
+        secrets=[RelaySecret(secret_id=7, wrapped_value="w")],
+        env=[
+            RelayEnvVar(var_name="TOKEN", secret_id=7),
+            RelayEnvVar(var_name="GIT_ASKPASS", literal_value=ASKPASS_HELPER_PATH),
+        ],
+        askpass_helper=True,
+    )
+    parsed = RelayRequest(**req.model_dump())
+    assert parsed == req
+    assert parsed.env[0].secret_id == 7
+    assert parsed.env[1].literal_value == ASKPASS_HELPER_PATH
+    assert parsed.askpass_helper is True

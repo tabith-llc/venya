@@ -1273,7 +1273,7 @@ def main() -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"venya-executor {_EXECUTOR_VERSION or 'unknown'}",
+        version=f"{_EXECUTOR_VERSION or 'unknown'}",
     )
     parser.add_argument(
         "--config",

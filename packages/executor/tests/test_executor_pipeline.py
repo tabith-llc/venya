@@ -14,7 +14,7 @@ import httpx2
 import pytest
 
 from executor.command_validator import CommandValidator
-from executor.executor import SHELL_METACHARS, CommandResult, Executor, SecretBundle
+from executor.executor import SHELL_METACHARS, CommandResult, Executor, SecretBundle, _validate_command_structure
 from executor.injector import wrap_with_sentinel
 
 # ---------------------------------------------------------------------------
@@ -66,7 +66,7 @@ class TestExecute:
         """Mock _run_command_sbx to return a basic CommandResult."""
         import os
 
-        def mock_sbx_run(self, command, injections, env_override, cwd):
+        def mock_sbx_run(self, command, injections, env_override, cwd, askpass_helper=False):
             import subprocess as _real_subprocess
 
             try:
@@ -630,6 +630,7 @@ class TestStage2NoSecretMaterial:
         executor.http_client = mock_http_client
 
         response = MagicMock()
+        response.status_code = 200
         response.json.return_value = {
             "stdout": base64.b64encode(b"filtered\n").decode(),
             "stderr": base64.b64encode(b"").decode(),
@@ -779,3 +780,102 @@ class TestStructuralGate:
             result = ex.execute("/usr/bin/echo hello", [])
         assert result.exit_code == 0
         strategy.execute_command.assert_called_once()
+
+
+class TestRedirectAllowance:
+    """Narrow redirect allowance (ticket secret-shape-sudo-remote, option (a),
+    user ruling 2026-09-21 — corporate targets almost never grant NOPASSWD
+    sudo): a STANDALONE '<' immediately followed by an exactly-matching
+    SESSION-BOUND secret path is the only tolerated metachar form. Paired
+    cells per the truth-table rule; the TestStructuralGate alphabet cells stay
+    green (fused '<' forms die with the same whole-string message)."""
+
+    def _executor(self, audit=None):
+        from executor.strategies.sbx_strategy import SbxStrategy
+
+        strategy = MagicMock(spec=SbxStrategy)
+        ex = Executor(
+            command_validator=CommandValidator(),
+            session_id="s-sudo",
+            injection_strategy=strategy,
+            audit_logger=audit,
+        )
+        ex.http_client = None
+        return ex, strategy
+
+    def test_canonical_sudo_shape_passes_full_pipeline(self):
+        ex, _strategy = self._executor()
+        secrets = [_make_secret("1", b"ssh-pass"), _make_secret("2", b"sudo-pass")]
+        cmd = (
+            "/usr/bin/sshpass -f /run/secrets/venya/1 /usr/bin/ssh bot@target-1 "
+            "/usr/bin/sudo -S -p '' systemctl restart httpd < /run/secrets/venya/2"
+        )
+        canned = CommandResult(command=cmd, exit_code=0, stdout=b"ok", stderr=b"")
+        with patch.object(Executor, "_run_command_sbx", return_value=canned) as m:
+            result = ex.execute(cmd, secrets)
+        assert result.exit_code == 0
+        m.assert_called_once()
+
+    def test_unbound_secret_path_redirect_rejected(self):
+        ex, strategy = self._executor()
+        secrets = [_make_secret("1", b"ssh-pass")]
+        cmd = "/usr/bin/sshpass -f /run/secrets/venya/1 /usr/bin/ssh bot@t /usr/bin/sudo -S id < /run/secrets/venya/2"
+        with pytest.raises(ValueError, match="SESSION-BOUND"):
+            ex.execute(cmd, secrets)
+        strategy.create_sandbox.assert_not_called()
+
+    def test_nonsecret_path_redirect_rejected(self):
+        ex, _strategy = self._executor()
+        with pytest.raises(ValueError, match="SESSION-BOUND"):
+            ex.execute("/usr/bin/sort < /etc/passwd", [_make_secret("1", b"x")])
+
+    def test_prefix_trick_and_relative_paths_rejected(self):
+        ex, _strategy = self._executor()
+        secrets = [_make_secret("4", b"x")]
+        for target in (
+            "/run/secrets/venya/4x",
+            "/run/secrets/venya/../4",
+            "run/secrets/venya/4",
+            "/run/secrets/venya/",
+        ):
+            with pytest.raises(ValueError, match="SESSION-BOUND"):
+                ex.execute(f"/usr/bin/cat x < {target}", secrets)
+
+    def test_fused_and_heredoc_forms_rejected_with_metachar_message(self):
+        ex, _strategy = self._executor()
+        secrets = [_make_secret("4", b"x")]
+        for form in ("<<", "<>", "<&3", "a<b"):
+            with pytest.raises(ValueError, match="Shell metacharacters"):
+                ex.execute(f"/usr/bin/echo hi {form} /run/secrets/venya/4", secrets)
+
+    def test_trailing_redirect_rejected(self):
+        ex, _strategy = self._executor()
+        with pytest.raises(ValueError, match="SESSION-BOUND"):
+            ex.execute("/usr/bin/sort <", [_make_secret("4", b"x")])
+
+    def test_output_redirect_still_rejected(self):
+        ex, _strategy = self._executor()
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            ex.execute("/usr/bin/echo hi > /tmp/x", [_make_secret("4", b"x")])
+
+    def test_multiple_redirects_all_must_be_bound(self):
+        both = "/usr/bin/cmd1 < /run/secrets/venya/1 < /run/secrets/venya/2"
+        toks = _validate_command_structure(both, frozenset({"/run/secrets/venya/1", "/run/secrets/venya/2"}))
+        assert "<" in toks
+        mixed = "/usr/bin/cmd1 < /run/secrets/venya/1 < /run/secrets/venya/9"
+        with pytest.raises(ValueError, match="SESSION-BOUND"):
+            _validate_command_structure(mixed, frozenset({"/run/secrets/venya/1"}))
+
+    def test_no_secrets_means_no_redirect_ever(self):
+        ex, _strategy = self._executor()
+        with pytest.raises(ValueError, match="SESSION-BOUND"):
+            ex.execute("/usr/bin/sort < /run/secrets/venya/4", [])
+
+    def test_rejection_audits_command_rejected(self):
+        audit = MagicMock()
+        ex, _strategy = self._executor(audit=audit)
+        with pytest.raises(ValueError):
+            ex.execute("/usr/bin/sort < /etc/passwd", [])
+        args, kwargs = audit.emit.call_args
+        assert args == ("command_rejected",)
+        assert "SESSION-BOUND" in kwargs["reason"]

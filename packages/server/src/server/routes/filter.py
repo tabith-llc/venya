@@ -215,7 +215,28 @@ async def filter_session_output(
         # We look up bound secrets through the SessionSecret join table.
         from core.engine.encryption import DecryptionError
         from core.engine.encryption import decrypt_secret as _decrypt_secret_impl
-        from core.iam.models import SessionSecret
+        from core.iam.models import ExecutionSession, SessionSecret
+
+        # FAIL CLOSED on unknown sessions (ticket
+        # stage2-filter-unknown-session-unmasked-passthrough): this route is the
+        # DEFINITIVE masker and the executor adopts its answer over its own
+        # Stage-1 masking — an empty-knowledge 200 therefore ships RAW output to
+        # the caller. Vanished sessions are a PROVEN real occurrence (the 10-min
+        # TTL reaper deletes rows mid-run — execute-stale-session-update-500), so
+        # unknown → 404 → the executor's existing "Stage 2 filter failed — using
+        # Stage 1 results" fallback keeps masking at one stage, never zero. A
+        # session that EXISTS with zero bindings still returns 200 (legitimately
+        # nothing to mask).
+        exec_session = db.query(ExecutionSession).filter(ExecutionSession.id == session_id).first()
+        if exec_session is None:
+            logger.warning(
+                "Filter called for unknown session %s — refusing empty-knowledge passthrough",
+                session_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session not found",
+            )
 
         bindings = db.query(SessionSecret).filter(SessionSecret.session_id == session_id).all()
 

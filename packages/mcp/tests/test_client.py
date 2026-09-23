@@ -247,6 +247,41 @@ async def test_request_sends_auth_header(mock_config: MCPConfig) -> None:
     assert call_kwargs["headers"]["Authorization"] == "Bearer initial-token"
 
 
+async def test_run_command_execute_leg_gets_long_timeout(mock_config: MCPConfig) -> None:
+    """Execute leg carries the last-fuse timeout; session-create leg does not
+    (ticket cli-execution-timeout-cold-start-default)."""
+    session_resp = _make_response(200, {"session_id": "s1"})
+    exec_resp = _make_response(200, {"exit_code": 0, "stdout": "ok", "stderr": "", "masked_count": 0})
+
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(side_effect=[session_resp, exec_resp])
+
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    result = await client.run_command("exec-1", "echo hi", [])
+    assert result["exit_code"] == 0
+
+    session_kwargs = mock_http.request.call_args_list[0][1]
+    exec_kwargs = mock_http.request.call_args_list[1][1]
+    assert exec_kwargs.get("timeout") == 340.0
+    assert "timeout" not in session_kwargs
+
+
+async def test_request_without_timeout_keeps_client_default(mock_config: MCPConfig) -> None:
+    """Paired negative: a plain _request must NOT forward timeout=None —
+    httpx reads an explicit None as 'no timeout' and would disable the
+    client default entirely."""
+    ok_resp = _make_response(200, {"ok": True})
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(return_value=ok_resp)
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+
+    await client._request("GET", "/api/v1/test")
+    assert "timeout" not in mock_http.request.call_args[1]
+
+
 async def test_list_secrets_filters(mock_config: MCPConfig) -> None:
     """executor/purpose/username → params sent; omitted → no params."""
     secrets_resp = _make_response(200, {"secrets": [{"key": "mysecret", "metadata": {}}]})

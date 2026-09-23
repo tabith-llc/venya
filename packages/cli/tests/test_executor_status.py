@@ -12,6 +12,7 @@ Tests cover:
 - executor_status() with various states
 """
 
+import os
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -220,6 +221,72 @@ class TestGetServerUrl:
             result = _get_server_url(args)
             assert result == "unknown"
 
+    # --- env step (ticket cli-core-url-server-url-naming-split: chain aligned
+    # --- to the 3f3ed1b chokepoint precedence flag > env > config > toml) ---
+
+    def test_env_used_when_no_flag(self):
+        """VENYA_SERVER_URL is honored between the flag and config.json."""
+        from venya_cli.commands import _get_server_url
+
+        args = MagicMock()
+        args.core_url = None
+        args.config_path = "/nonexistent/executor.toml"
+
+        with patch.dict(os.environ, {"VENYA_SERVER_URL": "https://env.example.com"}):
+            result = _get_server_url(args)
+            assert result == "https://env.example.com"
+
+    def test_flag_beats_env(self):
+        """Paired negative (mirrors the 3f3ed1b cells): explicit flag wins
+        over the env var."""
+        from venya_cli.commands import _get_server_url
+
+        args = MagicMock()
+        args.core_url = "https://flag.example.com"
+        args.config_path = "/nonexistent/executor.toml"
+
+        with patch.dict(os.environ, {"VENYA_SERVER_URL": "https://env.example.com"}):
+            result = _get_server_url(args)
+            assert result == "https://flag.example.com"
+
+    def test_env_beats_config(self):
+        """Env precedes config.json even when config holds a non-default URL."""
+        from venya_cli.commands import _get_server_url
+
+        args = MagicMock()
+        args.core_url = None
+        args.config_path = "/nonexistent/executor.toml"
+
+        with (
+            patch("venya_cli.api_client.Config") as MockConfig,
+            patch.dict(os.environ, {"VENYA_SERVER_URL": "https://env.example.com"}),
+        ):
+            mock_config = MagicMock()
+            mock_config.server_url = "https://from-config.example.com"
+            MockConfig.return_value = mock_config
+
+            result = _get_server_url(args)
+            assert result == "https://env.example.com"
+
+    def test_empty_env_falls_through(self):
+        """VENYA_SERVER_URL='' counts as unset — chain continues to config/toml."""
+        from venya_cli.commands import _get_server_url
+
+        args = MagicMock()
+        args.core_url = None
+        args.config_path = "/nonexistent/executor.toml"
+
+        with (
+            patch("venya_cli.api_client.Config") as MockConfig,
+            patch.dict(os.environ, {"VENYA_SERVER_URL": ""}),
+        ):
+            mock_config = MagicMock()
+            mock_config.server_url = "http://localhost:8000"
+            MockConfig.return_value = mock_config
+
+            result = _get_server_url(args)
+            assert result == "unknown"
+
 
 # ---------------------------------------------------------------------------
 # executor_status() tests
@@ -228,6 +295,22 @@ class TestGetServerUrl:
 
 class TestExecutorStatus:
     """Tests for the executor_status() function."""
+
+    def test_status_shows_env_server_url(self, tmp_path, capsys):
+        """Per-command env cell (ticket cli-core-url-server-url-naming-split):
+        status resolves VENYA_SERVER_URL when no flag is passed."""
+        from venya_cli.commands import executor_status
+
+        args = MagicMock()
+        args.cert_path = str(tmp_path / "absent.pem")
+        args.core_url = None
+        args.config_path = None
+
+        with patch.dict(os.environ, {"VENYA_SERVER_URL": "https://env-core.example.com"}):
+            result = executor_status(args)
+
+        assert result == 1  # not registered — but the URL line proves env resolution
+        assert "https://env-core.example.com" in capsys.readouterr().out
 
     def test_status_ok(self, tmp_path, capsys):
         """Status returns 0 when cert is valid with >7 days remaining."""

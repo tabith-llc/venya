@@ -44,6 +44,6 @@ What is NOT in this package
   between them and these models.
 """
 
-from venya_contract.relay import RelayRequest, RelayResponse, RelaySecret
+from venya_contract.relay import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, RelayResponse, RelaySecret
 
-__all__ = ["RelayRequest", "RelayResponse", "RelaySecret"]
+__all__ = ["ASKPASS_HELPER_PATH", "RelayEnvVar", "RelayRequest", "RelayResponse", "RelaySecret"]

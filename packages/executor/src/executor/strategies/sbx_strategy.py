@@ -21,11 +21,14 @@ never enters the VM.
 
 import logging
 import os
+import re
 import shutil
 import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx commands
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+
+from venya_contract import ASKPASS_HELPER_PATH
 
 from .base import InjectionResult, InjectionStrategy, SecretMount
 
@@ -80,6 +83,32 @@ def sweep_workspace_base(base: str = WORKSPACE_BASE) -> int:
     except OSError:
         logger.exception("Failed to sweep workspace base: %s", base)
     return swept
+
+
+# Askpass helper script (ticket secret-shape-askpass-helpers): git/ssh invoke
+# the file named by GIT_ASKPASS/SSH_ASKPASS with a prompt argument. It prints
+# the credential file named by VENYA_ASKPASS_SECRET; username prompts are
+# answered from VENYA_ASKPASS_USER when set. The guard is load-bearing: an
+# unguarded `cat "$VAR"` with VAR unset becomes `cat` on stdin, which would
+# HANG until SBX_TIMEOUT (1h) instead of failing loudly (ticket acceptance:
+# "never empty-string success" — and never a silent hang either).
+# STATIC content — carries no secret; written 0555 into the protected secrets
+# dir at runtime.
+ASKPASS_HELPER_CONTENT = """#!/bin/sh
+if [ -z "${VENYA_ASKPASS_SECRET:-}" ] || [ ! -r "${VENYA_ASKPASS_SECRET:-}" ]; then
+    echo "venya-askpass: VENYA_ASKPASS_SECRET is unset or unreadable" >&2
+    exit 1
+fi
+case "${1:-}" in
+    *sername*)
+        if [ -n "${VENYA_ASKPASS_USER:-}" ]; then
+            printf '%s\\n' "$VENYA_ASKPASS_USER"
+            exit 0
+        fi
+        ;;
+esac
+cat "$VENYA_ASKPASS_SECRET"
+"""
 
 
 class SbxStrategy(InjectionStrategy):
@@ -361,6 +390,113 @@ class SbxStrategy(InjectionStrategy):
 
             logger.debug("Copied secret %s into sandbox: %s", mount.secret_id, container_path)
 
+    def write_askpass_helper(self) -> None:
+        """Write the askpass helper script into the sandbox secrets dir (0555).
+
+        Fail-closed like copy_secrets_into_sandbox: any failed step removes the
+        partial file and raises — a missing helper would surface later as a
+        confusing git/ssh prompt failure. The script is STATIC (no secret
+        content); at invocation time it prints the credential file named by
+        VENYA_ASKPASS_SECRET and answers username prompts from
+        VENYA_ASKPASS_USER (ticket secret-shape-askpass-helpers).
+        """
+        if not self._sandbox_name:
+            raise RuntimeError("Sandbox not created yet")
+
+        mkdir_result = subprocess.run(  # nosec
+            ["sbx", "exec", self._sandbox_name, "mkdir", "-p", CONTAINER_SECRET_DIR],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if mkdir_result.returncode != 0:
+            logger.error("mkdir %s for askpass helper failed: %s", CONTAINER_SECRET_DIR, mkdir_result.stderr)
+            raise RuntimeError(f"Failed to create secrets directory {CONTAINER_SECRET_DIR} for askpass helper")
+
+        result = subprocess.run(  # nosec
+            ["sbx", "exec", "-i", self._sandbox_name, "tee", ASKPASS_HELPER_PATH],
+            input=ASKPASS_HELPER_CONTENT.encode("utf-8"),
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.error(
+                "askpass helper write failed: %s",
+                (result.stderr or b"").decode(errors="replace"),
+            )
+            subprocess.run(  # nosec
+                ["sbx", "exec", self._sandbox_name, "rm", "-f", ASKPASS_HELPER_PATH],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            raise RuntimeError("Failed to write askpass helper into sandbox")
+
+        chmod_result = subprocess.run(  # nosec
+            ["sbx", "exec", self._sandbox_name, "chmod", "555", ASKPASS_HELPER_PATH],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if chmod_result.returncode != 0:
+            logger.error("askpass helper chmod failed: %s", chmod_result.stderr)
+            subprocess.run(  # nosec
+                ["sbx", "exec", self._sandbox_name, "rm", "-f", ASKPASS_HELPER_PATH],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            raise RuntimeError("Failed to set askpass helper permissions")
+        logger.debug("Askpass helper written to %s (mode 555)", ASKPASS_HELPER_PATH)
+
+    # --- env-file injection (ticket secret-shape-env-injection, option ii) ---
+
+    _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    def _write_env_file(self, env: dict[str, str]) -> str:
+        """Write KEY=VALUE lines to a 0600 file in the session tmpfs dir.
+
+        Consumed via `sbx exec --env-file` (native flag, spike-verified on
+        exec-1 2026-09-21) — values never ride host argv, unlike the former
+        `-e K=V` form which exposed them in `/proc/<pid>/cmdline` for the
+        command's duration. The format is line-based: CR/LF in a value is
+        rejected here as the last line of defense against forging extra
+        env-file lines (callers validate too).
+        """
+        if self._session_dir is None:
+            os.makedirs(SECRET_TMPFS_BASE, mode=0o700, exist_ok=True)
+            self._session_dir = tempfile.mkdtemp(prefix="env_", dir=SECRET_TMPFS_BASE)
+        lines: list[str] = []
+        for name, value in env.items():
+            if not self._ENV_NAME_RE.match(name):
+                raise ValueError(f"invalid env var name: {name!r}")
+            if "\n" in value or "\r" in value:
+                raise ValueError(f"env var {name}: multi-line values cannot ride the env-file format")
+            lines.append(f"{name}={value}\n")
+        path = os.path.join(self._session_dir, "venya-env")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("".join(lines))
+        return path
+
+    @staticmethod
+    def _destroy_env_file(path: str) -> None:
+        """Zero + delete the env file immediately after the exec — values are needed only during it."""
+        try:
+            size = os.path.getsize(path)
+            with open(path, "r+b") as fh:
+                fh.write(b"\x00" * size)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.unlink(path)
+        except OSError:
+            logger.warning("Failed to destroy env file %s", path)
+
     def apply_network_policy(self, sandbox_name: str) -> None:
         """Apply egress allowlist to sandbox.
 
@@ -434,19 +570,19 @@ class SbxStrategy(InjectionStrategy):
     ) -> subprocess.CompletedProcess:
         """Execute a command inside the sandbox.
 
-        env_override and cwd ride as `sbx exec -e K=V / -w DIR` argv tokens
-        (docker-exec semantics). Physically probed on the deployed sbx
-        (2026-09-18, exec-1): values stay DATA — a metachar-laden env value
-        is never parsed by a shell; `-w` overrides the workspace-mount
-        default pwd per command without conflicting with the mount
-        (workspace is mounted at its host path inside the sandbox).
-        Ticket executor-env-override-cwd-sbx-noop: these parameters were
-        previously accepted by Executor.execute() and silently dropped on
-        this path.
+        env_override rides as a 0600 `--env-file` on the host session tmpfs
+        (NEVER `-e K=V` argv — that exposed values in host /proc for the
+        command's duration; ticket secret-shape-env-injection option (ii),
+        spike-ruled: `--env-file` is native to `sbx exec`). The file is zeroed
+        and deleted in a `finally` the moment the exec returns. cwd still
+        rides as `-w DIR` (docker-exec semantics; non-secret). Physically
+        probed on the deployed sbx (2026-09-18, exec-1): values stay DATA —
+        never shell-parsed; `-w` overrides the workspace-mount default pwd
+        per command without conflicting with the mount.
 
         Args:
             command: The command to execute inside the sandbox.
-            env_override: Environment variables to set (one -e per K=V).
+            env_override: Environment variables to set (0600 env-file).
             cwd: Per-command working directory inside the sandbox (-w).
 
         Returns:
@@ -456,18 +592,23 @@ class SbxStrategy(InjectionStrategy):
             raise RuntimeError("Sandbox not created yet")
 
         cmd = ["sbx", "exec"]
-        for name, value in (env_override or {}).items():
-            cmd += ["-e", f"{name}={value}"]
+        env_file = self._write_env_file(env_override) if env_override else None
+        if env_file:
+            cmd += ["--env-file", env_file]
         if cwd:
             cmd += ["-w", cwd]
         cmd += [self._sandbox_name, "sh", "-c", command]
 
-        result = subprocess.run(  # nosec
-            cmd,
-            capture_output=True,
-            timeout=SBX_TIMEOUT,
-            check=False,
-        )
+        try:
+            result = subprocess.run(  # nosec
+                cmd,
+                capture_output=True,
+                timeout=SBX_TIMEOUT,
+                check=False,
+            )
+        finally:
+            if env_file:
+                self._destroy_env_file(env_file)
         return result
 
     def remove_sandbox(self) -> None:

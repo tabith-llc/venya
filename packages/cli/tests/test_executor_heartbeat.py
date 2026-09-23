@@ -21,6 +21,7 @@ Tests cover:
 """
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -461,6 +462,60 @@ class TestHeartbeatServerUrl:
 
         captured = capsys.readouterr()
         assert "server URL not configured" in captured.err
+
+    def test_heartbeat_env_server_url_honored(self, tmp_path):
+        """Per-command env cell (ticket cli-core-url-server-url-naming-split):
+        VENYA_SERVER_URL passes the unknown-gate and becomes the POST base URL
+        when no --core-url/--server-url flag is given."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+
+        from venya_cli.commands import executor_heartbeat
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(key_path)
+        args.core_url = None
+
+        mock_client = _make_mock_client(
+            response_data={"revoked": False, "new_cert_required": False},
+        )
+
+        with (
+            patch.dict(os.environ, {"VENYA_SERVER_URL": "https://env-core.example.com"}),
+            patch("venya_cli.commands.httpx2.Client", return_value=mock_client),
+        ):
+            result = executor_heartbeat(args)
+
+        assert result == 0
+        assert mock_client.post.call_args[0][0] == "https://env-core.example.com/api/v1/heartbeat"
+
+    def test_heartbeat_unknown_url_message_names_alias_and_env(self, tmp_path, capsys):
+        """Ruling fold-in: the unknown-gate guidance names --server-url
+        (alias --core-url) AND VENYA_SERVER_URL — same terminology as the
+        register error (ticket cli-core-url-server-url-naming-split)."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+
+        from venya_cli.commands import executor_heartbeat
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(key_path)
+        args.core_url = None
+        args.config_path = "/nonexistent/executor.toml"
+
+        with patch("venya_cli.api_client.Config") as MockConfig:
+            mock_config = MagicMock()
+            mock_config.server_url = "http://localhost:8000"
+            MockConfig.return_value = mock_config
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "server URL not configured" in err
+        assert "--server-url" in err
+        assert "--core-url" in err
+        assert "VENYA_SERVER_URL" in err
 
 
 # ---------------------------------------------------------------------------

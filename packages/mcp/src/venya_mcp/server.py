@@ -50,10 +50,13 @@ async def list_tools() -> list[Tool]:
             name="list_secrets",
             description=(
                 "List secrets stored in Venya. Returns secret keys and metadata "
-                "(executor, purpose, username) — NEVER secret values. "
+                "(executor, purpose, username, shape, usage) — NEVER secret values. "
                 "Use this to discover which secrets are available for a given "
                 "executor or purpose. Filter by executor to find secrets for a "
-                "specific host."
+                "specific host. When a secret carries 'usage' metadata, it is the "
+                "command template for that secret: substitute {secret_path} with "
+                "/run/secrets/venya/<id>, the injected sandbox file (<id> = the "
+                "secret's numeric id from this listing)."
             ),
             inputSchema={
                 "type": "object",
@@ -95,11 +98,16 @@ async def list_tools() -> list[Tool]:
                 "the command can access them, but secret values are NEVER returned "
                 "in the output. Output containing secret values is automatically "
                 "redacted with [REDACTED:<id>] markers.\n\n"
+                "Each injected secret is a FILE at /run/secrets/venya/<id> inside "
+                "the sandbox — reference it by path, never inline a value. If the "
+                "secret's metadata carries a 'usage' template, follow it.\n\n"
                 "IMPORTANT: The command runs in a sandbox with restricted network "
                 "egress. Attempts to exfiltrate secrets via network connections "
                 "will be blocked.\n\n"
-                "Example: To SSH into web-server-3 as user 'bot' and install apache2:\n"
-                "  command: 'ssh bot@web-server-3 sudo apt install -y apache2'\n"
+                "Example: SSH into web-server-3 as 'bot' using its stored password "
+                "(secret id 7) and install apache2:\n"
+                "  command: 'sshpass -f /run/secrets/venya/7 ssh bot@web-server-3 "
+                "sudo apt install -y apache2'\n"
                 "  secret_keys: ['bot_password_web_server_3']"
             ),
             inputSchema={

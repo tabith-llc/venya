@@ -501,6 +501,11 @@ class AdminCertRevocation(Base):
 
     id = Column(Integer, primary_key=True)
     serial_number = Column(String(64), nullable=False, index=True)
+    # No server_default (Python-side lambda only): a raw-SQL INSERT that omits
+    # revoked_at violates NOT NULL (physically hit in the Delta B step-4 cell —
+    # ticket delta-b-run-low-bundle O6; ruled runbook-note, not migration).
+    # Supported write path is the ORM (`venya admin revoke-admin-cert`); manual
+    # inserts must supply revoked_at explicitly — see cert-rotation-runbook.md §4.
     revoked_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     reason = Column(String(64))
 

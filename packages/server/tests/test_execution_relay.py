@@ -20,6 +20,8 @@ from core.engine.core import CoreAccessError
 from fastapi import FastAPI
 from server.dependencies import get_current_user
 from server.routes import executors as executors_routes
+from server.routes.executors import _ENV_SHAPE_MIN_VERSION, _version_tuple
+from server.routes.secrets import wrap_with_sentinel
 from starlette.testclient import TestClient
 
 TEST_USER = {"user_id": "test-user", "roles": ["devops"], "caller": "human"}
@@ -1197,3 +1199,156 @@ class TestTlsMisconfiguration:
                 json={"session_id": "sess-1", "command": "echo hello"},
             )
         assert resp.status_code == 503
+
+
+# --- Env-shape derivation + version gate (ticket secret-shape-env-injection) --
+
+
+def _execute_env_harness(meta: dict, version: str | None, plaintext: str = "s3cret-value"):
+    """App + mocks for one execute call over a session with ONE secret
+    (id 1, key k1) carrying `meta`; executor reports `version`."""
+    app, backend = _create_test_app()
+    mock_db = MagicMock()
+
+    mock_exec_session = MagicMock()
+    mock_exec_session.id = "sess-env"
+    mock_exec_session.user_id = "test-user"
+    mock_exec_session.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    mock_exec_session.executor_id = "exec-1"
+    mock_session_query = MagicMock()
+    mock_session_query.filter.return_value.first.return_value = mock_exec_session
+
+    mock_executor = MagicMock()
+    mock_executor.id = "exec-1"
+    mock_executor.hostname = "10.27.28.14"
+    mock_executor.revoked_at = None
+    mock_executor.serial_number = None
+    mock_executor.version = version
+    mock_executor_query = MagicMock()
+    mock_executor_query.filter.return_value.first.return_value = mock_executor
+
+    ss = MagicMock()
+    ss.secret_id = 1
+    ss.wrapped_value = wrap_with_sentinel("k1", plaintext.encode())
+    mock_secrets_query = MagicMock()
+    mock_secrets_query.filter.return_value.all.return_value = [ss]
+
+    sec_row = MagicMock()
+    sec_row.id = 1
+    sec_row.meta = meta
+    mock_meta_query = MagicMock()
+    mock_meta_query.filter.return_value.all.return_value = [sec_row]
+
+    def query_side_effect(*models):
+        name = models[0].__name__
+        if name == "ExecutionSession":
+            return mock_session_query
+        if name == "Executor":
+            return mock_executor_query
+        if name == "SessionSecret":
+            return mock_secrets_query
+        if name == "Secret":
+            return mock_meta_query
+        none_q = MagicMock()
+        none_q.filter.return_value.first.return_value = None
+        return none_q
+
+    mock_db.query.side_effect = query_side_effect
+    backend.get_session.return_value = mock_db
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"exit_code": 0, "stdout": "ok\n", "stderr": "", "masked_count": 0}
+    mock_response.raise_for_status = MagicMock()
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+    return app, mock_client
+
+
+def _run_execute(app, mock_client):
+    with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
+        with patch("server.routes.executors.ssl.create_default_context", return_value=MagicMock()):
+            client = TestClient(app, raise_server_exceptions=False)
+            return client.post(
+                "/api/v1/executors/exec-1/execute",
+                json={"session_id": "sess-env", "command": "printenv MY_TOKEN"},
+            )
+
+
+def _sent_payload(mock_client):
+    return mock_client.post.call_args.kwargs["json"]
+
+
+class TestEnvShapeDerivation:
+    def test_env_shape_derives_relay_entry(self):
+        app, mc = _execute_env_harness({"shape": "env:MY_TOKEN"}, "0.1.0a13")
+        resp = _run_execute(app, mc)
+        assert resp.status_code == 200
+        payload = _sent_payload(mc)
+        assert payload["env"] == [{"var_name": "MY_TOKEN", "secret_id": 1, "literal_value": None}]
+        assert payload["askpass_helper"] is False
+        assert payload["secrets"][0]["secret_id"] == 1  # file injection ALWAYS rides along
+
+    def test_askpass_shape_derives_helper_wiring(self):
+        app, mc = _execute_env_harness({"shape": "askpass", "username": "gituser"}, "0.1.0a13")
+        resp = _run_execute(app, mc)
+        assert resp.status_code == 200
+        payload = _sent_payload(mc)
+        assert payload["askpass_helper"] is True
+        env = {e["var_name"]: e for e in payload["env"]}
+        assert env["GIT_ASKPASS"]["literal_value"] == "/run/secrets/venya/.venya-askpass"
+        assert env["SSH_ASKPASS"]["literal_value"] == "/run/secrets/venya/.venya-askpass"
+        assert env["VENYA_ASKPASS_SECRET"]["literal_value"] == "/run/secrets/venya/1"
+        assert env["VENYA_ASKPASS_USER"]["literal_value"] == "gituser"
+
+    def test_no_shape_payload_is_wire_identical_to_old(self):
+        """No env shape in play -> the payload carries EXACTLY the three
+        pre-env keys (old executors keep parsing every regular request)."""
+        app, mc = _execute_env_harness({"executor": "exec-1"}, "0.1.0a12")  # old version OK here
+        resp = _run_execute(app, mc)
+        assert resp.status_code == 200
+        assert set(_sent_payload(mc).keys()) == {"session_id", "command", "secrets"}
+
+    def test_old_executor_version_gated_422(self):
+        app, mc = _execute_env_harness({"shape": "env:MY_TOKEN"}, "0.1.0a12")
+        resp = _run_execute(app, mc)
+        assert resp.status_code == 422
+        assert "env-shape support" in resp.json()["detail"]
+        assert "0.1.0a13" in resp.json()["detail"]
+        assert mc.post.await_count == 0  # never dialed
+
+    def test_null_version_gated_422(self):
+        app, mc = _execute_env_harness({"shape": "env:MY_TOKEN"}, None)
+        resp = _run_execute(app, mc)
+        assert resp.status_code == 422
+        assert "pre-version-reporting" in resp.json()["detail"]
+        assert mc.post.await_count == 0
+
+    def test_newline_env_value_rejected_422(self):
+        app, mc = _execute_env_harness({"shape": "env:MY_TOKEN"}, "0.1.0a13", plaintext="line1\nline2")
+        resp = _run_execute(app, mc)
+        assert resp.status_code == 422
+        assert "single-line" in resp.json()["detail"]
+        assert mc.post.await_count == 0
+
+    def test_newer_versions_pass_gate(self):
+        for version in ("0.1.0a14", "0.1.0b1", "0.1.0", "0.2.0", "1.0.0"):
+            app, mc = _execute_env_harness({"shape": "env:MY_TOKEN"}, version)
+            resp = _run_execute(app, mc)
+            assert resp.status_code == 200, version
+
+
+class TestVersionTuple:
+    def test_ordering(self):
+        assert _version_tuple("0.1.0a12") < _ENV_SHAPE_MIN_VERSION
+        assert _version_tuple("0.1.0a13") == _ENV_SHAPE_MIN_VERSION
+        assert _version_tuple("0.1.0a9") < _ENV_SHAPE_MIN_VERSION  # numeric, not lexicographic
+        assert _version_tuple("0.1.0b1") > _ENV_SHAPE_MIN_VERSION
+        assert _version_tuple("0.1.0") > _ENV_SHAPE_MIN_VERSION  # final beats prerelease
+        assert _version_tuple("0.1.1") > _ENV_SHAPE_MIN_VERSION
+
+    def test_unparseable_fails_closed(self):
+        for bad in (None, "", "garbage", "0.1", "v0.1.0a13", "0.1.0a13+local"):
+            assert _version_tuple(bad) is None, bad

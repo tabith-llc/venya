@@ -78,7 +78,7 @@ executor-ID validator is the only shared logic (see
 
 | CA / cert | Location | Purpose |
 |---|---|---|
-| Venya root CA | core: `/var/lib/venya/ca/` | signs server TLS certs, relay client certs; distributed to clients via `/.well-known/venya-ca.crt` and installed into VM trust stores |
+| Venya root CA | core: `/var/lib/venya/ca/` | signs server TLS certs, relay client certs; distributed to clients via `/.well-known/venya-ca.crt` (workstations: `venya setup` installs it beside `config.json`) and installed into VM trust stores |
 | Server TLS cert | core: `/etc/venya/tls/` | nginx termination for `<core-host>` |
 | Relay client cert | core: `/etc/venya/relay/` | CN `<core-host>-relay`; presented when the core dials an executor's relay listener |
 | Admin CA | core: `/var/lib/venya/ca/admin-ca/` (key encrypted) | admin mTLS client certs |
@@ -103,13 +103,23 @@ unauthenticated transport.
    over the mTLS relay channel to the targeted executor. The calling client
    (human or LLM) sees only the command result — the wrapped blob is routed
    server → executor, never through the caller.
-3. **Inject.** The executor daemon unwraps **host-side**, writes the
-   plaintext to a per-session tmpfs staging file (0400, zeroed after the
-   run), and exposes it inside the sbx sandbox at `/run/secrets/venya/<id>`.
-   Execution sessions are ephemeral.
-4. **Filter.** stdout/stderr pass through the Rust filter, which replaces
-   any occurrence of secret material with `[REDACTED:...]` before the output
-   returns to the caller.
+ 3. **Inject.** The executor daemon unwraps **host-side**, writes the
+    plaintext to a per-session tmpfs staging file (0400, zeroed after the
+    run), and exposes it inside the sbx sandbox at `/run/secrets/venya/<id>`.
+    Execution sessions are ephemeral. File injection is the default
+    consumption shape; a secret's `usage` metadata selects alternatives
+    (`ssh-password`, `ssh-key`, `http-netrc`, `http-header-file`,
+    `mysql-defaults`, `ipmi-passfile`, `askpass` for sudo/git, `env:NAME`,
+    custom names) — every shape is mediated through the same per-session
+    tmpfs staging, never through the caller's context.
+ 4. **Filter.** Masking runs in two stages: the executor's Rust filter
+    (Stage 1) replaces any occurrence of secret material with
+    `[REDACTED:...]`, then the server-side **definitive** filter (Stage 2,
+    `POST /api/v1/sessions/{id}/filter` over executor mTLS) re-screens the
+    UNFILTERED bytes with the vault's own knowledge and its answer is
+    adopted. Stage 2 fails **closed**: an unknown or TTL-reaped session gets
+    404, and the executor keeps the Stage-1-masked output — a filter failure
+    never returns raw bytes.
 5. **Audit.** Every step records actor, command string, executor id,
    secret ids (never values), and timestamps. Non-admin users querying
    `get_audit` see only their own events (enforced server-side).

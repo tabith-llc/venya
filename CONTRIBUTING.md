@@ -50,6 +50,14 @@ against):
 uv sync --python 3.14
 ```
 
+`uv.lock` is **versioned** — sync resolves to the committed lock, and lock
+changes are committed like any other source change. The installers'
+host-requirements files (`venya-{core,executor}-requirements.txt`) are
+`uv export --frozen` output pinned to that lock: if you touch a `pyproject`
+or the lock, run `scripts/pin-requirements.sh` and commit the regenerated
+files — the pre-commit `requirements-pinned` hook fails otherwise (ticket
+`installer-deps-not-lock-pinned`).
+
 **Build the Rust filter extension (required).** The `venya_filter` pyo3
 extension is gitignored and normally built by the executor installer; a
 fresh clone does NOT have it. Without this step the executor suite exits

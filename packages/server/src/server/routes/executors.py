@@ -10,10 +10,12 @@ Handles executor CSR submission, certificate signing, and revocation
 list polling for mTLS-based executor authentication.
 """
 
+import base64
 import hashlib
 import hmac
 import json
 import logging
+import re
 import socket
 import ssl
 from datetime import UTC, datetime, timedelta
@@ -30,7 +32,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from venya_contract import RelayRequest, RelayResponse, RelaySecret
+from venya_contract import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, RelayResponse, RelaySecret
 
 from .. import metrics
 from ..ca import CAManager
@@ -41,6 +43,31 @@ from ..revocation import executor_revocation_state
 from ..utils.executor_id import EXECUTOR_ID_PATTERN
 from ..utils.time import effective_expiry_check_time, is_expired
 from .secrets import wrap_with_sentinel
+
+# --- Env-shape gating (ticket secret-shape-env-injection) -------------------
+# First release carrying relay `env` support. An executor reporting an older
+# version — or NULL (a pre-version-reporting daemon, a distinct honest signal)
+# — must NOT receive the new wire fields: old daemons validate extra="forbid"
+# and would answer a mysterious 502, so the server refuses first with an
+# actionable upgrade error (fail-loudly rule).
+_ENV_SHAPE_MIN_VERSION = (0, 1, 0, "a", 13)
+
+
+def _version_tuple(reported: str | None) -> tuple | None:
+    """Parse a heartbeat-reported PEP 440 normalized version into a comparable tuple.
+
+    ``X.Y.Z`` optionally followed by a prerelease tag (``a13``/``b1``/``rc2``) →
+    ``(X, Y, Z, pre_kind, pre_n)``; final releases get pre_kind ``"z"`` so they
+    sort after every prerelease tag. Unparseable or None → None (callers
+    fail closed — never send new wire fields to an executor of unknown age).
+    """
+    if not reported:
+        return None
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:([a-z]+)(\d+))?$", reported.strip())
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) or "z", int(m.group(5) or 0))
+
 
 logger = logging.getLogger("venya.server")
 
@@ -1103,6 +1130,80 @@ async def execute_command_on_executor(
     # Load wrapped secrets from session
     secrets = db.query(SessionSecret).filter(SessionSecret.session_id == session.id).all()
 
+    # Shape-derived env entries (ticket secret-shape-env-injection): only when
+    # the session carries secrets — the metadata query is lazy so the common
+    # no-secret path stays a single round-trip. shape=env:NAME derives a relay
+    # env entry referencing the secret; shape=askpass derives the helper
+    # wiring. Everything else stays file-injection only.
+    env_entries: list[RelayEnvVar] = []
+    askpass = False
+    if secrets:
+        from core.iam.models import Secret
+
+        metas = {
+            row.id: (row.meta or {})
+            for row in db.query(Secret).filter(Secret.id.in_([s.secret_id for s in secrets])).all()
+        }
+        for ss in secrets:
+            meta = metas.get(ss.secret_id, {})
+            shape = meta.get("shape")
+            if not isinstance(shape, str):
+                continue
+            if shape.startswith("env:"):
+                # Newline pre-check on our own sentinel wrap ([VENYA:hash8]b64[/VENYA])
+                # so the operator gets an actionable 422 HERE instead of a flat
+                # executor-side 503 (the env-file format is line-based).
+                try:
+                    inner = ss.wrapped_value.split("]", 1)[1].rsplit("[/VENYA]", 1)[0]
+                    plaintext = base64.b64decode(inner).decode("utf-8")
+                except Exception:  # undecodable → the executor fails loudly later; never guessed here
+                    plaintext = None
+                if plaintext is not None and ("\n" in plaintext or "\r" in plaintext):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=(
+                            f"Secret id {ss.secret_id} (shape '{shape}') contains a newline — env shapes "
+                            "are single-line only (the sandbox env-file format is line-based). Re-store "
+                            "the value without embedded newlines, or use a file-based shape."
+                        ),
+                    )
+                try:
+                    env_entries.append(RelayEnvVar(var_name=shape[4:], secret_id=ss.secret_id))
+                except ValueError as exc:  # contract validation (bad identifier)
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Secret id {ss.secret_id} has an invalid env shape '{shape}': {exc}",
+                    ) from exc
+            elif shape == "askpass":
+                askpass = True
+                env_entries.append(RelayEnvVar(var_name="GIT_ASKPASS", literal_value=ASKPASS_HELPER_PATH))
+                env_entries.append(RelayEnvVar(var_name="SSH_ASKPASS", literal_value=ASKPASS_HELPER_PATH))
+                env_entries.append(
+                    RelayEnvVar(
+                        var_name="VENYA_ASKPASS_SECRET",
+                        literal_value=f"/run/secrets/venya/{ss.secret_id}",
+                    )
+                )
+                username = meta.get("username")
+                if isinstance(username, str) and username:
+                    env_entries.append(RelayEnvVar(var_name="VENYA_ASKPASS_USER", literal_value=username))
+
+    # Version gate BEFORE dialing: never send the new wire fields to an
+    # executor that cannot parse them (old daemons validate extra="forbid"
+    # and would answer a mysterious 502 — fail loudly, name the upgrade).
+    if env_entries or askpass:
+        vt = _version_tuple(executor.version)
+        if vt is None or vt < _ENV_SHAPE_MIN_VERSION:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Executor '{id}' reports version "
+                    f"{executor.version or 'unknown (pre-version-reporting daemon)'}, which predates "
+                    "env-shape support (requires >= 0.1.0a13). Upgrade the executor (installer re-run) "
+                    "or use a file-based shape."
+                ),
+            )
+
     # Build request payload via the frozen relay contract (venya_contract) — the
     # server and executor both import these models, so a one-sided field change is
     # an import/type error here, not a runtime 500 at the executor boundary.
@@ -1110,7 +1211,14 @@ async def execute_command_on_executor(
         session_id=session.id,
         command=req.command,
         secrets=[RelaySecret(secret_id=s.secret_id, wrapped_value=s.wrapped_value) for s in secrets],
+        env=env_entries,
+        askpass_helper=askpass,
     ).model_dump()
+    if not env_entries and not askpass:
+        # Byte-identical to the pre-env wire shape when no env shape is in play:
+        # old executors keep parsing every regular request untouched.
+        payload.pop("env", None)
+        payload.pop("askpass_helper", None)
 
     # Construct executor URL from hostname
     executor_url = f"https://{executor.hostname}:8443/execute"

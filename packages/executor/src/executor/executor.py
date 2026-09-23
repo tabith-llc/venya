@@ -76,11 +76,22 @@ SBX_TIMEOUT = 3600  # 1 hour max
 SHELL_METACHARS = set("|;&$`(){}<>!*?\n\r")
 
 
-def _validate_command_structure(command: str) -> list[str]:
+def _validate_command_structure(command: str, allowed_redirect_paths: frozenset[str] = frozenset()) -> list[str]:
     """Split command into arguments and reject shell metacharacters.
 
+    NARROW REDIRECT ALLOWANCE (ticket secret-shape-sudo-remote, option (a),
+    user ruling 2026-09-21 — corporate targets almost never grant NOPASSWD
+    sudo, so a password must reach remote `sudo -S` over ssh stdin): `<` is
+    permitted ONLY as a standalone whitespace-delimited token immediately
+    followed by a token EXACTLY equal to a session-bound secret path
+    (`/run/secrets/venya/<id>` for an id in `allowed_redirect_paths`). Every
+    other `<` form (`<<`, `<>`, `<&`, fused `a<b`, quoted, trailing) and
+    every other metacharacter remains rejected whole-string — the 2026-09-16
+    unconditional-gate ruling is intact; this is one named, bounded exception.
+
     Args:
-        command: The command string to validate and split.
+        command: The command string to validate.
+        allowed_redirect_paths: exact secret-file paths bound to this session.
 
     Returns:
         List of command arguments from shlex.split().
@@ -91,7 +102,25 @@ def _validate_command_structure(command: str) -> list[str]:
     if not command or not command.strip():
         raise ValueError("Empty command")
 
-    if any(c in command for c in SHELL_METACHARS):
+    # '<' handled per-token (standalone + session-bound target only); every
+    # other metacharacter keeps the unconditional whole-string rejection.
+    tokens = command.split()
+    for i, tok in enumerate(tokens):
+        if "<" in tok:
+            if tok != "<":
+                raise ValueError(
+                    "Shell metacharacters are not permitted. "
+                    "Wrap complex commands in a script file and execute that instead."
+                )
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+            if nxt is None or nxt not in allowed_redirect_paths:
+                raise ValueError(
+                    "Redirect '<' is only permitted when immediately followed by a "
+                    "SESSION-BOUND secret path (/run/secrets/venya/<id> for a secret "
+                    "injected in this session). Any other redirect target is rejected."
+                )
+
+    if any(c in command for c in SHELL_METACHARS - {"<"}):
         raise ValueError(
             "Shell metacharacters are not permitted. "
             "Wrap complex commands in a script file and execute that instead."
@@ -102,6 +131,48 @@ def _validate_command_structure(command: str) -> list[str]:
         raise ValueError("Empty command after parsing")
 
     return args
+
+
+def _resolve_env_vars(
+    env_vars: list[dict[str, Any]] | None,
+    injections: list[SecretBundle],
+    env_override: dict[str, str] | None,
+) -> dict[str, str]:
+    """Resolve relay env specs into the final environment mapping.
+
+    ``secret_id`` specs resolve against the unwrapped bundles (the secret MUST
+    also be injected, so its fingerprints are registered — an env var is never
+    a masking blind spot); ``literal_value`` specs pass verbatim (paths,
+    usernames, helper constants). The line-based env-file format rejects
+    CR/LF in values loudly (forged-line defense). Legacy ``env_override``
+    dicts merge underneath (direct-call callers). Ticket
+    secret-shape-env-injection.
+    """
+    env_final = dict(env_override or {})
+    for spec in env_vars or []:
+        name = spec.get("var_name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"env spec missing var_name: {spec!r}")
+        sid = spec.get("secret_id")
+        if sid is not None:
+            bundle = next((b for b in injections if str(b.secret_id) == str(sid)), None)
+            if bundle is None:
+                raise ValueError(f"env var {name}: secret_id {sid} is not among the session's injected secrets")
+            try:
+                value = bundle.value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError(
+                    f"env var {name}: secret value is not valid UTF-8 — env shapes require text values"
+                ) from exc
+        else:
+            value = spec.get("literal_value") or ""
+        if "\n" in value or "\r" in value:
+            raise ValueError(
+                f"env var {name}: value contains a newline — the env-file format is line-based; "
+                "use a file shape for multi-line credentials"
+            )
+        env_final[name] = value
+    return env_final
 
 
 @dataclass
@@ -143,6 +214,8 @@ class Executor:
         secrets: list[dict[str, Any]],
         env_override: dict[str, str] | None = None,
         cwd: str | None = None,
+        env_vars: list[dict[str, Any]] | None = None,
+        askpass_helper: bool = False,
     ) -> CommandResult:
         """Execute a command with secret injection and output filtering.
 
@@ -151,6 +224,11 @@ class Executor:
             secrets: List of secret dicts with 'secret_id', 'value', 'wrapped_value'.
             env_override: Environment variables to set (not for secrets).
             cwd: Working directory for the command.
+            env_vars: Relay env specs (ticket secret-shape-env-injection):
+                dicts with 'var_name' plus exactly one of 'secret_id' (resolved
+                against the injected bundles) or 'literal_value'.
+            askpass_helper: Write the static askpass helper into the sandbox
+                (ticket secret-shape-askpass-helpers).
 
         Returns:
             CommandResult with exit code, filtered output, and audit data.
@@ -169,8 +247,11 @@ class Executor:
         # parsing cannot soundly distinguish local vs remote interpretation
         # here; the sandbox shell sees the whole string. Shell features must
         # use the script-file path.
+        # Session-bound secret paths are the ONLY legal redirect targets
+        # (ticket secret-shape-sudo-remote option (a)).
+        allowed_redirects = frozenset(f"/run/secrets/venya/{s['secret_id']}" for s in secrets if "secret_id" in s)
         try:
-            _validate_command_structure(command)
+            _validate_command_structure(command, allowed_redirects)
         except ValueError as exc:
             if self.audit_logger:
                 self.audit_logger.emit("command_rejected", command=command, reason=str(exc))
@@ -191,18 +272,26 @@ class Executor:
         try:
             injections = self._prepare_injections(secrets)
 
-            # Audit: credential_injected
+            # Resolve env-var specs (ticket secret-shape-env-injection):
+            # secret_id -> unwrapped bundle value; literal_value -> verbatim.
+            # Resolution happens HERE (not in the relay listener) because
+            # plaintext values only exist on the bundles after
+            # _prepare_injections.
+            env_final = _resolve_env_vars(env_vars, injections, env_override)
+
+            # Audit: credential_injected (env var NAMES only — never values)
             if self.audit_logger:
                 audit_data = {
                     "command": command,
                     "strategy": self.injection_strategy.name(),
                     "fd_count": len(injections),
                     "secret_ids": [s.secret_id for s in injections],
+                    "env_vars": sorted(env_final),
                 }
                 self.audit_logger.emit("credential_injected", **audit_data)
 
             # Step 3: Execute with injected secrets (sbx only)
-            result = self._run_command_sbx(command, injections, env_override, cwd)
+            result = self._run_command_sbx(command, injections, env_final or None, cwd, askpass_helper=askpass_helper)
 
             # Audit: command_executed
             if self.audit_logger:
@@ -469,6 +558,7 @@ class Executor:
         injections: list[SecretBundle],
         env_override: dict[str, str] | None,
         cwd: str | None,
+        askpass_helper: bool = False,
     ) -> CommandResult:
         """Run command inside a Docker Sandbox (microVM).
 
@@ -510,6 +600,12 @@ class Executor:
         # Copy secrets into sandbox
         if self._injection_result:
             strategy.copy_secrets_into_sandbox(self._injection_result.secret_mounts)
+
+        # Askpass helper (ticket secret-shape-askpass-helpers): static 0555
+        # script git/ssh invoke; it reads the credential file at run time.
+        # Written AFTER the secrets (it references their in-sandbox paths).
+        if askpass_helper:
+            strategy.write_askpass_helper()
 
         # Apply network policy from allowlist file
         strategy.apply_network_policy(sandbox_name)
@@ -749,6 +845,13 @@ class Executor:
             json=payload,
             timeout=timeout,
         )
+        if response.status_code != 200:
+            # Explicit fail-closed (ticket stage2-filter-unknown-session-
+            # unmasked-passthrough): a 404 means the server has NO knowledge of
+            # this session (unknown or TTL-reaped mid-run) — the caller keeps
+            # the Stage-1 masked results instead of adopting an empty-knowledge
+            # passthrough. Named RuntimeError, not an accidental KeyError.
+            raise RuntimeError(f"Stage-2 filter returned {response.status_code}")
         data = response.json()
 
         filtered_stdout = base64.b64decode(data["stdout"])

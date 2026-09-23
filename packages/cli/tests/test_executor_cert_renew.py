@@ -18,6 +18,7 @@ Tests cover:
 """
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -174,6 +175,31 @@ class TestRenewSuccess:
         ca_cert_path = tmp_path / "ca.crt"
         assert ca_cert_path.exists()
 
+    def test_renew_env_server_url_honored(self, tmp_path, capsys):
+        """Per-command env cell (ticket cli-core-url-server-url-naming-split):
+        renew POSTs to the VENYA_SERVER_URL-resolved server when no
+        --core-url/--server-url flag is given (was: env silently skipped,
+        'unknown' gate or config-only chain)."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = None
+
+        mock_client = _make_mock_httpx_client()
+
+        with (
+            patch.dict(os.environ, {"VENYA_SERVER_URL": "https://env-core.example.com"}),
+            patch("venya_cli.commands.httpx2.Client", return_value=mock_client),
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            result = executor_cert_renew(args)
+
+        assert result == 0
+        assert mock_client.post.call_args[0][0] == "https://env-core.example.com/api/v1/executors/register"
+
     def test_renew_success_with_custom_paths(self, tmp_path, capsys):
         """Renewal respects custom --cert-path and --key-path for output."""
         custom_dir = tmp_path / "custom"
@@ -236,6 +262,34 @@ class TestRenewErrors:
         assert result == 1
         captured = capsys.readouterr()
         assert "certificate not found" in captured.err
+
+    def test_renew_unknown_url_message_names_alias_and_env(self, tmp_path, capsys):
+        """Ruling fold-in: the unknown-gate guidance names --server-url
+        (alias --core-url) AND VENYA_SERVER_URL — same terminology as the
+        register error (ticket cli-core-url-server-url-naming-split)."""
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = None
+        args.config_path = "/nonexistent/executor.toml"
+
+        with patch("venya_cli.api_client.Config") as MockConfig:
+            mock_config = MagicMock()
+            mock_config.server_url = "http://localhost:8000"
+            MockConfig.return_value = mock_config
+
+            from venya_cli.commands import executor_cert_renew
+
+            result = executor_cert_renew(args)
+
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "server URL not configured" in err
+        assert "--server-url" in err
+        assert "--core-url" in err
+        assert "VENYA_SERVER_URL" in err
 
     def test_renew_missing_key(self, tmp_path, capsys):
         """Cert exists but key missing returns exit code 1."""

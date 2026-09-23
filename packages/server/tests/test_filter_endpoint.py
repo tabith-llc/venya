@@ -411,6 +411,11 @@ class TestFilterSessionOutput:
             def all(self):
                 return [binding]
 
+            def first(self):
+                # ExecutionSession existence check (stage2 fail-closed fix):
+                # this test's session EXISTS with bindings.
+                return SimpleNamespace(id="exec-session-uuid")
+
         class SecretMockQuery:
             def filter(self, *args, **kwargs):
                 return self
@@ -464,6 +469,12 @@ class TestFilterSessionOutput:
 
             def all(self):
                 return []
+
+            def first(self):
+                # ExecutionSession existence check (stage2 fail-closed fix):
+                # the session EXISTS; it simply has zero secret bindings —
+                # the legitimate 200 no-op case.
+                return SimpleNamespace(id="550e8400-e29b-41d4-a716-446655440000")
 
         db = MagicMock()
         db.query.return_value = MockQuery()
@@ -545,3 +556,62 @@ class TestFilterRouteCallerCheck:
             json={"stdout": "aGk=", "stderr": ""},
         )
         assert resp.status_code == 403
+
+
+class TestFilterUnknownSessionFailClosed:
+    """Ticket stage2-filter-unknown-session-unmasked-passthrough: the
+    DEFINITIVE masker must never answer 200-with-raw for a session it has no
+    knowledge of — the executor adopts Stage-2 over its own Stage-1 masking,
+    so an empty-knowledge 200 ships plaintext to the caller. The mid-run TTL
+    reaper race is PROVEN real (execute-stale-session-update-500). Unknown →
+    404 → executor keeps Stage-1. Existing-with-zero-secrets → 200 (legit)."""
+
+    def _client(self, side_effect):
+        db = MagicMock()
+        db.query.side_effect = side_effect
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        return TestClient(_create_test_app(backend=backend), raise_server_exceptions=False)
+
+    def _post(self, client, session_id):
+        import base64
+
+        stdout = base64.b64encode(b"top-secret-value").decode()
+        return client.post(
+            f"/api/v1/sessions/{session_id}/filter",
+            json={"stdout": stdout, "stderr": base64.b64encode(b"").decode()},
+        )
+
+    def _nothing_exists(self, model):
+        q = MagicMock()
+        q.filter.return_value.first.return_value = None
+        q.filter.return_value.all.return_value = []
+        return q
+
+    def test_unknown_uuid_session_404_never_passthrough(self):
+        import base64
+
+        resp = self._post(self._client(self._nothing_exists), "ce3306e7-dead-beef-0000-000000000000")
+        assert resp.status_code == 404
+        assert "top-secret-value" not in resp.text
+        assert base64.b64encode(b"top-secret-value").decode() not in resp.text
+
+    def test_unknown_integer_session_404(self):
+        resp = self._post(self._client(self._nothing_exists), "999")
+        assert resp.status_code == 404
+
+    def test_known_execution_session_zero_secrets_still_200(self):
+        import base64
+
+        def qse(model):
+            q = MagicMock()
+            if model.__name__ == "ExecutionSession":
+                q.filter.return_value.first.return_value = SimpleNamespace(id="known-1")
+            else:
+                q.filter.return_value.first.return_value = None
+                q.filter.return_value.all.return_value = []
+            return q
+
+        resp = self._post(self._client(qse), "known-1")
+        assert resp.status_code == 200
+        assert resp.json()["stdout"] == base64.b64encode(b"top-secret-value").decode()

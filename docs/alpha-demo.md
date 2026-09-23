@@ -8,9 +8,10 @@ key.
 ## Prerequisites
 
 - Core + executor installed and enrolled ([installation.md](installation.md))
-- Workstation bundle installed; admin (or any enrolled user) logged in:
+- Workstation set up (`venya setup <core-host>`, see installation.md §2);
+  admin (or any enrolled user) logged in:
   ```bash
-  SSL_CERT_FILE=~/.config/venya-ca.crt venya login <user-id>
+  venya login <user-id>
   ```
 - Executor shows active: `systemctl is-active venya-executor` on the
   executor host (or the `list_executors` MCP tool from an LLM client)
@@ -18,7 +19,7 @@ key.
 ## 1. Seed a demo secret (~1 min)
 
 ```bash
-SSL_CERT_FILE=~/.config/venya-ca.crt venya store demo-pass 'hunter2-demo-only' \
+venya store demo-pass 'hunter2-demo-only' \
   --roles user
 ```
 

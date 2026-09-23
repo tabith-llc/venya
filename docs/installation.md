@@ -27,6 +27,13 @@ completes but every sandboxed execution fails. Executor hosts also need a few
 GiB free on the state volume before the first `sbx create` — the agent-template
 pull fails below ~3.5 GiB (observed floor).
 
+**Host separation is enforced, not advisory.** Each installer detects the
+OTHER component system-wide and **refuses (exit 1) before any prompt or
+change** — `VENYA_SKIP_PROMPT=yes` does not bypass it. Co-location would merge
+the trust anchor into the treated-as-compromised zone (both services run as
+the same `venya` user; see the README's Host Trust Model). Same-component
+re-runs remain supported (the idempotency contract, §1).
+
 ## 1. Install the core server
 
 On the core VM (root):
@@ -35,8 +42,14 @@ On the core VM (root):
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
   VENYA_SKIP_PROMPT=yes \
   VENYA_DB_PASSWORD=<strong-db-password> \
+  VENYA_DB_PASSPHRASE=<server-encryption-passphrase> \
   bash -s
 ```
+
+`VENYA_DB_PASSPHRASE` has NO default and is **required for unattended
+(piped) installs** — the installer aborts with an actionable error without it
+(interactive runs are prompted; re-runs reuse the stored value and an explicit
+value must MATCH it).
 
 The installer is SHA-256-gated and fail-closed: with `VENYA_TARBALL_SHA256`
 set it verifies against that pin (strict integrity — recommended); unset, it
@@ -66,8 +79,10 @@ Verify:
 
 ```bash
 curl -sk https://<core-host>/api/v1/health
-# {"status":"ok","checks":{"ca":"ok","admin_ca":"ok"}}
+# {"status":"ok","version":"<server-version>","checks":{"ca":"ok","admin_ca":"ok"}}
 ```
+
+`/api/v1/health` is the canonical liveness endpoint (public, unauthenticated, version-only — it must never grow into a config dump). Bare `/health` is served as an alias returning the identical payload, for monitoring tools and load balancers that probe `/health` by convention. Both are unauthenticated and counted under the generic per-IP rate-limit tier (no health-specific exemption); every other unknown path still returns 401, so route existence is not disclosed to unauthenticated callers.
 
 **Re-runs are the idempotency contract.** Re-running an installer on a live
 host reuses stored secrets (`.env` stays byte-identical; an explicitly passed
@@ -84,10 +99,16 @@ trusting any acceptance probe.
 Install the workstation bundle first (section 4), then:
 
 ```bash
-curl -sk https://<core-host>/.well-known/venya-ca.crt -o ~/.config/venya-ca.crt
-venya config set-server https://<core-host>
-SSL_CERT_FILE=~/.config/venya-ca.crt venya init <admin-user-id>
+venya setup <core-host>
+venya init <admin-user-id>
 ```
+
+`venya setup` saves the server URL and installs the core's CA certificate
+(fetched from `/.well-known/venya-ca.crt`, written 0600 beside `config.json`,
+SHA-256 fingerprint printed for out-of-band verification). All later CLI
+commands then verify TLS against it automatically — no `SSL_CERT_FILE`
+needed. `venya config set-server <url>` remains for the offline case
+(URL only, no cert fetch).
 
 Touch the security key when prompted. A **recovery code is printed once** —
 store it securely; it is the only way back if the key is lost. Migrations
@@ -130,13 +151,55 @@ sudo -u venya curl -sk -X POST \
 # → {"enrollment_token": "enrl_exec_...", "expires_in_seconds": 1800, ...}
 ```
 
-The token expires in ~30 minutes and is consumed on first use. The core
+The token expires in ~30 minutes and is consumed on first **successful**
+registration — a rejected attempt (expired, invalid, revoked, bound to a
+different id, unresolvable executor-id) consumes nothing; what a failing
+install burns is the **wall clock** (apt/Docker/sbx steps run before
+registration). The TTL is server-configurable:
+`executor_enrollment.token_ttl_seconds` (raise it for slow or air-gapped
+installs). If the token expires, re-mint and re-run — the installer re-run is
+fast (idempotent: apt/Docker/sbx steps skip or cache):
+
+```bash
+# re-mint on a core (admin mTLS), then re-run the executor installer with the fresh token
+venya admin executor-enroll <executor-id>          # add --bundle for offline/air-gapped CA copy
+```
+
+The core
 **requires a token for executor registration by default**
 (`executor_enrollment.require_token`, enforced since 2026-09-20) — tokenless
 registration attempts are rejected 400 with an actionable error.
 **`<executor-id>` is a contract**: it becomes the client-certificate SAN and
 the hostname cores dial for relay calls — it must resolve from every core,
 and must match the pattern `^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$`.
+
+**Hostname strategy (executor-id resolution).** Resolution is checked
+**from each core** at registration (the server rejects unresolvable ids 400 —
+before the token gate, so a rejection burns nothing) and used at every relay
+dial. Two sanctioned strategies:
+
+- **DNS**: a record for `<executor-id>` pointing at the executor's IP — the
+  clean option wherever DNS exists.
+- **Core-side `/etc/hosts`** (the dev fleet's recipe — no DNS needed): on
+  **every core host**:
+
+  ```bash
+  echo "<executor-ip> <executor-id>" >> /etc/hosts
+  ```
+
+  **Minimal alpha recipe (one core host + one executor VM, no DNS):** pick a
+  dedicated executor-id — not the executor's own hostname (Ubuntu's
+  `127.0.1.1 <hostname>` self-entry makes the installer's local pre-check pass
+  trivially while saying nothing about the core's view) — and map it to the
+  executor VM's real IP **on the core side**:
+
+  ```bash
+  echo "192.168.1.50 venya-exec-1" >> /etc/hosts    # ON THE CORE; executor's real IP, never a loopback variant
+  ```
+
+The executor installer pre-checks local resolvability of the id and prints
+this remedy, but local resolution is only a proxy — the authoritative view is
+each core's.
 
 Then on the executor VM (root):
 
@@ -147,6 +210,9 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
   VENYA_EXECUTOR_ID=<executor-id> \
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> \
   bash -s
+# Docker credentials are REQUIRED for sandbox execution — see "Docker account
+# credentials" below (piped installs: VENYA_DOCKER_USERNAME/VENYA_DOCKER_API_KEY,
+# or run the downloaded script interactively for the hidden prompt).
 ```
 
 **Deferred registration (bootstrap token file).** If install-time registration
@@ -243,14 +309,13 @@ the mac already resolves. Do NOT disable verification.
 Day-one:
 
 ```bash
-venya config set-server https://<core-host>
-SSL_CERT_FILE=~/.config/venya-ca.crt venya login <user-id>
+venya setup <core-host>
+venya login <user-id>
 ```
 
 ## 5. Enroll regular users
 
 ```bash
-SSL_CERT_FILE=~/.config/venya-ca.crt \
 VENYA_ADMIN_CERT=admin-cert/admin.crt VENYA_ADMIN_KEY=admin-cert/admin.key \
 venya admin create-user <user-id> --roles user
 ```
@@ -267,7 +332,7 @@ The response carries a 15-minute single-use enrollment token; the user runs
       "command": "venya-mcp",
       "env": {
         "VENYA_CONFIG": "/home/you/.config/venya/config.json",
-        "VENYA_CA_CERT": "/home/you/.config/venya-ca.crt"
+        "VENYA_CA_CERT": "/home/you/.config/venya/ca.crt"
       }
     }
   }
@@ -275,7 +340,8 @@ The response carries a 15-minute single-use enrollment token; the user runs
 ```
 
 `VENYA_CA_CERT` is required at startup (fail-closed TLS; the internal CA is
-not in the system trust store).
+not in the system trust store). It is the file `venya setup` installs beside
+`config.json`.
 
 ### opencode
 
@@ -291,10 +357,10 @@ does not use the `mcpServers` convention:
       "type": "local",
       "command": ["/home/you/.local/bin/venya-mcp"],
       "enabled": true,
-      "environment": {
-        "VENYA_CONFIG": "/home/you/.config/venya/config.json",
-        "VENYA_CA_CERT": "/home/you/.config/venya-ca.crt"
-      }
+        "environment": {
+          "VENYA_CONFIG": "/home/you/.config/venya/config.json",
+          "VENYA_CA_CERT": "/home/you/.config/venya/ca.crt"
+        }
     }
   }
 }
@@ -305,6 +371,13 @@ tools are model-invoked, not slash commands: ask "list the venya secrets",
 don't type `/list_secrets`. On 401/expired: `venya login <user-id>` (key
 touch) and retry — the MCP server reads the refreshed token from the same
 `VENYA_CONFIG` file.
+
+### Next: create a secret and prove the redaction path
+
+With the client wired, run the 5-minute end-to-end demo —
+[alpha-demo.md](alpha-demo.md): `venya store` a secret, consume it with a
+masked `run_command` (`[REDACTED:…]` in the output), verify the audit trail,
+then drive the same flow from your MCP client.
 
 ## Uninstalling
 
@@ -321,7 +394,9 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstal
 
 The core uninstaller also drops the PostgreSQL database and role. Shared
 infrastructure (nginx/postgres/sbx packages) is kept; revoking a removed
-executor's certificate is a core-side admin operation.
+executor's certificate is a core-side admin operation. Uninstallers are
+**self-contained** — they embed their own helpers and fetch nothing at runtime,
+so they work offline and after the serving origin is gone.
 
 ## Air-gapped networks
 
@@ -353,8 +428,9 @@ procedure exists but is not yet packaged.
   separator on `venya run` is consumed by the CLI (not sent to the
   executor) and is safe to pass.
 - `Host key verification failed` / TLS failures between components: the CA
-  must be provisioned, never verification disabled. Re-fetch
-  `/.well-known/venya-ca.crt` after any core reinstall (the CA is
+  must be provisioned, never verification disabled. Re-run
+  `venya setup <core-host>` on each workstation after any core reinstall —
+  it re-fetches `/.well-known/venya-ca.crt` over the wire (the CA is
   regenerated only if absent — an uninstall or a fresh machine mints a new
   one; a plain reinstall reuses the existing CA but re-signs the server
   leaf cert).

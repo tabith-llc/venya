@@ -29,6 +29,7 @@ NO_ROLE_ROUTES = frozenset(
     for p in [
         # --- public / bootstrap: no authenticated session (or role) exists yet ---
         "/api/v1/health",  # liveness, no auth by design
+        "/health",  # bare alias of /api/v1/health, same handler, no auth by design
         "/api/v1/ready",  # readiness, no auth by design
         "/api/v1/auth/login/start",
         "/api/v1/auth/login/complete",

@@ -2,6 +2,217 @@
 
 Notable changes to Venya will be documented in this file.
 
+## [Unreleased]
+
+## [0.1.0alpha13] - 2026-09-23
+
+> **Backfill note (recorded late):** every UNMARKED entry in this section
+> shipped in `v0.1.0alpha12` but was absent from its CHANGELOG section — the
+> squash-at-tag-cut flow only collects what merges had already added to
+> `[Unreleased]`, and these merges shipped code without an entry. Found by the
+> completeness audit of `v0.1.0-alpha.11..v0.1.0alpha12` (51 merges classified
+> covered / entry-not-required / gap — ticket
+> `changelog-alpha12-completeness-gap`). The published `[0.1.0alpha12]` section
+> is immutable and is NOT edited. Entries added after the backfill are marked
+> *(post-alpha12)*.
+
+### Security
+
+- *(post-alpha12)* The Stage-2 output filter (the definitive masker) no longer
+  answers `200` with unmasked output for unknown or vanished sessions. The
+  executor treats the Stage-2 response as authoritative over its own local
+  masking, so an empty-knowledge passthrough could discard Stage-1
+  `[REDACTED:…]` masking and return plaintext secret values to the caller —
+  reachable through a proven race (the 10-minute TTL reaper deletes session
+  rows while a long command is still running). Unknown sessions now answer
+  `404` and the executor falls back to its own masked result: masking can
+  degrade to one stage, never to zero. Sessions that exist with zero bound
+  secrets still answer `200` (legitimately nothing to mask).
+- Executor session endpoints (`/api/v1/sessions/{id}/filter`, session-secret
+  revoke) now require a verified executor mTLS identity — client certificate
+  checked against the registration record and revocation state — instead of
+  granting executor context from the URL path with no credential check. Audit
+  events on these paths carry the executor identity.
+- Admin mTLS hardening: the admin-certificate allowlist fails closed (an empty
+  allowlist no longer means "allow"), and admin-certificate revocation is
+  checked in-process — a revoked admin serial answers 403 "Admin certificate
+  revoked".
+- The CLI's executor-heartbeat transport rejects `http://` server URLs outright
+  (exit 1 with the named requirement, before any transport is built):
+  executor-identifying state no longer POSTs in plaintext. `VENYA_TLS_VERIFY`
+  covers distrusted certificates over https — it never means "no TLS".
+- The public revocation endpoints (revocation-list and CRL GETs) are now
+  read-only — they previously purged expired entries on read (a write-on-read
+  path on unauthenticated endpoints); the purge moved into the authenticated
+  maintenance loop.
+- Exception-detail leaks eliminated: client-visible error details are limited
+  to audited exception classes (internals go to the journal only), the
+  dead-letter debug exemption was removed from the DB-passphrase boot check,
+  and nginx now runs `server_tokens off` (no version disclosure in the
+  `Server` header).
+- Removed debug log scaffolding that leaked raw session cookies to the journal.
+
+### Changed
+
+- *(post-alpha12)* **Remote sudo with a password** is now a runnable shape
+  (user-ruled: corporate targets almost never grant NOPASSWD sudo). The
+  structural gate gains ONE narrow exception: a standalone `<` token
+  immediately followed by an exactly-matching session-bound secret path
+  (`/run/secrets/venya/<id>`) is permitted, so the password can flow over ssh
+  stdin to a remote `sudo -S`. Every other `<` form (`<<`, `<>`, `<&`, fused,
+  quoted, trailing), unbound/prefix-trick/relative targets, and every other
+  metacharacter remain rejected whole-string (the 2026-09-16
+  unconditional-gate ruling is intact; full truth table re-run). Canonical
+  shape: `sshpass -f /run/secrets/venya/<id1> ssh <user>@<target> sudo -S
+  -p '' <cmd> < /run/secrets/venya/<id2>`. `shape=sudo-stdin` loses its
+  declarative-only warning (mechanism shipped; the pending set is now empty).
+- *(post-alpha12)* **env-shape and askpass secrets now EXECUTE**: a secret
+  stored with `--shape env:NAME` has its value injected into the sandbox
+  environment as `NAME`, carried by a 0600 host-side env file passed via
+  `sbx exec --env-file` — values never ride host argv (the former `-e K=V`
+  transport exposed them in `/proc/<pid>/cmdline` for the command's duration
+  and is gone), and the file is zeroed the moment the command returns.
+  Consumption is via tools that read their environment IMPLICITLY (aws,
+  kubectl via `KUBECONFIG`, psql via `PGPASSFILE`, docker via
+  `DOCKER_CONFIG`): a command can never reference `$NAME` itself — `$` is a
+  blocked metacharacter. `--shape askpass` wires `GIT_ASKPASS`/`SSH_ASKPASS`
+  to a static in-sandbox helper that prints the injected credential file
+  (username comes from the `username` metadata). The relay wire gains
+  OPTIONAL `env`/`askpass_helper` fields (coordinated contract change): the
+  server version-gates on the executor's heartbeat-reported build — older
+  executors get an actionable 422 naming the upgrade instead of a mystery
+  502 — and regular (file-shape) traffic keeps the exact pre-env wire shape.
+  Multi-line values are rejected at store AND execute time (the env-file
+  format is line-based). `sudo-stdin` remains declarative-only pending its
+  gate work.
+- *(post-alpha12)* Secret **shape metadata**: `venya store` and
+  `venya update-metadata` gain `--shape` and `--usage` flags (equivalently
+  `-m shape=… -m usage=…`) declaring how a secret is meant to be consumed —
+  e.g. `--shape ssh-key --usage 'ssh -i {secret_path} -o IdentitiesOnly=yes
+  {user}@{host} <cmd>'`. The server validates the convention at store and
+  metadata-update: usage templates interpolating the secret VALUE (`{value}`
+  and friends) are rejected with a 400 that names the path-only rule and why
+  (values in command text persist UNMASKED in the audit log); unknown shape
+  names are accepted as CUSTOM shapes with a teaching warning; unknown
+  placeholders warn. Shapes whose consumption mechanism has not shipped yet
+  are accepted but answer with a DECLARATIVE-ONLY warning that points at the
+  file path that DOES work — a label must never imply capability the product
+  lacks (that set was `env:NAME`, `askpass`, `sudo-stdin` when this entry was
+  first written; the env and askpass mechanisms ship in this same unreleased
+  train — see the entry above — leaving `sudo-stdin` as the only pending
+  label). `venya list` shows the shape. MCP `list_secrets` and
+  `run_command` descriptions now teach agents the injected-file pattern
+  (`/run/secrets/venya/<id>`) and usage templates — the previous
+  `run_command` example showed a command that could not consume its bound
+  secret at all.
+- nginx relay timeouts raised to 330s at the server level of the core site
+  config (the 300s server→executor relay ceiling + 30s margin): a cold-sandbox
+  command taking >60s previously answered an nginx 504 while the command still
+  succeeded executor-side (a client retry meant double execution); now the
+  server's clean `503 "Executor timed out"` wins at the boundary. Existing
+  cores need an installer re-run to regenerate the site config.
+- Execution-session lifecycle: the 10-minute TTL is now actually reaped (every
+  5-minute maintenance pass, FK-ordered deletes), and post-relay bookkeeping
+  tolerates a session row that vanished mid-execute (bulk UPDATE no-op +
+  WARNING instead of `StaleDataError` → 500 after the command already ran).
+- Installer re-runs now restart stale services: a running process older than
+  the just-deployed bytes is detected (both timestamps printed as a NOTICE),
+  restarted, and proven with a PROOF-OF-FRESH-BYTES line — absence of the
+  proof means do not trust the install. Previously a re-run swapped packages
+  under the live process and "verified" the OLD bytes.
+- Installer hardening: apt steps wait for the dpkg lock natively
+  (`DPkg::Lock::Timeout`, default 120s, override `VENYA_APT_LOCK_TIMEOUT`) and
+  surface the error tail + keep the log on failure instead of dying silently;
+  host Python requirements are pinned to `uv.lock` (regenerate:
+  `scripts/pin-requirements.sh`, enforced by pre-commit) so installed
+  dependency versions can no longer drift from the lockfile.
+- Version surfaces single-sourced: `venya --version`, the health endpoint
+  `"version"`, FastAPI/openapi, `venya-executor --version`, and the
+  heartbeat-reported `executors.version` column all read package metadata via
+  `importlib.metadata` — no independent version literals left to drift, and
+  per-executor build drift is fleet-visible without SSH.
+- The executor bootstrap enrollment token moved to a read-write canonical path
+  (`/var/lib/venya/executor/bootstrap-token`), out of the read-only-hardened
+  `/etc/venya` tree — daemon-side deferred registration no longer bricks on
+  token cleanup (EROFS). The legacy `executor.toml [bootstrap]` location is
+  still read-honored; a failure to clear is a loud ERROR + PROCEED.
+
+### Fixed
+
+- *(post-alpha12)* **`venya run` / MCP `run_command` no longer abandon long
+  sandbox runs at 30s**: the execute call's read timeout now defaults to
+  **340s**, keeping the client the LAST fuse in the chain (server→executor
+  relay 300s < nginx 330s < client 340s) so a clean upstream error always
+  beats a local timeout. The first run on a fresh executor (~65s cold sbx
+  template pull) previously died client-side as `Request timed out` while the
+  server completed it correctly — and the natural retry executed the command a
+  second time. `VENYA_EXECUTION_TIMEOUT` (positive integer seconds) overrides
+  and is now actually wired to the execute path — it was previously read only
+  by the executor-register transport, where it did nothing for runs (register
+  keeps a fixed 30s).
+- *(post-alpha12)* Rate-limit `429`s now carry `Retry-After` (delta-seconds) on
+  all four middleware paths — auth tier, generic tier, break-glass hourly, and
+  the break-glass failure backoff (seconds until the window resets / the
+  backoff expires). Previously only the route-level registration and
+  token-generation limiters set the header; middleware 429s left client backoff
+  as guesswork.
+- Alpha-QA sweep bundle (shipped in `v0.1.0alpha12`, recorded late; per-item
+  detail via `git log --merges v0.1.0-alpha.11..v0.1.0alpha12`): the broken
+  `venya fido2 enroll` command was deleted; credential removal now evicts
+  stored sessions; registration 500s fixed (PIN-only authenticator
+  attestation; registration-start with an existing credential); `venya init`
+  is idempotent over existing roles (no raw UniqueViolation, no leaked SQL);
+  the daemon heartbeat queue gained a backpressure guard; the CLI gained a
+  headless admin-mTLS gate; WebAuthn credential IDs are consistently
+  base64url-encoded; CLI enroll token-output bundling; core-installer
+  DB-password guard; executor-installer sshpass provisioning; the executor
+  installer's empty-token warning now names the real rejection mechanism; the
+  admin executor listing reads revocation from the single authoritative
+  source.
+
+- *(post-alpha12)* **`venya init` now works with clientPin-only security
+  keys** (keys with no built-in user-verification, e.g. TrustKey T120 class):
+  registration dispatches on the key's advertised options and drives the raw
+  CTAP2 clientPin path for such keys — the same spec-canonical path
+  `venya login` has always used — instead of the high-level library ceremony,
+  which mishandled them and surfaced as a cryptic
+  `(<ERR.BAD_REQUEST: 2>, CtapError('CTAP error: 0x31 - PIN_INVALID'))` that
+  burned one key PIN-retry per attempt. Wrong-PIN handling on registration now
+  retries (3×) with a friendly message instead of leaking the raw tuple. A
+  failed first-admin ceremony no longer bricks retry either: an abandoned
+  PENDING enrollment (e.g. from a key-less `venya init` attempt) is superseded
+  by the next plain `venya init <user>` — `--installation-reset` is no longer
+  required for that state (it remains the path for a COMPLETED admin; that
+  409 is unchanged).
+- *(post-alpha12)* Operator-facing fix bundle from the Gavin field reports and
+  the session sweeps (per-item detail via `git log --merges
+  v0.1.0alpha12..v0.1.0alpha13` — see the release commit's ticket list): the
+  installers REFUSE co-location — installing the executor on a host that
+  already runs a core (or vice versa) exits 1 with the detection evidence
+  before any prompt, and `VENYA_SKIP_PROMPT` does not bypass the guard
+  (same-component re-runs stay supported); `venya exec register` honors the
+  configured executor-id and accepts the enrollment token via
+  `VENYA_EXECUTOR_ENROLLMENT_TOKEN` (off argv), with consistent
+  `--server-url`/`VENYA_SERVER_URL` naming; the executor installer gained a
+  non-fatal dial-address pre-check with the remedy recipe, actionable
+  health-probe 401 diagnostics, and enrollment-token expiry guidance; unbound
+  installer env vars no longer crash mid-install; bare `GET /health` aliases
+  `/api/v1/health` (unknown paths still 401); `venya admin
+  get-command-policy` works (the CLI GETted a POST-only route — 405 since the
+  command shipped; the GET reports the stored policy or honest defaults and
+  never mutates); `venya-executor --version` prints the bare version (no
+  `venya-executor ` prefix); the uninstallers are fully self-contained (the
+  LAN-default fetch is gone — uninstall is 100% local).
+
+### Added
+
+- *(post-alpha12)* `venya setup` — one command points the CLI at a core and
+  installs its CA certificate: saves the server URL to the CLI config and
+  fetches the root CA from `/.well-known/venya-ca.crt` beside the config,
+  replacing the manual cert-export + `SSL_CERT_FILE` dance for workstation
+  onboarding. Trust precedence is unchanged: `SSL_CERT_FILE` env wins, then
+  the setup-installed CA, then system trust.
+
 ## [0.1.0alpha12] - 2026-09-21
 
 > **Operator-facing behavior changes in this release — failure signatures:**

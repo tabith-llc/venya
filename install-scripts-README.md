@@ -22,7 +22,8 @@ Installs the Venya Core server on a fresh VM. Includes:
 **Usage:**
 ```bash
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
-  VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=<strong-db-password> bash -s
+  VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=<strong-db-password> \
+  VENYA_DB_PASSPHRASE=<server-encryption-passphrase> bash -s
 ```
 
 **Environment variables:**
@@ -47,7 +48,7 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 Installs the Venya Executor daemon on a fresh VM. Includes:
 
 - **venya** service account (nologin + locked; no password)
-- System packages: `curl`, `sudo`, `build-essential`
+- System packages: `curl`, `sudo`, `build-essential`, `sshpass`
 - **Rust** toolchain (venya user)
 - Python virtual environment + executor/core packages
 - Rust extension build (`venya_filter.so`)
@@ -63,6 +64,13 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> bash -s
 ```
 
+Docker credentials are REQUIRED for sandbox execution (`VENYA_DOCKER_USERNAME`
++ `VENYA_DOCKER_API_KEY`, see the table) — a piped install without them fails
+closed unless `VENYA_SKIP_DOCKER_LOGIN=yes` (documented degraded install). To
+keep the API key out of argv/shell history entirely, download the script and
+run it from an interactive session so the key is entered at the hidden prompt
+(stdin-only handling, never argv/disk).
+
 **Environment variables:**
 
 | Variable | Default | Description |
@@ -72,7 +80,7 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 | `VENYA_TARBALL` | `https://github.com/tabith-llc/venya/releases/latest/download/venya-executor-install.tar.gz` | Tarball URL |
 | `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed |
 | `VENYA_EXECUTOR_ID` | `venya-exec-1` | Executor identifier — CONTRACT: used as the relay dial hostname + client-cert SAN; must be resolvable from every core |
-| `VENYA_SERVER_URL` | `https://venya-core` | Core server URL |
+| `VENYA_SERVER_URL` | (required — no default) | Core server URL; unset aborts with an actionable error (the server hostname cannot be guessed) |
 | `VENYA_EXECUTOR_ENROLLMENT_TOKEN` | (empty) | Bootstrap enrollment token — enables mTLS cert registration and heartbeat bootstrap at install time |
 | `VENYA_DOCKER_USERNAME` | (prompt if TTY) | Docker account for sbx agent-template pulls |
 | `VENYA_DOCKER_API_KEY` | (prompt if TTY) | Docker access token — stdin-only handling, never argv/disk; required unless already authenticated |
@@ -103,12 +111,15 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 
 ### `install-venya-cli.ps1` (Windows)
 
-Windows equivalent of `install-venya-cli.sh`, for PowerShell 5.1 and later. Installs
-the same bundle; **no administrator rights are needed for the install itself.**
+Windows equivalent of `install-venya-cli.sh`, for PowerShell 5.1 and later.
+Installs the same bundle **machine-wide — run from an Administrator terminal**
+(a standard user cannot create the install root or the uv Python junction;
+ticket `windows-uv-junction-standard-user`). Standard users need no rights to
+USE the CLI afterward.
 
-- **uv** (if missing, into `%USERPROFILE%\.local\bin`; uv persists that directory in the user `PATH`)
-- `venya-cli` and `venya-mcp` via `uv tool install` (isolated venvs under `%APPDATA%\uv\tools`)
-- Config lands in `%APPDATA%\venya\config.json`
+- **uv** (pinned, sha256-verified) + a uv-managed CPython 3.14, under the install root (default `C:\Program Files\Venya`; override with `VENYA_INSTALL_DIR`)
+- `venya-cli` and `venya-mcp` as isolated `uv tool` venvs under the install root, with `venya` / `venya-mcp` shims on the machine `PATH`
+- Per-user state (server URL, access token, CA cert) in `%APPDATA%\venya\`
 - Uses the built-in `curl.exe` and `tar.exe` (bsdtar) — no extra tooling, no compiler
 
 **Usage (on the operator workstation):**
@@ -124,13 +135,13 @@ $env:VENYA_SKIP_PROMPT = "yes"
 .\install-venya-cli.ps1
 ```
 
-> **FIDO2 limitation on Windows.** Since Windows 10 1903 the OS restricts raw
-> CTAP/HID access to elevated processes. Until the platform WebAuthn API path
-> lands, `venya init`, `venya login` and `venya credential add` require an
-> **Administrator** terminal, and only work in an interactive desktop session —
-> not over SSH or WinRM, because the platform API needs a foreground window
-> handle. A standard (non-admin) user sees a misleading `No FIDO2 devices found`.
-> Tracked as ticket `windows-fido2-requires-elevation`.
+> **FIDO2 on Windows.** `venya init`, `venya login`, `venya enroll` and
+> `venya credential add` go through the Windows platform WebAuthn API and work
+> for **standard (non-admin) users** — but only in an **interactive desktop
+> session**: never over SSH/WinRM, because the platform API needs a foreground
+> window handle. Only the machine-wide installer/uninstaller are admin-run
+> (ticket `windows-fido2-requires-elevation`, CLOSED — the platform-API path
+> shipped in alpha.10).
 >
 > Authenticator **reset** and **PIN management** are out of scope on Windows; the
 > platform API exposes only `make_credential` / `get_assertion`. Customer IT owns
@@ -138,19 +149,22 @@ $env:VENYA_SKIP_PROMPT = "yes"
 
 *Serving note:* `create-tarball-and-serve.sh` serves both `.ps1` files when the
 built ref contains them, and omits them (with a `WARN`, removing any stale copy)
-for older refs. They are not yet GitHub release assets — adding them is a
-`RELEASES.md` step.
+for older refs. They are GitHub release assets since `v0.1.0-alpha.10` (the
+15-asset manifest; pre-Windows tags legitimately carry 13).
 
 ### Uninstallers
 
-Each artifact has a matching uninstaller (served from the same origin):
+Each artifact has a matching uninstaller (served from the same origin).
+Uninstallers are **self-contained** — they embed their own helper functions and
+fetch nothing at runtime (ticket `uninstaller-fetch-origin-lan-default`), so
+they work offline and after the serving origin is gone:
 
 | Script | Runs as | Removes | Keeps |
 |---|---|---|---|
 | `uninstall-venya-core.sh` | root (on core VM) | service+unit, nginx site, /opt/venya, /etc/venya, /var/lib/venya (CA keys), well-known CA, trust entries, PostgreSQL db+role, venya user | nginx/postgresql OS packages |
 | `uninstall-venya-executor.sh` | root (on executor VM) | service+mount+seccomp units, /opt/venya, /etc/venya (mTLS key), /var/lib/venya, trust entries, venya user (Rust/uv/sbx state) | sbx/docker packages, /etc/hosts (provisioning-owned); revoke the cert on the core separately |
 | `uninstall-venya-cli.sh` | operator user (no sudo) | uv tools `venya-cli` + `venya-mcp` and shims; optionally `~/.config/venya` (`VENYA_PURGE_CONFIG=yes`) | uv itself |
-| `uninstall-venya-cli.ps1` | operator user (Windows, no admin) | uv tools `venya-cli` + `venya-mcp` and shims; optionally `%APPDATA%\venya` (`VENYA_PURGE_CONFIG=yes`) | uv itself and the `.local\bin` `PATH` entry |
+| `uninstall-venya-cli.ps1` | Administrator (Windows, machine-wide) | the install root (pinned uv, uv-managed Python, both tool venvs, shims), its bin dir from the MACHINE PATH; optionally the invoking user's `%APPDATA%\venya` (`VENYA_PURGE_CONFIG=yes`) | other users' per-profile config (a find-command is printed, not run) |
 
 **Usage:**
 ```bash
@@ -232,16 +246,24 @@ pkill -f 'python3 -m http.server 8080'
 ```bash
 sudo systemctl start venya-core
 curl -sk https://<core-hostname>/api/v1/health
-# Expected: {"status":"ok"}
+# Expected: {"status":"ok","version":"<server-version>","checks":{...}}
+# (bare /health serves the identical payload as an alias)
 ```
 
 ### Executor
 
 ```bash
-# 1. Generate mTLS certs on core server
-# 2. Copy ca.crt, executor.crt, executor.key to /etc/venya/executor/
-sudo systemctl start venya-executor
+# mTLS registration happens AT INSTALL TIME when VENYA_EXECUTOR_ENROLLMENT_TOKEN
+# was provided (admin mints one on a core: venya admin executor-enroll <executor-id>).
+# The installer writes /etc/venya/executor/{executor.crt,executor.key,ca.crt}.
+sudo systemctl start venya-executor      # already started by the installer; use after a manual stop
+journalctl -u venya-executor -n 20       # heartbeat POST ... 200 OK
 ```
+
+Deferred registration (no token at install time, or core unreachable → CA not
+installed): the token is written to `/var/lib/venya/executor/bootstrap-token`
+and the daemon registers automatically at service start once the core is
+reachable — retry with `sudo systemctl restart venya-executor`.
 
 ### Service account (both)
 

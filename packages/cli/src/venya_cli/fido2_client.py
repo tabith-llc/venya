@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -187,14 +188,19 @@ class Fido2Auth:
         # result = {"user_id": "...", "session_token": "..."}
     """
 
-    def __init__(self, server_url: str = "http://localhost:8000") -> None:
+    def __init__(self, server_url: str = "http://localhost:8000", ca_path: Path | None = None) -> None:
         self.server_url = server_url.rstrip("/")
+        # Same server-TLS precedence as APIClient: SSL_CERT_FILE env wins,
+        # then the CA installed by `venya setup`, then system trust.
+        self._verify: str | bool = True
+        if ca_path is not None and ca_path.exists() and not os.environ.get("SSL_CERT_FILE"):
+            self._verify = str(ca_path)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Simple GET request."""
         url = self.server_url + path
         try:
-            with httpx2.Client() as client:
+            with httpx2.Client(verify=self._verify) as client:
                 resp = client.get(url, params=params, timeout=30.0)
                 resp.raise_for_status()
                 return resp.json() if resp.content else {}
@@ -213,7 +219,7 @@ class Fido2Auth:
         """Simple POST request."""
         url = self.server_url + path
         try:
-            with httpx2.Client() as client:
+            with httpx2.Client(verify=self._verify) as client:
                 resp = client.post(
                     url,
                     json=json_data,
@@ -370,7 +376,22 @@ class Fido2Auth:
             try:
                 credential = self._get_credential(request_options, timeout=timeout)
                 break
-            except CtapError as e:
+            except (ClientError, CtapError) as e:
+                # fido2 may surface a CTAP error wrapped in ClientError (original
+                # in e.cause); unwrap so the PIN retry below still applies. This
+                # is the make_credential sibling of the authenticate() unwrap
+                # restored by da2c09a — register() was missed, so a high-level
+                # ClientError(PIN_INVALID) escaped as a raw tuple with no retry.
+                if isinstance(e, ClientError) and isinstance(e.cause, CtapError):
+                    e = e.cause
+                if isinstance(e, ClientError):
+                    if e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
+                        raise Fido2ClientError(
+                            "Security key has no PIN set and cannot verify the user "
+                            "another way. Set a PIN on the key (e.g. yubikey-manager), "
+                            "then try again."
+                        ) from e
+                    raise
                 if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
                     if attempt < max_pin_retries - 1:
                         logger.warning("Incorrect PIN. %d attempt(s) remaining.", max_pin_retries - 1 - attempt)
@@ -388,7 +409,9 @@ class Fido2Auth:
                         "  3. Touch your key in the browser\n"
                         "Your credential will be usable from the CLI immediately after."
                     ) from e
-                raise
+                # `raise e`, not bare `raise`: e may be the REBOUND unwrapped
+                # CtapError; a bare raise re-raises the original ClientError.
+                raise e  # noqa: TRY201 — rebinding makes bare raise semantically wrong
 
         # Step 4: Convert credential to server format and complete
         logger.info("Sending attestation to server")
@@ -476,42 +499,50 @@ class Fido2Auth:
             print(f"DEBUG: make_credential rp_id={rp_id} pubKeyCredParams={pub_params}", file=sys.stderr)
 
         collector = DefaultClientDataCollector(origin, verify_rp_id)
-        # Factory: WindowsClient (platform API, no enumeration) on win32;
-        # raw Fido2Client over the first HID device elsewhere. Raises
-        # Fido2NotFoundError (non-win32, no device) or Fido2ClientError
-        # (win32, platform API unavailable).
-        client = _make_webauthn_client(collector)
-        try:
-            return client.make_credential(request_options.public_key)
-        except (ClientError, CtapError) as e:
-            if sys.platform == "win32":
-                # The OS owns the PIN/UV dialog on the platform path, and the
-                # raw-Ctap2 clientPin fallbacks below require admin-only
-                # device access — unreachable for standard users by design.
+
+        if sys.platform == "win32":
+            # Platform API path: the OS owns enumeration (admin-only on Windows)
+            # and the PIN/UV dialog — no info-based dispatch, no raw fallback
+            # (the raw-Ctap2 path needs admin-only device access). Mirrors
+            # _get_assertion's win32 branch.
+            try:
+                return _make_webauthn_client(collector).make_credential(request_options.public_key)
+            except ClientError as e:
                 raise _translate_windows_error(e) from e
-            print(
-                f"DEBUG: make_credential high-level exception: {type(e).__name__} code={getattr(e, 'code', None)}",
-                file=sys.stderr,
-            )
-            device = next(iter(list_devices()), None)
-            if device is None:
-                raise
-            interaction = CliInteraction()
-            # Unwrap ClientError to check the underlying CtapError
-            cause = getattr(e, "cause", None)
-            if isinstance(cause, CtapError) and cause.code == CtapError.ERR.OPERATION_DENIED:
-                ctap2 = Ctap2(device)
-                if ctap2.info.options.get("clientPin"):
-                    return self._get_credential_pin_only(ctap2, request_options, interaction)
-            if isinstance(e, ClientError) and e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
-                ctap2 = Ctap2(device)
-                if ctap2.info.options.get("clientPin"):
-                    return self._get_credential_pin_only(ctap2, request_options, interaction)
-            if isinstance(e, CtapError) and e.code == CtapError.ERR.OPERATION_DENIED:
-                ctap2 = Ctap2(device)
-                if ctap2.info.options.get("clientPin"):
-                    return self._get_credential_pin_only(ctap2, request_options, interaction)
-            raise
+
+        devices = list(list_devices())
+        if not devices:
+            raise Fido2NotFoundError("No FIDO2 devices found")
+
+        ctap2 = Ctap2(devices[0])
+        info = ctap2.info
+        interaction = CliInteraction()
+
+        # WHY THIS PATH EXISTS — mirror of _get_assertion's info-based dispatch
+        # (ticket init-pin-invalid-after-installation-reset).
+        #
+        # fido2 2.2.1's high-level Fido2Client.make_credential mishandles
+        # clientPin-only keys (clientPin advertised, no built-in uv): its
+        # uv-negotiation path makes such authenticators return off-spec errors
+        # — observed as CTAP 0x31 PIN_INVALID on a makeCredUvNotRqd
+        # TrustKey-class key — and every failure burns one PIN-retry. For a
+        # clientPin-only key the PIN IS the user verification, so the raw Ctap2
+        # path (pinUvAuthParam, no uv option) is spec-canonical — the same
+        # deviation _get_assertion documents and relies on for login.
+        #
+        # Dispatch on the key's advertised options UP FRONT instead of trying
+        # the high-level path first and falling back only on
+        # OPERATION_DENIED/CONFIGURATION_UNSUPPORTED (which missed 0x31, so the
+        # working raw path was never reached for registration).
+        if info.options.get("uv"):
+            # built-in UV: existing high-level path
+            client = Fido2Client(devices[0], collector, user_interaction=interaction)
+            return client.make_credential(request_options.public_key)
+
+        if info.options.get("clientPin"):
+            return self._get_credential_pin_only(ctap2, request_options, interaction)
+
+        raise Fido2ClientError("Security key advertises neither built-in UV nor clientPin; cannot register.")
 
     @staticmethod
     def _format_credential_response(

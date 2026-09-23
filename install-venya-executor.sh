@@ -64,6 +64,7 @@ fi
 
 venya_print_colors
 venya_check_root
+venya_check_no_colocation executor
 venya_determine_install_dir /opt/venya
 venya_check_existing
 
@@ -418,16 +419,54 @@ EOF
 
 info "Executor config written to /etc/venya/executor.toml"
 
+# --- Executor-id dial-contract pre-check (ticket installer-executor-id-precheck-guidance) ---
+# EXECUTOR_ID is the relay dial hostname + client-cert SAN: EVERY core must
+# resolve it (DNS or core-side /etc/hosts), or the core rejects registration
+# 400 BEFORE the token gate — a rejected attempt does NOT burn the token.
+# Local getent is a WEAK PROXY: authoritative resolvability is core-side, and
+# Ubuntu's '127.0.1.1 <hostname>' entry makes ID == own-hostname pass trivially
+# here. Hence NON-FATAL by ruling — this check must never abort the install
+# (core-side-only /etc/hosts entries are a valid strategy; aborting on the
+# local proxy would false-positive them).
+if getent hosts "$EXECUTOR_ID" > /dev/null 2>&1; then
+    info "Executor ID '$EXECUTOR_ID' resolves locally."
+    info "CONTRACT: every CORE must also resolve '$EXECUTOR_ID' (relay dial hostname + cert SAN) —"
+    info "local resolution does not prove core-side resolution (127.0.1.1 own-hostname trap)."
+else
+    warn "Executor ID '$EXECUTOR_ID' does NOT resolve locally."
+    warn "CONTRACT: the ID is the relay dial hostname + client-cert SAN — it must resolve FROM EVERY CORE,"
+    warn "or the core rejects registration (400) and relay calls cannot dial this executor."
+    warn "A rejected attempt does NOT burn the enrollment token — retry is free."
+    warn "Remedy — on EACH core host: echo \"<executor-ip> $EXECUTOR_ID\" >> /etc/hosts  (or add a DNS record)"
+fi
+
 # --- Register mTLS certificate (if enrollment token provided) ---
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
+    # TTL timing guidance (ticket installer-enrollment-token-expiry-guidance):
+    # what burns on a failed install is the WALL CLOCK, not the token.
+    info "Enrollment token provided — TTL ~30 min by default (server knob: executor_enrollment.token_ttl_seconds)."
+    info "Registration runs near the END of install — mint the token immediately before running the installer."
     info "Attempting mTLS certificate registration..."
 
     if [ "$CA_INSTALLED" = true ]; then
-        # Health check with proper TLS (CA is now trusted)
-        if curl -sf "$SERVER_URL/api/v1/health" >/dev/null 2>&1; then
+        # Class-aware health probe (ticket health-probe-401-installer-diagnostics
+        # scope b): `curl -sf` conflated unreachable / unauthorized / unhealthy
+        # into one generic warn — exactly when diagnostics matter most. The HTTP
+        # code splits the classes (connection failure -> 000). `|| true` inside
+        # the substitution: a failing curl would otherwise die at the assignment
+        # under set -e (the REG_OUTPUT incident class noted below).
+        HEALTH_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$SERVER_URL/api/v1/health" 2>/dev/null || true)
+        if [ "$HEALTH_CODE" = "200" ]; then
             info "Core health check passed (TLS verified)"
+        elif [ "$HEALTH_CODE" = "000" ] || [ -z "$HEALTH_CODE" ]; then
+            warn "Core UNREACHABLE at $SERVER_URL (network/DNS/TLS) — check VENYA_SERVER_URL, firewall, CA."
+            warn "Proceeding with registration anyway."
+        elif [ "$HEALTH_CODE" = "401" ] || [ "$HEALTH_CODE" = "403" ]; then
+            warn "Core REACHABLE but UNAUTHORIZED (HTTP $HEALTH_CODE) — proxy/path/middleware misconfig."
+            warn "Proceeding with registration anyway."
         else
-            warn "Core health check failed — proceeding with registration anyway"
+            warn "Core reachable but UNHEALTHY (HTTP $HEALTH_CODE)."
+            warn "Proceeding with registration anyway."
         fi
 
         # Run registration — failures must abort install WITH diagnostics.
@@ -435,19 +474,48 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
         # substitution in an assignment kills the script at the assignment,
         # making the handler below unreachable and swallowing REG_OUTPUT
         # (observed live 2026-09-17: bad token → silent exit, no error shown).
+        # Token passes via ENV, not argv (ticket cli-exec-register-token-env-unsupported):
+        # --enrollment-token exposed the live token in /proc/*/cmdline to any
+        # local user during the install window (Docker-API-key stdin-only precedent).
         REG_EXIT=0
-        REG_OUTPUT=$("$INSTALL_DIR/.venv/bin/venya" exec register \
+        REG_OUTPUT=$(VENYA_EXECUTOR_ENROLLMENT_TOKEN="${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" \
+            "$INSTALL_DIR/.venv/bin/venya" exec register \
             --executor-id "$EXECUTOR_ID" \
             --core-url "$SERVER_URL" \
             --output-dir /etc/venya/executor \
-            --enrollment-token "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" \
             2>&1) || REG_EXIT=$?
         echo "$REG_OUTPUT"
 
         if [ "$REG_EXIT" -ne 0 ]; then
             error "Executor registration failed (exit $REG_EXIT)"
             error "Output: $REG_OUTPUT"
-            error "Check that VENYA_EXECUTOR_ENROLLMENT_TOKEN is valid and core is reachable"
+            # Class-aware guidance (tickets installer-enrollment-token-expiry-guidance +
+            # installer-executor-id-precheck-guidance): match the server's STABLE
+            # detail substrings — a soft cross-package contract already pinned by
+            # server tests (routes/executors.py), no new pin here. ANY non-match
+            # falls through to the generic hint: never mislabel a class.
+            if printf '%s' "$REG_OUTPUT" | grep -qiF "Enrollment token has expired"; then
+                error "CLASS: enrollment token EXPIRED. TTL is ~30 min by default (server knob:"
+                error "  executor_enrollment.token_ttl_seconds). Expiration is wall-clock: the failed"
+                error "  attempt did NOT consume the token — but the token is now past its window."
+                error "Re-mint on a core (admin mTLS):"
+                error "  venya admin executor-enroll $EXECUTOR_ID"
+                error "  (offline/air-gapped: 'venya admin executor-enroll --bundle ...' copies CA + token together)"
+                error "Then re-run this installer with the fresh token — the re-run is FAST (idempotent:"
+                error "  apt/Docker/sbx steps skip or cache, so TTL window pressure mostly evaporates):"
+                error "  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<new-token> <same installer command as before>"
+            elif printf '%s' "$REG_OUTPUT" | grep -qiF "does not resolve"; then
+                error "CLASS: executor-id NOT RESOLVABLE from the core. The ID is the relay dial"
+                error "  hostname + cert SAN — every core must resolve it. The rejected attempt did"
+                error "  NOT burn the enrollment token (the check precedes the token gate)."
+                error "Remedy — on EACH core host: echo \"<executor-ip> $EXECUTOR_ID\" >> /etc/hosts  (or DNS record)"
+                error "Then re-run this installer (or just the registration) with the SAME token."
+            else
+                error "Check that VENYA_EXECUTOR_ENROLLMENT_TOKEN is valid (server detail above names the"
+                error "  class: invalid / revoked / consumed / bound to a different executor_id), that the"
+                error "  core is reachable, and that every core can resolve '$EXECUTOR_ID' (relay dial"
+                error "  hostname + cert SAN — remedy: echo \"<executor-ip> $EXECUTOR_ID\" >> /etc/hosts on each core)."
+            fi
             exit 1
         fi
 
@@ -548,6 +616,11 @@ echo "  systemctl start|stop|restart|status venya-executor"
 echo ""
 echo "Next steps:"
 echo "  1. Run 'newgrp kvm' or re-login to activate KVM group (needed for Docker sandbox/KVM access)"
+echo ""
+echo "Executor ID contract:"
+echo "  '$EXECUTOR_ID' is the relay dial hostname + client-cert SAN — EVERY core"
+echo "  must resolve it (DNS or core-side /etc/hosts:"
+echo "  echo \"<executor-ip> $EXECUTOR_ID\" >> /etc/hosts)."
 echo ""
 echo "==============================================================="
 echo "  RELAY WIRING (CN match contract)"

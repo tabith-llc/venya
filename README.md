@@ -10,6 +10,28 @@ Venya is the first platform that lets AI agents execute commands on remote infra
 
 ---
 
+## Host Trust Model
+
+Venya's components carry deliberately different trust postures:
+
+- **The core server is the trust anchor — give it its own protected host.**
+  Firewalled, minimally exposed, reachable only by its executors (mTLS) and
+  administrators. It holds the CA keys, the encrypted secret store, and the
+  audit log.
+- **Executor hosts are treated as compromised by design.** Agents run arbitrary
+  commands on them, so Venya assumes an attacker may own the machine: secrets
+  are injected only inside sandboxed microVMs, egress is deny-by-default,
+  output is filtered, and executor identity is mTLS-bound and revocable. An
+  executor breach must never become a core breach.
+
+**Never install core and executor on the same machine.** Co-location merges the
+trust anchor into the assume-compromised zone and voids the isolation above —
+both services would run as the same OS user, letting a compromised executor
+reach the core's key material. On a single physical machine, run the core and
+each executor as separate virtual machines.
+
+---
+
 ## The Problem
 
 Infrastructure teams are adopting AI agents (Claude Code, Cursor, autonomous coding assistants) to manage servers, deploy applications, and troubleshoot incidents. But these agents need credentials to do their work — SSH keys, API tokens, database passwords.
@@ -134,9 +156,13 @@ Artifacts (installers, tarballs, SHA-256 sidecars) are published on the **[Relea
 ```bash
 # Core server (root)
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-core.sh | sudo \
-  VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=<strong-db-password> bash -s
+  VENYA_SKIP_PROMPT=yes VENYA_DB_PASSWORD=<strong-db-password> \
+  VENYA_DB_PASSPHRASE=<server-encryption-passphrase> bash -s
 
-# Executor (root; enrollment token from the core admin; a Docker account is REQUIRED — sbx pulls its agent template from Docker Hub; username + API key/access token via stdin)
+# Executor (root; enrollment token from the core admin; a Docker account is REQUIRED — sbx pulls its agent
+# template from Docker Hub. Piped installs need VENYA_DOCKER_USERNAME/VENYA_DOCKER_API_KEY, or download the
+# script and run it interactively for hidden-prompt entry — the key is handled stdin-only, never argv/disk.
+# See installation.md §3.)
 curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-venya-executor.sh | sudo \
   VENYA_SKIP_PROMPT=yes VENYA_SERVER_URL=https://<core-host> VENYA_EXECUTOR_ID=<executor-id> \
   VENYA_EXECUTOR_ENROLLMENT_TOKEN=<token> bash -s
@@ -153,6 +179,8 @@ powershell -ExecutionPolicy Bypass -File install-venya-cli.ps1
 ```
 
 Integrity: pin `VENYA_TARBALL_SHA256` (hashes on the release page) for strict verification; unset, the installer fetches the `.sha256` sidecar from the same origin as a corruption guardrail and fail-closes.
+
+Core and executor must run on separate hosts (or separate VMs on one physical machine) — see [Host Trust Model](#host-trust-model).
 
 Workstation CLI config file: `~/.config/venya/config.json` on Linux, `~/Library/Application Support/venya/config.json` on macOS, `%APPDATA%\venya\config.json` on Windows. FIDO2 needs no extra setup on macOS (native IOKit HID transport, no root) or Windows (platform WebAuthn API — standard-user capable, interactive desktop required); on Linux the installer prints udev rules if `/dev/hidraw*` is not user-readable.
 
@@ -217,8 +245,9 @@ hypervisor: VM provision → core/executor/CLI install from hash-verified
 tarballs → FIDO2 identity bootstrap (with wrong-key and replay negatives) →
 secret creation → an MCP `run_command` that consumes the secret with the value
 redacted from all output. Two live full-lifecycle runs passed on 2026-09-17;
-unit suites (cli / core / server / executor / mcp, Python 3.14) green at
-1,722 tests.
+the unit suites across all six packages (cli / core / server / executor / mcp /
+venya-contract, Python 3.14) are green — absolute counts deliberately live in
+the per-release records, not here (they rot with every merge).
 
 - **Run it yourself:** the [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md)
   is fully self-contained — commands, gates, failure modes, verification
@@ -265,7 +294,7 @@ This is the same licensing model used by HashiCorp (Vault, Terraform).
 
 **Can the AI agent extract secrets by crafting clever commands?**
 
-No. The secret is injected into the sandbox process as raw bytes — it's not an environment variable that can be echoed, not a file that can be cat'd. The Rust output filter scans all stdout/stderr for secret byte patterns and replaces matches with `[REDACTED]` markers before the output leaves the sandbox. Even if the command is `echo $SECRET`, the filter catches it.
+No. The agent never receives plaintext: the secret is injected only inside the sandbox — a per-session tmpfs file at `/run/secrets/venya/<id>` (0400, zeroed after the run; the env/askpass/sudo consumption shapes ride the same file-mediated transport) — and every byte of stdout/stderr passes two redaction stages (the executor's Rust filter, then the server-side definitive filter, which fails closed) that replace secret values with `[REDACTED]` markers before the output returns. A command that `cat`s the secret demonstrates the filter, not a bypass. Network exfiltration is blocked by deny-by-default egress allowlisting; the sandbox boundary is the containment — see the [full FAQ](docs/faq.md).
 
 **What if the AI agent goes rogue?**
 
