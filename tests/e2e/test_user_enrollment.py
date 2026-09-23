@@ -119,7 +119,7 @@ msg = f'{username}:{plaintext}'.encode()
 binding_hash = hmac.new(key, msg, hashlib.sha256).hexdigest()
 token_hash = hashlib.sha256(plaintext.encode()).hexdigest()
 
-engine = create_engine('postgresql://venya:venya808@localhost/venya')
+engine = create_engine('__DB_URL__')
 with engine.begin() as conn:
     conn.execute(text('''
         INSERT INTO users (user_id, status, auth_mode, display_name)
@@ -135,8 +135,13 @@ print(plaintext)
 
         plaintext = os.urandom(32).hex()
 
+        db_url = os.environ.get("VENYA_TEST_DB_URL")
+        if not db_url:
+            raise RuntimeError(
+                "VENYA_TEST_DB_URL not set (evaluated ON the core VM) — no hardcoded default in a published file"
+            )
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(_CREATE_SCRIPT)
+            f.write(_CREATE_SCRIPT.replace("__DB_URL__", db_url))
             script_path = f.name
 
         try:

@@ -14,35 +14,59 @@ Tests the full infrastructure provisioning flow:
 5. Install executor on venya-exec-1
 6. Verify health and connectivity
 
-Runs from montana (10.27.27.35). Requires SSH access to wyoming (hypervisor).
+Runs from the operator workstation; requires SSH access to the hypervisor
+host. ALL lab coordinates come from VENYA_TEST_* environment variables —
+this file ships in published release tarballs, so it carries NO hardcoded
+private infrastructure (ticket strip-private-infra-from-published-tree).
 """
 
 import os
 import subprocess
 import time
+from pathlib import Path
 
-# SSH to wyoming (hypervisor)
-WYOMING = "opencode@wyoming"
-WYOMING_PROVISION = "/home/opencode/bin/venya-provision-ubuntu.sh"
-WYOMING_POWER = "/home/opencode/bin/venya-power-ubuntu.sh"
-WYOMING_REMOVE_KNOWN_HOSTS = "/home/opencode/bin/remove_venya_known_hosts.sh"
+import pytest
 
-# Montanan paths
-MONTANA_TARBALL_SCRIPT = "/media/dust/dust-ext1/projects/venya-installer/create-tarball-and-serve.sh"
-MONTANA_REMOVE_KNOWN_HOSTS = "/home/dust/bin/remove_venya_known_hosts.sh"
 
-# VM access
-CORE = "bot@venya-core-1"
-EXEC = "bot@venya-exec-1"
-TARGET = "bot@venya-target-1"
+def _require_env(name: str, example: str) -> str:
+    """Lab coordinate with NO built-in default — the module skips loudly when
+    the operator's environment is not configured (published-file discipline:
+    private infrastructure identifiers must never be hardcoded here)."""
+    value = os.environ.get(name)
+    if not value:
+        pytest.skip(
+            f"{name} not set (example: {example}) — the infra E2E harness " "requires the operator's lab environment",
+            allow_module_level=True,
+        )
+    return value
 
-# Tarball server
-TARBALL_SERVER = "http://10.27.27.35:8080"
+
+# SSH to the hypervisor host + its VM-management scripts
+HYPERVISOR = _require_env("VENYA_TEST_HYPERVISOR", "user@hypervisor-host")
+HYPERVISOR_PROVISION = _require_env("VENYA_TEST_PROVISION_SCRIPT", "/path/to/venya-provision-ubuntu.sh")
+HYPERVISOR_POWER = _require_env("VENYA_TEST_POWER_SCRIPT", "/path/to/venya-power-ubuntu.sh")
+HYPERVISOR_REMOVE_KNOWN_HOSTS = _require_env(
+    "VENYA_TEST_HYPERVISOR_KNOWN_HOSTS_SCRIPT", "/path/to/remove_known_hosts.sh"
+)
+
+# Operator-workstation coordinates (the harness runs ON the workstation)
+WORKSTATION_SSH = _require_env("VENYA_TEST_WORKSTATION_SSH", "user@workstation")
+WORKSTATION_TARBALL_SCRIPT = _require_env("VENYA_TEST_TARBALL_SCRIPT", "/path/to/create-tarball-and-serve.sh")
+WORKSTATION_REMOVE_KNOWN_HOSTS = _require_env("VENYA_TEST_REMOVE_KNOWN_HOSTS_SCRIPT", "/path/to/remove_known_hosts.sh")
+
+# VM access (fleet naming convention per docs/full-lifecycle-test.md)
+CORE = os.environ.get("VENYA_TEST_CORE_SSH", "bot@venya-core-1")
+EXEC = os.environ.get("VENYA_TEST_EXEC_SSH", "bot@venya-exec-1")
+TARGET = os.environ.get("VENYA_TEST_TARGET_SSH", "bot@venya-target-1")
+
+# Build-mirror server serving the tag-built tarballs + its sidecar directory
+TARBALL_SERVER = _require_env("VENYA_TEST_TARBALL_SERVER", "http://<build-host>:8080")
+SIDECAR_DIR = _require_env("VENYA_TEST_SIDECAR_DIR", "/path/to/venya-installer")
 
 # Environment variables
 CORE_SHA = os.environ.get("VENYA_CORE_SHA256", "")
 EXEC_SHA = os.environ.get("VENYA_EXEC_SHA256", "")
-DB_PASSWORD = os.environ.get("VENYA_DB_PASSWORD", "venya808")
+DB_PASSWORD = _require_env("VENYA_DB_PASSWORD", "the lab installer's DB password")
 
 
 def _ssh(user_host, cmd, timeout=60):
@@ -56,14 +80,14 @@ def _ssh(user_host, cmd, timeout=60):
     )
 
 
-def _ssh_wyoming(cmd, timeout=60):
-    """Run a command on wyoming (hypervisor)."""
-    return _ssh(WYOMING, cmd, timeout)
+def _ssh_hypervisor(cmd, timeout=60):
+    """Run a command on the hypervisor host."""
+    return _ssh(HYPERVISOR, cmd, timeout)
 
 
-def _ssh_montana(cmd, timeout=60):
-    """Run a command on montana."""
-    return _ssh("dust@montana", cmd, timeout)
+def _ssh_workstation(cmd, timeout=60):
+    """Run a command on the operator workstation."""
+    return _ssh(WORKSTATION_SSH, cmd, timeout)
 
 
 class TestInfrastructure:
@@ -71,21 +95,21 @@ class TestInfrastructure:
 
     def test_phase0_destroy_fleet(self):
         """Phase 0: Destroy existing fleet."""
-        result = _ssh_wyoming(f"{WYOMING_PROVISION} destroy")
+        result = _ssh_hypervisor(f"{HYPERVISOR_PROVISION} destroy")
         assert result.returncode == 0, f"Destroy failed: {result.stderr}"
         assert "destroyed" in result.stdout.lower()
 
     def test_phase1_check_ram(self):
-        """Phase 1: Check available RAM on wyoming."""
-        result = _ssh_wyoming("free -g")
+        """Phase 1: Check available RAM on the hypervisor."""
+        result = _ssh_hypervisor("free -g")
         assert result.returncode == 0
         # DEFAULT fleet needs 15 GB (3 VMs × 5 GB)
-        # Wyoming has 31 GB total; Ollama uses ~half
-        assert "31" in result.stdout or "29" in result.stdout or "25" in result.stdout
+        total_g = int(result.stdout.splitlines()[1].split()[1])
+        assert total_g >= 15, f"hypervisor total RAM {total_g}G < 15G needed for the default fleet"
 
     def test_phase1_provision_fleet(self):
         """Phase 1: Provision fresh DEFAULT fleet."""
-        result = _ssh_wyoming(WYOMING_PROVISION)
+        result = _ssh_hypervisor(HYPERVISOR_PROVISION)
         assert result.returncode == 0, f"Provision failed: {result.stderr}"
         assert "venya-core-1" in result.stdout
         assert "venya-exec-1" in result.stdout
@@ -93,7 +117,7 @@ class TestInfrastructure:
 
     def test_phase1_power_on_and_ssh(self):
         """Phase 1: Power on fleet and verify SSH."""
-        result = _ssh_wyoming(f"{WYOMING_POWER} boot")
+        result = _ssh_hypervisor(f"{HYPERVISOR_POWER} boot")
         assert result.returncode == 0, f"Power on failed: {result.stderr}"
 
         # Verify SSH to each VM
@@ -103,10 +127,10 @@ class TestInfrastructure:
             assert "venya" in result.stdout.lower()
 
     def test_phase1_clean_known_hosts(self):
-        """Phase 1: Clean stale host keys on montana and wyoming."""
-        # On montana, run locally (can't SSH to self)
+        """Phase 1: Clean stale host keys on the workstation and hypervisor."""
+        # On the workstation, run locally (can't SSH to self)
         result = subprocess.run(
-            [MONTANA_REMOVE_KNOWN_HOSTS],
+            [WORKSTATION_REMOVE_KNOWN_HOSTS],
             capture_output=True,
             text=True,
             timeout=30,
@@ -115,8 +139,8 @@ class TestInfrastructure:
         # Script may exit 0 or 1 (no hosts to clean) — both OK
         assert "known_hosts" in result.stdout.lower() or result.returncode in (0, 1)
 
-        result = _ssh_wyoming(WYOMING_REMOVE_KNOWN_HOSTS)
-        assert result.returncode == 0, f"Wyoming known_hosts cleanup failed: {result.stderr}"
+        result = _ssh_hypervisor(HYPERVISOR_REMOVE_KNOWN_HOSTS)
+        assert result.returncode == 0, f"Hypervisor known_hosts cleanup failed: {result.stderr}"
 
     def test_phase1_outbound_internet(self):
         """Phase 1: Verify outbound internet from venya-core-1."""
@@ -127,7 +151,7 @@ class TestInfrastructure:
     def test_phase1_build_tarballs(self):
         """Phase 1: Build tarballs and start HTTP server."""
         result = subprocess.run(
-            [MONTANA_TARBALL_SCRIPT],
+            [WORKSTATION_TARBALL_SCRIPT],
             capture_output=True,
             text=True,
             timeout=120,
@@ -147,22 +171,15 @@ class TestInfrastructure:
         assert result.returncode == 0
         assert "200" in result.stdout
 
-        # Extract SHA256 hashes for later use
-        core_sha_file = "/media/dust/dust-ext1/projects/venya-installer/venya-core-install.tar.gz.sha256"
-        try:
-            with open(core_sha_file) as f:
-                global CORE_SHA
-                CORE_SHA = f.read().strip().split()[0]
-        except FileNotFoundError:
-            CORE_SHA = "2aec1ea80ec51881eebe52d47a72457744e5ac6561cbebe8b8e830a1acc1346d"  # pragma: allowlist secret
+        # Extract SHA256 hashes for later use (fail loudly if the build phase
+        # did not produce sidecars — no hardcoded fallbacks in a published file)
+        global CORE_SHA
+        with open(f"{SIDECAR_DIR}/venya-core-install.tar.gz.sha256") as f:
+            CORE_SHA = f.read().strip().split()[0]
 
-        exec_sha_file = "/media/dust/dust-ext1/projects/venya-installer/venya-executor-install.tar.gz.sha256"
-        try:
-            with open(exec_sha_file) as f:
-                global EXEC_SHA
-                EXEC_SHA = f.read().strip().split()[0]
-        except FileNotFoundError:
-            EXEC_SHA = "09f949aa85211e81bc1b6f422b275a4cc4a62817cdb28791a14d0a6abff88a65"  # pragma: allowlist secret
+        global EXEC_SHA
+        with open(f"{SIDECAR_DIR}/venya-executor-install.tar.gz.sha256") as f:
+            EXEC_SHA = f.read().strip().split()[0]
 
     def test_phase2_install_core(self):
         """Phase 2: Install core on venya-core-1."""
@@ -207,7 +224,7 @@ class TestInfrastructure:
         """Phase 2: Verify runtime is Python 3.14."""
         # Clean stale known_hosts (VMs may have been recreated)
         subprocess.run(
-            ["ssh-keygen", "-f", "/home/dust/.ssh/known_hosts", "-R", "venya-core-1"],
+            ["ssh-keygen", "-f", str(Path.home() / ".ssh" / "known_hosts"), "-R", "venya-core-1"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -322,7 +339,7 @@ executor_id = sys.argv[1]
 plaintext = sys.argv[2]
 token_hash = hmac.new(pepper.encode(), plaintext.encode(), hashlib.sha256).hexdigest()
 
-engine = create_engine('postgresql://venya:venya808@localhost/venya')
+engine = create_engine('__DB_URL__')
 with engine.begin() as conn:
     conn.execute(text('''
         INSERT INTO executor_enrollment_tokens (executor_id, token_hash, state, created_at, expires_at, created_by)
@@ -335,12 +352,18 @@ print(plaintext)
     import tempfile
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-        f.write(_GEN_SCRIPT)
+        db_url = os.environ.get("VENYA_TEST_DB_URL")
+        if not db_url:
+            raise RuntimeError(
+                "VENYA_TEST_DB_URL not set (example: postgresql://venya:<password>@localhost/venya, "
+                "evaluated ON the core VM) — no hardcoded default in a published file"
+            )
+        f.write(_GEN_SCRIPT.replace("__DB_URL__", db_url))
         script_path = f.name
 
     try:
         subprocess.run(
-            ["scp", script_path, "bot@venya-core-1:/tmp/gen_exec_token.py"],
+            ["scp", script_path, f"{CORE}:/tmp/gen_exec_token.py"],
             check=True,
             capture_output=True,
             timeout=10,
@@ -351,7 +374,7 @@ print(plaintext)
                 "ssh",
                 "-o",
                 "StrictHostKeyChecking=no",
-                "bot@venya-core-1",
+                CORE,
                 (
                     "echo '' | sudo -S /opt/venya/.venv/bin/python3.14 "
                     f"/tmp/gen_exec_token.py {executor_id} {plaintext}"

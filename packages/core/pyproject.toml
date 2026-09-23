@@ -1,6 +1,6 @@
 [project]
 name = "core"
-version = "0.1.0alpha13"
+version = "0.1.0alpha14"
 description = "Venya core library: RBAC, encryption, IAM, CLI"
 requires-python = ">=3.14,<3.15"
 dependencies = [

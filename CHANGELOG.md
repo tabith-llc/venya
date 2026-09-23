@@ -4,7 +4,37 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0alpha14] - 2026-09-23
+
+- **Supersede of `v0.1.0alpha13` (packaging defect — product code IDENTICAL;
+  the `packages/` delta is version literals only)**: alpha13's GitHub
+  installer-script ASSETS (`install-venya-core.sh`, `install-venya-executor.sh`,
+  `install-venya-cli.sh`, `install-venya-cli.ps1`) were uploaded from the
+  LAN-mirror build directory and carried a rewritten default `TARBALL_URL`
+  pointing at a build-network address — installs outside that network aborted
+  at the tarball fetch (fail-closed, loud; workaround `VENYA_TARBALL=<github
+  url>`), and the rewrite exposed private network addressing. The tarballs and
+  sidecars were canonical and hash-verified; the repository files at the tag
+  were always correct. The defective alpha13 release was DELETED from GitHub
+  by owner order ~1h after publishing (no known consumers); this version is
+  the canonical release of that code. Publish flow fixed: script assets are
+  now extracted from the tag itself and hash-checked against tag bytes before
+  upload.
+- **Private-infrastructure scrub of the published tree**: release tarballs are
+  whole-tree archives, so the E2E harness and docs previously published lab
+  coordinates (build-mirror addresses, workstation paths, a dev DB password in
+  harness defaults). All such values are now `VENYA_TEST_*` environment
+  parameters with loud skips/errors and NO built-in defaults; docs use
+  placeholders. No product behavior change.
+
 ## [0.1.0alpha13] - 2026-09-23
+
+> **Note:** the `v0.1.0alpha13` GitHub release was DELETED by owner order
+> shortly after publishing — its uploaded installer-script assets carried a
+> build-network origin rewrite (private-address exposure; broken installs off
+> that network). The code content of alpha13 ships, unchanged, in
+> `v0.1.0alpha14`; the section below is retained as the accurate record of
+> that content.
 
 > **Backfill note (recorded late):** every UNMARKED entry in this section
 > shipped in `v0.1.0alpha12` but was absent from its CHANGELOG section — the

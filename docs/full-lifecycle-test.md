@@ -70,7 +70,7 @@ run notes beyond what the operator needs.
 | `DB_PASSWORD` | PostgreSQL password for the install (dev run value; never commit) | (chosen at run time) |
 
 The provisioning scripts create VMs named `venya-core-N` / `venya-exec-N` /
-`venya-target-N` on a private network (`venya-net`, default `10.27.28.0/24`),
+`venya-target-N` on a private network (`venya-net`; subnet configured in the provisioning scripts),
 each with SSH user `bot` (passwordless sudo, key auth only). VM RAM/CPU/disk
 sizes are constants in the provisioning script (5 GB RAM / 2 vCPU each; disk
 10 GB core/target, 60 GB exec).
@@ -452,7 +452,7 @@ echo | openssl s_client -connect $CORE_HOST:443 2>/dev/null | \
 
 **Harness note (O4, ticket `delta-b-run-low-bundle`):** on some workstations
 `openssl s_client` **hangs** (rc 124, zero bytes) against healthy venya TLS
-services — observed on montana while curl and python-ssl reached the same
+services — observed on one dev workstation while curl and python-ssl reached the same
 service fine. Never diagnose a server fault from a hung `s_client` alone:
 second-probe with `curl --cacert /tmp/venya-ca.crt
 https://$CORE_HOST/api/v1/health`, and fetch the leaf via python instead:

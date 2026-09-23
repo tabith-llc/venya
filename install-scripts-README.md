@@ -181,7 +181,7 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/uninstal
 ### Build and serve
 
 ```bash
-cd /media/dust/dust-ext1/projects/venya-installer
+cd /path/to/venya-installer
 ./create-tarball-and-serve.sh --ref <tag-or-commit>   # deterministic: builds from the git ref
 ./create-tarball-and-serve.sh                         # DEPRECATED working-tree mode (rollback only)
 ```
@@ -208,22 +208,28 @@ sha256sum -c venya-core-install.tar.gz.sha256 venya-cli-install.tar.gz.sha256
 
 Notes: the executor tarball is byte-identical to the core tarball by design (whole-tree archive; component choice happens at install time). Byte-stability requires `gzip -n` (strips the timestamp) and the same git major version. `--prefix=./` is load-bearing: the installers extract with `tar --strip-components=1`, which consumes the `./` component — an unprefixed archive loses every top-level file (the v0.1.0-alpha.5 defect; its assets match the recipe without `--prefix=./`). Local `git archive` output carries no `pax_global_header` entry (that record appears only in GitHub-generated tarballs).
 
-### Install on VMs (dev LAN server — override the GitHub defaults)
+### Install from a local build mirror (override the GitHub defaults)
+
+The build script serves the tag-built tarballs + scripts on the build host's
+network. Point installs at that mirror with `VENYA_TARBALL` (the scripts
+self-fetch `venya-common.sh` from the same origin):
 
 ```bash
+MIRROR=http://<build-host>:8080
+
 # Core VM
-curl -fsSL http://10.27.27.35:8080/install-venya-core.sh | sudo \
-  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://10.27.27.35:8080/venya-core-install.tar.gz bash
+curl -fsSL $MIRROR/install-venya-core.sh | sudo \
+  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=$MIRROR/venya-core-install.tar.gz bash
 
 # Executor VM
-curl -fsSL http://10.27.27.35:8080/install-venya-executor.sh | sudo \
-  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://10.27.27.35:8080/venya-executor-install.tar.gz bash
+curl -fsSL $MIRROR/install-venya-executor.sh | sudo \
+  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=$MIRROR/venya-executor-install.tar.gz bash
 
 # Operator workstation (no sudo)
-curl -fsSL http://10.27.27.35:8080/install-venya-cli.sh | \
-  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=http://10.27.27.35:8080/venya-cli-install.tar.gz bash
+curl -fsSL $MIRROR/install-venya-cli.sh | \
+  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=$MIRROR/venya-cli-install.tar.gz bash
 
-# Stop the server
+# Stop the mirror server (on the build host)
 pkill -f 'python3 -m http.server 8080'
 ```
 
