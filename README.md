@@ -351,10 +351,13 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | Document | Description |
 |----------|-------------|
 | [Alpha Demo Guide](docs/alpha-demo.md) | 5-minute end-to-end demo |
+| [Example Workflow](docs/example-workflow.md) | Narrated incident-response walkthrough — every MCP call and its exact output |
 | [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md) | A-Z validation from clean hypervisor to MCP use-a-secret proof |
 | [Installation Guide](docs/installation.md) | Full deployment instructions |
 | [CLI Reference](docs/cli-reference.md) | Every `venya` command and argument — generated from the parser, test-enforced against drift |
 | [Architecture](docs/architecture.md) | Technical deep dive |
+| [Deployment Configuration](docs/deployment-config.md) | Required config fields, env-var mapping, validation timing |
+| [Cert & Key Rotation Runbook](docs/cert-rotation-runbook.md) | Rotation procedures for every certificate and key, source-cited |
 | [Firewall & Network Requirements](docs/FIREWALL.md) | Ports/protocols per host type — *(alpha, untested)* |
 | [Backup & Restore](docs/BACKUPS.md) | What to back up, the crypto pairings, restore + backup security — *(alpha, untested)* |
 | [FAQ](docs/faq.md) | Frequently asked questions |
