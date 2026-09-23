@@ -50,9 +50,11 @@ to that human.
 8. Sandbox execution failures return 503 with the cause in the executor
    journal — surface the error to your human verbatim; do not loop retries.
 
-## Installing / wiring (usually a human task)
+## Installing and configuring (usually a human task)
 
 - Full install flow: [installation.md](installation.md)
+- Server configuration: required fields, env-var mapping, validation timing: [deployment-config.md](deployment-config.md)
+- Every CLI command (incl. `venya setup` workstation configuration): [cli-reference.md](cli-reference.md)
 - MCP client wiring (generic + opencode): [installation.md §6](installation.md#6-mcp-client-wiring-llm-operators)
 - See the whole chain work end-to-end: [alpha-demo.md](alpha-demo.md)
 - Architecture and guarantees: [architecture.md](architecture.md)
