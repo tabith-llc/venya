@@ -319,7 +319,7 @@ This is the same licensing model used by HashiCorp (Vault, Terraform).
 
 **Can the AI agent extract secrets by crafting clever commands?**
 
-No. The agent never receives plaintext: the secret is injected only inside the sandbox — a per-session tmpfs file at `/run/secrets/venya/<id>` (0400, zeroed after the run; the env/askpass/sudo consumption shapes ride the same file-mediated transport) — and every byte of stdout/stderr passes two redaction stages (the executor's Rust filter, then the server-side definitive filter, which fails closed) that replace secret values with `[REDACTED]` markers before the output returns. A command that `cat`s the secret demonstrates the filter, not a bypass. Network exfiltration is blocked by deny-by-default egress allowlisting; the sandbox boundary is the containment — see the [full FAQ](docs/faq.md).
+No. The agent never receives plaintext: the secret is injected only inside the sandbox — a per-session tmpfs file at `/run/secrets/venya/<id>` (0400, zeroed after the run; the env/askpass/sudo consumption shapes ride the same file-mediated transport) — and every byte of stdout/stderr passes two redaction stages (the executor's Rust filter, then the server-side definitive filter, which fails closed) that replace secret values with `[REDACTED:<id>]` markers before the output returns. A command that `cat`s the secret demonstrates the filter, not a bypass. Network exfiltration is blocked by deny-by-default egress allowlisting; the sandbox boundary is the containment — see the [full FAQ](docs/faq.md).
 
 **What if the AI agent goes rogue?**
 
