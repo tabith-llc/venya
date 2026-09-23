@@ -1,0 +1,22 @@
+# Shared lane definitions for the example-workflow diagrams.
+# Imported by workflow.d2 (overview) and frames.d2 (per-step frames) so both
+# render identical, identically-ordered lanes.
+#
+# Lanes are source-matched to docs/architecture.md §System topology. No fills:
+# zone is carried by the label, which keeps one SVG readable in light and dark
+# (d2 applies explicit styles in both modes, so fills would glare under --dark-theme).
+#
+# The human lane is NOT declared here — workflow.d2 adds it. d2 orders sequence
+# actors by first CONNECTION appearance, not declaration, so a lane that is idle
+# in a given board gets sorted to the far right. The human is idle in Steps 3-5,
+# which made the lane jump position between frames. Keeping the human out of the
+# per-step frames holds the other five lanes in a fixed left-to-right order that
+# matches the direction of the story (agent -> core -> executor -> sandbox -> NAS).
+
+shape: sequence_diagram
+
+agent: "Agent (LLM)\nvia venya-mcp"
+core:  "Venya core\nvault · RBAC · audit"
+exec:  "Executor host\nassume-compromised"
+sbx:   "sbx microVM\negress deny-by-default"
+nas:   "NAS 192.0.2.40\nreston-data-01"
