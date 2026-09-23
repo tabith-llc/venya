@@ -34,13 +34,15 @@ each executor as separate virtual machines.
 
 ## Planned for Future Releases
 
-Venya is in alpha (`0.1.0alpha14` at the time of writing). The following are
-planned for future releases — direction committed, dates not. This list is not
-complete.
+Venya is in alpha. The following are planned for future releases — direction
+committed, dates not. This list is not complete.
 
 - **Single sign-on (SSO).** Enterprise directory authentication (LDAP first)
   hybridized with WebAuthn hardware-key binding — passwords for identity,
   physical keys for privileged operations.
+- **FIDO2 hardware attestation.** At enrollment, verify that security keys are
+  genuine FIDO2-certified authenticators (attestation checked against trusted
+  metadata) — not merely holders of a registered credential.
 - **High-availability core.** Multi-node core deployment for availability
   without changing the trust-anchor model.
 - **Tested backup and disaster recovery.** A documented backup set (encrypted
