@@ -4,6 +4,8 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0alpha13] - 2026-09-23
+
 > **Backfill note (recorded late):** every UNMARKED entry in this section
 > shipped in `v0.1.0alpha12` but was absent from its CHANGELOG section — the
 > squash-at-tag-cut flow only collects what merges had already added to
@@ -167,6 +169,49 @@ Notable changes to Venya will be documented in this file.
   installer's empty-token warning now names the real rejection mechanism; the
   admin executor listing reads revocation from the single authoritative
   source.
+
+- *(post-alpha12)* **`venya init` now works with clientPin-only security
+  keys** (keys with no built-in user-verification, e.g. TrustKey T120 class):
+  registration dispatches on the key's advertised options and drives the raw
+  CTAP2 clientPin path for such keys — the same spec-canonical path
+  `venya login` has always used — instead of the high-level library ceremony,
+  which mishandled them and surfaced as a cryptic
+  `(<ERR.BAD_REQUEST: 2>, CtapError('CTAP error: 0x31 - PIN_INVALID'))` that
+  burned one key PIN-retry per attempt. Wrong-PIN handling on registration now
+  retries (3×) with a friendly message instead of leaking the raw tuple. A
+  failed first-admin ceremony no longer bricks retry either: an abandoned
+  PENDING enrollment (e.g. from a key-less `venya init` attempt) is superseded
+  by the next plain `venya init <user>` — `--installation-reset` is no longer
+  required for that state (it remains the path for a COMPLETED admin; that
+  409 is unchanged).
+- *(post-alpha12)* Operator-facing fix bundle from the Gavin field reports and
+  the session sweeps (per-item detail via `git log --merges
+  v0.1.0alpha12..v0.1.0alpha13` — see the release commit's ticket list): the
+  installers REFUSE co-location — installing the executor on a host that
+  already runs a core (or vice versa) exits 1 with the detection evidence
+  before any prompt, and `VENYA_SKIP_PROMPT` does not bypass the guard
+  (same-component re-runs stay supported); `venya exec register` honors the
+  configured executor-id and accepts the enrollment token via
+  `VENYA_EXECUTOR_ENROLLMENT_TOKEN` (off argv), with consistent
+  `--server-url`/`VENYA_SERVER_URL` naming; the executor installer gained a
+  non-fatal dial-address pre-check with the remedy recipe, actionable
+  health-probe 401 diagnostics, and enrollment-token expiry guidance; unbound
+  installer env vars no longer crash mid-install; bare `GET /health` aliases
+  `/api/v1/health` (unknown paths still 401); `venya admin
+  get-command-policy` works (the CLI GETted a POST-only route — 405 since the
+  command shipped; the GET reports the stored policy or honest defaults and
+  never mutates); `venya-executor --version` prints the bare version (no
+  `venya-executor ` prefix); the uninstallers are fully self-contained (the
+  LAN-default fetch is gone — uninstall is 100% local).
+
+### Added
+
+- *(post-alpha12)* `venya setup` — one command points the CLI at a core and
+  installs its CA certificate: saves the server URL to the CLI config and
+  fetches the root CA from `/.well-known/venya-ca.crt` beside the config,
+  replacing the manual cert-export + `SSL_CERT_FILE` dance for workstation
+  onboarding. Trust precedence is unchanged: `SSL_CERT_FILE` env wins, then
+  the setup-installed CA, then system trust.
 
 ## [0.1.0alpha12] - 2026-09-21
 
