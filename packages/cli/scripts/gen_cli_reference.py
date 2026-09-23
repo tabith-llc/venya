@@ -106,18 +106,13 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
         ),
     ],
     ("admin", "enroll"): [
-        (["admin", "enroll", "jsmith"], "issue an enrollment token for a new user (security-key mode)"),
-        (
-            ["admin", "enroll", "jsmith", "--mode", "platform"],
-            "enroll for a platform authenticator (e.g. Windows Hello)",
-        ),
+        (["admin", "enroll", "jsmith"], "issue an enrollment token for a new user"),
     ],
     ("admin", "remove"): [
         (["admin", "remove", "jsmith"], "remove a user"),
     ],
     ("admin", "configure-user"): [
         (["admin", "configure-user", "jsmith", "--timeout", "1800"], "session timeout in seconds"),
-        (["admin", "configure-user", "jsmith", "--mode", "platform"], "switch the user's auth mode"),
     ],
     ("admin", "list"): [
         (["admin", "list"], "all registered users"),

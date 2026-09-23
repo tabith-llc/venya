@@ -305,6 +305,42 @@ class TestSuppressedSkipMigrations:
         _assert_exit2(["init", "--skip-migrations"])
 
 
+class TestRemovedPlatformModeArg:
+    """`admin enroll` / `admin configure-user` `--mode`: HARD-REMOVED (b1).
+
+    Ticket cli-admin-enroll-platform-mode-surface, owner ruling 2026-09-23:
+    the flag advertised a platform-authenticator enrollment mode that was
+    stored-but-inert end-to-end (no WebAuthn path read auth_mode; enrollment
+    completion overwrote it to "webauthn"), and platform authenticators are
+    not planned (standing ruling). Hard removal, not a SUPPRESS'd no-op:
+    ANY `--mode` — including the former default spelling — must fail loudly
+    with a usage error rather than be silently accepted.
+    """
+
+    def test_enroll_mode_platform_rejected(self):
+        _assert_exit2(["admin", "enroll", "jsmith", "--mode", "platform"])
+
+    def test_enroll_mode_security_key_also_rejected(self):
+        _assert_exit2(["admin", "enroll", "jsmith", "--mode", "security-key"])
+
+    def test_configure_user_mode_rejected(self):
+        _assert_exit2(["admin", "configure-user", "jsmith", "--mode", "platform"])
+
+    def test_enroll_bare_parses_without_mode_attr(self):
+        ns = _parse(["admin", "enroll", "jsmith"])
+        assert ns.user_id == "jsmith"
+        assert not hasattr(ns, "mode")
+
+    def test_configure_user_timeout_survives_without_mode(self):
+        ns = _parse(["admin", "configure-user", "jsmith", "--timeout", "60"])
+        assert ns.timeout == 60
+        assert not hasattr(ns, "mode")
+
+    def test_mode_absent_from_help(self):
+        assert "--mode" not in PARSER_BY_PATH[("admin", "enroll")].format_help()
+        assert "--mode" not in PARSER_BY_PATH[("admin", "configure-user")].format_help()
+
+
 class TestRunRemainderShape:
     """`run` command_args = nargs=REMAINDER — excluded from the generic matrix.
 

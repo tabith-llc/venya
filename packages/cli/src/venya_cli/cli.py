@@ -194,12 +194,6 @@ def create_parser() -> argparse.ArgumentParser:
     # admin enroll
     enroll_parser = admin_sub.add_parser("enroll", help="Enroll a new user")
     enroll_parser.add_argument("user_id", help="User ID to enroll")
-    enroll_parser.add_argument(
-        "--mode",
-        choices=["security-key", "platform"],
-        default="security-key",
-        help="Auth mode (default: security-key)",
-    )
 
     # admin remove
     remove_parser = admin_sub.add_parser("remove", help="Remove a user")
@@ -208,7 +202,6 @@ def create_parser() -> argparse.ArgumentParser:
     # admin configure-user
     configure_parser = admin_sub.add_parser("configure-user", help="Configure user settings")
     configure_parser.add_argument("user_id", help="User ID to configure")
-    configure_parser.add_argument("--mode", choices=["security-key", "platform"], help="Auth mode")
     configure_parser.add_argument("--timeout", type=int, help="Session timeout in seconds")
 
     # admin list
