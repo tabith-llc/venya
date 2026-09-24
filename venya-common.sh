@@ -594,6 +594,33 @@ venya_write_egress_allowlist() {
     fi
 }
 
+# --- 14c. Resolve the sandbox DNS resolver (no default — owner ruling D1 option (a)) ---
+
+# Sets DNS_RESOLVER globally. Precedence: VENYA_DNS_RESOLVER env > existing
+# /etc/venya/executor.toml value (re-run reuse — the installer's toml write
+# OVERWRITES, so dropping the stored value would brick a working executor) >
+# fail loudly with discovery guidance. Strict IPv4: a hostname resolver is
+# chicken-and-egg (sandbox DNS is what this value serves).
+venya_resolve_dns_resolver() {
+    DNS_RESOLVER="${VENYA_DNS_RESOLVER:-}"
+    if [ -z "$DNS_RESOLVER" ] && [ -f /etc/venya/executor.toml ]; then
+        DNS_RESOLVER="$(sed -n 's/^dns_resolver = "\(.*\)"$/\1/p' /etc/venya/executor.toml | head -1)"
+        if [ -n "$DNS_RESOLVER" ]; then
+            info "Reusing dns_resolver from existing /etc/venya/executor.toml"
+        fi
+    fi
+    if [ -z "$DNS_RESOLVER" ]; then
+        error "VENYA_DNS_RESOLVER is required — the IP of the DNS resolver sandboxed commands may use."
+        error "Find yours with: resolvectl status   (or: grep nameserver /etc/resolv.conf)"
+        error "Example: VENYA_DNS_RESOLVER=198.51.100.53"
+        exit 1
+    fi
+    if ! _venya_valid_ipv4 "$DNS_RESOLVER"; then
+        error "VENYA_DNS_RESOLVER='$DNS_RESOLVER' is not a valid IPv4 address (hostnames are not accepted — the resolver must be reachable by IP)."
+        exit 1
+    fi
+}
+
 # --- 15. Service start retry loop ---
 
 venya_service_retry() {

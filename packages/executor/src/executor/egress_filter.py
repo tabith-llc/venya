@@ -18,7 +18,6 @@ from pathlib import Path
 logger = logging.getLogger("venya.executor.egress")
 
 DEFAULT_ALLOWLIST_PATH = Path("/etc/venya/egress-allowlist.txt")
-DEFAULT_DNS_RESOLVER = "10.27.28.1"
 
 
 class EgressFilter:
@@ -28,8 +27,8 @@ class EgressFilter:
     No hot-reload, no per-command updates.
 
     Format: one entry per line. Entries can be:
-      - IP addresses: 10.27.28.5
-      - CIDRs: 10.27.28.0/24
+      - IP addresses: 198.51.100.7
+      - CIDRs: 203.0.113.0/24
       - Hostnames: web-server-3
     Lines starting with # are comments. Blank lines are ignored.
     """
@@ -37,7 +36,8 @@ class EgressFilter:
     def __init__(
         self,
         allowlist_path: Path | None = None,
-        dns_resolver: str = DEFAULT_DNS_RESOLVER,
+        *,
+        dns_resolver: str,
     ):
         self.allowlist_path = allowlist_path or DEFAULT_ALLOWLIST_PATH
         self.dns_resolver = dns_resolver

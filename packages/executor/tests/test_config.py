@@ -327,6 +327,12 @@ class TestExecutorConfigDefaults:
         cfg = ExecutorConfig()
         assert isinstance(cfg.network, NetworkConfig)
 
+    def test_dns_resolver_default_is_none(self):
+        """Ruling D1 option (a): no built-in resolver — the daemon refuses
+        to start without one (Venya never guesses your network)."""
+        cfg = ExecutorConfig()
+        assert cfg.dns_resolver is None
+
 
 class TestExecutorConfigFromEnv:
     """Tests for environment variable loading."""

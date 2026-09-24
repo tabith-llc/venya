@@ -248,6 +248,16 @@ persistent across reboots, ordered before `venya-executor.service`) and
 initializes the sbx global network policy to **deny-all** (per-sandbox
 allow rules come from the egress allowlist at execution time).
 
+The sandbox DNS resolver is explicit config — `VENYA_DNS_RESOLVER` (required,
+no default; strict IPv4, validated before any write). It is the resolver IP
+sandboxed commands may use, always allowed for egress. Re-runs reuse the value
+already stored in `/etc/venya/executor.toml` (the toml write overwrites on every
+run, so the installer preserves the stored value rather than re-guessing). Find
+yours with `resolvectl status` or `grep nameserver /etc/resolv.conf`. An
+executor without a configured resolver **refuses to start** (Venya never guesses
+your network). **Upgrading:** add `dns_resolver = "<ip>"` to
+`/etc/venya/executor.toml` BEFORE restarting the executor.
+
 The installer's apt list includes `sshpass`: sandbox ssh-password injection
 shapes (`sshpass -f <secret-file> ssh ...`) need it inside the sandbox, and
 the executor copies the host binary in at sandbox create. Hosts provisioned

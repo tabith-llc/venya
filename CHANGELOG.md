@@ -4,6 +4,18 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+- **BREAKING — Executor: the built-in DNS-resolver default is removed; `dns_resolver`
+  is now explicit config.** The sandbox egress policy previously always admitted a
+  hardcoded resolver IP (`10.27.28.1` — a development-fleet address, functionally
+  dead on any other network). Now set `dns_resolver = "<your resolver IP>"` in
+  `/etc/venya/executor.toml` — fresh installs take it from the required
+  `VENYA_DNS_RESOLVER` installer knob (re-runs reuse the stored value) — or
+  `VENYA_EXECUTOR_DNS_RESOLVER` in the service environment. An executor without it
+  REFUSES TO START with a named error (by design: Venya never guesses your network).
+  Find your resolver with `resolvectl status` or `grep nameserver /etc/resolv.conf`.
+  **Upgrading:** add the key to `/etc/venya/executor.toml` BEFORE restarting the
+  executor.
+
 - **CLI: `venya admin enroll --mode` and `venya admin configure-user --mode`
   removed.** The flag advertised a platform-authenticator enrollment mode
   (e.g. Windows Hello) that did nothing: no authentication path ever read the

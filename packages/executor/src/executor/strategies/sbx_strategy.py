@@ -30,7 +30,7 @@ from pathlib import Path
 
 from venya_contract import ASKPASS_HELPER_PATH
 
-from ..egress_filter import DEFAULT_ALLOWLIST_PATH, DEFAULT_DNS_RESOLVER
+from ..egress_filter import DEFAULT_ALLOWLIST_PATH
 from .base import InjectionResult, InjectionStrategy, SecretMount
 
 logger = logging.getLogger("venya.executor.strategies.sbx")
@@ -131,7 +131,7 @@ class SbxStrategy(InjectionStrategy):
     def __init__(
         self,
         secret_base_fd: int = 100,
-        dns_resolver: str = DEFAULT_DNS_RESOLVER,
+        dns_resolver: str | None = None,
         egress_allowlist_path: str | Path = DEFAULT_ALLOWLIST_PATH,
     ) -> None:
         self.secret_base_fd = secret_base_fd
@@ -518,6 +518,13 @@ class SbxStrategy(InjectionStrategy):
             sandbox_name: Name of the sandbox to apply policies to.
         """
         from ..egress_filter import EgressFilter
+
+        if self.dns_resolver is None:
+            raise RuntimeError(
+                "dns_resolver is not configured — set `dns_resolver` in "
+                "/etc/venya/executor.toml or VENYA_EXECUTOR_DNS_RESOLVER in the "
+                "daemon environment (find it: resolvectl status or /etc/resolv.conf)"
+            )
 
         # Config values arrive via the constructor (daemon.create_executor wires
         # them from ExecutorConfig: toml `dns_resolver`/`egress_allowlist_path`
