@@ -120,7 +120,7 @@
   <div class="card" id="c-core" style="left:220px;top:76px;width:184px;height:180px">
     <div class="hd">
       <div class="ico"><svg class="i"><use href="#i-shield"/></svg></div>
-      <div><div class="t1">Venya core</div><div class="t2">vault · RBAC · audit</div></div>
+      <div><div class="t1">Venya core</div><div class="t2">secret store · RBAC · audit</div></div>
     </div>
     <div class="sect" style="top:50px;display:flex;align-items:center;gap:8px">
       <span class="lbl">Session</span>
@@ -128,7 +128,7 @@
       <span class="chip human abs" id="sess-on" style="left:50px"><svg class="i"><use href="#i-check"/></svg>jreyes · FIDO2</span>
     </div>
     <div class="sect" style="top:76px">
-      <div class="lbl" style="margin-bottom:3px">Vault</div>
+      <div class="lbl" style="margin-bottom:3px">Secrets</div>
       <div class="vrow" id="vr-nas"><svg class="i"><use href="#i-lock"/></svg><span>reston_nas_admin_creds</span></div>
       <div class="vrow" id="vr-mon"><svg class="i"><use href="#i-lock"/></svg><span>reston_network_monitor_api_key</span></div>
     </div>
@@ -202,7 +202,7 @@
     <path id="m-net-out" d="M770 101 H822" fill="none"/>
     <path id="m-sto-sbx" d="M604 166 H630" fill="none"/>
     <path id="m-sto-out" d="M770 166 H822" fill="none"/>
-    <!-- the secret: vault row -> executor host -> sandbox -->
+    <!-- the secret: secret-store row -> executor host -> sandbox -->
     <path id="p-sec1" d="M372 173 C390 173 392 166 404 166 H590" fill="none"/>
     <path id="p-sec2" d="M590 166 H660" fill="none"/>
 
@@ -288,7 +288,7 @@
     </div>
 
     <div class="blk" id="b-s2">
-      <div class="ctx"><b>venya core</b> · vault</div>
+      <div class="ctx"><b>venya core</b> · secret store</div>
       <div class="ln" id="b2a">reston_nas_admin_creds          <span class="dimln">value: encrypted at rest</span></div>
       <div class="ln" id="b2b">reston_network_monitor_api_key  <span class="dimln">value: encrypted at rest</span></div>
       <div class="note" id="b2c" style="margin-top:4px"><svg class="i core"><use href="#i-lock"/></svg><span>values are never returned, to anyone, ever: only keys + metadata</span></div>
@@ -310,7 +310,7 @@
       <div class="ln" id="b4c">Volume reston-data-01 status: <span class="sec">DEGRADED</span></div>
       <div class="ln" id="b4d">  Replication peer auth: <span class="leak"><span class="raw" id="leak-raw">Rv8#nP2!wQz4</span><span class="red masked" id="leak-masked">[REDACTED:12]</span></span><span class="tagline" id="leak-tag"><svg class="i"><use href="#i-arrow"/></svg>the NAS echoed the password</span></div>
       <div class="note" id="b4e"><svg class="i ok"><use href="#i-check"/></svg><span><b>Stage 1</b> · executor's Rust filter masks it before output leaves</span></div>
-      <div class="note" id="b4f"><svg class="i ok"><use href="#i-check"/></svg><span><b>Stage 2</b> · the vault re-screens the raw bytes and fails closed</span></div>
+      <div class="note" id="b4f"><svg class="i ok"><use href="#i-check"/></svg><span><b>Stage 2</b> · the core re-screens the raw bytes and fails closed</span></div>
       <div class="note" id="b4g"><svg class="i ok"><use href="#i-check"/></svg><span>secret file zeroed after the run</span></div>
       <div id="scan"></div>
     </div>
@@ -342,10 +342,10 @@
   <div class="cap" id="cap-2"><div class="tag">Step 2 · Secrets</div><div class="hd">Names and metadata, never values</div><div class="dt"><code>list_secrets()</code> shows what exists. The agent will request only what it needs.</div></div>
   <div class="cap" id="cap-3"><div class="tag">Step 3 · Probe</div><div class="hd">The first probe fails, so the agent adapts</div><div class="dt">From network-01 the NAS times out (exit 255). No blind retries: it switches executors.</div></div>
   <div class="cap" id="cap-4a"><div class="tag">Step 4 · Escalate</div><div class="hd">Now the credential is needed</div><div class="dt">The command names a file, <code>/run/secrets/venya/12</code>, never the password.</div></div>
-  <div class="cap" id="cap-4b"><div class="tag">Step 4 · Escalate</div><div class="hd">Vault to executor, never through the agent</div><div class="dt">Decrypted in the core, wrapped, and relayed over mTLS to storage-01.</div></div>
+  <div class="cap" id="cap-4b"><div class="tag">Step 4 · Escalate</div><div class="hd">Core to executor, never through the agent</div><div class="dt">Decrypted in the core, wrapped, and relayed over mTLS to storage-01.</div></div>
   <div class="cap" id="cap-4c"><div class="tag">Step 4 · Escalate</div><div class="hd">Inside the sandbox, it is just a file</div><div class="dt">Mode 0400 at <code>/run/secrets/venya/12</code>. sshpass reads it; the NAS answers.</div></div>
   <div class="cap" id="cap-4d"><div class="tag">Step 4 · Escalate</div><div class="hd">The NAS echoes the password back</div><div class="dt">Its status output includes the stored credential: a classic accidental leak.</div></div>
-  <div class="cap" id="cap-4e"><div class="tag">Step 4 · Escalate</div><div class="hd">Redacted before it can reach the agent</div><div class="dt">Stage 1: the executor's Rust filter. Stage 2: the vault re-screens, and fails closed.</div></div>
+  <div class="cap" id="cap-4e"><div class="tag">Step 4 · Escalate</div><div class="hd">Redacted before it can reach the agent</div><div class="dt">Stage 1: the executor's Rust filter. Stage 2: the core re-screens, and fails closed.</div></div>
   <div class="cap" id="cap-4f"><div class="tag">Step 4 · Escalate</div><div class="hd">The agent sees <code class="r">[REDACTED:12]</code> and the diagnosis</div><div class="dt">Volume DEGRADED, Disk 4B failing. The secret file is zeroed after the run.</div></div>
   <div class="cap" id="cap-5"><div class="tag">Step 5 · Remediate</div><div class="hd">A controlled failover to the DR site</div><div class="dt">Same secret, same injection path. About 3 minutes, no data loss expected.</div></div>
   <div class="cap" id="cap-6"><div class="tag">Step 6 · Audit</div><div class="hd">Every command is on the record</div><div class="dt"><code>get_audit()</code>: each run is attributed to user=jreyes, the human, never the agent.</div></div>
@@ -360,7 +360,7 @@
       <ul>
         <li>The probe from reston-va-network-01 timed out; the storage segment still reaches the NAS.</li>
         <li>Volume reston-data-01 is READ-ONLY; Disk 4B exceeded its SMART thresholds.</li>
-        <li>Failover <code>FO-2026-09-23-00047</code> to DR-SITE-VA-02: about 28 min, no data loss expected.</li>
+        <li>Failover <code>FO-2026-09-23-00047</code> to DR-SITE-VA-02: about 3 min, no data loss expected.</li>
         <li>Next: monitor replication lag, then replace Disk 4B once failover completes.</li>
       </ul>
       <div class="fine">Credentials used: <code>reston_nas_admin_creds</code> (2 commands). <b>Neither value was exposed to me at any point.</b> One accidental echo in NAS output was redacted inside the executor.</div>
