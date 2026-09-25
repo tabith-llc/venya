@@ -42,10 +42,35 @@ RFC1918 = re.compile(
 )
 
 
+# Tree-wide guard (ticket private-infra-product-defaults-and-fixtures, Stage 3):
+# no RFC1918 literal in any shipped source/test/doc. Exclusions are deliberate.
+TREE_SCAN_ROOTS = ("packages", "docs")  # + root-level *.sh/*.ps1 already covered by ARTIFACT_GLOBS
+INTERLOCK_EXCLUDES = (
+    "test_installer_no_private_literals.py",  # self (docstring + regex self-test pins)
+    "CHANGELOG.md",  # D3 — historical release record
+)
+INTERLOCK_EXCLUDE_DIRS = {".git", ".venv", "__pycache__", ".pytest_cache", "node_modules"}
+INTERLOCK_EXCLUDE_SUFFIXES = (".lock",)  # uv.lock — generated
+
+
 def _artifacts() -> list[Path]:
     files = sorted({p for g in ARTIFACT_GLOBS for p in REPO_ROOT.glob(g)})
     assert files, f"no installer artifacts matched {ARTIFACT_GLOBS} at {REPO_ROOT} — path drift?"
     return files
+
+
+def _tree_files():
+    for root in TREE_SCAN_ROOTS:
+        for p in (REPO_ROOT / root).rglob("*"):
+            if not p.is_file():
+                continue
+            if any(d in p.parts for d in INTERLOCK_EXCLUDE_DIRS):
+                continue
+            if p.name in INTERLOCK_EXCLUDES or p.name == Path(__file__).name:
+                continue
+            if p.suffix in INTERLOCK_EXCLUDE_SUFFIXES:
+                continue
+            yield p
 
 
 class TestInstallerNoPrivateLiterals:
@@ -78,6 +103,29 @@ class TestInstallerNoPrivateLiterals:
         assert RFC1918.search("DNS to 10.27.28.1")
         assert not RFC1918.search("203.0.113.0/24")  # RFC 5737 examples stay legal
         assert not RFC1918.search("version 1.10.27")
+
+    def test_zero_rfc1918_literals_tree_wide(self):
+        # ponytail: matches full dotted quads only — bare class shorthand
+        # (10/8) and IPv6 ULA (fc00::/7) are NOT caught; CIDRs whose base is
+        # a full dotted quad DO match (the self-test pins prove it). Widen
+        # the regex only on an owner scope decision (Stage-3 ruling: no).
+        offenders = []
+        scanned = 0
+        for path in _tree_files():
+            scanned += 1
+            try:
+                text = path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue  # binary/undecodable — not a shipped text literal
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if RFC1918.search(line):
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}: {line.strip()}")
+        assert (
+            scanned > 50
+        ), f"tree scan surface shrank to {scanned} — path drift?"  # paired negative: guard can't pass by scanning nothing
+        assert (
+            not offenders
+        ), "RFC1918 literals in the public tree (use RFC 5737 192.0.2/198.51.100/203.0.113):\n" + "\n".join(offenders)
 
 
 class TestTeachingDefaultPinned:

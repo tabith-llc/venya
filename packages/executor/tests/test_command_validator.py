@@ -655,7 +655,7 @@ class TestHostScopedValidation:
         cmd = (
             "sshpass -f /run/secrets/venya/2 ssh "
             "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-            "tier1@10.27.28.22 sudo apt-get install -y apache2"
+            "tier1@192.0.2.22 sudo apt-get install -y apache2"
         )
         valid, _reason = validator.validate(cmd)
         assert valid is True
