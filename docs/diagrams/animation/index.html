@@ -321,7 +321,7 @@
       <div class="ln" id="b5b"><span class="wht">$ sshpass … initiate-failover reston-data-01 --target=192.0.2.41</span></div>
       <div class="ln" id="b5c">Failover initiated for volume reston-data-01</div>
       <div class="ln" id="b5d">  Target: 192.0.2.41 (DR-SITE-VA-02) · replication lag 4.2 s</div>
-      <div class="ln" id="b5e">  Estimated completion: 28 minutes</div>
+      <div class="ln" id="b5e">  Estimated completion: 3 minutes</div>
       <div class="note" id="b5f"><svg class="i ok"><use href="#i-check"/></svg><span>output filtered · secret file zeroed after the run</span></div>
     </div>
 
@@ -347,7 +347,7 @@
   <div class="cap" id="cap-4d"><div class="tag">Step 4 · Escalate</div><div class="hd">The NAS echoes the password back</div><div class="dt">Its status output includes the stored credential: a classic accidental leak.</div></div>
   <div class="cap" id="cap-4e"><div class="tag">Step 4 · Escalate</div><div class="hd">Redacted before it can reach the agent</div><div class="dt">Stage 1: the executor's Rust filter. Stage 2: the vault re-screens, and fails closed.</div></div>
   <div class="cap" id="cap-4f"><div class="tag">Step 4 · Escalate</div><div class="hd">The agent sees <code class="r">[REDACTED:12]</code> and the diagnosis</div><div class="dt">Volume DEGRADED, Disk 4B failing. The secret file is zeroed after the run.</div></div>
-  <div class="cap" id="cap-5"><div class="tag">Step 5 · Remediate</div><div class="hd">A controlled failover to the DR site</div><div class="dt">Same secret, same injection path. About 28 minutes, no data loss expected.</div></div>
+  <div class="cap" id="cap-5"><div class="tag">Step 5 · Remediate</div><div class="hd">A controlled failover to the DR site</div><div class="dt">Same secret, same injection path. About 3 minutes, no data loss expected.</div></div>
   <div class="cap" id="cap-6"><div class="tag">Step 6 · Audit</div><div class="hd">Every command is on the record</div><div class="dt"><code>get_audit()</code>: each run is attributed to user=jreyes, the human, never the agent.</div></div>
   <div class="cap" id="cap-7"><div class="tag">Done</div><div class="hd">A plain-English report for the human</div><div class="dt">Neither the agent nor jreyes ever held the NAS password.</div></div>
 

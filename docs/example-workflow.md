@@ -172,7 +172,7 @@ Command exited with code 0.
 stdout:
 Failover initiated for volume reston-data-01
   Target: 192.0.2.41 (DR-SITE-VA-02)
-  Estimated completion: 28 minutes
+  Estimated completion: 3 minutes
   Failover ID: FO-2026-09-23-00047
   Current replication lag: 4.2 seconds
   Protection mode: ACTIVE (no data loss expected)
@@ -215,9 +215,9 @@ never carry secret values.
 >    - Replication lag: 4.2 seconds (acceptable)
 > 3. Failover initiated:
 >    - Failover ID: FO-2026-09-23-00047, target 192.0.2.41 (DR-SITE-VA-02)
->    - Estimated completion: 28 minutes, no data loss expected
+>    - Estimated completion: 3 minutes, no data loss expected
 > 4. Next steps:
->    - Monitor replication lag; no intervention needed for ~30 minutes
+>    - Monitor replication lag; no intervention needed for ~5 minutes
 >    - Replace Disk 4B after failover completes
 >
 > All actions are in the audit log under your user. Credentials used:
