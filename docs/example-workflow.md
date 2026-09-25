@@ -5,7 +5,7 @@ calls, and — exactly — what comes back. Every tool name, call signature,
 output rendering, and redaction-marker format below is the real one
 (source-matched; see the honesty note at the end).
 
-![Animated walkthrough of the incident: jreyes authorizes the session with a FIDO2 key and types one sentence; the agent lists executors and secrets, times out probing the NAS from network-01, then checks it from storage-01 while the credential travels from the vault to the executor and into the sandbox as a file; the NAS echoes the password and Venya redacts it before the agent sees it; the agent starts a failover to the DR site, and every command is audited to jreyes](diagrams/workflow.gif)
+![Animated walkthrough of the incident: jreyes authorizes the session with a FIDO2 key and types one sentence; the agent lists executors and secrets, times out probing the NAS from network-01, then checks it from storage-01 while the credential travels from Venya's secret store to the executor and into the sandbox as a file; the NAS echoes the password and Venya redacts it before the agent sees it; the agent starts a failover to the DR site, and every command is audited to jreyes](diagrams/workflow.gif)
 
 *The whole incident in about 75 seconds, on a loop: what reaches the agent on
 the left, what Venya does behind the scenes on the right. Tool output is
@@ -140,7 +140,7 @@ then runs in two stages. **Stage 1** is the executor's Rust filter, which
 replaces the value with `[REDACTED:12]` inside the executor, before the output
 leaves the sandbox. **Stage 2** is the definitive one: the executor ships the
 *unfiltered* bytes to the core over its mTLS channel
-(`POST /api/v1/sessions/{id}/filter`), the vault re-screens them against what
+(`POST /api/v1/sessions/{id}/filter`), the core re-screens them against what
 it actually knows, and its answer is adopted. Stage 2 fails **closed** — an
 unknown or TTL-reaped session returns 404 and the executor keeps the
 Stage-1-masked output, so a filter failure can never return raw bytes. Those
@@ -267,10 +267,10 @@ session/TTL rules are real and source-matched. The diagrams and the
 animation carry the same split: their lanes and mechanisms come from
 [architecture.md](architecture.md), while the host names, addresses and NAS
 output in them (including the echoed password the animation shows being
-redacted) are the illustrative fiction described above. They are generated
-from `docs/diagrams/` via `scripts/render-diagrams.sh` (SVGs) and
-`scripts/render-animation.py` (the GIF) — edit the sources there, not the
-renders.*
+redacted) are the illustrative fiction described above. The SVGs are
+generated from `docs/diagrams/` via `scripts/render-diagrams.sh` (edit the
+sources there, not the renders); the GIF is rendered from a separate animation
+source that is not part of this repository.*
 
 **See also:** [alpha-demo.md](alpha-demo.md) — run the real thing yourself in
 5 minutes · [agents.md](agents.md) — the operating brief for your agent ·
