@@ -1,0 +1,397 @@
+<!doctype html>
+<!--
+  Copyright (c) 2026 Tabith LLC.
+  Use of this source code is governed by the Business Source License 1.1
+  included in the LICENSE file at the root of this repository. As of the
+  Change Date listed there, the work is available under MPL 2.0.
+  SPDX-License-Identifier: BUSL-1.1
+
+  Source for docs/diagrams/workflow.gif, the animated companion to
+  docs/example-workflow.md. Open this file in a browser to preview it with a
+  scrubber; render the GIF with scripts/render-animation.py.
+
+  Layout (static, 960x540) lives here and in style.css. Timing lives in
+  animation.js, which is a pure function of time: seek(t) sets every element's
+  state for second t. That is what makes frame-exact rendering possible.
+
+  The lanes are the ones in the d2 diagrams (docs/diagrams/lanes.d2) and are
+  source-matched to docs/architecture.md. Names, IPs, NAS output, the password
+  and timestamps are the same illustrative fiction as example-workflow.md.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Venya example workflow: animation</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-person" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M4.8 20c.6-3.8 3.5-6.1 7.2-6.1s6.6 2.3 7.2 6.1"/></symbol>
+    <symbol id="i-fido" viewBox="0 0 24 24"><rect x="7" y="8.5" width="10" height="12.5" rx="3"/><path d="M9.5 8.5V3.5h5v5"/><circle cx="12" cy="14.8" r="1.9"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.2l2 6.8 6.8 2-6.8 2-2 6.8-2-6.8-6.8-2 6.8-2z"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 2.8v5.5c0 4.4-2.9 8-7 9.7-4.1-1.7-7-5.3-7-9.7V5.8z"/><circle cx="12" cy="10.6" r="1.7"/><path d="M12 12.3v3.2"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="7" rx="1.8"/><rect x="4" y="13" width="16" height="7" rx="1.8"/><path d="M8 7.5h.01M8 16.5h.01"/></symbol>
+    <symbol id="i-cube" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></symbol>
+    <symbol id="i-disk" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="2.8"/><path d="M5 6v12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6"/><path d="M5 12c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6.5 3h7.5l4 4v14h-11.5z"/><path d="M14 3v4h4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+    <symbol id="i-log" viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8.5 8h7M8.5 12h7M8.5 16h4"/></symbol>
+  </defs>
+</svg>
+
+<div id="stage">
+
+  <!-- ================= header ================= -->
+  <div id="hdr">
+    <div id="brand">
+      <span class="wm">Venya</span><span class="dot"></span>
+      <span class="ttl">Example workflow</span>
+      <span class="sub">NAS outage at the Reston VA datacenter</span>
+    </div>
+    <div id="chapters">
+      <div class="ch" id="ch0">Authorize</div>
+      <div class="ch" id="ch1"><b>1</b> Discover</div>
+      <div class="ch" id="ch2"><b>2</b> Secrets</div>
+      <div class="ch" id="ch3"><b>3</b> Probe</div>
+      <div class="ch" id="ch4"><b>4</b> Escalate</div>
+      <div class="ch" id="ch5"><b>5</b> Remediate</div>
+      <div class="ch" id="ch6"><b>6</b> Audit</div>
+    </div>
+  </div>
+
+  <!-- ================= zones ================= -->
+  <div class="zone" style="left:20px">Operator</div>
+  <div class="zone" style="left:220px">Trust anchor</div>
+  <div class="zone" style="left:454px">Executor hosts <em>· assume-compromised</em></div>
+  <div class="zone" style="left:822px">Targets</div>
+
+  <!-- ================= wires (under the cards) ================= -->
+  <svg id="wires" viewBox="0 0 960 540">
+    <path class="link" id="l-human-core" d="M170 107 H220"/>
+    <path class="link" id="l-agent-core" d="M170 225 H220"/>
+    <path class="link" id="l-human-agent" d="M95 138 V194"/>
+    <path class="link" id="l-core-net" d="M404 101 H454"/>
+    <path class="link" id="l-core-sto" d="M404 166 H454"/>
+    <path class="link" id="l-core-bak" d="M404 231 H454"/>
+    <!-- executor host -> its sandbox (same machine), and that segment's path to the NAS -->
+    <path class="link" id="l-net-in" d="M604 101 H630"/>
+    <path class="link" id="l-sto-in" d="M604 166 H630"/>
+    <path class="link" id="l-net-nas" d="M630 101 H822"/>
+    <path class="link" id="l-sto-nas" d="M630 166 H822"/>
+    <path class="link" id="l-nas-dr" d="M881 182 V208"/>
+
+    <text class="wlabel" x="195" y="101" text-anchor="middle">login</text>
+    <text class="wlabel" x="195" y="219" text-anchor="middle">MCP</text>
+    <text class="wlabel" x="101" y="170">prompt</text>
+    <text class="wlabel" x="429" y="95" text-anchor="middle">mTLS relay</text>
+    <text class="wlabel" x="887" y="198">replicate</text>
+  </svg>
+
+    <!-- ================= cards ================= -->
+  <div class="card" id="c-human" style="left:20px;top:76px;width:150px;height:62px">
+    <div class="row">
+      <div class="ico"><svg class="i"><use href="#i-person"/></svg></div>
+      <div>
+        <div class="t1">jreyes</div>
+        <div class="t2">human operator</div>
+        <div class="t2 keyln"><svg class="i"><use href="#i-fido"/></svg>FIDO2 security key</div>
+      </div>
+    </div>
+    <div class="ring" id="ring1"></div>
+    <div class="ring" id="ring2"></div>
+  </div>
+
+  <div class="card" id="c-agent" style="left:20px;top:194px;width:150px;height:62px">
+    <div class="row">
+      <div class="ico"><svg class="i fill"><use href="#i-spark"/></svg></div>
+      <div>
+        <div class="t1">AI agent</div>
+        <div class="t2">LLM via venya-mcp</div>
+        <div class="t2" id="agent-sess">session · jreyes</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="c-core" style="left:220px;top:76px;width:184px;height:180px">
+    <div class="hd">
+      <div class="ico"><svg class="i"><use href="#i-shield"/></svg></div>
+      <div><div class="t1">Venya core</div><div class="t2">vault · RBAC · audit</div></div>
+    </div>
+    <div class="sect" style="top:50px;display:flex;align-items:center;gap:8px">
+      <span class="lbl">Session</span>
+      <span class="chip mute" id="sess-none">none</span>
+      <span class="chip human abs" id="sess-on" style="left:50px"><svg class="i"><use href="#i-check"/></svg>jreyes · FIDO2</span>
+    </div>
+    <div class="sect" style="top:76px">
+      <div class="lbl" style="margin-bottom:3px">Vault</div>
+      <div class="vrow" id="vr-nas"><svg class="i"><use href="#i-lock"/></svg><span>reston_nas_admin_creds</span></div>
+      <div class="vrow" id="vr-mon"><svg class="i"><use href="#i-lock"/></svg><span>reston_network_monitor_api_key</span></div>
+    </div>
+    <div class="sect" style="top:136px">
+      <div class="lbl" style="margin-bottom:5px">Audit</div>
+      <div class="slots" id="audit-row">
+        <div class="slot" id="slot1"></div><div class="slot" id="slot2"></div><div class="slot" id="slot3"></div>
+        <span id="audit-n">0 records</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card exec" id="c-net" style="left:454px;top:76px;width:150px;height:50px">
+    <div class="row">
+      <div class="ico" style="width:24px;height:24px"><svg class="i"><use href="#i-server"/></svg></div>
+      <div>
+        <div class="pre">reston-va-</div>
+        <div class="name">network-01</div>
+        <div class="st"><span class="led"></span><span id="st-net">-</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="card exec" id="c-sto" style="left:454px;top:141px;width:150px;height:50px">
+    <div class="row">
+      <div class="ico" style="width:24px;height:24px"><svg class="i"><use href="#i-server"/></svg></div>
+      <div>
+        <div class="pre">reston-va-</div>
+        <div class="name">storage-01</div>
+        <div class="st"><span class="led"></span><span id="st-sto">-</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="card exec" id="c-bak" style="left:454px;top:206px;width:150px;height:50px">
+    <div class="row">
+      <div class="ico" style="width:24px;height:24px"><svg class="i"><use href="#i-server"/></svg></div>
+      <div>
+        <div class="pre">reston-va-</div>
+        <div class="name">backup-01</div>
+        <div class="st"><span class="led"></span><span id="st-bak">-</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card sbx" id="sbx-net" style="left:630px;top:76px;width:140px;height:50px">
+    <div class="shd"><svg class="i"><use href="#i-cube"/></svg>sbx microVM</div>
+    <div class="ssub">egress deny-by-default</div>
+  </div>
+  <div class="card sbx" id="sbx-sto" style="left:630px;top:141px;width:140px;height:50px">
+    <div class="shd"><svg class="i"><use href="#i-cube"/></svg>sbx microVM</div>
+    <div class="ssub" id="sbx-sto-sub">egress deny-by-default</div>
+    <div class="sfile abs" id="sfile" style="left:9px;top:27px"><svg class="i"><use href="#i-file"/></svg><span id="sfile-t">…/venya/12 · 0400</span></div>
+  </div>
+
+  <div class="card" id="c-nas" style="left:822px;top:76px;width:118px;height:106px">
+    <div class="shd lg"><svg class="i"><use href="#i-disk"/></svg>NAS</div>
+    <div class="tl mono" style="color:var(--text-2)">192.0.2.40</div>
+    <div class="tl mono" style="color:var(--text-3)">reston-data-01</div>
+    <span class="chip mute tchip" id="nas-st0">status unknown</span>
+    <span class="chip warn tchip" id="nas-st1">DEGRADED</span>
+    <span class="chip core tchip" id="nas-st2">FAILING OVER</span>
+  </div>
+  <div class="card" id="c-dr" style="left:822px;top:208px;width:118px;height:48px">
+    <div class="shd" style="font-size:10.5px">DR-SITE-VA-02</div>
+    <div class="tl mono" style="color:var(--text-2);display:flex;align-items:center;gap:6px">192.0.2.41<span class="chip ok" id="dr-st1">sync</span></div>
+  </div>
+
+  <!-- ================= packets (over the cards) ================= -->
+  <svg id="fx" viewBox="0 0 960 540">
+    <!-- motion paths -->
+    <path id="m-net-sbx" d="M604 101 H630" fill="none"/>
+    <path id="m-net-out" d="M770 101 H822" fill="none"/>
+    <path id="m-sto-sbx" d="M604 166 H630" fill="none"/>
+    <path id="m-sto-out" d="M770 166 H822" fill="none"/>
+    <!-- the secret: vault row -> executor host -> sandbox -->
+    <path id="p-sec1" d="M372 173 C390 173 392 166 404 166 H590" fill="none"/>
+    <path id="p-sec2" d="M590 166 H660" fill="none"/>
+
+    <g id="xmark" transform="translate(796 101)">
+      <circle r="8" fill="#2a1418" stroke="#f87171" stroke-width="1.4"/>
+      <path d="M-3 -3 L3 3 M3 -3 L-3 3" stroke="#f87171" stroke-width="1.8" stroke-linecap="round"/>
+    </g>
+    <g id="packets"></g>
+  </svg>
+
+  <!-- ================= agent's view (what reaches the model) ================= -->
+  <div class="panel" id="p-view" style="left:20px;width:374px">
+    <div class="ph"><span class="pt" style="color:var(--agent)">Agent's view</span><span class="ps">what reaches the model</span></div>
+    <div class="pv"><div id="view-scroll">
+      <div class="entry" id="v0">
+        <div class="msg" id="v0a"><span class="who">jreyes: </span><span id="v0b">The Reston VA datacenter NAS appears offline.</span></div>
+      </div>
+      <div class="entry" id="v1">
+        <div class="ln call" id="v1a">› list_executors()</div>
+        <div class="ln" id="v1b">  - reston-va-storage-01 [<span class="ok">ONLINE</span>]</div>
+        <div class="ln" id="v1c">  - reston-va-network-01 [<span class="ok">ONLINE</span>]</div>
+        <div class="ln" id="v1d">  - reston-va-backup-01 [<span class="off">OFFLINE</span>]</div>
+      </div>
+      <div class="entry" id="v2">
+        <div class="ln call" id="v2a">› list_secrets()</div>
+        <div class="ln" id="v2b">  Available secrets (values not shown):</div>
+        <div class="ln" id="v2c">  - reston_nas_admin_creds  purpose: nas_management</div>
+        <div class="ln" id="v2d">  - reston_network_monitor_api_key  purpose: monitoring</div>
+      </div>
+      <div class="entry" id="v3">
+        <div class="ln call" id="v3a">› run_command(executor_id="reston-va-network-01",</div>
+        <div class="ln call" id="v3b">    command="ssh nas-admin@192.0.2.40 …",</div>
+        <div class="ln call" id="v3c">    secret_keys=[])</div>
+        <div class="ln" id="v3d">  Command exited with code <span class="bad">255</span>.</div>
+        <div class="ln" id="v3e">  stderr: … port 22: <span class="bad">Connection timed out</span></div>
+      </div>
+      <div class="entry" id="v4">
+        <div class="ln call" id="v4a">› run_command(executor_id="reston-va-storage-01",</div>
+        <div class="ln call" id="v4b">    command="sshpass -f <span class="sec">/run/secrets/venya/12</span> ssh …",</div>
+        <div class="ln call" id="v4c">    secret_keys=["<span class="sec">reston_nas_admin_creds</span>"])</div>
+        <div class="ln" id="v4d">  Command exited with code <span class="ok">0</span>.</div>
+        <div class="ln" id="v4e">  Volume reston-data-01 status: <span class="sec">DEGRADED</span></div>
+        <div class="ln" id="v4f">    Pending replacement: Disk 4B</div>
+        <div class="ln" id="v4g">    Replication peer auth: <span class="red" id="v4red">[REDACTED:12]</span></div>
+        <div class="ln" id="v4h">  (1 secret(s) masked in output)</div>
+      </div>
+      <div class="entry" id="v5">
+        <div class="ln call" id="v5a">› run_command(executor_id="reston-va-storage-01",</div>
+        <div class="ln call" id="v5b">    command="sshpass -f … initiate-failover …",</div>
+        <div class="ln call" id="v5c">    secret_keys=["<span class="sec">reston_nas_admin_creds</span>"])</div>
+        <div class="ln" id="v5d">  Command exited with code <span class="ok">0</span>.</div>
+        <div class="ln" id="v5e">  Failover initiated for volume reston-data-01</div>
+        <div class="ln" id="v5f">    Target: 192.0.2.41 (DR-SITE-VA-02)</div>
+        <div class="ln" id="v5g">    Failover ID: <span class="wht">FO-2026-09-23-00047</span></div>
+        <div class="ln" id="v5h">    Protection mode: <span class="ok">ACTIVE</span> (no data loss expected)</div>
+      </div>
+      <div class="entry" id="v6">
+        <div class="ln call" id="v6a">› get_audit(limit=5)</div>
+        <div class="ln" id="v6b">  [14:03:41] command_executed <span class="hum">user=jreyes</span> storage-01</div>
+        <div class="ln" id="v6c">  [14:02:58] command_executed <span class="hum">user=jreyes</span> storage-01</div>
+        <div class="ln" id="v6d">  [14:01:12] command_executed <span class="hum">user=jreyes</span> network-01</div>
+      </div>
+    </div></div>
+  </div>
+
+  <!-- ================= behind the scenes ================= -->
+  <div class="panel" id="p-bts" style="left:450px;width:490px">
+    <div class="ph"><span class="pt" style="color:var(--core)">Behind the scenes</span><span class="ps">inside Venya</span></div>
+
+    <div class="blk" id="b-auth">
+      <div class="ctx"><b>venya core</b> · authentication</div>
+      <div class="note" id="ba1"><svg class="i ok"><use href="#i-check"/></svg><span>FIDO2 assertion verified: a physical key touch by <b>jreyes</b></span></div>
+      <div class="note" id="ba2"><svg class="i ok"><use href="#i-check"/></svg><span>session bound to <b>user=jreyes</b> · 15 min idle timeout · 4 h hard cap</span></div>
+      <div class="note" id="ba3"><svg class="i bad"><use href="#i-x"/></svg><span>the agent cannot authorize itself; only a key touch can</span></div>
+    </div>
+
+    <div class="blk" id="b-s1">
+      <div class="ctx"><b>venya core</b> · executor registry</div>
+      <div class="ln" id="b1a">reston-va-storage-01  last heartbeat 14:00:12      <span class="ok">ONLINE</span></div>
+      <div class="ln" id="b1b">reston-va-network-01  last heartbeat 13:58:47      <span class="ok">ONLINE</span></div>
+      <div class="ln" id="b1c">reston-va-backup-01   last heartbeat 09-21 09:14   <span class="off">OFFLINE</span></div>
+      <div class="note" id="b1d" style="margin-top:4px"><span>heartbeats decide ONLINE / OFFLINE</span></div>
+    </div>
+
+    <div class="blk" id="b-s2">
+      <div class="ctx"><b>venya core</b> · vault</div>
+      <div class="ln" id="b2a">reston_nas_admin_creds          <span class="dimln">value: encrypted at rest</span></div>
+      <div class="ln" id="b2b">reston_network_monitor_api_key  <span class="dimln">value: encrypted at rest</span></div>
+      <div class="note" id="b2c" style="margin-top:4px"><svg class="i core"><use href="#i-lock"/></svg><span>values are never returned, to anyone, ever: only keys + metadata</span></div>
+      <div class="note" id="b2d"><svg class="i ok"><use href="#i-check"/></svg><span>entered once by an admin, scoped by role</span></div>
+    </div>
+
+    <div class="blk" id="b-s3">
+      <div class="ctx"><b>reston-va-network-01</b> · sbx microVM</div>
+      <div class="ln" id="b3a"><span class="wht">$ ssh nas-admin@192.0.2.40 get-volume-status reston-data-01</span></div>
+      <div class="ln" id="b3b"><span class="bad">ssh: connect to host 192.0.2.40 port 22: Connection timed out</span></div>
+      <div class="note" id="b3c" style="margin-top:4px"><svg class="i bad"><use href="#i-x"/></svg><span>exit 255 · the network path from this segment is dead</span></div>
+      <div class="note" id="b3d"><svg class="i ok"><use href="#i-check"/></svg><span>no secret requested, none injected (<b>secret_keys=[]</b>)</span></div>
+    </div>
+
+    <div class="blk" id="b-s4">
+      <div class="ctx"><b>reston-va-storage-01</b> · sbx microVM</div>
+      <div class="note" id="b4a"><svg class="i" style="color:var(--secret)"><use href="#i-file"/></svg><span>secret written to tmpfs (mode 0400), exposed at <b>/run/secrets/venya/12</b></span></div>
+      <div class="ln" id="b4b"><span class="wht">$ sshpass -f /run/secrets/venya/12 ssh nas-admin@192.0.2.40 …</span></div>
+      <div class="ln" id="b4c">Volume reston-data-01 status: <span class="sec">DEGRADED</span></div>
+      <div class="ln" id="b4d">  Replication peer auth: <span class="leak"><span class="raw" id="leak-raw">Rv8#nP2!wQz4</span><span class="red masked" id="leak-masked">[REDACTED:12]</span></span><span class="tagline" id="leak-tag"><svg class="i"><use href="#i-arrow"/></svg>the NAS echoed the password</span></div>
+      <div class="note" id="b4e"><svg class="i ok"><use href="#i-check"/></svg><span><b>Stage 1</b> · executor's Rust filter masks it before output leaves</span></div>
+      <div class="note" id="b4f"><svg class="i ok"><use href="#i-check"/></svg><span><b>Stage 2</b> · the vault re-screens the raw bytes and fails closed</span></div>
+      <div class="note" id="b4g"><svg class="i ok"><use href="#i-check"/></svg><span>secret file zeroed after the run</span></div>
+      <div id="scan"></div>
+    </div>
+
+    <div class="blk" id="b-s5">
+      <div class="ctx"><b>reston-va-storage-01</b> · sbx microVM · NAS · DR site</div>
+      <div class="note" id="b5a"><svg class="i" style="color:var(--secret)"><use href="#i-file"/></svg><span>same secret, same path: <b>/run/secrets/venya/12</b> (0400)</span></div>
+      <div class="ln" id="b5b"><span class="wht">$ sshpass … initiate-failover reston-data-01 --target=192.0.2.41</span></div>
+      <div class="ln" id="b5c">Failover initiated for volume reston-data-01</div>
+      <div class="ln" id="b5d">  Target: 192.0.2.41 (DR-SITE-VA-02) · replication lag 4.2 s</div>
+      <div class="ln" id="b5e">  Estimated completion: 28 minutes</div>
+      <div class="note" id="b5f"><svg class="i ok"><use href="#i-check"/></svg><span>output filtered · secret file zeroed after the run</span></div>
+    </div>
+
+    <div class="blk" id="b-s6">
+      <div class="ctx"><b>venya core</b> · audit log</div>
+      <div class="ln" id="b6a">[14:01:12] command_executed <span class="hum">user=jreyes</span> executor=reston-va-network-01</div>
+      <div class="ln" id="b6b">[14:02:58] command_executed <span class="hum">user=jreyes</span> executor=reston-va-storage-01</div>
+      <div class="ln" id="b6c">[14:03:41] command_executed <span class="hum">user=jreyes</span> executor=reston-va-storage-01</div>
+      <div class="note" id="b6d" style="margin-top:4px"><svg class="i core"><use href="#i-log"/></svg><span>full rows also carry the command and secret ids, never values</span></div>
+    </div>
+  </div>
+
+  <!-- ================= captions ================= -->
+  <div id="capbar"></div>
+  <div class="cap" id="cap-a0"><div class="tag">Authorize</div><div class="hd">A human opens the session with a physical key</div><div class="dt">jreyes touches a FIDO2 security key. The agent cannot authorize itself.</div></div>
+  <div class="cap" id="cap-a1"><div class="tag">Authorize</div><div class="hd">“The Reston VA datacenter NAS appears offline.”</div><div class="dt">One sentence. That is the entire instruction.</div></div>
+  <div class="cap" id="cap-1"><div class="tag">Step 1 · Discover</div><div class="hd">Find out what exists</div><div class="dt"><code>list_executors()</code>: two executors online, one offline.</div></div>
+  <div class="cap" id="cap-2"><div class="tag">Step 2 · Secrets</div><div class="hd">Names and metadata, never values</div><div class="dt"><code>list_secrets()</code> shows what exists. The agent will request only what it needs.</div></div>
+  <div class="cap" id="cap-3"><div class="tag">Step 3 · Probe</div><div class="hd">The first probe fails, so the agent adapts</div><div class="dt">From network-01 the NAS times out (exit 255). No blind retries: it switches executors.</div></div>
+  <div class="cap" id="cap-4a"><div class="tag">Step 4 · Escalate</div><div class="hd">Now the credential is needed</div><div class="dt">The command names a file, <code>/run/secrets/venya/12</code>, never the password.</div></div>
+  <div class="cap" id="cap-4b"><div class="tag">Step 4 · Escalate</div><div class="hd">Vault to executor, never through the agent</div><div class="dt">Decrypted in the core, wrapped, and relayed over mTLS to storage-01.</div></div>
+  <div class="cap" id="cap-4c"><div class="tag">Step 4 · Escalate</div><div class="hd">Inside the sandbox, it is just a file</div><div class="dt">Mode 0400 at <code>/run/secrets/venya/12</code>. sshpass reads it; the NAS answers.</div></div>
+  <div class="cap" id="cap-4d"><div class="tag">Step 4 · Escalate</div><div class="hd">The NAS echoes the password back</div><div class="dt">Its status output includes the stored credential: a classic accidental leak.</div></div>
+  <div class="cap" id="cap-4e"><div class="tag">Step 4 · Escalate</div><div class="hd">Redacted before it can reach the agent</div><div class="dt">Stage 1: the executor's Rust filter. Stage 2: the vault re-screens, and fails closed.</div></div>
+  <div class="cap" id="cap-4f"><div class="tag">Step 4 · Escalate</div><div class="hd">The agent sees <code class="r">[REDACTED:12]</code> and the diagnosis</div><div class="dt">Volume DEGRADED, Disk 4B failing. The secret file is zeroed after the run.</div></div>
+  <div class="cap" id="cap-5"><div class="tag">Step 5 · Remediate</div><div class="hd">A controlled failover to the DR site</div><div class="dt">Same secret, same injection path. About 28 minutes, no data loss expected.</div></div>
+  <div class="cap" id="cap-6"><div class="tag">Step 6 · Audit</div><div class="hd">Every command is on the record</div><div class="dt"><code>get_audit()</code>: each run is attributed to user=jreyes, the human, never the agent.</div></div>
+  <div class="cap" id="cap-7"><div class="tag">Done</div><div class="hd">A plain-English report for the human</div><div class="dt">Neither the agent nor jreyes ever held the NAS password.</div></div>
+
+  <!-- ================= overlays ================= -->
+  <div id="ov-sum">
+    <div class="bd"></div>
+    <div id="sumcard">
+      <div class="from"><div class="ico"><svg class="i fill"><use href="#i-spark"/></svg></div><b>AI agent</b> to jreyes</div>
+      <p>The NAS is in degraded mode due to an imminent disk failure. I've initiated a controlled failover to the DR site.</p>
+      <ul>
+        <li>The probe from reston-va-network-01 timed out; the storage segment still reaches the NAS.</li>
+        <li>Volume reston-data-01 is READ-ONLY; Disk 4B exceeded its SMART thresholds.</li>
+        <li>Failover <code>FO-2026-09-23-00047</code> to DR-SITE-VA-02: about 28 min, no data loss expected.</li>
+        <li>Next: monitor replication lag, then replace Disk 4B once failover completes.</li>
+      </ul>
+      <div class="fine">Credentials used: <code>reston_nas_admin_creds</code> (2 commands). <b>Neither value was exposed to me at any point.</b> One accidental echo in NAS output was redacted inside the executor.</div>
+    </div>
+  </div>
+
+  <div class="ov" id="ov-end">
+    <div class="kicker">Venya</div>
+    <div class="big">The agent did the work.<br><span class="acc">No one saw the password.</span></div>
+    <div class="lede">Not the agent, and not the human at the keyboard.<br>Every step is audited to the person who authorized it.</div>
+    <div class="foot">AI agents manage infrastructure securely · every call and its exact output is in the walkthrough below ↓</div>
+  </div>
+
+  <div class="ov" id="ov-title">
+    <div class="kicker">Venya · example workflow</div>
+    <div class="big">An AI agent troubleshoots a NAS outage<br><span class="acc">without ever seeing the password.</span></div>
+    <div class="lede">A storage incident at the Reston VA datacenter, start to finish.</div>
+    <div class="facts">
+      <div class="fact"><b>1</b> sentence from a human</div>
+      <div class="fact"><b>6</b> steps by the agent</div>
+      <div class="fact z"><b>0</b> secrets exposed</div>
+    </div>
+  </div>
+</div>
+
+<div id="player">
+  <button id="pp">Pause</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0">
+  <span id="clock">0.0 s</span>
+</div>
+
+<script src="animation.js"></script>
+</body>
+</html>
