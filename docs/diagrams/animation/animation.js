@@ -309,10 +309,11 @@ function storyboard() {
   const H = G6 + 5.4; //     the agent's report
   const I = H + 6.6; //      end card
   const END = I + 4.6;
+  const LOOP_TAIL = 0.4; // end card -> title crossfade; only the looping GIF needs it
 
   // --- title card: fully visible on frame 0 (GitHub shows it while loading),
   // and faded back in at the end so the loop is seamless.
-  key('ov-title', 'o', [0, 1], [A - 0.3, 1], [A + 0.05, 0, 'in'], [END - 0.4, 0], [END, 1, 'out']);
+  key('ov-title', 'o', [0, 1], [A - 0.3, 1], [A + 0.05, 0, 'in'], [END - LOOP_TAIL, 0], [END, 1, 'out']);
 
   // --- chapter tracker
   const starts = [A, B, C, D, E, G5, G6, H];
@@ -574,7 +575,7 @@ function storyboard() {
   // ------------------------------------------------ end card
   show('ov-end', I, null, 0.35);
 
-  return END;
+  return { duration: END, loopTail: LOOP_TAIL };
 }
 
 // ============================================================ boot
@@ -624,11 +625,11 @@ window.anim = {
     const missing = faces.filter((f, i) => loaded[i].length === 0);
     if (missing.length) throw new Error(`animation: fonts failed to load: ${missing.join(', ')}`);
     await document.fonts.ready;
-    const duration = storyboard();
+    const { duration, loopTail } = storyboard();
     buildScroll();
     finalize();
     seek(0);
     if (!RENDER) preview(duration);
-    return { duration };
+    return { duration, loopTail };
   })(),
 };
