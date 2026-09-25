@@ -1,6 +1,8 @@
 # Venya
 
 > **AI agents:** start at **[docs/agents.md](docs/agents.md)** — how to install, configure, and operate
+>
+> **Wiring an agent?** paste the operating contract from **[docs/agent-prompts.md](docs/agent-prompts.md)** into its instruction file (AGENTS.md / CLAUDE.md / Cursor rules)
 
 ### AI agents manage infrastructure securely.
 
@@ -365,6 +367,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy + safe harbor |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (incl. license terms for contributions) |
 | [Agent Instructions](docs/agents.md) | Brief for LLM agents operating Venya via MCP |
+| [Agent Prompts](docs/agent-prompts.md) | Paste-ready operating contract for your agent's instruction file (AGENTS.md / CLAUDE.md / Cursor rules) |
 | [Third-Party Notices](THIRD-PARTY-NOTICES.md) | Third-party components and licenses (incl. required proprietary Docker sbx) |
 
 ---

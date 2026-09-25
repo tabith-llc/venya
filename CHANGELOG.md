@@ -4,6 +4,9 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- New `docs/agent-prompts.md` — a paste-ready operating contract for customer AI agents (AGENTS.md / CLAUDE.md / Cursor rules), linked from the README banner + docs table, installation §6, and agents.md. An interlock test pins the block's claims (tool names, redaction marker, injection path, 401/503 behavior) to the live MCP tool surface so the prompt cannot silently rot.
+
 ### Changed
 - Test fixtures and docs no longer embed development-fleet addresses or identities: private-range (RFC1918) literals swept to documentation ranges (RFC 5737), `dust@montana` → `admin@example.com`, dev password probe → synthetic. A tree-wide interlock test now fails CI if any RFC1918 literal re-enters `packages/` or `docs/` (installer-artifact guard extended; CHANGELOG and the guard's own self-test excluded). No product behavior change.
 
