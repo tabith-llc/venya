@@ -304,9 +304,12 @@ class ExecutorConfig(BaseSettings):
         default="/etc/venya/egress-allowlist.txt",
         description="Path to egress allowlist file (one CIDR/host per line)",
     )
-    dns_resolver: str = Field(
-        default="10.27.28.1",
-        description="DNS resolver IP always allowed for egress",
+    dns_resolver: str | None = Field(
+        default=None,
+        description=(
+            "DNS resolver IP always allowed for sandbox egress. REQUIRED — no default: "
+            "unset, the executor refuses to start (Venya never guesses your network)"
+        ),
     )
 
     # Logging

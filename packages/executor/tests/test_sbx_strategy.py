@@ -15,7 +15,7 @@ import pytest
 from venya_contract import ASKPASS_HELPER_PATH
 
 from executor.bundles import SecretBundle
-from executor.egress_filter import DEFAULT_ALLOWLIST_PATH, DEFAULT_DNS_RESOLVER
+from executor.egress_filter import DEFAULT_ALLOWLIST_PATH
 from executor.strategies.sbx_strategy import (
     ASKPASS_HELPER_CONTENT,
     SBX_CREATE_TIMEOUT,
@@ -361,7 +361,7 @@ class TestSbxStrategyCopySecrets:
 
 class TestSbxStrategyNetworkPolicy:
     def test_apply_network_policy_adds_allow_rules(self, tmp_path: Path):
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(dns_resolver="192.0.2.53")
         strategy._sandbox_name = "venya-test123"
         allowlist = tmp_path / "egress-allowlist.txt"
         allowlist.write_text("10.10.10.50\n10.10.10.100\n")
@@ -388,7 +388,7 @@ class TestSbxStrategyNetworkPolicy:
         """A registration failure must raise, not log-and-continue: a
         swallowed failure leaves the sandbox under deny-all and the command
         dies later with an opaque network error (F11)."""
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(dns_resolver="192.0.2.53")
         strategy._sandbox_name = "venya-test123"
 
         mock_egress = MagicMock()
@@ -401,7 +401,7 @@ class TestSbxStrategyNetworkPolicy:
                     strategy.apply_network_policy("venya-test123")
 
     def test_apply_network_policy_rejects_empty_host(self, tmp_path: Path):
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(dns_resolver="192.0.2.53")
         strategy._sandbox_name = "venya-test123"
 
         mock_egress = MagicMock()
@@ -414,7 +414,7 @@ class TestSbxStrategyNetworkPolicy:
             mock_run.assert_not_called()
 
     def test_apply_network_policy_dns_always_allowed(self, tmp_path: Path):
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(dns_resolver="192.0.2.53")
         strategy._sandbox_name = "venya-test123"
 
         mock_egress = MagicMock()
@@ -430,7 +430,7 @@ class TestSbxStrategyNetworkPolicy:
             assert "10.27.28.1" in call_args
 
     def test_apply_network_policy_missing_allowlist(self):
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(dns_resolver="192.0.2.53")
         strategy._sandbox_name = "venya-test123"
 
         mock_egress = MagicMock()
@@ -452,7 +452,9 @@ class TestConfigPlumbing:
 
     def test_constructor_defaults_mirror_module_constants(self):
         strategy = SbxStrategy()
-        assert strategy.dns_resolver == DEFAULT_DNS_RESOLVER
+        # Ruling D1 option (a): no built-in resolver — the constant is gone,
+        # so the default is None (the daemon refuses to start without one).
+        assert strategy.dns_resolver is None
         assert strategy.egress_allowlist_path == DEFAULT_ALLOWLIST_PATH
 
     def test_explicit_values_carried_on_attrs(self):
@@ -476,24 +478,15 @@ class TestConfigPlumbing:
                 dns_resolver="203.0.113.53",
             )
 
-    def test_apply_network_policy_defaults_unchanged(self):
-        """Behavior-preservation pin: default-constructed strategy must pass
-        the module constants to EgressFilter. GREEN before AND after the fix
-        (the old hardcodes equal the constants)."""
+    def test_apply_network_policy_none_resolver_raises(self):
+        """Replaces the stage-1 behavior-preservation pin, which dies BY
+        RULING (ticket private-infra-product-defaults-and-fixtures, ruling D1
+        option (a)): a default-constructed strategy has no resolver, so
+        building the egress policy must fail loudly instead of using a
+        guessed IP."""
         strategy = SbxStrategy()
-        strategy._sandbox_name = "venya-test123"
-
-        mock_egress = MagicMock()
-        mock_egress.get_allowed_hosts.return_value = [DEFAULT_DNS_RESOLVER]
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
-            with patch("executor.egress_filter.EgressFilter", return_value=mock_egress) as mock_cls:
-                strategy.apply_network_policy("venya-test123")
-            mock_cls.assert_called_once_with(
-                allowlist_path=DEFAULT_ALLOWLIST_PATH,
-                dns_resolver=DEFAULT_DNS_RESOLVER,
-            )
+        with pytest.raises(RuntimeError, match="dns_resolver"):
+            strategy.apply_network_policy("venya-test123")
 
 
 class TestSbxStrategyExecuteCommand:
