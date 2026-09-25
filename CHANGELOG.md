@@ -4,6 +4,9 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Test fixtures and docs no longer embed development-fleet addresses or identities: private-range (RFC1918) literals swept to documentation ranges (RFC 5737), `dust@montana` → `admin@example.com`, dev password probe → synthetic. A tree-wide interlock test now fails CI if any RFC1918 literal re-enters `packages/` or `docs/` (installer-artifact guard extended; CHANGELOG and the guard's own self-test excluded). No product behavior change.
+
 - **BREAKING — Executor: the built-in DNS-resolver default is removed; `dns_resolver`
   is now explicit config.** The sandbox egress policy previously always admitted a
   hardcoded resolver IP (`10.27.28.1` — a development-fleet address, functionally

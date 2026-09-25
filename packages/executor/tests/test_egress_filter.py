@@ -19,42 +19,42 @@ class TestReadAllowlist:
     def test_read_allowlist_parses_entries(self, tmp_path: Path):
         """File with 3 entries returns 3 hosts."""
         allowlist = tmp_path / "egress-allowlist.txt"
-        allowlist.write_text("10.10.10.50\n10.10.10.100\nweb-server-3\n")
+        allowlist.write_text("198.51.100.50\n198.51.100.100\nweb-server-3\n")
 
         egress = EgressFilter(allowlist_path=allowlist, dns_resolver="192.0.2.53")
         result = egress.read_allowlist()
 
-        assert result == ["10.10.10.50", "10.10.10.100", "web-server-3"]
+        assert result == ["198.51.100.50", "198.51.100.100", "web-server-3"]
 
     def test_read_allowlist_ignores_comments(self, tmp_path: Path):
         """Lines starting with # are skipped."""
         allowlist = tmp_path / "egress-allowlist.txt"
-        allowlist.write_text("# This is a comment\n10.10.10.50\n# Another comment\n")
+        allowlist.write_text("# This is a comment\n198.51.100.50\n# Another comment\n")
 
         egress = EgressFilter(allowlist_path=allowlist, dns_resolver="192.0.2.53")
         result = egress.read_allowlist()
 
-        assert result == ["10.10.10.50"]
+        assert result == ["198.51.100.50"]
 
     def test_read_allowlist_ignores_blanks(self, tmp_path: Path):
         """Empty lines are skipped."""
         allowlist = tmp_path / "egress-allowlist.txt"
-        allowlist.write_text("\n10.10.10.50\n\n\n10.10.10.100\n")
+        allowlist.write_text("\n198.51.100.50\n\n\n198.51.100.100\n")
 
         egress = EgressFilter(allowlist_path=allowlist, dns_resolver="192.0.2.53")
         result = egress.read_allowlist()
 
-        assert result == ["10.10.10.50", "10.10.10.100"]
+        assert result == ["198.51.100.50", "198.51.100.100"]
 
     def test_read_allowlist_strips_whitespace(self, tmp_path: Path):
         """Leading/trailing whitespace is removed."""
         allowlist = tmp_path / "egress-allowlist.txt"
-        allowlist.write_text("  10.10.10.50  \n\t10.10.10.100\n")
+        allowlist.write_text("  198.51.100.50  \n\t198.51.100.100\n")
 
         egress = EgressFilter(allowlist_path=allowlist, dns_resolver="192.0.2.53")
         result = egress.read_allowlist()
 
-        assert result == ["10.10.10.50", "10.10.10.100"]
+        assert result == ["198.51.100.50", "198.51.100.100"]
 
     def test_missing_file_returns_empty(self, tmp_path: Path):
         """No file returns empty list (fail-closed)."""
@@ -82,18 +82,18 @@ class TestGetAllowedHosts:
     def test_get_allowed_hosts_includes_dns(self, tmp_path: Path):
         """DNS resolver is always in result."""
         allowlist = tmp_path / "egress-allowlist.txt"
-        allowlist.write_text("10.10.10.50\n")
+        allowlist.write_text("198.51.100.50\n")
 
         egress = EgressFilter(allowlist_path=allowlist, dns_resolver="192.0.2.53")
         result = egress.get_allowed_hosts()
 
-        assert "10.10.10.50" in result
+        assert "198.51.100.50" in result
         assert "192.0.2.53" in result
 
     def test_get_allowed_hosts_no_duplicates(self, tmp_path: Path):
         """DNS resolver not duplicated if already in file."""
         allowlist = tmp_path / "egress-allowlist.txt"
-        allowlist.write_text("192.0.2.53\n10.10.10.50\n")
+        allowlist.write_text("192.0.2.53\n198.51.100.50\n")
 
         egress = EgressFilter(allowlist_path=allowlist, dns_resolver="192.0.2.53")
         result = egress.get_allowed_hosts()
@@ -113,7 +113,7 @@ class TestGetAllowedHosts:
     def test_get_allowed_hosts_custom_dns(self, tmp_path: Path):
         """Custom DNS resolver is used when specified."""
         allowlist = tmp_path / "egress-allowlist.txt"
-        allowlist.write_text("10.10.10.50\n")
+        allowlist.write_text("198.51.100.50\n")
 
         egress = EgressFilter(allowlist_path=allowlist, dns_resolver="8.8.8.8")
         result = egress.get_allowed_hosts()
@@ -124,12 +124,12 @@ class TestGetAllowedHosts:
     def test_get_allowed_hosts_cidr(self, tmp_path: Path):
         """CIDR entries are passed through."""
         allowlist = tmp_path / "egress-allowlist.txt"
-        allowlist.write_text("10.27.28.0/24\n")
+        allowlist.write_text("198.51.100.0/24\n")
 
         egress = EgressFilter(allowlist_path=allowlist, dns_resolver="192.0.2.53")
         result = egress.get_allowed_hosts()
 
-        assert "10.27.28.0/24" in result
+        assert "198.51.100.0/24" in result
         assert "192.0.2.53" in result
 
 

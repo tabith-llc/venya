@@ -194,7 +194,7 @@ dial. Two sanctioned strategies:
   executor VM's real IP **on the core side**:
 
   ```bash
-  echo "192.168.1.50 venya-exec-1" >> /etc/hosts    # ON THE CORE; executor's real IP, never a loopback variant
+  echo "192.0.2.50 venya-exec-1" >> /etc/hosts    # ON THE CORE; executor's real IP, never a loopback variant
   ```
 
 The executor installer pre-checks local resolvability of the id and prints

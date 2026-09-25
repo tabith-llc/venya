@@ -283,16 +283,16 @@ class TestRateLimitMultiWorker:
         app = _create_test_app(requests_per_minute=2)
         client = TestClient(app)
 
-        # IP 10.0.0.1 uses its limit
-        resp1 = client.get("/api/v1/health", headers={"X-Forwarded-For": "10.0.0.1"})
+        # IP 203.0.113.1 uses its limit
+        resp1 = client.get("/api/v1/health", headers={"X-Forwarded-For": "203.0.113.1"})
         assert resp1.status_code == 200
-        resp2 = client.get("/api/v1/health", headers={"X-Forwarded-For": "10.0.0.1"})
+        resp2 = client.get("/api/v1/health", headers={"X-Forwarded-For": "203.0.113.1"})
         assert resp2.status_code == 200
-        resp3 = client.get("/api/v1/health", headers={"X-Forwarded-For": "10.0.0.1"})
+        resp3 = client.get("/api/v1/health", headers={"X-Forwarded-For": "203.0.113.1"})
         assert resp3.status_code == 429
 
-        # IP 10.0.0.2 should still work (separate counter)
-        resp = client.get("/api/v1/health", headers={"X-Forwarded-For": "10.0.0.2"})
+        # IP 203.0.113.2 should still work (separate counter)
+        resp = client.get("/api/v1/health", headers={"X-Forwarded-For": "203.0.113.2"})
         assert resp.status_code == 200
 
     def test_xff_rightmost_entry_keys_the_limit(self):
@@ -306,15 +306,15 @@ class TestRateLimitMultiWorker:
         client = TestClient(app)
 
         # Same real IP behind three different spoofs → ONE bucket: 2 pass, 3rd 429
-        r1 = client.get("/api/v1/health", headers={"X-Forwarded-For": "1.1.1.1, 10.0.0.7"})
-        r2 = client.get("/api/v1/health", headers={"X-Forwarded-For": "2.2.2.2, 10.0.0.7"})
+        r1 = client.get("/api/v1/health", headers={"X-Forwarded-For": "1.1.1.1, 203.0.113.7"})
+        r2 = client.get("/api/v1/health", headers={"X-Forwarded-For": "2.2.2.2, 203.0.113.7"})
         assert r1.status_code == 200
         assert r2.status_code == 200
-        r3 = client.get("/api/v1/health", headers={"X-Forwarded-For": "3.3.3.3, 10.0.0.7"})
+        r3 = client.get("/api/v1/health", headers={"X-Forwarded-For": "3.3.3.3, 203.0.113.7"})
         assert r3.status_code == 429  # spoof rotation does NOT reset the bucket
 
         # A different REAL (rightmost) IP still has its own bucket
-        r4 = client.get("/api/v1/health", headers={"X-Forwarded-For": "1.1.1.1, 10.0.0.8"})
+        r4 = client.get("/api/v1/health", headers={"X-Forwarded-For": "1.1.1.1, 203.0.113.8"})
         assert r4.status_code == 200
 
     def test_backend_unavailable_returns_503(self):

@@ -111,7 +111,7 @@ class TestCreateExecutionSession:
         mock_session = MagicMock()
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         mock_query = MagicMock()
@@ -163,7 +163,7 @@ class TestCreateExecutionSession:
         app, backend = _create_test_app()
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         mock_db = _mock_db_for_session(mock_executor, [None])
@@ -185,7 +185,7 @@ class TestCreateExecutionSession:
         app, backend = _create_test_app()
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         mock_db = _mock_db_for_session(mock_executor, [None])
@@ -216,7 +216,7 @@ class TestCreateExecutionSession:
         app, backend = _create_test_app()
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         secrets = _mock_secret_rows(("db-password", None), ("api-key", None))
@@ -249,7 +249,7 @@ class TestCreateExecutionSession:
         app, backend = _create_test_app()
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         secrets = _mock_secret_rows(("db-password", None))
@@ -285,7 +285,7 @@ class TestCreateExecutionSession:
         app, backend = _create_test_app()
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
         secrets = _mock_secret_rows(("db-password", {"executor": "other-exec"}))
@@ -315,7 +315,7 @@ class TestCreateExecutionSession:
     def test_session_10_minute_ttl(self):
         """Session expires_at is created_at + 10 minutes."""
         app, backend = _create_test_app()
-        mock_db = _mock_db_for_session(MagicMock(id="exec-1", hostname="10.27.28.14", revoked_at=None), [])
+        mock_db = _mock_db_for_session(MagicMock(id="exec-1", hostname="192.0.2.14", revoked_at=None), [])
         backend.get_session.return_value = mock_db
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -456,7 +456,7 @@ class TestExecuteCommandOnExecutor:
         # Executor query: return mock executor
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
@@ -558,7 +558,7 @@ class TestExecuteCommandOnExecutor:
         # Executor query: return mock executor
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
@@ -647,7 +647,7 @@ class TestExecutorReachability:
 
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
@@ -686,7 +686,7 @@ class TestExecutorReachability:
 
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
@@ -751,7 +751,7 @@ class TestExecutorReachability:
 
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
@@ -819,7 +819,7 @@ class TestExecutorReachability:
 
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
@@ -957,7 +957,7 @@ class TestMalformedExecutorResponse:
 
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
@@ -1121,7 +1121,7 @@ class TestTlsMisconfiguration:
 
         mock_executor = MagicMock()
         mock_executor.id = "exec-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
 
@@ -1220,7 +1220,7 @@ def _execute_env_harness(meta: dict, version: str | None, plaintext: str = "s3cr
 
     mock_executor = MagicMock()
     mock_executor.id = "exec-1"
-    mock_executor.hostname = "10.27.28.14"
+    mock_executor.hostname = "192.0.2.14"
     mock_executor.revoked_at = None
     mock_executor.serial_number = None
     mock_executor.version = version
