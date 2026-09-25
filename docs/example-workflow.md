@@ -5,6 +5,13 @@ calls, and — exactly — what comes back. Every tool name, call signature,
 output rendering, and redaction-marker format below is the real one
 (source-matched; see the honesty note at the end).
 
+![Animated walkthrough of the incident: jreyes authorizes the session with a FIDO2 key and types one sentence; the agent lists executors and secrets, times out probing the NAS from network-01, then checks it from storage-01 while the credential travels from the vault to the executor and into the sandbox as a file; the NAS echoes the password and Venya redacts it before the agent sees it; the agent starts a failover to the DR site, and every command is audited to jreyes](diagrams/workflow.gif)
+
+*The whole incident in about 75 seconds, on a loop: what reaches the agent on
+the left, what Venya does behind the scenes on the right. Tool output is
+abbreviated in the animation; the steps below give the exact calls and
+renderings.*
+
 **Human prompt:**
 
 > *"The Reston VA datacenter NAS appears offline."*
@@ -256,12 +263,14 @@ CLI and its outputs, failover IDs, and timestamps are illustrative fiction.
 The tool names and call signatures, output renderings, `[REDACTED:<id>]`
 marker format, masked-count line, secret-file mechanism
 (`/run/secrets/venya/<id>`, 0400, zeroed after run), audit attribution, and
-session/TTL rules are real and source-matched. The diagrams carry the same
-split: their lanes and mechanisms come from
+session/TTL rules are real and source-matched. The diagrams and the
+animation carry the same split: their lanes and mechanisms come from
 [architecture.md](architecture.md), while the host names, addresses and NAS
-output in them are the illustrative fiction described above. They are
-generated from `docs/diagrams/` via `scripts/render-diagrams.sh` — edit the
-sources there, not the SVGs.*
+output in them (including the echoed password the animation shows being
+redacted) are the illustrative fiction described above. They are generated
+from `docs/diagrams/` via `scripts/render-diagrams.sh` (SVGs) and
+`scripts/render-animation.py` (the GIF) — edit the sources there, not the
+renders.*
 
 **See also:** [alpha-demo.md](alpha-demo.md) — run the real thing yourself in
 5 minutes · [agents.md](agents.md) — the operating brief for your agent ·
