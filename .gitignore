@@ -53,3 +53,6 @@ DEVELOPER_NOTE.md
 
 # Rust build artifacts
 target/
+
+# MacOS
+.DS_Store

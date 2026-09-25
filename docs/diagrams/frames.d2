@@ -1,0 +1,18 @@
+# Per-step frames: one board per narrative step, for showing beside the prose
+# in docs/example-workflow.md.
+#
+# `scenarios` (not `steps`) is deliberate: scenarios inherit the lanes from
+# lanes.d2 but NOT each other's messages, so every frame stays roughly square.
+# `steps` would be cumulative — board 6 would grow back into the full-height
+# overview, which is exactly what these frames exist to avoid.
+
+...@lanes
+
+scenarios: {
+  s1: { label: "Step 1 — Discover what exists";                   ...@steps/s1 }
+  s2: { label: "Step 2 — Find relevant secrets";                  ...@steps/s2 }
+  s3: { label: "Step 3 — First probe, from the network executor"; ...@steps/s3 }
+  s4: { label: "Step 4 — Escalate to the storage executor";       ...@steps/s4 }
+  s5: { label: "Step 5 — Controlled remediation";                 ...@steps/s5 }
+  s6: { label: "Step 6 — Close the loop";                         ...@steps/s6 }
+}

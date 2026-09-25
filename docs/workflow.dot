@@ -1,0 +1,121 @@
+digraph venya_workflow {
+    rankdir=TB;
+    compound=true;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10];
+    edge [fontname="Helvetica", fontsize=9];
+    label="Venya Incident Workflow: NAS Storage Failure — Reston VA";
+    labelloc="t";
+    fontsize=15;
+    size="10,13";
+    pad=0.5;
+
+    /* ---- Discovery ---- */
+    subgraph cluster_discovery {
+        label="Discovery";
+        style="filled,rounded";
+        color="#e8f4f8";
+
+        step1 [label="list_executors()", shape=box3d, style=filled, fillcolor="#fff3cd"];
+        step2 [label="list_secrets()", shape=box3d, style=filled, fillcolor="#fff3cd"];
+        step1 -> step2 [label="discover executors", style=solid];
+    }
+
+    /* ---- Executor nodes ---- */
+    subgraph cluster_executors {
+        label="Executors";
+        style=filled;
+        color="#f0f0f0";
+
+        ex_storage [label="reston-va-storage-01\n[ONLINE]", shape=box, style=filled, fillcolor="#d4edda"];
+        ex_network [label="reston-va-network-01\n[ONLINE]", shape=box, style=filled, fillcolor="#d4edda"];
+        ex_backup  [label="reston-va-backup-01\n[OFFLINE]", shape=box, style=filled, fillcolor="#f8d7da"];
+    }
+
+    /* ---- Secret nodes ---- */
+    subgraph cluster_secrets {
+        label="Secrets Vault";
+        style=filled;
+        color="#fff5f5";
+
+        sec_nas [label="reston_nas_admin_creds\npurpose: nas_management", shape=cylinder, style=filled, fillcolor="#f5c6cb", penwidth=2];
+        sec_mon [label="reston_network_monitor_api_key\npurpose: monitoring", shape=cylinder, style=filled, fillcolor="#e2e3e5"];
+    }
+
+    /* ---- Infrastructure ---- */
+    subgraph cluster_infra {
+        label="Infrastructure";
+        style=filled;
+        color="#e8f0fe";
+
+        nas [label="192.0.2.40\nNAS (reston-data-01)", shape=diamond, style=filled, fillcolor="#d1ecf1"];
+        dr  [label="192.0.2.41\nDR-SITE-VA-02", shape=diamond, style=filled, fillcolor="#d1ecf1"];
+    }
+
+    /* ---- Diagnosis ---- */
+    subgraph cluster_diagnosis {
+        label="Diagnosis";
+        style="filled,rounded";
+        color="#fff8e1";
+
+        step3 [label="run_command\nexecutor: reston-va-network-01\nssh nas-admin@192.0.2.40\nget-volume-status", shape=box3d, style=filled, fillcolor="#fff3cd"];
+        step4 [label="run_command\nexecutor: reston-va-storage-01\nsshpass -f /run/secrets/venya/12\nget-volume-status", shape=box3d, style=filled, fillcolor="#fff3cd"];
+        timeout [label="TIMEOUT\nport 22:\nConnection timed out", shape=box, style=filled, fillcolor="#f8d7da"];
+        degraded [label="DEGRADED\nVolume READ-ONLY\nDisk 4B SMART\nReplication lag: 4.2s", shape=box, style=filled, fillcolor="#fff3cd"];
+        adapt  [label="network path dead\n→ adapt executor", shape=ellipse, style=filled, fillcolor="#ffe0b2"];
+    }
+
+    /* ---- Remediation ---- */
+    subgraph cluster_remediation {
+        label="Remediation";
+        style="filled,rounded";
+        color="#e8f5e9";
+
+        step5 [label="run_command\nexecutor: reston-va-storage-01\ninitiate-failover\n--target=192.0.2.41", shape=box3d, style=filled, fillcolor="#fff3cd"];
+        failover [label="FAILOVER INITIATED\nFO-2026-09-23-00047\nTarget: DR-SITE-VA-02\nEst. 28 min\nProtection: ACTIVE", shape=box, style=filled, fillcolor="#d4edda"];
+    }
+
+    /* ---- Audit ---- */
+    subgraph cluster_audit {
+        label="Audit & Closure";
+        style="filled,rounded";
+        color="#e3f2fd";
+
+        step6 [label="get_audit(limit=5)", shape=box3d, style=filled, fillcolor="#fff3cd"];
+        audit [label="AUDIT CLOSED\n3 records → user: jreyes\nNo secret values exposed", shape=box, style=filled, fillcolor="#d1ecf1"];
+    }
+
+    /* ---- Human summary ---- */
+    summary [label="Human Summary\nAgent reports findings + next steps\nCredentials never exposed", shape=note, style=filled, fillcolor="#f8f9fa", penwidth=2];
+
+    /* ---- Edges: Discovery ---- */
+    step1 -> ex_storage [label="ONLINE"];
+    step1 -> ex_network [label="ONLINE"];
+    step1 -> ex_backup  [label="OFFLINE", style=dashed, color=red];
+    step2 -> sec_nas;
+    step2 -> sec_mon [style=dashed, color=gray, label="unused"];
+
+    /* ---- Edges: Diagnosis ---- */
+    step3 -> ex_network [dir=back, style=dashed];
+    step3 -> nas [label="ssh port 22"];
+    step3 -> timeout [color=red, penwidth=2];
+    timeout -> adapt [color=red];
+    adapt -> step4 [color=orange, penwidth=2];
+    step4 -> ex_storage [dir=back, style=dashed];
+    step4 -> sec_nas [dir=back, label="secret file\n/run/secrets/venya/12", color=red, penwidth=2];
+    step4 -> nas [label="sshpass ssh"];
+    step4 -> degraded [color=orange, penwidth=2];
+    degraded -> nas [label="replication auth\n[REDACTED:12]", style=dashed, color=red, penwidth=2];
+
+    /* ---- Edges: Remediation ---- */
+    step5 -> ex_storage [dir=back, style=dashed];
+    step5 -> sec_nas [dir=back, label="secret file\n/run/secrets/venya/12", color=red, penwidth=2];
+    step5 -> nas [label="initiate-failover"];
+    step5 -> dr [label="failover target"];
+    step5 -> failover [color=green, penwidth=2];
+
+    /* ---- Edges: Audit ---- */
+    step6 -> audit;
+    failover -> step6 [label="document event"];
+    audit -> summary [style=dashed];
+}
