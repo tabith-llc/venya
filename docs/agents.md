@@ -37,8 +37,12 @@ to that human.
    (not sent to the executor); venya's own flags (`--secret`,
    `--executor-id`) must come BEFORE the command — everything after the
    first command token belongs to the remote command.
-5. Use **IP addresses** for hosts inside commands when instructed —
-   sandbox DNS does not resolve site-local hostnames.
+5. **Hostnames resolve only if they are allowlisted as hostnames.** The
+   sandbox's DNS is a policy-enforcing proxy: a name resolves if and only
+   if that exact hostname is an entry in the executor's egress allowlist.
+   IP and CIDR entries authorize connections to those addresses but never
+   enable name resolution — use IP addresses for targets not allowlisted
+   by name. Everything else is deny-by-default.
 6. **First run after an executor install may time out** (~60 s agent-
    template pull) while still succeeding server-side. Before retrying:
    check the result of the first attempt (audit/target state). Warm runs
