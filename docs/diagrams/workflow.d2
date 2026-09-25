@@ -1,0 +1,23 @@
+# Overview: the whole incident as one swimlane sequence.
+# Companion to docs/example-workflow.md. Messages live in steps/*.d2 — the
+# single source of truth shared with frames.d2; edit those, not this file.
+#
+# The human lane is declared HERE, and before the lanes import, rather than in
+# lanes.d2 (see the note there). Declaring it ahead of the import is what places
+# it leftmost; declared after, d2 drops it into the middle of the other lanes.
+
+shape: sequence_diagram
+human: "Human — jreyes\nFIDO2 key"
+
+...@lanes
+
+auth: "Authorization — before the agent can act"        { ...@steps/auth }
+s1:   "Step 1 — Discover what exists"                   { ...@steps/s1 }
+s2:   "Step 2 — Find relevant secrets"                  { ...@steps/s2 }
+s3:   "Step 3 — First probe, from the network executor" { ...@steps/s3 }
+s4:   "Step 4 — Escalate to the storage executor"       { ...@steps/s4 }
+s5:   "Step 5 — Controlled remediation"                 { ...@steps/s5 }
+s6:   "Step 6 — Close the loop" {
+  ...@steps/s6
+  ...@steps/s6-summary
+}

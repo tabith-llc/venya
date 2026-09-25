@@ -1,0 +1,176 @@
+digraph workflow_legend {
+    rankdir=TB;
+    compound=true;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11];
+    edge [fontname="Helvetica", fontsize=10];
+    label="Workflow Legend";
+    labelloc="t";
+    fontsize=16;
+    size="8,11";
+    pad=0.5;
+
+    /* ============================================================
+       SECTION 1: NODE SHAPES
+       ============================================================ */
+    subgraph cluster_shapes {
+        label="Node Shapes";
+        style="filled,rounded";
+        color="#f8f9fa";
+        penwidth=2;
+        fontsize=13;
+        margin=12;
+        pad=0.4;
+
+        /* Row 1 */
+        { rank=same;
+          ls_tool [label="Tool Call\n(run_command, list_executors, etc.)", shape=box3d, style=filled, fillcolor="#fff3cd", fontsize=10, width=2.5, height=1.2];
+          ls_secret [label="Secret\n(credentials vault)", shape=cylinder, style=filled, fillcolor="#f5c6cb", fontsize=10, width=2.5, height=1.2];
+          ls_infra [label="Infrastructure\n(host, NAS, DR site)", shape=diamond, style=filled, fillcolor="#d1ecf1", fontsize=10, width=2.5, height=1.2];
+        }
+
+        /* Row 2 */
+        { rank=same;
+          ls_result [label="Result State\n(TIMEOUT, DEGRADED, etc.)", shape=box, style=filled, fillcolor="#e2e3e5", fontsize=10, width=2.5, height=1.2];
+          ls_decision [label="Decision Point\n(adapt, switch executor)", shape=ellipse, style=filled, fillcolor="#ffe0b2", fontsize=10, width=2.5, height=1.2];
+          ls_summary [label="Summary / Note\n(human-readable output)", shape=note, style=filled, fillcolor="#f8f9fa", fontsize=10, width=2.5, height=1.2];
+        }
+
+        /* Stack rows */
+        ls_tool -> ls_result [style=invis];
+        ls_secret -> ls_decision [style=invis];
+        ls_infra -> ls_summary [style=invis];
+    }
+
+    /* ============================================================
+       SECTION 2: NODE COLORS
+       ============================================================ */
+    subgraph cluster_colors {
+        label="Node Fill Colors";
+        style="filled,rounded";
+        color="#f8f9fa";
+        penwidth=2;
+        fontsize=13;
+        margin=12;
+        pad=0.4;
+
+        /* Row 1 */
+        { rank=same;
+          lc_online [label="ONLINE\nexecutor healthy", shape=box, style=filled, fillcolor="#d4edda", fontsize=10, width=2.5, height=1.0];
+          lc_success [label="SUCCESS\n(failover, audit closed)", shape=box, style=filled, fillcolor="#d4edda", fontsize=10, width=2.5, height=1.0];
+        }
+
+        /* Row 2 */
+        { rank=same;
+          lc_degraded [label="DEGRADED\n(warning state)", shape=box, style=filled, fillcolor="#fff3cd", fontsize=10, width=2.5, height=1.0];
+        }
+
+        /* Row 3 */
+        { rank=same;
+          lc_offline [label="OFFLINE\nexecutor down", shape=box, style=filled, fillcolor="#f8d7da", fontsize=10, width=2.5, height=1.0];
+          lc_timeout [label="TIMEOUT\n(connection failed)", shape=box, style=filled, fillcolor="#f8d7da", fontsize=10, width=2.5, height=1.0];
+        }
+
+        /* Stack rows */
+        lc_online -> lc_degraded [style=invis];
+        lc_success -> lc_offline [style=invis];
+        lc_degraded -> lc_timeout [style=invis];
+    }
+
+    /* ============================================================
+       SECTION 3: EDGE STYLES
+       ============================================================ */
+    subgraph cluster_edges {
+        label="Edge Styles & Colors";
+        style="filled,rounded";
+        color="#f8f9fa";
+        penwidth=2;
+        fontsize=13;
+        margin=12;
+        pad=0.4;
+
+        /* Row 1: normal flow + back-reference */
+        { rank=same;
+          le1_label [label="Normal flow", shape=box, style=filled, fillcolor="#fff", fontsize=9, width=2.5, height=0.5, margin=0.1];
+          le1_a [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le1_b [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le2_label [label="Back-reference", shape=box, style=filled, fillcolor="#fff", fontsize=9, width=2.5, height=0.5, margin=0.1];
+          le2_a [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le2_b [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le1_a -> le1_b [style=solid, penwidth=2];
+          le2_b -> le2_a [style=solid, penwidth=2, dir=back];
+          le1_label -> le1_a [style=invis];
+          le1_b -> le2_label [style=invis];
+          le2_label -> le2_a [style=invis];
+        }
+
+        /* Row 2: warning + unused */
+        { rank=same;
+          le3_label [label="Warning / adaptation", shape=box, style=filled, fillcolor="#fff", fontsize=9, width=2.5, height=0.5, margin=0.1];
+          le3_a [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le3_b [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le4_label [label="Available but unused", shape=box, style=filled, fillcolor="#fff", fontsize=9, width=2.5, height=0.5, margin=0.1];
+          le4_a [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le4_b [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le3_a -> le3_b [color=orange, penwidth=2.5];
+          le4_a -> le4_b [style=dashed, color=gray, penwidth=1.5];
+          le3_label -> le3_a [style=invis];
+          le3_b -> le4_label [style=invis];
+          le4_label -> le4_a [style=invis];
+        }
+
+        /* Row 3: error + redacted */
+        { rank=same;
+          le5_label [label="Error / failure", shape=box, style=filled, fillcolor="#fff", fontsize=9, width=2.5, height=0.5, margin=0.1];
+          le5_a [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le5_b [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le6_label [label="Redacted output", shape=box, style=filled, fillcolor="#fff", fontsize=9, width=2.5, height=0.5, margin=0.1];
+          le6_a [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le6_b [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le5_a -> le5_b [color=red, penwidth=2.5];
+          le6_a -> le6_b [style=dashed, color=red, penwidth=2.5];
+          le5_label -> le5_a [style=invis];
+          le5_b -> le6_label [style=invis];
+          le6_label -> le6_a [style=invis];
+        }
+
+        /* Row 4: secret injection + success */
+        { rank=same;
+          le7_label [label="Secret injection", shape=box, style=filled, fillcolor="#fff", fontsize=9, width=2.5, height=0.5, margin=0.1];
+          le7_a [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le7_b [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le8_label [label="Success", shape=box, style=filled, fillcolor="#fff", fontsize=9, width=2.5, height=0.5, margin=0.1];
+          le8_a [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le8_b [label="", shape=circle, style=filled, fillcolor="#333", width=0.15, height=0.15, margin=0];
+          le7_a -> le7_b [color=red, penwidth=2.5, style=solid];
+          le8_a -> le8_b [color=green, penwidth=2.5];
+          le7_label -> le7_a [style=invis];
+          le7_b -> le8_label [style=invis];
+          le8_label -> le8_a [style=invis];
+        }
+
+        /* Stack rows */
+        le1_label -> le3_label [style=invis];
+        le3_label -> le5_label [style=invis];
+        le5_label -> le7_label [style=invis];
+    }
+
+    /* ============================================================
+       SECTION 4: KEY GUARANTEES
+       ============================================================ */
+    subgraph cluster_guarantees {
+        label="Key Guarantees";
+        style="filled,rounded";
+        color="#f8f9fa";
+        penwidth=2;
+        fontsize=13;
+        margin=12;
+        pad=0.4;
+
+        lg_g1 [label="Secrets are injected as files\n(/run/secrets/venya/<id>, mode 0400)\nnever pasted into command text", shape=box, style=filled, fillcolor="#fff", fontsize=10, width=5.0, height=1.2];
+        lg_g2 [label="Output redaction happens\ninside the sandbox\nbefore data leaves the executor", shape=box, style=filled, fillcolor="#fff", fontsize=10, width=5.0, height=1.2];
+        lg_g3 [label="All actions attributed\nto the authorizing human\n(not the agent)", shape=box, style=filled, fillcolor="#fff", fontsize=10, width=5.0, height=1.2];
+
+        lg_g1 -> lg_g2 -> lg_g3 [style=invis];
+    }
+}
