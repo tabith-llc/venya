@@ -56,3 +56,6 @@ target/
 
 # MacOS
 .DS_Store
+
+# Boring stuff
+marketing/
