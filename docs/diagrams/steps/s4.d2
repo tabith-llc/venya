@@ -12,7 +12,7 @@ nas -> sbx: "DEGRADED — and echoes its own\nreplication credential in the outp
 }
 sbx -> exec: "raw stdout — still carries the value"
 exec -> exec: "Stage 1 — Rust filter → [REDACTED:12]"
-exec -> core: "Stage 2 — unfiltered bytes re-screened\nagainst the vault (executor mTLS)" {
+exec -> core: "Stage 2 — unfiltered bytes re-screened\nagainst the secret store (executor mTLS)" {
   style.stroke: "#c62828"
   style.stroke-dash: 3
 }

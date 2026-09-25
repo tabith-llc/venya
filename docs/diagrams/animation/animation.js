@@ -453,7 +453,7 @@ function storyboard() {
   packet('dot', 'l-agent-core', E + 1.75, 0.45, { color: COLOR.agent });
   hl('c-core', E + 2.15, E + 5.8);
 
-  // vault -> executor host, wrapped; the agent is not on this path
+  // secret store -> executor host, wrapped; the agent is not on this path
   packet('capsule', 'p-sec1', E + 4.1, 1.4, { pre: 0.35, hold: 2.4, fade: 0.2 });
   hl('l-core-sto', E + 4.2, E + 5.4);
   hl('c-sto', E + 5.3, E + 21.2);
