@@ -48,6 +48,9 @@ Notable changes to Venya will be documented in this file.
   not yours. Delete it or replace it with your own target ranges; the file is
   read at sandbox creation, so no restart is needed.
 
+### Fixed
+- MCP `list_secrets` output now carries what its tool description promised: each secret's numeric id and — when stored — its `shape` and `usage` metadata. `{secret_path}`/`{secret_id}` placeholders in usage templates are resolved renderer-side to the injected sandbox file path (`/run/secrets/venya/<id>`), so agents receive a ready-to-run command template instead of having to substitute placeholders themselves; `{host}`/`{user}` stay as authored (task-context). Secret values remain unreachable, and description pins now fail CI if the promise and the rendering drift apart again.
+
 ## [0.1.0alpha14] - 2026-09-23
 
 - **Supersede of `v0.1.0alpha13` (packaging defect — product code IDENTICAL;
