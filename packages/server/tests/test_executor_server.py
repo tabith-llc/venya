@@ -112,6 +112,19 @@ class MockExecutorCertRevocation:
     revoked_at: object = None
 
 
+@dataclass
+class MockCommandPolicy:
+    """Mock of core.iam.models.CommandPolicy (ticket
+    command-policy-no-server-executor-propagation): the JSON text columns
+    carry raw strings exactly like the real row."""
+
+    policy_name: str = "default"
+    preset: str = "balanced"
+    allowed_commands: object = None  # JSON text or None
+    dangerous_patterns: object = None  # JSON text or None
+    updated_at: object = None  # datetime
+
+
 # ---------------------------------------------------------------------------
 # CAManager tests
 # ---------------------------------------------------------------------------
@@ -309,12 +322,14 @@ class TestCAManager:
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_db(executor_certs=None, revocations=None):
+def _make_mock_db(executor_certs=None, revocations=None, command_policies=None):
     """Create a mock DB session for testing endpoints."""
     if executor_certs is None:
         executor_certs = []
     if revocations is None:
         revocations = []
+    if command_policies is None:
+        command_policies = []
 
     db = MagicMock()
     db.add = MagicMock()
@@ -332,6 +347,8 @@ def _make_mock_db(executor_certs=None, revocations=None):
                     results = list(executor_certs)
                 elif model.__name__ == "ExecutorCertRevocation":
                     results = list(revocations)
+                elif model.__name__ == "CommandPolicy":
+                    results = list(command_policies)
                 elif model.__name__ == "User":
                     return None
                 else:
@@ -812,3 +829,100 @@ class TestHeartbeat:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/executors/test-exec/heartbeat")
         assert resp.status_code == 404
+
+
+class TestCommandPolicyPropagation:
+    """Ticket command-policy-no-server-executor-propagation (owner ruling (a)
+    2026-09-26): the core's 'default' CommandPolicy row rides the heartbeat +
+    registration responses as an ADDITIVE optional field. Truth table: carried
+    when set, null when unset, and a corrupt row must NEVER poison the beat
+    (fail-soft: logged, not propagated, still 200)."""
+
+    def _create_app(self, ca_manager, db, auth_executor_id=None):
+        app = FastAPI()
+        app.state.backend = MagicMock()
+        app.state.backend.get_session.return_value = db
+        app.state.ca_manager = ca_manager
+        app.include_router(executors_routes.router, prefix="/api/v1")
+        if auth_executor_id is not None:
+            _add_executor_auth(app, auth_executor_id)
+        return app
+
+    def _beat(self, ca_manager, db):
+        app = self._create_app(ca_manager, db, auth_executor_id="test-exec")
+        return TestClient(app).post(
+            "/api/v1/heartbeat",
+            json={"executor_id": "test-exec", "cert_fingerprint": "abc"},
+        )
+
+    def test_heartbeat_carries_default_policy(self, ca_manager):
+        from datetime import UTC, datetime
+
+        row = MockCommandPolicy(
+            preset="strict",
+            allowed_commands='["/usr/bin/ssh", "/usr/bin/scp"]',
+            dangerous_patterns=None,
+            updated_at=datetime(2026, 9, 26, 1, 2, 3, tzinfo=UTC),
+        )
+        resp = self._beat(ca_manager, _make_mock_db(command_policies=[row]))
+        assert resp.status_code == 200
+        policy = resp.json()["command_policy"]
+        assert policy["preset"] == "strict"
+        assert policy["allowed_commands"] == ["/usr/bin/ssh", "/usr/bin/scp"]
+        assert policy["dangerous_patterns"] is None
+        assert policy["updated_at"] == "2026-09-26T01:02:03+00:00"
+
+    def test_heartbeat_policy_null_when_unset(self, ca_manager):
+        """Paired negative: no policy row -> null field, beat unaffected."""
+        resp = self._beat(ca_manager, _make_mock_db())
+        assert resp.status_code == 200
+        assert resp.json()["command_policy"] is None
+
+    def test_heartbeat_corrupt_policy_json_not_propagated(self, ca_manager):
+        """Corrupt JSON text column -> fail-soft: 200, null policy (the beat
+        must never die because an admin row is broken)."""
+        row = MockCommandPolicy(preset="strict", allowed_commands="NOT-JSON", updated_at=None)
+        resp = self._beat(ca_manager, _make_mock_db(command_policies=[row]))
+        assert resp.status_code == 200
+        assert resp.json()["command_policy"] is None
+
+    def test_heartbeat_wrong_shape_policy_not_propagated(self, ca_manager):
+        """Paired negative on shape: valid JSON of the WRONG type (dict, not
+        list of strings) -> null, not a crash and not a partial payload."""
+        row = MockCommandPolicy(preset="strict", allowed_commands='{"a": 1}', updated_at=None)
+        resp = self._beat(ca_manager, _make_mock_db(command_policies=[row]))
+        assert resp.status_code == 200
+        assert resp.json()["command_policy"] is None
+
+    def test_register_carries_default_policy(self, ca_manager, executor_csr):
+        from datetime import UTC, datetime
+
+        row = MockCommandPolicy(
+            preset="balanced",
+            allowed_commands=None,
+            dangerous_patterns='["curl "]',
+            updated_at=datetime(2026, 9, 26, tzinfo=UTC),
+        )
+        db = _make_mock_db(command_policies=[row])
+        app = self._create_app(ca_manager, db)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = TestClient(app).post(
+            "/api/v1/executors/register",
+            json={"executor_id": "test-exec-1", "csr_pem": csr_pem},
+        )
+        assert resp.status_code == 201
+        policy = resp.json()["command_policy"]
+        assert policy["preset"] == "balanced"
+        assert policy["allowed_commands"] == []
+        assert policy["dangerous_patterns"] == ["curl "]
+
+    def test_register_policy_null_when_unset(self, ca_manager, executor_csr):
+        db = _make_mock_db()
+        app = self._create_app(ca_manager, db)
+        csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
+        resp = TestClient(app).post(
+            "/api/v1/executors/register",
+            json={"executor_id": "test-exec-1", "csr_pem": csr_pem},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["command_policy"] is None
