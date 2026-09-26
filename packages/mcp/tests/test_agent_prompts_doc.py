@@ -61,6 +61,15 @@ class TestAgentPromptsDocPinned:
         ):
             assert needle in block, f"snippet lost the '{needle}' contract claim"
 
+    def test_block_never_directs_a_web_fetch(self):
+        block = _block()
+        assert "http" not in block, (
+            "paste-block contains a URL — the block is self-contained by design; "
+            "agents must never need a web fetch to operate (owner ruling "
+            "2026-09-25, live-cell evidence: the brief-fetch line cost a webfetch "
+            "of GitHub navigation chrome)"
+        )
+
     def test_doc_points_at_the_full_brief(self):
         text = DOC.read_text()
         assert "agents.md" in text, "doc no longer links the full operating brief"

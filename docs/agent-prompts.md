@@ -10,19 +10,18 @@ below into the instruction file your agent framework reads at every session:
 | Cursor | `.cursor/rules` (or `.cursorrules`) |
 | Anything else | the agent's system prompt / instructions field |
 
-The block is deliberately short — instruction files are prime real estate,
-and a bloated contract gets trimmed or ignored. The full operating brief is
-[agents.md](agents.md); the block directs your agent to read it before the
-first tool call. An interlock test in `packages/mcp/tests/` pins the block's
-load-bearing claims to the live MCP tool surface, so it cannot silently rot
-when the tools change.
+The block is deliberately short and self-contained — instruction files are
+prime real estate, and a bloated contract gets trimmed or ignored. The full
+operating brief is [agents.md](agents.md), linked for the human; the agent
+needs no web fetches to operate. An interlock test in `packages/mcp/tests/`
+pins the block's load-bearing claims to the live MCP tool surface, so it
+cannot silently rot when the tools change.
 
 <!-- snippet-start -->
 ## Venya — operating contract
 
 You operate infrastructure through Venya. Four MCP tools: `list_executors`,
-`list_secrets`, `run_command`, `get_audit`. Before your first tool call, read
-the full brief: https://github.com/tabith-llc/venya/blob/main/docs/agents.md
+`list_secrets`, `run_command`, `get_audit`.
 
 1. **Secret values are unreachable by design.** Never attempt to read, echo,
    encode, or exfiltrate one — attempts are logged and attributed to the
