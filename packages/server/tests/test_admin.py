@@ -348,6 +348,35 @@ class TestAdminSetCommandPolicy:
         assert resp.json()["updated"] is True
         assert resp.json()["preset"] == "strict"
 
+    def test_set_policy_writes_audit_event(self):
+        """Control-plane attribution (ticket
+        command-policy-no-server-executor-propagation): the row now ENFORCES
+        fleet-wide via heartbeat propagation, so the change must land in the
+        audit log with the acting admin + the new preset."""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/admin/command-policy",
+            json={"preset": "strict", "custom_allowed_commands": ["/usr/bin/ssh"]},
+        )
+        assert resp.status_code == 200
+        from core.iam.models import AuditEvent
+
+        events = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], AuditEvent)]
+        assert len(events) == 1
+        assert events[0].event_type == "command_policy_changed"
+        import json as _json
+
+        fields = _json.loads(events[0].fields)  # AuditEvent.fields serializes dicts to JSON text
+        assert fields["preset"] == "strict"
+        assert fields["custom_allowed_commands"] == ["/usr/bin/ssh"]
+        assert events[0].user_id  # attributed, never empty
+
     def test_set_policy_existing(self):
         """POST /admin/command-policy should update existing policy."""
         policy = SimpleNamespace(
