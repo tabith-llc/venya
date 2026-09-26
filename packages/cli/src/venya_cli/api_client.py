@@ -18,6 +18,7 @@ Token model (per plan section 5.1):
 
 import logging
 import os
+import ssl
 import sys
 import tempfile
 from pathlib import Path
@@ -86,6 +87,31 @@ class APIClientError(Exception):
 
 class APIClientAuthenticationError(APIClientError):
     """Authentication failed — requires re-auth."""
+
+
+def _build_ssl_context(cafile: str | None, certfile: str | None, keyfile: str | None) -> ssl.SSLContext:
+    """Build the single TLS context for APIClient.
+
+    Ticket cli-admin-mtls-verify-cert-conflict (option (a)): httpx2 >= 2.12
+    rejects `cert=` combined with a string `verify` — the natural admin flow
+    (setup-installed config CA + VENYA_ADMIN_CERT/KEY, no SSL_CERT_FILE)
+    TypeErrored on every command before any request was sent. One context
+    carries both directions: server-trust anchors (cafile=None → system
+    store) and, when admin mTLS is configured, the client cert chain.
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    if cafile:
+        ctx.load_verify_locations(cafile=cafile)
+    else:
+        ctx.load_default_certs()
+    if certfile and keyfile:
+        try:
+            ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+        except (ssl.SSLError, OSError) as e:
+            raise APIClientError(
+                f"Failed to load the admin mTLS client cert/key pair " f"({certfile!r} / {keyfile!r}): {e}"
+            ) from e
+    return ctx
 
 
 class Config:
@@ -234,15 +260,23 @@ class APIClient:
                         f"{var} points at {p!r}, which does not exist. "
                         "Copy the admin cert/key from the core (see installer banner) and retry."
                     )
-            http_kwargs["cert"] = (cert_path, key_path)
-        # Server-TLS verification precedence: SSL_CERT_FILE env wins (Python's
-        # ssl module honors it natively — the full-lifecycle-test.md and
-        # cert-rotation-runbook flows drive the CLI that way); then the CA
-        # installed by `venya setup` beside config.json; then system trust.
-        if not os.environ.get("SSL_CERT_FILE"):
+        # Server-TLS verification precedence: SSL_CERT_FILE env wins (the
+        # full-lifecycle-test.md and cert-rotation-runbook flows drive the CLI
+        # that way); then the CA installed by `venya setup` beside config.json;
+        # then system trust. All three paths unify into one ssl.SSLContext
+        # that also carries the admin client cert when mTLS is set — the
+        # former cert= + string-verify combination TypeErrors on httpx2
+        # >= 2.12 (ticket cli-admin-mtls-verify-cert-conflict, option (a)).
+        cafile: str | None = os.environ.get("SSL_CERT_FILE")
+        if not cafile:
             ca_path = self.config.ca_path
             if ca_path.exists():
-                http_kwargs["verify"] = str(ca_path)
+                cafile = str(ca_path)
+        http_kwargs["verify"] = _build_ssl_context(
+            cafile=cafile,
+            certfile=cert_path if (cert_path and key_path) else None,
+            keyfile=key_path if (cert_path and key_path) else None,
+        )
         self._http = httpx2.Client(**http_kwargs)
 
     def _get_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
