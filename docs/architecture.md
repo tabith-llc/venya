@@ -132,7 +132,13 @@ text** (`sshpass -p <pw>`, `--password=…`, `echo <token> | …`): it lands in
 those sinks, and on the target it is exposed via `/proc/<pid>/cmdline` and
 shell history. The blessed shape is file injection —
 `sshpass -f /run/secrets/venya/<id> ssh …` — which keeps the secret off
-every command-line surface. Operator behavior is the primary control here;
+every command-line surface. When authoring usage templates for ssh-carried
+commands, mind a second trap: ssh re-joins the remote command's arguments
+with spaces **without re-quoting**, so an empty or space-bearing argument
+vanishes or splits remotely — `sudo -S -p ''` arrives as `sudo -S -p` and
+sudo swallows the next token as its prompt string (usage error, exit 1).
+Omit `-p ''`; the remote sudo prompt text on stderr is harmless and carries
+no secret. Operator behavior is the primary control here;
 post-beta hardening may additionally scrub the command string against known
 secret values (ticket sec-secret-redaction-log-leaks #14).
 
