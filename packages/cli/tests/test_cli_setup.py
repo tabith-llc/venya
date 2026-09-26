@@ -150,36 +150,53 @@ class TestSetupCommand:
 
 
 class TestCaVerifyPrecedence:
-    """APIClient.__init__: SSL_CERT_FILE env > setup ca.crt > system trust."""
+    """APIClient.__init__: SSL_CERT_FILE env > setup ca.crt > system trust.
+
+    Since ticket cli-admin-mtls-verify-cert-conflict (option (a)) the chosen
+    anchor is loaded into ONE ssl.SSLContext passed as verify= (string verify
+    and the cert= kwarg are gone — httpx2 >= 2.12 rejects the combination).
+    The precedence itself is unchanged; observed via the cafile argument the
+    initializer hands _build_ssl_context. Context behavior itself is tested
+    with real certs in test_api_client_mtls.py::TestBuildSslContext.
+    """
 
     def test_ca_used_when_present_no_env(self, tmp_path: Path):
         ca = tmp_path / "ca.crt"
-        ca.write_bytes(b"pem")
+        ca.write_bytes(b"pem")  # content irrelevant — the spy observes the PATH
+        sentinel = object()
         with (
             patch.dict(os.environ, {}, clear=True),
+            patch("venya_cli.api_client._build_ssl_context", return_value=sentinel) as spy,
             patch("venya_cli.api_client.httpx2.Client") as mock_client,
         ):
             APIClient(config_file=tmp_path / "config.json")
-        assert mock_client.call_args.kwargs.get("verify") == str(ca)
+        assert spy.call_args.kwargs["cafile"] == str(ca)
+        assert mock_client.call_args.kwargs.get("verify") is sentinel
+        assert "cert" not in mock_client.call_args.kwargs
 
     def test_env_wins_over_ca(self, tmp_path: Path):
         """LOAD-BEARING NEGATIVE: env set + ca.crt present -> env still wins."""
         ca = tmp_path / "ca.crt"
         ca.write_bytes(b"pem")
+        sentinel = object()
         with (
             patch.dict(os.environ, {"SSL_CERT_FILE": "/tmp/venya-ca.crt"}, clear=True),
-            patch("venya_cli.api_client.httpx2.Client") as mock_client,
+            patch("venya_cli.api_client._build_ssl_context", return_value=sentinel) as spy,
+            patch("venya_cli.api_client.httpx2.Client"),
         ):
             APIClient(config_file=tmp_path / "config.json")
-        assert "verify" not in mock_client.call_args.kwargs
+        assert spy.call_args.kwargs["cafile"] == "/tmp/venya-ca.crt"
 
     def test_system_trust_when_neither(self, tmp_path: Path):
+        sentinel = object()
         with (
             patch.dict(os.environ, {}, clear=True),
+            patch("venya_cli.api_client._build_ssl_context", return_value=sentinel) as spy,
             patch("venya_cli.api_client.httpx2.Client") as mock_client,
         ):
             APIClient(config_file=tmp_path / "config.json")
-        assert "verify" not in mock_client.call_args.kwargs
+        assert spy.call_args.kwargs["cafile"] is None
+        assert mock_client.call_args.kwargs.get("verify") is sentinel
 
 
 class TestFido2CaPrecedence:
