@@ -44,6 +44,10 @@ The following are planned for future releases:
 - **FIDO2 hardware attestation.** At enrollment, verify that security keys are
   genuine FIDO2-certified authenticators (attestation checked against trusted
   metadata) — not merely holders of a registered credential.
+- **PIV smart-card support.** FIPS 201 (PIV) certificate authentication for
+  federal and regulated environments — a secondary login method alongside
+  WebAuthn using dual-credential keys (FIDO2 + PIV, e.g. YubiKey 5-series),
+  with configurable agency trust anchors and certificate revocation checking.
 - **High-availability core.** Multi-node core deployment for availability
   without changing the trust-anchor model.
 - **Tested backup and disaster recovery.** A documented backup set (encrypted
