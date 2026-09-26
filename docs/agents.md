@@ -2,6 +2,8 @@
 
 You are an LLM agent operating (or being asked to operate) infrastructure
 through Venya. Read this once, fully, before your first tool call.
+(Humans wiring an agent: a paste-ready version of this contract lives in
+[agent-prompts.md](agent-prompts.md).)
 
 ## What Venya is
 

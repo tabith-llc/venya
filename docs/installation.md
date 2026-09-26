@@ -335,6 +335,11 @@ The response carries a 15-minute single-use enrollment token; the user runs
 
 ## 6. MCP client wiring (LLM operators)
 
+After wiring, paste the operating contract from
+[agent-prompts.md](agent-prompts.md) into your agent's instruction file
+(AGENTS.md / CLAUDE.md / Cursor rules) — the distilled brief for agents
+driving Venya, pinned by test to the live tool surface.
+
 ```json
 {
   "mcpServers": {
