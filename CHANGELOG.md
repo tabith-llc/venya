@@ -5,6 +5,16 @@ Notable changes to Venya will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Executor installer: the sbx agent template is warmed at install time.**
+  A throwaway `sbx create`/`sbx rm --force` pair (after Docker auth and the
+  deny-all policy init) caches the multi-GiB template, so the first relayed
+  command on a fresh executor is seconds-scale instead of ~60–90 s. Warm
+  failure is non-fatal (loud warning; first run falls back to the cold path)
+  and is skipped under `VENYA_SKIP_DOCKER_LOGIN=yes`. The installation
+  troubleshooting entry claiming the first run "times out client-side" is
+  corrected — that has not been possible on default timeouts since the
+  alpha13 fuse chain (create cap 240 s < relay 300 s < nginx 330 s <
+  client 340 s).
 - **Central command policy now ENFORCES fleet-wide.** `venya admin set-command-policy` / `add-allowed-command` previously wrote a policy row with zero consumers — executors enforced only their local `/etc/venya/executor.toml`, so the admin commands silently affected nothing. The core's "default" policy now propagates as an additive field on executor registration and heartbeat (~30 s) responses and is hot-applied through the command validator. Semantics mirror the local config exactly: the preset drives trusted-path behavior (balanced/strict/permissive), an explicit dangerous-pattern list replaces the built-ins, null keeps them. A corrupt or absent policy never kills the heartbeat and never reverts a live policy mid-run (last applied persists until daemon restart, which re-bootstraps from toml). Policy changes are audit-logged (`command_policy_changed`, attributed to the acting admin). Old daemons ignore the field — wire-compatible both directions.
 
 ### Fixed
