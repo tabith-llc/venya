@@ -255,13 +255,18 @@ def cmd_store(client: APIClient, args: Any) -> int:
     (omitted value with interactive stdin). The stdin/prompt paths keep the
     value out of argv — /proc/*/cmdline and shell history are not secret
     stores (ticket cli-store-stdin-help-false; same stdin-carriage discipline
-    the installers use for passwords). Trailing newline stripped from piped
-    input (``echo`` convention).
+    the installers use for passwords). Piped stdin is stored BYTE-EXACT —
+    no trailing-newline stripping (ticket cli-store-stdin-rstrip-pem-corruption:
+    the former rstrip corrupted PEM keys, which OpenSSH >= 10 refuses to load
+    unterminated). ``echo pass |`` therefore stores a trailing newline —
+    harmless for line-based consumers (sshpass -f, sudo -S) and output masking
+    (trimmed-hash filter variant); use ``printf %s pass |`` for byte-exact
+    single-line values.
     """
     value = args.value
     if value is None or value == "-":
         if value == "-" or not sys.stdin.isatty():
-            value = sys.stdin.read().rstrip("\r\n")
+            value = sys.stdin.read()
         else:
             value = getpass.getpass("Secret value (input hidden): ")
         if not value:
