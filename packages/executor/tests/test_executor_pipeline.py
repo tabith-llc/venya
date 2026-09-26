@@ -806,9 +806,14 @@ class TestRedirectAllowance:
     def test_canonical_sudo_shape_passes_full_pipeline(self):
         ex, _strategy = self._executor()
         secrets = [_make_secret("1", b"ssh-pass"), _make_secret("2", b"sudo-pass")]
+        # Canonical templates must NOT carry `sudo -S -p ''`: ssh joins remote
+        # argv with spaces WITHOUT re-quoting, the empty arg vanishes, and the
+        # remote sudo swallows the next token as its prompt string (misparse →
+        # usage error, exit 1). Field-proven 2026-09-25 on tvc/tve; the sudo
+        # prompt text appearing in stderr is harmless (carries no secret).
         cmd = (
             "/usr/bin/sshpass -f /run/secrets/venya/1 /usr/bin/ssh bot@target-1 "
-            "/usr/bin/sudo -S -p '' systemctl restart httpd < /run/secrets/venya/2"
+            "/usr/bin/sudo -S systemctl restart httpd < /run/secrets/venya/2"
         )
         canned = CommandResult(command=cmd, exit_code=0, stdout=b"ok", stderr=b"")
         with patch.object(Executor, "_run_command_sbx", return_value=canned) as m:
