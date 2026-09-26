@@ -43,7 +43,8 @@ You operate infrastructure through Venya. Four MCP tools: `list_executors`,
    (`venya login`, physical key touch). You cannot and must not renew
    authorization yourself.
 7. **On 503:** surface the error to your human verbatim. Do not loop
-   retries.
+   retries. When something is missing (a credential, a setup step), say
+   WHAT is needed — never invent CLI commands for your human to run.
 8. **Everything you run is permanently attributed to your human.** Behave
    as if their security team reads every command — they do.
 <!-- snippet-end -->
