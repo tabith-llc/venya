@@ -626,10 +626,18 @@ async def register_executor(
     # Create executor user account if it doesn't exist
     existing_user = db.query(User).filter(User.user_id == resolved_executor_id).first()
     if existing_user is None:
-        # Auto-create executor user account
+        # Auto-create executor user account. Registration IS the enrollment
+        # for an mtls machine identity — there is no WebAuthn ceremony to
+        # complete — so the row is born active. The model default
+        # ("pending_enrollment") describes humans awaiting ceremony and
+        # would strand this identity forever (ticket
+        # executor-user-status-stuck-pending-enrollment; the admin list
+        # renders users.status verbatim).
         new_user = User(
             user_id=resolved_executor_id,
             auth_mode="mtls",
+            status="active",
+            enrolled_at=datetime.now(UTC),
         )
         db.add(new_user)
         db.flush()
@@ -638,6 +646,15 @@ async def register_executor(
         # Update auth mode if it was something else
         if existing_user.auth_mode != "mtls":
             existing_user.auth_mode = "mtls"
+        # Self-heal identities stranded by the pre-fix auto-create (born
+        # pending_enrollment, never flipped): re-registration completes the
+        # enrollment exactly as first registration now does. Idempotent —
+        # an already-active row is never touched, enrolled_at never
+        # overwritten (mirrors the executors-table logic below).
+        if existing_user.status == "pending_enrollment":
+            existing_user.status = "active"
+            if existing_user.enrolled_at is None:
+                existing_user.enrolled_at = datetime.now(UTC)
 
     # Sign the CSR
     try:
