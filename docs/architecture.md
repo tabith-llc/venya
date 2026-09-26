@@ -138,7 +138,11 @@ with spaces **without re-quoting**, so an empty or space-bearing argument
 vanishes or splits remotely — `sudo -S -p ''` arrives as `sudo -S -p` and
 sudo swallows the next token as its prompt string (usage error, exit 1).
 Omit `-p ''`; the remote sudo prompt text on stderr is harmless and carries
-no secret. Operator behavior is the primary control here;
+no secret. Carry `-o StrictHostKeyChecking=accept-new` in ssh-based
+templates: every sandbox starts with no `known_hosts`, and without the
+option the first connection to a host fails **silently** (`sshpass` exit 6,
+empty stderr). accept-new still refuses CHANGED keys, so the trust-on-first-use
+convenience costs no man-in-the-middle signal. Operator behavior is the primary control here;
 post-beta hardening may additionally scrub the command string against known
 secret values (ticket sec-secret-redaction-log-leaks #14).
 
