@@ -4,6 +4,12 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- `venya store` piped-stdin values are now stored BYTE-EXACT (no trailing-newline stripping). The previous behavior corrupted PEM private keys (`--shape ssh-key`): OpenSSH >= 10 refuses to load a key whose armor file is not newline-terminated (`Load key: error in libcrypto`), so a key stored via `venya store key - < keyfile` was unusable at consumption time with no in-product remedy. Line-based consumers (`sshpass -f`, `sudo -S`) and output masking (trimmed-hash filter variant) tolerate a trailing newline, so single-line password secrets are unaffected.
+
+### Changed
+- **Behavior change for pipers:** `echo "pass" | venya store key` now stores the trailing newline with the value — use `printf %s "pass" |` for byte-exact single-line values. `--help` text and the generated CLI reference updated to match.
+
 ## [0.1.0alpha15] - 2026-09-25
 
 ### Added
