@@ -129,7 +129,7 @@ class TestGenerateAdminCert:
             "Args",
             (),
             {
-                "identity": "dust@montana",
+                "identity": "admin@example.com",
                 "ca_dir": admin_ca_initialized,
                 "output_dir": output_dir,
             },

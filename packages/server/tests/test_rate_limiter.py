@@ -186,13 +186,13 @@ class TestSlidingWindowRateLimiterIntegration:
 
         # Simulate 5 registrations from same IP for same executor
         for i in range(5):
-            ip_ok, _ = await ip_limiter.check_and_consume(["reg_ip:10.0.0.1"])
+            ip_ok, _ = await ip_limiter.check_and_consume(["reg_ip:203.0.113.1"])
             exec_ok, _ = await exec_limiter.check_and_consume(["reg_exec:executor1"])
             assert ip_ok is True
             assert exec_ok is True, f"Registration {i+1} should pass"
 
         # 6th registration for same executor should fail
-        ip_ok, _ = await ip_limiter.check_and_consume(["reg_ip:10.0.0.1"])
+        ip_ok, _ = await ip_limiter.check_and_consume(["reg_ip:203.0.113.1"])
         exec_ok, _ = await exec_limiter.check_and_consume(["reg_exec:executor1"])
         assert ip_ok is True
         assert exec_ok is False
@@ -208,9 +208,9 @@ class TestSlidingWindowRateLimiterIntegration:
 
         # First registration: stricter limit of 3
         for i in range(3):
-            allowed, _ = await first_limiter.check_and_consume(["reg_ip:10.0.0.1"])
+            allowed, _ = await first_limiter.check_and_consume(["reg_ip:203.0.113.1"])
             assert allowed is True
-        allowed, _ = await first_limiter.check_and_consume(["reg_ip:10.0.0.1"])
+        allowed, _ = await first_limiter.check_and_consume(["reg_ip:203.0.113.1"])
         assert allowed is False
 
 
@@ -247,7 +247,7 @@ class TestRateLimitRegistrationDep:
         return SimpleNamespace(executor_enrollment=SimpleNamespace(**base))
 
     @staticmethod
-    def _request(executor_id, config, host="10.0.0.1", first=False):
+    def _request(executor_id, config, host="203.0.113.1", first=False):
         req = SimpleNamespace()
         if first:
             # Backend mock whose cert probe returns None -> is_first is True.
@@ -327,6 +327,6 @@ class TestRateLimitRegistrationDep:
         with pytest.raises(HTTPException) as exc:
             await rate_limit_registration(self._request("execA", cfg, first=True))
         assert exc.value.status_code == 429
-        # Negative control: a fresh IP must NOT be blocked by 10.0.0.1's exhausted
+        # Negative control: a fresh IP must NOT be blocked by 203.0.113.1's exhausted
         # first-attempt counter (if the limiter were one shared counter, this 429s).
-        await rate_limit_registration(self._request("execB", cfg, host="10.0.0.2", first=True))
+        await rate_limit_registration(self._request("execB", cfg, host="203.0.113.2", first=True))

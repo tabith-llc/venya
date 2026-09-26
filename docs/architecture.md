@@ -139,8 +139,10 @@ secret values (ticket sec-secret-redaction-log-leaks #14).
 ## Sandbox and egress
 
 Commands run in sbx (Docker Sandboxes) microVMs. Networking is
-deny-by-default against `/etc/venya/egress-allowlist.txt` (the installer
-seeds the local subnet + DNS); a compromised command cannot phone home.
+deny-by-default against `/etc/venya/egress-allowlist.txt` (written empty by
+design at install — fail-closed; seed it via `VENYA_EGRESS_ALLOW` or edit it
+directly; the configured DNS resolver is always permitted); a compromised
+command cannot phone home.
 The executor service runs under a seccomp profile, `PrivateTmp`, and no
 `CAP_IPC_LOCK` (mlock is confined to the core by design and enforced by
 tests in both packages). The daemon user has KVM access for sandboxing;

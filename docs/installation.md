@@ -194,7 +194,7 @@ dial. Two sanctioned strategies:
   executor VM's real IP **on the core side**:
 
   ```bash
-  echo "192.168.1.50 venya-exec-1" >> /etc/hosts    # ON THE CORE; executor's real IP, never a loopback variant
+  echo "192.0.2.50 venya-exec-1" >> /etc/hosts    # ON THE CORE; executor's real IP, never a loopback variant
   ```
 
 The executor installer pre-checks local resolvability of the id and prints
@@ -247,6 +247,16 @@ The installer also starts `venya-sandboxd.service` (the sbx daemon,
 persistent across reboots, ordered before `venya-executor.service`) and
 initializes the sbx global network policy to **deny-all** (per-sandbox
 allow rules come from the egress allowlist at execution time).
+
+The sandbox DNS resolver is explicit config — `VENYA_DNS_RESOLVER` (required,
+no default; strict IPv4, validated before any write). It is the resolver IP
+sandboxed commands may use, always allowed for egress. Re-runs reuse the value
+already stored in `/etc/venya/executor.toml` (the toml write overwrites on every
+run, so the installer preserves the stored value rather than re-guessing). Find
+yours with `resolvectl status` or `grep nameserver /etc/resolv.conf`. An
+executor without a configured resolver **refuses to start** (Venya never guesses
+your network). **Upgrading:** add `dns_resolver = "<ip>"` to
+`/etc/venya/executor.toml` BEFORE restarting the executor.
 
 The installer's apt list includes `sshpass`: sandbox ssh-password injection
 shapes (`sshpass -f <secret-file> ssh ...`) need it inside the sandbox, and
@@ -324,6 +334,11 @@ The response carries a 15-minute single-use enrollment token; the user runs
 `venya enroll <token>` on their own workstation with their own key.
 
 ## 6. MCP client wiring (LLM operators)
+
+After wiring, paste the operating contract from
+[agent-prompts.md](agent-prompts.md) into your agent's instruction file
+(AGENTS.md / CLAUDE.md / Cursor rules) — the distilled brief for agents
+driving Venya, pinned by test to the live tool surface.
 
 ```json
 {

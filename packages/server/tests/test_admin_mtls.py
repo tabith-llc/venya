@@ -184,7 +184,7 @@ class TestAdminSignCert:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, key_pem, cert_pem = manager.sign_admin_cert("dust@montana")
+        cert, key_pem, cert_pem = manager.sign_admin_cert("admin@example.com")
 
         assert cert is not None
         assert isinstance(cert, x509.Certificate)
@@ -481,7 +481,7 @@ def _sqlite_revocation_backend(revocation_rows: list[tuple[str, str]] | None = N
 
 def _create_admin_mtls_app(
     admin_ca_dir: str,
-    admin_identity: str = "dust@montana",
+    admin_identity: str = "admin@example.com",
     known_admin_ids: list[str] | None = None,
     admin_mtls_enabled: bool = True,
     revocation_rows: list[tuple[str, str]] | None = None,
@@ -562,7 +562,7 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
 
         client = TestClient(app, raise_server_exceptions=False)
         # Send X-Client-Verified but NOT X-Client-Subject
@@ -579,7 +579,7 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/admin/test")
@@ -592,12 +592,12 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, _, _ = manager.sign_admin_cert("dust@montana")
+        cert, _, _ = manager.sign_admin_cert("admin@example.com")
         # Extract CN from cert subject for X-Client-Subject header
         cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
         subject_dn = f"CN={cn},OU=Admin,O=Venya"
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
@@ -619,11 +619,11 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, _, _ = manager.sign_admin_cert("dust@montana")
+        cert, _, _ = manager.sign_admin_cert("admin@example.com")
         cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
         subject_dn = f"CN={cn},OU=Admin,O=Venya"
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
@@ -647,11 +647,11 @@ class TestAdminMTLSMiddleware:
         # Use unknown identity
         subject_dn = "CN=rogue@attacker.internal,OU=Admin,O=Venya"
 
-        # Only dust@montana is known
+        # Only admin@example.com is known
         app = _create_admin_mtls_app(
             admin_ca_dir,
-            "dust@montana",
-            known_admin_ids=["dust@montana"],
+            "admin@example.com",
+            known_admin_ids=["admin@example.com"],
         )
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -671,7 +671,7 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        # Create a cert with CN = "dust@montana" (known identity)
+        # Create a cert with CN = "admin@example.com" (known identity)
         ca_cert, ca_key = manager._load_ca_cert_and_key()
         from cryptography.hazmat.primitives.asymmetric import ec as ec_mod
 
@@ -684,7 +684,7 @@ class TestAdminMTLSMiddleware:
                     [
                         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
                         x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
-                        x509.NameAttribute(NameOID.COMMON_NAME, "dust@montana"),
+                        x509.NameAttribute(NameOID.COMMON_NAME, "admin@example.com"),
                     ]
                 )
             )
@@ -699,7 +699,7 @@ class TestAdminMTLSMiddleware:
                 critical=False,
             )
             .add_extension(
-                x509.SubjectAlternativeName([x509.DNSName("dust@montana")]),
+                x509.SubjectAlternativeName([x509.DNSName("admin@example.com")]),
                 critical=False,
             )
             .sign(ca_key, hashes.SHA256())
@@ -708,7 +708,7 @@ class TestAdminMTLSMiddleware:
         cn = cert_with_san.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
         subject_dn = f"CN={cn},OU=Admin,O=Venya"
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
@@ -719,7 +719,7 @@ class TestAdminMTLSMiddleware:
                 "X-Client-Serial": "1234123412341234",
             },
         )
-        # Should pass because CN = "dust@montana" matches known_admin_ids
+        # Should pass because CN = "admin@example.com" matches known_admin_ids
         assert resp.status_code == 200  # mTLS passes → auth_user set → route returns 200
 
     def test_unknown_identity_rejected_signed_cert(self, admin_ca_dir, admin_ca_security):
@@ -734,11 +734,11 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        _, _, _ = manager.sign_admin_cert("dust@montana")
+        _, _, _ = manager.sign_admin_cert("admin@example.com")
         # Use unknown identity
         subject_dn = "CN=unknown@identity.internal,OU=Admin,O=Venya"
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
@@ -757,7 +757,7 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/health")
@@ -769,7 +769,7 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana", admin_mtls_enabled=False)
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", admin_mtls_enabled=False)
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/admin/test")
@@ -783,13 +783,13 @@ class TestAdminMTLSMiddleware:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Subject": "CN=dust@montana,OU=Admin,O=Venya",
+                "X-Client-Subject": "CN=admin@example.com,OU=Admin,O=Venya",
                 "X-Client-Verified": "false",  # Wrong value
             },
         )
@@ -815,7 +815,7 @@ class TestStartupEnforcement:
             admin_mtls=AdminMTLSConfig(
                 enabled=True,
                 ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
-                known_admin_ids=["dust@montana"],
+                known_admin_ids=["admin@example.com"],
             ),
             recovery_code_pepper="test-pepper",
         )
@@ -838,7 +838,7 @@ class TestStartupEnforcement:
             admin_mtls=AdminMTLSConfig(
                 enabled=True,
                 ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
-                known_admin_ids=["dust@montana"],
+                known_admin_ids=["admin@example.com"],
             ),
             recovery_code_pepper="test-pepper",
         )
@@ -859,7 +859,7 @@ class TestStartupEnforcement:
             admin_mtls=AdminMTLSConfig(
                 enabled=True,
                 ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
-                known_admin_ids=["dust@montana"],
+                known_admin_ids=["admin@example.com"],
             ),
             recovery_code_pepper="test-pepper",
         )
@@ -880,7 +880,7 @@ class TestStartupEnforcement:
             admin_mtls=AdminMTLSConfig(
                 enabled=True,
                 ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
-                known_admin_ids=["dust@montana"],
+                known_admin_ids=["admin@example.com"],
             ),
             recovery_code_pepper="test-pepper",
         )
@@ -910,7 +910,7 @@ class TestStartupEnforcement:
             admin_mtls=AdminMTLSConfig(
                 enabled=True,
                 ca_cert=admin_ca_missing + "/admin-ca.crt",
-                known_admin_ids=["dust@montana"],
+                known_admin_ids=["admin@example.com"],
             ),
             recovery_code_pepper="test-pepper",
         )
@@ -939,7 +939,7 @@ class TestStartupEnforcement:
             admin_mtls=AdminMTLSConfig(
                 enabled=True,
                 ca_cert=str(PPath(admin_ca_dir) / "admin-ca.crt"),
-                known_admin_ids=["dust@montana"],
+                known_admin_ids=["admin@example.com"],
             ),
             recovery_code_pepper="test-pepper",
         )
@@ -1259,7 +1259,7 @@ def _create_concurrent_test_app(admin_ca_dir: str):
         admin_mtls=AdminMTLSConfig(
             enabled=True,
             ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
-            known_admin_ids=["dust@montana"],
+            known_admin_ids=["admin@example.com"],
         ),
         recovery_code_pepper="test-pepper",
     )
@@ -1292,7 +1292,7 @@ class TestAdminMTLSConcurrency:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        cert, _, _ = manager.sign_admin_cert("dust@montana")
+        cert, _, _ = manager.sign_admin_cert("admin@example.com")
         cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
         subject_dn = f"CN={cn},OU=Admin,O=Venya"
 
@@ -1345,13 +1345,13 @@ class TestAdminCARotation:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Subject": "CN=dust@montana,OU=Admin,O=Venya",
+                "X-Client-Subject": "CN=admin@example.com,OU=Admin,O=Venya",
                 "X-Client-Verified": "SUCCESS",
                 "X-Client-Serial": "1234123412341234",
             },
@@ -1365,7 +1365,7 @@ class TestAdminCARotation:
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
-        app = _create_admin_mtls_app(admin_ca_dir, "dust@montana")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
 
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
@@ -1384,7 +1384,7 @@ class TestAdminCARotation:
 # ---------------------------------------------------------------------------
 
 _VALID_ADMIN_HEADERS = {
-    "X-Client-Subject": "CN=dust@montana,OU=Admin,O=Venya",
+    "X-Client-Subject": "CN=admin@example.com,OU=Admin,O=Venya",
     "X-Client-Verified": "SUCCESS",
     "X-Client-Serial": "1234123412341234",
 }
@@ -1409,7 +1409,7 @@ class TestAdminMtlsSerialRevocation:
     def test_executor_cn_rejected_by_allowlist(self, admin_ca_dir):
         """#15 acceptance row: an executor cert's CN cannot authenticate as
         admin under a populated allowlist."""
-        app = _create_admin_mtls_app(admin_ca_dir, known_admin_ids=["dust@montana"])
+        app = _create_admin_mtls_app(admin_ca_dir, known_admin_ids=["admin@example.com"])
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
             "/api/v1/admin/test",

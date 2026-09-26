@@ -1008,7 +1008,10 @@ class ExecutorDaemon:
         Returns:
             Configured Executor instance with HTTP client for server API calls.
         """
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(
+            dns_resolver=self.config.dns_resolver,
+            egress_allowlist_path=self.config.egress_allowlist_path,
+        )
         audit_logger = AuditLogger(self.config.audit, session_id)
         return Executor(
             command_validator=self.command_validator,
@@ -1033,6 +1036,20 @@ class ExecutorDaemon:
                 "would never bind and this executor could not receive commands. "
                 "Set relay_client_ids to the core's relay client certificate CN "
                 "in executor.toml."
+            )
+            raise SystemExit(1)
+        # Refuse to boot without a configured DNS resolver (ruling D1 option (a):
+        # Venya never guesses your network). Same shape/position as the deaf-relay
+        # guard above — checked BEFORE registration so the one-shot enrollment
+        # token is never consumed on a doomed boot. Without a resolver the sandbox
+        # egress policy cannot be built and hostname targets could never resolve.
+        if not self.config.dns_resolver:
+            logger.error(
+                "dns_resolver is not configured — refusing to start: the sandbox "
+                "egress policy cannot be built and hostname targets could never "
+                "resolve. Set `dns_resolver` in /etc/venya/executor.toml or "
+                "VENYA_EXECUTOR_DNS_RESOLVER in the service environment "
+                "(find your resolver: resolvectl status or grep nameserver /etc/resolv.conf)."
             )
             raise SystemExit(1)
         logger.info("Starting executor daemon: %s", self.config.executor_id)

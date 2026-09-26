@@ -474,25 +474,150 @@ venya_create_directories() {
 
 # --- 14b. Write egress allowlist ---
 
+# Validate a bare IPv4 address: exactly four dot-separated numeric octets.
+# Digits-and-dots input with an out-of-range octet fails here (loud) rather
+# than masquerading as an inert hostname entry later.
+_venya_valid_ipv4() {
+    local ip="$1" o count=0
+    local IFS=.
+    case "$ip" in
+        *.*.*.*) ;;
+        *) return 1 ;;
+    esac
+    for o in $ip; do
+        count=$((count + 1))
+        case "$o" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        [ "${#o}" -le 3 ] || return 1
+        [ "$((10#$o))" -le 255 ] || return 1
+    done
+    [ "$count" -eq 4 ]
+}
+
+# Validate one egress allowlist entry: IPv4 CIDR, bare IPv4, or hostname
+# (conservative RFC1123 shape: alphanumeric labels, inner hyphens, dots).
+venya_validate_egress_entry() {
+    local entry="$1" ip prefix
+    case "$entry" in
+        '')
+            return 1
+            ;;
+        */*)
+            ip="${entry%%/*}"
+            prefix="${entry#*/}"
+            case "$prefix" in
+                ''|*[!0-9]*) return 1 ;;
+            esac
+            [ "${#prefix}" -le 2 ] || return 1
+            [ "$((10#$prefix))" -le 32 ] || return 1
+            _venya_valid_ipv4 "$ip"
+            ;;
+        *[!0-9.]*)
+            printf '%s' "$entry" | grep -Eq '^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$'
+            ;;
+        *)
+            _venya_valid_ipv4 "$entry"
+            ;;
+    esac
+}
+
 venya_write_egress_allowlist() {
     EGRESS_ALLOWLIST="/etc/venya/egress-allowlist.txt"
     mkdir -p /etc/venya
 
-    if [ ! -f "$EGRESS_ALLOWLIST" ]; then
-        cat > "$EGRESS_ALLOWLIST" << 'EOF'
-# Venya Egress Allowlist
-# One entry per line: IP, CIDR, or hostname
-# Lines starting with # are comments. Blank lines ignored.
-# Missing or empty file = fail-closed (all egress blocked except DNS)
-#
-# Default: allow venya-net private subnet
-10.27.28.0/24
-EOF
-        chmod 644 "$EGRESS_ALLOWLIST"
-        info "Default egress allowlist written to $EGRESS_ALLOWLIST"
-        info "Allowing: 10.27.28.0/24 (venya-net) + DNS to 10.27.28.1"
-    else
+    if [ -f "$EGRESS_ALLOWLIST" ]; then
         info "Egress allowlist already exists at $EGRESS_ALLOWLIST — not overwriting"
+        return 0
+    fi
+
+    # Owner ruling 2026-09-23 (ticket installer-default-egress-allowlist-dev-subnet):
+    # (a) teaching-empty default — Venya never guesses the operator's network.
+    #     Empty file = fail-closed (all sandbox egress blocked except DNS), and
+    #     the file itself teaches the mechanism.
+    # (c) VENYA_EGRESS_ALLOW (comma/space-separated IPs, CIDRs, hostnames)
+    #     seeds the file explicitly at install time. Invalid input ABORTS the
+    #     install loudly BEFORE anything is written — a partially-applied
+    #     allowlist looks configured, which is worse than empty.
+    local entries=()
+    local raw="${VENYA_EGRESS_ALLOW:-}"
+    if [ -n "$raw" ]; then
+        local normalized tokens=() entry bad=0
+        normalized="$(printf '%s' "$raw" | tr ',' ' ')"
+        read -r -a tokens <<< "$normalized"
+        for entry in "${tokens[@]}"; do
+            if venya_validate_egress_entry "$entry"; then
+                entries+=("$entry")
+            else
+                error "VENYA_EGRESS_ALLOW: invalid entry '$entry' — expected IPv4 CIDR (e.g. 203.0.113.0/24), IPv4 address, or hostname"
+                bad=1
+            fi
+        done
+        if [ "$bad" -ne 0 ]; then
+            error "VENYA_EGRESS_ALLOW contains invalid entries — aborting install; nothing was written to $EGRESS_ALLOWLIST"
+            exit 1
+        fi
+        if [ "${#entries[@]}" -eq 0 ]; then
+            error "VENYA_EGRESS_ALLOW is set but empty after parsing — aborting install (set real entries, or unset it for the fail-closed default)"
+            exit 1
+        fi
+    fi
+
+    {
+        echo "# Venya Egress Allowlist"
+        echo "# One entry per line: IP, CIDR, or hostname"
+        echo "# Lines starting with # are comments. Blank lines ignored."
+        echo "# Missing or empty file = fail-closed (all egress blocked except DNS)"
+        if [ "${#entries[@]}" -eq 0 ]; then
+            echo "#"
+            echo "# EMPTY BY DESIGN — Venya never guesses your network. Add the ranges"
+            echo "# or hosts your sandboxed commands must reach, one per line, e.g.:"
+            echo "#   203.0.113.0/24"
+            echo "#   198.51.100.7"
+            echo "# Read at sandbox creation: edits apply on the next command run."
+        else
+            echo "#"
+            echo "# Seeded from VENYA_EGRESS_ALLOW at install time."
+            printf '%s\n' "${entries[@]}"
+        fi
+    } > "$EGRESS_ALLOWLIST"
+    chmod 644 "$EGRESS_ALLOWLIST"
+
+    if [ "${#entries[@]}" -gt 0 ]; then
+        info "Egress allowlist written to $EGRESS_ALLOWLIST (${#entries[@]} entries from VENYA_EGRESS_ALLOW)"
+        info "Sandbox egress: deny-by-default; listed entries + DNS allowed"
+    else
+        info "Egress allowlist written to $EGRESS_ALLOWLIST — EMPTY BY DESIGN (fail-closed: all sandbox egress blocked except DNS)"
+        info "Venya never guesses your network. To allow traffic: edit $EGRESS_ALLOWLIST"
+        info "and add your target ranges/hosts (one per line). No restart needed — the"
+        info "file is read at sandbox creation, so edits apply on the next command run."
+    fi
+}
+
+# --- 14c. Resolve the sandbox DNS resolver (no default — owner ruling D1 option (a)) ---
+
+# Sets DNS_RESOLVER globally. Precedence: VENYA_DNS_RESOLVER env > existing
+# /etc/venya/executor.toml value (re-run reuse — the installer's toml write
+# OVERWRITES, so dropping the stored value would brick a working executor) >
+# fail loudly with discovery guidance. Strict IPv4: a hostname resolver is
+# chicken-and-egg (sandbox DNS is what this value serves).
+venya_resolve_dns_resolver() {
+    DNS_RESOLVER="${VENYA_DNS_RESOLVER:-}"
+    if [ -z "$DNS_RESOLVER" ] && [ -f /etc/venya/executor.toml ]; then
+        DNS_RESOLVER="$(sed -n 's/^dns_resolver = "\(.*\)"$/\1/p' /etc/venya/executor.toml | head -1)"
+        if [ -n "$DNS_RESOLVER" ]; then
+            info "Reusing dns_resolver from existing /etc/venya/executor.toml"
+        fi
+    fi
+    if [ -z "$DNS_RESOLVER" ]; then
+        error "VENYA_DNS_RESOLVER is required — the IP of the DNS resolver sandboxed commands may use."
+        error "Find yours with: resolvectl status   (or: grep nameserver /etc/resolv.conf)"
+        error "Example: VENYA_DNS_RESOLVER=198.51.100.53"
+        exit 1
+    fi
+    if ! _venya_valid_ipv4 "$DNS_RESOLVER"; then
+        error "VENYA_DNS_RESOLVER='$DNS_RESOLVER' is not a valid IPv4 address (hostnames are not accepted — the resolver must be reachable by IP)."
+        exit 1
     fi
 }
 

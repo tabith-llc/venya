@@ -1,6 +1,6 @@
 [project]
 name = "server"
-version = "0.1.0alpha14"
+version = "0.1.0alpha15"
 description = "FastAPI server: WebAuthn, REST API"
 requires-python = ">=3.14,<3.15"
 dependencies = [

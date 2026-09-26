@@ -4,6 +4,58 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0alpha15] - 2026-09-25
+
+### Added
+- New `docs/agent-prompts.md` — a paste-ready operating contract for customer AI agents (AGENTS.md / CLAUDE.md / Cursor rules), linked from the README banner + docs table, installation §6, and agents.md. An interlock test pins the block's claims (tool names, redaction marker, injection path, 401/503 behavior) to the live MCP tool surface so the prompt cannot silently rot.
+
+### Changed
+- Test fixtures and docs no longer embed development-fleet addresses or identities: private-range (RFC1918) literals swept to documentation ranges (RFC 5737), `dust@montana` → `admin@example.com`, dev password probe → synthetic. A tree-wide interlock test now fails CI if any RFC1918 literal re-enters `packages/` or `docs/` (installer-artifact guard extended; CHANGELOG and the guard's own self-test excluded). No product behavior change.
+
+- **BREAKING — Executor: the built-in DNS-resolver default is removed; `dns_resolver`
+  is now explicit config.** The sandbox egress policy previously always admitted a
+  hardcoded resolver IP (`10.27.28.1` — a development-fleet address, functionally
+  dead on any other network). Now set `dns_resolver = "<your resolver IP>"` in
+  `/etc/venya/executor.toml` — fresh installs take it from the required
+  `VENYA_DNS_RESOLVER` installer knob (re-runs reuse the stored value) — or
+  `VENYA_EXECUTOR_DNS_RESOLVER` in the service environment. An executor without it
+  REFUSES TO START with a named error (by design: Venya never guesses your network).
+  Find your resolver with `resolvectl status` or `grep nameserver /etc/resolv.conf`.
+  **Upgrading:** add the key to `/etc/venya/executor.toml` BEFORE restarting the
+  executor.
+
+- **CLI: `venya admin enroll --mode` and `venya admin configure-user --mode`
+  removed.** The flag advertised a platform-authenticator enrollment mode
+  (e.g. Windows Hello) that did nothing: no authentication path ever read the
+  stored `auth_mode` value, and enrollment completion overwrote it to
+  `webauthn` regardless. Platform authenticators are not offered at this time.
+  The server API is unchanged (the `auth_mode` field and its default remain;
+  `venya admin list` still displays stored values). Scripts passing `--mode` —
+  including the former default `security-key` — now fail with a usage error
+  instead of silently doing nothing.
+
+- **Executor: `dns_resolver` and `egress_allowlist_path` config knobs now take
+  effect.** Both were loadable from `/etc/venya/executor.toml` (or the
+  `VENYA_EXECUTOR_DNS_RESOLVER` / `VENYA_EXECUTOR_EGRESS_ALLOWLIST_PATH` env
+  keys) but had no readers — the sandbox network policy used hardcoded values.
+  Defaults are unchanged; operator overrides are now honored.
+
+- **Installer: fresh executor installs no longer seed the development fleet's
+  subnet into the sandbox egress allowlist.** `/etc/venya/egress-allowlist.txt`
+  is now written empty by design (fail-closed: all sandbox egress blocked
+  except DNS) with in-file guidance, and can be seeded explicitly at install
+  time with `VENYA_EGRESS_ALLOW` (comma/space-separated IPs, CIDRs, hostnames;
+  any invalid entry aborts the install loudly — a partially applied allowlist
+  is never written). A standing interlock test fails if a private-range
+  literal returns to any shipped installer script. **Installed a release
+  before this fix?** Check `/etc/venya/egress-allowlist.txt`: releases through
+  `v0.1.0alpha14` seeded `10.27.28.0/24` — a development-fleet subnet that is
+  not yours. Delete it or replace it with your own target ranges; the file is
+  read at sandbox creation, so no restart is needed.
+
+### Fixed
+- MCP `list_secrets` output now carries what its tool description promised: each secret's numeric id and — when stored — its `shape` and `usage` metadata. `{secret_path}`/`{secret_id}` placeholders in usage templates are resolved renderer-side to the injected sandbox file path (`/run/secrets/venya/<id>`), so agents receive a ready-to-run command template instead of having to substitute placeholders themselves; `{host}`/`{user}` stay as authored (task-context). Secret values remain unreachable, and description pins now fail CI if the promise and the rendering drift apart again.
+
 ## [0.1.0alpha14] - 2026-09-23
 
 - **Supersede of `v0.1.0alpha13` (packaging defect — product code IDENTICAL;

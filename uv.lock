@@ -289,7 +289,7 @@ wheels = [
 
 [[package]]
 name = "core"
-version = "0.1.0a14"
+version = "0.1.0a15"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "alembic" },
@@ -449,7 +449,7 @@ wheels = [
 
 [[package]]
 name = "executor"
-version = "0.1.0a14"
+version = "0.1.0a15"
 source = { editable = "packages/executor" }
 dependencies = [
     { name = "core" },
@@ -1317,7 +1317,7 @@ wheels = [
 
 [[package]]
 name = "server"
-version = "0.1.0a14"
+version = "0.1.0a15"
 source = { editable = "packages/server" }
 dependencies = [
     { name = "core" },
@@ -1550,7 +1550,7 @@ wheels = [
 
 [[package]]
 name = "venya"
-version = "0.1.0a14"
+version = "0.1.0a15"
 source = { virtual = "." }
 dependencies = [
     { name = "core" },
@@ -1596,7 +1596,7 @@ dev = [
 
 [[package]]
 name = "venya-cli"
-version = "0.1.0a14"
+version = "0.1.0a15"
 source = { editable = "packages/cli" }
 dependencies = [
     { name = "cryptography" },
@@ -1624,7 +1624,7 @@ provides-extras = ["test"]
 
 [[package]]
 name = "venya-contract"
-version = "0.1.0a14"
+version = "0.1.0a15"
 source = { editable = "packages/venya-contract" }
 dependencies = [
     { name = "pydantic" },
@@ -1644,7 +1644,7 @@ dev = [{ name = "pip-audit", specifier = ">=2.10.1" }]
 
 [[package]]
 name = "venya-mcp"
-version = "0.1.0a14"
+version = "0.1.0a15"
 source = { editable = "packages/mcp" }
 dependencies = [
     { name = "httpx2" },

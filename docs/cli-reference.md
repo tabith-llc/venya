@@ -291,19 +291,17 @@ Subcommands:
 Enroll a new user
 
 ```
-venya admin enroll <USER_ID> [OPTIONS]
+venya admin enroll <USER_ID>
 ```
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `USER_ID` (positional) | **yes** | string | — | User ID to enroll |
-| `--mode` | no | one of: `security-key`, `platform` | `security-key` | Auth mode (default: security-key) |
 
 **Examples**
 
 ```bash
-venya admin enroll jsmith  # issue an enrollment token for a new user (security-key mode)
-venya admin enroll jsmith --mode platform  # enroll for a platform authenticator (e.g. Windows Hello)
+venya admin enroll jsmith  # issue an enrollment token for a new user
 ```
 
 ### `venya admin remove`
@@ -335,14 +333,12 @@ venya admin configure-user <USER_ID> [OPTIONS]
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `USER_ID` (positional) | **yes** | string | — | User ID to configure |
-| `--mode` | no | one of: `security-key`, `platform` | — | Auth mode |
 | `--timeout` | no | int | — | Session timeout in seconds |
 
 **Examples**
 
 ```bash
 venya admin configure-user jsmith --timeout 1800  # session timeout in seconds
-venya admin configure-user jsmith --mode platform  # switch the user's auth mode
 ```
 
 ### `venya admin list`

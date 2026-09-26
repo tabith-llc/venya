@@ -170,7 +170,7 @@ class TestNoSensitiveData:
     def test_metrics_output_no_passwords(self):
         """Metrics output shouldn't contain passwords."""
         output = generate_latest(REGISTRY).decode()
-        assert "venya707" not in output
+        assert "synthetic-do-not-use-999" not in output
 
 
 class TestMiddlewareEndpointNormalization:

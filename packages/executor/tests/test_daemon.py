@@ -159,6 +159,7 @@ def config(tmp_path: Path, tmp_ca_dir: Path) -> ExecutorConfig:
     return ExecutorConfig(
         server_url="https://example.com",
         executor_id="test-executor",
+        dns_resolver="192.0.2.53",
         mtls=MtlsConfig(
             ca_cert=str(tmp_ca_dir / "ca.crt"),
             cert=str(tmp_path / "executor.crt"),
@@ -1326,6 +1327,48 @@ class TestDeafBootRefusal:
         d.start()
         assert d.state.running is True
         d._main_loop.assert_called_once()
+
+
+class TestResolverBootRefusal:
+    """Ticket private-infra-product-defaults-and-fixtures (stage 2, ruling D1
+    option (a)): an executor without a configured dns_resolver refuses to
+    boot — the sandbox egress policy cannot be built and hostname targets
+    could never resolve. Mirrors TestDeafBootRefusal: checked at start(),
+    BEFORE registration, so the one-shot enrollment token is never consumed
+    on a doomed boot."""
+
+    def _daemon(self, config):
+        from executor.daemon import ExecutorDaemon
+
+        d = ExecutorDaemon(config)
+        d.cert_manager = MagicMock()
+        d.reaper = MagicMock()
+        return d
+
+    def test_start_refuses_without_dns_resolver(self, config, caplog):
+        import logging
+
+        cfg = config.model_copy(update={"relay_client_ids": ["core-relay"], "dns_resolver": None})
+        d = self._daemon(cfg)
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(SystemExit) as exc:
+                d.start()
+        assert exc.value.code == 1
+        d.cert_manager.register.assert_not_called()  # one-shot token not consumed
+        assert d.state.running is False
+        assert "dns_resolver" in caplog.text
+        assert "VENYA_EXECUTOR_DNS_RESOLVER" in caplog.text
+
+    def test_start_passes_resolver_gate(self, config):
+        """Paired positive: resolver set → the gate is passed (the only
+        pre-registration refusals are the deaf-relay guard and this one)."""
+        cfg = config.model_copy(update={"relay_client_ids": ["core-relay"], "dns_resolver": "192.0.2.53"})
+        d = self._daemon(cfg)
+        sentinel = RuntimeError("past-the-resolver-gate")
+        d.cert_manager.register.side_effect = sentinel
+        with pytest.raises(RuntimeError) as exc:
+            d.start()
+        assert exc.value is sentinel  # reached registration ⇒ resolver gate passed
 
 
 class TestMtlsMaterialNamedError:

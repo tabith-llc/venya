@@ -85,6 +85,8 @@ run it from an interactive session so the key is entered at the hidden prompt
 | `VENYA_DOCKER_USERNAME` | (prompt if TTY) | Docker account for sbx agent-template pulls |
 | `VENYA_DOCKER_API_KEY` | (prompt if TTY) | Docker access token — stdin-only handling, never argv/disk; required unless already authenticated |
 | `VENYA_SKIP_DOCKER_LOGIN` | (empty) | `yes` = degraded install (executor runs; sandbox executes fail 503 until `sudo -H -u venya sbx login`) |
+| `VENYA_EGRESS_ALLOW` | (empty) | Optional seed for `/etc/venya/egress-allowlist.txt` — comma/space-separated IPs, CIDRs, hostnames (e.g. `203.0.113.0/24,nas.example.com`). Unset: file written empty by design (fail-closed: all sandbox egress blocked except DNS; edit it, effective on the next command run). Any invalid entry aborts the install — never half-applied |
+| `VENYA_DNS_RESOLVER` | (required, no default; re-runs reuse the stored toml value) | Resolver IP always allowed for sandbox egress — strict IPv4, validated before any write; find it via `resolvectl status` / `/etc/resolv.conf` |
 
 ### `install-venya-cli.sh`
 

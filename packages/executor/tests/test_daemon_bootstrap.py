@@ -90,6 +90,7 @@ enrollment_token = "enrl_exec_toml_legacy"
             bootstrap=BootstrapConfig(enrollment_token=toml_token),
             config_path=config_file,
             relay_client_ids=["core-relay"],
+            dns_resolver="192.0.2.53",
         )
         daemon = ExecutorDaemon(config)
         daemon._bootstrap_token_path = tmp_path / "bootstrap-token"

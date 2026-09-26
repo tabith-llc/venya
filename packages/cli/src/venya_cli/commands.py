@@ -565,7 +565,7 @@ def cmd_admin_enroll(client: APIClient, args: Any) -> int:
     try:
         result = client.post(
             "/api/v1/admin/enroll",
-            json={"user_id": args.user_id, "auth_mode": args.mode},
+            json={"user_id": args.user_id},
         )
         print(f"User '{args.user_id}' enrolled successfully.")
         if "enrollment_token" in result:
@@ -597,8 +597,6 @@ def cmd_admin_configure(client: APIClient, args: Any) -> int:
     """Configure user settings."""
     try:
         config = {}
-        if args.mode:
-            config["auth_mode"] = args.mode
         if args.timeout:
             config["session_timeout"] = args.timeout
 

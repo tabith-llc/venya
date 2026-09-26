@@ -350,7 +350,7 @@ class ServerConfig(BaseSettings):
     network: NetworkConfig = Field(default_factory=NetworkConfig)
 
     # Trusted proxies for X-Forwarded-* handling (passed to FastAPI forwarded_allow_ips).
-    # pydantic-settings parses a JSON list from env, e.g. VENYA_TRUSTED_PROXIES='["10.0.0.1"]'
+    # pydantic-settings parses a JSON list from env, e.g. VENYA_TRUSTED_PROXIES='["192.0.2.1"]'
     trusted_proxies: list[str] = Field(
         default_factory=lambda: ["127.0.0.1"],
         description="IPs/CIDRs trusted for X-Forwarded-* headers. Env VENYA_TRUSTED_PROXIES (JSON list).",

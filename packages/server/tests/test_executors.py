@@ -61,7 +61,7 @@ class TestListExecutors:
         mock_session = MagicMock()
         mock_executor = MagicMock()
         mock_executor.id = "web-server-3"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.last_heartbeat = datetime.now(UTC) - timedelta(seconds=30)
         mock_executor.enrolled_at = datetime.now(UTC) - timedelta(days=10)
         mock_executor.revoked_at = None
@@ -96,7 +96,7 @@ class TestListExecutors:
         mock_session = MagicMock()
         mock_executor = MagicMock()
         mock_executor.id = "web-server-1"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.last_heartbeat = datetime.now(UTC) - timedelta(seconds=30)
         mock_executor.enrolled_at = datetime.now(UTC) - timedelta(days=5)
         mock_executor.revoked_at = None
@@ -120,7 +120,7 @@ class TestListExecutors:
         mock_session = MagicMock()
         mock_executor = MagicMock()
         mock_executor.id = "web-server-2"
-        mock_executor.hostname = "10.27.28.15"
+        mock_executor.hostname = "192.0.2.15"
         mock_executor.last_heartbeat = datetime.now(UTC) - timedelta(seconds=120)
         mock_executor.enrolled_at = datetime.now(UTC) - timedelta(days=5)
         mock_executor.revoked_at = None
@@ -144,7 +144,7 @@ class TestListExecutors:
         mock_session = MagicMock()
         mock_executor = MagicMock()
         mock_executor.id = "revoked-server"
-        mock_executor.hostname = "10.27.28.16"
+        mock_executor.hostname = "192.0.2.16"
         mock_executor.last_heartbeat = datetime.now(UTC) - timedelta(seconds=30)
         mock_executor.enrolled_at = datetime.now(UTC) - timedelta(days=10)
         mock_executor.revoked_at = datetime.now(UTC) - timedelta(hours=1)
@@ -184,7 +184,7 @@ class TestListExecutors:
         mock_session = MagicMock()
         mock_executor = MagicMock()
         mock_executor.id = "web-server-3"
-        mock_executor.hostname = "10.27.28.14"
+        mock_executor.hostname = "192.0.2.14"
         mock_executor.last_heartbeat = None
         mock_executor.enrolled_at = datetime.now(UTC) - timedelta(days=5)
         mock_executor.revoked_at = None
@@ -200,7 +200,7 @@ class TestListExecutors:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["executors"][0]["hostname"] == "10.27.28.14"
+        assert data["executors"][0]["hostname"] == "192.0.2.14"
 
     def test_list_executors_forbidden_without_roles(self):
         """Authenticated user with no roles -> 403 on GET /executors."""

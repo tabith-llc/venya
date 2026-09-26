@@ -30,6 +30,7 @@ from pathlib import Path
 
 from venya_contract import ASKPASS_HELPER_PATH
 
+from ..egress_filter import DEFAULT_ALLOWLIST_PATH
 from .base import InjectionResult, InjectionStrategy, SecretMount
 
 logger = logging.getLogger("venya.executor.strategies.sbx")
@@ -127,8 +128,15 @@ class SbxStrategy(InjectionStrategy):
     - Cleanup: sandbox destroyed, tmpfs deleted, secrets zeroed
     """
 
-    def __init__(self, secret_base_fd: int = 100) -> None:
+    def __init__(
+        self,
+        secret_base_fd: int = 100,
+        dns_resolver: str | None = None,
+        egress_allowlist_path: str | Path = DEFAULT_ALLOWLIST_PATH,
+    ) -> None:
         self.secret_base_fd = secret_base_fd
+        self.dns_resolver = dns_resolver
+        self.egress_allowlist_path = egress_allowlist_path
         self._session_dir: str | None = None
         self._sandbox_name: str | None = None
         self._workspace_dir: str | None = None
@@ -500,8 +508,9 @@ class SbxStrategy(InjectionStrategy):
     def apply_network_policy(self, sandbox_name: str) -> None:
         """Apply egress allowlist to sandbox.
 
-        Reads /etc/venya/egress-allowlist.txt and allows each entry
-        via sbx policy allow network <host>. DNS resolver is always allowed.
+        Reads the configured allowlist file (default /etc/venya/egress-allowlist.txt) and
+        allows each entry via sbx policy allow network <host>. DNS resolver is always
+        allowed.
 
         Missing/empty allowlist -> only DNS resolver allowed (fail-closed).
 
@@ -510,13 +519,19 @@ class SbxStrategy(InjectionStrategy):
         """
         from ..egress_filter import EgressFilter
 
-        # Use default config values if no config available
-        egress_path = "/etc/venya/egress-allowlist.txt"
-        dns_resolver = "10.27.28.1"
+        if self.dns_resolver is None:
+            raise RuntimeError(
+                "dns_resolver is not configured — set `dns_resolver` in "
+                "/etc/venya/executor.toml or VENYA_EXECUTOR_DNS_RESOLVER in the "
+                "daemon environment (find it: resolvectl status or /etc/resolv.conf)"
+            )
 
+        # Config values arrive via the constructor (daemon.create_executor wires
+        # them from ExecutorConfig: toml `dns_resolver`/`egress_allowlist_path`
+        # or VENYA_EXECUTOR_* env). Ticket executor-dns-resolver-config-inert.
         egress = EgressFilter(
-            allowlist_path=Path(egress_path),
-            dns_resolver=dns_resolver,
+            allowlist_path=Path(self.egress_allowlist_path),
+            dns_resolver=self.dns_resolver,
         )
 
         # Run as the daemon user, never via sudo: the sbx daemon and

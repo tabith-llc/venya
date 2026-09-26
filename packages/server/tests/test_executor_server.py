@@ -517,14 +517,14 @@ class TestExecutorRegistration:
         resp = client.post(
             "/api/v1/executors/register",
             json={"executor_id": "web-server-3", "csr_pem": csr_pem},  # no hostname
-            headers={"X-Forwarded-For": "10.27.28.14"},
+            headers={"X-Forwarded-For": "192.0.2.14"},
         )
         assert resp.status_code == 201
         added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], Executor)]
         assert len(added) == 1
         # executor_id is the dial address; the forwarded IP is never stored.
         assert added[0].hostname == "web-server-3"
-        assert added[0].hostname != "10.27.28.14"
+        assert added[0].hostname != "192.0.2.14"
 
     def test_register_upsert_sets_existing_hostname_to_executor_id(self, ca_manager, executor_csr, executor_keypair):
         """Existing-row upsert rewrites hostname to executor_id (idempotent on rotation)."""
@@ -532,7 +532,7 @@ class TestExecutorRegistration:
 
         from core.iam.models import Executor
 
-        existing = Executor(id="web-server-3", hostname="10.27.28.14", status="active")
+        existing = Executor(id="web-server-3", hostname="192.0.2.14", status="active")
         existing.enrolled_at = datetime(2026, 1, 1, tzinfo=UTC)
         db = _make_mock_db()
         self._make_db_with_executor(db, existing)

@@ -50,13 +50,15 @@ async def list_tools() -> list[Tool]:
             name="list_secrets",
             description=(
                 "List secrets stored in Venya. Returns secret keys and metadata "
-                "(executor, purpose, username, shape, usage) — NEVER secret values. "
-                "Use this to discover which secrets are available for a given "
-                "executor or purpose. Filter by executor to find secrets for a "
-                "specific host. When a secret carries 'usage' metadata, it is the "
-                "command template for that secret: substitute {secret_path} with "
-                "/run/secrets/venya/<id>, the injected sandbox file (<id> = the "
-                "secret's numeric id from this listing)."
+                "(id, executor, purpose, username, and — when stored — shape and "
+                "usage) — NEVER secret values. Use this to discover which secrets "
+                "are available for a given executor or purpose. Filter by executor "
+                "to find secrets for a specific host. When a secret carries a "
+                "'usage' entry, it is the command template for that secret with "
+                "{secret_path} and {secret_id} ALREADY RESOLVED to the injected "
+                "sandbox file (/run/secrets/venya/<id>) — follow it as written; "
+                "fill any {host}/{user} placeholders from your task and the "
+                "secret's metadata. Never inline a secret value."
             ),
             inputSchema={
                 "type": "object",
@@ -193,12 +195,29 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             lines = ["Available secrets (values not shown):"]
             for s in secrets:
                 meta = s.get("metadata", {})
-                lines.append(
-                    f"  - key: {s['key']}"
-                    f"  executor: {meta.get('executor', 'N/A')}"
-                    f"  purpose: {meta.get('purpose', 'N/A')}"
-                    f"  username: {meta.get('username', 'N/A')}"
-                )
+                secret_id = s.get("id")
+                parts = [f"  - key: {s['key']}"]
+                if secret_id is not None:
+                    parts.append(f"id: {secret_id}")
+                parts.append(f"executor: {meta.get('executor', 'N/A')}")
+                parts.append(f"purpose: {meta.get('purpose', 'N/A')}")
+                parts.append(f"username: {meta.get('username', 'N/A')}")
+                shape = meta.get("shape")
+                if isinstance(shape, str) and shape:
+                    parts.append(f"shape: {shape}")
+                usage = meta.get("usage")
+                if isinstance(usage, str) and usage:
+                    if secret_id is not None:
+                        # Owner ruling a2 (ticket mcp-list-secrets-id-usage-not-rendered):
+                        # resolve the id-derived placeholders HERE so agents receive a
+                        # ready-to-run template instead of performing string surgery.
+                        # {host}/{user} are task-context placeholders and stay as
+                        # authored. Values can never appear: usage write-time
+                        # validation rejects value interpolation (routes/secrets.py).
+                        usage = usage.replace("{secret_path}", f"/run/secrets/venya/{secret_id}")
+                        usage = usage.replace("{secret_id}", str(secret_id))
+                    parts.append(f"usage: {usage}")
+                lines.append("  ".join(parts))
             return [TextContent(type="text", text="\n".join(lines))]
 
         elif name == "list_executors":

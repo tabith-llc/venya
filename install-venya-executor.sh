@@ -30,6 +30,9 @@ set -euo pipefail
 #                                    is the relay dial hostname + client-cert SAN — it MUST
 #                                    be resolvable from every core (e.g. via /etc/hosts or DNS).
 #   VENYA_SERVER_URL               - Core server URL (required)
+#   VENYA_DNS_RESOLVER         - Sandbox DNS resolver IP (required, no default — strict
+#                                IPv4, validated; re-runs reuse the stored toml value). Find
+#                                yours: resolvectl status / grep nameserver /etc/resolv.conf
 #   VENYA_CORE_HOSTNAME    - Core hostname for /etc/hosts resolution (default: venya-core-1)
 #   VENYA_CORE_IP          - Core IP for /etc/hosts resolution (no default —
 #                            required only when the core hostname resolves
@@ -71,10 +74,12 @@ venya_check_existing
 # --- Require VENYA_SERVER_URL (no default — server hostname is unknown) ---
 if [ -z "${VENYA_SERVER_URL:-}" ]; then
     error "VENYA_SERVER_URL is required."
-    error "Set it to your core server URL, e.g.: https://venya-core or https://10.0.1.50"
+    error "Set it to your core server URL, e.g.: https://venya-core or https://198.51.100.50"
     exit 1
 fi
 SERVER_URL="$VENYA_SERVER_URL"
+
+venya_resolve_dns_resolver
 
 info "Installing Venya Executor to $INSTALL_DIR"
 
@@ -405,6 +410,7 @@ daemonize = false
 injection_method = "sbx"
 secret_base_fd = 100
 ca_bundle = "$CA_BUNDLE_PATH"
+dns_resolver = "$DNS_RESOLVER"
 
 # Relay CN allowlist — MUST stay top-level (not under [mtls]). Value mirrors
 # the core's relay-client cert CN (core installer). 'venya exec register'
@@ -418,6 +424,7 @@ key = "/etc/venya/executor/executor.key"
 EOF
 
 info "Executor config written to /etc/venya/executor.toml"
+info "Sandbox DNS resolver: $DNS_RESOLVER"
 
 # --- Executor-id dial-contract pre-check (ticket installer-executor-id-precheck-guidance) ---
 # EXECUTOR_ID is the relay dial hostname + client-cert SAN: EVERY core must

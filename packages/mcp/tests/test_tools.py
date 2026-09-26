@@ -64,6 +64,88 @@ async def test_list_secrets_formats() -> None:
     assert "username: bot" in result[0].text
 
 
+async def test_list_secrets_renders_id_shape_and_resolved_usage() -> None:
+    """Owner ruling a2 (ticket mcp-list-secrets-id-usage-not-rendered): id and
+    shape are rendered, and usage arrives READY TO RUN — {secret_path} and
+    {secret_id} resolved renderer-side; {host}/{user} are task-context
+    placeholders and stay as authored."""
+    mock = _make_mock_client()
+    mock.list_secrets = AsyncMock(
+        return_value=[
+            {
+                "id": 7,
+                "key": "nas_creds",
+                "metadata": {
+                    "executor": "storage-01",
+                    "purpose": "ssh_login",
+                    "username": "nas-admin",
+                    "shape": "ssh-password",
+                    "usage": "sshpass -f {secret_path} ssh {user}@{host} status  # secret {secret_id}",
+                },
+            },
+        ]
+    )
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        result = await call_tool("list_secrets", {})
+    text = result[0].text
+    assert "id: 7" in text
+    assert "shape: ssh-password" in text
+    assert "usage: sshpass -f /run/secrets/venya/7 ssh {user}@{host} status  # secret 7" in text
+    assert "{secret_path}" not in text
+    assert "{secret_id}" not in text
+
+
+async def test_list_secrets_absent_shape_usage_render_no_fields() -> None:
+    """Paired negative: no shape/usage stored → the fields are honestly
+    omitted (no 'shape: None' garbage), while id still renders."""
+    mock = _make_mock_client()
+    mock.list_secrets = AsyncMock(return_value=[{"id": 3, "key": "plain_key", "metadata": {"executor": "web-3"}}])
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        result = await call_tool("list_secrets", {})
+    text = result[0].text
+    assert "id: 3" in text
+    assert "shape:" not in text
+    assert "usage:" not in text
+
+
+async def test_list_secrets_never_renders_a_value_field() -> None:
+    """Security pin (defense in depth): even if an API response ever carried
+    a value field, the renderer prints only known non-value fields."""
+    mock = _make_mock_client()
+    mock.list_secrets = AsyncMock(
+        return_value=[
+            {
+                "id": 9,
+                "key": "k",
+                "value": "ZZZ-DO-NOT-RENDER-000",
+                "metadata": {"executor": "e", "purpose": "p", "username": "u", "usage": "cat {secret_path}"},
+            }
+        ]
+    )
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        result = await call_tool("list_secrets", {})
+    text = result[0].text
+    assert "ZZZ-DO-NOT-RENDER-000" not in text
+    assert "usage: cat /run/secrets/venya/9" in text
+
+
+def test_list_secrets_description_pins_resolved_usage() -> None:
+    """a2 pin: the description must promise RESOLVED usage (agents never
+    substitute {secret_path} themselves) and name the id field — the
+    description/rendering drift this ticket fixed must not return."""
+    import asyncio
+
+    from venya_mcp.server import list_tools
+
+    tools = asyncio.run(list_tools())
+    by_name = {t.name: t for t in tools}
+    desc = by_name["list_secrets"].description
+    assert "ALREADY RESOLVED" in desc
+    assert "id, executor" in desc
+    assert "{secret_path}" in desc  # existing pin from secret-shape-metadata survives
+    assert "/run/secrets/venya/" in desc
+
+
 # --- list_executors tests ---
 
 

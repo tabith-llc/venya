@@ -691,3 +691,28 @@ class TestReaperOrphanCleanup:
 
         reaper = ReaperLoop(config, state)
         assert reaper.tmpfs_dir == daemon_mod.SECRET_TMPFS_BASE
+
+
+# ---------------------------------------------------------------------------
+# ExecutorDaemon.create_executor — config knob plumbing
+# (ticket executor-dns-resolver-config-inert)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateExecutorPlumbing:
+    """create_executor must wire the config's dns_resolver /
+    egress_allowlist_path into the SbxStrategy (previously it constructed a
+    bare SbxStrategy() and the hardcoded values won)."""
+
+    def test_create_executor_plumbs_config_knobs(self, config: ExecutorConfig):
+        config.dns_resolver = "198.51.100.53"
+        config.egress_allowlist_path = "/tmp/venya-t5.txt"
+
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        with patch("shutil.which", return_value="/usr/bin/sbx"):
+            executor = daemon.create_executor("sess-1")
+
+        strategy = executor.injection_strategy
+        assert strategy.dns_resolver == "198.51.100.53"
+        assert strategy.egress_allowlist_path == "/tmp/venya-t5.txt"

@@ -49,6 +49,25 @@ Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart
 
 ---
 
+### `dns_resolver` (executor)
+
+**Config key:** `dns_resolver` (top-level field on the EXECUTOR config; env `VENYA_EXECUTOR_DNS_RESOLVER`; toml key `dns_resolver` in `/etc/venya/executor.toml`)
+
+**Requirement:** MUST be set to a valid IPv4 address. With no value the executor daemon **refuses to start** — the check runs in `ExecutorDaemon.start()` before registration, so the one-shot enrollment token is never consumed on a doomed boot. This is a named, loud failure by design (owner ruling D1 option (a): "Venya never guesses your network"); there is no built-in default.
+
+**Purpose:** The DNS resolver IP that sandboxed commands may use; it is always admitted to the sandbox egress policy. Without it, hostname-based egress entries can never resolve inside the sandbox, so the egress policy cannot be built.
+
+**Error on missing (named ERROR log then `exit 1`; verbatim from `daemon.py` `start()`):**
+```
+dns_resolver is not configured — refusing to start: the sandbox egress policy cannot be built and hostname targets could never resolve. Set `dns_resolver` in /etc/venya/executor.toml or VENYA_EXECUTOR_DNS_RESOLVER in the service environment (find your resolver: resolvectl status or grep nameserver /etc/resolv.conf).
+```
+
+**How to find the value:** `resolvectl status` or `grep nameserver /etc/resolv.conf`.
+
+**Installer knob:** `VENYA_DNS_RESOLVER` (required on fresh installs; re-runs reuse the stored `/etc/venya/executor.toml` value).
+
+---
+
 ## Configuration Loading
 
 The server config is a pydantic-settings `BaseSettings` class (`packages/server/src/server/config.py`). There is NO TOML config file for the server (the inert `/etc/venya/server.toml` written by old installers is actively removed; the sole file source is the env file). Sources, in precedence order:

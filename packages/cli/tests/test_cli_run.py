@@ -69,7 +69,7 @@ class TestRunSeparatorStrip:
                 "/usr/bin/ssh",
                 "-o",
                 "StrictHostKeyChecking=accept-new",
-                "tier1@10.27.28.22",
+                "tier1@192.0.2.22",
                 "sudo",
                 "apt-get",
                 "install",

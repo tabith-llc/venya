@@ -244,6 +244,34 @@ class TestExecutorConfigNetwork:
         assert cfg.network.registration_timeout_seconds == 60
 
 
+class TestExecutorConfigEgressKnobs:
+    """Loadability of the dns_resolver / egress_allowlist_path knobs
+    (ticket executor-dns-resolver-config-inert). Loading was never the broken
+    half — the dead readers were — so these are GREEN pre-fix and pin the
+    config surface the plumbing test exercises."""
+
+    def test_from_file_loads_egress_knobs(self, tmp_path: Path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            """
+dns_resolver = "198.51.100.53"
+egress_allowlist_path = "/tmp/venya-t6.txt"
+"""
+        )
+
+        cfg = ExecutorConfig.from_file(config_file)
+
+        assert cfg.dns_resolver == "198.51.100.53"
+        assert cfg.egress_allowlist_path == "/tmp/venya-t6.txt"
+
+    def test_env_overrides_egress_knobs(self, monkeypatch):
+        monkeypatch.setenv("VENYA_EXECUTOR_DNS_RESOLVER", "198.51.100.53")
+        monkeypatch.setenv("VENYA_EXECUTOR_EGRESS_ALLOWLIST_PATH", "/tmp/venya-t7.txt")
+        cfg = ExecutorConfig()
+        assert cfg.dns_resolver == "198.51.100.53"
+        assert cfg.egress_allowlist_path == "/tmp/venya-t7.txt"
+
+
 class TestExecutorConfigDefaults:
     """Tests for ExecutorConfig default values."""
 
@@ -298,6 +326,12 @@ class TestExecutorConfigDefaults:
     def test_default_network_config(self):
         cfg = ExecutorConfig()
         assert isinstance(cfg.network, NetworkConfig)
+
+    def test_dns_resolver_default_is_none(self):
+        """Ruling D1 option (a): no built-in resolver — the daemon refuses
+        to start without one (Venya never guesses your network)."""
+        cfg = ExecutorConfig()
+        assert cfg.dns_resolver is None
 
 
 class TestExecutorConfigFromEnv:

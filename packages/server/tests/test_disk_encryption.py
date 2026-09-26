@@ -28,7 +28,7 @@ class TestGetPgDataDirectory:
 
     def test_returns_none_for_remote_host(self):
         """Returns None for remote hosts (can't determine local dir)."""
-        result = _get_pg_data_directory("postgresql://user@10.0.0.5:5432/venya")
+        result = _get_pg_data_directory("postgresql://user@203.0.113.5:5432/venya")
         assert result is None
 
     def test_returns_none_for_localhost_no_existing_path(self):
@@ -163,6 +163,6 @@ class TestCheckDiskEncryption:
     def test_logs_warning_when_no_data_dir(self, caplog):
         """Logs WARNING when data directory can't be determined."""
         with patch("server.utils.disk_encryption._get_pg_data_directory", return_value=None):
-            check_disk_encryption("postgresql://user@10.0.0.5/venya")
+            check_disk_encryption("postgresql://user@203.0.113.5/venya")
 
         assert any("Could not determine PostgreSQL data directory" in record.message for record in caplog.records)
