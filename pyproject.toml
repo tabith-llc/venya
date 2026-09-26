@@ -1,6 +1,6 @@
 [project]
 name = "venya"
-version = "0.1.0alpha14"
+version = "0.1.0alpha15"
 description = "A secrets broker system for LLMs"
 requires-python = ">=3.14,<3.15"
 dependencies = [
