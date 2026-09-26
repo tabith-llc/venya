@@ -18,6 +18,14 @@ Notable changes to Venya will be documented in this file.
 - **Central command policy now ENFORCES fleet-wide.** `venya admin set-command-policy` / `add-allowed-command` previously wrote a policy row with zero consumers — executors enforced only their local `/etc/venya/executor.toml`, so the admin commands silently affected nothing. The core's "default" policy now propagates as an additive field on executor registration and heartbeat (~30 s) responses and is hot-applied through the command validator. Semantics mirror the local config exactly: the preset drives trusted-path behavior (balanced/strict/permissive), an explicit dangerous-pattern list replaces the built-ins, null keeps them. A corrupt or absent policy never kills the heartbeat and never reverts a live policy mid-run (last applied persists until daemon restart, which re-bootstraps from toml). Policy changes are audit-logged (`command_policy_changed`, attributed to the acting admin). Old daemons ignore the field — wire-compatible both directions.
 
 ### Fixed
+- **Executor registration now activates the `users`-side identity row.**
+  The auto-created account inherited the human default `pending_enrollment`
+  and was never flipped (the transition lives in the WebAuthn enrollment
+  path machine identities never traverse), so `venya admin list` showed
+  working, heartbeating executors as pending enrollment. New registrations
+  are born `active` with `enrolled_at` set; re-registration self-heals
+  stranded rows; a data migration backfills existing installs
+  (`auth_mode='mtls'` rows only — human enrollments untouched).
 - **Every `venya admin` mTLS command TypeErrored in the natural flow** (config CA from `venya setup` + `VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`, no `SSL_CERT_FILE` exported): httpx2 >= 2.12 rejects `cert=` combined with a string `verify`, so the client died with a cryptic constructor error before any request was sent. The CLI now builds a single `ssl.SSLContext` carrying both the server-trust anchors (`SSL_CERT_FILE` > setup-installed CA > system store — precedence unchanged) and the admin client cert. Affects alpha14–alpha15; masked in the documented runbook flows because they export `SSL_CERT_FILE`. **Workaround on older releases:** `export SSL_CERT_FILE=<venya ca.crt>` before admin commands.
 - `venya store` piped-stdin values are now stored BYTE-EXACT (no trailing-newline stripping). The previous behavior corrupted PEM private keys (`--shape ssh-key`): OpenSSH >= 10 refuses to load a key whose armor file is not newline-terminated (`Load key: error in libcrypto`), so a key stored via `venya store key - < keyfile` was unusable at consumption time with no in-product remedy. Line-based consumers (`sshpass -f`, `sudo -S`) and output masking (trimmed-hash filter variant) tolerate a trailing newline, so single-line password secrets are unaffected.
 
