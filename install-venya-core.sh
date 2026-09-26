@@ -77,6 +77,18 @@ info "Installing Venya Core to $INSTALL_DIR"
 # The server reads /opt/venya/.env, never this file (core-server-toml-inert).
 rm -f /etc/venya/server.toml
 
+# --- Upgrade support: capture the INSTALLED version BEFORE anything is
+# replaced (ticket installer-upgrade-version-guard-and-backup). The old venv
+# survives until the venv rebuild, but the source tree is
+# overwritten in place by venya_extract_tarball — this is the last reliable
+# readout point. Empty = fresh install (or an install predating this guard).
+INSTALLED_VERSION=""
+if [ -x "$INSTALL_DIR/.venv/bin/python" ]; then
+    INSTALLED_VERSION=$("$INSTALL_DIR/.venv/bin/python" -c \
+        "from importlib.metadata import version; print(version('core'))" 2>/dev/null || true)
+    [ -n "$INSTALLED_VERSION" ] && info "Installed version: $INSTALLED_VERSION"
+fi
+
 # --- Server encryption passphrase (VENYA_DB_PASSPHRASE) — NO DEFAULT ---
 # The KEK protecting every encrypted DB secret derives from this value (the
 # server fails fast at boot when it is missing). A published default would be
@@ -149,6 +161,22 @@ fi
 # named in the abort message. Raw-string comparison matches the raw URL
 # write below — passwords containing @ or : break the URL at write time
 # regardless (pre-existing wart, recorded in the ticket, NOT fixed here).
+# Re-run reuse (ticket installer-rerun-db-password-no-reuse, option (a)):
+# the stored .env is authoritative for the DB password exactly like the
+# other four secrets — an unattended re-run must not demand it. Option (b)
+# (skip-on-existing-DB) was investigated and rejected: the template below
+# rewrites VENYA_DB_URL/VENYA_DB__DATABASE_URL on EVERY run and the
+# migrations + server boot read them. Fresh installs (no stored .env)
+# still prompt / require the env. An explicitly-passed value must still
+# MATCH the stored one (the unchanged elif below) — no silent rotation.
+if [ -z "${VENYA_DB_PASSWORD:-}" ] && [ -f "$STORED_ENV_FILE" ]; then
+    VENYA_DB_PASSWORD=$(sed -n 's|^VENYA_DB_URL=postgresql://venya:\(.*\)@localhost/venya$|\1|p' "$STORED_ENV_FILE" | head -n1)
+    if [ -n "$VENYA_DB_PASSWORD" ]; then
+        info "Existing install: reusing stored PostgreSQL password from $STORED_ENV_FILE (VENYA_DB_URL)."
+    else
+        warn "Could not parse a stored password from $STORED_ENV_FILE's VENYA_DB_URL — falling through to prompt/env."
+    fi
+fi
 if [ -z "${VENYA_DB_PASSWORD:-}" ]; then
     if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
         while :; do
@@ -199,6 +227,36 @@ venya_install_python314
 
 # --- Download and extract tarball ---
 venya_download_tarball core
+
+# --- Upgrade support: version guard BEFORE any mutation (ticket
+# installer-upgrade-version-guard-and-backup). The incoming version is peeked
+# from the tarball without extracting, so a refused downgrade leaves ZERO
+# changes. Alembic migrations never reverse automatically — old code on a
+# newer schema is undefined behavior, hence refuse-by-default. sort -V is a
+# pragmatic PEP 440 approximation for the 0.1.0aN/bN scheme; the escape knob
+# is the calibration edge for odd builds.
+INCOMING_VERSION=$(tar -xzOf "$TARBALL_FILE" --wildcards '*/packages/core/pyproject.toml' 2>/dev/null \
+    | sed -n 's/^version = "\(.*\)"$/\1/p' | head -n1)
+if [ -z "$INCOMING_VERSION" ]; then
+    warn "Could not read the core version from the tarball — skipping the version guard (sha256 verification already passed)."
+elif [ -z "$INSTALLED_VERSION" ]; then
+    info "Fresh install of version $INCOMING_VERSION"
+elif [ "$INSTALLED_VERSION" = "$INCOMING_VERSION" ]; then
+    info "Version: $INSTALLED_VERSION (same-version re-run)"
+elif [ "$(printf '%s\n%s\n' "$INSTALLED_VERSION" "$INCOMING_VERSION" | sort -V | head -n1)" = "$INCOMING_VERSION" ]; then
+    if [ "${VENYA_ALLOW_DOWNGRADE:-}" = "yes" ]; then
+        warn "DOWNGRADE $INSTALLED_VERSION -> $INCOMING_VERSION allowed by VENYA_ALLOW_DOWNGRADE=yes."
+        warn "The database schema is NOT downgraded; old code on a new schema is unsupported."
+    else
+        error "Refusing to downgrade: installed $INSTALLED_VERSION, tarball $INCOMING_VERSION."
+        error "Alembic migrations never run in reverse automatically — old code on a newer"
+        error "schema is undefined behavior. If this is deliberate: VENYA_ALLOW_DOWNGRADE=yes."
+        exit 1
+    fi
+else
+    info "Upgrade: $INSTALLED_VERSION -> $INCOMING_VERSION"
+fi
+
 venya_extract_tarball
 
 # --- Apply shared code fixes (patch source BEFORE building) ---
@@ -377,6 +435,20 @@ if [ -z "$CA_KEY_PASSPHRASE" ]; then
 fi
 
 # --- Write .env (core-specific) ---
+# Operator-added config keys survive regeneration (ticket
+# installer-rerun-env-custom-keys-clobbered): the template below owns
+# MANAGED_ENV_KEYS only; every other line starting at column 0 with VENYA_
+# in an existing .env (e.g. VENYA_SESSION__* tuning) is captured here and
+# re-appended after the template blocks. The five SECRETS keep their own
+# stored-reuse blocks above — this is for non-secret operator config.
+MANAGED_ENV_KEYS="VENYA_HOST VENYA_DB_URL VENYA_DB__DATABASE_URL VENYA_DB__PASSPHRASE VENYA_FIDO2__RP_ID VENYA_FIDO2__RP_NAME VENYA_CORS__ORIGINS VENYA_RECOVERY_CODE_PEPPER VENYA_ADMIN_MTLS__ENABLED VENYA_ADMIN_MTLS__CA_CERT VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS VENYA_MTLS_CERT VENYA_MTLS_KEY"
+PRESERVED_ENV_LINES=""
+if [ -f "$STORED_ENV_FILE" ]; then
+    PRESERVED_ENV_LINES=$(awk -F= -v managed="$MANAGED_ENV_KEYS" '
+        BEGIN { n = split(managed, m, " "); for (i = 1; i <= n; i++) skip[m[i]] = 1 }
+        /^VENYA_/ && !($1 in skip)
+    ' "$STORED_ENV_FILE")
+fi
 cat > "$INSTALL_DIR/.env" << EOF
 VENYA_HOST=127.0.0.1
 VENYA_DB_URL=postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya
@@ -397,6 +469,14 @@ VENYA_ADMIN_MTLS__ENABLED=true
 VENYA_ADMIN_MTLS__CA_CERT="$ADMIN_CA_DIR/admin-ca.crt"
 VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS=["$ADMIN_IDENTITY"]
 EOF
+fi
+
+if [ -n "$PRESERVED_ENV_LINES" ]; then
+    {
+        echo "# --- operator-added keys preserved across re-run (installer) ---"
+        printf '%s\n' "$PRESERVED_ENV_LINES"
+    } >> "$INSTALL_DIR/.env"
+    info "Preserved $(printf '%s\n' "$PRESERVED_ENV_LINES" | wc -l) operator-added .env key(s) across regeneration."
 fi
 
 # Runtime passphrase delivery: a 0640 root:venya EnvironmentFile that systemd
@@ -710,6 +790,30 @@ info "Starting Nginx..."
 systemctl enable nginx > /dev/null 2>&1
 systemctl restart nginx > /dev/null 2>&1 || true
 info "Nginx enabled and started"
+
+# --- Pre-upgrade database backup (ticket installer-upgrade-version-guard-and-backup) ---
+# Migrations are forward-only; the honest rollback is restore-from-backup.
+# Taken ONLY on a version-changing re-run over an existing install: fresh
+# installs have an empty DB, same-version re-runs have no schema delta.
+# Failure aborts BEFORE any migration runs — no backup, no upgrade.
+if [ -n "$INSTALLED_VERSION" ] && [ -n "$INCOMING_VERSION" ] && [ "$INSTALLED_VERSION" != "$INCOMING_VERSION" ]; then
+    BACKUP_DIR="/var/backups/venya"
+    mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
+    BACKUP_FILE="$BACKUP_DIR/pre-upgrade-${INSTALLED_VERSION}-to-${INCOMING_VERSION}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"
+    info "Backing up database before migrations -> $BACKUP_FILE"
+    if ! sudo -u postgres pg_dump -d venya 2>/dev/null | gzip > "$BACKUP_FILE"; then
+        error "Pre-upgrade pg_dump FAILED — aborting BEFORE migrations (no backup, no upgrade)."
+        rm -f "$BACKUP_FILE"
+        exit 1
+    fi
+    chmod 600 "$BACKUP_FILE"
+    # Retention: keep the 3 newest pre-upgrade backups.
+    ls -1t "$BACKUP_DIR"/pre-upgrade-*.sql.gz 2>/dev/null | tail -n +4 | while read -r old_backup; do
+        rm -f "$old_backup"
+    done
+    info "Backup complete: $(du -h "$BACKUP_FILE" | cut -f1)"
+fi
 
 # --- Run database migrations (core-specific) ---
 info "Running database migrations..."
