@@ -5,6 +5,18 @@ Notable changes to Venya will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Installer: upgrade-aware core re-runs.** The core installer now reports
+  the version transition (`Upgrade: X -> Y`), refuses downgrades unless
+  `VENYA_ALLOW_DOWNGRADE=yes` (alembic migrations never reverse
+  automatically — old code on a newer schema is unsupported), and takes a
+  compressed `pg_dump` backup to `/var/backups/venya/` before running
+  migrations on any version-changing re-run (failure aborts the upgrade;
+  the 3 newest backups are kept). Operator-added `VENYA_*` keys in
+  `/opt/venya/.env` now survive re-runs — the template owns only its 13
+  managed keys; preserved lines are re-appended under a marker comment.
+  Unattended re-runs no longer demand `VENYA_DB_PASSWORD`: the stored value
+  is reused like the other four secrets (an explicitly-passed mismatch
+  still aborts; fresh installs unchanged).
 - **Executor installer: the sbx agent template is warmed at install time.**
   A throwaway `sbx create`/`sbx rm --force` pair (after Docker auth and the
   deny-all policy init) caches the multi-GiB template, so the first relayed
