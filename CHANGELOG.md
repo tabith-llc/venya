@@ -5,6 +5,15 @@ Notable changes to Venya will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **CLI: factory-fresh security keys can now be registered.** A key whose
+  PIN has never been set (CTAP2 `clientPin: false`) previously dead-ended
+  `venya init` / enroll / `credential add` with a misleading "neither
+  built-in UV nor clientPin" error. The CLI now detects the unset PIN and
+  walks the operator through creating one (double entry, 4-63 bytes,
+  validated client-side, no retry-counter burn), sets it over the CTAP2
+  encrypted handshake, and continues registration without re-prompting.
+  Windows platform ceremonies are unchanged (PIN lifecycle there remains
+  the operator/vendor-tool step, per the documented Windows guidance).
 - **CLI: `venya list --json`.** The secrets list now supports the same
   `--json` flag as `audit`, `admin list`, and `exec list`, emitting the API
   envelope byte-exact (`{"secrets": [...]}` — parseable even when empty;
