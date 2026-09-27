@@ -145,6 +145,11 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="Filter by username metadata field",
     )
+    list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
+    )
 
     # delete
     delete_parser = subparsers.add_parser("delete", help="Delete a secret")
