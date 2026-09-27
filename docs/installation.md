@@ -16,6 +16,9 @@ URLs used below always resolve to the current release; pin
 | Operator workstation | `venya` CLI + `venya-mcp` (FIDO2 key attached here) | `install-venya-cli.sh` |
 | Target hosts | The machines commands ultimately run on (via SSH from executors) | none |
 
+For help sizing a deployment (executor count, measured CPU/RAM/disk/throughput),
+see the [Deployment Sizing Guide](deployment-sizing.md).
+
 Requirements: Ubuntu 24.04 LTS (tested target) on servers; PostgreSQL and
 nginx are installed automatically by the core installer; Python 3.14 is
 provisioned automatically via `uv`; a FIDO2 security key (YubiKey, TrustKey,

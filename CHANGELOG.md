@@ -5,6 +5,9 @@ Notable changes to Venya will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Docs: deployment sizing guide.** `docs/deployment-sizing.md` — how many
+  executors you need and the measured CPU/RAM/disk/throughput figures behind it
+  (concurrent-session sizing + serial-path benchmark numbers).
 - **CLI: factory-fresh security keys can now be registered.** A key whose
   PIN has never been set (CTAP2 `clientPin: false`) previously dead-ended
   `venya init` / enroll / `credential add` with a misleading "neither
