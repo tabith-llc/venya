@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
-from venya_cli.fido2_client import Fido2Auth, Fido2ClientError, Fido2NotFoundError
+from venya_cli.fido2_client import CliInteraction, Fido2Auth, Fido2ClientError, Fido2NotFoundError
 
 
 class TestFido2ClientInstantiation:
@@ -951,3 +951,360 @@ class TestWrapAttestationResponse:
         assert bytes(ar.attestation_object) == bytes(AttestationObject.create("packed", auth_data, {}))
         assert ar.client_data == b"cd"
         assert wrapper.transports is None
+
+
+class TestPinSetupNewKey:
+    """Factory-fresh security key (CTAP2 clientPin:false) registration.
+
+    Ticket cli-fido2-pin-setup-new-key. A key whose PIN has never been set
+    advertises clientPin:false (capability present, PIN NOT set) and, for the
+    clientPin-only keys this flow exists for, no built-in uv. _get_credential
+    must detect that shape (is False — not truthy), create the PIN in-ceremony
+    via _setup_key_pin (non-TTY loud-fail, 4-63 byte client-side validation
+    before any device round-trip, double entry capped at 3, single-shot
+    set_pin — blind retries burn the key's PIN-retry counter to
+    PIN_AUTH_BLOCKED), then continue the existing raw pin-only path carrying
+    the new PIN as a one-shot CliInteraction preset. All device I/O is
+    mocked — no real HID device is touched, ever.
+    """
+
+    @staticmethod
+    def _fresh_key_ctap2(mock_ctap2_cls) -> MagicMock:
+        """Factory-fresh key shape: clientPin present but False (PIN unset),
+        no built-in uv; pin_uv_protocols from the REAL ClientPin.PROTOCOLS
+        (first entry only, mirroring the handoff spec)."""
+        from fido2.client import ClientPin
+
+        mock_ctap2 = MagicMock()
+        mock_ctap2_cls.return_value = mock_ctap2
+        mock_ctap2.info.options = {"clientPin": False, "up": True, "rk": True}
+        mock_ctap2.info.pin_uv_protocols = [p.VERSION for p in ClientPin.PROTOCOLS][:1]
+        return mock_ctap2
+
+    @staticmethod
+    def _reg_options(auth: Fido2Auth):
+        return auth._build_registration_options(
+            {
+                "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                "rp": {"name": "Venya"},
+                "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                "timeout": 60000,
+            }
+        )
+
+    @patch("sys.stdin.isatty")
+    @patch("venya_cli.fido2_client.getpass")
+    @patch("venya_cli.fido2_client.ClientPin")
+    @patch.object(Fido2Auth, "_get_credential_pin_only")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.Ctap2")
+    def test_creation_flow_sets_pin_once_then_registers(
+        self,
+        mock_ctap2_cls,
+        mock_collector_cls,
+        mock_fido2_client_cls,
+        mock_list_devices,
+        mock_pin_only,
+        mock_clientpin,
+        mock_getpass,
+        mock_isatty,
+    ):
+        """T1: clientPin:false + no uv -> _setup_key_pin sets the PIN EXACTLY
+        once (set_pin is unauthenticated — one device call), then the existing
+        raw pin-only path runs (registration continues to the sentinel)."""
+        from fido2.client import ClientPin as RealClientPin
+
+        mock_isatty.return_value = True
+        mock_list_devices.return_value = ["fake_device"]
+        self._fresh_key_ctap2(mock_ctap2_cls)
+        # Patch trap: the wholesale ClientPin mock wipes PROTOCOLS (the
+        # negotiation loop iterates it) — restore the real class attribute.
+        mock_clientpin.PROTOCOLS = RealClientPin.PROTOCOLS
+        mock_getpass.getpass.side_effect = ["newpin123", "newpin123"]
+        mock_collector_cls.return_value = MagicMock()
+        sentinel = MagicMock()
+        mock_pin_only.return_value = sentinel
+
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = self._reg_options(auth)
+
+        result = auth._get_credential(options, timeout=10.0)
+
+        assert result is sentinel
+        mock_clientpin.return_value.set_pin.assert_called_once_with("newpin123")
+        mock_pin_only.assert_called_once()
+        # raw path received the Ctap2 instance built from the enumerated device
+        assert mock_pin_only.call_args[0][0] is mock_ctap2_cls.return_value
+        # high-level Fido2Client path NOT used (no built-in uv)
+        mock_fido2_client_cls.assert_not_called()
+
+    @patch("sys.stdin.isatty")
+    @patch("venya_cli.fido2_client.getpass")
+    @patch("venya_cli.fido2_client.ClientPin")
+    @patch.object(Fido2Auth, "_get_credential_pin_only")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.Ctap2")
+    def test_created_pin_carried_as_one_shot_preset(
+        self,
+        mock_ctap2_cls,
+        mock_collector_cls,
+        mock_fido2_client_cls,
+        mock_list_devices,
+        mock_pin_only,
+        mock_clientpin,
+        mock_getpass,
+        mock_isatty,
+    ):
+        """T2: the just-created PIN rides the CliInteraction into the raw path
+        as a one-shot preset — the ceremony's first request_pin consumes it,
+        so the operator never types the PIN a third time."""
+        from fido2.client import ClientPin as RealClientPin
+
+        mock_isatty.return_value = True
+        mock_list_devices.return_value = ["fake_device"]
+        self._fresh_key_ctap2(mock_ctap2_cls)
+        mock_clientpin.PROTOCOLS = RealClientPin.PROTOCOLS
+        mock_getpass.getpass.side_effect = ["newpin123", "newpin123"]
+        mock_collector_cls.return_value = MagicMock()
+        mock_pin_only.return_value = MagicMock()
+
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = self._reg_options(auth)
+
+        auth._get_credential(options, timeout=10.0)
+
+        handed_interaction = mock_pin_only.call_args[0][2]
+        assert handed_interaction.preset_pin == "newpin123"
+
+    @patch("venya_cli.fido2_client.ClientPin")
+    @patch.object(Fido2Auth, "_get_credential_pin_only")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.Ctap2")
+    def test_pin_already_set_skips_creation_flow(
+        self,
+        mock_ctap2_cls,
+        mock_collector_cls,
+        mock_fido2_client_cls,
+        mock_list_devices,
+        mock_pin_only,
+        mock_clientpin,
+    ):
+        """T3 (paired negative — GREEN-by-design pre-fix): clientPin:true (PIN
+        already set) -> the existing raw path is taken unchanged; set_pin is
+        NEVER invoked. Mirrors
+        test_get_credential_pin_only_key_dispatches_to_raw_path."""
+        mock_list_devices.return_value = ["fake_device"]
+        mock_ctap2 = MagicMock()
+        mock_ctap2_cls.return_value = mock_ctap2
+        mock_ctap2.info.options = {"clientPin": True, "up": True, "rk": True}  # no uv
+        mock_collector_cls.return_value = MagicMock()
+        sentinel = MagicMock()
+        mock_pin_only.return_value = sentinel
+
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = self._reg_options(auth)
+
+        result = auth._get_credential(options, timeout=10.0)
+
+        assert result is sentinel
+        mock_pin_only.assert_called_once()
+        # creation flow must NOT run when a PIN already exists
+        mock_clientpin.return_value.set_pin.assert_not_called()
+        mock_fido2_client_cls.assert_not_called()
+
+    @patch("sys.stdin.isatty")
+    @patch("venya_cli.fido2_client.getpass")
+    @patch("venya_cli.fido2_client.ClientPin")
+    @patch.object(Fido2Auth, "_get_credential_pin_only")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.Ctap2")
+    def test_mismatched_entries_abort_after_three_attempts(
+        self,
+        mock_ctap2_cls,
+        mock_collector_cls,
+        mock_fido2_client_cls,
+        mock_list_devices,
+        mock_pin_only,
+        mock_clientpin,
+        mock_getpass,
+        mock_isatty,
+    ):
+        """T4: double-entry mismatch three times -> loud abort; set_pin NEVER
+        called — confirmation mismatches are caught client-side and burn no
+        device retry counter."""
+        from fido2.client import ClientPin as RealClientPin
+
+        mock_isatty.return_value = True
+        mock_list_devices.return_value = ["fake_device"]
+        self._fresh_key_ctap2(mock_ctap2_cls)
+        mock_clientpin.PROTOCOLS = RealClientPin.PROTOCOLS
+        # 3 attempts, each a mismatched pair (all 4 bytes — length is fine)
+        mock_getpass.getpass.side_effect = ["aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff"]
+        mock_collector_cls.return_value = MagicMock()
+
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = self._reg_options(auth)
+
+        with pytest.raises(Fido2ClientError, match="aborted after 3 failed attempts"):
+            auth._get_credential(options, timeout=10.0)
+
+        mock_clientpin.return_value.set_pin.assert_not_called()
+        mock_pin_only.assert_not_called()
+
+    @patch("sys.stdin.isatty")
+    @patch("venya_cli.fido2_client.getpass")
+    @patch("venya_cli.fido2_client.ClientPin")
+    @patch.object(Fido2Auth, "_get_credential_pin_only")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.Ctap2")
+    def test_short_pin_rejected_client_side_before_device(
+        self,
+        mock_ctap2_cls,
+        mock_collector_cls,
+        mock_fido2_client_cls,
+        mock_list_devices,
+        mock_pin_only,
+        mock_clientpin,
+        mock_getpass,
+        mock_isatty,
+        capsys,
+    ):
+        """T5: 3-byte PIN (below the 4-byte floor) x3 -> client-side length
+        rejection before ANY device round-trip; loud abort, stderr carries the
+        4-63 message, set_pin never called."""
+        from fido2.client import ClientPin as RealClientPin
+
+        mock_isatty.return_value = True
+        mock_list_devices.return_value = ["fake_device"]
+        self._fresh_key_ctap2(mock_ctap2_cls)
+        mock_clientpin.PROTOCOLS = RealClientPin.PROTOCOLS
+        mock_getpass.getpass.side_effect = ["abc", "abc", "abc", "abc", "abc", "abc"]
+        mock_collector_cls.return_value = MagicMock()
+
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = self._reg_options(auth)
+
+        with pytest.raises(Fido2ClientError, match="aborted after 3 failed attempts"):
+            auth._get_credential(options, timeout=10.0)
+
+        mock_clientpin.return_value.set_pin.assert_not_called()
+        mock_pin_only.assert_not_called()
+        assert "4-63" in capsys.readouterr().err
+
+    @patch("sys.stdin.isatty")
+    @patch("venya_cli.fido2_client.getpass")
+    @patch("venya_cli.fido2_client.ClientPin")
+    @patch.object(Fido2Auth, "_get_credential_pin_only")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.Ctap2")
+    def test_non_tty_fails_loud_before_any_prompt(
+        self,
+        mock_ctap2_cls,
+        mock_collector_cls,
+        mock_fido2_client_cls,
+        mock_list_devices,
+        mock_pin_only,
+        mock_clientpin,
+        mock_getpass,
+        mock_isatty,
+    ):
+        """T6: non-TTY (piped/headless) -> explicit 'interactive terminal'
+        error before any prompt; getpass and set_pin never reached, no hang."""
+        from fido2.client import ClientPin as RealClientPin
+
+        mock_isatty.return_value = False
+        mock_list_devices.return_value = ["fake_device"]
+        self._fresh_key_ctap2(mock_ctap2_cls)
+        mock_clientpin.PROTOCOLS = RealClientPin.PROTOCOLS
+        mock_collector_cls.return_value = MagicMock()
+
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = self._reg_options(auth)
+
+        with pytest.raises(Fido2ClientError, match="interactive terminal"):
+            auth._get_credential(options, timeout=10.0)
+
+        mock_getpass.getpass.assert_not_called()
+        mock_clientpin.return_value.set_pin.assert_not_called()
+        mock_pin_only.assert_not_called()
+
+    @patch("sys.stdin.isatty")
+    @patch("venya_cli.fido2_client.getpass")
+    @patch("venya_cli.fido2_client.ClientPin")
+    @patch.object(Fido2Auth, "_get_credential_pin_only")
+    @patch("venya_cli.fido2_client.list_devices")
+    @patch("venya_cli.fido2_client.Fido2Client")
+    @patch("venya_cli.fido2_client.DefaultClientDataCollector")
+    @patch("venya_cli.fido2_client.Ctap2")
+    def test_device_refusal_is_single_shot_no_retry(
+        self,
+        mock_ctap2_cls,
+        mock_collector_cls,
+        mock_fido2_client_cls,
+        mock_list_devices,
+        mock_pin_only,
+        mock_clientpin,
+        mock_getpass,
+        mock_isatty,
+    ):
+        """T7: set_pin device refusal -> loud converted error, set_pin called
+        EXACTLY once — a loop retry here would burn the key's PIN-retry
+        counter to PIN_AUTH_BLOCKED (session-4 lesson)."""
+        from fido2.client import ClientPin as RealClientPin
+        from fido2.ctap import CtapError
+
+        mock_isatty.return_value = True
+        mock_list_devices.return_value = ["fake_device"]
+        self._fresh_key_ctap2(mock_ctap2_cls)
+        mock_clientpin.PROTOCOLS = RealClientPin.PROTOCOLS
+        mock_getpass.getpass.side_effect = ["newpin123", "newpin123"]
+        mock_collector_cls.return_value = MagicMock()
+        mock_clientpin.return_value.set_pin.side_effect = CtapError(CtapError.ERR.PIN_INVALID)
+
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        options = self._reg_options(auth)
+
+        with pytest.raises(Fido2ClientError, match="Setting the key PIN failed") as exc_info:
+            auth._get_credential(options, timeout=10.0)
+
+        assert isinstance(exc_info.value.__cause__, CtapError)
+        assert mock_clientpin.return_value.set_pin.call_count == 1
+        mock_pin_only.assert_not_called()
+
+    @patch("sys.stdin.isatty")
+    @patch("venya_cli.fido2_client.getpass")
+    def test_preset_pin_is_one_shot(
+        self,
+        mock_getpass,
+        mock_isatty,
+    ):
+        """T8 (direct CliInteraction unit): the preset PIN answers the FIRST
+        request_pin and is consumed — the second call falls through to the
+        normal hidden-input prompt."""
+        from fido2.client import ClientPin
+
+        mock_isatty.return_value = True
+        mock_getpass.getpass.return_value = "typed"
+
+        interaction = CliInteraction()
+        interaction.preset_pin = "x"
+
+        first = interaction.request_pin(ClientPin.PERMISSION.MAKE_CREDENTIAL, "venya-core-1")
+        second = interaction.request_pin(ClientPin.PERMISSION.MAKE_CREDENTIAL, "venya-core-1")
+
+        assert first == "x"
+        assert second == "typed"
+        assert interaction.preset_pin is None
