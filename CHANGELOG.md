@@ -5,6 +5,11 @@ Notable changes to Venya will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **CLI: `venya list --json`.** The secrets list now supports the same
+  `--json` flag as `audit`, `admin list`, and `exec list`, emitting the API
+  envelope byte-exact (`{"secrets": [...]}` — parseable even when empty;
+  keys and metadata only, never values). Human table output is unchanged
+  without the flag.
 - **Installer: upgrade-aware core re-runs.** The core installer now reports
   the version transition (`Upgrade: X -> Y`), refuses downgrades unless
   `VENYA_ALLOW_DOWNGRADE=yes` (alembic migrations never reverse

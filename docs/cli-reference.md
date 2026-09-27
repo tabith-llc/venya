@@ -176,6 +176,7 @@ venya list [PREFIX] [OPTIONS]
 | `--executor` | no | string | — | Filter by executor metadata field |
 | `--purpose` | no | string | — | Filter by purpose metadata field |
 | `--username` | no | string | — | Filter by username metadata field |
+| `--json` | no | flag | false (flag) | Output in JSON format |
 
 **Examples**
 
@@ -183,6 +184,7 @@ venya list [PREFIX] [OPTIONS]
 venya list  # all secrets visible to you
 venya list db/  # keys under the db/ prefix
 venya list --purpose ci  # filter by a metadata field
+venya list --json  # machine-readable result
 ```
 
 ## `venya delete`
