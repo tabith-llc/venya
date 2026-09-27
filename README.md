@@ -232,7 +232,7 @@ Production deployment guide: **[Installation Guide](docs/installation.md)**
 - Windows — **Workstation CLI only** (core and executor are Linux). Machine-wide install via `install-venya-cli.ps1` requires Administrator; standard users run the CLI after install. FIDO2 ceremonies work for standard users via the platform WebAuthn API (verified Windows 11 25H2). Interactive desktop only — headless Windows is unsupported
 - PostgreSQL — installed automatically by the core installer (16 on Ubuntu 24.04)
 - Python 3.14 — pinned (`>=3.14,<3.15`); provisioned automatically via uv
-- FIDO2 security key (YubiKey, SoloKeys, etc.)
+- FIDO2 security key — Tabith LLC recommends Yubico YubiKey® for Venya
 - Docker Sandboxes (sbx) — installed automatically by the executor installer; **a Docker account is required** (username + API key/access token at install time, stdin-only): sbx pulls its agent template from Docker Hub, so executor installs need a Docker account and outbound access to Docker Hub. **Executor hosts need hardware-virtualization access (`/dev/kvm`) — sbx runs microVMs; VM deployments require nested virtualization enabled**
 - MCP-compatible AI client (Claude Code, Cursor)
 
@@ -298,9 +298,7 @@ the per-release records, not here (they rot with every merge).
   tools by hand and see the redaction proof yourself.
 - **Verified MCP clients:** [opencode](https://opencode.com) and local LLMs
   via [omlx.ai](https://omlx.ai) — both drive `venya-mcp` as a stdio server.
-- **Hardware:** FIDO2 ceremonies verified with the Yubico **Security Key C
-  NFC** — Basic Compatibility, MFA security key and passkey, USB-C or NFC,
-  FIDO Certified.
+- **Hardware:** FIDO2 ceremonies verified with Yubico Security Keys.
 - **Longer timeouts for testing:** default session idle is 15 min and executor
   enrollment tokens expire in 30 min. For relaxed test runs, append to
   `/opt/venya/.env` on the core, restart, and **re-login** (existing sessions
@@ -385,3 +383,5 @@ See [LICENSE](LICENSE) for the full terms. Contributions are accepted under the 
 ---
 
 *Venya™ is a trademark pending with the USPTO, owned by Tabith LLC. This software is in alpha and not yet certified for regulated environments. Security claims on this page describe design properties of the software, not formal attestations.*
+
+*Tabith LLC recommends YubiKey® security keys for Venya. Yubico and YubiKey are registered trademarks of Yubico AB. All other trademarks are the property of their respective owners.*
