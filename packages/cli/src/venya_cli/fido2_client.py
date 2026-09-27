@@ -309,7 +309,9 @@ class Fido2Auth:
                     if e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
                         raise Fido2ClientError(
                             "Security key has no PIN set and cannot verify the user "
-                            "another way. Set a PIN on the key (e.g. yubikey-manager), "
+                            "another way. Venya creates a key's PIN during registration — "
+                            "run venya credential add for this key (first enrollment: "
+                            "venya enroll <token>) and enter the PIN when prompted, "
                             "then try again."
                         ) from e
                     raise
@@ -397,9 +399,9 @@ class Fido2Auth:
                 if isinstance(e, ClientError):
                     if e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
                         raise Fido2ClientError(
-                            "Security key has no PIN set and cannot verify the user "
-                            "another way. Set a PIN on the key (e.g. yubikey-manager), "
-                            "then try again."
+                            "Security key reports PIN support but has no PIN set. "
+                            "Venya creates a key's PIN during registration — "
+                            "power-cycle the key and re-run, or use a fresh key."
                         ) from e
                     raise
                 if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
