@@ -1591,7 +1591,9 @@ def _elevate(client: APIClient) -> str:
                     if e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
                         raise APIClientError(
                             "Security key has no PIN set and cannot verify the user "
-                            "another way. Set a PIN on the key (e.g. yubikey-manager), "
+                            "another way. Venya creates a key's PIN during registration — "
+                            "run venya credential add for this key (first enrollment: "
+                            "venya enroll <token>) and enter the PIN when prompted, "
                             "then try again."
                         ) from e
                     raise
