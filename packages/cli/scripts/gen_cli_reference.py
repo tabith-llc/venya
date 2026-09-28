@@ -57,6 +57,7 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
         (["list"], "all secrets visible to you"),
         (["list", "db/"], "keys under the db/ prefix"),
         (["list", "--purpose", "ci"], "filter by a metadata field"),
+        (["list", "--json"], "machine-readable result"),
     ],
     ("delete",): [
         (["delete", "db/password"], "delete a secret (fails if still referenced by an execution session)"),

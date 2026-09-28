@@ -11,10 +11,13 @@ URLs used below always resolve to the current release; pin
 
 | Node | Role | Installer |
 |---|---|---|
-| Core server (1) | FastAPI vault + API behind nginx TLS, PostgreSQL, CA authority | `install-venya-core.sh` |
+| Core server (1) | FastAPI secret store + API behind nginx TLS, PostgreSQL, CA authority | `install-venya-core.sh` |
 | Executor host (1..n) | Sandboxed command execution daemon, secret injection, redaction | `install-venya-executor.sh` |
 | Operator workstation | `venya` CLI + `venya-mcp` (FIDO2 key attached here) | `install-venya-cli.sh` |
 | Target hosts | The machines commands ultimately run on (via SSH from executors) | none |
+
+For help sizing a deployment (executor count, measured CPU/RAM/disk/throughput),
+see the [Deployment Sizing Guide](deployment-sizing.md).
 
 Requirements: Ubuntu 24.04 LTS (tested target) on servers; PostgreSQL and
 nginx are installed automatically by the core installer; Python 3.14 is
@@ -24,8 +27,9 @@ hardware-virtualization access (`/dev/kvm`, `kvm` group)** — sbx runs each
 command in a microVM. If the executor itself is a virtual machine, nested
 virtualization must be enabled in the hypervisor; without it the install
 completes but every sandboxed execution fails. Executor hosts also need a few
-GiB free on the state volume before the first `sbx create` — the agent-template
-pull fails below ~3.5 GiB (observed floor).
+GiB free on the state volume — the installer warms the agent template at
+install time (a throwaway `sbx create`), and the pull fails below ~3.5 GiB
+free (observed floor).
 
 **Host separation is enforced, not advisory.** Each installer detects the
 OTHER component system-wide and **refuses (exit 1) before any prompt or
@@ -246,7 +250,11 @@ under the service account's home). Without credentials the installer
 The installer also starts `venya-sandboxd.service` (the sbx daemon,
 persistent across reboots, ordered before `venya-executor.service`) and
 initializes the sbx global network policy to **deny-all** (per-sandbox
-allow rules come from the egress allowlist at execution time).
+allow rules come from the egress allowlist at execution time). The installer
+then **warms the agent template** with a throwaway sandbox (multi-GiB pull,
+once per host) so the first relayed command is seconds-scale; a failed warm
+is non-fatal — loud warning, and the first command falls back to the cold
+pull path.
 
 The sandbox DNS resolver is explicit config — `VENYA_DNS_RESOLVER` (required,
 no default; strict IPv4, validated before any write). It is the resolver IP
@@ -424,11 +432,18 @@ procedure exists but is not yet packaged.
 
 - `502` from nginx immediately after core install: give the backend a few
   seconds to bind; re-probe `api/v1/health`.
-- **First** `run_command`/`venya run` after an executor install times out
-  client-side: the first sandbox create pulls the agent template (~60 s+).
-  The command usually still completes server-side — check the executor
-  journal (`journalctl -u venya-executor`) and the target's actual state
-  before retrying; the warm rerun is seconds-scale.
+- **First** `run_command`/`venya run` after an executor install is
+  seconds-scale: the installer warms the sbx agent template at install time
+  (throwaway sandbox, after Docker auth and policy init). If the warm failed
+  or was skipped (`VENYA_SKIP_DOCKER_LOGIN=yes` degraded install), the first
+  sandbox create pulls the multi-GiB template instead: ~60–90 s on a fast
+  uplink — slow, but inside the timeout chain (executor create cap 240 s <
+  relay 300 s < nginx 330 s < client 340 s). On uplinks slower than the
+  create cap, the first create fails with an explicit executor-side error;
+  re-run the installer (idempotent) or warm by hand with a throwaway
+  `sbx create` + `sbx rm --force` pair. Whenever a run looks like it failed,
+  check the executor journal (`journalctl -u venya-executor`) and the
+  target's actual state before retrying.
 - `503` with `Not authenticated to Docker` in the executor journal: sbx
   login missing/expired — rerun the installer with Docker credentials or
   `sudo -H -u venya sbx login` on the executor.

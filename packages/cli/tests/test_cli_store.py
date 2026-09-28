@@ -184,7 +184,14 @@ class TestCmdStoreStdin:
         client, config_file, mock_http = self._client_with_post()
         try:
             assert cmd_store(client, _make_args(value="-", key_version="v1")) == 0
-            assert _post_payload(mock_http)["value"] == "piped-secret"  # trailing newline stripped
+            # Byte-exact stdin carriage (ticket cli-store-stdin-rstrip-pem-corruption,
+            # option (a) ruling): the trailing newline is PART of the piped bytes and
+            # is stored as-is. The former rstrip corrupted PEM keys (OpenSSH >= 10
+            # rejects an unterminated armor file: "error in libcrypto"). echo-pipers
+            # wanting no trailing newline use `printf %s`. Line-based consumers
+            # (sshpass -f, sudo -S) and the filter's trimmed-hash variant are
+            # trailing-newline tolerant, so masking and consumption are unaffected.
+            assert _post_payload(mock_http)["value"] == "piped-secret\n"
         finally:
             client.close()
             config_file.unlink()
@@ -197,7 +204,47 @@ class TestCmdStoreStdin:
         client, config_file, mock_http = self._client_with_post()
         try:
             assert cmd_store(client, _make_args(value=None, key_version="v1")) == 0
-            assert _post_payload(mock_http)["value"] == "s3cret"
+            # Byte-exact: CRLF carriage is the piper's bytes, stored verbatim
+            # (ticket cli-store-stdin-rstrip-pem-corruption).
+            assert _post_payload(mock_http)["value"] == "s3cret\r\n"
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_piped_multiline_pem_stored_byte_exact(self, monkeypatch):
+        """RED cell for the fix: a PEM-shaped multi-line value with its
+        terminating newline must survive storage byte-for-byte — the stripped
+        form is unloadable by OpenSSH >= 10 (ticket
+        cli-store-stdin-rstrip-pem-corruption; field-verified on tvc/tve)."""
+        import io
+        import sys
+
+        pem = (
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n"  # pragma: allowlist secret
+            "fake-line-one-fake-line-one-fake-line-one-fake-line-one-fake\n"
+            "fake-line-two-fake-line-two-fake-line-two-fake-line-two-fake\n"
+            "-----END OPENSSH PRIVATE KEY-----\n"  # pragma: allowlist secret
+        )
+        monkeypatch.setattr(sys, "stdin", io.StringIO(pem))
+        client, config_file, mock_http = self._client_with_post()
+        try:
+            assert cmd_store(client, _make_args(value="-", key_version="v1")) == 0
+            assert _post_payload(mock_http)["value"] == pem
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_piped_value_without_trailing_newline_not_extended(self, monkeypatch):
+        """Paired negative: byte-exact means NO newline invention either — a
+        value piped without a terminating newline is stored without one."""
+        import io
+        import sys
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO("no-newline-value"))
+        client, config_file, mock_http = self._client_with_post()
+        try:
+            assert cmd_store(client, _make_args(value="-", key_version="v1")) == 0
+            assert _post_payload(mock_http)["value"] == "no-newline-value"
         finally:
             client.close()
             config_file.unlink()

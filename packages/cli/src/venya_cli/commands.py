@@ -255,13 +255,18 @@ def cmd_store(client: APIClient, args: Any) -> int:
     (omitted value with interactive stdin). The stdin/prompt paths keep the
     value out of argv — /proc/*/cmdline and shell history are not secret
     stores (ticket cli-store-stdin-help-false; same stdin-carriage discipline
-    the installers use for passwords). Trailing newline stripped from piped
-    input (``echo`` convention).
+    the installers use for passwords). Piped stdin is stored BYTE-EXACT —
+    no trailing-newline stripping (ticket cli-store-stdin-rstrip-pem-corruption:
+    the former rstrip corrupted PEM keys, which OpenSSH >= 10 refuses to load
+    unterminated). ``echo pass |`` therefore stores a trailing newline —
+    harmless for line-based consumers (sshpass -f, sudo -S) and output masking
+    (trimmed-hash filter variant); use ``printf %s pass |`` for byte-exact
+    single-line values.
     """
     value = args.value
     if value is None or value == "-":
         if value == "-" or not sys.stdin.isatty():
-            value = sys.stdin.read().rstrip("\r\n")
+            value = sys.stdin.read()
         else:
             value = getpass.getpass("Secret value (input hidden): ")
         if not value:
@@ -379,6 +384,15 @@ def cmd_list(client: APIClient, args: Any) -> int:
 
         result = client.get("/api/v1/secrets", params=params)
         secrets = result.get("secrets", [])
+
+        # --json: byte-exact passthrough of the API envelope (keys+metadata,
+        # never values). BEFORE the empty check on purpose: an empty store
+        # must still emit parseable JSON ({"secrets": []}) — the cmd_audit
+        # branch sits after its empty check and prints a human string there;
+        # that quirk is flagged in ticket cli-list-json-output, not copied.
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2))
+            return 0
 
         if not secrets:
             print("No secrets found.")
@@ -1577,7 +1591,9 @@ def _elevate(client: APIClient) -> str:
                     if e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
                         raise APIClientError(
                             "Security key has no PIN set and cannot verify the user "
-                            "another way. Set a PIN on the key (e.g. yubikey-manager), "
+                            "another way. Venya creates a key's PIN during registration — "
+                            "run venya credential add for this key (first enrollment: "
+                            "venya enroll <token>) and enter the PIN when prompted, "
                             "then try again."
                         ) from e
                     raise

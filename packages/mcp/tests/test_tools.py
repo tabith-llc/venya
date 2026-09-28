@@ -108,6 +108,40 @@ async def test_list_secrets_absent_shape_usage_render_no_fields() -> None:
     assert "usage:" not in text
 
 
+async def test_list_secrets_renders_host_metadata() -> None:
+    """Stored `host` metadata renders beside username: the target of a usage
+    template must be completable from the listing itself, not only from the
+    human's prompt (live-cell evidence 2026-09-25: host=venya.ai stored but
+    invisible in the rendering)."""
+    mock = _make_mock_client()
+    mock.list_secrets = AsyncMock(
+        return_value=[
+            {
+                "id": 11,
+                "key": "web_sudo",
+                "metadata": {
+                    "executor": "tve",
+                    "purpose": "webhost",
+                    "username": "bot",
+                    "host": "venya.ai",
+                },
+            },
+        ]
+    )
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        result = await call_tool("list_secrets", {})
+    assert "host: venya.ai" in result[0].text
+
+
+async def test_list_secrets_absent_host_renders_no_field() -> None:
+    """Paired negative: no host metadata → no field (no 'host: N/A' noise)."""
+    mock = _make_mock_client()
+    mock.list_secrets = AsyncMock(return_value=[{"id": 3, "key": "plain_key", "metadata": {"executor": "web-3"}}])
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        result = await call_tool("list_secrets", {})
+    assert "host:" not in result[0].text
+
+
 async def test_list_secrets_never_renders_a_value_field() -> None:
     """Security pin (defense in depth): even if an API response ever carried
     a value field, the renderer prints only known non-value fields."""

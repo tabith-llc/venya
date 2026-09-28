@@ -318,6 +318,37 @@ else
     warn "sbx policy init deny-all failed or policy already initialized — verify manually if sandbox creates fail"
 fi
 
+# --- sbx agent-template warm (ticket sbx-cold-start-prepull) ---
+# The first `sbx create` on a fresh host pulls the multi-GiB `shell` agent
+# template inside the first relayed command's request path (~60-90 s on a
+# fast uplink; longer on slow links). Warm the cache here with a throwaway
+# sandbox so every real command takes the ~5 s cached path. Prereq order is
+# load-bearing: Docker auth + sandboxd + deny-all policy init all precede
+# this (a create without the global policy fails). Failure is NON-FATAL by
+# design: the product still works, the first run is merely slow (the pre-fix
+# behavior) — warn loudly and continue. Skipped under the documented
+# degraded install (no Docker auth → the pull cannot work).
+if [ "${VENYA_SKIP_DOCKER_LOGIN:-}" = "yes" ]; then
+    info "Skipping agent-template warm (VENYA_SKIP_DOCKER_LOGIN=yes — no Docker auth)."
+else
+    info "Warming sbx agent template (throwaway sandbox; multi-GiB pull on a fresh host can take several minutes)..."
+    WARM_SANDBOX="venya-install-warm"
+    sudo -H -u venya mkdir -p /home/venya/.venya-workspaces 2>/dev/null || true
+    WARM_WS="$(sudo -H -u venya mktemp -d /home/venya/.venya-workspaces/warm.XXXXXX 2>/dev/null || true)"
+    # Clear a stale warm sandbox from a previous failed run (create would refuse the name).
+    sudo -H -u venya sbx rm --force "$WARM_SANDBOX" < /dev/null > /dev/null 2>&1 || true
+    if [ -n "$WARM_WS" ] && timeout 1800 sudo -H -u venya sbx create --name "$WARM_SANDBOX" shell "$WARM_WS" < /dev/null > /dev/null 2>&1; then
+        info "Agent template warm (first sandbox create is now seconds-scale)"
+    else
+        warn "Agent-template warm FAILED — the first sandbox execution will pull the template itself (~60-90 s+; slow but within the timeout chain). Check disk free (>= ~3.5 GiB), Docker auth, and: sudo -H -u venya sbx diagnose"
+        warn "Manual warm: sudo -H -u venya sbx create --name warm shell <existing-empty-dir> && sudo -H -u venya sbx rm --force warm"
+    fi
+    sudo -H -u venya sbx rm --force "$WARM_SANDBOX" < /dev/null > /dev/null 2>&1 || true
+    if [ -n "$WARM_WS" ]; then
+        sudo -H -u venya rmdir "$WARM_WS" < /dev/null 2>/dev/null || true
+    fi
+fi
+
 # --- Resolve Core Hostname ---
 # CORE_HOSTNAME is the relay CN-derivation base: the core signs its
 # relay-client cert with CN="${CORE_HOSTNAME}-relay". Formula: explicit
@@ -642,8 +673,10 @@ echo "  carry the SAME CN, or relay calls are rejected at handshake (403)."
 echo "  Verify on the core:"
 echo "    openssl x509 -in /etc/venya/relay/relay-client.crt -noout -subject"
 echo ""
-echo "  Fail-closed: an empty allowlist prevents the relay listener from"
-echo "  binding at all (ERROR at daemon start). A mismatch means closed,"
-echo "  never open."
+echo "  Safe by design: the relay opens only when correctly wired. An empty"
+echo "  allowlist means the relay listener stays down (noted when the daemon"
+echo "  starts), and a CN mismatch is refused at the handshake - both keep"
+echo "  the relay closed rather than open. That is the intended, secure"
+echo "  outcome, not a fault."
 echo "==============================================================="
 echo ""

@@ -307,6 +307,10 @@ class CertificateManager:
             self.serial,
             self._not_after.isoformat(),
         )
+        # Stash the propagated policy payload for the daemon to apply
+        # (ticket command-policy-no-server-executor-propagation — the
+        # daemon owns the validator; CertificateManager only carries bytes).
+        self.last_command_policy = data.get("command_policy")
 
     def needs_rotation(self) -> bool:
         """Check if the certificate needs rotation.
@@ -859,6 +863,14 @@ class ExecutorDaemon:
             policy=build_command_policy(cv),
         )
 
+        # Server-propagated command policy (ticket
+        # command-policy-no-server-executor-propagation): signature of the last
+        # payload applied via update_policy(); None = the toml-built policy is
+        # still the live one. Fail-closed semantics: absence of the payload
+        # NEVER reverts to toml mid-run — the last applied server policy sticks
+        # until daemon restart (restart re-bootstraps from toml).
+        self._applied_server_policy_sig: tuple | None = None
+
         # Certificate manager — client created after registration
         self.cert_manager = CertificateManager(config)
 
@@ -1065,6 +1077,13 @@ class ExecutorDaemon:
         # never self.client. After registration, certs are on disk.
         enrollment_token = self._resolve_bootstrap_token()
         self.cert_manager.register(self.state.executor_id, enrollment_token=enrollment_token)
+        # Registration carries the same additive policy field as the
+        # heartbeat; apply it before the first beat so a fresh install
+        # enforces the core's policy from its very first command.
+        self._maybe_apply_server_policy(
+            {"command_policy": getattr(self.cert_manager, "last_command_policy", None)},
+            "registration",
+        )
 
         # Clear the consumed bootstrap token (both locations) after successful
         # registration — once per start(), never per loop iteration.
@@ -1194,6 +1213,77 @@ class ExecutorDaemon:
             return
         self._heartbeat_future = self._http_executor.submit(self._send_heartbeat)
 
+    def _maybe_apply_server_policy(self, data: Any, source: str) -> None:
+        """Apply a core-propagated command policy if present and changed.
+
+        Ticket command-policy-no-server-executor-propagation (owner ruling (a)
+        2026-09-26): the server's 'default' policy row rides the registration
+        and heartbeat responses; this is the consumer that makes
+        `set-command-policy`/`add-allowed-command` actually enforce.
+
+        Advisory-channel discipline (same as the revoked flag): a malformed
+        payload never kills registration or the heartbeat — it is logged and
+        the current policy stays. Change detection: identical payloads apply
+        ONCE; a changed row re-applies on the next beat (~30 s). Absence/null
+        means "no server policy" — the toml-built (or last applied) policy is
+        kept; it never reverts mid-run (fail-closed).
+        """
+        if not isinstance(data, dict):
+            return
+        payload = data.get("command_policy")
+        if payload is None:
+            return
+        if not isinstance(payload, dict):
+            logger.error("Server command policy from %s is not an object — keeping current policy", source)
+            return
+        preset = payload.get("preset")
+        if preset not in ("permissive", "balanced", "strict"):
+            logger.error(
+                "Server command policy from %s has unknown preset %r — keeping current policy",
+                source,
+                preset,
+            )
+            return
+        allowed_raw = payload.get("allowed_commands")
+        patterns_raw = payload.get("dangerous_patterns")
+        if allowed_raw is not None and not isinstance(allowed_raw, list):
+            logger.error("Server command policy from %s: allowed_commands is not a list — keeping current", source)
+            return
+        if patterns_raw is not None and not isinstance(patterns_raw, list):
+            logger.error("Server command policy from %s: dangerous_patterns is not a list — keeping current", source)
+            return
+        allowed = frozenset(str(c) for c in (allowed_raw or []))
+        patterns = frozenset(str(p) for p in patterns_raw) if patterns_raw is not None else None
+        sig = (
+            preset,
+            tuple(sorted(allowed)),
+            tuple(sorted(patterns)) if patterns is not None else None,
+            str(payload.get("updated_at", "")),
+        )
+        if sig == self._applied_server_policy_sig:
+            return
+        # Preset semantics mirror build_command_policy exactly: balanced gets
+        # the trusted-path floor; strict enforces the allowlist; permissive
+        # skips path checks. A server pattern list REPLACES the built-in
+        # defaults (the same authority the local toml has); null keeps them.
+        trusted = frozenset(DEFAULT_TRUSTED_PATHS) if preset == "balanced" else frozenset()
+        self.command_validator.update_policy(
+            CommandPolicy(
+                preset=preset,
+                allowed_commands=allowed,
+                trusted_paths=trusted,
+                dangerous_patterns=patterns if patterns is not None else frozenset(DEFAULT_DANGEROUS_PATTERNS),
+            )
+        )
+        self._applied_server_policy_sig = sig
+        logger.info(
+            "Applied server command policy from %s: preset=%s allowed=%d dangerous=%s",
+            source,
+            preset,
+            len(allowed),
+            "custom" if patterns is not None else "built-in-default",
+        )
+
     def _send_heartbeat(self) -> None:
         """Send heartbeat to server.
 
@@ -1218,15 +1308,19 @@ class ExecutorDaemon:
             # F3 ride-along — the daemon previously discarded it): a fast
             # cooperative stop between revocation-list polls. Advisory channel:
             # a malformed body never kills the beat; the poll stays the
-            # authoritative stop signal.
+            # authoritative stop signal. The command-policy payload rides the
+            # same advisory discipline (ticket
+            # command-policy-no-server-executor-propagation).
             try:
-                if resp.json().get("revoked"):
+                data = resp.json()
+                if data.get("revoked"):
                     logger.warning(
                         "Heartbeat reports this executor REVOKED — shutting down "
                         "(server-side revocation state; identity or current serial "
                         "was revoked — see the revocation list for detail)."
                     )
                     self.state.revoked = True
+                self._maybe_apply_server_policy(data, "heartbeat")
             except ValueError:
                 pass
         except httpx2.RequestError:

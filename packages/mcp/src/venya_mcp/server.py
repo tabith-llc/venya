@@ -202,6 +202,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 parts.append(f"executor: {meta.get('executor', 'N/A')}")
                 parts.append(f"purpose: {meta.get('purpose', 'N/A')}")
                 parts.append(f"username: {meta.get('username', 'N/A')}")
+                # host renders only when stored (no N/A noise): it is the
+                # target of the usage template's {host} placeholder, so the
+                # agent can complete the command from the listing alone.
+                host = meta.get("host")
+                if isinstance(host, str) and host:
+                    parts.append(f"host: {host}")
                 shape = meta.get("shape")
                 if isinstance(shape, str) and shape:
                     parts.append(f"shape: {shape}")

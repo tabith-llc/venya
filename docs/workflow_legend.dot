@@ -25,7 +25,7 @@ digraph workflow_legend {
         /* Row 1 */
         { rank=same;
           ls_tool [label="Tool Call\n(run_command, list_executors, etc.)", shape=box3d, style=filled, fillcolor="#fff3cd", fontsize=10, width=2.5, height=1.2];
-          ls_secret [label="Secret\n(credentials vault)", shape=cylinder, style=filled, fillcolor="#f5c6cb", fontsize=10, width=2.5, height=1.2];
+          ls_secret [label="Secret\n(credential store)", shape=cylinder, style=filled, fillcolor="#f5c6cb", fontsize=10, width=2.5, height=1.2];
           ls_infra [label="Infrastructure\n(host, NAS, DR site)", shape=diamond, style=filled, fillcolor="#d1ecf1", fontsize=10, width=2.5, height=1.2];
         }
 

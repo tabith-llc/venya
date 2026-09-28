@@ -7,7 +7,7 @@ through Venya. Read this once, fully, before your first tool call.
 
 ## What Venya is
 
-Venya brokers privileged operations: credentials stay in its vault, commands
+Venya brokers privileged operations: credentials stay in its store, commands
 run in sandboxed executors, secrets are injected inside the sandbox, and
 output is filtered before it reaches you. A human authorized your session
 with a physical FIDO2 key. Every action you take is audited and attributed

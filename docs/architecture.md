@@ -13,7 +13,7 @@ for the threat-model pitch see the [README](../README.md).
 │ FIDO2 security key      │  Bearer   │  └─ proxy → uvicorn 127.0.0.1    │
 └─────────────────────────┘           │ FastAPI server (packages/server) │
         ▲ stdio (MCP)                 │  ├─ FIDO2/WebAuthn ceremonies    │
-┌───────┴─────────────────┐           │  ├─ secrets vault (envelope enc) │
+┌───────┴─────────────────┐           │  ├─ secret store (envelope enc) │
 │ LLM client              │           │  ├─ RBAC + audit log             │
 │ (Claude Code, Cursor…)  │           │  └─ CA services (root/admin CA)  │
 └─────────────────────────┘           │ PostgreSQL (secrets, audit, IAM) │
@@ -116,7 +116,7 @@ unauthenticated transport.
     (Stage 1) replaces any occurrence of secret material with
     `[REDACTED:...]`, then the server-side **definitive** filter (Stage 2,
     `POST /api/v1/sessions/{id}/filter` over executor mTLS) re-screens the
-    UNFILTERED bytes with the vault's own knowledge and its answer is
+    UNFILTERED bytes with the store's own knowledge and its answer is
     adopted. Stage 2 fails **closed**: an unknown or TTL-reaped session gets
     404, and the executor keeps the Stage-1-masked output — a filter failure
     never returns raw bytes.
@@ -132,7 +132,17 @@ text** (`sshpass -p <pw>`, `--password=…`, `echo <token> | …`): it lands in
 those sinks, and on the target it is exposed via `/proc/<pid>/cmdline` and
 shell history. The blessed shape is file injection —
 `sshpass -f /run/secrets/venya/<id> ssh …` — which keeps the secret off
-every command-line surface. Operator behavior is the primary control here;
+every command-line surface. When authoring usage templates for ssh-carried
+commands, mind a second trap: ssh re-joins the remote command's arguments
+with spaces **without re-quoting**, so an empty or space-bearing argument
+vanishes or splits remotely — `sudo -S -p ''` arrives as `sudo -S -p` and
+sudo swallows the next token as its prompt string (usage error, exit 1).
+Omit `-p ''`; the remote sudo prompt text on stderr is harmless and carries
+no secret. Carry `-o StrictHostKeyChecking=accept-new` in ssh-based
+templates: every sandbox starts with no `known_hosts`, and without the
+option the first connection to a host fails **silently** (`sshpass` exit 6,
+empty stderr). accept-new still refuses CHANGED keys, so the trust-on-first-use
+convenience costs no man-in-the-middle signal. Operator behavior is the primary control here;
 post-beta hardening may additionally scrub the command string against known
 secret values (ticket sec-secret-redaction-log-leaks #14).
 
@@ -167,4 +177,4 @@ PostgreSQL and its CA material, so HA is a replication problem (tracked for
 beta). Executors scale horizontally — each is an independent daemon with its
 own certificate. Targets are untouched: Venya installs nothing on them;
 executors reach them over SSH with operator-provided credentials (which are
-themselves vault secrets, injected per-command).
+themselves secrets, injected per-command).

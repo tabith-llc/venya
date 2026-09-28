@@ -1462,7 +1462,7 @@ class TestShapeMetadata:
             assert resp.json()["metadata_warnings"] == [], shape
 
     def test_custom_shape_accepted_with_teaching_warning(self):
-        resp = self._store({"shape": "internal-vault-cli"})
+        resp = self._store({"shape": "internal-secret-store-cli"})
         assert resp.status_code == 201
         warnings = resp.json()["metadata_warnings"]
         assert len(warnings) == 1
@@ -1471,7 +1471,9 @@ class TestShapeMetadata:
         assert "usage" in warnings[0] and "{secret_path}" in warnings[0]
 
     def test_custom_shape_with_usage_omits_the_nag(self):
-        resp = self._store({"shape": "internal-vault-cli", "usage": "vaulttool --cred-file {secret_path} run"})
+        resp = self._store(
+            {"shape": "internal-secret-store-cli", "usage": "secret-store --cred-file {secret_path} run"}
+        )
         assert resp.status_code == 201
         warnings = resp.json()["metadata_warnings"]
         assert len(warnings) == 1
@@ -1518,11 +1520,11 @@ class TestShapeMetadata:
         client, *_ = self._patch_client()
         resp = client.patch(
             "/api/v1/secrets/db-password/metadata",
-            json={"metadata": {"shape": "internal-vault-cli", "usage": "vaulttool -f {secret_path}"}},
+            json={"metadata": {"shape": "internal-secret-store-cli", "usage": "secret-store -f {secret_path}"}},
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["metadata"]["shape"] == "internal-vault-cli"
+        assert data["metadata"]["shape"] == "internal-secret-store-cli"
         assert data["metadata"]["executor"] == "web-server-3"  # merge preserved
         assert len(data["metadata_warnings"]) == 1
         assert "CUSTOM shape" in data["metadata_warnings"][0]

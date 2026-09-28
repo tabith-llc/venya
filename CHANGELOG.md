@@ -4,6 +4,69 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0alpha16] - 2026-09-27
+
+### Added
+- **Docs: deployment sizing guide.** `docs/deployment-sizing.md` — how many
+  executors you need and the measured CPU/RAM/disk/throughput figures behind it
+  (concurrent-session sizing + serial-path benchmark numbers).
+- **CLI: factory-fresh security keys can now be registered.** A key whose
+  PIN has never been set (CTAP2 `clientPin: false`) previously dead-ended
+  `venya init` / enroll / `credential add` with a misleading "neither
+  built-in UV nor clientPin" error. The CLI now detects the unset PIN and
+  walks the operator through creating one (double entry, 4-63 bytes,
+  validated client-side, no retry-counter burn), sets it over the CTAP2
+  encrypted handshake, and continues registration without re-prompting.
+  Windows platform ceremonies are unchanged (PIN lifecycle there remains
+  the operator/vendor-tool step, per the documented Windows guidance).
+- **CLI: `venya list --json`.** The secrets list now supports the same
+  `--json` flag as `audit`, `admin list`, and `exec list`, emitting the API
+  envelope byte-exact (`{"secrets": [...]}` — parseable even when empty;
+  keys and metadata only, never values). Human table output is unchanged
+  without the flag.
+- **Installer: upgrade-aware core re-runs.** The core installer now reports
+  the version transition (`Upgrade: X -> Y`), refuses downgrades unless
+  `VENYA_ALLOW_DOWNGRADE=yes` (alembic migrations never reverse
+  automatically — old code on a newer schema is unsupported), and takes a
+  compressed `pg_dump` backup to `/var/backups/venya/` before running
+  migrations on any version-changing re-run (failure aborts the upgrade;
+  the 3 newest backups are kept). Operator-added `VENYA_*` keys in
+  `/opt/venya/.env` now survive re-runs — the template owns only its 13
+  managed keys; preserved lines are re-appended under a marker comment.
+  Unattended re-runs no longer demand `VENYA_DB_PASSWORD`: the stored value
+  is reused like the other four secrets (an explicitly-passed mismatch
+  still aborts; fresh installs unchanged).
+- **Executor installer: the sbx agent template is warmed at install time.**
+  A throwaway `sbx create`/`sbx rm --force` pair (after Docker auth and the
+  deny-all policy init) caches the multi-GiB template, so the first relayed
+  command on a fresh executor is seconds-scale instead of ~60–90 s. Warm
+  failure is non-fatal (loud warning; first run falls back to the cold path)
+  and is skipped under `VENYA_SKIP_DOCKER_LOGIN=yes`. The installation
+  troubleshooting entry claiming the first run "times out client-side" is
+  corrected — that has not been possible on default timeouts since the
+  alpha13 fuse chain (create cap 240 s < relay 300 s < nginx 330 s <
+  client 340 s).
+- **Central command policy now ENFORCES fleet-wide.** `venya admin set-command-policy` / `add-allowed-command` previously wrote a policy row with zero consumers — executors enforced only their local `/etc/venya/executor.toml`, so the admin commands silently affected nothing. The core's "default" policy now propagates as an additive field on executor registration and heartbeat (~30 s) responses and is hot-applied through the command validator. Semantics mirror the local config exactly: the preset drives trusted-path behavior (balanced/strict/permissive), an explicit dangerous-pattern list replaces the built-ins, null keeps them. A corrupt or absent policy never kills the heartbeat and never reverts a live policy mid-run (last applied persists until daemon restart, which re-bootstraps from toml). Policy changes are audit-logged (`command_policy_changed`, attributed to the acting admin). Old daemons ignore the field — wire-compatible both directions.
+
+### Fixed
+- **Executor registration now activates the `users`-side identity row.**
+  The auto-created account inherited the human default `pending_enrollment`
+  and was never flipped (the transition lives in the WebAuthn enrollment
+  path machine identities never traverse), so `venya admin list` showed
+  working, heartbeating executors as pending enrollment. New registrations
+  are born `active` with `enrolled_at` set; re-registration self-heals
+  stranded rows; a data migration backfills existing installs
+  (`auth_mode='mtls'` rows only — human enrollments untouched).
+- **Every `venya admin` mTLS command TypeErrored in the natural flow** (config CA from `venya setup` + `VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`, no `SSL_CERT_FILE` exported): httpx2 >= 2.12 rejects `cert=` combined with a string `verify`, so the client died with a cryptic constructor error before any request was sent. The CLI now builds a single `ssl.SSLContext` carrying both the server-trust anchors (`SSL_CERT_FILE` > setup-installed CA > system store — precedence unchanged) and the admin client cert. Affects alpha14–alpha15; masked in the documented runbook flows because they export `SSL_CERT_FILE`. **Workaround on older releases:** `export SSL_CERT_FILE=<venya ca.crt>` before admin commands.
+- `venya store` piped-stdin values are now stored BYTE-EXACT (no trailing-newline stripping). The previous behavior corrupted PEM private keys (`--shape ssh-key`): OpenSSH >= 10 refuses to load a key whose armor file is not newline-terminated (`Load key: error in libcrypto`), so a key stored via `venya store key - < keyfile` was unusable at consumption time with no in-product remedy. Line-based consumers (`sshpass -f`, `sudo -S`) and output masking (trimmed-hash filter variant) tolerate a trailing newline, so single-line password secrets are unaffected.
+- Corrected the no-PIN security-key error guidance: the stale "set a PIN with yubikey-manager" advice now points at Venya's own in-registration PIN creation; keys reporting PIN support with no PIN set get power-cycle/re-run guidance.
+
+### Changed
+- **Usage-template authoring:** canonical `sudo -S` templates over ssh must NOT carry `-p ''` — ssh re-joins remote arguments without re-quoting, the empty argument vanishes, and remote sudo swallows the next token as its prompt string (usage error, exit 1; field-proven). The sudo prompt text appearing in stderr is harmless and carries no secret. ssh-based templates SHOULD carry `-o StrictHostKeyChecking=accept-new` — every sandbox starts with no `known_hosts`, and without the option the first connection can fail silently (sshpass exit 6, empty stderr); changed host keys are still refused. Both documented in the operator-rule section of `architecture.md`; the exit-6 diagnostic also joins the `agent-prompts.md` paste-block.
+- MCP `list_secrets` now renders stored `host` metadata beside `username`, so an agent can fill a usage template's `{host}` placeholder from the listing alone instead of relying on the human's prompt to name the target (field omitted when no host is stored).
+- **Behavior change for pipers:** `echo "pass" | venya store key` now stores the trailing newline with the value — use `printf %s "pass" |` for byte-exact single-line values. `--help` text and the generated CLI reference updated to match.
+- Executor-installer relay-wiring summary reworded to describe the empty-allowlist/CN-mismatch outcomes as the intended secure behavior — copy-only.
+
 ## [0.1.0alpha15] - 2026-09-25
 
 ### Added

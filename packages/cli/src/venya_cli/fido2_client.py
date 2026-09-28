@@ -65,11 +65,21 @@ class CliInteraction(UserInteraction):
     the caller (Fido2Auth) catches CtapError and retries request_pin().
     """
 
+    # One-shot PIN carry from the creation flow (ticket
+    # cli-fido2-pin-setup-new-key): the just-created PIN answers the
+    # ceremony's first request_pin so the operator does not type it a third
+    # time; consumed on first use, never persisted anywhere.
+    preset_pin: str | None = None
+
     def request_pin(self, permissions: ClientPin.PERMISSION, rp_id: str | None) -> str | None:
         """Prompt for PIN via getpass (no echo, stderr only).
 
         Returns None if stdin is not a TTY (headless / piped).
         """
+        if self.preset_pin is not None:
+            pin = self.preset_pin
+            self.preset_pin = None
+            return pin
         if not sys.stdin.isatty():
             logger.warning("No TTY available — cannot prompt for PIN.")
             return None
@@ -299,7 +309,9 @@ class Fido2Auth:
                     if e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
                         raise Fido2ClientError(
                             "Security key has no PIN set and cannot verify the user "
-                            "another way. Set a PIN on the key (e.g. yubikey-manager), "
+                            "another way. Venya creates a key's PIN during registration — "
+                            "run venya credential add for this key (first enrollment: "
+                            "venya enroll <token>) and enter the PIN when prompted, "
                             "then try again."
                         ) from e
                     raise
@@ -387,9 +399,9 @@ class Fido2Auth:
                 if isinstance(e, ClientError):
                     if e.code == ClientError.ERR.CONFIGURATION_UNSUPPORTED:
                         raise Fido2ClientError(
-                            "Security key has no PIN set and cannot verify the user "
-                            "another way. Set a PIN on the key (e.g. yubikey-manager), "
-                            "then try again."
+                            "Security key reports PIN support but has no PIN set. "
+                            "Venya creates a key's PIN during registration — "
+                            "power-cycle the key and re-run, or use a fresh key."
                         ) from e
                     raise
                 if e.code in (CtapError.ERR.PIN_INVALID, CtapError.ERR.PIN_AUTH_INVALID):
@@ -542,7 +554,19 @@ class Fido2Auth:
         if info.options.get("clientPin"):
             return self._get_credential_pin_only(ctap2, request_options, interaction)
 
-        raise Fido2ClientError("Security key advertises neither built-in UV nor clientPin; cannot register.")
+        if info.options.get("clientPin") is False:
+            # Factory-fresh key: clientPin capability present, PIN NOT set
+            # (CTAP2 semantics: option false = supported-but-unset; absent =
+            # unsupported). For a clientPin-only key the PIN IS the user
+            # verification — create it now, then ride the existing raw
+            # pin-only path (ticket cli-fido2-pin-setup-new-key). The win32
+            # platform branch above is deliberately NOT covered: PIN
+            # lifecycle on Windows is the operator/vendor-tool step
+            # (2026-09-18 ruling).
+            self._setup_key_pin(ctap2, interaction)
+            return self._get_credential_pin_only(ctap2, request_options, interaction)
+
+        raise Fido2ClientError("Security key advertises neither built-in UV nor clientPin support; cannot register.")
 
     @staticmethod
     def _format_credential_response(
@@ -777,6 +801,60 @@ class Fido2Auth:
 
         raise Fido2ClientError("Security key advertises neither built-in UV nor clientPin; cannot assert.")
 
+    @staticmethod
+    def _negotiate_pin_protocol(ctap2: Ctap2) -> Any:
+        """Pick the first PIN/UV protocol both sides speak (dedupe of the
+        loop previously inline in _get_assertion_pin_only)."""
+        for proto in ClientPin.PROTOCOLS:
+            if proto.VERSION in ctap2.info.pin_uv_protocols:
+                return proto()
+        raise Fido2ClientError("No compatible PIN/UV protocol supported by the security key.")
+
+    @staticmethod
+    def _setup_key_pin(ctap2: Ctap2, interaction: CliInteraction) -> None:
+        """Create the PIN on a factory-fresh key (clientPin supported, unset).
+
+        Safety rules earned the hard way (ticket
+        init-pin-invalid-after-installation-reset): never loop-retry a device
+        failure — blind retries burn the key's PIN-retry counter to
+        PIN_AUTH_BLOCKED (full key reset). Double entry + client-side
+        validation run BEFORE any device round-trip; set_pin itself is
+        unauthenticated, so confirmation mismatches cost nothing. The PIN
+        goes straight into the CTAP2 encrypted handshake — never logged,
+        never stored, never sent to the server.
+        """
+        if not sys.stdin.isatty():
+            raise Fido2ClientError(
+                "This security key has no PIN set, and creating one requires an interactive "
+                "terminal (the prompts are hidden-input). Re-run attached to a real terminal."
+            )
+        proto = Fido2Auth._negotiate_pin_protocol(ctap2)
+        pin: str | None = None
+        for _attempt in range(3):
+            new_pin = getpass.getpass(
+                "\nThis security key has no PIN yet. Create one (4-63 characters; " "Venya never stores it): "
+            )
+            if not 4 <= len(new_pin.encode("utf-8")) <= 63:
+                print("PIN must be 4-63 bytes — try again.", file=sys.stderr)
+                continue
+            confirm = getpass.getpass("Confirm the new PIN: ")
+            if new_pin != confirm:
+                print("PINs did not match — try again.", file=sys.stderr)
+                continue
+            pin = new_pin
+            break
+        if pin is None:
+            raise Fido2ClientError("PIN creation aborted after 3 failed attempts; the key is unchanged.")
+        try:
+            ClientPin(ctap2, proto).set_pin(pin)
+        except (CtapError, ValueError) as e:
+            # Fail loud, NEVER retry in-loop (retry-counter lesson).
+            raise Fido2ClientError(
+                f"Setting the key PIN failed: {e}. The key is unchanged; re-run to try again."
+            ) from e
+        interaction.preset_pin = pin
+        print("PIN set on the security key — continuing registration.", file=sys.stderr)
+
     def _get_assertion_pin_only(
         self,
         ctap2: Ctap2,
@@ -798,12 +876,7 @@ class Fido2Auth:
             AssertionSelection wrapping the raw response.
         """
         # Negotiate PIN/UV protocol
-        for proto in ClientPin.PROTOCOLS:
-            if proto.VERSION in ctap2.info.pin_uv_protocols:
-                pin_protocol = proto()
-                break
-        else:
-            raise Fido2ClientError("No compatible PIN/UV protocol supported by the security key.")
+        pin_protocol = Fido2Auth._negotiate_pin_protocol(ctap2)
 
         rp_id = public_key.rp_id or "localhost"
         pin = interaction.request_pin(ClientPin.PERMISSION.GET_ASSERTION, rp_id)

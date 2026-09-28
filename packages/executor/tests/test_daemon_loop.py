@@ -23,6 +23,7 @@ import httpx2
 import pytest
 from cryptography.hazmat.primitives import hashes
 
+from executor.command_validator import DEFAULT_DANGEROUS_PATTERNS, DEFAULT_TRUSTED_PATHS
 from executor.config import ExecutorConfig, ReaperConfig
 from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop
 
@@ -716,3 +717,114 @@ class TestCreateExecutorPlumbing:
         strategy = executor.injection_strategy
         assert strategy.dns_resolver == "198.51.100.53"
         assert strategy.egress_allowlist_path == "/tmp/venya-t5.txt"
+
+
+class TestHeartbeatCommandPolicyPropagation:
+    """Ticket command-policy-no-server-executor-propagation (owner ruling (a)
+    2026-09-26): the heartbeat/registration responses may carry the core's
+    default command policy; the daemon applies it via update_policy() with
+    change detection. Malformed or absent payloads never kill the beat and
+    never revert the live policy (advisory-channel discipline, fail-closed)."""
+
+    def _daemon(self, config: ExecutorConfig, payload):
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        resp = MagicMock()
+        resp.json.return_value = payload
+        daemon.client.post.return_value = resp
+        daemon.command_validator = MagicMock()
+        return daemon
+
+    def _policy_payload(
+        self, preset="strict", allowed=("/usr/bin/ssh",), patterns=None, updated="2026-09-26T00:00:00+00:00"
+    ):
+        return {
+            "revoked": False,
+            "command_policy": {
+                "preset": preset,
+                "allowed_commands": list(allowed),
+                "dangerous_patterns": list(patterns) if patterns is not None else None,
+                "updated_at": updated,
+            },
+        }
+
+    def test_strict_policy_applied_with_allowlist_and_default_patterns(self, config):
+        daemon = self._daemon(config, self._policy_payload())
+        daemon._send_heartbeat()
+        daemon.command_validator.update_policy.assert_called_once()
+        policy = daemon.command_validator.update_policy.call_args[0][0]
+        assert policy.preset == "strict"
+        assert policy.allowed_commands == frozenset({"/usr/bin/ssh"})
+        assert policy.trusted_paths == frozenset()
+        assert policy.dangerous_patterns == frozenset(DEFAULT_DANGEROUS_PATTERNS)
+
+    def test_balanced_policy_gets_trusted_paths_floor(self, config):
+        daemon = self._daemon(config, self._policy_payload(preset="balanced", allowed=()))
+        daemon._send_heartbeat()
+        policy = daemon.command_validator.update_policy.call_args[0][0]
+        assert policy.trusted_paths == frozenset(DEFAULT_TRUSTED_PATHS)
+
+    def test_custom_patterns_replace_builtin_floor(self, config):
+        """Semantics mirror the local toml builder: an explicit server list
+        REPLACES the built-in patterns (admin-gated authority, same as the
+        operator's own executor.toml)."""
+        daemon = self._daemon(config, self._policy_payload(patterns=["curl "]))
+        daemon._send_heartbeat()
+        policy = daemon.command_validator.update_policy.call_args[0][0]
+        assert policy.dangerous_patterns == frozenset({"curl "})
+
+    def test_identical_payload_applies_once(self, config):
+        daemon = self._daemon(config, self._policy_payload())
+        daemon._send_heartbeat()
+        daemon._send_heartbeat()
+        daemon._send_heartbeat()
+        assert daemon.command_validator.update_policy.call_count == 1
+
+    def test_changed_row_reapplies(self, config):
+        daemon = self._daemon(config, self._policy_payload())
+        daemon._send_heartbeat()
+        daemon.client.post.return_value.json.return_value = self._policy_payload(updated="2026-09-26T01:00:00+00:00")
+        daemon._send_heartbeat()
+        assert daemon.command_validator.update_policy.call_count == 2
+
+    def test_absent_field_keeps_toml_policy(self, config):
+        """Paired negative: no policy in the response -> update_policy is
+        NEVER called (the toml-built policy stays live)."""
+        daemon = self._daemon(config, {"revoked": False})
+        daemon._send_heartbeat()
+        daemon.command_validator.update_policy.assert_not_called()
+
+    def test_unknown_preset_rejected_and_beat_survives(self, config):
+        """Malformed payload: not applied — and the advisory channel keeps
+        working: the revoked flag on the SAME beat still stops the daemon."""
+        daemon = self._daemon(
+            config,
+            {
+                "revoked": True,
+                "command_policy": {
+                    "preset": "wat",
+                    "allowed_commands": [],
+                    "dangerous_patterns": None,
+                    "updated_at": "",
+                },
+            },
+        )
+        daemon._send_heartbeat()
+        daemon.command_validator.update_policy.assert_not_called()
+        assert daemon.state.revoked is True
+
+    def test_non_dict_payload_ignored(self, config):
+        daemon = self._daemon(config, {"revoked": False, "command_policy": "strict"})
+        daemon._send_heartbeat()
+        daemon.command_validator.update_policy.assert_not_called()
+
+    def test_registration_source_applies(self, config):
+        """_maybe_apply_server_policy is the shared consumer; register() hooks
+        it with source='registration' so a fresh install gets the policy on
+        its first response, before the first beat."""
+        daemon = self._daemon(config, None)
+        daemon._maybe_apply_server_policy(
+            {"command_policy": self._policy_payload()["command_policy"]},
+            "registration",
+        )
+        daemon.command_validator.update_policy.assert_called_once()

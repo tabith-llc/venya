@@ -126,7 +126,7 @@ venya store <KEY> [VALUE] --roles ROLES [OPTIONS]
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `KEY` (positional) | **yes** | string | — | Secret key |
-| `VALUE` (positional, nargs=?) | no | string | — | Secret value; '-' or omitted reads stdin (interactive TTY: hidden prompt) |
+| `VALUE` (positional, nargs=?) | no | string | — | Secret value; '-' or omitted reads stdin BYTE-EXACT, incl. any trailing newline (interactive TTY: hidden prompt; use 'printf %s' when piping single-line values) |
 | `--roles` | **yes** | repeatable/space-separated list | — | Role(s) to scope the secret to |
 | `--key-version` | no | string | — | Key version ID to encrypt with (default: server's active key version) |
 | `--metadata`, `-m` | no | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |
@@ -176,6 +176,7 @@ venya list [PREFIX] [OPTIONS]
 | `--executor` | no | string | — | Filter by executor metadata field |
 | `--purpose` | no | string | — | Filter by purpose metadata field |
 | `--username` | no | string | — | Filter by username metadata field |
+| `--json` | no | flag | false (flag) | Output in JSON format |
 
 **Examples**
 
@@ -183,6 +184,7 @@ venya list [PREFIX] [OPTIONS]
 venya list  # all secrets visible to you
 venya list db/  # keys under the db/ prefix
 venya list --purpose ci  # filter by a metadata field
+venya list --json  # machine-readable result
 ```
 
 ## `venya delete`

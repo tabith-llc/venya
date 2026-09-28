@@ -23,7 +23,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import httpx2
-from core.iam.models import AuditEvent, Executor, ExecutorCert, ExecutorEnrollmentToken, User
+from core.iam.models import AuditEvent, CommandPolicy, Executor, ExecutorCert, ExecutorEnrollmentToken, User
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -128,6 +128,58 @@ class ExecutorRegisterRequest(BaseModel):
     )
 
 
+class CommandPolicyPayload(BaseModel):
+    """Core-side command policy propagated to executors.
+
+    ADDITIVE wire field on the registration + heartbeat responses (ticket
+    command-policy-no-server-executor-propagation, owner ruling (a)
+    2026-09-26): old daemons ignore it, old servers never send it (daemons
+    keep their toml-built policy). Semantics mirror the executor's local
+    build_command_policy: the preset drives trusted_paths (balanced ->
+    DEFAULT_TRUSTED_PATHS; strict -> allowlist; permissive -> no path
+    check); dangerous_patterns null -> the executor's built-in default set,
+    a list REPLACES it — the same authority the local toml already has,
+    admin-gated at the write route.
+    """
+
+    preset: str
+    allowed_commands: list[str] = Field(default_factory=list)
+    dangerous_patterns: list[str] | None = None
+    updated_at: str = Field(description="ISO timestamp — daemon-side change detection")
+
+
+def _default_command_policy_payload(db: Session) -> CommandPolicyPayload | None:
+    """The 'default' policy row as a wire payload, or None (unset/corrupt).
+
+    Fail-soft by design: a corrupt row must never poison registration or
+    heartbeats — the daemon keeps its current policy and the parse failure
+    is logged loudly here.
+    """
+    row = db.query(CommandPolicy).filter(CommandPolicy.policy_name == "default").first()
+    if row is None:
+        return None
+    try:
+        allowed = json.loads(row.allowed_commands) if row.allowed_commands else []
+        patterns = json.loads(row.dangerous_patterns) if row.dangerous_patterns else None
+        if not isinstance(allowed, list) or not all(isinstance(a, str) for a in allowed):
+            raise ValueError("allowed_commands must be a list of strings")
+        if patterns is not None and (not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns)):
+            raise ValueError("dangerous_patterns must be a list of strings or null")
+    except (ValueError, TypeError) as e:
+        logger.error(
+            "Default command policy row is corrupt (%s) — NOT propagating; "
+            "re-set it via `venya admin set-command-policy`",
+            e,
+        )
+        return None
+    return CommandPolicyPayload(
+        preset=row.preset,
+        allowed_commands=allowed,
+        dangerous_patterns=patterns,
+        updated_at=row.updated_at.isoformat() if row.updated_at else "",
+    )
+
+
 class ExecutorRegisterResponse(BaseModel):
     """Response for successful executor registration."""
 
@@ -136,6 +188,13 @@ class ExecutorRegisterResponse(BaseModel):
     ca_cert_pem: str
     serial_number: str
     not_after: str
+    command_policy: CommandPolicyPayload | None = Field(
+        default=None,
+        description=(
+            "ADDITIVE (ticket command-policy-no-server-executor-propagation): the core's "
+            "'default' command policy, or null when unset. Old daemons ignore it."
+        ),
+    )
 
 
 class RevocationListResponse(BaseModel):
@@ -178,6 +237,14 @@ class HeartbeatResponse(BaseModel):
 
     revoked: bool = Field(default=False, description="Whether this executor has been revoked")
     new_cert_required: bool = Field(default=False, description="Whether a certificate rotation is needed")
+    command_policy: CommandPolicyPayload | None = Field(
+        default=None,
+        description=(
+            "ADDITIVE (ticket command-policy-no-server-executor-propagation): the core's "
+            "'default' command policy, or null when unset/corrupt — the daemon keeps its "
+            "current policy on null. Old daemons ignore the field."
+        ),
+    )
 
 
 class ExecutorInfo(BaseModel):
@@ -559,10 +626,18 @@ async def register_executor(
     # Create executor user account if it doesn't exist
     existing_user = db.query(User).filter(User.user_id == resolved_executor_id).first()
     if existing_user is None:
-        # Auto-create executor user account
+        # Auto-create executor user account. Registration IS the enrollment
+        # for an mtls machine identity — there is no WebAuthn ceremony to
+        # complete — so the row is born active. The model default
+        # ("pending_enrollment") describes humans awaiting ceremony and
+        # would strand this identity forever (ticket
+        # executor-user-status-stuck-pending-enrollment; the admin list
+        # renders users.status verbatim).
         new_user = User(
             user_id=resolved_executor_id,
             auth_mode="mtls",
+            status="active",
+            enrolled_at=datetime.now(UTC),
         )
         db.add(new_user)
         db.flush()
@@ -571,6 +646,15 @@ async def register_executor(
         # Update auth mode if it was something else
         if existing_user.auth_mode != "mtls":
             existing_user.auth_mode = "mtls"
+        # Self-heal identities stranded by the pre-fix auto-create (born
+        # pending_enrollment, never flipped): re-registration completes the
+        # enrollment exactly as first registration now does. Idempotent —
+        # an already-active row is never touched, enrolled_at never
+        # overwritten (mirrors the executors-table logic below).
+        if existing_user.status == "pending_enrollment":
+            existing_user.status = "active"
+            if existing_user.enrolled_at is None:
+                existing_user.enrolled_at = datetime.now(UTC)
 
     # Sign the CSR
     try:
@@ -675,6 +759,7 @@ async def register_executor(
             ca_cert_pem=ca_cert_pem,
             serial_number=serial_hex,
             not_after=cert.not_valid_after_utc.isoformat(),
+            command_policy=_default_command_policy_payload(db),
         )
     except HTTPException:
         metrics.EXECUTOR_REGISTERED.labels(result="db_error").inc()
@@ -894,6 +979,7 @@ async def heartbeat(
     return HeartbeatResponse(
         revoked=revoked,
         new_cert_required=new_cert_required,
+        command_policy=_default_command_policy_payload(db),
     )
 
 

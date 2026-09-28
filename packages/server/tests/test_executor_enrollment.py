@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
-from core.iam.models import ExecutorEnrollmentToken
+from core.iam.models import ExecutorEnrollmentToken, User
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -1348,3 +1348,81 @@ class TestAdminIdentityCapture:
             mock_db.query(ExecutorEnrollmentToken).filter(ExecutorEnrollmentToken.created_by_session_id == None).first()
         )
         assert result is not None
+
+
+class TestRegisterActivatesExecutorUser:
+    """Ticket executor-user-status-stuck-pending-enrollment: the users-side
+    identity row must be born active (registration IS the mtls enrollment)
+    and stranded pending rows must self-heal on re-registration."""
+
+    def _register(self, existing_user):
+        """POST a valid token registration; existing_user = what the users
+        lookup returns (None = auto-create path). Returns (response, mock_db)."""
+        mock_db = MagicMock()
+        backend = MagicMock()
+        backend.get_session.return_value = mock_db
+        app = _create_test_app(
+            backend=backend,
+            auth_user={"user_id": "admin"},
+            ca_manager=_make_mock_ca(),
+        )
+        mock_token = _make_mock_token("exec-1", "enrl_exec_testtoken", "created")
+        token_query = MagicMock()
+        token_query.filter.return_value.first.return_value = mock_token
+        users_query = MagicMock()
+        users_query.filter.return_value.first.return_value = existing_user
+        other_query = MagicMock()
+        other_query.filter.return_value.first.return_value = None
+
+        def query_side_effect(model):
+            table = getattr(model, "__tablename__", "")
+            if table == "executor_enrollment_tokens":
+                return token_query
+            if table == "users":
+                return users_query
+            return other_query
+
+        mock_db.query.side_effect = query_side_effect
+        mock_result = MagicMock()
+        mock_result.rowcount = 1
+        mock_db.execute.return_value = mock_result
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.post(
+            "/api/v1/executors/register",
+            json={
+                "executor_id": "exec-1",
+                "csr_pem": _generate_test_csr(),
+                "enrollment_token": "enrl_exec_testtoken",
+            },
+        )
+        return response, mock_db
+
+    def test_autocreated_user_is_born_active_with_enrolled_at(self):
+        response, mock_db = self._register(existing_user=None)
+        assert response.status_code == 201
+        added_users = [c.args[0] for c in mock_db.add.call_args_list if isinstance(c.args[0], User)]
+        assert len(added_users) == 1
+        # Pre-fix RED reason: SQLAlchemy column defaults apply at INSERT, not
+        # at construction — the captured row had .status None (never 'active').
+        assert added_users[0].status == "active"
+        assert added_users[0].enrolled_at is not None
+
+    def test_stranded_pending_identity_self_heals_on_reregistration(self):
+        stranded = User(user_id="exec-1", auth_mode="mtls", status="pending_enrollment")
+        assert stranded.enrolled_at is None
+        response, _ = self._register(existing_user=stranded)
+        assert response.status_code == 201
+        # Pre-fix RED reason: the else-branch never touched status — the row
+        # stayed 'pending_enrollment' with enrolled_at None.
+        assert stranded.status == "active"
+        assert stranded.enrolled_at is not None
+
+    def test_active_identity_reregistration_is_a_noop(self):
+        """Paired no-op pin (GREEN-by-design even pre-fix): an already-active
+        identity keeps its status AND its original enrolled_at."""
+        original = datetime(2026, 9, 20, 10, 0, 0, tzinfo=UTC)
+        active = User(user_id="exec-1", auth_mode="mtls", status="active", enrolled_at=original)
+        response, _ = self._register(existing_user=active)
+        assert response.status_code == 201
+        assert active.status == "active"
+        assert active.enrolled_at == original  # never overwritten

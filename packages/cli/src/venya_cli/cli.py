@@ -82,7 +82,7 @@ def create_parser() -> argparse.ArgumentParser:
     store_parser.add_argument(
         "value",
         nargs="?",
-        help="Secret value; '-' or omitted reads stdin (interactive TTY: hidden prompt)",
+        help="Secret value; '-' or omitted reads stdin BYTE-EXACT, incl. any trailing newline (interactive TTY: hidden prompt; use 'printf %s' when piping single-line values)",
     )
     store_parser.add_argument(
         "--roles",
@@ -144,6 +144,11 @@ def create_parser() -> argparse.ArgumentParser:
         "--username",
         default=None,
         help="Filter by username metadata field",
+    )
+    list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output in JSON format",
     )
 
     # delete

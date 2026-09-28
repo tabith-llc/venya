@@ -730,12 +730,12 @@ async def admin_key_version_rollback(
 )
 async def admin_set_command_policy(
     req: AdminSetCommandPolicyRequest,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminSetCommandPolicyResponse:
     """Set executor command policy (admin only)."""
     try:
-        from core.iam.models import CommandPolicy
+        from core.iam.models import AuditEvent, CommandPolicy
 
         policy = db.query(CommandPolicy).filter(CommandPolicy.policy_name == "default").first()
 
@@ -753,6 +753,24 @@ async def admin_set_command_policy(
             policy.dangerous_patterns = json.dumps(req.custom_dangerous_patterns)
         policy.updated_at = datetime.now(UTC)
 
+        db.commit()
+        # Audit the control-plane change (ticket
+        # command-policy-no-server-executor-propagation): the row now ENFORCES
+        # fleet-wide via heartbeat propagation, so who changed what and when
+        # is security-relevant, not cosmetic.
+        db.add(
+            AuditEvent(
+                event_type="command_policy_changed",
+                user_id=admin.get("user_id", "unknown"),
+                fields={
+                    "policy_name": "default",
+                    "preset": req.preset,
+                    "custom_allowed_commands": req.custom_allowed_commands,
+                    "custom_dangerous_patterns": req.custom_dangerous_patterns,
+                    "session_id": str(admin["session_id"]) if admin.get("session_id") else None,
+                },
+            )
+        )
         db.commit()
         return AdminSetCommandPolicyResponse(
             policy_name="default",
