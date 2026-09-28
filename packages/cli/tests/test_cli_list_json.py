@@ -6,7 +6,7 @@
 
 """`venya list --json` (ticket cli-list-json-output): byte-exact envelope
 passthrough of the GET /api/v1/secrets response — parseable even when the
-vault is empty (branch BEFORE the empty check; the cmd_audit human-string
+store is empty (branch BEFORE the empty check; the cmd_audit human-string
 quirk is flagged in-ticket, not copied)."""
 
 import json

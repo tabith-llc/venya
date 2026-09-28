@@ -79,7 +79,7 @@ the sbx egress allowlist, not the host firewall.
 
 | Dir | Port | Proto | From / To | Purpose |
 |-----|------|-------|-----------|---------|
-| **inbound** | **22/tcp** | SSH | executor sandbox → target | Venya runs commands on targets over SSH using operator-provided credentials (which are themselves vault secrets, injected per-command). **Nothing is installed on a target.** |
+| **inbound** | **22/tcp** | SSH | executor sandbox → target | Venya runs commands on targets over SSH using operator-provided credentials (which are themselves secrets, injected per-command). **Nothing is installed on a target.** |
 
 Open 22/tcp to the executor host(s) and nowhere else if you can scope it. The SSH
 credentials are injected per-command and redacted from output; they never persist on the
