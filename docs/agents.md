@@ -56,6 +56,42 @@ to that human.
 8. Sandbox execution failures return 503 with the cause in the executor
    journal — surface the error to your human verbatim; do not loop retries.
 
+## Sandbox mechanics
+
+Verified facts about the execution environment — plan with these, do not
+rediscover them:
+
+- **The sandbox is created fresh per run.** Nothing persists between runs,
+  files on your machine are invisible to it, and it carries no
+  `known_hosts` — the first SSH to any host fails the host-key check
+  unless the command includes `-o StrictHostKeyChecking=accept-new`.
+- **No stdin channel exists, and shell metacharacters are rejected
+  (503).** The whole command string is scanned: ``| ; & $ ` ( ) { } < >
+  ! * ?``, backticks, and newlines are blocked — no pipes, no `&&`, no
+  redirects. The single exception: a standalone `<` token immediately
+  followed by `/run/secrets/venya/<id>` for a secret injected in the
+  same run.
+- **A dangerous-pattern policy scans commands before execution.** For
+  ssh/sshpass remote-exec commands only the LOCAL (sandbox) portion is
+  scanned — tokens after the ssh destination are remote-side and pass;
+  any other command is scanned whole. Default blocklist: `scp`, `rsync`,
+  `nc`, `ncat`, `sudo`, `su`, `dd`, `rm -rf`, `mkfs`, `fdisk`, `shred`,
+  `mount`, `insmod`, `modprobe`, `chmod 4755`, `setuid`. This is the
+  **default** list — an administrator can replace it wholesale via the
+  command policy, and the change reaches executors on the next
+  heartbeat. Until they do, the blocklist stands. `sudo` therefore
+  belongs on the REMOTE side of an ssh command only.
+- **There is no file-transfer channel into the sandbox** (scp/rsync/nc
+  blocked, pipes and redirects rejected, no stdin); results come back
+  only as redacted stdout. If a task needs real file transfer, report
+  the limitation to your human instead of engineering around it.
+  Remote-side transfers (e.g. scp invoked on the far side of an ssh
+  command) are outside the sandbox scan — if a task needs file
+  movement, propose the remote-side form to your human rather than
+  requesting the blocklist change yourself.
+- **Exit codes:** sshpass `5` = wrong password, `6` = unknown host key;
+  ssh `255` = connection/DNS failure.
+
 ## Installing and configuring (usually a human task)
 
 - Full install flow: [installation.md](installation.md)
