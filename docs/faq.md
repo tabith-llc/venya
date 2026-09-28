@@ -5,11 +5,11 @@ Expanded answers; the short forms live in the [README](../README.md).
 ## Product
 
 **What is Venya, in one sentence?**
-A secrets broker for humans and AI agents: credentials stay in the vault,
+A secrets broker for humans and AI agents: credentials stay in the store,
 commands that need them run in sandboxed executors, and everything is
 FIDO2-authorized and audited.
 
-**Does Venya replace SSH or my vault?**
+**Does Venya replace SSH or my secrets manager?**
 No. Executors still reach targets over SSH with real credentials — the
 difference is that those credentials live in Venya, are injected per-command
 inside a sandbox, and are never revealed to the operator or the LLM. Venya
@@ -55,7 +55,7 @@ relay client certificate — fail-closed in both directions.
 
 **What happens if the core is compromised?**
 Secrets are envelope-encrypted at rest (KEK-wrapped DEK); the Admin CA key
-is encrypted at rest; executors hold no vault plaintext between executions
+is encrypted at rest; executors hold no plaintext between executions
 (tmpfs, zeroed after each run). CA-key backup uses Shamir splitting
 (`venya admin split-ca-key`) so no single backup artifact reconstructs the
 key.

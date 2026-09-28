@@ -119,7 +119,7 @@ admin) and the executor re-registers. Target hosts hold nothing — no backup ne
 ## Backup security — these files ARE the keys to everything
 
 `/opt/venya/.env` + `/etc/venya/venya-core.env` + `/var/lib/venya/ca/` together are
-**plaintext-equivalent to every secret in the vault**: the passphrases decrypt the CA keys
+**plaintext-equivalent to every secret in the store**: the passphrases decrypt the CA keys
 and the KEK, and the KEK decrypts the secrets. Treat the backup archive as **top secret**:
 
 - **Encrypt backups at rest** (e.g. `age`/`gpg`/`restic`/`borg` with a strong key, or an

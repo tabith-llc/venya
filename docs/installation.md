@@ -11,7 +11,7 @@ URLs used below always resolve to the current release; pin
 
 | Node | Role | Installer |
 |---|---|---|
-| Core server (1) | FastAPI vault + API behind nginx TLS, PostgreSQL, CA authority | `install-venya-core.sh` |
+| Core server (1) | FastAPI secret store + API behind nginx TLS, PostgreSQL, CA authority | `install-venya-core.sh` |
 | Executor host (1..n) | Sandboxed command execution daemon, secret injection, redaction | `install-venya-executor.sh` |
 | Operator workstation | `venya` CLI + `venya-mcp` (FIDO2 key attached here) | `install-venya-cli.sh` |
 | Target hosts | The machines commands ultimately run on (via SSH from executors) | none |

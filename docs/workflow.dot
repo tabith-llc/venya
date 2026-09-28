@@ -34,7 +34,7 @@ digraph venya_workflow {
 
     /* ---- Secret nodes ---- */
     subgraph cluster_secrets {
-        label="Secrets Vault";
+        label="Secrets Store";
         style=filled;
         color="#fff5f5";
 

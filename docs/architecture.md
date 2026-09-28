@@ -13,7 +13,7 @@ for the threat-model pitch see the [README](../README.md).
 │ FIDO2 security key      │  Bearer   │  └─ proxy → uvicorn 127.0.0.1    │
 └─────────────────────────┘           │ FastAPI server (packages/server) │
         ▲ stdio (MCP)                 │  ├─ FIDO2/WebAuthn ceremonies    │
-┌───────┴─────────────────┐           │  ├─ secrets vault (envelope enc) │
+┌───────┴─────────────────┐           │  ├─ secret store (envelope enc) │
 │ LLM client              │           │  ├─ RBAC + audit log             │
 │ (Claude Code, Cursor…)  │           │  └─ CA services (root/admin CA)  │
 └─────────────────────────┘           │ PostgreSQL (secrets, audit, IAM) │
@@ -116,7 +116,7 @@ unauthenticated transport.
     (Stage 1) replaces any occurrence of secret material with
     `[REDACTED:...]`, then the server-side **definitive** filter (Stage 2,
     `POST /api/v1/sessions/{id}/filter` over executor mTLS) re-screens the
-    UNFILTERED bytes with the vault's own knowledge and its answer is
+    UNFILTERED bytes with the store's own knowledge and its answer is
     adopted. Stage 2 fails **closed**: an unknown or TTL-reaped session gets
     404, and the executor keeps the Stage-1-masked output — a filter failure
     never returns raw bytes.
@@ -177,4 +177,4 @@ PostgreSQL and its CA material, so HA is a replication problem (tracked for
 beta). Executors scale horizontally — each is an independent daemon with its
 own certificate. Targets are untouched: Venya installs nothing on them;
 executors reach them over SSH with operator-provided credentials (which are
-themselves vault secrets, injected per-command).
+themselves secrets, injected per-command).

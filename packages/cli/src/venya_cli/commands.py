@@ -386,7 +386,7 @@ def cmd_list(client: APIClient, args: Any) -> int:
         secrets = result.get("secrets", [])
 
         # --json: byte-exact passthrough of the API envelope (keys+metadata,
-        # never values). BEFORE the empty check on purpose: an empty vault
+        # never values). BEFORE the empty check on purpose: an empty store
         # must still emit parseable JSON ({"secrets": []}) — the cmd_audit
         # branch sits after its empty check and prints a human string there;
         # that quirk is flagged in ticket cli-list-json-output, not copied.
