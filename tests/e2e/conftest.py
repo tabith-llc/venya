@@ -27,14 +27,32 @@ def pytest_configure(config):
     )
 
 
-def pytest_collection_modifyitems(items):
+def _e2e_skip_reason() -> str | None:
+    """Return a reason to skip the e2e suite, or None when it should run.
+
+    The lab env is operator-provided (published-file discipline: no private
+    coordinates are hardcoded here). Skip loudly at collection / fixture
+    setup rather than hard-aborting mid-session when the env is unset.
+    """
     if not os.environ.get("RUN_E2E_TESTS"):
-        skip_e2e = pytest.mark.skip(
-            reason="E2E tests disabled. Set RUN_E2E_TESTS=1 to enable.",
+        return "E2E tests disabled. Set RUN_E2E_TESTS=1 to enable."
+    if not os.environ.get("VENYA_TEST_SERVER_URL"):
+        return (
+            "RUN_E2E_TESTS is set but VENYA_TEST_SERVER_URL is not "
+            "(e.g. https://venya-core-1) — skipping. Set the VENYA_TEST_* "
+            "lab envs to run the e2e suite."
         )
-        for item in items:
-            if "e2e" in item.keywords:
-                item.add_marker(skip_e2e)
+    return None
+
+
+def pytest_collection_modifyitems(items):
+    reason = _e2e_skip_reason()
+    if reason is None:
+        return
+    skip_e2e = pytest.mark.skip(reason=reason)
+    for item in items:
+        if "e2e" in item.keywords:
+            item.add_marker(skip_e2e)
 
 
 @pytest.fixture(scope="session")
@@ -42,8 +60,9 @@ def server_url():
     """Core server URL — the VM being tested, not localhost."""
     url = os.environ.get("VENYA_TEST_SERVER_URL")
     if not url:
-        pytest.exit(
-            "VENYA_TEST_SERVER_URL not set. Example: https://venya-core-1",
+        pytest.skip(
+            "VENYA_TEST_SERVER_URL not set (e.g. https://venya-core-1) — "
+            "the e2e suite requires the operator's lab environment.",
         )
     return url
 
