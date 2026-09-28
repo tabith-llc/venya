@@ -4,6 +4,8 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0alpha16] - 2026-09-27
+
 ### Added
 - **Docs: deployment sizing guide.** `docs/deployment-sizing.md` — how many
   executors you need and the measured CPU/RAM/disk/throughput figures behind it
@@ -57,11 +59,13 @@ Notable changes to Venya will be documented in this file.
   (`auth_mode='mtls'` rows only — human enrollments untouched).
 - **Every `venya admin` mTLS command TypeErrored in the natural flow** (config CA from `venya setup` + `VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`, no `SSL_CERT_FILE` exported): httpx2 >= 2.12 rejects `cert=` combined with a string `verify`, so the client died with a cryptic constructor error before any request was sent. The CLI now builds a single `ssl.SSLContext` carrying both the server-trust anchors (`SSL_CERT_FILE` > setup-installed CA > system store — precedence unchanged) and the admin client cert. Affects alpha14–alpha15; masked in the documented runbook flows because they export `SSL_CERT_FILE`. **Workaround on older releases:** `export SSL_CERT_FILE=<venya ca.crt>` before admin commands.
 - `venya store` piped-stdin values are now stored BYTE-EXACT (no trailing-newline stripping). The previous behavior corrupted PEM private keys (`--shape ssh-key`): OpenSSH >= 10 refuses to load a key whose armor file is not newline-terminated (`Load key: error in libcrypto`), so a key stored via `venya store key - < keyfile` was unusable at consumption time with no in-product remedy. Line-based consumers (`sshpass -f`, `sudo -S`) and output masking (trimmed-hash filter variant) tolerate a trailing newline, so single-line password secrets are unaffected.
+- Corrected the no-PIN security-key error guidance: the stale "set a PIN with yubikey-manager" advice now points at Venya's own in-registration PIN creation; keys reporting PIN support with no PIN set get power-cycle/re-run guidance.
 
 ### Changed
 - **Usage-template authoring:** canonical `sudo -S` templates over ssh must NOT carry `-p ''` — ssh re-joins remote arguments without re-quoting, the empty argument vanishes, and remote sudo swallows the next token as its prompt string (usage error, exit 1; field-proven). The sudo prompt text appearing in stderr is harmless and carries no secret. ssh-based templates SHOULD carry `-o StrictHostKeyChecking=accept-new` — every sandbox starts with no `known_hosts`, and without the option the first connection can fail silently (sshpass exit 6, empty stderr); changed host keys are still refused. Both documented in the operator-rule section of `architecture.md`; the exit-6 diagnostic also joins the `agent-prompts.md` paste-block.
 - MCP `list_secrets` now renders stored `host` metadata beside `username`, so an agent can fill a usage template's `{host}` placeholder from the listing alone instead of relying on the human's prompt to name the target (field omitted when no host is stored).
 - **Behavior change for pipers:** `echo "pass" | venya store key` now stores the trailing newline with the value — use `printf %s "pass" |` for byte-exact single-line values. `--help` text and the generated CLI reference updated to match.
+- Executor-installer relay-wiring summary reworded to describe the empty-allowlist/CN-mismatch outcomes as the intended secure behavior — copy-only.
 
 ## [0.1.0alpha15] - 2026-09-25
 
