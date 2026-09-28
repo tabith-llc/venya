@@ -12,6 +12,10 @@ Venya is the first platform that lets AI agents execute commands on remote infra
 
 ---
 
+[![Animated walkthrough: an agent runs a NAS failover incident — jreyes authorizes with a FIDO2 key and types one sentence; the agent lists executors and secrets, probes from network-01, fails over to storage-01, the credential travels Venya → executor → sandbox and the echoed password is redacted; every command audited](docs/diagrams/workflow.gif)](docs/example-workflow.md)
+
+**Watch the full session: [the narrated example workflow →](docs/example-workflow.md)**
+
 ## Host Trust Model
 
 Venya's components carry deliberately different trust postures:
