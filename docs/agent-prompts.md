@@ -52,6 +52,34 @@ You operate infrastructure through Venya. Four MCP tools: `list_executors`,
    as if their security team reads every command — they do.
 <!-- snippet-end -->
 
+## Operator site facts (fill in, paste with the block)
+
+Live agent testing showed a filled-in site-facts block was the single
+largest time-to-success factor: the agent stopped probing the environment
+and started working. Fill this in for YOUR deployment and paste it after
+the operating contract. Values are never part of this block — secret KEY
+NAMES only. Generic sandbox mechanics do not belong here; they live in
+[agents.md](agents.md) ("Sandbox mechanics").
+
+```text
+## Site facts (deployment-specific)
+
+**Hosts**
+
+| Host | What | Facts |
+|---|---|---|
+| <target-host> | <role> | <OS>; SSH port <port>, user <user>; resolves in the sandbox? <allowlisted hostname, else IP <ip>> |
+| <executor-id> | Venya executor (jump host) | every run_command runs in a fresh ephemeral sandbox here; sandbox OS = <os> |
+
+**Credentials** (one line per secret; key names only — NEVER values)
+
+- <secret-key> (shape <shape>) — <what it authenticates; which usage line to copy>
+
+**Sandbox binary paths** (verified present — list what your tasks need)
+
+<path> · <path> · <path>
+```
+
 ---
 
 *Honesty note: every claim in the block is source-matched to the shipped
