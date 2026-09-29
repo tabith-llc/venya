@@ -96,7 +96,8 @@ new bytes** — a loud NOTICE names both timestamps and a PROOF-OF-FRESH-BYTES
 line attests the verification probed the new process (ticket
 `installer-rerun-no-service-restart`). No manual `systemctl restart` is
 needed after a re-run; check for the PROOF line in the transcript before
-trusting any acceptance probe.
+trusting any acceptance probe. Upgrading between released versions? See
+[UPGRADE.md](UPGRADE.md) — the drill-tested in-place upgrade runbook.
 
 ## 2. Bootstrap the first admin (workstation, FIDO2)
 
