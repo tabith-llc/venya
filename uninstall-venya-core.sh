@@ -90,6 +90,14 @@ info "Dropping PostgreSQL database and role..."
 if systemctl is-active --quiet postgresql; then
     sudo -u postgres psql -c "DROP DATABASE IF EXISTS venya;" > /dev/null 2>&1 || warn "DROP DATABASE failed — check manually."
     sudo -u postgres psql -c "DROP ROLE IF EXISTS venya;" > /dev/null 2>&1 || warn "DROP ROLE failed (open connections?) — check manually."
+    sudo -u postgres psql -c "DROP ROLE IF EXISTS venya_audit;" > /dev/null 2>&1 || warn "DROP ROLE venya_audit failed (open connections?) — check manually."
+    # Remove the venya_audit peer-auth config lines (marker-guarded; warn-only, never fatal).
+    for d in /etc/postgresql/*/main; do
+        [ -d "$d" ] || continue
+        sudo -u postgres sed -i "/^venya_map venya venya_audit$/d" "$d/pg_ident.conf" 2>/dev/null || warn "pg_ident.conf cleanup failed in $d — check manually."
+        sudo -u postgres sed -i "/venya_audit.*peer map=venya_map/d" "$d/pg_hba.conf" 2>/dev/null || warn "pg_hba.conf cleanup failed in $d — check manually."
+    done
+    sudo -u postgres psql -c "SELECT pg_reload_conf();" > /dev/null 2>&1
 else
     warn "PostgreSQL not running — skipped DB/role drop."
 fi

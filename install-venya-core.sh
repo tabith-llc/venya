@@ -394,6 +394,32 @@ fi
 sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/dev/null | grep -q 1 || \
     sudo -u postgres psql -c "CREATE DATABASE venya OWNER venya;" > /dev/null 2>&1
 
+# Runtime DB role (issue #66 G9 — DB-enforced append-only audit trail): the
+# server connects as venya_audit via peer auth over the local socket — NO
+# password, so /opt/venya/.env holds no runtime DB credential. Migrations
+# still run as the owner role 'venya' over TCP (migration step below).
+# Migration 031_audit_append_only_grants fails loud if this role is missing.
+sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya_audit'" 2>/dev/null | grep -q 1 || \
+    sudo -u postgres psql -c "CREATE ROLE venya_audit LOGIN;" > /dev/null 2>&1
+
+PG_MAIN_DIR=$(ls -d /etc/postgresql/*/main 2>/dev/null | head -n1)
+if [ -z "$PG_MAIN_DIR" ]; then
+    error "PostgreSQL main config dir not found — cannot install the venya_audit peer map."
+fi
+# pg_ident peer map: OS user 'venya' -> DB role 'venya_audit' (marker-guarded idempotent).
+if ! grep -q "^venya_map venya venya_audit" "$PG_MAIN_DIR/pg_ident.conf" 2>/dev/null; then
+    sudo -u postgres bash -c "echo 'venya_map venya venya_audit' >> '$PG_MAIN_DIR/pg_ident.conf'"
+fi
+# pg_hba line MUST precede the default "local all all peer" (first match wins).
+if ! grep -q "venya_audit.*peer map=venya_map" "$PG_MAIN_DIR/pg_hba.conf" 2>/dev/null; then
+    if grep -q "^local[[:space:]]\+all[[:space:]]\+all[[:space:]]\+peer" "$PG_MAIN_DIR/pg_hba.conf"; then
+        sudo -u postgres sed -i "/^local[[:space:]]\+all[[:space:]]\+all[[:space:]]\+peer/i local   venya           venya_audit                         peer map=venya_map" "$PG_MAIN_DIR/pg_hba.conf"
+    else
+        error "Default 'local all all peer' line not found in pg_hba.conf — insert 'local venya venya_audit peer map=venya_map' before the first matching local line manually."
+    fi
+fi
+sudo -u postgres psql -c "SELECT pg_reload_conf();" > /dev/null 2>&1
+
 # --- Server binds to localhost only — nginx terminates TLS ---
 BIND_ADDRESS="127.0.0.1"
 info "Server will bind to: $BIND_ADDRESS (Nginx handles TLS)"
@@ -452,7 +478,7 @@ fi
 cat > "$INSTALL_DIR/.env" << EOF
 VENYA_HOST=127.0.0.1
 VENYA_DB_URL=postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya
-VENYA_DB__DATABASE_URL=postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya
+VENYA_DB__DATABASE_URL=postgresql://venya_audit@/venya?host=/var/run/postgresql
 VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
 VENYA_FIDO2__RP_ID=$CORE_HOSTNAME
 VENYA_FIDO2__RP_NAME=Venya Core
