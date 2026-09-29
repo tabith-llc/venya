@@ -166,7 +166,7 @@ Venya speaks the Model Context Protocol — the open standard for connecting AI 
 | Compromised executors are blocked | Revoked certs rejected at the executor's next revocation poll |
 | Data exfiltration is prevented | sbx sandbox with deny-by-default egress allowlisting |
 | Every action is traceable | Append-only audit log with user, executor, command, timestamp |
-| Secrets are encrypted at rest | AES-256 with KEK-wrapped DEK (envelope encryption) |
+| Secrets are encrypted at rest | Envelope encryption — per-secret DEK wrapped with AES-256-KW; payload ChaCha20-Poly1305 |
 
 ---
 
