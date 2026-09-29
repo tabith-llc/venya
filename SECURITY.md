@@ -41,6 +41,21 @@ Out of scope:
 - Physical access attacks
 - Third-party dependencies (report upstream, CC us if critical)
 
+## Access Control & Audit Integrity
+
+Database access uses a split-identity model: the server runtime connects as a
+dedicated passwordless role (`venya_audit`, peer-authenticated over the local
+socket) that is `REVOKE`d `UPDATE, DELETE` on `audit_events` — the append-only
+audit trail is enforced by PostgreSQL privileges, not application convention.
+See `docs/deployment-config.md` § Database Identity for the full model.
+
+Installer edge case (intentional fail-safe): the installer inserts the
+`venya_audit` peer-auth line into `pg_hba.conf` before the stock
+`local all all peer` line. If `pg_hba.conf` has been customized and that
+anchor line is missing, the installer ABORTS with an error and requires
+manual insertion — deliberately, so a non-stock configuration can never be
+silently misconfigured into a weaker auth state.
+
 ## Safe Harbor
 
 We consider research and reporting done in good faith as authorized testing.

@@ -118,6 +118,29 @@ Together these ensure:
 
 ---
 
+## Database Identity
+
+The core server holds **two** PostgreSQL roles, split by trust boundary:
+
+| Role | Identity | Authentication | Rights |
+|------|----------|----------------|--------|
+| `venya` | **owner / ops / migrations** | password (SCRAM, TCP loopback) — installer `VENYA_DB_PASSWORD` | full DDL + DML, database owner |
+| `venya_audit` | **server runtime** | **peer over the local Unix socket, no password** | DML on all tables **except** `UPDATE, DELETE` on `audit_events` |
+
+**How it works.** The installer creates `venya_audit LOGIN` with **no password** and maps the OS service user to it: a `pg_ident.conf` line (`venya_map venya venya_audit`) plus a `pg_hba.conf` line (`local venya venya_audit peer map=venya_map`). The server's runtime `VENYA_DB__DATABASE_URL` is the socket URL `postgresql://venya_audit@/venya?host=/var/run/postgresql` — it carries **no password**, so `/opt/venya/.env` holds no credential for the runtime DB identity. Migrations and ops work still connect as the owner role `venya` over TCP with the installer password.
+
+**Trust boundary:** authentication relies on the OS kernel verifying the `venya` user identity — the connection is trusted exactly as far as "this process runs as the `venya` service account on this host". There is no stored secret to steal, rotate, or leak: removing the trust anchor means changing the OS user, which changes the whole service.
+
+**Failure mode:** if the application runs as the wrong OS user, it will fail to start (peer authentication refuses the connection). This is a security feature, not a bug — a misconfigured identity must not silently fall back to a weaker one.
+
+**Audit trail:** because every server connection presents as `venya_audit`, PostgreSQL's own logs attribute each statement to the runtime role, making it easy to trace actions back to the specific service instance. The owner role's activity (ops, migrations) is distinctly visible as `venya`.
+
+**Append-only enforcement.** Migration `031_audit_append_only_grants` grants `venya_audit` `SELECT, INSERT, UPDATE, DELETE, REFERENCES` on all current tables (REFERENCES is mandatory — the schema is FK-dense and INSERTs into a referencing table check REFERENCES on the referenced table), and sets `ALTER DEFAULT PRIVILEGES` so tables/sequences created by future migrations are granted automatically. It finishes with `REVOKE UPDATE, DELETE ON audit_events` — the app can INSERT audit events (logging) and SELECT them (audit API) but can never modify or delete them; only the owner role can. This is what makes the published "append-only audit log" guarantee a database-enforced property rather than a code convention (issue #66, G9). The grant surface is pinned by `packages/core/tests/test_migration_031_audit_append_only.py`; the behavioral proof is the post-deploy bench (INSERT/SELECT allowed, UPDATE/DELETE refused for `venya_audit`; both allowed for the owner).
+
+**Upgrading an existing install:** re-run the installer — it creates the role, appends the peer-map lines (marker-guarded), rewrites the runtime URL, and the 031 migration applies the grants. The uninstaller drops the role and removes the pg config lines.
+
+---
+
 ## Related
 
 - `cli-reference.md` — complete CLI command/argument reference (generated from the parser)
