@@ -87,7 +87,18 @@ class TestBrowserEnrollCompleteResponseFields:
         fido2 = MagicMock()
         fido2.finish_registration.return_value = mock_cred
 
-        app = _create_test_app(fido2_manager=fido2, backend=backend)
+        # The enroll-complete handler now reads request.app.state.config.session
+        # to build the session config (#291); the enrollment_manager dependency
+        # also reads config.fido2. Provide both, as a real ServerConfig does.
+        config = SimpleNamespace(
+            session=SimpleNamespace(
+                session_timeout=900,
+                access_token_ttl=300,
+                max_session_duration=14400,
+            ),
+            fido2=SimpleNamespace(enrollment_token_ttl=15),
+        )
+        app = _create_test_app(fido2_manager=fido2, backend=backend, config=config)
 
         with patch("server.routes.enroll.verify_binding_hash", return_value=True):
             with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):

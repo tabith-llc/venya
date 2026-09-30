@@ -9,7 +9,7 @@
 import logging
 import os
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("venya.server")
@@ -40,6 +40,15 @@ class SessionConfig(BaseModel):
         default=14400,
         description="Hard cap on session duration in seconds (default: 4 hours)",
     )
+
+    @model_validator(mode="after")
+    def _session_timeout_within_max(self) -> SessionConfig:
+        if self.session_timeout > self.max_session_duration:
+            raise ValueError(
+                f"session.session_timeout ({self.session_timeout}s) must not exceed "
+                f"session.max_session_duration ({self.max_session_duration}s)"
+            )
+        return self
 
 
 class RateLimitConfig(BaseModel):
