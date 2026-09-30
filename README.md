@@ -57,8 +57,6 @@ The following are planned for future releases:
 - **Tested backup and disaster recovery.** A documented backup set (encrypted
   CA material, database, server configuration) with a tested, step-by-step
   restore procedure — not just a doc that claims to work.
-- **A pure auditor role.** Read-only access to audit logs and metadata with an
-  affirmative deny on secret values.
 - **More secret shapes.** Beyond the shipped stack (env injection, askpass,
   sudo-stdin, sshpass): a custom shape registry so teams can define their own
   consumption patterns safely.
@@ -148,7 +146,7 @@ Every command execution is logged:
 - **When** it ran (timestamp)
 - **What secrets** were injected (secret IDs, never values)
 
-Both human operators (via `venya audit` CLI) and AI agents (via the `get_audit` MCP tool) can query the audit log. Non-admin users see only their own events.
+Both human operators (via `venya audit` CLI) and AI agents (via the `get_audit` MCP tool) can query the audit log. Callers holding admin or an auditor-tier role see the full log; all others see only their own events.
 
 ### MCP Protocol Native
 Venya speaks the Model Context Protocol — the open standard for connecting AI assistants to external tools. It works with Claude Code, Cursor, and any MCP-compatible client. No proprietary lock-in. No vendor-specific API.
@@ -167,6 +165,37 @@ Venya speaks the Model Context Protocol — the open standard for connecting AI 
 | Data exfiltration is prevented | sbx sandbox with deny-by-default egress allowlisting |
 | Every action is traceable | Append-only audit log with user, executor, command, timestamp |
 | Secrets are encrypted at rest | Envelope encryption — per-secret DEK wrapped with AES-256-KW; payload ChaCha20-Poly1305 |
+
+---
+
+## Roles & Permissions
+
+Human callers get a role tier: **read**, **read-write**, or **auditor**
+(created with `venya role create <name> --permissions <tier>`, assigned by
+an admin; the seeded `admin` role holds read-write).
+
+- **read** — metadata listings and masked secret reads. No audit-log access.
+- **read-write** — everything above plus writes: create/delete secrets,
+  create sessions, execute commands. Audit-log access included.
+- **auditor** — the compliance tier: read visibility across secrets, roles
+  and executors (metadata) plus full audit-log access, with an affirmative
+  deny on secret **values**. An auditor-only caller gets a 403 on any value
+  read — even with a valid elevation token, refused before the token is
+  consumed, and every refusal is audit-logged. Elevation is not issued to
+  auditor-only callers at all, so they cannot self-add FIDO2 credentials
+  (an admin provisions them).
+
+The auditor tier is **exclusive by design** (separation of duties): any
+role grant or tier flip that would combine auditor with another tier is
+refused with 409 and audit-logged, so audit independence is enforced by
+construction. This design supports NIST SP 800-53 Rev 5 **AC-5**
+(separation of duties), **AU-3/AU-6** (audit-record content and review —
+denials are logged, auditors see the full trail including their own
+denials), and PCI DSS **10.2.1** (failed-access logging) — aligned with,
+not certified by; attestation requires an assessor. Auditor-tier holders
+see the full audit log (all users' events), like the `admin` role; other
+callers see only their own events. Details:
+[docs/auditor-role.md](docs/auditor-role.md).
 
 ---
 
@@ -366,6 +395,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [CLI Reference](docs/cli-reference.md) | Every `venya` command and argument — generated from the parser, test-enforced against drift |
 | [Architecture](docs/architecture.md) | Technical deep dive |
 | [Deployment Configuration](docs/deployment-config.md) | Required config fields, env-var mapping, validation timing |
+| [The Auditor Role](docs/auditor-role.md) | The auditor permission tier: full audit visibility, no secret values, audited denials |
 | [Deployment Sizing Guide](docs/deployment-sizing.md) | How many executors you need + measured CPU/RAM/disk/throughput figures |
 | [Cert & Key Rotation Runbook](docs/cert-rotation-runbook.md) | Rotation procedures for every certificate and key, source-cited |
 | [Firewall & Network Requirements](docs/FIREWALL.md) | Ports/protocols per host type — *(alpha, untested)* |

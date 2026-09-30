@@ -121,8 +121,9 @@ unauthenticated transport.
     404, and the executor keeps the Stage-1-masked output — a filter failure
     never returns raw bytes.
 5. **Audit.** Every step records actor, command string, executor id,
-   secret ids (never values), and timestamps. Non-admin users querying
-   `get_audit` see only their own events (enforced server-side).
+   secret ids (never values), and timestamps. Callers with admin or an
+   auditor-tier role querying `get_audit` see the full log; all others
+   see only their own events (enforced server-side).
 
 **Operator rule (load-bearing).** Step 4's masking covers **stdout/stderr
 only** — the command string itself persists UNMASKED by design (step 5:

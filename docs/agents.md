@@ -20,7 +20,7 @@ to that human.
 | `list_secrets` | Discovery: secret keys + metadata (purpose, executor hints). Values are NEVER returned — to anyone, ever. |
 | `list_executors` | Which executors exist and are online. |
 | `run_command` | Execute a command on an executor with named secrets injected (`secret_keys`). |
-| `get_audit` | Your authorizing user's execution history (non-admins see only their own events). |
+| `get_audit` | Your authorizing user's execution history (callers with admin or an auditor-tier role see the full log; all others see only their own events). |
 
 ## Hard rules
 

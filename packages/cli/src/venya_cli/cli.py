@@ -465,9 +465,9 @@ def create_parser() -> argparse.ArgumentParser:
     role_create.add_argument("name", help="Role name")
     role_create.add_argument(
         "--permissions",
-        choices=["read", "read-write"],
+        choices=["read", "read-write", "auditor"],
         default="read",
-        help="Permission tier",
+        help="Permission tier ('auditor' = read-only audit-log visibility, no secret values)",
     )
     role_create.add_argument("--description", help="Role description")
 

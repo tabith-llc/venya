@@ -178,6 +178,46 @@ async def elevate_assert(
             detail="Elevation verification failed",
         ) from None
 
+    # Auditor-role rework (ruling 1c-ii, blanket issuance-deny): refuse to
+    # ISSUE an elevation token to auditor-only callers — the last gate before
+    # the token exists. Diagnostics only: the authoritative value-deny lives
+    # at the secrets_get unmask chokepoint. Blanket by ruling: the token also
+    # gates self-service credential-add (credentials._verify_elevation), so
+    # an auditor-only user cannot add their own security keys (release-notes
+    # wording). Union (1b): any non-auditor membership passes.
+    from core.iam.role_manager import RoleManager
+
+    from ..dependencies import auditor_only_permissions
+
+    if auditor_only_permissions(RoleManager(db).get_user_permissions(user_info["user_id"])):
+        # Denials are audit-logged (owner ruling 2026-09-30). COMMIT BEFORE
+        # the raise — get_db rolls back escaped exceptions. Value-free:
+        # no token material exists yet at this gate. Fail-closed: audit-write
+        # failure never upgrades the denial (logged loudly, still 403).
+        from core.iam.models import AuditEvent
+
+        try:
+            db.add(
+                AuditEvent(
+                    event_type="auditor_elevation_denied",
+                    user_id=user_info["user_id"],
+                    fields={
+                        "outcome": "denied",
+                        "reason": "auditor-only role",
+                        "user_id": user_info["user_id"],
+                        "endpoint": "/api/v1/auth/elevate/assert",
+                    },
+                    timestamp=datetime.now(UTC),
+                )
+            )
+            db.commit()
+        except Exception:
+            logger.exception("Audit write failed on auditor elevation deny (still denying)")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="insufficient role: auditor cannot elevate",
+        )
+
     # Create elevation token
     elevation_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(elevation_token.encode()).hexdigest()

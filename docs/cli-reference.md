@@ -847,7 +847,7 @@ venya role create <NAME> [OPTIONS]
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `NAME` (positional) | **yes** | string | — | Role name |
-| `--permissions` | no | one of: `read`, `read-write` | `read` | Permission tier |
+| `--permissions` | no | one of: `read`, `read-write`, `auditor` | `read` | Permission tier ('auditor' = read-only audit-log visibility, no secret values) |
 | `--description` | no | string | — | Role description |
 
 **Examples**

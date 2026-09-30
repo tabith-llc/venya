@@ -68,7 +68,8 @@ venya audit
 ```
 
 Your execution appears: actor, command string, executor, secret ids,
-timestamp. Non-admin users see only their own events (server-enforced).
+timestamp. Callers with admin or an auditor-tier role see the full log;
+all others see only their own events (server-enforced).
 
 ## Extended demo: real work on a target host
 

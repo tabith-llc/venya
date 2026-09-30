@@ -118,6 +118,27 @@ class TestRolesCreate:
             assert data["permissions"] == "read"
             assert data["description"] == "Developers"
 
+    def test_create_auditor_permissions_accepted(self):
+        """Acceptance (ticket auditor-role): permissions="auditor" passes the
+        request-model Literal gate and reaches RoleManager.create_role
+        verbatim (pre-fix the Literal 422'd it before role_manager ran)."""
+        rm = _make_mock_role_manager(
+            role=SimpleNamespace(id=2, name="auditor", permissions="auditor", description=None)
+        )
+        backend = MagicMock()
+        session = MagicMock()
+        backend.get_session.return_value = session
+        app = _create_test_app(backend=backend)
+
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/api/v1/roles", json={"name": "auditor", "permissions": "auditor"})
+            assert resp.status_code == 201
+            assert resp.json()["permissions"] == "auditor"
+        assert rm.create_role.call_args.kwargs["permissions"] == "auditor"
+
     def test_create_duplicate(self):
         """POST /roles should return 400 for duplicate role name."""
         rm = _make_mock_role_manager(error=RoleManagerError("Role 'dev' already exists"))
@@ -538,3 +559,120 @@ class TestRoleMemberRemove:
             resp = client.delete("/api/v1/roles/1/members/nonexistent")
             assert resp.status_code == 404
             assert "not found" in resp.json()["detail"]
+
+
+def _sod(user_id="target", role_id=1, tiers=None):
+    from core.iam.role_manager import SeparationOfDutiesError
+
+    return SeparationOfDutiesError(
+        f"Separation of duties: resulting tiers {sorted(tiers or {'auditor', 'read'})}",
+        user_id=user_id,
+        role_id=role_id,
+        tiers=tiers or {"auditor", "read"},
+    )
+
+
+def _sod_session(rm):
+    """App + (backend session mock) wired to the mocked RoleManager."""
+    backend = MagicMock()
+    session = MagicMock()
+    backend.get_session.return_value = session
+    app = _create_test_app(backend=backend)
+    return app, session
+
+
+class TestAuditorSeparationOfDuties:
+    """POST /roles/{id}/members and PUT /roles/{id} refuse SoD mixtures
+    with 409 and ONE value-free auditor_sod_denied audit event (ruling 2');
+    audit-write failure stays a 409 (fail-closed — never 200/500)."""
+
+    def _post_member(self, app, rm):
+        with (
+            patch("core.iam.role_manager.RoleManager", return_value=rm),
+            patch("server.dependencies.RoleManager", return_value=rm),
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            return client.post("/api/v1/roles/1/members", json={"user_id": "target"})
+
+    def _put_role(self, app, rm, body):
+        with (
+            patch("core.iam.role_manager.RoleManager", return_value=rm),
+            patch("server.dependencies.RoleManager", return_value=rm),
+        ):
+            client = TestClient(app, raise_server_exceptions=False)
+            return client.put("/api/v1/roles/1", json=body)
+
+    @staticmethod
+    def _sod_events(session):
+        return [
+            c.args[0]
+            for c in session.add.call_args_list
+            if getattr(c.args[0], "event_type", None) == "auditor_sod_denied"
+        ]
+
+    def test_member_add_success_writes_no_sod_event(self):
+        """P1/P2 handler-side: a legal grant commits membership, zero events."""
+        rm = _make_mock_role_manager()
+        app, session = _sod_session(rm)
+        resp = self._post_member(app, rm)
+        assert resp.status_code == 201
+        assert self._sod_events(session) == []
+        session.commit.assert_called()
+
+    def test_member_add_sod_409_with_one_event(self):
+        """N1/N2 handler-side: mixed-tier grant → 409 + exactly one event
+        carrying action/target/tiers; value-free; commit-BEFORE-raise ran."""
+        rm = _make_mock_role_manager()
+        rm.add_member.side_effect = _sod(user_id="target", tiers={"auditor", "read"})
+        app, session = _sod_session(rm)
+        resp = self._post_member(app, rm)
+        assert resp.status_code == 409
+        events = self._sod_events(session)
+        assert len(events) == 1
+        event = events[0]
+        assert event.user_id == "test-user"  # actor (require_admin override)
+        assert '"action": "add_member"' in event.fields
+        assert '"target_user_id": "target"' in event.fields
+        assert '["auditor", "read"]' in event.fields
+
+    def test_member_add_sod_reverse_direction_409(self):
+        """N2 paired: non-auditor tier onto an auditor is the same refusal."""
+        rm = _make_mock_role_manager()
+        rm.add_member.side_effect = _sod(user_id="audited", tiers={"auditor", "read-write"})
+        app, session = _sod_session(rm)
+        resp = self._post_member(app, rm)
+        assert resp.status_code == 409
+        assert len(self._sod_events(session)) == 1
+
+    def test_role_tier_flip_sod_409_with_one_event(self):
+        """N3 handler-side: roles_update tier flip refused → 409 + one
+        event with action=role_tier_change."""
+        rm = _make_mock_role_manager()
+        rm.update_role.side_effect = _sod(user_id="target", tiers={"auditor", "read-write"})
+        app, session = _sod_session(rm)
+        resp = self._put_role(app, rm, {"permissions": "auditor"})
+        assert resp.status_code == 409
+        events = self._sod_events(session)
+        assert len(events) == 1
+        assert '"action": "role_tier_change"' in events[0].fields
+
+    def test_role_tier_flip_memberless_allowed(self):
+        """N4 handler-side pair: a clean update commits, zero events."""
+        rm = _make_mock_role_manager(role=SimpleNamespace(id=1, name="flip", permissions="auditor", description=None))
+        rm.update_role.return_value = SimpleNamespace(id=1, name="flip", permissions="auditor", description=None)
+        app, session = _sod_session(rm)
+        resp = self._put_role(app, rm, {"permissions": "auditor"})
+        assert resp.status_code == 200
+        assert resp.json()["permissions"] == "auditor"
+        assert self._sod_events(session) == []
+
+    def test_audit_write_failure_still_409(self):
+        """H1: audit-event commit blows up → STILL 409, never 200/500
+        (fail-closed guard — the refusal is the control)."""
+        rm = _make_mock_role_manager()
+        rm.add_member.side_effect = _sod()
+        app, session = _sod_session(rm)
+        session.commit.side_effect = RuntimeError("audit store down")
+        resp = self._post_member(app, rm)
+        assert resp.status_code == 409
+        assert "Separation of duties" in resp.json()["detail"]

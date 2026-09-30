@@ -18,6 +18,33 @@ class RoleManagerError(Exception):
     """Role manager error."""
 
 
+class SeparationOfDutiesError(RoleManagerError):
+    """Grant-time separation-of-duties refusal (auditor-role ruling 2',
+    NIST SP 800-53 Rev 5 AC-5 preventive: an auditor+other-tier mixture
+    must be IMPOSSIBLE by construction, not merely inadvisable).
+
+    Subclasses RoleManagerError so every existing catch keeps working;
+    carries the structured grant context (target user, role, resulting
+    tier-set) so the server layer writes the auditor_sod_denied audit
+    event without re-querying or string-matching the message.
+    """
+
+    def __init__(self, message: str, *, user_id: str, role_id: int, tiers: set[str]) -> None:
+        super().__init__(message)
+        self.user_id = user_id
+        self.role_id = role_id
+        self.tiers = sorted(tiers)
+
+
+def _mixed_auditor_tiers(tiers: set[str]) -> bool:
+    """True iff 'auditor' coexists with ANY non-auditor tier (ruling 2').
+
+    Two auditor-tier memberships are legal — the resulting set is still
+    {auditor}; len() == 1.
+    """
+    return "auditor" in tiers and len(tiers) > 1
+
+
 @dataclass
 class RoleInfo:
     """Role information."""
@@ -46,7 +73,7 @@ class RoleManager:
 
         Args:
             name: Role name (unique).
-            permissions: Permission tier — "read" or "read-write".
+            permissions: Permission tier — "read", "read-write", or "auditor".
             description: Optional description.
 
         Returns:
@@ -55,8 +82,8 @@ class RoleManager:
         Raises:
             RoleManagerError: If role name already exists or permissions are invalid.
         """
-        if permissions not in ("read", "read-write"):
-            raise RoleManagerError(f"Invalid permissions: {permissions}. Must be 'read' or 'read-write'")
+        if permissions not in ("read", "read-write", "auditor"):
+            raise RoleManagerError(f"Invalid permissions: {permissions}. Must be 'read', 'read-write', or 'auditor'")
 
         existing = self.db.query(Role).filter(func.lower(Role.name) == name.lower()).first()
         if existing:
@@ -102,10 +129,32 @@ class RoleManager:
                     raise RoleManagerError(f"Role '{name}' already exists")
 
         if permissions is not None:
-            if permissions not in ("read", "read-write"):
-                raise RoleManagerError(f"Invalid permissions: {permissions}. Must be 'read' or 'read-write'")
+            if permissions not in ("read", "read-write", "auditor"):
+                raise RoleManagerError(
+                    f"Invalid permissions: {permissions}. Must be 'read', 'read-write', or 'auditor'"
+                )
             if permissions == role.permissions:
                 permissions = None
+
+        # Separation of duties (auditor-role ruling 2', applied BEFORE any
+        # mutation): a tier flip must not mix {auditor, non-auditor} for ANY
+        # current member — each member's RESULTING tier-set is evaluated with
+        # this role already carrying the new tier (a role whose members all
+        # hold only auditor, or a role with no members, is always allowed).
+        if permissions is not None:
+            for member in self.get_role_members(role_id):
+                resulting = {
+                    permissions if m.role_id == role_id else m.role.permissions
+                    for m in self.get_user_roles(member.user_id)
+                }
+                if _mixed_auditor_tiers(resulting):
+                    raise SeparationOfDutiesError(
+                        f"Separation of duties: setting role {role_id} to '{permissions}' would mix "
+                        f"tiers {sorted(resulting)} for user '{member.user_id}'",
+                        user_id=member.user_id,
+                        role_id=role_id,
+                        tiers=resulting,
+                    )
 
         if name is not None:
             role.name = name.lower()
@@ -159,7 +208,8 @@ class RoleManager:
         # Check existence
         if not self.db.query(User).filter(User.user_id == user_id).first():
             raise RoleManagerError(f"User '{user_id}' not found")
-        if not self.get_role(role_id):
+        role = self.get_role(role_id)
+        if role is None:
             raise RoleManagerError(f"Role ID {role_id} not found")
 
         # Check for duplicate
@@ -168,6 +218,22 @@ class RoleManager:
         )
         if existing:
             raise RoleManagerError(f"User '{user_id}' is already a member of role {role_id}")
+
+        # Separation of duties (auditor-role ruling 2'): the add may not
+        # produce a mixed {auditor, non-auditor} tier-set. Computed on the
+        # RESULTING set — auditor+auditor stays legal, auditor+anything
+        # else is refused. No legacy-state migration is needed: the
+        # auditor tier ships for the first time WITH this guard, so no
+        # mixed state can pre-exist.
+        resulting = {m.role.permissions for m in self.get_user_roles(user_id)} | {role.permissions}
+        if _mixed_auditor_tiers(resulting):
+            raise SeparationOfDutiesError(
+                f"Separation of duties: user '{user_id}' cannot hold the auditor tier together "
+                f"with other tiers — resulting tiers {sorted(resulting)}",
+                user_id=user_id,
+                role_id=role_id,
+                tiers=resulting,
+            )
 
         membership = RoleMember(user_id=user_id, role_id=role_id)
         self.db.add(membership)
@@ -204,7 +270,7 @@ class RoleManager:
         Args:
             user_id: User ID.
             role_id: Role ID.
-            required_permission: "read" or "read-write".
+            required_permission: "read", "read-write", or "auditor".
 
         Returns:
             True if the user's role permission meets or exceeds the required level.
@@ -223,6 +289,13 @@ class RoleManager:
         role = membership.role
         if required_permission == "read-write":
             return role.permissions == "read-write"
+        if required_permission == "auditor":
+            # Audit-visibility tier (ticket auditor-role): the auditor role
+            # passes, and read-write EXCEEDS it — the ticket's post-change
+            # permission table grants audit-log viewing to read-write/admin
+            # (admin roles are seeded permissions="read-write"), so an
+            # auditor-only check here would lock admins out of the audit log.
+            return role.permissions in ("auditor", "read-write")
         return True  # "read" is always granted if membership exists
 
     def get_user_permissions(self, user_id: str) -> dict[int, str]:
