@@ -345,6 +345,9 @@ class TestSecretsGet:
             caller="human",
             unmask=False,
             user_id="test-user",
+            # secrets-get-forgets-role-names: role names now reach core.get
+            # (mocked role wiring yields [] — real semantics ORM cells below).
+            role_names=[],
         )
 
     def test_get_human_unmask_without_token_403(self):
@@ -385,6 +388,7 @@ class TestSecretsGet:
             caller="human",
             unmask=False,
             user_id="test-user",
+            role_names=[],
         )
 
     def test_get_caller_param_plus_unmask_still_403(self):
@@ -430,7 +434,10 @@ class TestSecretsGet:
             secret_key="db-password",
             caller="human",
             unmask=False,
+            # No user_id -> no role lookup (injection plane: executors consume
+            # via core.get_for_injection, never this route).
             user_id=None,
+            role_names=None,
         )
 
     def test_get_unmask_with_valid_token_returns_plaintext(self):
@@ -459,6 +466,7 @@ class TestSecretsGet:
             caller="human",
             unmask=True,
             user_id="test-user",
+            role_names=[],
         )
         db.commit.assert_called()
 
@@ -487,6 +495,7 @@ class TestSecretsGet:
             caller="human",
             unmask=False,
             user_id="test-user",
+            role_names=[],
         )
 
     def test_get_not_found(self):
@@ -522,6 +531,7 @@ class TestSecretsGet:
             caller="human",
             unmask=True,
             user_id="test-user",
+            role_names=[],
         )
 
     def test_get_elevation_query_param_is_dead_transport(self):
@@ -1758,3 +1768,158 @@ class TestUnmaskAuditorDenyTokenIntactORM:
         assert "top-secret" not in event.fields
         assert token not in event.fields
         s.close()
+
+
+class TestSecretsGetRoleNames:
+    """Ticket secrets-get-forgets-role-names: GET /secrets/{key} must carry
+    the caller's role NAMES into core.get (LIST already does; GET forgot —
+    every role-scoped secret 404'd for non-creators while LIST showed it).
+
+    Truth table per A2 — paired negatives guard the no-enumeration design
+    (scoped-out keys stay indistinguishable from nonexistent ones).
+    ORM-backed cells reuse _build_scoped_app (real core enforcement, zero
+    mocks in the visibility path); N3 pins the injection-plane shape at the
+    route with mocks.
+    """
+
+    def _add_token(self, engine, token):
+        import hashlib
+        from datetime import UTC, datetime, timedelta
+
+        from core.iam.models import ElevationToken
+        from sqlalchemy.orm import sessionmaker
+
+        s = sessionmaker(bind=engine)()
+        s.add(
+            ElevationToken(
+                token_hash=hashlib.sha256(token.encode()).hexdigest(),
+                user_id="test-user",
+                expires_at=datetime.now(UTC) + timedelta(seconds=60),
+            )
+        )
+        s.commit()
+        s.close()
+
+    def _token_used(self, engine):
+        from core.iam.models import ElevationToken
+        from sqlalchemy.orm import sessionmaker
+
+        s = sessionmaker(bind=engine)()
+        try:
+            return s.query(ElevationToken).one().used
+        finally:
+            s.close()
+
+    def test_p1_non_creator_role_holder_masked_get_200(self, tmp_path):
+        """P1: non-creator HOLDING the scoped role -> masked GET 200
+        (value redacted). Pre-fix this 404'd: GET never passed role_names."""
+        app, engine = _build_scoped_app(tmp_path, member_role="admin")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/admin-credentials")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"key": "admin-credentials", "value": "\u2022" * 8, "masked": True}
+        engine.dispose()
+
+    def test_p2_role_holder_unmask_200_token_consumed_once(self, tmp_path):
+        """P2: same non-creator role-holder + valid elevation token ->
+        unmask 200 plaintext, token consumed ONCE (used=True committed on
+        the success path)."""
+        app, engine = _build_scoped_app(tmp_path, member_role="admin")
+        token = "elev-p2-token"
+        self._add_token(engine, token)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/admin-credentials",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": token},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"key": "admin-credentials", "value": "top-secret", "masked": False}
+        assert self._token_used(engine) is True
+        engine.dispose()
+
+    def test_n1_scoped_out_404_indistinguishable_from_missing(self, tmp_path):
+        """N1: caller WITHOUT the scoped role and not creator -> 404, same
+        shape as the nonexistent-key 404 (no cross-role key enumeration)."""
+        app, engine = _build_scoped_app(tmp_path, member_role="user")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        r_scoped = client.get("/api/v1/secrets/admin-credentials")
+        r_missing = client.get("/api/v1/secrets/no-such-key")
+
+        assert r_scoped.status_code == 404
+        assert r_missing.status_code == 404
+        assert r_scoped.json()["detail"].replace("admin-credentials", "KEY") == r_missing.json()["detail"].replace(
+            "no-such-key", "KEY"
+        )
+        engine.dispose()
+
+    def test_n2_creator_with_no_roles_still_visible(self, tmp_path):
+        """N2: creator holding NO roles keeps the ownership path (the fix
+        must not regress creator access)."""
+        app, engine = _build_scoped_app(tmp_path, member_role="user")
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "admin-user",
+            "roles": [],
+            "caller": "human",
+        }
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/admin-credentials")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["masked"] is True
+        engine.dispose()
+
+    def test_n3_injection_plane_shape_skips_role_lookup(self):
+        """N3: executor-shaped auth context (no user_id — the injection
+        plane is served by core.get_for_injection in executors.py, never
+        this route): GET resolves NO roles, passes user_id=None and
+        role_names=None. RoleManager must not even be constructed."""
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        app = _create_test_app(core=core)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "caller": "executor",
+            "executor_id": "exec-1",
+        }
+        rm_cls = MagicMock()
+        with patch("core.iam.role_manager.RoleManager", rm_cls):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/api/v1/secrets/db-password")
+
+        assert resp.status_code == 200
+        assert resp.json()["masked"] is True
+        core.get.assert_called_once_with(
+            secret_key="db-password",
+            caller="human",
+            unmask=False,
+            user_id=None,
+            role_names=None,
+        )
+        rm_cls.assert_not_called()
+
+    def test_h1_visibility_404_on_unmask_does_not_burn_token(self, tmp_path):
+        """H1 (A0 pin — fleet-sheet verdict 2026-09-30: used=FALSE after the
+        unmask-path 404; flush-then-raise + get_db rollback model confirmed):
+        a REAL ElevationToken row stays unused when the fetch 404s on
+        visibility. Zero-mock interlock — mocks cannot prove a rolled-back
+        UPDATE stayed rolled back; only the real UPDATE can."""
+        app, engine = _build_scoped_app(tmp_path, member_role="user")
+        token = "elev-h1-token"
+        self._add_token(engine, token)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get(
+            "/api/v1/secrets/admin-credentials",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": token},
+        )
+
+        assert resp.status_code == 404
+        assert self._token_used(engine) is False
+        engine.dispose()

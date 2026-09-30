@@ -381,6 +381,20 @@ async def secrets_get(
 
     from core.engine.core import Caller, CoreAccessError
 
+    # Ticket secrets-get-forgets-role-names: the caller's role NAMES must
+    # reach core.get's single visibility enforcement point (_resolve_secret_in)
+    # — GET omitted them, so every role-scoped secret 404'd for non-creators
+    # while LIST showed it. One request-scoped lookup shared by ALL three
+    # core.get sites below (masked + unmask paths), mirroring secrets_list.
+    # NOT user_info["_role_permissions"]: that map is role IDS -> tiers.
+    user_id = user_info.get("user_id")
+    role_names: list[str] | None = None
+    if user_id is not None:
+        from core.iam.role_manager import RoleManager
+
+        rm = RoleManager(db)
+        role_names = [m.role.name for m in rm.get_user_roles(user_id)]
+
     # Unmask is ALWAYS elevation-gated (ticket
     # sec-secret-caller-param-plaintext-bypass): tokenless unmask is a loud
     # 403, never a silent fall-through to plaintext.
@@ -483,7 +497,8 @@ async def secrets_get(
                     secret_key=key,
                     caller=Caller.HUMAN,
                     unmask=False,
-                    user_id=user_info.get("user_id"),
+                    user_id=user_id,
+                    role_names=role_names,
                 )
                 return SecretGetResponse(key=key, value=value, masked=True)
 
@@ -493,7 +508,8 @@ async def secrets_get(
                     secret_key=key,
                     caller=Caller.HUMAN,
                     unmask=True,
-                    user_id=user_info.get("user_id"),
+                    user_id=user_id,
+                    role_names=role_names,
                 )
                 db.commit()
                 return SecretGetResponse(key=key, value=value, masked=False)
@@ -524,7 +540,8 @@ async def secrets_get(
             secret_key=key,
             caller=Caller.HUMAN,
             unmask=False,
-            user_id=user_info.get("user_id"),
+            user_id=user_id,
+            role_names=role_names,
         )
     except CoreAccessError as e:
         raise HTTPException(

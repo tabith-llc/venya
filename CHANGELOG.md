@@ -51,6 +51,14 @@ Notable changes to Venya will be documented in this file.
   material behind a success banner. Restored data is now validated as a
   parseable PEM private key before anything is written to disk, in both
   backup and shares restore modes.
+- **GET /secrets/{key} now passes the caller's role names to core.get.**
+  The GET route omitted the `role_names` argument that `_resolve_secret_in`
+  uses as the visibility contract, so every role-scoped secret 404'd for
+  non-creator role-holders (masked AND unmask) while LIST correctly showed
+  it. Role names are resolved once per request (same idiom as LIST) and
+  passed at all three core.get call sites; scoped-out keys stay
+  404-indistinguishable from nonexistent ones, and a visibility 404 on the
+  unmask path still never burns the elevation token (rollback pin test).
 
 ## [0.1.0alpha16] - 2026-09-27
 
