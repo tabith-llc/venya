@@ -60,6 +60,13 @@ Notable changes to Venya will be documented in this file.
   404-indistinguishable from nonexistent ones, and a visibility 404 on the
   unmask path still never burns the elevation token (rollback pin test).
 
+- **Rotated executor certificates no longer leak their HTTP clients.**
+  Cert rotation rebuilt the mTLS client and swapped it into the daemon,
+  cert manager, and reaper, but never closed the pre-rotation client — its
+  connection pool and TLS session (holding the now-revoked cert) lingered
+  until daemon stop. The outgoing client is now closed as the last step of
+  the swap, and a close failure is warned-about, never rotation-aborting.
+
 ## [0.1.0alpha16] - 2026-09-27
 
 ### Added
