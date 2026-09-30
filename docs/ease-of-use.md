@@ -112,7 +112,7 @@ destination to the egress allowlist:
 ```
 # /etc/venya/egress-allowlist.txt  (on the executor host)
 files.internal.example
-10.0.4.0/24
+192.0.2.0/24
 ```
 
 - One entry per line: an IP, an IPv4 CIDR, or a hostname. `#` starts a
