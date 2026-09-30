@@ -396,6 +396,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [Architecture](docs/architecture.md) | Technical deep dive |
 | [Deployment Configuration](docs/deployment-config.md) | Required config fields, env-var mapping, validation timing |
 | [The Auditor Role](docs/auditor-role.md) | The auditor permission tier: full audit visibility, no secret values, audited denials |
+| [Making Venya Easier to Use](docs/ease-of-use.md) | Deliberate relaxations: the scp worked recipe, per-knob gain/loss catalog, the never-relax list |
 | [Deployment Sizing Guide](docs/deployment-sizing.md) | How many executors you need + measured CPU/RAM/disk/throughput figures |
 | [Cert & Key Rotation Runbook](docs/cert-rotation-runbook.md) | Rotation procedures for every certificate and key, source-cited |
 | [Firewall & Network Requirements](docs/FIREWALL.md) | Ports/protocols per host type — *(alpha, untested)* |
