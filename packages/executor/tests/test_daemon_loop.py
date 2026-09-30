@@ -577,6 +577,129 @@ class TestMainLoop:
 
         assert rotate_called[0] is True
 
+    def _run_one_rotation(self, daemon, old_client, new_client):
+        """Drive _main_loop() through exactly one rotation, then shutdown."""
+
+        def do_rotate():
+            daemon.state.running = False
+
+        with (
+            patch.object(daemon.cert_manager, "needs_rotation", return_value=True),
+            patch.object(daemon.cert_manager, "rotate", side_effect=do_rotate),
+            patch.object(daemon, "_create_mtls_client", return_value=new_client),
+            patch.object(daemon.cert_manager, "check_revocation", return_value=False),
+            patch.object(daemon, "_send_heartbeat"),
+            patch.object(daemon._shutdown_event, "wait", return_value=False),
+        ):
+            daemon._main_loop()
+
+    def test_rotation_closes_pre_rotation_client(self, config: ExecutorConfig):
+        """T1 (#178 residual): rotation swaps ALL references onto the new
+        client AND closes the pre-rotation client exactly once — the
+        never-closed orphan lingered with the revoked cert until daemon
+        stop."""
+        daemon = ExecutorDaemon(config)
+        old_client = MagicMock(spec=httpx2.Client)
+        new_client = MagicMock(spec=httpx2.Client)
+        daemon.client = old_client
+        daemon.state.running = True
+
+        self._run_one_rotation(daemon, old_client, new_client)
+
+        assert daemon.client is new_client
+        assert daemon.cert_manager.client is new_client
+        assert daemon.reaper.http_client is new_client
+        old_client.close.assert_called_once_with()
+        new_client.close.assert_not_called()
+
+    def test_rotation_closes_old_client_only_after_reference_swap(self, config: ExecutorConfig):
+        """T2 (#178 residual): the close is the LAST swap step — at the
+        moment .close() fires, every consumer reference already points at
+        the new client (an early close would race the reaper thread into a
+        closed client)."""
+        daemon = ExecutorDaemon(config)
+        old_client = MagicMock(spec=httpx2.Client)
+        new_client = MagicMock(spec=httpx2.Client)
+        daemon.client = old_client
+        daemon.state.running = True
+
+        seen: dict = {}
+        old_client.close.side_effect = lambda: seen.update(
+            self_client=daemon.client is new_client,
+            cert_manager=daemon.cert_manager.client is new_client,
+            reaper=daemon.reaper.http_client is new_client,
+        )
+
+        self._run_one_rotation(daemon, old_client, new_client)
+
+        assert seen == {"self_client": True, "cert_manager": True, "reaper": True}
+
+    def test_rotation_survives_close_failure(self, config: ExecutorConfig, caplog):
+        """T3 (#178 residual): a raising old-client .close() is swallowed
+        with a warning — rotation still lands the new references and the
+        main loop never aborts."""
+        daemon = ExecutorDaemon(config)
+        old_client = MagicMock(spec=httpx2.Client)
+        old_client.close.side_effect = RuntimeError("close boom")
+        new_client = MagicMock(spec=httpx2.Client)
+        daemon.client = old_client
+        daemon.state.running = True
+
+        with caplog.at_level(logging.WARNING, logger="venya.executor.daemon"):
+            self._run_one_rotation(daemon, old_client, new_client)
+
+        assert daemon.client is new_client
+        assert daemon.reaper.http_client is new_client
+        assert any("pre-rotation client close failed" in r.getMessage() for r in caplog.records)
+
+    def test_non_rotating_iteration_touches_no_clients(self, config: ExecutorConfig):
+        """T4 (paired negative): without needs_rotation the loop creates NO
+        client and closes NOTHING — the handoff lives only in the rotation
+        block."""
+        daemon = ExecutorDaemon(config)
+        old_client = MagicMock(spec=httpx2.Client)
+        daemon.client = old_client
+        daemon.state.running = True
+
+        call_count = [0]
+
+        def stop_after_two():
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                daemon.state.running = False
+
+        with (
+            patch.object(daemon.cert_manager, "needs_rotation", return_value=False),
+            patch.object(daemon.cert_manager, "check_revocation", return_value=False),
+            patch.object(daemon, "_create_mtls_client") as create_mock,
+            patch.object(daemon, "_send_heartbeat", side_effect=stop_after_two),
+            patch.object(daemon._shutdown_event, "wait", return_value=False),
+        ):
+            daemon._main_loop()
+
+        create_mock.assert_not_called()
+        old_client.close.assert_not_called()
+        assert daemon.client is old_client
+
+    def test_rotation_with_no_prior_client_skips_close(self, config: ExecutorConfig):
+        """T5 (None-safety pin): the outgoing client is only closed when one
+        exists. The registration site is None-safe by inspection — start()
+        initializes self.client=None and :1101 is its FIRST assignment
+        (register() uses throwaway clients, never self.client) — so no swap
+        there orphans; this cell pins the guard the rotation code relies on
+        staying None-safe if a rotation ever runs before an assignment."""
+        daemon = ExecutorDaemon(config)
+        new_client = MagicMock(spec=httpx2.Client)
+        daemon.client = None
+        daemon.state.running = True
+
+        self._run_one_rotation(daemon, None, new_client)
+
+        assert daemon.client is new_client
+        assert daemon.cert_manager.client is new_client
+        assert daemon.reaper.http_client is new_client
+        new_client.close.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # ReaperLoop._check_orphaned — real sbx layout (ticket daemon-reaper-phantom-session)

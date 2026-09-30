@@ -1150,10 +1150,29 @@ class ExecutorDaemon:
             if self.cert_manager.needs_rotation():
                 try:
                     self.cert_manager.rotate()
-                    # Recreate client with new cert
+                    # Recreate client with new cert. Ticket daemon-reaper-cert-orphan
+                    # #178 residual (acceptance bullet left unimplemented by 9bc0cd7):
+                    # the pre-rotation client used to be dropped on the floor — its
+                    # connection pool + TLS session lingered with the REVOKED cert
+                    # until daemon stop. Capture the outgoing client BEFORE the
+                    # reassignments; close it only AFTER all three references
+                    # (daemon/cert_manager/reaper) are on the new client, so the
+                    # reaper thread's next request can never see a closed client it
+                    # fetched after the swap. A close failure is swallowed with a
+                    # warning — rotation already succeeded; the orphan (bounded: one
+                    # per failed close) is strictly better than an aborted swap.
+                    old_client = self.client
                     self.client = self._create_mtls_client()
                     self.cert_manager.client = self.client
                     self.reaper.http_client = self.client
+                    if old_client is not None:
+                        try:
+                            old_client.close()
+                        except Exception:
+                            logger.warning(
+                                "pre-rotation client close failed — orphaned client " "persists until daemon stop",
+                                exc_info=True,
+                            )
                     self.state.cert_serial = self.cert_manager.serial
                     self.state.cert_not_after = self.cert_manager.not_after
                     logger.info(
