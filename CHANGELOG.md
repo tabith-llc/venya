@@ -66,6 +66,15 @@ Notable changes to Venya will be documented in this file.
   connection pool and TLS session (holding the now-revoked cert) lingered
   until daemon stop. The outgoing client is now closed as the last step of
   the swap, and a close failure is warned-about, never rotation-aborting.
+- **Adding a second security key no longer fails with a CTAP error.**
+  `venya credential add` (and any PIN-only-key registration carrying
+  excludeCredentials) died at the key with `CTAP 0x11 CBOR_UNEXPECTED_TYPE`:
+  the CLI's raw CTAP path read the credential/user id bytes back through
+  python-fido2's JSON view, which re-encodes bytes as base64url STRINGS —
+  the authenticator requires byte strings. Those fields now cross to the
+  key as bytes (the library's own CTAP convention); users with zero
+  existing credentials were never affected, which is why first-time
+  init/enroll worked.
 
 ## [0.1.0alpha16] - 2026-09-27
 
