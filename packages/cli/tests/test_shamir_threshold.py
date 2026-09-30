@@ -97,7 +97,14 @@ class TestRestoreHandler:
         assert not (ca_dir / "ca.key").exists()  # never writes a corrupt key
 
     def test_restore_at_threshold_roundtrips(self, tmp_path):
-        secret = b"THE-CA-KEY"
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        secret = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
         shares = split(secret, threshold=2, shares=3)
         ca_dir = tmp_path / "ca"
         ca_dir.mkdir()

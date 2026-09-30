@@ -2759,9 +2759,11 @@ def _decrypt_ca_backup(data: bytes, passphrase: str) -> bytes:
 
     Raises ValueError with an operator-actionable message on any format,
     passphrase, or tamper failure — never returns suspect material. The
-    legacy CBC path runs FULL PKCS7 validation: the pre-fix check inspected
-    only the last padding byte's RANGE, so a wrong passphrase or tampered
-    blob could restore silently-corrupted key material (finding 5).
+    legacy CBC path runs FULL PKCS7 validation (the pre-fix check inspected
+    only the last padding byte's RANGE). Padding alone is NOT authenticated,
+    though: a wrong passphrase can pass strict PKCS7 by coincidence (~1/256),
+    so the reconstructed bytes are additionally content-validated as a parseable
+    PEM private key at the single restore write site by `_validate_ca_key_pem`.
     """
     from cryptography.exceptions import InvalidTag
     from cryptography.hazmat.primitives import ciphers
@@ -2791,6 +2793,23 @@ def _decrypt_ca_backup(data: bytes, passphrase: str) -> bytes:
     if pad < 1 or pad > 16 or pad > len(padded) or padded[-pad:] != bytes([pad]) * pad:
         raise ValueError("invalid passphrase or corrupted backup (PKCS7 validation failed)")
     return padded[:-pad]
+
+
+def _validate_ca_key_pem(data: bytes) -> bytes:
+    """Fail closed unless `data` parses as a PEM private key.
+
+    Compensating control for the unauthenticated legacy CBC reader: a wrong
+    passphrase that coincidentally passes PKCS7 (~1/256) would otherwise be
+    written to disk as ca.key behind a success banner. Applied to EVERY
+    restore write path (backup + shares modes) at the single write site.
+    """
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    try:
+        load_pem_private_key(data, password=None)
+    except Exception as exc:
+        raise ValueError("restored data is not a valid PEM private key") from exc
+    return data
 
 
 def cmd_admin_export_ca_key(args: Any) -> int:
@@ -2978,6 +2997,12 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
 
     else:
         print(f"Unknown restore mode: {mode}", file=sys.stderr)
+        return 1
+
+    try:
+        _validate_ca_key_pem(reconstructed)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         return 1
 
     # Write the restored key
