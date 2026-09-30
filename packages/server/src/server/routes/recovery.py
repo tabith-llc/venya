@@ -6,7 +6,6 @@
 
 """Break-glass recovery endpoint."""
 
-import hashlib
 import logging
 from datetime import UTC
 
@@ -15,6 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db
+from ..recovery_codes import hash_recovery_code
 
 logger = logging.getLogger("venya.server")
 
@@ -59,7 +59,7 @@ async def recovery(
             "recovery_code_pepper",
             "",
         )
-        submitted_hash = hashlib.sha256((pepper + req.code).encode()).hexdigest()
+        submitted_hash = hash_recovery_code(req.code, pepper)
 
         # Find admin user with matching recovery code hash
         admin_user = (

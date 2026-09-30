@@ -6,9 +6,7 @@
 
 """Initialization endpoints — two-step FIDO2 enrollment flow."""
 
-import hashlib
 import logging
-import secrets
 from datetime import UTC
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -18,6 +16,8 @@ from sqlalchemy.orm import Session
 from ..dependencies import get_db
 from ..fido2.browser_adapter import challenge_to_browser_options
 from ..fido2.manager import WebAuthnError
+from ..recovery_codes import generate_recovery_code as _generate_recovery_code
+from ..recovery_codes import hash_recovery_code as _hash_recovery_code
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -432,32 +432,3 @@ async def init_complete(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Enrollment completion failed",
         ) from e
-
-
-def _generate_recovery_code() -> str:
-    """Generate a break-glass recovery code.
-
-    256 bits of randomness, encoded as base62, split into 8 groups of 6.
-    Format: XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX
-    """
-    raw_bytes = secrets.token_bytes(256 // 8)
-    # Convert to base62
-    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-    number = int.from_bytes(raw_bytes, byteorder="big")
-    base62 = ""
-    while number > 0:
-        number, remainder = divmod(number, len(alphabet))
-        base62 = alphabet[remainder] + base62
-    # Pad to 48 characters (8 groups of 6)
-    base62 = base62.zfill(48)
-    # Split into groups of 6
-    groups = [base62[i : i + 6] for i in range(0, 48, 6)]
-    return "-".join(groups)
-
-
-def _hash_recovery_code(code: str, pepper: str) -> str:
-    """Hash a recovery code with a server-side pepper.
-
-    Uses SHA-256 with pepper prepended to the code.
-    """
-    return hashlib.sha256((pepper + code).encode()).hexdigest()

@@ -44,6 +44,16 @@ Notable changes to Venya will be documented in this file.
 - **Docs: added `docs/UPGRADE.md`** — the tested in-place upgrade runbook (core upgrade drill alpha15→alpha16: backup, migrations, config preservation, downgrade policy).
 - **Docs: added `docs/ease-of-use.md`** — the deliberate-relaxation guide: the scp worked recipe (command policy + egress allowlist, with the paired locked default), a per-knob gain/loss catalog of every supported relaxation surface, and the never-relax list. Docs-only; no behavior change.
 
+- **Break-glass recovery-code RE-ISSUE.** `venya admin reissue-recovery-code`
+  mints a fresh code for the logged-in caller without reinstalling: gated by
+  admin mTLS (the `/api/v1/admin/` middleware chain) AND a session bearer AND
+  a fresh WebAuthn elevation assertion — strictly more proof than holding the
+  old code. The new code prints exactly once, the old one dies in the same
+  commit (one live code, always), and every reissue/denial writes a value-free
+  audit row. Lost-printed-code operators keep their key AND their
+  break-glass. Multi-factor loss (key AND code) remains out of scope:
+  Shamir CA shares + backups + reinstall is still the last-resort path.
+
 ### Fixed
 - **CLI: CA-key restore is fail-closed on content.** A wrong-passphrase
   restore from a legacy (pre-canonical) backup blob previously passed with

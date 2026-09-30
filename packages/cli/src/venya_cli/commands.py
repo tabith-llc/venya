@@ -569,6 +569,8 @@ def cmd_admin(client: APIClient, args: Any) -> int:
         return cmd_admin_generate_admin_cert(args)
     elif admin_command == "revoke-admin-cert":
         return cmd_admin_revoke_admin_cert(client, args)
+    elif admin_command == "reissue-recovery-code":
+        return cmd_admin_reissue_recovery_code(client, args)
     else:
         print(f"Unknown admin command: {admin_command}", file=sys.stderr)
         return 1
@@ -3317,3 +3319,29 @@ def cmd_admin_revoke_admin_cert(client: APIClient, args: Any) -> int:
     except Exception as e:
         print(f"Revocation failed: {e}", file=sys.stderr)
         return 1
+
+
+def cmd_admin_reissue_recovery_code(client: APIClient, args: Any) -> int:
+    """Reissue the caller's own break-glass recovery code (admin role).
+
+    Requires: a logged-in session whose user holds the admin role, the
+    admin mTLS cert material, and a fresh WebAuthn elevation assertion —
+    strictly more proof than holding the old code (ticket #296 ruling).
+    The server returns the new code exactly once; the old one dies at the
+    same instant (single live code).
+    """
+    try:
+        elevation_token = _elevate(client)
+        result = client.post(
+            "/api/v1/admin/recovery-code/reissue",
+            json={},
+            extra_headers={"X-Elevation-Token": elevation_token},
+        )
+    except APIClientError as e:
+        print(f"Recovery-code reissue failed: {e}", file=sys.stderr)
+        return 1
+
+    print("Recovery code re-issued. The previous code is now DEAD.")
+    print("This code is shown ONCE — store it securely with your off-site backup set:")
+    print(f"  {result['recovery_code']}")
+    return 0
