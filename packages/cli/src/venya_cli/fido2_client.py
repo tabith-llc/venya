@@ -965,15 +965,40 @@ class Fido2Auth:
         public_key = request_options.public_key
         rp = public_key.get("rp", {})
         rp_id = rp.get("id", "localhost")
-        user = public_key.get("user", {})
+        # Ticket cli-add-credential-ctap-unexpected-type (#294): NEVER source
+        # bytes-bearing fields via public_key Mapping reads — that re-enters
+        # python-fido2's JSON view (_JsonDataObject.__getitem__,
+        # fido2/utils.py:321-325), which re-encodes every bytes value as a
+        # base64url STRING; CTAP2 then gets text-where-bytes-required and the
+        # key answers 0x11 CBOR_UNEXPECTED_TYPE. Read the typed attributes
+        # (genuine bytes) and pass plain CTAP-form dicts — the exact
+        # convention the library's own client uses via _as_cbor before every
+        # Ctap2 call (fido2/client/__init__.py ~:863).
+        user_entity = public_key.user
+        user_id = user_entity.id
         # Ensure user id is a proper opaque 32-byte value (CTAP2 requirement).
         # The server currently sends the username string; we override it here
         # for the direct Ctap2 path to satisfy strict authenticators.
-        if len(user.get("id", b"")) < 16:
+        # Length now checks BYTES (pre-fix it ran on the base64url str, which
+        # let long ids cross CTAP as strings — the same #294 bug class).
+        if len(user_id) < 16:
             import os
 
-            user = dict(user)
-            user["id"] = os.urandom(32)
+            user_id = os.urandom(32)
+        user = {"id": user_id}
+        if user_entity.name is not None:
+            user["name"] = user_entity.name
+        if user_entity.display_name is not None:
+            user["displayName"] = user_entity.display_name
+
+        exclude_list = None
+        if public_key.exclude_credentials:
+            exclude_list = []
+            for cred in public_key.exclude_credentials:
+                entry = {"type": cred.type, "id": cred.id}  # id: BYTES
+                if cred.transports is not None:
+                    entry["transports"] = list(cred.transports)
+                exclude_list.append(entry)
 
         pin = interaction.request_pin(ClientPin.PERMISSION.MAKE_CREDENTIAL, rp_id)
         if not pin:
@@ -1009,7 +1034,7 @@ class Fido2Auth:
             print(f"DEBUG: user={user}", file=sys.stderr)
             print(f"DEBUG: client_data_hash (len={len(client_data.hash)})", file=sys.stderr)
             print(f"DEBUG: pubKeyCredParams={public_key.get('pubKeyCredParams', [])}", file=sys.stderr)
-            print(f"DEBUG: exclude_list={public_key.get('excludeCredentials')}", file=sys.stderr)
+            print(f"DEBUG: exclude_list={exclude_list}", file=sys.stderr)
             print("DEBUG: options sent to ctap2={'rk': True}", file=sys.stderr)
         try:
             # Some keys require "rk": True for the first credential after reset
@@ -1018,7 +1043,7 @@ class Fido2Auth:
                 rp,
                 user,
                 public_key.get("pubKeyCredParams", []),
-                exclude_list=public_key.get("excludeCredentials"),
+                exclude_list=exclude_list,
                 options={"rk": True},
                 pin_uv_param=pin_uv_param,
                 pin_uv_protocol=pin_uv_protocol,

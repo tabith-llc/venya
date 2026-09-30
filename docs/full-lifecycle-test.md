@@ -625,6 +625,11 @@ VENYA_CONFIG=$USER_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt VENYA_FIDO2_DE
   $USER_WS/.venv/bin/venya login $USER_ID           # touch KEY_B
 ```
 
+**SoD note (`--roles`):** the `auditor` tier is **exclusive** — granting an
+auditor-tier role to a user who already holds any other tier (or the reverse)
+→ **409** + audit-logged `auditor_sod_denied`. Auditor roles live on dedicated
+users only; auditor+auditor is legal.
+
 ### C.6 Verification (no keys needed except where marked)
 
 **Config files:**
@@ -810,6 +815,12 @@ failure was logged (login still succeeded by design) — record it.
   ```bash
   ssh bot@$CORE_HOST "sudo -u postgres psql -d venya -c \"UPDATE roles SET permissions='read-write' WHERE name='user';\""
   ```
+
+  **SoD caveat (auditor tier):** `auditor` is an **exclusive** tier — via the
+  API/CLI a grant or tier-flip that would leave a user holding auditor plus
+  any other tier → **409** + audit-logged `auditor_sod_denied`. A direct psql
+  flip like the above BYPASSES that guard — never point one at `'auditor'`;
+  the value-deny/visibility math assumes no mixed state can exist.
 
 ### D.2 Create the secret (admin workstation)
 

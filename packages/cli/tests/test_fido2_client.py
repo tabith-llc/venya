@@ -670,9 +670,10 @@ class TestWindowsClientFactory:
         monkeypatch.setattr("sys.platform", "win32")
         wc_cls, wc_instance = self._install_fake_windows_client(monkeypatch, available=True)
         collector = MagicMock(name="collector")
-        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
-            "venya_cli.fido2_client.Fido2Client"
-        ) as mock_raw:
+        with (
+            patch("venya_cli.fido2_client.list_devices") as mock_list,
+            patch("venya_cli.fido2_client.Fido2Client") as mock_raw,
+        ):
             result = _make_webauthn_client(collector)
         assert result is wc_instance
         wc_cls.assert_called_once_with(collector)
@@ -687,9 +688,10 @@ class TestWindowsClientFactory:
 
         monkeypatch.setattr("sys.platform", "win32")
         self._install_fake_windows_client(monkeypatch, available=False)
-        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
-            "venya_cli.fido2_client.Fido2Client"
-        ) as mock_raw:
+        with (
+            patch("venya_cli.fido2_client.list_devices") as mock_list,
+            patch("venya_cli.fido2_client.Fido2Client") as mock_raw,
+        ):
             with pytest.raises(Fido2ClientError) as exc_info:
                 _make_webauthn_client(MagicMock(name="collector"))
         assert "1903" in str(exc_info.value)
@@ -702,9 +704,10 @@ class TestWindowsClientFactory:
 
         monkeypatch.setattr("sys.platform", "linux")
         collector = MagicMock(name="collector")
-        with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]) as mock_list, patch(
-            "venya_cli.fido2_client.Fido2Client"
-        ) as mock_raw:
+        with (
+            patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]) as mock_list,
+            patch("venya_cli.fido2_client.Fido2Client") as mock_raw,
+        ):
             result = _make_webauthn_client(collector)
         mock_list.assert_called_once()
         assert result is mock_raw.return_value
@@ -732,9 +735,11 @@ class TestWindowsCeremonyDispatch:
         _wc_cls, wc_instance = TestWindowsClientFactory._install_fake_windows_client(monkeypatch)
         auth = Fido2Auth(server_url="https://venya-core-1")
         options = TestWindowsClientFactory._req_options(auth)
-        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
-            "venya_cli.fido2_client.Ctap2"
-        ) as mock_ctap2, patch("venya_cli.fido2_client.Fido2Client") as mock_raw:
+        with (
+            patch("venya_cli.fido2_client.list_devices") as mock_list,
+            patch("venya_cli.fido2_client.Ctap2") as mock_ctap2,
+            patch("venya_cli.fido2_client.Fido2Client") as mock_raw,
+        ):
             result = auth._get_assertion(options, timeout=10.0)
         assert result is wc_instance.get_assertion.return_value
         wc_instance.get_assertion.assert_called_once_with(options.public_key)
@@ -747,9 +752,10 @@ class TestWindowsCeremonyDispatch:
         _wc_cls, wc_instance = TestWindowsClientFactory._install_fake_windows_client(monkeypatch)
         auth = Fido2Auth(server_url="https://venya-core-1")
         options = TestWindowsClientFactory._reg_options(auth)
-        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
-            "venya_cli.fido2_client.Ctap2"
-        ) as mock_ctap2:
+        with (
+            patch("venya_cli.fido2_client.list_devices") as mock_list,
+            patch("venya_cli.fido2_client.Ctap2") as mock_ctap2,
+        ):
             result = auth._get_credential(options, timeout=10.0)
         assert result is wc_instance.make_credential.return_value
         wc_instance.make_credential.assert_called_once_with(options.public_key)
@@ -766,9 +772,10 @@ class TestWindowsCeremonyDispatch:
         wc_instance.make_credential.side_effect = ClientError.ERR.OTHER_ERROR(ValueError("platform boom"))
         auth = Fido2Auth(server_url="https://venya-core-1")
         options = TestWindowsClientFactory._reg_options(auth)
-        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
-            "venya_cli.fido2_client.Ctap2"
-        ) as mock_ctap2:
+        with (
+            patch("venya_cli.fido2_client.list_devices") as mock_list,
+            patch("venya_cli.fido2_client.Ctap2") as mock_ctap2,
+        ):
             with pytest.raises(Fido2ClientError) as exc_info:
                 auth._get_credential(options, timeout=10.0)
         # translated, not raw: operators must never see "(<ERR.OTHER_ERROR: 1>, ...)"
@@ -896,9 +903,10 @@ class TestWindowsErrorTranslation:
         )
         auth = Fido2Auth(server_url="https://venya-core-1")
         options = TestWindowsClientFactory._req_options(auth)
-        with patch("venya_cli.fido2_client.list_devices") as mock_list, patch(
-            "venya_cli.fido2_client.Ctap2"
-        ) as mock_ctap2:
+        with (
+            patch("venya_cli.fido2_client.list_devices") as mock_list,
+            patch("venya_cli.fido2_client.Ctap2") as mock_ctap2,
+        ):
             with pytest.raises(Fido2ClientError) as exc_info:
                 auth._get_assertion(options, timeout=10.0)
         assert "already registered" in str(exc_info.value)
@@ -1308,3 +1316,136 @@ class TestPinSetupNewKey:
         assert first == "x"
         assert second == "typed"
         assert interaction.preset_pin is None
+
+
+class TestPinOnlyCtap2FieldTyping:
+    """#294 (cli-add-credential-ctap-unexpected-type): the raw pin-only path
+    fed CTAP2 make_credential via public_key Mapping reads, and python-fido2's
+    _JsonDataObject.__getitem__ re-encodes every bytes value to a base64url
+    STRING (fido2/utils.py:321-325). CTAP2 requires BYTE STRING ids -> the key
+    answered 0x11 CBOR_UNEXPECTED_TYPE, deterministically, whenever
+    excludeCredentials was non-empty (add-credential). The library's own
+    client never suffers this: it converts with _as_cbor before CTAP
+    (fido2/client/__init__.py ~:863). These cells pin the consumption-site
+    boundary: bytes cross as bytes, mirroring the library convention.
+
+    Harness style follows TestPinOnlyRegistrationFlow: all device I/O mocked,
+    no real HID, no product binary.
+    """
+
+    EXIST_ID = b"\x01\x02" * 16  # fake stored credential id (32 bytes)
+    USER32 = b"U" * 32
+
+    @staticmethod
+    def _b64(data: bytes) -> str:
+        import base64
+
+        return base64.b64encode(data).decode("ascii")
+
+    def _reg_json(self, *, user_id: str, exclude: bool) -> dict:
+        options = {
+            "challenge": self._b64(b"test-challenge"),
+            "rp": {"id": "venya-core-1", "name": "Venya"},
+            "user": {"id": user_id, "name": "jsmith", "displayName": "jsmith"},
+            "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+            "timeout": 60000,
+        }
+        if exclude:
+            options["excludeCredentials"] = [{"type": "public-key", "id": self._b64(self.EXIST_ID)}]
+        return options
+
+    def _run(self, auth: Fido2Auth, reg_json: dict):
+        """Drive _get_credential_pin_only end-to-end with mocks; return the
+        captured ctap2.make_credential call."""
+        options = auth._build_registration_options(reg_json)
+        ctap2 = MagicMock()
+        ctap2.info.pin_uv_protocols = [1]
+        interaction = MagicMock()
+        interaction.request_pin.return_value = "1234"
+
+        class MockProtocol:
+            VERSION = 1
+
+            def authenticate(self, token, message):
+                return b"\xaa" * 16
+
+        client_data = MagicMock()
+        client_data.hash = b"x" * 32
+        collector = MagicMock()
+        collector.collect_client_data.return_value = (client_data, "venya-core-1")
+
+        with (
+            patch("venya_cli.fido2_client.ClientPin") as mock_cp_cls,
+            patch("venya_cli.fido2_client.DefaultClientDataCollector", return_value=collector),
+            # The mocked CTAP response cannot feed the real CBOR-encoding
+            # wrapper; the assertion target is the make_credential CALL, not
+            # the response shaping (pinned by its own tests upstream).
+            patch.object(Fido2Auth, "_wrap_attestation_response"),
+        ):
+            # Patch trap (house pattern): the wholesale ClientPin mock wipes
+            # PROTOCOLS — the negotiation loop iterates it.
+            mock_cp_cls.PROTOCOLS = [MockProtocol]
+            mock_cp_cls.return_value.get_pin_token.return_value = b"\x00" * 32
+            auth._get_credential_pin_only(ctap2, options, interaction)
+
+        ctap2.make_credential.assert_called_once()
+        return ctap2.make_credential.call_args
+
+    def test_t1_exclude_ids_cross_as_bytes(self):
+        """T1 (RED-first, the #294 defect): non-empty excludeCredentials ->
+        every exclude_list descriptor id at the CTAP2 boundary is BYTES."""
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        call = self._run(auth, self._reg_json(user_id=self._b64(b"jsmith"), exclude=True))
+        exclude_list = call.kwargs["exclude_list"]
+        assert len(exclude_list) == 1
+        cred_id = exclude_list[0]["id"]
+        assert isinstance(cred_id, bytes), f"CTAP2 got {type(cred_id).__name__} id: {cred_id!r}"
+        assert cred_id == self.EXIST_ID
+        assert str(exclude_list[0]["type"]) == "public-key" or exclude_list[0]["type"] == "public-key"
+
+    def test_t2_long_user_id_crosses_as_bytes(self):
+        """T2: user id >= 16 BYTES is shipped as bytes (the JSON-view str
+        coercion and the <16-on-strlen heuristic must both be gone)."""
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        call = self._run(auth, self._reg_json(user_id=self._b64(self.USER32), exclude=False))
+        user = call.args[2]
+        assert isinstance(user["id"], bytes), f"CTAP2 got {type(user['id']).__name__} user.id"
+        assert user["id"] == self.USER32
+
+    def test_t3_short_user_id_keeps_urandom_replacement(self):
+        """T3 (behavior pin): the documented <16-byte username-length
+        override survives — 32 fresh BYTES, never the short value, str or
+        otherwise."""
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        call = self._run(auth, self._reg_json(user_id=self._b64(b"user123"), exclude=False))
+        uid = call.args[2]["id"]
+        assert isinstance(uid, bytes)
+        assert len(uid) == 32
+        assert uid != b"user123"
+
+    def test_t4_empty_exclude_stays_none(self):
+        """T4 (paired negative / fleet-verified path): fresh user (empty
+        excludeCredentials) -> exclude_list still None at the boundary —
+        init/enroll behavior byte-for-byte unchanged."""
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        call = self._run(auth, self._reg_json(user_id=self._b64(b"jsmith"), exclude=False))
+        assert call.kwargs["exclude_list"] is None
+
+    def test_t5_call_shape_no_signature_drift(self):
+        """T5 (pin): same arg COUNT/ORDER and kwarg names as today — the fix
+        re-types fields in place, it does not reshape the make_credential
+        call."""
+        auth = Fido2Auth(server_url="https://venya-core-1")
+        call = self._run(auth, self._reg_json(user_id=self._b64(b"jsmith"), exclude=True))
+        assert len(call.args) == 4  # client_data_hash, rp, user, key_params
+        assert call.args[0] == b"x" * 32  # hash via the (untouched) collector
+        assert set(call.kwargs) == {
+            "exclude_list",
+            "options",
+            "pin_uv_param",
+            "pin_uv_protocol",
+            "on_keepalive",
+        }
+        assert call.kwargs["options"] == {"rk": True}
+        assert call.kwargs["pin_uv_param"] == b"\xaa" * 16
+        assert call.kwargs["pin_uv_protocol"] == 1
