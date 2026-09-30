@@ -752,3 +752,16 @@ class TestRoleCreateAuditorChoice:
         with pytest.raises(SystemExit) as exc:
             parser.parse_args(["role", "create", "x", "--permissions", "superadmin"])
         assert exc.value.code == 2
+
+    def test_permissions_help_states_exclusive_tier(self):
+        """Ticket #290: help copy must state the SoD rulings — the auditor
+        tier is exclusive (409 on any combination) and its audit-log
+        visibility is full. Regression pin against copy rotting back to the
+        pre-ruling 'read-only audit-log visibility' wording."""
+        from venya_cli.cli import create_parser
+
+        parser = create_parser()
+        role_parser = parser._subparsers._group_actions[0].choices["role"]
+        help_text = role_parser._subparsers._group_actions[0].choices["create"].format_help()
+        assert "exclusive" in help_text
+        assert "full audit-log" in help_text
