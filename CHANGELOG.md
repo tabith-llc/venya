@@ -51,6 +51,16 @@ Notable changes to Venya will be documented in this file.
   material behind a success banner. Restored data is now validated as a
   parseable PEM private key before anything is written to disk, in both
   backup and shares restore modes.
+- **Server: enroll-complete session honors the configured session settings.**
+  The browser enrollment completion handler built its session with core
+  defaults (`SessionManager(db)`), silently bypassing the operator's `session`
+  config (idle timeout / access-token TTL / max duration) that every other
+  session-creation path (login, refresh, browser login, middleware) already
+  honored. It now constructs the session from
+  `request.app.state.config.session`, mirroring the login path. Paired guard:
+  `session.session_timeout` greater than `session.max_session_duration` now
+  fails config validation loudly at startup (nothing else validated that
+  pairing).
 
 ## [0.1.0alpha16] - 2026-09-27
 

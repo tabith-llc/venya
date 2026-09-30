@@ -39,6 +39,82 @@ def _create_test_app(fido2_manager=None, backend=None, config=None):
     return app
 
 
+def _run_enroll_complete(session):
+    """Drive POST /enroll/browser/complete to the session-creation step with a
+    fully mocked fido2/enrollment/db stack. ``session`` is the session config
+    namespace (session_timeout/access_token_ttl/max_session_duration). Returns
+    (response, the patched SessionManager class-mock) so callers can assert how
+    the session was built."""
+    from core.iam.enrollment_manager import EnrollmentManager
+
+    mock_token = SimpleNamespace(
+        user_id=1,
+        state="in_progress",
+        token_hash="test-token-hash-00000000000000000000000000000000000000000000000000000000",
+        binding_hash="test-binding-hash-000000000000000000000000000000000000000000000000000000000000000000000000000",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+    mock_user = SimpleNamespace(
+        id=1,
+        user_id="newuser",
+        status="pending_enrollment",
+        display_name="New User",
+        roles=[],
+    )
+    mock_cred = SimpleNamespace(
+        user_id="1",
+        credential_id=b"cred-123",
+        public_key=b"pub-key",
+        sign_count=0,
+    )
+    mock_session = SimpleNamespace(id=1)
+    mock_access_token = SimpleNamespace(token="access-token-xyz")
+
+    mock_em = MagicMock()
+    mock_em.get_token_by_plaintext.return_value = mock_token
+    mock_em.complete_enrollment.return_value = None
+    mock_sm = MagicMock()
+    mock_sm.create_session.return_value = (mock_session, mock_access_token)
+
+    mock_filter = MagicMock()
+    mock_filter.first.return_value = mock_user
+    mock_filter.filter.return_value.first.return_value = mock_user
+    db = MagicMock()
+    db.query.return_value = mock_filter
+
+    backend = MagicMock()
+    backend.get_session.return_value = db
+
+    fido2 = MagicMock()
+    fido2.finish_registration.return_value = mock_cred
+
+    # A real ServerConfig always carries a fido2 section (enrollment TTL); the
+    # enrollment_manager dependency reads config.fido2 directly, so the test
+    # config must too.
+    config = SimpleNamespace(
+        session=session,
+        fido2=SimpleNamespace(enrollment_token_ttl=15),
+    )
+    app = _create_test_app(fido2_manager=fido2, backend=backend, config=config)
+
+    with patch("server.routes.enroll.verify_binding_hash", return_value=True):
+        with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
+            with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
+                with patch.object(EnrollmentManager, "complete_enrollment", mock_em.complete_enrollment):
+                    with patch("core.iam.session_manager.SessionManager", return_value=mock_sm) as sm_cls:
+                        client = TestClient(app, raise_server_exceptions=False)
+                        resp = client.post(
+                            "/api/v1/enroll/browser/complete",
+                            json={
+                                "enrollment_token": "test-token",
+                                "challenge_id": "challenge-123",
+                                "response": {"id": "dGVzdA==", "response": {}},
+                                "label": "Primary key",
+                            },
+                        )
+    return resp, sm_cls
+
+
 class TestBrowserEnrollStart:
     """Tests for POST /enroll/browser/start."""
 
@@ -160,73 +236,58 @@ class TestBrowserEnrollComplete:
 
     def test_enroll_complete_success(self):
         """Should store credential, activate user, create session."""
-        from core.iam.enrollment_manager import EnrollmentManager
-
-        mock_token = SimpleNamespace(
-            user_id=1,
-            state="in_progress",
-            token_hash="test-token-hash-00000000000000000000000000000000000000000000000000000000000000000000000",
-            binding_hash="test-binding-hash-0000000000000000000000000000000000000000000000000000000000000000",
-            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        resp, _sm = _run_enroll_complete(
+            SimpleNamespace(
+                session_timeout=900,
+                access_token_ttl=300,
+                max_session_duration=14400,
+            )
         )
-        mock_user = SimpleNamespace(
-            id=1,
-            user_id="newuser",
-            status="pending_enrollment",
-            display_name="New User",
-            roles=[],
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        # Check session cookie was set
+        set_cookie = resp.headers.get("set-cookie", "")
+        assert "venya_access_token" in set_cookie
+
+    def test_enroll_complete_uses_configured_session_expiry(self):
+        """#291 (enroll-session-config-bypass): the enroll-complete session must
+        be built from the operator's configured session settings
+        (request.app.state.config.session), not the core defaults. The
+        SessionManager is handed a config carrying the configured expiry."""
+        resp, sm_cls = _run_enroll_complete(
+            SimpleNamespace(
+                session_timeout=600,
+                access_token_ttl=240,
+                max_session_duration=7200,
+            )
         )
-        mock_cred = SimpleNamespace(
-            user_id="1",
-            credential_id=b"cred-123",
-            public_key=b"pub-key",
-            sign_count=0,
+        assert resp.status_code == 200
+        args, _kwargs = sm_cls.call_args
+        cfg = args[1]
+        assert cfg.session_timeout == timedelta(seconds=600)
+        assert cfg.access_token_ttl == timedelta(seconds=240)
+        assert cfg.max_session_duration == timedelta(seconds=7200)
+
+    def test_enroll_complete_default_config_preserves_core_defaults(self):
+        """#291 T-neg2: server session config at defaults -> the session config
+        handed to SessionManager equals the core defaults (900 s / 300 s / 4 h)."""
+        from core.iam.session_manager import SessionConfig as CoreSessionConfig
+
+        resp, sm_cls = _run_enroll_complete(
+            SimpleNamespace(
+                session_timeout=900,
+                access_token_ttl=300,
+                max_session_duration=14400,
+            )
         )
-        mock_session = SimpleNamespace(id=1)
-        mock_access_token = SimpleNamespace(token="access-token-xyz")
-
-        mock_em = MagicMock()
-        mock_em.get_token_by_plaintext.return_value = mock_token
-        mock_em.complete_enrollment.return_value = None
-
-        mock_sm = MagicMock()
-        mock_sm.create_session.return_value = (mock_session, mock_access_token)
-
-        mock_filter = MagicMock()
-        mock_filter.first.return_value = mock_user
-        mock_filter.filter.return_value.first.return_value = mock_user
-        db = MagicMock()
-        db.query.return_value = mock_filter
-
-        backend = MagicMock()
-        backend.get_session.return_value = db
-
-        fido2 = MagicMock()
-        fido2.finish_registration.return_value = mock_cred
-
-        app = _create_test_app(fido2_manager=fido2, backend=backend)
-
-        with patch("server.routes.enroll.verify_binding_hash", return_value=True):
-            with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
-                with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
-                    with patch.object(EnrollmentManager, "complete_enrollment", mock_em.complete_enrollment):
-                        with patch("core.iam.session_manager.SessionManager", return_value=mock_sm):
-                            client = TestClient(app, raise_server_exceptions=False)
-                            resp = client.post(
-                                "/api/v1/enroll/browser/complete",
-                                json={
-                                    "enrollment_token": "test-token",
-                                    "challenge_id": "challenge-123",
-                                    "response": {"id": "dGVzdA==", "response": {}},
-                                    "label": "Primary key",
-                                },
-                            )
-                            assert resp.status_code == 200
-                            data = resp.json()
-                            assert data["status"] == "ok"
-                            # Check session cookie was set
-                        set_cookie = resp.headers.get("set-cookie", "")
-                        assert "venya_access_token" in set_cookie
+        assert resp.status_code == 200
+        args, _kwargs = sm_cls.call_args
+        cfg = args[1]
+        core = CoreSessionConfig()
+        assert cfg.session_timeout == core.session_timeout
+        assert cfg.access_token_ttl == core.access_token_ttl
+        assert cfg.max_session_duration == core.max_session_duration
 
     def test_enroll_complete_cross_user_challenge_rejected(self):
         """Binding guard (sec-auth-elevation-authz-hardening #4): challenge_id

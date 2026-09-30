@@ -12,7 +12,7 @@ Two-step enrollment flow:
 """
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -289,9 +289,17 @@ async def browser_enroll_complete(
         user.auth_mode = "webauthn"
 
         # Create session
+        from core.iam.session_manager import SessionConfig as CoreSessionConfig
         from core.iam.session_manager import SessionManager
 
-        sm = SessionManager(db)
+        sc = request.app.state.config.session
+        session_config = CoreSessionConfig(
+            session_timeout=timedelta(seconds=sc.session_timeout),
+            access_token_ttl=timedelta(seconds=sc.access_token_ttl),
+            max_session_duration=timedelta(seconds=sc.max_session_duration),
+        )
+
+        sm = SessionManager(db, session_config)
         roles = [rm.role_id for rm in user.roles] if user and user.roles else []
         _session, access_token = sm.create_session(
             user_id=user.user_id,
