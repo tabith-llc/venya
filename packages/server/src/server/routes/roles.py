@@ -7,9 +7,10 @@
 """Role CRUD endpoints."""
 
 import logging
+from datetime import UTC, datetime
 from typing import Literal
 
-from core.iam.role_manager import RoleManagerError
+from core.iam.role_manager import RoleManagerError, SeparationOfDutiesError
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -20,19 +21,52 @@ router = APIRouter()
 logger = logging.getLogger("venya.server")
 
 
+def _audit_sod_denied(db: Session, actor: dict, action: str, error: SeparationOfDutiesError) -> None:
+    """Write the auditor_sod_denied compliance event on a SoD refusal
+    (auditor-role ruling 2'). COMMIT BEFORE the raise — get_db rolls back
+    any exception escaping the route, so an add-then-raise without commit
+    would evaporate the event. Fail-closed: an audit-write failure never
+    upgrades the refusal (logged loudly, still 4xx). Value-free fields:
+    ids, tiers, outcome — no role descriptions or user data beyond ids.
+    """
+    from core.iam.models import AuditEvent
+
+    try:
+        db.add(
+            AuditEvent(
+                event_type="auditor_sod_denied",
+                user_id=(actor or {}).get("user_id"),
+                fields={
+                    "outcome": "denied",
+                    "reason": "separation of duties: auditor tier is exclusive",
+                    "action": action,
+                    "target_user_id": error.user_id,
+                    "role_id": error.role_id,
+                    "attempted_tiers": error.tiers,
+                },
+                timestamp=datetime.now(UTC),
+            )
+        )
+        db.commit()
+    except Exception:
+        logger.exception("Audit write failed on auditor SoD deny (still denying)")
+
+
 # --- Request/Response models ---
 
 
 class RoleCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, pattern=r"^[a-zA-Z0-9_-]+$", description="Role name (unique)")
-    permissions: Literal["read", "read-write"] = Field("read", description='Permission tier: "read" or "read-write"')
+    permissions: Literal["read", "read-write", "auditor"] = Field(
+        "read", description='Permission tier: "read", "read-write", or "auditor"'
+    )
     description: str | None = Field(None, description="Optional description")
 
 
 class RoleUpdateRequest(BaseModel):
     name: str | None = Field(None, min_length=1, pattern=r"^[a-zA-Z0-9_-]+$", description="New role name")
-    permissions: Literal["read", "read-write"] | None = Field(
-        None, description='New permission tier: "read" or "read-write"'
+    permissions: Literal["read", "read-write", "auditor"] | None = Field(
+        None, description='New permission tier: "read", "read-write", or "auditor"'
     )
     description: str | None = Field(None, description="New description")
 
@@ -191,7 +225,7 @@ async def roles_get(
 async def roles_update(
     role_id: int,
     req: RoleUpdateRequest,
-    _: dict = Depends(require_admin),
+    auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> RoleGetResponse:
     """Update a role.
@@ -219,6 +253,12 @@ async def roles_update(
         )
     except HTTPException:
         raise
+    except SeparationOfDutiesError as e:
+        _audit_sod_denied(db, auth_user, action="role_tier_change", error=e)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
     except RoleManagerError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -306,7 +346,7 @@ async def role_members_list(
 async def role_member_add(
     role_id: int,
     req: RoleMemberAddRequest,
-    _: dict = Depends(require_admin),
+    auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> RoleMemberAddResponse:
     """Add a user to a role.
@@ -329,6 +369,12 @@ async def role_member_add(
         )
     except HTTPException:
         raise
+    except SeparationOfDutiesError as e:
+        _audit_sod_denied(db, auth_user, action="add_member", error=e)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
     except RoleManagerError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

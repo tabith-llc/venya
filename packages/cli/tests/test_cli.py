@@ -720,3 +720,35 @@ class TestWindowsCeremonyHints:
         monkeypatch.setattr("sys.platform", "linux")
         assert cmd_login(client, args) == 0
         assert "Windows:" not in capsys.readouterr().out
+
+
+class TestRoleCreateAuditorChoice:
+    """Ticket auditor-role: role create accepts the auditor tier.
+
+    (The generic arg-surface matrix grows the reject-cases automatically from
+    the choices list; this pins the positive parse + the pass-through value.)
+    """
+
+    def test_permissions_auditor_parses(self):
+        from venya_cli.cli import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["role", "create", "auditor", "--permissions", "auditor"])
+        assert args.permissions == "auditor"
+
+    def test_permissions_default_unchanged(self):
+        """Paired negative: the default stays 'read' — widening choices did
+        not silently change the default tier."""
+        from venya_cli.cli import create_parser
+
+        parser = create_parser()
+        args = parser.parse_args(["role", "create", "devs"])
+        assert args.permissions == "read"
+
+    def test_permissions_bogus_rejected(self):
+        from venya_cli.cli import create_parser
+
+        parser = create_parser()
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["role", "create", "x", "--permissions", "superadmin"])
+        assert exc.value.code == 2

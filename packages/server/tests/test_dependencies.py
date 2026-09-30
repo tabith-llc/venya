@@ -123,6 +123,82 @@ class TestRequireRoleReadWrite:
         assert resp.status_code == 200
 
 
+class TestRequireRoleAuditor:
+    """Tests for require_role("auditor") — audit-visibility tier (ticket
+    auditor-role). Auditor OR read-write passes; plain read is DENIED
+    (audit access is auditor-scoped); auditor never satisfies read-write."""
+
+    def test_passes_with_auditor_role(self):
+        rm = _make_rm_mock({"user1": {1: "auditor"}})
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_app({"user_id": "user1"}, "auditor")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 200
+        assert resp.json()["result"] == "ok"
+
+    def test_denied_for_read_only_user(self):
+        """Acceptance: read-role users CANNOT query audit-gated routes."""
+        rm = _make_rm_mock({"user1": {1: "read"}})
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_app({"user_id": "user1"}, "auditor")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Auditor permission required"
+
+    def test_passes_with_read_write_role(self):
+        """Regression pin: read-write EXCEEDS auditor — admin (seeded
+        read-write) must not lose audit-log access."""
+        rm = _make_rm_mock({"user1": {1: "read-write"}})
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_app({"user_id": "user1"}, "auditor")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 200
+
+    def test_denied_for_user_with_no_roles(self):
+        rm = _make_rm_mock({})
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_app({"user_id": "user1"}, "auditor")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Auditor permission required"
+
+    def test_auditor_denied_on_read_write_gate(self):
+        """KEY paired negative (acceptance: auditor cannot create secrets /
+        execute commands — those routes are require_role("read-write"))."""
+        rm = _make_rm_mock({"user1": {1: "auditor"}})
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_app({"user_id": "user1"}, "read-write")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Read-write permission required"
+
+    def test_auditor_passes_read_gate(self):
+        """Acceptance: auditor CAN list roles/executors/secrets metadata —
+        those routes stay require_role("read") = any membership."""
+        rm = _make_rm_mock({"user1": {1: "auditor"}})
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_app({"user_id": "user1"}, "read")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 200
+
+    def test_executor_passes_auditor_gate_without_role_lookup(self):
+        """Executor mTLS bypass holds on the new tier (no user_id to look up)."""
+        rm = _make_rm_mock({})
+        rm.get_user_permissions.side_effect = AssertionError("role lookup must not run for executors")
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            app = _create_app({"caller": "executor", "executor_id": "exec-1"}, "auditor")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/protected")
+        assert resp.status_code == 200
+        rm.get_user_permissions.assert_not_called()
+
+
 class TestRequireRoleExecutorBypass:
     """Executors (mTLS) bypass the role check (no user_id for a role lookup)."""
 
@@ -164,8 +240,13 @@ class TestRequireRoleFactory:
 
     def test_invalid_permission_raises_value_error(self):
         """require_role("execute") raises ValueError at factory call time."""
-        with pytest.raises(ValueError, match="Must be 'none', 'read', or 'read-write'"):
+        with pytest.raises(ValueError, match="Must be 'none', 'read', 'auditor', or 'read-write'"):
             require_role("execute")
+
+    def test_auditor_permission_accepted_by_factory(self):
+        """Positive factory cell: the widened validation set includes auditor."""
+        checker = require_role("auditor")
+        assert checker._venya_guard == "auditor"
 
     def test_empty_permission_raises_value_error(self):
         """require_role("") raises ValueError at factory call time."""
@@ -359,3 +440,74 @@ class TestGetCurrentSessionOperatorMaxCap:
         5h-old session rejected."""
         assert self._call(None, created_age_seconds=7200) is not None
         assert self._call(None, created_age_seconds=18000) is None
+
+
+class TestAuditorOnlyPermissionsHelper:
+    """auditor_only_permissions — the union predicate behind the value-deny
+    and issuance-deny (auditor-role rework, ruling 1b). Truth table with
+    paired negatives."""
+
+    def test_all_auditor_is_true(self):
+        from server.dependencies import auditor_only_permissions
+
+        assert auditor_only_permissions({1: "auditor"}) is True
+        assert auditor_only_permissions({1: "auditor", 2: "auditor"}) is True
+
+    def test_union_with_any_other_tier_is_false(self):
+        """1b union paired negative: auditor+read (or +read-write) keeps
+        value access — the deny must NOT fire."""
+        from server.dependencies import auditor_only_permissions
+
+        assert auditor_only_permissions({1: "auditor", 2: "read"}) is False
+        assert auditor_only_permissions({1: "auditor", 2: "read-write"}) is False
+
+    def test_empty_membership_is_false(self):
+        """Empty map is False: the helper never grants; read gates reject
+        no-membership callers before the deny is consulted."""
+        from server.dependencies import auditor_only_permissions
+
+        assert auditor_only_permissions({}) is False
+
+
+class TestRequireRoleAttachesRoleMap:
+    """F2 lookup design: require_role's _checker attaches its already-fetched
+    role map to user_info so value-gating handlers reuse it request-scoped."""
+
+    def test_read_gate_attaches_role_map(self):
+        rm = _make_rm_mock({"user1": {1: "auditor"}})
+        app = FastAPI()
+        app.state.backend = MagicMock()
+
+        @app.get("/echo")
+        async def echo(user=Depends(require_role("read"))):
+            return {"map": user.get("_role_permissions")}
+
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": "user1"}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/echo")
+        assert resp.status_code == 200
+        # JSON coerces the int role-id keys to strings on the way out.
+        assert resp.json()["map"] == {"1": "auditor"}
+
+    def test_executor_bypass_attaches_nothing(self):
+        """Executor (mTLS) returns before any role fetch — no map attached,
+        and no lookup runs (it has no user_id)."""
+        rm = _make_rm_mock({})
+        rm.get_user_permissions.side_effect = AssertionError("executor must not trigger lookup")
+        app = FastAPI()
+        app.state.backend = MagicMock()
+
+        @app.get("/echo")
+        async def echo(user=Depends(require_role("read"))):
+            return {"map": user.get("_role_permissions")}
+
+        app.dependency_overrides[get_current_user] = lambda: {
+            "caller": "executor",
+            "executor_id": "exec-1",
+        }
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get("/echo")
+        assert resp.status_code == 200
+        assert resp.json()["map"] is None

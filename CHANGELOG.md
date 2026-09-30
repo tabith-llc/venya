@@ -4,7 +4,45 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+- **IAM: `auditor` permission tier.** Roles can now be created with
+  `permissions="auditor"` (API, CLI `role create --permissions auditor`).
+  Auditors keep the read-tier listings (secrets/roles/executors metadata)
+  and gain audit-log visibility, but NEVER satisfy read-write gates (no
+  secret create/delete, no session create, no command execution) and never
+  reach admin routes.
+- **Secret values deny auditors at the chokepoint.** An auditor-only caller
+  (ALL memberships auditor-tier; a union with any other tier keeps its
+  rights) receives a 403 on any secret-value read — enforced inside the
+  masked-get unmask path BEFORE the single-use elevation token is consumed,
+  so denied attempts never burn tokens. Every denial is audit-logged
+  (`auditor_secret_read_denied`, value-free fields; the audit-write itself
+  can never turn a denial into an allow).
+- **Elevation tokens are not issued to auditor-only callers.** Both elevate
+  assert endpoints (CLI/API and browser) 403 before creating the token, and
+  audit-log the refusal (`auditor_elevation_denied`).
+  Because the same token gates self-service security-key registration
+  (`credential add`), an auditor cannot add their own credential: an
+  administrator provisions it (the tiers being exclusive means a
+  second non-auditor role is not an option either — release-notes item).
+- **The auditor tier is EXCLUSIVE by design (separation of duties).** A
+  role grant (`POST /roles/{id}/members`) or role tier flip
+  (`PUT /roles/{id}`) that would make one user hold `auditor` together
+  with any other tier is refused with 409 and audit-logged
+  (`auditor_sod_denied`, value-free fields; the refusal stands even if the
+  audit write itself fails). Auditor+auditor remains legal; the tier ships
+  for the first time with this rule, so no mixed state can pre-exist. The
+  union permission math is unchanged underneath as defense-in-depth.
+  Aligned with NIST SP 800-53 Rev 5 AC-5 (Separation of Duties); the
+  audit-logged denials above provide evidence for NIST AU-3/AU-6 and PCI
+  DSS 10.2.1. Aligned — not certified: attestation requires an assessor.
+- **Behavior change: the audit log is auditor-scoped.** `GET /api/v1/audit`
+  moved from the read tier to the auditor gate: plain `read`-only users are
+  now 403 there (auditor and read-write/admin retain access). Auditor-tier
+  holders see the FULL log — other users' events included — the same
+  visibility the `admin` role holds; every other non-admin caller keeps
+  the self-filter to their own events.
 - **Docs: added `docs/UPGRADE.md`** — the tested in-place upgrade runbook (core upgrade drill alpha15→alpha16: backup, migrations, config preservation, downgrade policy).
+- **Docs: added `docs/ease-of-use.md`** — the deliberate-relaxation guide: the scp worked recipe (command policy + egress allowlist, with the paired locked default), a per-knob gain/loss catalog of every supported relaxation surface, and the never-relax list. Docs-only; no behavior change.
 
 ### Fixed
 - **CLI: CA-key restore is fail-closed on content.** A wrong-passphrase

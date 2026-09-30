@@ -390,6 +390,64 @@ async def secrets_get(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Elevation token required to unmask",
             )
+
+        # Auditor-role rework (rulings 1b/1c-i): auditor-only callers NEVER
+        # receive secret VALUES — affirmative chokepoint deny regardless of
+        # method, BEFORE the elevation token is consumed (a denied request
+        # must not burn the caller's single-use token). The union ruling
+        # (1b) keeps value access for any caller holding a non-auditor
+        # membership. Role map rides the require_role("read") gate's fetch
+        # (request-scoped, no extra query); fresh lookup fallback, and a
+        # lookup failure DENIES (fail-closed — no value on uncertainty).
+        from ..dependencies import auditor_only_permissions
+
+        permissions = user_info.get("_role_permissions")
+        if permissions is None:
+            try:
+                from core.iam.role_manager import RoleManager
+
+                permissions = RoleManager(db).get_user_permissions(user_info["user_id"])
+            except HTTPException:
+                raise
+            except Exception:
+                logger.exception("Auditor check failed on unmask (denying)")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="insufficient role: auditor cannot read secret values",
+                ) from None
+        if auditor_only_permissions(permissions):
+            # Denials are audit-logged (owner ruling 2026-09-30 reverses the
+            # earlier "logging is left as is"). COMMIT BEFORE the raise:
+            # get_db rolls back any exception escaping the route, so an
+            # add-then-raise without commit would evaporate the compliance
+            # event. VALUE-FREE fields: key name + tier reason only — no
+            # secret value, no elevation token, no role-map internals.
+            # Fail-closed: an audit-write failure never upgrades the denial
+            # (logged loudly, still 403).
+            from core.iam.models import AuditEvent
+
+            try:
+                db.add(
+                    AuditEvent(
+                        event_type="auditor_secret_read_denied",
+                        user_id=user_info["user_id"],
+                        fields={
+                            "outcome": "denied",
+                            "reason": "auditor-only role",
+                            "user_id": user_info["user_id"],
+                            "secret_key": key,
+                            "endpoint": "/api/v1/secrets/{key}",
+                        },
+                        timestamp=datetime.now(UTC),
+                    )
+                )
+                db.commit()
+            except Exception:
+                logger.exception("Audit write failed on auditor unmask deny (still denying)")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="insufficient role: auditor cannot read secret values",
+            )
         try:
             from core.iam.models import ElevationToken
             from sqlalchemy import update
