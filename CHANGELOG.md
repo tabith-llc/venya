@@ -6,6 +6,14 @@ Notable changes to Venya will be documented in this file.
 
 - **Docs: added `docs/UPGRADE.md`** — the tested in-place upgrade runbook (core upgrade drill alpha15→alpha16: backup, migrations, config preservation, downgrade policy).
 
+### Fixed
+- **CLI: CA-key restore is fail-closed on content.** A wrong-passphrase
+  restore from a legacy (pre-canonical) backup blob previously passed with
+  ~1/256 probability (padding coincidence) and silently wrote corrupt key
+  material behind a success banner. Restored data is now validated as a
+  parseable PEM private key before anything is written to disk, in both
+  backup and shares restore modes.
+
 ## [0.1.0alpha16] - 2026-09-27
 
 ### Added

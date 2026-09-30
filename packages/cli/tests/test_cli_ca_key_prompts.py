@@ -65,9 +65,17 @@ class TestCaKeyPromptsHidden:
         assert not out.exists()
 
     def test_restore_backup_roundtrip_uses_getpass(self, tmp_path):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        key = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
         ca_dir = tmp_path / "ca"
         ca_dir.mkdir()
-        (ca_dir / "ca.key").write_bytes(b"ORIGINAL-KEY\n")
+        (ca_dir / "ca.key").write_bytes(key)
         backup = tmp_path / "b.enc"
         with patch("builtins.input", _boom), patch("venya_cli.commands.getpass.getpass", side_effect=["pw", "pw"]):
             assert cmd_admin_export_ca_key(SimpleNamespace(output=str(backup), ca_dir=str(ca_dir))) == 0
@@ -77,5 +85,5 @@ class TestCaKeyPromptsHidden:
                 SimpleNamespace(mode="backup", backup_file=str(backup), shares=None, ca_dir=str(ca_dir))
             )
         assert rc == 0
-        assert (ca_dir / "ca.key").read_bytes() == b"ORIGINAL-KEY\n"
+        assert (ca_dir / "ca.key").read_bytes() == key
         assert Path(ca_dir / "ca.key").stat().st_mode & 0o777 == 0o600

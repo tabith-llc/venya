@@ -87,6 +87,33 @@ def _mint_canonical_gcm(plaintext: bytes, passphrase: str) -> bytes:
     return MAGIC + salt + nonce + AESGCM(key).encrypt(nonce, plaintext, None)
 
 
+def _real_key_pem() -> bytes:
+    """A REAL parseable EC P-256 PKCS#8 PEM. Content validation (the fix)
+    rejects PEM-shaped dummies, so restore-success paths need bytes that pass
+    the compensating control on their merits. House pattern (test_executor_cert_renew)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    return ec.generate_private_key(ec.SECP256R1()).private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
+# Deterministic valid-PKCS7-tail negative constants (found offline 2026-09-30,
+# ~327 iterations): for SALT + WRONG passphrase "wrong-pw", the final CBC
+# plaintext block D_k(c_last) XOR c_prev ends in a strict pad-1 tail (0x01).
+# IV only steers block 0, so this blob's wrong-key decrypt has a VALID PKCS7
+# tail every run — pre-fix it restored 31 bytes of garbage behind the banner.
+# These are offline-found TEST VECTORS (salt/iv/ciphertext), NOT secrets; the
+# Hex High Entropy scanner cannot tell, so each line carries the allowlist pragma.
+_DET_SALT = "71efcb8039eb8ce11beeb1b431223e64"  # pragma: allowlist secret
+_DET_IV = "6c42f5dd6b8cd6eb2e3a9f6693c49824"  # pragma: allowlist secret
+_DET_CPREV = "fe1bfbf37902810395f58de23c7cf2bd"  # pragma: allowlist secret
+_DET_CLAST = "bb365c29e1ef38f0468696f15f4e0169"  # pragma: allowlist secret
+
+
 def _ca_dir(tmp_path, key: bytes = KEY):
     d = tmp_path / "ca"
     d.mkdir(parents=True, exist_ok=True)
@@ -94,8 +121,8 @@ def _ca_dir(tmp_path, key: bytes = KEY):
     return d
 
 
-def _export(tmp_path, pw="pw1"):
-    ca = _ca_dir(tmp_path)
+def _export(tmp_path, pw="pw1", key: bytes = KEY):
+    ca = _ca_dir(tmp_path, key)
     out = tmp_path / "b.enc"
     with patch("venya_cli.commands.getpass.getpass", side_effect=[pw, pw]):
         rc = cmd_admin_export_ca_key(SimpleNamespace(output=str(out), ca_dir=str(ca)))
@@ -119,31 +146,34 @@ class TestCanonicalEnvelope:
         assert KEY not in data
 
     def test_canonical_roundtrip(self, tmp_path):
-        ca, out = _export(tmp_path)
+        key = _real_key_pem()
+        ca, out = _export(tmp_path, key=key)
         (ca / "ca.key").unlink()
         assert _restore(ca, out, "pw1") == 0
-        assert (ca / "ca.key").read_bytes() == KEY
+        assert (ca / "ca.key").read_bytes() == key
 
     def test_restore_minted_canonical_blob(self, tmp_path):
         """A contract-reference canonical blob (minted independently of the
         CLI code) restores — pins the byte format, not the implementation."""
+        key = _real_key_pem()
         ca = _ca_dir(tmp_path)
         (ca / "ca.key").unlink()
         blob = tmp_path / "ref.enc"
-        blob.write_bytes(_mint_canonical_gcm(KEY, "refpw"))
+        blob.write_bytes(_mint_canonical_gcm(key, "refpw"))
         assert _restore(ca, blob, "refpw") == 0
-        assert (ca / "ca.key").read_bytes() == KEY
+        assert (ca / "ca.key").read_bytes() == key
 
 
 class TestLegacyCbcReader:
     def test_legacy_cbc_blob_restores(self, tmp_path):
         """No stranded key material: an alpha.11 CBC export still restores."""
+        key = _real_key_pem()
         ca = _ca_dir(tmp_path)
         (ca / "ca.key").unlink()
         blob = tmp_path / "legacy.enc"
-        blob.write_bytes(_mint_legacy_cbc(KEY, "oldpw"))
+        blob.write_bytes(_mint_legacy_cbc(key, "oldpw"))
         assert _restore(ca, blob, "oldpw") == 0
-        assert (ca / "ca.key").read_bytes() == KEY
+        assert (ca / "ca.key").read_bytes() == key
 
     def test_legacy_cbc_bogus_pkcs7_rejected(self, tmp_path):
         """RED-FIRST pin of the weak-validation defect: pre-fix restore checked
@@ -168,6 +198,25 @@ class TestLegacyCbcReader:
         blob = tmp_path / "legacy.enc"
         blob.write_bytes(_mint_legacy_cbc(KEY, "right-pw"))
         assert _restore(ca, blob, "wrong-pw") == 1
+
+    def test_legacy_cbc_valid_padding_garbage_rejected_deterministic(self, tmp_path, capsys):
+        """FIXED-bytes negative (ticket legacy-ca-restore-padding-only-validation):
+        a legacy CBC blob whose WRONG-passphrase decrypt carries a VALID PKCS7 tail
+        (found offline for these exact constants — final block D_k(c_last) XOR c_prev
+        ends in a strict pad-1 tail 0x01). Pre-fix the reader stripped the padding and
+        wrote 31 bytes of garbage as ca.key behind the success banner (rc 0). Post-fix
+        the write-site content validator rejects it rc 1 EVERY run — deterministic,
+        flake class eliminated. The probabilistic pin above is retained as a broad fuzz."""
+        ca = _ca_dir(tmp_path)
+        (ca / "ca.key").unlink()
+        blob = tmp_path / "det.enc"
+        # salt(16) + iv(16) + c_prev(16) + c_last(16); IV only steers block 0, so the
+        # baked (salt, c_prev, c_last) makes the wrong-key tail valid-PKCS7 every run.
+        blob.write_bytes(bytes.fromhex(_DET_SALT + _DET_IV + _DET_CPREV + _DET_CLAST))
+        rc = _restore(ca, blob, "wrong-pw")
+        assert rc == 1
+        assert not (ca / "ca.key").exists()
+        assert "not a valid PEM private key" in capsys.readouterr().err
 
 
 class TestCanonicalNegatives:
@@ -214,9 +263,10 @@ class TestCrossCompatContract:
     def test_server_export_cli_restore(self, tmp_path):
         from server.ca import CAManager
 
+        key = _real_key_pem()
         srv_dir = tmp_path / "srv-ca"
         srv_dir.mkdir()
-        (srv_dir / "ca.key").write_bytes(KEY)
+        (srv_dir / "ca.key").write_bytes(key)
         manager = CAManager(str(srv_dir))
         blob = manager.export_ca_key("xpw")
         assert blob.startswith(MAGIC)
@@ -226,4 +276,40 @@ class TestCrossCompatContract:
         blob_path = tmp_path / "srv.enc"
         blob_path.write_bytes(blob)
         assert _restore(cli_dir, blob_path, "xpw") == 0
-        assert (cli_dir / "ca.key").read_bytes() == KEY
+        assert (cli_dir / "ca.key").read_bytes() == key
+
+
+class TestSharesRestoreContentGate:
+    """The content validator sits at the single convergence write site, so it
+    gates shares-mode restore too (not just backup). T6 proves a legitimate
+    reconstruction (a real key) passes; T7 proves shares that recombine to
+    non-PEM fail closed — the guard is at the convergence site, both modes."""
+
+    def _restore_shares(self, tmp_path, secret: bytes, threshold: int, n_shares: int):
+        from venya_cli.shamir import split
+
+        ca = _ca_dir(tmp_path)
+        (ca / "ca.key").unlink()
+        shares = split(secret, threshold=threshold, shares=n_shares)
+        paths = []
+        for share in shares[:threshold]:
+            p = tmp_path / f"share-{share[0]:02d}"
+            p.write_bytes(share[1:])  # handler contract: file stores data, ID from filename
+            paths.append(str(p))
+        return ca, cmd_admin_restore_ca_key(
+            SimpleNamespace(mode="shares", shares=paths, backup_file=None, ca_dir=str(ca))
+        )
+
+    def test_shares_restore_real_key_succeeds(self, tmp_path):
+        """T6: a legitimate shares reconstruction of a real key passes the gate."""
+        key = _real_key_pem()
+        ca, rc = self._restore_shares(tmp_path, key, threshold=2, n_shares=3)
+        assert rc == 0
+        assert (ca / "ca.key").read_bytes() == key
+
+    def test_shares_restore_non_pem_rejected(self, tmp_path, capsys):
+        """T7: shares that recombine to non-PEM are rejected rc 1 at the write site."""
+        ca, rc = self._restore_shares(tmp_path, b"NOT-PEM-GARBAGE-SECRET-32B!!", threshold=2, n_shares=3)
+        assert rc == 1
+        assert not (ca / "ca.key").exists()
+        assert "not a valid PEM private key" in capsys.readouterr().err
