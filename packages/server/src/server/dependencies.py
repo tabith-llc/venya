@@ -196,9 +196,14 @@ def require_role(permission: str):
     """Dependency factory that requires a specific permission tier.
 
     Args:
-        permission: Required permission — "none", "read", or "read-write".
+        permission: Required permission — "none", "read", "auditor", or
+            "read-write".
             "none" accepts any authenticated caller without role checks.
             "read" passes with any role membership;
+            "auditor" requires at least one auditor or read-write role
+            (audit-visibility tier, ticket auditor-role — read-write exceeds
+            it so admins, seeded read-write, keep audit-log access; plain
+            "read" memberships are DENIED: audit access is auditor-scoped);
             "read-write" requires at least one read-write role. Executors
             (mTLS) always pass.
 
@@ -208,11 +213,12 @@ def require_role(permission: str):
         required level.
 
     Raises:
-        ValueError: If permission is not "none", "read", or "read-write".
-            Raised at factory call time (app startup), not per request.
+        ValueError: If permission is not "none", "read", "auditor", or
+            "read-write". Raised at factory call time (app startup), not
+            per request.
     """
-    if permission not in ("none", "read", "read-write"):
-        raise ValueError(f"Invalid permission: {permission}. Must be 'none', 'read', or 'read-write'")
+    if permission not in ("none", "read", "auditor", "read-write"):
+        raise ValueError(f"Invalid permission: {permission}. Must be 'none', 'read', 'auditor', or 'read-write'")
 
     async def _checker(
         user_info: dict = Depends(get_current_user),
@@ -239,6 +245,15 @@ def require_role(permission: str):
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="Insufficient permissions",
                     )
+            elif permission == "auditor":
+                # Audit-visibility tier (ticket auditor-role): auditor OR
+                # read-write memberships pass (read-write exceeds — admin
+                # keeps audit access); plain "read" is denied.
+                if not any(p in ("auditor", "read-write") for p in permissions.values()):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Auditor permission required",
+                    )
             else:  # "read-write"
                 if not any(p == "read-write" for p in permissions.values()):
                     raise HTTPException(
@@ -246,6 +261,10 @@ def require_role(permission: str):
                         detail="Read-write permission required",
                     )
 
+            # Auditor-role rework (ruled 1b/1c): attach the role map already
+            # fetched here so value-gating handlers (secrets_get unmask deny)
+            # reuse it request-scoped instead of re-querying.
+            user_info["_role_permissions"] = permissions
             return user_info
         except HTTPException:
             raise
@@ -257,6 +276,17 @@ def require_role(permission: str):
 
     _checker._venya_guard = permission  # type: ignore[attr-defined]
     return _checker
+
+
+def auditor_only_permissions(permissions: dict[int, str]) -> bool:
+    """True iff the caller holds memberships and EVERY one is auditor-tier.
+
+    Ruling 1b (union): a caller with ANY non-auditor membership keeps value
+    access (auditor+read keeps read's rights). An empty membership map is
+    False — this helper never grants anything; read-gated routes reject
+    no-membership callers before it is consulted.
+    """
+    return bool(permissions) and all(p == "auditor" for p in permissions.values())
 
 
 def require_admin(

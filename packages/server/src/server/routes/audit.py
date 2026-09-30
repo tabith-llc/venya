@@ -56,14 +56,19 @@ async def audit_list(
     executor_id: str | None = Query(None, description="Filter by executor ID"),
     limit: int = Query(100, ge=1, le=1000, description="Max results"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
-    auth_user: dict = Depends(require_role("read")),
+    auth_user: dict = Depends(require_role("auditor")),
     db: Session = Depends(get_db),
 ) -> AuditListResponse:
     """Query audit log.
 
-    Admin users see all events. Non-admin users see only their own events
-    (filtered by user_id). Non-human callers (no user_id) receive an empty
-    result to prevent event leakage.
+    Gated at the AUDITOR tier (ticket auditor-role): auditor or read-write
+    roles pass (admin holds read-write); plain "read" memberships are denied
+    — audit access is auditor-scoped, a deliberate release-notes behavior
+    change for read-only users who previously queried this route.
+
+    Admin users and auditor-tier holders see all events; other callers
+    see only their own events (filtered by user_id). Non-human callers
+    (no user_id) receive an empty result to prevent event leakage.
     """
     from datetime import datetime, timedelta
 
@@ -76,9 +81,17 @@ async def audit_list(
     if user_id is None:
         return AuditListResponse(events=[], total=0, limit=limit, offset=offset)
 
-    # Non-admin: filter to own events only
+    # Non-admin: filter to own events only — UNLESS the caller holds an
+    # auditor-tier membership (auditor-role ticket, owner ruling
+    # 2026-09-30: an auditor who can only see their own events is not an
+    # auditor — auditor-tier sees the FULL log). The tier map rides the
+    # require_role("auditor") gate's fetch (_checker attaches it
+    # request-scoped); a missing map falls back to the self-filter —
+    # conservative on leakage.
     is_admin = _is_admin(db, user_id)
-    if not is_admin:
+    role_permissions = auth_user.get("_role_permissions") or {}
+    full_visibility = is_admin or any(p == "auditor" for p in role_permissions.values())
+    if not full_visibility:
         query = query.filter(AuditEvent.user_id == user_id)
 
     # Apply filters

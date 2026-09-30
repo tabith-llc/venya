@@ -1528,3 +1528,233 @@ class TestShapeMetadata:
         assert data["metadata"]["executor"] == "web-server-3"  # merge preserved
         assert len(data["metadata_warnings"]) == 1
         assert "CUSTOM shape" in data["metadata_warnings"][0]
+
+
+class TestUnmaskAuditorValueDeny:
+    """Auditor-role rework (rulings 1b/1c-i): auditor-only callers are
+    AFFIRMATIVELY denied secret VALUES at the unmask chokepoint, BEFORE the
+    elevation token is consumed. Mock harness pins the code order
+    (no core.get, no token-burn UPDATE); the ORM-backed cell pins the real
+    token row intact."""
+
+    def _app_with_tier(self, tier_map):
+        core = _make_mock_core()
+        core.get.return_value = "plaintext-secret"
+        backend = MagicMock()
+        app = _create_test_app(core=core, backend=backend)
+        db = backend.get_session.return_value
+        db.execute.return_value = MagicMock(rowcount=1)  # token would burn
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: tier_map
+        patcher = patch("server.dependencies.RoleManager", return_value=rm)
+        patcher.start()
+        self._patchers.append(patcher)
+        return app, core, db
+
+    def setup_method(self):
+        self._patchers = []
+
+    def teardown_method(self):
+        for p in self._patchers:
+            p.stop()
+
+    def test_auditor_only_valid_token_403_token_never_burned(self):
+        """LOAD-BEARING: auditor-only + VALID token → 403, core.get never
+        reached, and the atomic token-burn UPDATE never runs (token row
+        intact — deny precedes consumption in code)."""
+        app, core, db = self._app_with_tier({1: "auditor"})
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-auditor-1"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "insufficient role: auditor cannot read secret values"
+        core.get.assert_not_called()
+        db.execute.assert_not_called()
+
+    def test_audit_write_failure_still_denies_403(self):
+        """H1: if the denial AuditEvent commit blows up, the request is
+        STILL 403 — the deny is the control, the log is the loud
+        side-effect; a broken audit store must never flip the gate to
+        allow (200) or to a 500."""
+        app, core, db = self._app_with_tier({1: "auditor"})
+        db.commit.side_effect = RuntimeError("audit store down")
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-auditor-1"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "insufficient role: auditor cannot read secret values"
+        core.get.assert_not_called()
+
+    def test_union_caller_adds_no_deny_event(self):
+        """N1: the union pass (auditor+read unmasks) writes ZERO
+        auditor_secret_read_denied events — the log is a deny trail, not
+        a request trail."""
+        from core.iam.models import AuditEvent
+
+        app, _core, db = self._app_with_tier({1: "auditor", 2: "read"})
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-union-1"},
+        )
+        assert resp.status_code == 200
+        added = [c.args[0] for c in db.add.call_args_list]
+        assert not any(isinstance(o, AuditEvent) and o.event_type == "auditor_secret_read_denied" for o in added)
+
+    def test_plain_read_unmask_success_adds_no_deny_event(self):
+        """N2: a normal non-auditor success path (read tier + valid token)
+        writes zero deny events."""
+        from core.iam.models import AuditEvent
+
+        app, _core, db = self._app_with_tier({1: "read"})
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-read-1"},
+        )
+        assert resp.status_code == 200
+        added = [c.args[0] for c in db.add.call_args_list]
+        assert not any(isinstance(o, AuditEvent) and o.event_type == "auditor_secret_read_denied" for o in added)
+
+    def test_auditor_read_union_keeps_value_access(self):
+        """1b union paired positive: auditor+read holds a non-auditor
+        membership → value access passes with a valid token (token burns)."""
+        app, core, db = self._app_with_tier({1: "auditor", 2: "read"})
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get(
+            "/api/v1/secrets/db-password",
+            params={"unmask": True},
+            headers={"X-Elevation-Token": "elev-union-1"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["masked"] is False
+        core.get.assert_called_once()
+        assert db.execute.call_count == 1
+
+    def test_masked_get_unaffected_for_auditor(self):
+        """Paired positive: the deny targets VALUES only — auditor metadata
+        (masked) reads keep the read-tier behavior (200, masked)."""
+        app, core, _ = self._app_with_tier({1: "auditor"})
+        core.get.return_value = "\u2022" * 8
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/secrets/db-password")
+        assert resp.status_code == 200
+        assert resp.json()["masked"] is True
+
+
+class TestUnmaskAuditorDenyTokenIntactORM:
+    """Zero-mock interlock for the deny ordering claim: a REAL
+    ElevationToken row must still be unused after the 403 (mocks cannot
+    prove the burn UPDATE was skipped — only the real UPDATE can)."""
+
+    def _build_auditor_app(self, tmp_path):
+        from core.engine.backend import Backend, BackendConfig
+        from core.engine.encryption import KEK_SIZE, encrypt_secret
+        from core.iam.models import Base, Role, RoleMember, Secret, SecretRole, User
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        db_path = tmp_path / "auditor_unmask.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(bind=engine)
+
+        kek = b"k" * KEK_SIZE
+        s = SessionLocal()
+        wrapped_dek, nonce, ciphertext = encrypt_secret(kek, b"top-secret")
+        auditor_role = Role(name="audit-view", permissions="auditor")
+        s.add_all([User(user_id="test-user"), auditor_role])
+        s.flush()
+        s.add(RoleMember(user_id="test-user", role_id=auditor_role.id))
+        secret = Secret(
+            key="db-password",
+            encrypted_value=ciphertext,
+            nonce=nonce,
+            wrapped_dek=wrapped_dek,
+            key_version_id="v1",
+            created_by="test-user",
+            meta={},
+        )
+        s.add(secret)
+        s.flush()
+        s.add(SecretRole(secret_id=secret.id, role_id=auditor_role.id))
+        s.commit()
+        s.close()
+
+        backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+        backend._engine = engine
+        backend._session_factory = SessionLocal
+        core = backend.get_core()
+
+        from fastapi import FastAPI
+        from server.dependencies import get_current_user
+
+        app = FastAPI()
+        app.state.core = core
+        app.state.backend = backend
+        app.include_router(secrets_routes.router, prefix="/api/v1")
+        app.dependency_overrides[get_current_user] = lambda: dict(TEST_USER)
+        return app, SessionLocal
+
+    def test_denied_unmask_leaves_real_token_row_unused(self, tmp_path):
+        import hashlib
+        from datetime import UTC, datetime, timedelta
+
+        from core.iam.models import ElevationToken
+
+        app, SessionLocal = self._build_auditor_app(tmp_path)
+        token = "auditor-intact-token"
+        s = SessionLocal()
+        s.add(
+            ElevationToken(
+                token_hash=hashlib.sha256(token.encode()).hexdigest(),
+                user_id="test-user",
+                expires_at=datetime.now(UTC) + timedelta(seconds=60),
+            )
+        )
+        s.commit()
+        s.close()
+
+        # _checker's gate map: auditor-only (fixture re-patch, house pattern).
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {1: "auditor"}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.get(
+                "/api/v1/secrets/db-password",
+                params={"unmask": True},
+                headers={"X-Elevation-Token": token},
+            )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "insufficient role: auditor cannot read secret values"
+
+        s = SessionLocal()
+        rows = s.query(ElevationToken).all()
+        assert len(rows) == 1
+        assert rows[0].used is False
+
+        # P1 (ruling 2026-09-30: denials are audit-logged): exactly ONE
+        # real auditor_secret_read_denied row, committed on the raise path
+        # (commit-before-raise survives get_db's rollback). H2 hygiene: the
+        # serialized fields carry NO secret value and NO token literal —
+        # the compliance trail is value-free by construction.
+        from core.iam.models import AuditEvent
+
+        events = s.query(AuditEvent).filter(AuditEvent.event_type == "auditor_secret_read_denied").all()
+        assert len(events) == 1
+        event = events[0]
+        assert event.user_id == "test-user"
+        assert '"outcome": "denied"' in event.fields
+        assert '"reason": "auditor-only role"' in event.fields
+        assert '"secret_key": "db-password"' in event.fields
+        assert "top-secret" not in event.fields
+        assert token not in event.fields
+        s.close()

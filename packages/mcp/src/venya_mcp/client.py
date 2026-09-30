@@ -283,7 +283,7 @@ class VenyaClient:
         executor_id: str | None = None,
         limit: int = 50,
     ) -> list[dict]:
-        """Query audit log. Non-admin users see only their own events."""
+        """Query audit log. Admin or auditor-tier callers see the full log; all others see only their own events."""
         params: dict[str, str] = {"limit": str(limit), "hours": str(hours)}
         if event_type:
             params["event_type"] = event_type

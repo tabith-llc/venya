@@ -563,6 +563,47 @@ async def browser_elevate_assert(
                 detail="Elevation verification failed",
             ) from None
 
+        # Auditor-role rework (ruling 1c-ii, blanket issuance-deny): mirror of
+        # auth_elevation.elevate_assert — refuse to ISSUE an elevation token
+        # to auditor-only callers (last gate before the token exists; the
+        # authoritative value-deny is the secrets_get unmask chokepoint).
+        # Blanket by ruling: this same issuance gates self-service
+        # credential-add (union 1b: any non-auditor membership passes).
+        from core.iam.role_manager import RoleManager
+
+        from ..dependencies import auditor_only_permissions
+
+        if auditor_only_permissions(RoleManager(db).get_user_permissions(session.user_id)):
+            # Denials are audit-logged (owner ruling 2026-09-30). COMMIT
+            # BEFORE the raise; this route's HTTPException path skips
+            # rollback (finally only closes), and a committed row survives
+            # either way. Value-free: no token material exists yet at this
+            # gate. Fail-closed: audit-write failure never upgrades the
+            # denial (logged loudly, still 403).
+            from core.iam.models import AuditEvent
+
+            try:
+                db.add(
+                    AuditEvent(
+                        event_type="auditor_elevation_denied",
+                        user_id=session.user_id,
+                        fields={
+                            "outcome": "denied",
+                            "reason": "auditor-only role",
+                            "user_id": session.user_id,
+                            "endpoint": "/api/v1/auth/elevate/browser/assert",
+                        },
+                        timestamp=datetime.now(UTC),
+                    )
+                )
+                db.commit()
+            except Exception:
+                logger.exception("Audit write failed on auditor elevation deny (still denying)")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="insufficient role: auditor cannot elevate",
+            )
+
         # Clean up the challenge
         del elevation_challenges[req.challenge_id]
 
