@@ -42,6 +42,7 @@ Notable changes to Venya will be documented in this file.
   visibility the `admin` role holds; every other non-admin caller keeps
   the self-filter to their own events.
 - **Docs: added `docs/UPGRADE.md`** — the tested in-place upgrade runbook (core upgrade drill alpha15→alpha16: backup, migrations, config preservation, downgrade policy).
+- **Docs: added `docs/ease-of-use.md`** — the deliberate-relaxation guide: the scp worked recipe (command policy + egress allowlist, with the paired locked default), a per-knob gain/loss catalog of every supported relaxation surface, and the never-relax list. Docs-only; no behavior change.
 
 ## [0.1.0alpha16] - 2026-09-27
 
