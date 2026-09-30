@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import metrics
-from ..dependencies import enrollment_manager, get_db, require_admin
+from ..dependencies import enrollment_manager, get_current_user, get_db, require_admin
 from ..rate_limit import rate_limit_admin_token_gen
 from ..utils.executor_id import validate_executor_id
 from ..utils.token_binding import compute_binding_hash
@@ -1620,3 +1620,165 @@ async def admin_revoke_admin_cert(
 
     logger.info("Admin cert %s revoked (reason: %s)", serial, req.reason)
     return AdminRevokeCertResponse(serial=serial, revoked=True, reason=req.reason)
+
+
+# --- Recovery-code reissue (ticket recovery-code-reissue #296) ---
+
+
+class RecoveryCodeReissueResponse(BaseModel):
+    user_id: str
+    recovery_code: str
+
+
+@router.post(
+    "/admin/recovery-code/reissue",
+    response_model=RecoveryCodeReissueResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_reissue_recovery_code(
+    request: Request,
+    user_info: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> RecoveryCodeReissueResponse:
+    """Reissue the caller's own break-glass recovery code (admin-role members).
+
+    Gate ordering (owner rulings Q1/Q2/Q9/Q10, A1 brief record):
+      1. Bearer SESSION required. The mTLS admin identity arrives here as a
+         caller=admin dict with no user_id and holds no role memberships —
+         it can never reach the mint (ruling: cert identities must not pass).
+      2. Admin-role membership of the SESSION user (self-reissue only).
+         Auditor-tier sessions fail here structurally (SoD exclusivity:
+         an auditor never holds admin) — Q7 ruling: no bespoke auditor check.
+      3. All other fallible checks (user row, pepper) run BEFORE elevation
+         consumption (Q10): a pre-check failure never burns the token.
+      4. Elevation: X-Elevation-Token header (single-use WebAuthn-asserted
+         token). The atomic conditional UPDATE mirrors
+         credentials._verify_elevation, but the burn lands via FLUSH with
+         the final commit (not its immediate commit): token burn, hash
+         replace and audit row are ONE transaction — a failure after the
+         consume rolls the burn back (get_db; #292/H1 semantics, pinned by
+         test_post_consume_failure_rolls_back_token_burn).
+      5. Mint: generate 256-bit base62 code (server/recovery_codes.py, the
+         #296-Q8 single source), last-wins atomic replace of the single
+         String(64) hash column (Q3 — one live code by construction); a
+         NULL hash is allowed and mints fresh (Q9).
+
+    The plaintext code crosses ONLY the authenticated response boundary
+    exactly once — never logged, never stored, never in the audit row
+    (value-free fields per Q5).
+    """
+    from core.iam.models import AuditEvent, ElevationToken, Role, RoleMember, User
+    from sqlalchemy import update
+
+    from ..recovery_codes import generate_recovery_code, hash_recovery_code
+
+    user_id = user_info.get("user_id")
+    if not user_id or user_info.get("caller") in ("admin", "executor"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session authentication required to reissue a recovery code",
+        )
+
+    membership = db.query(RoleMember).join(Role).filter(Role.name == "admin", RoleMember.user_id == user_id).first()
+    if membership is None:
+        # Denials are audit-logged (Q5): commit-before-raise so the event
+        # survives the get_db rollback (auditor_secret_read_denied pattern,
+        # routes/secrets.py); fail-closed-log: an audit-write failure never
+        # upgrades the denial. Value-free fields — nothing to leak here, the
+        # code has not been generated yet.
+        try:
+            db.add(
+                AuditEvent(
+                    event_type="recovery_code_reissue_denied",
+                    user_id=user_id,
+                    fields={
+                        "outcome": "denied",
+                        "reason": "admin role membership required",
+                        "actor_user_id": user_id,
+                        "target_user_id": user_id,
+                        "endpoint": "/api/v1/admin/recovery-code/reissue",
+                    },
+                    timestamp=datetime.now(UTC),
+                )
+            )
+            db.commit()
+        except Exception:
+            logger.exception("Audit write failed on recovery-code reissue deny (still denying)")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role membership required to reissue a recovery code",
+        )
+
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    pepper = getattr(
+        getattr(request.app.state, "config", None),
+        "recovery_code_pepper",
+        "",
+    )
+    if not pepper:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Recovery pepper not configured",
+        )
+
+    elevation_token = request.headers.get("X-Elevation-Token")
+    if not elevation_token:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Elevation token required to reissue a recovery code",
+        )
+
+    token_hash = hashlib.sha256(elevation_token.encode()).hexdigest()
+    server_config = getattr(request.app.state, "config", None)
+    tolerance = (
+        server_config.clock_skew.token_tolerance_seconds
+        if server_config and hasattr(server_config, "clock_skew")
+        else 60
+    )
+    expiry_cutoff = datetime.now(UTC) - timedelta(seconds=tolerance)
+    result = db.execute(
+        update(ElevationToken)
+        .where(
+            ElevationToken.token_hash == token_hash,
+            ElevationToken.user_id == user_id,
+            ElevationToken.used.is_(False),
+            ElevationToken.expires_at > expiry_cutoff,
+        )
+        .values(used=True)
+    )
+    # Deferred commit (point 4 of the docstring): flush only — everything
+    # below rides ONE final commit, and any raise routes through get_db's
+    # rollback, un-burning the token.
+    db.flush()
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired elevation token",
+        )
+
+    code = generate_recovery_code()
+    user.recovery_code_hash = hash_recovery_code(code, pepper)
+    db.add(
+        AuditEvent(
+            event_type="recovery_code_reissued",
+            user_id=user_id,
+            fields={
+                "outcome": "reissued",
+                "actor_user_id": user_id,
+                "target_user_id": user_id,
+                "endpoint": "/api/v1/admin/recovery-code/reissue",
+            },
+            timestamp=datetime.now(UTC),
+        )
+    )
+    db.commit()
+
+    logger.info("Recovery code reissued for %s", user_id)
+    return RecoveryCodeReissueResponse(user_id=user_id, recovery_code=code)

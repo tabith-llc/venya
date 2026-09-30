@@ -258,7 +258,7 @@ EXPECTED_SUBCOMMAND_COUNTS: dict[tuple[str, ...], int] = {
     # top 16→17: `setup` added by feature/cli-setup-command (deliberate
     # interlock update, cli-reference regenerated in the same commit).
     (): 17,
-    ("admin",): 23,
+    ("admin",): 24,
     ("admin", "key-version"): 5,
     ("role",): 7,
     # exec 5→6: `exec list` added by feature/version-surfaces (ruling

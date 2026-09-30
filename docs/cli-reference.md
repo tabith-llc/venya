@@ -57,6 +57,7 @@ and exits `1`.
   - [`venya admin init-admin-ca`](#venya-admin-init-admin-ca)
   - [`venya admin generate-admin-cert`](#venya-admin-generate-admin-cert)
   - [`venya admin revoke-admin-cert`](#venya-admin-revoke-admin-cert)
+  - [`venya admin reissue-recovery-code`](#venya-admin-reissue-recovery-code)
 - [`venya role`](#venya-role) *(group)*
   - [`venya role create`](#venya-role-create)
   - [`venya role list`](#venya-role-list)
@@ -287,6 +288,7 @@ Subcommands:
 - [`venya admin init-admin-ca`](#venya-admin-init-admin-ca) — Initialize the admin CA (create key/cert pair)
 - [`venya admin generate-admin-cert`](#venya-admin-generate-admin-cert) — Sign an admin client certificate
 - [`venya admin revoke-admin-cert`](#venya-admin-revoke-admin-cert) — Revoke an admin certificate by serial number
+- [`venya admin reissue-recovery-code`](#venya-admin-reissue-recovery-code) — Reissue your own break-glass recovery code (session + elevation + admin mTLS)
 
 ### `venya admin enroll`
 
@@ -816,6 +818,22 @@ venya admin revoke-admin-cert --serial SERIAL [OPTIONS]
 
 ```bash
 venya admin revoke-admin-cert --serial 1A2B3C  # revoke by hex serial; mTLS bundle then rejects it
+```
+
+### `venya admin reissue-recovery-code`
+
+Reissue your own break-glass recovery code (session + elevation + admin mTLS)
+
+```
+venya admin reissue-recovery-code
+```
+
+*Takes no arguments.*
+
+**Examples**
+
+```bash
+venya admin reissue-recovery-code  # reissue your own break-glass code (session bearer + elevation touch + admin mTLS); the new code prints ONCE and the old one dies immediately
 ```
 
 ## `venya role`

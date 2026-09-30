@@ -456,6 +456,12 @@ def create_parser() -> argparse.ArgumentParser:
         help="Core server URL (default: from config or VENYA_SERVER_URL)",
     )
 
+    # admin reissue-recovery-code
+    admin_sub.add_parser(
+        "reissue-recovery-code",
+        help="Reissue your own break-glass recovery code (session + elevation + admin mTLS)",
+    )
+
     # role
     role_parser = subparsers.add_parser("role", help="Role management")
     role_sub = role_parser.add_subparsers(dest="role_command")

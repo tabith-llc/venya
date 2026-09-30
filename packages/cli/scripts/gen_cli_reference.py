@@ -225,6 +225,15 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
     ("admin", "revoke-admin-cert"): [
         (["admin", "revoke-admin-cert", "--serial", "1A2B3C"], "revoke by hex serial; mTLS bundle then rejects it"),
     ],
+    ("admin", "reissue-recovery-code"): [
+        (
+            ["admin", "reissue-recovery-code"],
+            (
+                "reissue your own break-glass code (session bearer + elevation touch + admin mTLS); "
+                "the new code prints ONCE and the old one dies immediately"
+            ),
+        ),
+    ],
     ("role", "create"): [
         (["role", "create", "app"], "read-only role (default tier)"),
         (
