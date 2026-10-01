@@ -94,16 +94,20 @@ sudo tar -tzf /root/venya-backup/venya-secrets-*.tar.gz | grep -E '\.env$|ca\.ke
 
 ### Alternative: portable CA-key custody (CLI)
 
-> **KNOWN-ISSUE (open defect: `ca-key-export-blind-to-at-rest`).** The export/restore
-> commands below **fail on installs where the CA key is encrypted at rest** — which is every
-> install since the at-rest fixes (drill-confirmed, deterministic, 2026-09-30; the shares
-> path, `split-ca-key`, reads the same at-rest bytes and is same-class suspect — not
-> exercised). Export wraps the raw on-disk bytes (a
-> `BEGIN ENCRYPTED PRIVATE KEY` blob) and restore's validator parses with no password, so
-> even the **correct** passphrase is rejected: `Error: restored data is not a valid PEM
-> private key`. The wrong-passphrase arm still
-> fails distinctly (`GCM authentication failed`), so operators can tell corruption from
-> this defect. Until the defect is fixed, use the tar backup above for CA custody.
+> **CUSTODY STATUS (defect `ca-key-export-blind-to-at-rest`) — was broken, fix merged,
+> live verification pending.** The 2026-09-30 drill PROVED the export/restore commands
+> **failed on installs where the CA key is encrypted at rest** — which is every install
+> since the at-rest fixes (drill-confirmed, deterministic). Export wrapped the raw on-disk
+> bytes (a `BEGIN ENCRYPTED PRIVATE KEY` blob) and restore's validator parsed them with no
+> password, so even the **correct** passphrase was rejected: `Error: restored data is not a
+> valid PEM private key`. The wrong-passphrase arm failed distinctly
+> (`GCM authentication failed`), so operators can tell corruption from defect. The same-day
+> custody fix makes export/split/restore honor the at-rest envelope; **live-core
+> verification of the round-trip is scheduled for the next fleet window**. Until that
+> passes, treat this custody path as REHEARSE-BEFORE-YOU-NEED-IT — exercise it against a
+> test CA before an incident; the tar backup above remains the drill-proven path. The
+> shares path, `split-ca-key`, reads the same at-rest bytes and is same-class suspect — not
+> exercised.
 
 For off-site / escrow custody of the CA key, the CLI has purpose-built break-glass commands
 (they never write the plaintext key to disk or stdout):
@@ -158,9 +162,9 @@ admin) and the executor re-registers. Target hosts hold nothing — no backup ne
    ```
    The restored `VENYA_DB__PASSPHRASE` **must** match the one the secrets were encrypted
    under — there is no silent KEK rotation. If you use the CLI CA-key custody path, restore
-   the CA key with `venya admin restore-ca-key` — currently blocked by
-   `ca-key-export-blind-to-at-rest` (see KNOWN-ISSUE above); the tar in step 4 is the
-   working path.
+   the CA key with `venya admin restore-ca-key` — drill-proven broken on at-rest installs
+   (defect `ca-key-export-blind-to-at-rest`), fix merged, live-core verification pending
+   (see CUSTODY STATUS above); the tar in step 4 is the drill-proven path.
 5. **Re-issue the install-time TLS material from the restored CAs — mandatory, the restore
    is not self-healing.** Nothing at boot re-signs the server leaf, the relay client cert,
    the nginx client-CA bundle, or the served CA copy against the restored CA; if you skip

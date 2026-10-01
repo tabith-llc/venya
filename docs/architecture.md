@@ -95,9 +95,10 @@ unauthenticated transport.
 1. **Store.** Secret value encrypted server-side under envelope encryption
    (random DEK per secret, wrapped by the KEK with AES-256-KW per RFC 5649;
    the value itself is ChaCha20-Poly1305), scoped to roles. Plaintext never
-   persists;
-   the API never returns values — only metadata (key, roles, purpose,
-   executor hints) for discovery by humans and LLMs.
+   persists; listing and admin surfaces return metadata only (key, roles,
+   purpose, executor hints), and a value is returned only through the
+   elevation-gated unmask (a human re-authenticating via WebAuthn with a
+   single-use token) or mTLS-executor session injection at command time.
 2. **Dispatch.** For a `run_command`/`venya run` execution, the server
    decrypts, wraps the value in cryptographic sentinel markers, and sends it
    over the mTLS relay channel to the targeted executor. The calling client
