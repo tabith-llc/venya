@@ -54,6 +54,18 @@ Notable changes to Venya will be documented in this file.
   break-glass. Multi-factor loss (key AND code) remains out of scope:
   Shamir CA shares + backups + reinstall is still the last-resort path.
 
+- **Removed: `venya admin set-command-policy --custom`.** The flag was inert
+  surface (#289): it posted a `custom` key the API model does not define (and
+  never even opened the file it named), so the server silently dropped it.
+  Replaced by explicit `--custom-allowed` / `--custom-dangerous` (comma-
+  and/or space-separated), each mapping 1:1 to a real API field; each list
+  REPLACES its stored counterpart (replace-not-union), an omitted flag leaves
+  the stored list untouched.
+- **Changed: `POST /api/v1/admin/command-policy` now rejects unknown body
+  keys with 422** (`extra="forbid"` on the request model, #289 Q4). Junk
+  keys on this control-plane route can no longer succeed silently; documented
+  senders (which use the real fields) are unaffected.
+
 ### Fixed
 - **CLI: CA-key custody round-trip works on encrypted-at-rest installs
   (#297).** Since encrypt-at-rest (4218ec1/3667c6e), `venya admin
@@ -124,6 +136,14 @@ Notable changes to Venya will be documented in this file.
   key as bytes (the library's own CTAP convention); users with zero
   existing credentials were never affected, which is why first-time
   init/enroll worked.
+- **CLI: `set-command-policy` custom lists actually reach the server (#289).**
+  The dead-key payload (a `custom` path string pydantic silently dropped) is
+  gone; the command now posts only real `AdminSetCommandPolicyRequest`
+  fields, and a drift-guard test pins every postable CLI key against the
+  server model so this dead-payload-key class cannot ship again. The GET
+  docstring's stale "server→executor propagation is not wired" claim was
+  corrected — propagation is wired (861a682) and the row enforces fleet-wide
+  via heartbeat.
 
 ## [0.1.0alpha16] - 2026-09-27
 

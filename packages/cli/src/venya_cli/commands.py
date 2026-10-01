@@ -723,8 +723,13 @@ def cmd_admin_set_policy(client: APIClient, args: Any) -> int:
     """Set command policy."""
     try:
         policy = {"preset": args.preset}
-        if args.custom:
-            policy["custom"] = args.custom
+        # Real AdminSetCommandPolicyRequest fields only (#289: the old
+        # "custom" key was silently dropped server-side). Comma/space tokens
+        # flatten with the #293 idiom; each list REPLACES its stored one.
+        if args.custom_allowed:
+            policy["custom_allowed_commands"] = [c.strip() for item in args.custom_allowed for c in item.split(",")]
+        if args.custom_dangerous:
+            policy["custom_dangerous_patterns"] = [p.strip() for item in args.custom_dangerous for p in item.split(",")]
 
         client.post("/api/v1/admin/command-policy", json=policy)
         print(f"Command policy set to '{args.preset}'.")

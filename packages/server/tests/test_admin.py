@@ -400,6 +400,53 @@ class TestAdminSetCommandPolicy:
         assert resp.status_code == 200
         assert resp.json()["preset"] == "permissive"
 
+    def test_set_policy_rejects_unknown_key(self):
+        """N2 (ticket #289 Q4): extra='forbid' — the dead 'custom' key the CLI
+        used to post is now a 422, not a silent pydantic ignore."""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/admin/command-policy",
+            json={"preset": "balanced", "custom": ["rm -rf"]},
+        )
+        assert resp.status_code == 422
+
+    def test_set_policy_custom_lists_roundtrip_via_get(self):
+        """T4: POST both custom lists -> GET shows BOTH (replace-not-union,
+        effect visible to the read counterpart — the P cell of #289 A2)."""
+        policy = SimpleNamespace(
+            policy_name="default",
+            preset="balanced",
+            allowed_commands='["/bin/OLD"]',
+            dangerous_patterns='["mkfs"]',
+            updated_at=None,
+        )
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = policy
+        backend = MagicMock()
+        backend.get_session.return_value = db
+        app = _create_test_app(backend=backend)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/admin/command-policy",
+            json={
+                "preset": "permissive",
+                "custom_allowed_commands": ["/usr/bin/ssh", "/bin/ls"],
+                "custom_dangerous_patterns": ["rm -rf", "dd"],
+            },
+        )
+        assert resp.status_code == 200
+        got = client.get("/api/v1/admin/command-policy").json()
+        assert got["allowed_commands"] == ["/usr/bin/ssh", "/bin/ls"]
+        assert got["dangerous_patterns"] == ["rm -rf", "dd"]
+        assert got["configured"] is True
+
 
 class TestAdminRecoveryRemoved:
     """The /admin/recovery route is deleted — it minted admins with no code validation.

@@ -137,6 +137,12 @@ class AdminKeyVersionRollbackResponse(BaseModel):
 
 
 class AdminSetCommandPolicyRequest(BaseModel):
+    # extra="forbid" (ticket cli-set-policy-custom-key-mismatch #289 Q4):
+    # pydantic's default-ignore silently dropped a dead CLI key while the
+    # caller saw success. Unknown keys on this control-plane route are now a
+    # 422, never a no-op.
+    model_config = {"extra": "forbid"}
+
     preset: str = Field("balanced", description="Policy preset: strict, balanced, permissive")
     custom_allowed_commands: list[str] | None = None
     custom_dangerous_patterns: list[str] | None = None
@@ -804,11 +810,14 @@ async def admin_get_command_policy(
     - Reports what the admin API STORED. An unconfigured policy (no row)
       answers the built-in default shape (preset "balanced", empty custom
       lists, configured=False); GET never mutates.
-    - The executor's EFFECTIVE policy is derived from the executor's own
-      config (executor.toml `command_validator` section →
-      build_command_policy); server→executor propagation is not wired
-      (recorded as an adjacent gap on the ticket). This route reports
-      server state, not remote executor state.
+    - Server→executor propagation IS wired (ticket
+      command-policy-no-server-executor-propagation, merged 861a682): this
+      stored row rides the ADDITIVE `command_policy` field of the
+      registration/heartbeat responses and ENFORCES fleet-wide on each
+      executor's next heartbeat (~30 s); a null dangerous list leaves the
+      executor's built-in set, a list REPLACES it. Pre-propagation daemons
+      ignore the field and keep their executor.toml policy. This route
+      reports server state, not a live per-executor read-back.
     """
     from core.iam.models import CommandPolicy
 
