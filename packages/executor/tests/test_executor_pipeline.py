@@ -603,6 +603,16 @@ class TestValidateCommandStructure:
         with pytest.raises(ValueError, match="Shell metacharacters"):
             _validate_command_structure("/usr/bin/echo hello\n/usr/bin/echo world")
 
+    def test_rejects_quoted_metachar_from_cli_interim_join(self):
+        """sweep3a-low-hygiene-batch S3A-15 (interim): the CLI now passes
+        metachar-containing args shlex.quoted — the gate is a whole-STRING
+        scan, not quote-aware, so the quoted shape is rejected exactly as
+        the unquoted form. Pairs with test_rejects_pipe."""
+        from executor.executor import _validate_command_structure
+
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure("/usr/bin/echo 'a|b'")
+
     def test_rejects_empty_command(self):
         from executor.executor import _validate_command_structure
 

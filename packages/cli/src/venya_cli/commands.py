@@ -10,6 +10,7 @@ import getpass
 import hashlib
 import json
 import os
+import shlex
 import ssl
 import sys
 import tempfile
@@ -1292,7 +1293,11 @@ def cmd_run(client: APIClient, args: Any) -> int:
     # in argparse).
     if command_args and command_args[0] == "--":
         command_args = command_args[1:]
-    command = " ".join(command_args) if command_args else ""
+    # shlex.quote each arg before the join: a plain space-join word-splits
+    # args containing spaces on both execution paths (sweep3a-low-hygiene-batch
+    # S3A-15; interim fix — the structural wire fix is
+    # execution-command-wire-unstructured-string).
+    command = " ".join(shlex.quote(a) for a in command_args) if command_args else ""
     if not command:
         print("Error: command required", file=sys.stderr)
         return 1

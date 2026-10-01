@@ -16,6 +16,7 @@ the captured separator. MCP's run_command takes a plain string parameter and
 never passes through this join — unaffected by both bug and fix.
 """
 
+import shlex
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -87,3 +88,35 @@ class TestRunSeparatorStrip:
         rc = cmd_run(client, args)
         assert rc == 1
         client.post.assert_not_called()
+
+
+class TestRunArgWhitespace:
+    """sweep3a-low-hygiene-batch S3A-15 (interim fix; the structural wire fix
+    is execution-command-wire-unstructured-string): each argument is
+    shlex.quoted before the space join, so argument boundaries survive the
+    string wire — the plain join word-split them (`grep 'error message'` →
+    three tokens on both execution paths).
+    """
+
+    def test_arg_with_spaces_survives_to_payload_verbatim(self):
+        """Audit-trail honesty: the command text that reaches the wire is the
+        quoted string VERBATIM (the server passes req.command through
+        unchanged into the relay, the audit event, and
+        execution_sessions.command) — never a silently re-split/re-joined
+        reformat. shlex.split round-trips to the exact original argv."""
+        _rc, command = _run(["grep", "error message", "app.log"])
+        assert command == "grep 'error message' app.log"
+        assert shlex.split(command) == ["grep", "error message", "app.log"]
+
+    def test_arg_with_single_quote_survives_to_payload(self):
+        _rc, command = _run(["echo", "it's here", "ok"])
+        assert command == "echo 'it'\"'\"'s here' ok"
+        assert shlex.split(command) == ["echo", "it's here", "ok"]
+
+    def test_metachar_arg_payload_shape(self):
+        """A metachar-containing arg is passed quoted; the executor gate
+        rejects the quoted string exactly as it rejects the unquoted form
+        (paired negative: TestValidateCommandStructure in the executor
+        suite, incl. the sweep3a cell for the quoted shape)."""
+        _rc, command = _run(["echo", "a|b"])
+        assert command == "echo 'a|b'"
