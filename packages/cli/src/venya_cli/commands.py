@@ -1309,12 +1309,11 @@ def cmd_run(client: APIClient, args: Any) -> int:
     # in argparse).
     if command_args and command_args[0] == "--":
         command_args = command_args[1:]
-    # shlex.quote each arg before the join: a plain space-join word-splits
-    # args containing spaces on both execution paths (sweep3a-low-hygiene-batch
-    # S3A-15; interim fix — the structural wire fix is
-    # execution-command-wire-unstructured-string).
-    command = " ".join(shlex.quote(a) for a in command_args) if command_args else ""
-    if not command:
+    # The REMAINDER argv list posts AS a list (ticket execution-command-wire-
+    # unstructured-string #322, ruling Q1=A1): argument boundaries ride the wire
+    # as structured data. The #319 interim per-arg shlex.quote join is deleted —
+    # quoting artifacts no longer enter the wire, audit, or the echo below.
+    if not command_args:
         print("Error: command required", file=sys.stderr)
         return 1
 
@@ -1342,12 +1341,12 @@ def cmd_run(client: APIClient, args: Any) -> int:
 
     # Step 3: Execute command via executor
     try:
-        print(f"Executing: {command}")
+        print(f"Executing: {shlex.join(command_args)}")
         exec_result = client.post(
             f"/api/v1/executors/{executor_id}/execute",
             json={
                 "session_id": session_id,
-                "command": command,
+                "command": command_args,
             },
             # Last-fuse read timeout (relay 300s < nginx 330s < 340s default):
             # a cold-sandbox run (~65s template pull) must not be abandoned

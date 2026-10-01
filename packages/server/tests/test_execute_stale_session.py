@@ -21,6 +21,7 @@ no exception, WARNING logged, rowcount 0 (the caller still returns the result).
 """
 
 import logging
+import shlex
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -71,10 +72,11 @@ def _seed_execution_session(s, sid="sess-1"):
 def test_row_present_is_updated(session):
     """Truth-table positive half: a live row gets the result persisted."""
     _seed_execution_session(session)
-    _mark_execution_session_completed(session, "sess-1", "echo hi", datetime.now(UTC), RESULT)
+    _mark_execution_session_completed(session, "sess-1", "echo hi", ["echo", "hi"], datetime.now(UTC), RESULT)
     session.commit()
     row = session.query(ExecutionSession).filter(ExecutionSession.id == "sess-1").one()
     assert row.command == "echo hi"
+    assert row.command_argv == ["echo", "hi"]
     assert row.exit_code == 0
     assert row.stdout == "ok\n"
     assert row.stderr == ""
@@ -93,7 +95,30 @@ def test_row_absent_noops_with_warning_not_staledataerror(session, caplog):
     session.commit()
 
     with caplog.at_level(logging.WARNING, logger="venya.server"):
-        _mark_execution_session_completed(session, "sess-1", "echo hi", datetime.now(UTC), RESULT)
+        _mark_execution_session_completed(session, "sess-1", "echo hi", ["echo", "hi"], datetime.now(UTC), RESULT)
         session.commit()  # must not raise StaleDataError
 
     assert any("vanished" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+def test_command_argv_recoverable_exact(session):
+    """#322 audit truth table: display text is the RENDERED view, the true argv
+    is recoverable EXACTLY from command_argv — including an arg with a space
+    and an arg with a quote (the headline bug: `grep error message app.log`
+    survives as 3 tokens, not free words)."""
+    argv = ["grep", "-i", "error message", "it's", 'say "hi"', "app.log"]
+    display = shlex.join(argv)
+    _seed_execution_session(session, "sess-argv")
+    _mark_execution_session_completed(session, "sess-argv", display, argv, datetime.now(UTC), RESULT)
+    session.commit()
+    row = session.query(ExecutionSession).filter(ExecutionSession.id == "sess-argv").one()
+    assert row.command_argv == argv  # exact token recovery
+    assert len(row.command_argv) == 6
+    assert row.command == display  # stored display is never re-quoted/re-split
+
+
+def test_pre_change_row_keeps_argv_null(session):
+    """Old rows (NULL command_argv) stay readable — the column is additive."""
+    _seed_execution_session(session, "sess-old")
+    row = session.query(ExecutionSession).filter(ExecutionSession.id == "sess-old").one()
+    assert row.command_argv is None

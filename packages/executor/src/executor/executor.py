@@ -66,71 +66,76 @@ TRUNCATION_MARKER = "... [OUTPUT TRUNCATED: {n} bytes discarded]\n"
 SBX_TIMEOUT = 3600  # 1 hour max
 
 # Shell metacharacters that are not permitted in executor commands.
-# Enforced WHOLE-STRING by `_validate_command_structure` at the top of
-# `execute()` — before policy validation and before any strategy dispatch —
-# because the production sbx path hands the command string to `sh -c` inside
-# the sandbox (the memfd/direct path's shell=False is the exception, not the
-# rule). Rejection at the gate means these characters never reach any shell.
-# Users needing pipes, redirects, or other shell features should provide a
-# script file.
+# Enforced PER ELEMENT by `_validate_command_structure` at the top of
+# `execute()` — before policy validation and before any strategy dispatch.
+# The command crosses the wire as a structured argv list (ticket
+# execution-command-wire-unstructured-string #322, ruling Q1=A1), so the gate
+# checks every metacharacter INSIDE every argv element — a `|` packed into one
+# element can never be misread as a separator. The production sbx path still
+# hands an executor-reconstituted string to `sh -c` inside the sandbox (the
+# memfd/direct path's shell=False is the exception, not the rule); rejection
+# at the gate means these characters never reach any shell. Users needing
+# pipes, redirects, or other shell features should provide a script file.
 SHELL_METACHARS = set("|;&$`(){}<>!*?\n\r")
 
 
-def _validate_command_structure(command: str, allowed_redirect_paths: frozenset[str] = frozenset()) -> list[str]:
-    """Split command into arguments and reject shell metacharacters.
+def _validate_command_structure(command: list[str], allowed_redirect_paths: frozenset[str] = frozenset()) -> list[str]:
+    """Reject shell metacharacters in any argv element (no join, no shlex).
+
+    PER-ELEMENT GATE (ticket execution-command-wire-unstructured-string #322,
+    ruling Q2-B1 — resolved-by-consequence of Q1=A1: the wire carries argv, no
+    fallback string path exists, so this is the only validation mode). An
+    element containing a shell metacharacter is rejected even though the
+    sandbox shell would never word-split the reconstituted list around it —
+    the 2026-09-16 unconditional-gate ruling is intact, just re-expressed on
+    the element list.
 
     NARROW REDIRECT ALLOWANCE (ticket secret-shape-sudo-remote, option (a),
     user ruling 2026-09-21 — corporate targets almost never grant NOPASSWD
     sudo, so a password must reach remote `sudo -S` over ssh stdin): `<` is
-    permitted ONLY as a standalone whitespace-delimited token immediately
-    followed by a token EXACTLY equal to a session-bound secret path
-    (`/run/secrets/venya/<id>` for an id in `allowed_redirect_paths`). Every
-    other `<` form (`<<`, `<>`, `<&`, fused `a<b`, quoted, trailing) and
-    every other metacharacter remains rejected whole-string — the 2026-09-16
-    unconditional-gate ruling is intact; this is one named, bounded exception.
+    permitted ONLY as a standalone element immediately followed by an element
+    EXACTLY equal to a session-bound secret path (`/run/secrets/venya/<id>`
+    for an id in `allowed_redirect_paths`). Every other `<` form (fused `a<b`,
+    trailing, unbound target) and every other metacharacter remains rejected.
 
     Args:
-        command: The command string to validate.
+        command: The argv list to validate.
         allowed_redirect_paths: exact secret-file paths bound to this session.
 
     Returns:
-        List of command arguments from shlex.split().
+        The validated argv list (identity — kept for the direct-path caller).
 
     Raises:
-        ValueError: If the command contains shell metacharacters or is empty.
+        ValueError: If any element contains shell metacharacters or the
+            command is empty.
     """
-    if not command or not command.strip():
+    if not command:
         raise ValueError("Empty command")
 
-    # '<' handled per-token (standalone + session-bound target only); every
-    # other metacharacter keeps the unconditional whole-string rejection.
-    tokens = command.split()
-    for i, tok in enumerate(tokens):
-        if "<" in tok:
-            if tok != "<":
+    # '<' handled per-element (standalone + session-bound target only); every
+    # other metacharacter keeps the unconditional per-element rejection.
+    metachars = SHELL_METACHARS - {"<"}
+    for i, elem in enumerate(command):
+        if "<" in elem:
+            if elem != "<":
                 raise ValueError(
                     "Shell metacharacters are not permitted. "
                     "Wrap complex commands in a script file and execute that instead."
                 )
-            nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+            nxt = command[i + 1] if i + 1 < len(command) else None
             if nxt is None or nxt not in allowed_redirect_paths:
                 raise ValueError(
                     "Redirect '<' is only permitted when immediately followed by a "
                     "SESSION-BOUND secret path (/run/secrets/venya/<id> for a secret "
                     "injected in this session). Any other redirect target is rejected."
                 )
+        if any(c in elem for c in metachars):
+            raise ValueError(
+                "Shell metacharacters are not permitted. "
+                "Wrap complex commands in a script file and execute that instead."
+            )
 
-    if any(c in command for c in SHELL_METACHARS - {"<"}):
-        raise ValueError(
-            "Shell metacharacters are not permitted. "
-            "Wrap complex commands in a script file and execute that instead."
-        )
-
-    args = shlex.split(command)
-    if not args:
-        raise ValueError("Empty command after parsing")
-
-    return args
+    return list(command)
 
 
 def _resolve_env_vars(
@@ -210,7 +215,7 @@ class Executor:
 
     def execute(
         self,
-        command: str,
+        command: list[str],
         secrets: list[dict[str, Any]],
         env_override: dict[str, str] | None = None,
         cwd: str | None = None,
@@ -220,7 +225,8 @@ class Executor:
         """Execute a command with secret injection and output filtering.
 
         Args:
-            command: The command to execute.
+            command: The command argv list to execute (ticket #322: the wire
+                carries structured argv; no string path exists).
             secrets: List of secret dicts with 'secret_id', 'value', 'wrapped_value'.
             env_override: Environment variables to set (not for secrets).
             cwd: Working directory for the command.
@@ -242,11 +248,12 @@ class Executor:
         # layer's `_split_local_remote` shlex-parses, so structure-first
         # guarantees it receives parseable input.
         # ACCEPTED TRADEOFF (ruled, recorded in the ticket + plan-9 tracker
-        # Deviations row 6): quoted metachars in arguments (e.g. `echo "a; b"`)
-        # are rejected although a shell would treat them safely — quote-scoped
-        # parsing cannot soundly distinguish local vs remote interpretation
-        # here; the sandbox shell sees the whole string. Shell features must
-        # use the script-file path.
+        # Deviations row 6; re-expressed per-element by ticket #322 Q2-B1):
+        # metachars inside a single argument (e.g. `echo` + arg `a; b`) are
+        # rejected although the reconstituted shell string would keep them
+        # quote-safe — quote-scoped parsing cannot soundly distinguish local
+        # vs remote interpretation here; the sandbox shell sees the whole
+        # string. Shell features must use the script-file path.
         # Session-bound secret paths are the ONLY legal redirect targets
         # (ticket secret-shape-sudo-remote option (a)).
         allowed_redirects = frozenset(f"/run/secrets/venya/{s['secret_id']}" for s in secrets if "secret_id" in s)
@@ -254,17 +261,29 @@ class Executor:
             _validate_command_structure(command, allowed_redirects)
         except ValueError as exc:
             if self.audit_logger:
-                self.audit_logger.emit("command_rejected", command=command, reason=str(exc))
+                self.audit_logger.emit("command_rejected", command=shlex.join(command), reason=str(exc))
             raise ValueError(f"Command rejected: {exc}") from None
 
-        # Step 1b: POLICY gate — dangerous patterns / preset checks.
-        is_valid, reason = self.command_validator.validate(command)
+        # EXECUTION POSTURE — UNCHANGED by the wire fix (ticket
+        # execution-command-wire-unstructured-string #322). The validated argv
+        # is reconstituted with shlex.join and fed to the EXISTING sh -c sbx
+        # path byte-identically to the pre-#322 wire text (shlex.join == the
+        # per-arg quoting the CLI used to bake in, so the sh -c payload is the
+        # same string production runs today). The ruled C3 argv-direct switch
+        # is LEG B, gated on the fleet sbx argv-boundary probe; this join is
+        # the ruled C1 floor. Shipping the posture change on an unverified
+        # probe is prohibited.
+        command_str = shlex.join(command)
+
+        # Step 1b: POLICY gate — dangerous patterns / preset checks (string-
+        # typed throughout; sees the rendered form, same bytes as today).
+        is_valid, reason = self.command_validator.validate(command_str)
         if not is_valid:
             if self.audit_logger:
-                self.audit_logger.emit("command_rejected", command=command, reason=reason)
+                self.audit_logger.emit("command_rejected", command=command_str, reason=reason)
             raise ValueError(f"Command rejected: {reason}")
 
-        logger.info("Executing command: %s", command)
+        logger.info("Executing command: %s", command_str)
         start_time = time.time()
 
         # Step 2: Prepare secret injections
@@ -282,7 +301,7 @@ class Executor:
             # Audit: credential_injected (env var NAMES only — never values)
             if self.audit_logger:
                 audit_data = {
-                    "command": command,
+                    "command": command_str,
                     "strategy": self.injection_strategy.name(),
                     "fd_count": len(injections),
                     "secret_ids": [s.secret_id for s in injections],
@@ -291,14 +310,16 @@ class Executor:
                 self.audit_logger.emit("credential_injected", **audit_data)
 
             # Step 3: Execute with injected secrets (sbx only)
-            result = self._run_command_sbx(command, injections, env_final or None, cwd, askpass_helper=askpass_helper)
+            result = self._run_command_sbx(
+                command_str, injections, env_final or None, cwd, askpass_helper=askpass_helper
+            )
 
             # Audit: command_executed
             if self.audit_logger:
                 duration_ms = (time.time() - start_time) * 1000
                 self.audit_logger.emit(
                     "command_executed",
-                    command=command,
+                    command=command_str,
                     exit_code=result.exit_code,
                     duration_ms=round(duration_ms, 2),
                 )
@@ -373,7 +394,7 @@ class Executor:
 
     def _run_command_direct(
         self,
-        command: str,
+        command: list[str],
         injections: list[SecretBundle],
         env_override: dict[str, str] | None,
         cwd: str | None,
@@ -381,6 +402,9 @@ class Executor:
         """Run command directly via subprocess.Popen (memfd strategy).
 
         This is the existing execution path. Kept for backwards compat.
+        Takes the argv list and runs it shell=False (ticket #322: the engine
+        boundary is argv-structured end to end; this path was already
+        argv-exact after shlex.split — the split moved to the wire).
         """
         # Build process environment
         env = os.environ.copy()
@@ -436,7 +460,7 @@ class Executor:
         exit_code = process.wait()
 
         return self._filter_and_build_result(
-            command,
+            shlex.join(command),  # response-side display stays a string (#322)
             exit_code,
             stdout,
             stderr,

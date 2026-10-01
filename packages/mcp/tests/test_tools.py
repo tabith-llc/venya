@@ -253,6 +253,26 @@ async def test_run_command_masked_output() -> None:
     assert "2 secret(s) masked" in result[0].text
 
 
+async def test_run_command_unparsable_string_maps_to_clean_tool_error() -> None:
+    """M1 (#322): the client-boundary shlex.split raises ValueError with an
+    actionable message; the tool layer's EXISTING exception path turns it
+    into the agent-visible error text (no traceback, no unhandled crash)."""
+    mock = _make_mock_client()
+    mock.run_command = AsyncMock(
+        side_effect=ValueError("Command could not be parsed as a shell line: No closing quotation")
+    )
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        with pytest.raises(RuntimeError, match="Command could not be parsed as a shell line"):
+            await call_tool(
+                "run_command",
+                {
+                    "executor_id": "web-3",
+                    "command": 'echo "unclosed',
+                    "secret_keys": [],
+                },
+            )
+
+
 # --- get_audit tests ---
 
 

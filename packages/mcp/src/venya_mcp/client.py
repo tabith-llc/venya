@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import warnings
 from pathlib import Path
 
@@ -242,7 +243,7 @@ class VenyaClient:
         Two-step internal flow (exposed as single tool to LLM):
         1. POST /executors/sessions with {executor_id, secret_keys}
            → server resolves, decrypts, wraps, stores secrets server-side
-        2. POST /executors/{id}/execute with {session_id, command}
+        2. POST /executors/{id}/execute with {session_id, command: argv list}
            → {exit_code, stdout, stderr, masked_count}
 
         The MCP server never sees secret plaintext. Output contains
@@ -264,12 +265,23 @@ class VenyaClient:
 
         # Step 2: Execute command — long-running: last-fuse timeout (ticket
         # cli-execution-timeout-cold-start-default).
+        # M1 boundary split (ticket execution-command-wire-unstructured-string
+        # #322, owner ruling): the MCP TOOL surface stays a shell string, but
+        # ExecuteRequest.command is a list[str] since #322 — argv is split
+        # HERE so the wire carries structured tokens. An unparseable string
+        # (unbalanced quote) becomes a ValueError, which rides the EXISTING
+        # tool-error path (server.py: handler exceptions become isError=True
+        # results carrying this message; no traceback reaches the agent).
+        try:
+            argv = shlex.split(command)
+        except ValueError as exc:
+            raise ValueError(f"Command could not be parsed as a shell line: {exc}") from None
         result = await self._request(
             "POST",
             f"/api/v1/executors/{executor_id}/execute",
             json_body={
                 "session_id": session_id,
-                "command": command,
+                "command": argv,
             },
             timeout=_EXECUTE_TIMEOUT_SECONDS,
         )

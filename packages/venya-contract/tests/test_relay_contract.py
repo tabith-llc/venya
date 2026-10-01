@@ -21,6 +21,8 @@ Three disjoint failure modes, per the refactor-2 acceptance:
    accepts.
 """
 
+import json
+
 import pytest
 from pydantic import ValidationError
 from venya_contract import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, RelayResponse, RelaySecret
@@ -59,7 +61,7 @@ def test_response_forbids_renamed_required_field():
 
 def test_request_forbids_extra_field():
     with pytest.raises(ValidationError):
-        RelayRequest(session_id="s", command="echo hi", bogus="x")
+        RelayRequest(session_id="s", command=["echo", "hi"], bogus="x")
 
 
 def test_secret_forbids_extra_field():
@@ -81,7 +83,7 @@ def test_response_round_trip():
 def test_request_round_trip_with_secrets():
     req = RelayRequest(
         session_id="s1",
-        command="echo hi",
+        command=["echo", "hi"],
         secrets=[RelaySecret(secret_id=1, wrapped_value="wrapped")],
     )
     parsed = RelayRequest(**req.model_dump())
@@ -90,7 +92,7 @@ def test_request_round_trip_with_secrets():
 
 
 def test_request_secrets_default_empty():
-    req = RelayRequest(session_id="s1", command="echo hi")
+    req = RelayRequest(session_id="s1", command=["echo", "hi"])
     assert req.secrets == []
 
 
@@ -105,12 +107,31 @@ def test_response_masked_count_defaults_zero():
 
 
 def test_old_wire_payload_parses_with_env_defaults():
-    """Compat direction 1: an OLD server's payload (exactly the three pre-env
-    keys) parses on the NEW model with inert defaults."""
-    old_payload = {"session_id": "s1", "command": "echo hi", "secrets": []}
+    """Compat direction 1: a payload WITHOUT the optional env keys (exactly the
+    three pre-env keys) parses on the NEW model with inert defaults."""
+    old_payload = {"session_id": "s1", "command": ["echo", "hi"], "secrets": []}
     req = RelayRequest(**old_payload)
     assert req.env == []
     assert req.askpass_helper is False
+
+
+# --- argv wire (ticket execution-command-wire-unstructured-string #322) ------
+# Ruling Q1=A1: command is a list[str]; the string field is REMOVED. Stale
+# peers fail loud BY RULING — both halves of that truth table are pinned.
+
+
+def test_string_command_rejected():
+    """Negative half of the A1 freeze: the old str wire fails loud."""
+    with pytest.raises(ValidationError):
+        RelayRequest(session_id="s1", command="echo hi")  # type: ignore[arg-type]
+
+
+def test_argv_boundaries_survive_round_trip():
+    """Positive half: args with spaces/quotes round-trip as exact tokens."""
+    argv = ["grep", "-i", "error message", "it's", 'say "hi"', "app.log"]
+    req = RelayRequest(session_id="s1", command=argv)
+    parsed = RelayRequest(**json.loads(json.dumps(req.model_dump())))
+    assert parsed.command == argv
 
 
 def test_env_var_requires_exactly_one_source():
@@ -137,7 +158,7 @@ def test_env_var_forbids_extra_field():
 def test_request_round_trip_with_env():
     req = RelayRequest(
         session_id="s1",
-        command="printenv TOKEN",
+        command=["printenv", "TOKEN"],
         secrets=[RelaySecret(secret_id=7, wrapped_value="w")],
         env=[
             RelayEnvVar(var_name="TOKEN", secret_id=7),

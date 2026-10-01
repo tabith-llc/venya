@@ -268,6 +268,62 @@ async def test_run_command_execute_leg_gets_long_timeout(mock_config: MCPConfig)
     assert "timeout" not in session_kwargs
 
 
+# --- M1 argv split at the MCP client boundary (ticket #322) -----------------
+# The tool surface stays a shell string; the wire carries the argv LIST.
+# Both halves of each truth table, client level (the MCP-only mapping cells
+# live in test_tools.py).
+
+
+def _argv_harness(mock_config: MCPConfig) -> tuple[VenyaClient, MagicMock]:
+    """Client with the two execute-leg responses canned; returns (client, http)."""
+    session_resp = _make_response(200, {"session_id": "s1"})
+    exec_resp = _make_response(200, {"exit_code": 0, "stdout": "ok", "stderr": "", "masked_count": 0})
+    mock_http = MagicMock()
+    mock_http.request = AsyncMock(side_effect=[session_resp, exec_resp])
+    client = VenyaClient(mock_config, verify=False)
+    client._http = mock_http
+    return client, mock_http
+
+
+async def test_run_command_posts_argv_list(mock_config: MCPConfig) -> None:
+    """Positive: a quoted arg with a space posts as ONE exact element —
+    boundaries survive without quoting artifacts in the wire value."""
+    client, mock_http = _argv_harness(mock_config)
+    await client.run_command("exec-1", "grep 'error message' app.log", [])
+    exec_body = mock_http.request.call_args_list[1][1]["json"]
+    assert exec_body["command"] == ["grep", "error message", "app.log"]
+
+
+async def test_run_command_metachar_stays_element_data(mock_config: MCPConfig) -> None:
+    """Split is BOUNDARY-preserving, not sanitizing: `;` inside ONE quoted
+    element posts intact — rejection is the executor's per-element gate
+    (paired negative: executor TestValidateCommandStructure)."""
+    client, mock_http = _argv_harness(mock_config)
+    await client.run_command("exec-1", 'echo "a;b|c"', [])
+    exec_body = mock_http.request.call_args_list[1][1]["json"]
+    assert exec_body["command"] == ["echo", "a;b|c"]
+
+
+async def test_run_command_unterminated_quote_raises_clean_valueerror(mock_config: MCPConfig) -> None:
+    """Negative: an unbalanced quote is a clean ValueError with an actionable
+    message (server.py maps handler exceptions to isError=True) — never a
+    raw shlex traceback, never a POSTed half-parse."""
+    client, mock_http = _argv_harness(mock_config)
+    with pytest.raises(ValueError, match="Command could not be parsed as a shell line"):
+        await client.run_command("exec-1", 'echo "unclosed', [])
+    # only the session leg ran; nothing half-parsed reached the execute wire
+    assert mock_http.request.await_count == 1
+
+
+async def test_run_command_empty_string_posts_empty_argv(mock_config: MCPConfig) -> None:
+    """Empty string posts [] — the server/executor empty-command gate owns
+    the rejection (fail-loudly downstream); the client never invents one."""
+    client, mock_http = _argv_harness(mock_config)
+    await client.run_command("exec-1", "", [])
+    exec_body = mock_http.request.call_args_list[1][1]["json"]
+    assert exec_body["command"] == []
+
+
 async def test_request_without_timeout_keeps_client_default(mock_config: MCPConfig) -> None:
     """Paired negative: a plain _request must NOT forward timeout=None —
     httpx reads an explicit None as 'no timeout' and would disable the

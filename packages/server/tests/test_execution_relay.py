@@ -352,7 +352,7 @@ class TestExecuteCommandOnExecutor:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/executors/exec-1/execute",
-            json={"session_id": "nonexistent", "command": "echo hello"},
+            json={"session_id": "nonexistent", "command": ["echo", "hello"]},
         )
 
         assert resp.status_code == 404
@@ -376,7 +376,7 @@ class TestExecuteCommandOnExecutor:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/executors/exec-1/execute",
-            json={"session_id": "sess-1", "command": "echo hello"},
+            json={"session_id": "sess-1", "command": ["echo", "hello"]},
         )
 
         assert resp.status_code == 400
@@ -400,7 +400,7 @@ class TestExecuteCommandOnExecutor:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/executors/exec-1/execute",
-            json={"session_id": "sess-1", "command": "echo hello"},
+            json={"session_id": "sess-1", "command": ["echo", "hello"]},
         )
 
         assert resp.status_code == 403
@@ -425,7 +425,7 @@ class TestExecuteCommandOnExecutor:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/executors/exec-1/execute",
-            json={"session_id": "sess-1", "command": "echo hello"},
+            json={"session_id": "sess-1", "command": ["echo", "hello"]},
         )
 
         assert resp.status_code == 403
@@ -511,10 +511,13 @@ class TestExecuteCommandOnExecutor:
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
-                    json={"session_id": "sess-1", "command": "echo hello"},
+                    json={"session_id": "sess-1", "command": ["echo", "hello"]},
                 )
 
         assert resp.status_code == 200
+        # #322: the relay payload carries the argv LIST verbatim (no server-side
+        # join); the audit fields carry only the rendered display text (below).
+        assert mock_client.post.call_args.kwargs["json"]["command"] == ["echo", "hello"]
 
         # Check audit event
         audit_event = None
@@ -612,7 +615,7 @@ class TestExecuteCommandOnExecutor:
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
-                    json={"session_id": "sess-1", "command": "echo secret"},
+                    json={"session_id": "sess-1", "command": ["echo", "secret"]},
                 )
 
         assert resp.status_code == 200
@@ -662,7 +665,7 @@ class TestExecutorReachability:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/executors/exec-1/execute",
-                json={"session_id": "sess-1", "command": "echo hello"},
+                json={"session_id": "sess-1", "command": ["echo", "hello"]},
             )
 
             assert resp.status_code == 500  # Generic error for unexpected exceptions
@@ -726,7 +729,7 @@ class TestExecutorReachability:
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
-                    json={"session_id": "sess-1", "command": "echo hello"},
+                    json={"session_id": "sess-1", "command": ["echo", "hello"]},
                 )
 
         assert resp.status_code == 503
@@ -789,7 +792,7 @@ class TestExecutorReachability:
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
-                    json={"session_id": "sess-1", "command": "echo hello"},
+                    json={"session_id": "sess-1", "command": ["echo", "hello"]},
                 )
 
         assert resp.status_code == 503
@@ -859,7 +862,7 @@ class TestExecutorReachability:
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
-                    json={"session_id": "sess-1", "command": "echo hello"},
+                    json={"session_id": "sess-1", "command": ["echo", "hello"]},
                 )
 
         assert resp.status_code == 503
@@ -922,7 +925,7 @@ class TestExecutorReachability:
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
-                    json={"session_id": "sess-1", "command": "echo hello"},
+                    json={"session_id": "sess-1", "command": ["echo", "hello"]},
                 )
 
         assert resp.status_code == 503
@@ -1013,7 +1016,7 @@ class TestMalformedExecutorResponse:
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
-                    json={"session_id": "sess-1", "command": "echo hello"},
+                    json={"session_id": "sess-1", "command": ["echo", "hello"]},
                 )
         assert resp.status_code == 502
 
@@ -1028,7 +1031,7 @@ class TestMalformedExecutorResponse:
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
-                    json={"session_id": "sess-1", "command": "echo hello"},
+                    json={"session_id": "sess-1", "command": ["echo", "hello"]},
                 )
         assert resp.status_code == 502
 
@@ -1059,7 +1062,7 @@ class TestMalformedExecutorResponse:
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
-                    json={"session_id": "sess-1", "command": "echo hello"},
+                    json={"session_id": "sess-1", "command": ["echo", "hello"]},
                 )
         assert resp.status_code == 502
 
@@ -1089,7 +1092,7 @@ class TestMalformedExecutorResponse:
                 with caplog.at_level(logging.WARNING):
                     resp = client.post(
                         "/api/v1/executors/exec-1/execute",
-                        json={"session_id": "sess-1", "command": "echo hello"},
+                        json={"session_id": "sess-1", "command": ["echo", "hello"]},
                     )
         assert resp.status_code == 502
         # paired truth table: body content absent, scrubbed field summary present
@@ -1164,7 +1167,7 @@ class TestTlsMisconfiguration:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/executors/exec-1/execute",
-                json={"session_id": "sess-1", "command": "echo hello"},
+                json={"session_id": "sess-1", "command": ["echo", "hello"]},
             )
         assert resp.status_code == 503
 
@@ -1178,7 +1181,7 @@ class TestTlsMisconfiguration:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/executors/exec-1/execute",
-                json={"session_id": "sess-1", "command": "echo hello"},
+                json={"session_id": "sess-1", "command": ["echo", "hello"]},
             )
         assert resp.status_code == 503
 
@@ -1196,7 +1199,7 @@ class TestTlsMisconfiguration:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/executors/exec-1/execute",
-                json={"session_id": "sess-1", "command": "echo hello"},
+                json={"session_id": "sess-1", "command": ["echo", "hello"]},
             )
         assert resp.status_code == 503
 
@@ -1273,7 +1276,7 @@ def _run_execute(app, mock_client):
             client = TestClient(app, raise_server_exceptions=False)
             return client.post(
                 "/api/v1/executors/exec-1/execute",
-                json={"session_id": "sess-env", "command": "printenv MY_TOKEN"},
+                json={"session_id": "sess-env", "command": ["printenv", "MY_TOKEN"]},
             )
 
 
@@ -1305,7 +1308,8 @@ class TestEnvShapeDerivation:
 
     def test_no_shape_payload_is_wire_identical_to_old(self):
         """No env shape in play -> the payload carries EXACTLY the three
-        pre-env keys (old executors keep parsing every regular request)."""
+        pre-env keys (no env/askpass additions ride the wire; the command
+        VALUE is the #322 argv list on both ends of the coordinated change)."""
         app, mc = _execute_env_harness({"executor": "exec-1"}, "0.1.0a12")  # old version OK here
         resp = _run_execute(app, mc)
         assert resp.status_code == 200

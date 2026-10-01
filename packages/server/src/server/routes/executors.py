@@ -16,6 +16,7 @@ import hmac
 import json
 import logging
 import re
+import shlex
 import socket
 import ssl
 from datetime import UTC, datetime, timedelta
@@ -307,10 +308,14 @@ class ExecuteRequest(BaseModel):
     distinct contract from the server -> executor relay wire. It stays local by
     ruling (refactor-2): the relay wire shape lives in ``venya_contract`` and
     additionally carries the ``secrets`` list the server loads from the session.
+
+    ``command`` is the argv ``list[str]`` (ticket execution-command-wire-unstructured-
+    string #322, ruling Q1=A1) — it relays onward as the structured list; audit
+    stores the rendered display text (``shlex.join``) plus the true argv list.
     """
 
     session_id: str = Field(..., description="Execution session ID")
-    command: str = Field(..., description="Shell command to execute")
+    command: list[str] = Field(..., description="Command as an argv list")
 
 
 # The relay response shape (executor -> server, and server -> client) is owned by
@@ -336,6 +341,7 @@ def _mark_execution_session_completed(
     db: Session,
     session_id: str,
     command: str,
+    command_argv: list[str] | None,
     completed_at: datetime,
     result: dict,
 ) -> None:
@@ -353,12 +359,16 @@ def _mark_execution_session_completed(
     res = db.execute(
         text(
             "UPDATE execution_sessions "
-            "SET command = :command, completed_at = :completed_at, exit_code = :exit_code, "
+            "SET command = :command, command_argv = :command_argv, completed_at = :completed_at, "
+            "exit_code = :exit_code, "
             "stdout = :stdout, stderr = :stderr "
             "WHERE id = :sid"
         ),
         {
             "command": command,
+            # JSON column via the repo's raw-write convention (json.dumps +
+            # plain str bind; psycopg2 sends it untyped, PG assigns to JSONB).
+            "command_argv": json.dumps(command_argv) if command_argv is not None else None,
             "completed_at": completed_at,
             "exit_code": result["exit_code"],
             "stdout": result["stdout"],
@@ -1297,6 +1307,9 @@ async def execute_command_on_executor(
     # Build request payload via the frozen relay contract (venya_contract) — the
     # server and executor both import these models, so a one-sided field change is
     # an import/type error here, not a runtime 500 at the executor boundary.
+    # command crosses as the structured argv list (ticket #322, ruling Q1=A1);
+    # display text is the rendered shlex.join view, generated for audit only.
+    display_command = shlex.join(req.command)
     payload = RelayRequest(
         session_id=session.id,
         command=req.command,
@@ -1384,7 +1397,7 @@ async def execute_command_on_executor(
         fields={
             "session_id": session.id,
             "executor_id": id,
-            "command": req.command,
+            "command": display_command,
             "exit_code": result["exit_code"],
             "masked_count": result.get("masked_count", 0),
         },
@@ -1396,7 +1409,7 @@ async def execute_command_on_executor(
     # mid-execute (ticket execute-stale-session-update-500) — an ORM flush here raised
     # StaleDataError -> 500 after the command already ran. The audit event above commits
     # atomically in the same transaction.
-    _mark_execution_session_completed(db, session.id, req.command, now, result)
+    _mark_execution_session_completed(db, session.id, display_command, req.command, now, result)
     db.commit()
 
     return RelayResponse(**result)
