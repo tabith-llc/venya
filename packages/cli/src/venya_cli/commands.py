@@ -32,6 +32,7 @@ from .api_client import (
 from .at_rest_key import (
     acquire_server_passphrase,
     atomic_write_key,
+    ensure_secret_dir,
     resolve_ca_key_path,
     restore_at_rest_bytes,
     server_passphrase_env_for,
@@ -883,6 +884,7 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
 
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ensure_secret_dir(output_path)
 
             token_path = output_path / "token"
             token_tmp: str | None = None
@@ -2095,6 +2097,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     try:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ensure_secret_dir(output_path)
 
         # Save private key
         key_path = output_path / "executor.key"
@@ -2410,6 +2413,7 @@ def executor_cert_renew(args: Any) -> int:
     try:
         output_dir = str(Path(cert_path).parent)
         Path(output_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+        ensure_secret_dir(Path(output_dir))
 
         cert_tmp.write_bytes(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
 
@@ -2971,6 +2975,7 @@ def cmd_admin_export_ca_key(args: Any) -> int:
 
     # Write: MAGIC(8) + salt(16) + nonce(12) + ciphertext+tag
     output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_secret_dir(output_path.parent)
     blob_tmp: str | None = None
     try:
         with tempfile.NamedTemporaryFile(dir=output_path.parent, prefix=".venya-cabackup-", delete=False) as fd:
@@ -3039,6 +3044,7 @@ def cmd_admin_split_ca_key(args: Any) -> int:
 
     shares = split(plaintext_key, threshold=threshold, shares=num_shares)
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_secret_dir(output_dir)
 
     for i, share in enumerate(shares):
         share_id = share[0]
@@ -3219,7 +3225,7 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
 
         # Create directory
         output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(str(output_dir), 0o700)
+        ensure_secret_dir(output_dir)
 
         # Write key
         key_path = output_dir / "admin-ca.key"
@@ -3398,6 +3404,7 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
 
         # Create output directory
         output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ensure_secret_dir(output_dir)
 
         # Write key (unencrypted — operator manages security)
         key_pem = admin_key.private_bytes(

@@ -26,7 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from venya_cli.at_rest_key import rewrap_at_rest, unwrap_at_rest
+from venya_cli.at_rest_key import ensure_secret_dir, rewrap_at_rest, unwrap_at_rest
 from venya_cli.commands import (
     _decrypt_ca_backup,
     cmd_admin_export_ca_key,
@@ -432,5 +432,60 @@ class TestSecretFileCreationModes:
             atomic_write_key(d / "ca.key", _real_key_pem())
         finally:
             os.umask(old)
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+        assert stat.S_IMODE((d / "ca.key").stat().st_mode) == 0o600
+
+
+class TestEnsureSecretDir:
+    """#317 fold-in: a PRE-EXISTING secret dir gets tightened (never
+    loosened); non-owner/group-only cases warn loud and touch nothing."""
+
+    def test_preexisting_0755_owned_dir_tightens_to_0700(self, tmp_path, capsys):
+        d = tmp_path / "conf"
+        d.mkdir()
+        d.chmod(0o755)
+        f = d / "token"
+        f.write_bytes(b"tok")
+        f.chmod(0o600)
+        ensure_secret_dir(d)
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+        assert f.read_bytes() == b"tok"  # content flow unchanged (paired positive)
+        assert capsys.readouterr().err == ""  # silent one-time tightening, no per-run spam
+
+    def test_already_0700_untouched_no_warning(self, tmp_path, capsys):
+        d = tmp_path / "ok"
+        d.mkdir(mode=0o700)
+        ensure_secret_dir(d)
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+        assert capsys.readouterr().err == ""
+
+    def test_owned_group_only_mode_warns_not_overridden(self, tmp_path, capsys):
+        d = tmp_path / "shared"
+        d.mkdir()
+        d.chmod(0o750)
+        ensure_secret_dir(d)
+        assert stat.S_IMODE(d.stat().st_mode) == 0o750  # deliberate group grant left intact
+        err = capsys.readouterr().err
+        assert "WARNING" in err and "mode 750" in err
+
+    def test_looser_not_owned_warns_no_chmod_attempt(self, tmp_path, monkeypatch, capsys):
+        d = tmp_path / "svc"
+        d.mkdir()
+        d.chmod(0o755)
+        # chown needs privileges the test lacks; the guard branches on
+        # st_uid != geteuid(), so patching geteuid exercises it honestly.
+        monkeypatch.setattr("venya_cli.at_rest_key.os.geteuid", lambda: d.stat().st_uid + 1)
+        ensure_secret_dir(d)
+        assert stat.S_IMODE(d.stat().st_mode) == 0o755  # no chmod attempted
+        err = capsys.readouterr().err
+        assert "WARNING" in err and "not owned" in err
+
+    def test_atomic_write_key_tightens_preexisting_parent(self, tmp_path):
+        from venya_cli.at_rest_key import atomic_write_key
+
+        d = tmp_path / "ca"
+        d.mkdir()
+        d.chmod(0o755)
+        atomic_write_key(d / "ca.key", _real_key_pem())
         assert stat.S_IMODE(d.stat().st_mode) == 0o700
         assert stat.S_IMODE((d / "ca.key").stat().st_mode) == 0o600

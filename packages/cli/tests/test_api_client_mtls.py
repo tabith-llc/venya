@@ -307,3 +307,20 @@ class TestConfigSaveModes:
         assert stat.S_IMODE(cfg.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
         assert json.loads(cfg.read_text())["access_token"] == "tok_modes_check"
+
+
+class TestConfigSaveDirTighten:
+    """#317 fold-in: Config.save normalizes a pre-existing (upgraded) config dir."""
+
+    def test_save_tightens_preexisting_config_dir(self, tmp_path):
+        d = tmp_path / "venya-cfg2"
+        d.mkdir()
+        d.chmod(0o755)
+        cfg = d / "config.json"
+        client = APIClient(config_file=cfg)
+        try:
+            client.config.access_token = "tok_dir_tighten"  # setter calls save()
+        finally:
+            client.close()
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+        assert stat.S_IMODE(cfg.stat().st_mode) == 0o600

@@ -177,6 +177,7 @@ def atomic_write_key(key_path: Path, data: bytes) -> None:
     is untouched (the byte-identity property that saved drill R6-b).
     """
     key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_secret_dir(key_path.parent)
     stat_src = key_path if key_path.exists() else key_path.parent
     uid, gid = stat_src.stat().st_uid, stat_src.stat().st_gid
     fd, tmp_name = tempfile.mkstemp(prefix=f"{key_path.name}.", suffix=".tmp", dir=str(key_path.parent))
@@ -197,3 +198,42 @@ def atomic_write_key(key_path: Path, data: bytes) -> None:
         except OSError:
             pass
         raise
+
+
+def ensure_secret_dir(dir_path: Path) -> None:
+    """Normalize a secret-bearing directory toward owner-only 0700 (#317).
+
+    mkdir(..., mode=0o700, exist_ok=True) never touches a PRE-EXISTING dir,
+    so upgraded installs kept looser config/log/at-rest dirs. Run after the
+    mkdir at every creation site. Tightens only, never loosens:
+
+    - 0700 or stricter: silent no-op.
+    - world bits set and dir owned by the current euid: chmod to 0700.
+    - group-only bits (deliberate shared-custody channel; the 0600 files
+      inside already guard contents): warn, leave intact.
+    - looser but not owner-owned: warn LOUD, attempt no chmod — a
+      service-account-owned dir must not turn every CLI command into a
+      traceback.
+    """
+    try:
+        st = os.stat(str(dir_path))
+    except OSError:
+        return  # raced away / unstatable: the mkdir call site reports it
+    mode = st.st_mode & 0o777
+    if not (mode & ~0o700):
+        return  # already 0700-or-stricter
+    owned = st.st_uid == os.geteuid()
+    if owned and (mode & 0o007):
+        try:
+            os.chmod(str(dir_path), 0o700)
+        except OSError as e:
+            print(f"WARNING: cannot tighten {dir_path} (mode {mode:03o}): {e}", file=sys.stderr)
+        return
+    if owned:
+        reason = "group bits look deliberate — left intact"
+    else:
+        reason = "not owned by the current user — secure it manually"
+    print(
+        f"WARNING: {dir_path} mode {mode:03o} is looser than 0700 ({reason})",
+        file=sys.stderr,
+    )

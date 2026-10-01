@@ -299,3 +299,19 @@ class TestSecretFileCreationModes:
         assert b"GARBAGE" not in data  # replaced whole, not merged
         assert serialization.load_pem_private_key(data, password=None) is not None
         assert stat.S_IMODE(key.stat().st_mode) == 0o600  # temp mode wins over 0644
+
+    def test_init_admin_ca_tightens_preexisting_0755_dir(self, tmp_path, monkeypatch):
+        """#317 fold-in: init into a pre-existing loose dir lands it at 0700
+        (replaces the old unconditional post-mkdir chmod)."""
+        monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
+        out = tmp_path / "preexisting"
+        out.mkdir()
+        out.chmod(0o755)
+        args = type("Args", (), {"output_dir": str(out)})()
+        old = os.umask(0o022)
+        try:
+            assert cmd_admin_init_admin_ca(args) == 0
+        finally:
+            os.umask(old)
+        assert stat.S_IMODE(out.stat().st_mode) == 0o700
+        assert stat.S_IMODE(Path(out, "admin-ca.key").stat().st_mode) == 0o600
