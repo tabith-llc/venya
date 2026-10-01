@@ -398,7 +398,7 @@ class TestSessionEvents:
 
     @pytest.mark.parametrize(
         "identifier",
-        [USER_ID, "alice@corp.example", "10.27.27.35", "2001:db8::1"],
+        [USER_ID, "alice@corp.example", "203.0.113.10", "2001:db8::1"],
     )
     def test_login_failed_rows_never_carry_principles_or_ips(self, identifier):
         """Q6 variant B parametrized negative over identifier shapes."""
