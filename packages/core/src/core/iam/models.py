@@ -222,8 +222,12 @@ class ExecutorEnrollmentToken(Base):
     state = Column(String(16), nullable=False, default="created")
     created_by = Column(
         String(64),
-        ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
+        comment=(
+            "FK INTENTIONALLY absent (migration 022) — stores the auth "
+            "principal verbatim regardless of mechanism (incl. mTLS CNs), "
+            "which have no users row"
+        ),
     )
     created_by_session_id = Column(
         String(64), nullable=True, comment="Forensic trace — nullify after 90 days per retention policy"
