@@ -27,15 +27,14 @@ install steps see [installation.md](installation.md).
 
 | Dir | Port | Proto | From / To | Purpose |
 |-----|------|-------|-----------|---------|
-| **inbound** | **443/tcp** | HTTPS (TLS 1.2+) | workstations, executors, admins | The only inbound service. nginx terminates TLS and proxies to the local backend. Admin API paths additionally require an mTLS **client certificate** (`ssl_verify_client optional` at the listener; enforced per-path) chained to the per-install Admin CA. |
+| **inbound** | **443/tcp** | HTTPS (TLS versions as configured upstream; no floor is pinned in the installer as of this writing) | workstations, executors, admins | The only inbound service. nginx terminates TLS and proxies to the local backend. Admin API paths additionally require an mTLS **client certificate** (`ssl_verify_client optional` at the listener; enforced per-path) chained to the per-install Admin CA. |
 | **outbound** | **8443/tcp** | HTTPS (mTLS) | core → each executor | The relay: the core **dials** the executor's relay listener to run a command, presenting its `<core-host>-relay` client certificate. |
-| **outbound** | **443/tcp** | HTTPS | core → Docker Hub | Only at executor/agent-template provisioning time (sbx). Not a steady-state core dependency; see the executor section. |
 
 **Localhost-only — never expose these:**
 
 | Port | Proto | Binding | Why it stays local |
 |------|-------|---------|--------------------|
-| 8080/tcp | HTTP | `127.0.0.1` | The uvicorn/FastAPI backend. nginx proxies to it (`proxy_pass http://127.0.0.1:8080`). It has no TLS of its own — exposing it would bypass TLS + mTLS. |
+| 8080/tcp | HTTP | `127.0.0.1` | The uvicorn/FastAPI backend. nginx proxies to it (`proxy_pass http://127.0.0.1:8080`). As shipped it has no TLS of its own — exposing it would bypass TLS + mTLS. Caveat: the optional inner-mTLS channel (`InnerTLSConfig` in `server/config.py`, env `VENYA_INNER_MTLS__*`, disabled by default) makes uvicorn terminate TLS itself on this loopback bind; exposing that port would still bypass the outer nginx TLS + admin-mTLS layer. |
 | 5432/tcp | PostgreSQL | `localhost` | The `venya` database (connection string `postgresql://venya:…@localhost/venya`). Stock Ubuntu PostgreSQL listens on loopback; keep it that way. |
 
 A host firewall on the core needs **443/tcp inbound** (from workstations, executors, and
@@ -49,8 +48,8 @@ external rule and must not be forwarded.
 | Dir | Port | Proto | From / To | Purpose |
 |-----|------|-------|-----------|---------|
 | **inbound** | **8443/tcp** | HTTPS (mTLS, `CERT_REQUIRED`) | core → executor | The relay listener. Accepts connections **only** from client certificates whose CN is in `relay_client_ids` (derived from the core hostname, e.g. `venya-core-1-relay`). An empty allowlist makes the listener refuse to bind (fail-closed). Restrict the source to your core host(s) if your firewall can. |
-| **outbound** | **443/tcp** | HTTPS (TLS, executor client cert) | executor → core | Registration/enrollment, the ~30 s heartbeat, and the revocation-list poll. The executor's `server_url` is `https://<core-host>`. |
-| **outbound** | **443/tcp** | HTTPS | executor → Docker Hub | sbx pulls its agent template on first sandbox create (and `sbx login` authenticates a Docker account). Steady-state only on a cold/uncached template; see `sbx-cold-start-prepull`. |
+| **outbound** | **443/tcp** | HTTPS (TLS, executor client cert) | executor → core | Registration/enrollment, the ~30 s heartbeat, and the revocation-list poll. The executor's `server_url` must be an `https://` URL to the core host — operator-supplied (`VENYA_SERVER_URL`, required; the installer has no hardcoded default). |
+| **outbound** | **443/tcp** | HTTPS | executor → Docker Hub | sbx pulls its agent template on first sandbox create (and `sbx login` authenticates a Docker account). Steady-state only on a cold/uncached template; see `sbx-cold-start-prepull`. The pull is **executor-side** — the core never talks to Docker Hub; the install-time cache pre-pull is the "sbx agent-template warm" block in `install-venya-executor.sh`. |
 | **outbound** | **22/tcp** (and any allowlisted port) | SSH | sandbox → target | Command execution against targets. **See the sandbox-egress note below — this is governed by the sbx allowlist, not the host firewall.** |
 
 **Localhost / host-local (no external rule):** `venya-sandboxd` (the sbx daemon) is a
@@ -63,11 +62,16 @@ Commands run inside sbx microVMs. Sandbox network egress is handled by an **in-d
 user-mode egress proxy**, not the host kernel network stack: it does **not** traverse the
 executor host's interfaces, and a host-side `tcpdump` / iptables / nftables / ufw rule
 will neither see nor filter it. Sandbox egress is **deny-by-default** against the
-operator-owned allowlist at `/etc/venya/egress-allowlist.txt` (the installer seeds the
-local subnet + the DNS resolver). To permit an executor to reach a target on 22/tcp, you
-add the target to that **allowlist** — opening 22/tcp in the executor's *host* firewall
-does nothing for sandbox traffic. (Conversely, the executor's own daemon traffic to the
-core on 443 *is* host-stack traffic and *is* subject to the host firewall.)
+operator-owned allowlist at `/etc/venya/egress-allowlist.txt`. The installer writes that
+file **empty by default** (`venya_write_egress_allowlist` in `venya-common.sh` — Venya
+never guesses the operator's network; entries are seeded only via the explicit
+`VENYA_EGRESS_ALLOW` install knob). The DNS resolver is **not** in the file — it is
+auto-allowed at runtime by the code (`get_allowed_hosts()` in
+`packages/executor/src/executor/egress_filter.py`). To permit an executor to reach a
+target on 22/tcp, you add the target to that **allowlist** — opening 22/tcp in the
+executor's *host* firewall does nothing for sandbox traffic. (Conversely, the executor's
+own daemon traffic to the core on 443 *is* host-stack traffic and *is* subject to the
+host firewall.)
 
 **Host firewall on an executor:** **8443/tcp inbound** from the core, **443/tcp outbound**
 to the core (and to Docker Hub for template pulls). Target reachability is configured in
