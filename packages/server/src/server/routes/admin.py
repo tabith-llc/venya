@@ -337,31 +337,49 @@ async def admin_create_user(
     try:
 
         from core.iam.enrollment_manager import EnrollmentError
-        from core.iam.models import Role, RoleMember, User
+        from core.iam.models import Role, User
+        from core.iam.role_manager import RoleManager, SeparationOfDutiesError
+
+        from .roles import _audit_sod_denied
 
         em = enrollment_manager(db, request)
+        role_manager = RoleManager(db)
 
         # Check if user already exists
         existing = db.query(User).filter(User.user_id == req.username).first()
         if existing:
             raise EnrollmentError(f"User '{req.username}' already exists")
 
-        # Create user
-        user = User(
-            user_id=req.username,
-            display_name=req.display_name,
-            status="pending_enrollment",
-        )
-        db.add(user)
-        db.flush()
+        # sod-bypass-admin-create-user: memberships are minted through the
+        # ONE enforcement point (core RoleManager.add_member — SoD ruling 2'),
+        # never by direct ORM. The user + grants live in a SAVEPOINT: a
+        # mid-loop refusal rolls the partial work back WITHOUT a route-level
+        # rollback on the get_db-owned session (dependencies.get_db contract),
+        # so the denial-side commit that follows carries the event ONLY —
+        # no phantom user, no partial memberships, no user_created lifecycle
+        # row (admin-lifecycle-audit-events complete-or-nothing posture).
+        try:
+            with db.begin_nested():
+                user = User(
+                    user_id=req.username,
+                    display_name=req.display_name,
+                    status="pending_enrollment",
+                )
+                db.add(user)
+                db.flush()
 
-        # Assign roles
-        for role_name in req.roles:
-            role = db.query(Role).filter(Role.name == role_name).first()
-            if role is None:
-                raise EnrollmentError(f"Role '{role_name}' not found")
-            membership = RoleMember(user_id=user.user_id, role_id=role.id)
-            db.add(membership)
+                # Assign roles
+                for role_name in req.roles:
+                    role = db.query(Role).filter(Role.name == role_name).first()
+                    if role is None:
+                        raise EnrollmentError(f"Role '{role_name}' not found")
+                    role_manager.add_member(user_id=user.user_id, role_id=role.id)
+        except SeparationOfDutiesError as e:
+            _audit_sod_denied(db, auth_user, action="add_member", error=e)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e),
+            )
 
         # Create enrollment token
         token, plaintext = em.create_enrollment_token(user.user_id)

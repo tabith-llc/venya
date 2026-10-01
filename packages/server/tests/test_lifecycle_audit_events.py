@@ -580,7 +580,17 @@ class TestUserLifecycle:
         q = MagicMock()
         q.filter.return_value.first.side_effect = iter([None, role])
         db.query.return_value = q
-        with patch("core.iam.enrollment_manager.EnrollmentManager", return_value=mock_em):
+        # sod-bypass-admin-create-user rerouted grants through
+        # RoleManager.add_member (real SoD refusal pinned in
+        # test_sod_admin_create_user.py); this cell stays a MagicMock, so the
+        # chokepoint call is stubbed — every original assertion below is kept.
+        with (
+            patch("core.iam.enrollment_manager.EnrollmentManager", return_value=mock_em),
+            patch(
+                "core.iam.role_manager.RoleManager.add_member",
+                return_value=SimpleNamespace(user_id="carol", role_id=9),
+            ),
+        ):
             app = _admin_app(db)
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/api/v1/admin/users", json={"username": "carol", "roles": ["auditor"]})
