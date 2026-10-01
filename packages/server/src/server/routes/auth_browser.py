@@ -23,6 +23,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from .. import metrics
+from ..audit_lifecycle import (
+    SESSION_ENDED,
+    SESSION_STARTED,
+    audit_lifecycle,
+    record_login_failure,
+    record_session_end_failure,
+)
 from ..dependencies import get_current_session
 from ..fido2.browser_adapter import (
     browser_assertion_to_fido2,
@@ -226,6 +233,7 @@ async def browser_login_assert(
         )
     except WebAuthnError as e:
         metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
+        record_login_failure(request, "browser", "assertion")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
@@ -233,6 +241,7 @@ async def browser_login_assert(
     except ValueError:
         metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
         logger.exception("Browser login verification failed (internal)")
+        record_login_failure(request, "browser", "internal")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Login verification failed",
@@ -266,6 +275,12 @@ async def browser_login_assert(
             user_id=result["user_id"],
             roles=role_ids,
         )
+        audit_lifecycle(
+            db,
+            SESSION_STARTED,
+            result["user_id"],
+            {"mode": "browser", "session_jti": getattr(session, "access_token_jti", None)},
+        )
         db.commit()
         metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="success").inc()
 
@@ -278,6 +293,7 @@ async def browser_login_assert(
         metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="failure").inc()
         logger.warning("Browser login refused for user_id=%s: session gate (not active)", result["user_id"])
         db.rollback()
+        record_login_failure(request, "browser", "status_gate")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Login verification failed",
@@ -288,6 +304,7 @@ async def browser_login_assert(
 
         logger.error("Login failed:\n%s", traceback.format_exc())
         db.rollback()
+        record_login_failure(request, "browser", "internal")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create session",
@@ -369,6 +386,8 @@ async def browser_logout(
         return response
 
     db, session, user_info = result
+    actor_user_id = user_info.get("user_id") if isinstance(user_info, dict) else user_info
+    session_jti = getattr(session, "access_token_jti", None)
     try:
         from core.iam.session_manager import SessionConfig, SessionManager
 
@@ -381,9 +400,19 @@ async def browser_logout(
         manager = SessionManager(db, session_config)
 
         manager.revoke_session(session.id)
+        audit_lifecycle(
+            db,
+            SESSION_ENDED,
+            actor_user_id,
+            {"mode": "browser", "session_jti": session_jti, "revoked": True},
+        )
         db.commit()
     except Exception:
         db.rollback()
+        # Pre-existing swallow (logout-swallows-revoke-failure owns the fix):
+        # control flow unchanged, but
+        # the observable failure now leaves its revoked=False row behind.
+        record_session_end_failure(request, db, actor_user_id, session_jti)
     finally:
         db.close()
 

@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ..audit_lifecycle import BREAK_GLASS_RECOVERY_USED, audit_lifecycle
 from ..dependencies import get_db
 from ..recovery_codes import hash_recovery_code
 
@@ -129,7 +130,12 @@ async def recovery(
         # code for the recovered system is separate scope (see ticket
         # test-recovery-admin-enrollment-key cross-reference).
         admin_user.recovery_code_hash = None
-
+        audit_lifecycle(
+            db,
+            BREAK_GLASS_RECOVERY_USED,
+            admin_user.user_id,
+            {"new_user_id": req.new_user_id, "code_consumed": True},
+        )
         db.commit()
 
         logger.info(

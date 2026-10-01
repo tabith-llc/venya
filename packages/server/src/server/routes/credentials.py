@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ..audit_lifecycle import CREDENTIAL_ADDED, CREDENTIAL_REMOVED, audit_lifecycle
 from ..dependencies import get_db
 from ..fido2.browser_adapter import (
     browser_registration_to_fido2,
@@ -266,6 +267,13 @@ async def credentials_add_complete(
             is_active=True,
         )
         db.add(webauthn_cred)
+        db.flush()
+        audit_lifecycle(
+            db,
+            CREDENTIAL_ADDED,
+            user_id,
+            {"credential_id": getattr(webauthn_cred, "id", None), "elevated": True},
+        )
         db.commit()
 
         logger.info(
@@ -343,6 +351,12 @@ async def credentials_remove(
         # Soft-delete (under lock)
         cred_bytes = cred.credential_id  # capture before commit (expire_on_commit refresh)
         cred.is_active = False
+        audit_lifecycle(
+            db,
+            CREDENTIAL_REMOVED,
+            user_id,
+            {"credential_id": credential_id, "elevated": True},
+        )
         db.commit()
 
         # Evict from the in-memory auth store so the credential stops working

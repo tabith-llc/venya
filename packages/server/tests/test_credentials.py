@@ -437,7 +437,12 @@ class TestCredentialAddComplete:
             },
             headers={"X-Elevation-Token": "elev-token-123"},
         )
-        add_call = db.add.call_args
+        # (ticket admin-lifecycle-audit-events: the credential is no longer the
+        # only db.add on this path — a credential_added AuditEvent rides the
+        # same commit. Select by type; every original assertion is kept.)
+        from core.iam.models import WebAuthnCredential as _WA
+
+        add_call = next(c for c in db.add.call_args_list if isinstance(c.args[0], _WA))
         cred_obj = add_call[0][0]
         assert cred_obj.user_id == "user1"
         assert cred_obj.credential_id == b"cred-bytes"

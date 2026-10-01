@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ..audit_lifecycle import ADMIN_INITIALIZED, FIRST_ADMIN_ENROLLED, audit_lifecycle
 from ..dependencies import get_db
 from ..fido2.browser_adapter import challenge_to_browser_options
 from ..fido2.manager import WebAuthnError
@@ -255,6 +256,12 @@ async def init_core(
             role_id=admin_role.id,
         )
         db.add(membership)
+        audit_lifecycle(
+            db,
+            ADMIN_INITIALIZED,
+            req.user_id,
+            {"outcome": "pending_created", "roles_seeded": ["admin", "user"]},
+        )
         db.commit()
 
         fido2_manager = getattr(request.app.state, "fido2_manager", None)
@@ -410,7 +417,12 @@ async def init_complete(
         user.status = "active"
         user.enrolled_at = datetime.now(UTC)
         user.recovery_code_hash = recovery_code_hash
-
+        audit_lifecycle(
+            db,
+            FIRST_ADMIN_ENROLLED,
+            req.user_id,
+            {"outcome": "enrolled", "auth_mode": "webauthn", "recovery_code_issued": True},
+        )
         db.commit()
 
         logger.info(

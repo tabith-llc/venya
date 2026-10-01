@@ -15,6 +15,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ..audit_lifecycle import (
+    MEMBER_ADDED,
+    MEMBER_REMOVED,
+    ROLE_CREATED,
+    ROLE_DELETED,
+    ROLE_UPDATED,
+    audit_lifecycle,
+)
 from ..dependencies import get_db, require_admin, require_role
 
 router = APIRouter()
@@ -124,7 +132,7 @@ class RoleMemberRemoveResponse(BaseModel):
 )
 async def roles_create(
     req: RoleCreateRequest,
-    _: dict = Depends(require_admin),
+    auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> RoleCreateResponse:
     """Create a new role.
@@ -139,6 +147,12 @@ async def roles_create(
             name=req.name,
             permissions=req.permissions,
             description=req.description,
+        )
+        audit_lifecycle(
+            db,
+            ROLE_CREATED,
+            auth_user.get("user_id"),
+            {"role_id": role.id, "role_name": role.name, "permissions": role.permissions},
         )
         db.commit()
     except RoleManagerError as e:
@@ -242,6 +256,16 @@ async def roles_update(
             permissions=req.permissions,
             description=req.description,
         )
+        audit_lifecycle(
+            db,
+            ROLE_UPDATED,
+            auth_user.get("user_id"),
+            {
+                "role_id": role.id,
+                "role_name": role.name,
+                "changed_fields": [f for f in ("name", "permissions", "description") if getattr(req, f) is not None],
+            },
+        )
         db.commit()
         members = role_manager.get_role_members(role_id)
         return RoleGetResponse(
@@ -279,7 +303,7 @@ async def roles_update(
 )
 async def roles_delete(
     role_id: int,
-    _: dict = Depends(require_admin),
+    auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> RoleDeleteResponse:
     """Delete a role.
@@ -297,12 +321,19 @@ async def roles_delete(
                 detail=f"Role {role_id} not found",
             )
         name = role.name
+        members_affected = len(role_manager.get_role_members(role_id))
         deleted = role_manager.delete_role(role_id)
         if not deleted:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Role {role_id} not found",
             )
+        audit_lifecycle(
+            db,
+            ROLE_DELETED,
+            auth_user.get("user_id"),
+            {"role_id": role_id, "role_name": name, "members_affected": members_affected},
+        )
         db.commit()
         return RoleDeleteResponse(deleted=True, name=name)
     except HTTPException:
@@ -361,6 +392,12 @@ async def role_member_add(
             user_id=req.user_id,
             role_id=role_id,
         )
+        audit_lifecycle(
+            db,
+            MEMBER_ADDED,
+            auth_user.get("user_id"),
+            {"role_id": role_id, "target_user_id": membership.user_id},
+        )
         db.commit()
         return RoleMemberAddResponse(
             user_id=membership.user_id,
@@ -396,7 +433,7 @@ async def role_member_add(
 async def role_member_remove(
     role_id: int,
     user_id: str,
-    _: dict = Depends(require_admin),
+    auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> RoleMemberRemoveResponse:
     """Remove a user from a role.
@@ -416,6 +453,12 @@ async def role_member_remove(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"User '{user_id}' not found in role {role_id}",
             )
+        audit_lifecycle(
+            db,
+            MEMBER_REMOVED,
+            auth_user.get("user_id"),
+            {"role_id": role_id, "target_user_id": user_id},
+        )
         db.commit()
         return RoleMemberRemoveResponse(removed=True, user_id=user_id)
     except HTTPException:

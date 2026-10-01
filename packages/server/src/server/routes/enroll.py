@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ..audit_lifecycle import SESSION_STARTED, audit_lifecycle
 from ..dependencies import enrollment_manager, get_db
 from ..fido2.browser_adapter import (
     browser_registration_to_fido2,
@@ -304,6 +305,12 @@ async def browser_enroll_complete(
         _session, access_token = sm.create_session(
             user_id=user.user_id,
             roles=[str(r) for r in roles],
+        )
+        audit_lifecycle(
+            db,
+            SESSION_STARTED,
+            user.user_id,
+            {"mode": "enrollment", "session_jti": getattr(_session, "access_token_jti", None)},
         )
         db.commit()
 

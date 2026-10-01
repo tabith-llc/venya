@@ -65,6 +65,16 @@ Notable changes to Venya will be documented in this file.
   keys with 422** (`extra="forbid"` on the request model, #289 Q4). Junk
   keys on this control-plane route can no longer succeed silently; documented
   senders (which use the real fields) are unaffected.
+- **Server: the admin lifecycle is now auditable.** Every lifecycle write —
+  core init and first-admin enrollment, login (success and value-free failure),
+  browser session end, break-glass recovery, user create/update/delete, role
+  create/update/delete, role member add/remove, security-key add/remove —
+  records a value-free `audit_events` row (ids/names only; never tokens,
+  codes, hashes, key material, or IP addresses) IN THE SAME TRANSACTION as
+  the action, so a failed audit write aborts the action: the append-only log
+  is complete or nothing happened. The auditor tier therefore sees the full
+  "who created this role / who added this user / who logged in" trail its
+  visibility promise is built on.
 
 ### Fixed
 - **CLI: CA-key custody round-trip works on encrypted-at-rest installs
