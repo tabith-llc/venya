@@ -725,3 +725,127 @@ class TestHostScopedValidation:
         valid, reason = validator.validate("rm -rf /tmp/data && ssh user@host echo hi")
         assert valid is False
         assert "Dangerous pattern" in reason
+
+
+# ---------------------------------------------------------------------------
+# #318: non-word-end boundary regex + trusted-path prefix collision
+# ---------------------------------------------------------------------------
+
+
+def _isolated_dangerous(patterns):
+    """Balanced-shape validator whose ONLY dangerous pattern set is given
+    (permissive preset so nothing but the pattern layer can reject)."""
+    policy = CommandPolicy(
+        preset="permissive",
+        allowed_commands=frozenset(),
+        trusted_paths=frozenset(),
+        dangerous_patterns=frozenset(patterns),
+    )
+    return CommandValidator(policy=policy)
+
+
+def _custom_only_validator():
+    policy = CommandPolicy(
+        preset="permissive",
+        allowed_commands=frozenset(),
+        trusted_paths=frozenset(),
+        dangerous_patterns=frozenset(),
+    )
+    return CommandValidator(policy=policy)
+
+
+class TestNonWordBoundaryPatterns:
+    """Patterns ending (or starting) in a non-word char were vacuous:
+    \\b...\\b can never match them. Pinned per-pattern with an isolated
+    policy so no sibling pattern can mask the match."""
+
+    def test_dd_if_equals_matches(self):
+        v = _isolated_dangerous(["dd if="])
+        valid, reason = v.validate("dd if=/dev/sda of=/tmp/x")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_dd_if_equals_matches_midstring(self):
+        v = _isolated_dangerous(["dd if="])
+        valid, reason = v.validate("mytool dd if=/dev/sda")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_dd_if_equals_benign_sibling_accepted(self):
+        # empirically pinned: 'ifo=' does not contain the literal 'if='
+        v = _isolated_dangerous(["dd if="])
+        valid, _reason = v.validate("dd ifo=/tmp/x")
+        assert valid is True
+
+    def test_su_colon_matches(self):
+        v = _isolated_dangerous(["su:"])
+        valid, reason = v.validate("run su: -c whoami")
+        assert valid is False
+        assert "Dangerous pattern" in reason
+
+    def test_su_colon_benign_sibling_accepted(self):
+        # empirically pinned: 'runabus:' contains no standalone 'su:'
+        v = _isolated_dangerous(["su:"])
+        valid, _reason = v.validate("runabus: x")
+        assert valid is True
+
+    def test_custom_trailing_nonword_matches(self):
+        v = _custom_only_validator()
+        v.add_custom_pattern("evil=")
+        valid, reason = v.validate("run evil=1")
+        assert valid is False
+        assert "Custom pattern" in reason
+
+    def test_custom_trailing_nonword_benign_sibling_accepted(self):
+        # empirically pinned: leading boundary still guards 'devil='
+        v = _custom_only_validator()
+        v.add_custom_pattern("evil=")
+        valid, _reason = v.validate("run devil=1")
+        assert valid is True
+
+    def test_custom_leading_space_pattern_matches(self):
+        """Custom-pattern loop does not strip(): a leading-space custom
+        pattern was vacuous at the FRONT too (\\b before a space)."""
+        v = _custom_only_validator()
+        v.add_custom_pattern(" evil")
+        valid, reason = v.validate("run evil x")
+        assert valid is False
+        assert "Custom pattern" in reason
+
+
+class TestTrustedPathPrefixBoundary:
+    """startswith(trusted) trusted sibling paths sharing a prefix."""
+
+    def test_sibling_dir_collision_rejected(self):
+        v = CommandValidator(policy=make_balanced_policy())
+        valid, reason = v.validate("/usr/binfoo --evil")
+        assert valid is False
+        assert "not in trusted paths" in reason
+
+    def test_trusted_dir_exact_child_accepted(self):
+        v = CommandValidator(policy=make_balanced_policy())
+        valid, _reason = v.validate("/usr/bin/ls -la")
+        assert valid is True
+
+    def test_binary_prefix_collision_rejected(self):
+        policy = CommandPolicy(
+            preset="balanced",
+            allowed_commands=frozenset(),
+            trusted_paths=frozenset(["/usr/bin/id"]),
+            dangerous_patterns=frozenset(),
+        )
+        v = CommandValidator(policy=policy)
+        valid, reason = v.validate("/usr/bin/idcat evil")
+        assert valid is False
+        assert "not in trusted paths" in reason
+
+    def test_exact_trusted_binary_accepted(self):
+        policy = CommandPolicy(
+            preset="balanced",
+            allowed_commands=frozenset(),
+            trusted_paths=frozenset(["/usr/bin/id"]),
+            dangerous_patterns=frozenset(),
+        )
+        v = CommandValidator(policy=policy)
+        valid, _reason = v.validate("/usr/bin/id --help")
+        assert valid is True
