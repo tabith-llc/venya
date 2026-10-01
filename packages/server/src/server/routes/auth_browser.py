@@ -6,9 +6,17 @@
 
 """Browser WebAuthn authentication endpoints.
 
-DISABLED — browser auth unmounted as of 2026-08-18.
-Code retained for future web UI re-introduction.
-Elevation endpoints moved to auth_elevation.py (bearer auth).
+Router MOUNTED (app.py: app.include_router(auth_browser.router,
+prefix="/api/v1")). The browser login entry points
+(/auth/login/browser/challenge and /assert) are SessionMiddleware
+PUBLIC_PATHS; every other route in this module —
+/auth/refresh/browser, /auth/logout/browser,
+/auth/elevate/browser/challenge, /auth/elevate/browser/assert,
+/auth/me — is LIVE and gated by SessionMiddleware, satisfied by the
+HttpOnly session cookie or a Bearer token.
+
+The CLI/API elevation endpoints moved to auth_elevation.py (bearer
+auth); the browser elevation ceremony stays here.
 
 Parallel auth endpoints that use Fido2Manager but serialize for browser
 consumption via the browser adapter. Tokens are stored in HttpOnly cookies.
