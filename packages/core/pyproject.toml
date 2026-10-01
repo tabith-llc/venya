@@ -38,4 +38,6 @@ markers = [
 [dependency-groups]
 dev = [
     "pip-audit>=2.10.1",
+    # must match the Yelp/detect-secrets rev in .pre-commit-config.yaml (v1.5.0)
+    "detect-secrets==1.5.0",
 ]
