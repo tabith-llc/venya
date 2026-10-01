@@ -11,6 +11,7 @@ Policy is configurable at initialization and changeable by an admin.
 """
 
 import os
+import re
 import shlex
 import shutil
 from dataclasses import dataclass, field
@@ -100,6 +101,27 @@ SSH_OPTS_WITH_VALUE: frozenset[str] = frozenset(
         "-s",
     }
 )
+
+
+def _pattern_regex(pattern: str) -> str:
+    r"""Build the word-boundary regex for one dangerous/custom pattern.
+
+    A ``\b`` only ever matches BETWEEN a word and a non-word character, so
+    pinning it on both ends of a pattern makes the pattern vacuous whenever
+    it starts or ends with a non-word character (e.g. ``\bdd\ if=\b`` can
+    never match ``dd if=/dev/sda``). Anchor each end only when the adjacent
+    pattern character is a word character (#318).
+
+    ``match_word_boundaries`` call sites keep their existing handling of
+    surrounding spaces (the dangerous-pattern loop strips; the custom loop
+    does not) — this helper only fixes the boundary anchors (#318 scope).
+    """
+    regex = re.escape(pattern)
+    if pattern and re.match(r"\w", pattern[0]):
+        regex = r"\b" + regex
+    if pattern and re.match(r"\w", pattern[-1]):
+        regex = regex + r"\b"
+    return regex
 
 
 def _load_default_policy() -> CommandPolicy:
@@ -270,10 +292,9 @@ class CommandValidator:
         import re
 
         for pattern in self.policy.dangerous_patterns:
-            stripped = pattern.strip()
+            stripped = pattern.strip()  # scope-note #318: strip kept as-is (default-set preserving)
             if self.policy.match_word_boundaries:
-                regex = r"\b" + re.escape(stripped) + r"\b"
-                if re.search(regex, command):
+                if re.search(_pattern_regex(stripped), command):
                     return True, f"Dangerous pattern blocked: {pattern!r}"
             else:
                 if stripped in command:
@@ -293,8 +314,7 @@ class CommandValidator:
 
         for pattern in self.custom_patterns:
             if self.policy.match_word_boundaries:
-                regex = r"\b" + re.escape(pattern) + r"\b"
-                if re.search(regex, command):
+                if re.search(_pattern_regex(pattern), command):
                     return True, f"Custom pattern blocked: {pattern!r}"
             else:
                 if pattern in command:
@@ -316,7 +336,9 @@ class CommandValidator:
         if not cmd_path:
             return False, "Cannot extract command path"
         for trusted_path in self.policy.trusted_paths:
-            if cmd_path.startswith(trusted_path):
+            # Component-boundary compare (#318): exact match or a real
+            # path-component prefix — "/usr/bin" must not trust "/usr/binfoo".
+            if cmd_path == trusted_path or cmd_path.startswith(trusted_path + os.sep):
                 return True, ""
         return False, f"Command not in trusted paths: {cmd_path!r}"
 
