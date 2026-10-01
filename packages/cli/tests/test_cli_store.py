@@ -469,3 +469,39 @@ class TestUpdateMetadataShapeFlags:
         finally:
             client.close()
             config_file.unlink()
+
+
+class TestCmdStoreRolesSplit:
+    """--roles is comma- AND space-separated; raw comma tokens must split
+    into separate roles (ticket cli-role-name-and-comma-defects, defect 2 —
+    cmd_store previously passed the token(s) raw, so 'a,b' hit the server as
+    ONE role name; cmd_admin_create_user already split correctly)."""
+
+    def _stored_roles(self, roles_value):
+        client, config_file = _make_client()
+        try:
+            mock_http = MagicMock()
+            mock_http.request.return_value = _make_mock_response(201, {"id": 1, "key": "mykey", "role_names": []})
+            client._http = mock_http
+            result = cmd_store(client, _make_args(roles=roles_value, key_version="v1"))
+            assert result == 0
+            return _post_payload(mock_http)["roles"]
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_comma_single_token_splits(self):
+        """--roles a,b (one argv token) -> TWO roles in the payload."""
+        assert self._stored_roles(["a,b"]) == ["a", "b"]
+
+    def test_space_after_comma_strips(self):
+        """--roles 'a, b' -> whitespace stripped from each name."""
+        assert self._stored_roles(["a, b"]) == ["a", "b"]
+
+    def test_single_role_unchanged(self):
+        """N3: single-role form forwarded intact."""
+        assert self._stored_roles(["admin"]) == ["admin"]
+
+    def test_mixed_space_and_comma_tokens(self):
+        """nargs='+': space-separated AND comma-separated tokens both split."""
+        assert self._stored_roles(["a,b", "c"]) == ["a", "b", "c"]

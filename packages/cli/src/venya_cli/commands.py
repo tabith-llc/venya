@@ -294,7 +294,10 @@ def cmd_store(client: APIClient, args: Any) -> int:
         payload = {
             "key": args.key,
             "value": value,
-            "roles": args.roles,
+            # --roles accepts space- (nargs='+') AND comma-separated tokens;
+            # split each like cmd_admin_create_user does, else 'a,b' reaches
+            # the server as ONE role name (ticket cli-role-name-and-comma-defects).
+            "roles": [r.strip() for item in args.roles for r in item.split(",")],
             "key_version_id": key_version_id,
         }
 
@@ -1117,10 +1120,34 @@ def cmd_role_list(client: APIClient, args: Any) -> int:
         return 1
 
 
+def _resolve_role_id(client: APIClient, role_ref: str) -> str:
+    """Resolve a role reference: an int ID passes through, a name is looked
+    up in GET /api/v1/roles and matched case-folded (ticket
+    cli-role-name-and-comma-defects — the help advertises "Role ID or name"
+    but the /roles/{role_id} path param is int-validated, so raw names died
+    at 422). Case folding mirrors the server convention: RoleManager stores
+    names lowercased and matches func.lower(Role.name) == name.lower()
+    (core/iam/role_manager.py). Raises APIClientError naming the failed
+    lookup — never a raw 422 dump.
+    """
+    try:
+        int(role_ref)
+        return role_ref
+    except ValueError:
+        pass
+    target = role_ref.casefold()
+    result = client.get("/api/v1/roles")
+    for role in result.get("roles", []):
+        if str(role.get("name", "")).casefold() == target:
+            return str(role["id"])
+    raise APIClientError(f"role '{role_ref}' not found — no name match in the role list (check `venya role list`)")
+
+
 def cmd_role_get(client: APIClient, args: Any) -> int:
     """Get role details."""
     try:
-        result = client.get(f"/api/v1/roles/{args.role_id}")
+        role_id = _resolve_role_id(client, args.role_id)
+        result = client.get(f"/api/v1/roles/{role_id}")
         print(json.dumps(result, indent=2))
         return 0
     except APIClientError as e:
@@ -1134,7 +1161,8 @@ def cmd_role_get(client: APIClient, args: Any) -> int:
 def cmd_role_delete(client: APIClient, args: Any) -> int:
     """Delete a role."""
     try:
-        client.delete(f"/api/v1/roles/{args.role_id}")
+        role_id = _resolve_role_id(client, args.role_id)
+        client.delete(f"/api/v1/roles/{role_id}")
         print(f"Role '{args.role_id}' deleted.")
         return 0
     except APIClientError as e:
@@ -1148,7 +1176,8 @@ def cmd_role_delete(client: APIClient, args: Any) -> int:
 def cmd_role_members(client: APIClient, args: Any) -> int:
     """List role members."""
     try:
-        result = client.get(f"/api/v1/roles/{args.role_id}/members")
+        role_id = _resolve_role_id(client, args.role_id)
+        result = client.get(f"/api/v1/roles/{role_id}/members")
         members = result.get("members", [])
 
         if not members:
@@ -1173,8 +1202,9 @@ def cmd_role_members(client: APIClient, args: Any) -> int:
 def cmd_role_add_member(client: APIClient, args: Any) -> int:
     """Add user to role."""
     try:
+        role_id = _resolve_role_id(client, args.role_id)
         client.post(
-            f"/api/v1/roles/{args.role_id}/members",
+            f"/api/v1/roles/{role_id}/members",
             json={"user_id": args.user_id},
         )
         print(f"User '{args.user_id}' added to role '{args.role_id}'.")
@@ -1190,7 +1220,8 @@ def cmd_role_add_member(client: APIClient, args: Any) -> int:
 def cmd_role_remove_member(client: APIClient, args: Any) -> int:
     """Remove user from role."""
     try:
-        client.delete(f"/api/v1/roles/{args.role_id}/members/{args.user_id}")
+        role_id = _resolve_role_id(client, args.role_id)
+        client.delete(f"/api/v1/roles/{role_id}/members/{args.user_id}")
         print(f"User '{args.user_id}' removed from role '{args.role_id}'.")
         return 0
     except APIClientError as e:

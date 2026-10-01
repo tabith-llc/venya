@@ -55,6 +55,20 @@ Notable changes to Venya will be documented in this file.
   Shamir CA shares + backups + reinstall is still the last-resort path.
 
 ### Fixed
+- **CLI: role subcommands honor their "Role ID or name" promise.** `venya
+  role get|delete|members|add-member|remove-member` previously interpolated
+  the raw `role_id` argument into the int-validated `/api/v1/roles/{role_id}`
+  path, so every NAME died with a raw 422 dump. All five handlers now share
+  ONE resolver: int IDs pass through untouched, names are looked up in
+  `GET /api/v1/roles` with a case-folded match (mirroring the server's
+  lowercased-name convention), and an unresolvable name exits 1 with a clean
+  error naming the lookup.
+- **CLI: `venya store --roles a,b` now actually means TWO roles.** `cmd_store`
+  passed the raw token(s) into the secret payload, so a comma-separated
+  `--roles` list reached the server as ONE role name ("Role not found:
+  a,b") while the sibling `admin create-user --roles` split correctly.
+  Store now splits AND strips every comma token (space-separated tokens keep
+  working); help updated to say "comma- and/or space-separated".
 - **CLI: CA-key restore is fail-closed on content.** A wrong-passphrase
   restore from a legacy (pre-canonical) backup blob previously passed with
   ~1/256 probability (padding coincidence) and silently wrote corrupt key
