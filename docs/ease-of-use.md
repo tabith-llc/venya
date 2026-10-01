@@ -100,8 +100,10 @@ Notes that matter:
   one **replaces** it entirely — a list that drops `rm -rf` along with
   `scp` silently un-blocks `rm -rf` too. Keep the pattern list under the
   same review discipline as firewall rules.
-- The CLI's `set-command-policy` sets the preset; the pattern list itself
-  is written through the admin API above.
+- The CLI's `set-command-policy` sets the preset and can write the pattern
+  lists itself: `--custom-allowed` sets the allowed-commands list,
+  `--custom-dangerous` the dangerous-pattern list. Each flag **replaces**
+  the stored list whole; an omitted flag leaves that stored list untouched.
 - Executors pick the change up on their next heartbeat (~30 s), and the
   write is audit-logged with actor and content.
 
