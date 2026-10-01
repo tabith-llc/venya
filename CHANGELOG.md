@@ -75,6 +75,19 @@ Notable changes to Venya will be documented in this file.
   is complete or nothing happened. The auditor tier therefore sees the full
   "who created this role / who added this user / who logged in" trail its
   visibility promise is built on.
+- **Added: executor audit-spool ingest endpoint.** `POST /api/v1/audit/ingest`
+  accepts an executor's spool-forwarder batch (ndjson + zstd) over executor
+  mTLS and appends every event — including `command_rejected` policy refusals —
+  to the append-only `audit_events` ledger, where the auditor tier sees it
+  through the existing `event_type` / `executor_id` filters. Rows carry the
+  sending executor's cert CN as the principal and `executor_id` /
+  `sender_revoked` / `forwarded` provenance fields; a revoked-but-registered
+  sender's evidence still lands, flagged. Batches from a revoked sender or an
+  unregistered/forged sender are refused or flagged per ruling; malformed
+  lines reject the whole batch (400), and delivery is at-least-once (retried
+  batches may duplicate rows). On the executor side the forwarder now presents
+  its mTLS client certificate and drains in bounded batches
+  (`[audit] max_batch_lines`, default 500, bounded by `max_buffer_size`).
 
 ### Fixed
 - **Server: a wrong encryption passphrase no longer boots silently.** The KEK
@@ -91,6 +104,22 @@ Notable changes to Venya will be documented in this file.
   corrupt). The sentinel is minted idempotently at the first successful
   crypto use (the single wrap-convergence point, Core.encrypt). Adds Alembic
   migration 032 (kek_sentinel table; model+migration together per repo rule).
+- **CLI: `venya audit --json` now prints parseable JSON when the audit log is
+  empty.** With zero events the command printed the human string
+  "No audit events found." even under `--json`, breaking scripted
+  consumption (e.g. `jq`). The `--json` branch now runs BEFORE the empty
+  check and passes the API envelope through verbatim, so an empty log
+  yields a parseable object with an empty `events` list — the same
+  ordering `venya list --json` already uses. Non-empty `--json` output is
+  byte-identical to before, and the human path (empty and non-empty) is
+  unchanged.
+- **Executor: the `[audit]` forwarder is no longer a dead knob.** With a
+  configured `remote_url` the forwarder previously sent unauthenticated POSTs
+  no server endpoint accepted, and without one it went silently inert; now a
+  configured forwarder authenticates with the executor's mTLS client
+  certificate, refuses to send (loud error, spool lines kept) if that
+  material is missing, and pairs with the new server ingest endpoint above.
+  An unconfigured forwarder stays honestly inert (spool-only, no network).
 - **Server: browser logout no longer swallows session-revocation failures.**
   When revoking the session fails, the server now logs the error, records a
   `session_ended` lifecycle audit row with `revoked: false`, and answers 503

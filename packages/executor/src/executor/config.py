@@ -146,6 +146,22 @@ class AuditForwarderConfig(BaseModel):
         default=90,
         description="Local audit log retention days",
     )
+    max_batch_lines: int = Field(
+        default=500,
+        description="Max spool lines per forwarded batch (bounded by max_buffer_size)",
+    )
+
+    @model_validator(mode="after")
+    def _batch_within_buffer(self) -> AuditForwarderConfig:
+        """#307 D3: a forwarded batch must fit the local buffer and stay
+        under the server's body-size middleware — a batch larger than the
+        spool is a config error, not a silent clamp."""
+        if not 1 <= self.max_batch_lines <= self.max_buffer_size:
+            raise ValueError(
+                f"audit.max_batch_lines must satisfy 1 <= {self.max_batch_lines} <= "
+                f"max_buffer_size ({self.max_buffer_size})"
+            )
+        return self
 
     @model_validator(mode="after")
     def _require_verified_https_remote(self) -> AuditForwarderConfig:

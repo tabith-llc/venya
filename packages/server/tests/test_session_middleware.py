@@ -328,6 +328,10 @@ class TestExecutorSessionPathAuth:
         def heartbeat_stub(request: Request):
             return {"user": getattr(request.state, "auth_user", None)}
 
+        @app.post("/api/v1/audit/ingest")
+        def ingest_stub(request: Request):
+            return {"user": getattr(request.state, "auth_user", None)}
+
         return app
 
     def _make_executor_backend(self, executor_row=None, cert_row=None, crl_row=None):
@@ -593,6 +597,61 @@ class TestExecutorSessionPathAuth:
         resp = client.post(
             "/api/v1/heartbeat",
             json={"executor_id": "venya-exec-1", "cert_fingerprint": "abc"},
+            headers={
+                "X-Client-Verified": "SUCCESS",
+                "X-Client-Subject": self.EXEC_SUBJECT,
+                "X-Client-Serial": "0000000000000001",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["user"]["caller"] == "executor"
+
+    # --- Audit-forwarder ingest gating (ticket audit-forwarder-server-sink #307) ---
+
+    def test_audit_ingest_no_cert_rejected_401(self):
+        """No X-Client-Verified → 401 before the route: the sink writes
+        ledger rows, so an anonymous POST is an audit-forgery attempt."""
+        executor_row, _, _ = self._rows()
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/audit/ingest", content=b"x")
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Executor mTLS authentication required"
+
+    def test_audit_ingest_verified_registered_passes(self):
+        """Verified cert + registered CN → route with caller=executor state
+        (route-side guard + provenance write pinned in test_audit.py)."""
+        executor_row, _, _ = self._rows()
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/audit/ingest",
+            content=b"x",
+            headers={
+                "X-Client-Verified": "SUCCESS",
+                "X-Client-Subject": self.EXEC_SUBJECT,
+                "X-Client-Serial": "0000000000000001",
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["user"] == {"caller": "executor", "executor_id": "venya-exec-1"}
+
+    def test_audit_ingest_revoked_identity_passes_through(self):
+        """D2 RULING PIN (#307): a revoked executor is NOT 403'd on the
+        ingest path — its evidence still lands, route-side flagged
+        sender_revoked=true (contrast test_identity_revoked_rejected_403
+        on the session path). The reject_revoked=False here is for
+        EVIDENCE PRESERVATION, a different purpose than the heartbeat's
+        cooperative-stop advisory channel."""
+        executor_row, _, _ = self._rows(revoked_at=datetime.now(UTC))
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/audit/ingest",
+            content=b"x",
             headers={
                 "X-Client-Verified": "SUCCESS",
                 "X-Client-Subject": self.EXEC_SUBJECT,

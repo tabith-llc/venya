@@ -398,9 +398,9 @@ def cmd_list(client: APIClient, args: Any) -> int:
 
         # --json: byte-exact passthrough of the API envelope (keys+metadata,
         # never values). BEFORE the empty check on purpose: an empty store
-        # must still emit parseable JSON ({"secrets": []}) — the cmd_audit
-        # branch sits after its empty check and prints a human string there;
-        # that quirk is flagged in ticket cli-list-json-output, not copied.
+        # must still emit parseable JSON ({"secrets": []}). cmd_audit uses
+        # the same ordering ({"events": []} on an empty vault, ticket
+        # audit-json-empty-case-unparseable).
         if getattr(args, "json", False):
             print(json.dumps(result, indent=2))
             return 0
@@ -508,12 +508,16 @@ def cmd_audit(client: APIClient, args: Any) -> int:
         result = client.get("/api/v1/audit", params=params)
         events = result.get("events", [])
 
-        if not events:
-            print("No audit events found.")
-            return 0
-
+        # --json: byte-exact passthrough of the API envelope. BEFORE the
+        # empty check: an empty vault must still emit parseable JSON
+        # ({"events": []}) — same ordering as cmd_list (ticket
+        # audit-json-empty-case-unparseable).
         if getattr(args, "json", False):
             print(json.dumps(result, indent=2))
+            return 0
+
+        if not events:
+            print("No audit events found.")
             return 0
 
         for event in events:
