@@ -77,6 +77,15 @@ Notable changes to Venya will be documented in this file.
   visibility promise is built on.
 
 ### Fixed
+- **CLI: `venya audit --json` now prints parseable JSON when the audit log is
+  empty.** With zero events the command printed the human string
+  "No audit events found." even under `--json`, breaking scripted
+  consumption (e.g. `jq`). The `--json` branch now runs BEFORE the empty
+  check and passes the API envelope through verbatim, so an empty log
+  yields a parseable object with an empty `events` list — the same
+  ordering `venya list --json` already uses. Non-empty `--json` output is
+  byte-identical to before, and the human path (empty and non-empty) is
+  unchanged.
 - **Server: browser logout no longer swallows session-revocation failures.**
   When revoking the session fails, the server now logs the error, records a
   `session_ended` lifecycle audit row with `revoked: false`, and answers 503
