@@ -176,7 +176,7 @@ def atomic_write_key(key_path: Path, data: bytes) -> None:
     then os.replace. On any failure the temp file is removed and the original
     is untouched (the byte-identity property that saved drill R6-b).
     """
-    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     stat_src = key_path if key_path.exists() else key_path.parent
     uid, gid = stat_src.stat().st_uid, stat_src.stat().st_gid
     fd, tmp_name = tempfile.mkstemp(prefix=f"{key_path.name}.", suffix=".tmp", dir=str(key_path.parent))

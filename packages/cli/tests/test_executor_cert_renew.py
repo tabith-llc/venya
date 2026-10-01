@@ -20,7 +20,6 @@ Tests cover:
 import json
 import os
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from cryptography import x509
@@ -452,16 +451,19 @@ class TestRenewAtomicWrite:
         # Mock the server response as successful
         mock_client = _make_mock_httpx_client()
 
-        # Patch Path.write_bytes to fail after the cert temp file is written
-        original_write_bytes = Path.write_bytes
+        # Patch os.replace to fail on the key publish (atomic-create-0600
+        # house pattern: the key is staged in a random-named temp, then
+        # os.replace'd — injecting there simulates "write fails after the
+        # cert temp file is written").
+        original_replace = os.replace
 
-        def failing_write_bytes(self, data):
-            if ".tmp" in str(self) and "key" in str(self):
+        def failing_replace(src, dst, *a, **kw):
+            if str(dst) == str(key_path):
                 raise OSError("Disk full")
-            return original_write_bytes(self, data)
+            return original_replace(src, dst, *a, **kw)
 
         with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
-            with patch.object(Path, "write_bytes", failing_write_bytes):
+            with patch("venya_cli.commands.os.replace", side_effect=failing_replace):
                 from venya_cli.commands import executor_cert_renew
 
                 result = executor_cert_renew(args)
@@ -472,9 +474,9 @@ class TestRenewAtomicWrite:
         assert cert_path.read_bytes() == original_cert_data
         assert key_path.read_bytes() == original_key_data
 
-        # Temp files should be cleaned up
+        # Temp files should be cleaned up (cert tmp + staged key temp)
         assert not cert_path.with_suffix(".pem.tmp").exists()
-        assert not key_path.with_suffix(".key.tmp").exists()
+        assert not list(key_path.parent.glob(".venya-key-*"))
 
     def test_atomic_rename_order_key_before_cert(self, tmp_path):
         """Key is renamed before cert — key_tmp should not persist on success."""
@@ -504,3 +506,61 @@ class TestRenewAtomicWrite:
 
         key_data = key_path.read_bytes()
         assert b"PRIVATE KEY" in key_data
+
+
+class TestRenewSecretFileModes:
+    """#317: the renewed key lands 0600 at creation via the atomic-create
+    house pattern (random-named temp, no post-write chmod)."""
+
+    @staticmethod
+    def _renew(cert_path, key_path):
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(key_path)
+        args.core_url = "https://venya-core"
+        mock_client = _make_mock_httpx_client()
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_cert_renew
+
+            return executor_cert_renew(args)
+
+    def test_key_created_0600_under_umask022(self, tmp_path):
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        old = os.umask(0o022)
+        try:
+            assert self._renew(cert_path, key_path) == 0
+        finally:
+            os.umask(old)
+        assert key_path.stat().st_mode & 0o777 == 0o600
+        assert serialization.load_pem_private_key(key_path.read_bytes(), password=None) is not None
+        assert not list(tmp_path.glob(".venya-key-*"))
+        assert not key_path.with_suffix(".key.tmp").exists()
+
+    def test_preexisting_key_target_replaced_not_merged(self, tmp_path):
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        original_key_data = key_path.read_bytes()
+        key_path.chmod(0o644)  # pre-existing target in the loose mode
+        old = os.umask(0o022)
+        try:
+            assert self._renew(cert_path, key_path) == 0
+        finally:
+            os.umask(old)
+        data = key_path.read_bytes()
+        assert data != original_key_data  # whole new key, not merged/extended
+        assert serialization.load_pem_private_key(data, password=None) is not None
+        # temp's 0600 wins over the target's old 0644 — os.replace semantics
+        assert key_path.stat().st_mode & 0o777 == 0o600
+
+    def test_planted_legacy_key_tmp_collision_fails_safe(self, tmp_path):
+        """Old mechanism used the deterministic name <key>.key.tmp — the new
+        random-named temp must neither write nor follow a planted file there."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        planted = key_path.with_suffix(".key.tmp")
+        planted.write_bytes(b"ATTACKER-PLANTED")
+        old = os.umask(0o022)
+        try:
+            assert self._renew(cert_path, key_path) == 0
+        finally:
+            os.umask(old)
+        assert planted.read_bytes() == b"ATTACKER-PLANTED"  # untouched
+        assert serialization.load_pem_private_key(key_path.read_bytes(), password=None) is not None

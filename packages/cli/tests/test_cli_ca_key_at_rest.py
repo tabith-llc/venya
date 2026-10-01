@@ -20,6 +20,8 @@ variant, no plaintext ever on disk, no secret material in logs.
 """
 
 import logging
+import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -354,3 +356,81 @@ def test_environment_variable_names_match_server_spec():
 
     assert server_passphrase_env_for(Path("/var/lib/venya/ca/ca.key")) == "VENYA_CA_KEY_PASSPHRASE"
     assert server_passphrase_env_for(Path("/var/lib/venya/ca/admin-ca/admin-ca.key")) == "VENYA_ADMIN_CA_KEY_PASSPHRASE"
+
+
+class TestSecretFileCreationModes:
+    """#317: export blob, split shares, and atomic_write_key land 0600 /
+    fresh parent dirs 0700 AT CREATION (atomic-create house pattern;
+    Path.mkdir(mode=0o700) — verified 0700 survives umask 022)."""
+
+    def test_export_blob_0600_parent_dir_0700_at_creation(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", SERVER_PW)
+        ca, key = _encrypted_ca(tmp_path)
+        out = tmp_path / "backups" / "b.enc"
+        old = os.umask(0o022)
+        try:
+            assert _export(ca, out) == 0
+        finally:
+            os.umask(old)
+        assert stat.S_IMODE(out.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600
+        # byte-content identical envelope to the old write path: decrypts
+        assert _decrypt_ca_backup(out.read_bytes(), OP_PW) == key
+        assert not list(out.parent.glob(".venya-cabackup-*"))
+
+    def test_export_replaces_preexisting_0644_target(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", SERVER_PW)
+        ca, key = _encrypted_ca(tmp_path)
+        out = tmp_path / "b2.enc"
+        out.write_bytes(b"OLD-OLD-OLD" * 200)
+        out.chmod(0o644)
+        assert _export(ca, out) == 0
+        assert _decrypt_ca_backup(out.read_bytes(), OP_PW) == key  # replaced whole
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600  # temp mode wins over 0644
+
+    def test_split_shares_0600_dir_0700_at_creation(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", SERVER_PW)
+        ca, _key = _encrypted_ca(tmp_path)
+        od = tmp_path / "shards"
+        old = os.umask(0o022)
+        try:
+            assert _split(ca, od) == 0
+        finally:
+            os.umask(old)
+        assert stat.S_IMODE(od.stat().st_mode) == 0o700
+        files = sorted(od.glob("share-*"))
+        assert len(files) == 3
+        for f in files:
+            assert stat.S_IMODE(f.stat().st_mode) == 0o600
+            assert len(f.read_bytes()) > 0
+        assert not list(od.glob(".venya-share-*"))
+
+    def test_split_replaces_preexisting_share_targets(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", SERVER_PW)
+        ca, key = _encrypted_ca(tmp_path)
+        od = tmp_path / "shards"
+        od.mkdir()
+        for name in ("share-01", "share-02", "share-03"):
+            junk = od / name
+            junk.write_bytes(b"GARBAGE" * 50)
+            junk.chmod(0o644)
+        assert _split(ca, od) == 0
+        for f in sorted(od.glob("share-*")):
+            assert f.read_bytes() != b"GARBAGE" * 50  # replaced whole
+            assert stat.S_IMODE(f.stat().st_mode) == 0o600
+        from venya_cli.shamir import combine
+
+        chosen = [bytes([int(p.stem.split("-")[-1])]) + p.read_bytes() for p in sorted(od.glob("share-*"))[:2]]
+        assert combine(chosen) == key  # shares are real, byte-correct material
+
+    def test_atomic_write_key_parent_dir_0700_at_creation(self, tmp_path):
+        from venya_cli.at_rest_key import atomic_write_key
+
+        d = tmp_path / "keys" / "ca"
+        old = os.umask(0o022)
+        try:
+            atomic_write_key(d / "ca.key", _real_key_pem())
+        finally:
+            os.umask(old)
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+        assert stat.S_IMODE((d / "ca.key").stat().st_mode) == 0o600

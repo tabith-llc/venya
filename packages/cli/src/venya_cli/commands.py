@@ -882,10 +882,24 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
             import hashlib as hashlib_mod
 
             output_path = Path(output_dir)
-            output_path.mkdir(parents=True, exist_ok=True)
+            output_path.mkdir(parents=True, exist_ok=True, mode=0o700)
 
             token_path = output_path / "token"
-            token_path.write_text(token)
+            token_tmp: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=output_path, prefix=".venya-token-", delete=False) as fd:
+                    token_tmp = fd.name
+                    fd.write(token.encode())
+                    fd.flush()
+                    os.fchmod(fd.fileno(), 0o600)
+                os.replace(token_tmp, token_path)
+            except BaseException:
+                if token_tmp is not None:
+                    try:
+                        os.unlink(token_tmp)
+                    except OSError:
+                        pass
+                raise
 
             core_ca_path = output_path / "core-server-ca.crt"
             if _BUNDLE_CORE_CA.exists():
@@ -2080,7 +2094,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     # Step 4: Save cert + key to output-dir
     try:
         output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        output_path.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Save private key
         key_path = output_path / "executor.key"
@@ -2089,8 +2103,21 @@ def executor_register(client: APIClient, args: Any) -> int:
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         )
-        key_path.write_bytes(key_pem)
-        os.chmod(str(key_path), 0o600)
+        key_tmp: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=output_path, prefix=".venya-key-", delete=False) as fd:
+                key_tmp = fd.name
+                fd.write(key_pem)
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o600)
+            os.replace(key_tmp, key_path)
+        except BaseException:
+            if key_tmp is not None:
+                try:
+                    os.unlink(key_tmp)
+                except OSError:
+                    pass
+            raise
 
         # Save signed certificate
         cert_path = output_path / "executor.crt"
@@ -2378,12 +2405,11 @@ def executor_cert_renew(args: Any) -> int:
         return 1
 
     # Atomic write: write to temp files, then rename
+    cert_tmp = Path(cert_path).with_suffix(".pem.tmp")
+    key_tmp_name: str | None = None
     try:
         output_dir = str(Path(cert_path).parent)
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-
-        cert_tmp = Path(cert_path).with_suffix(".pem.tmp")
-        key_tmp = Path(key_path).with_suffix(".key.tmp")
+        Path(output_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
 
         cert_tmp.write_bytes(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
 
@@ -2392,8 +2418,13 @@ def executor_cert_renew(args: Any) -> int:
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         )
-        key_tmp.write_bytes(key_pem)
-        key_tmp.chmod(0o600)
+        with tempfile.NamedTemporaryFile(dir=Path(key_path).parent, prefix=".venya-key-", delete=False) as fd:
+            key_tmp_name = fd.name
+            fd.write(key_pem)
+            fd.flush()
+            os.fchmod(fd.fileno(), 0o600)
+        os.replace(key_tmp_name, key_path)
+        key_tmp_name = None
 
         if ca_cert_pem:
             ca_cert_path = Path(cert_path).with_name("ca.crt")  # type: ignore[assignment]
@@ -2401,13 +2432,16 @@ def executor_cert_renew(args: Any) -> int:
             ca_tmp.write_bytes(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
             ca_tmp.rename(ca_cert_path)
 
-        key_tmp.rename(key_path)
         cert_tmp.rename(cert_path)
     except OSError as e:
         # Clean up temp files on failure
-        for tmp in (cert_tmp, key_tmp):
+        try:
+            cert_tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if key_tmp_name is not None:
             try:
-                tmp.unlink(missing_ok=True)
+                os.unlink(key_tmp_name)
             except OSError:
                 pass
         print(f"Failed to save certificate: {e}", file=sys.stderr)
@@ -2936,9 +2970,22 @@ def cmd_admin_export_ca_key(args: Any) -> int:
     encrypted = AESGCM(key).encrypt(nonce, plaintext_key, None)
 
     # Write: MAGIC(8) + salt(16) + nonce(12) + ciphertext+tag
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(_CA_BLOB_MAGIC + salt + nonce + encrypted)
-    output_path.chmod(0o600)
+    output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    blob_tmp: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=output_path.parent, prefix=".venya-cabackup-", delete=False) as fd:
+            blob_tmp = fd.name
+            fd.write(_CA_BLOB_MAGIC + salt + nonce + encrypted)
+            fd.flush()
+            os.fchmod(fd.fileno(), 0o600)
+        os.replace(blob_tmp, output_path)
+    except BaseException:
+        if blob_tmp is not None:
+            try:
+                os.unlink(blob_tmp)
+            except OSError:
+                pass
+        raise
 
     print(f"CA key encrypted (AES-256-GCM) and exported to {output_path}")
     print("Store this file securely. It requires the passphrase to decrypt.")
@@ -2991,13 +3038,26 @@ def cmd_admin_split_ca_key(args: Any) -> int:
         return 1
 
     shares = split(plaintext_key, threshold=threshold, shares=num_shares)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     for i, share in enumerate(shares):
         share_id = share[0]
         share_file = output_dir / f"share-{share_id:02d}"
-        share_file.write_bytes(share[1:])  # Store data only (ID is embedded)
-        share_file.chmod(0o600)
+        share_tmp: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=output_dir, prefix=".venya-share-", delete=False) as fd:
+                share_tmp = fd.name
+                fd.write(share[1:])  # Store data only (ID is embedded)
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o600)
+            os.replace(share_tmp, share_file)
+        except BaseException:
+            if share_tmp is not None:
+                try:
+                    os.unlink(share_tmp)
+                except OSError:
+                    pass
+            raise
         print(f"  Share {share_id}/{num_shares} written to {share_file}")
 
     print(f"\n{num_shares} shares created. Any {threshold} are needed to reconstruct.")
@@ -3158,13 +3218,26 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
             )
 
         # Create directory
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(str(output_dir), 0o700)
 
         # Write key
         key_path = output_dir / "admin-ca.key"
-        key_path.write_bytes(key_pem)
-        key_path.chmod(0o600)
+        key_tmp: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=output_dir, prefix=".venya-cakey-", delete=False) as fd:
+                key_tmp = fd.name
+                fd.write(key_pem)
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o600)
+            os.replace(key_tmp, key_path)
+        except BaseException:
+            if key_tmp is not None:
+                try:
+                    os.unlink(key_tmp)
+                except OSError:
+                    pass
+            raise
 
         # Create self-signed CA certificate
         now = datetime.now(UTC)
@@ -3236,7 +3309,6 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives.serialization import PrivateFormat
     from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
     identity = args.identity
@@ -3325,17 +3397,30 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         ).sign(ca_key, hashes.SHA256())
 
         # Create output directory
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Write key (unencrypted — operator manages security)
         key_pem = admin_key.private_bytes(
             encoding=serialization.Encoding.PEM,
-            format=PrivateFormat.PKCS8,
+            format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         )
         key_path = output_dir / "admin.key"
-        key_path.write_bytes(key_pem)
-        key_path.chmod(0o600)
+        key_tmp: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=output_dir, prefix=".venya-key-", delete=False) as fd:
+                key_tmp = fd.name
+                fd.write(key_pem)
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o600)
+            os.replace(key_tmp, key_path)
+        except BaseException:
+            if key_tmp is not None:
+                try:
+                    os.unlink(key_tmp)
+                except OSError:
+                    pass
+            raise
 
         # Write cert
         cert_pem = cert.public_bytes(serialization.Encoding.PEM)

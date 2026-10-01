@@ -24,6 +24,8 @@ evidence:
 """
 
 import json
+import os
+import stat
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -144,3 +146,50 @@ class TestEnrollTokenBundle:
         finally:
             client.close()
             config_file.unlink()
+
+
+class TestEnrollTokenFileModes:
+    """#317: the token lands 0600 at creation via the atomic-create house
+    pattern (no post-write chmod) and a fresh bundle dir lands 0700."""
+
+    def _run_enroll(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("venya_cli.commands._BUNDLE_CORE_CA", tmp_path / "absent-ca.crt")
+        monkeypatch.setattr("venya_cli.commands._BUNDLE_ADMIN_CA", tmp_path / "absent-admin-ca.crt")
+        client, config_file = _make_client()
+        try:
+            client._http = MagicMock()
+            client._http.request.return_value = _make_response(
+                200, {"enrollment_token": "enrl_exec_TEST", "expires_in_seconds": 1800}
+            )
+            return cmd_admin_executor_enroll(client, _args(tmp_path))
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_token_and_dir_modes_at_creation_under_umask022(self, tmp_path, monkeypatch):
+        old = os.umask(0o022)
+        try:
+            assert self._run_enroll(tmp_path, monkeypatch) == 0
+        finally:
+            os.umask(old)
+        bundle = tmp_path / "bundle"
+        assert stat.S_IMODE(bundle.stat().st_mode) == 0o700
+        token = bundle / "token"
+        assert stat.S_IMODE(token.stat().st_mode) == 0o600
+        # content byte-identical to the old write_text path
+        assert token.read_bytes() == b"enrl_exec_TEST"
+        assert not list(bundle.glob(".venya-token-*"))
+
+    def test_token_replaces_preexisting_target_not_merged(self, tmp_path, monkeypatch):
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        token = bundle / "token"
+        token.write_text("OLD-OLD-OLD-OLD-OLD-OLD-OLD-OLD-OLD")
+        token.chmod(0o644)
+        old = os.umask(0o022)
+        try:
+            assert self._run_enroll(tmp_path, monkeypatch) == 0
+        finally:
+            os.umask(old)
+        assert token.read_bytes() == b"enrl_exec_TEST"  # replaced, not merged
+        assert stat.S_IMODE(token.stat().st_mode) == 0o600  # temp mode wins over old 0644

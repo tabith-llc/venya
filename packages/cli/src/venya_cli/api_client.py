@@ -140,7 +140,7 @@ class Config:
 
     def save(self) -> None:
         """Save config to disk with owner-only permissions (0o600)."""
-        self.config_file.parent.mkdir(parents=True, exist_ok=True)
+        self.config_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp_path: str | None = None
         try:
             with tempfile.NamedTemporaryFile(

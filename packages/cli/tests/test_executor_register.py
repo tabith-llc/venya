@@ -1009,3 +1009,70 @@ class TestPlaceholderSubcommands:
             assert result == 1
         finally:
             client.close()
+
+
+class TestExecutorRegisterFileModes:
+    """#317: executor.key lands 0600 at creation (atomic-create house
+    pattern, no post-write chmod) and a fresh output dir lands 0700."""
+
+    @staticmethod
+    def _register(tmp_path):
+        from venya_cli.commands import executor_register
+
+        private_key = _generate_test_keypair()
+        cert = _generate_test_cert(private_key, "venya-exec", validity_days=30)
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+
+        args = MagicMock()
+        args.executor_id = "venya-exec"
+        args.core_url = "https://core.example.com"
+        args.output_dir = str(tmp_path / "certs")
+
+        client, config_file = _make_mock_client()
+        mock_response = _make_mock_response(
+            status_code=201,
+            json_data={
+                "executor_id": "venya-exec",
+                "cert_pem": cert_pem,
+                "ca_cert_pem": cert_pem,
+                "serial_number": "01:23:45",
+                "not_after": "2026-09-13T00:00:00+00:00",
+            },
+        )
+        try:
+            with patch("venya_cli.api_client.httpx2.Client") as MockClient:
+                MockClient.return_value.__enter__.return_value = MockClient.return_value
+                MockClient.return_value.post.return_value = mock_response
+                return executor_register(client, args)
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_key_and_dir_modes_at_creation_under_umask022(self, tmp_path):
+        old = os.umask(0o022)
+        try:
+            assert self._register(tmp_path) == 0
+        finally:
+            os.umask(old)
+        out = tmp_path / "certs"
+        assert stat.S_IMODE(out.stat().st_mode) == 0o700
+        key = out / "executor.key"
+        assert stat.S_IMODE(key.stat().st_mode) == 0o600
+        assert serialization.load_pem_private_key(key.read_bytes(), password=None) is not None
+        assert not list(out.glob(".venya-key-*"))
+
+    def test_key_replaces_preexisting_target_not_merged(self, tmp_path):
+        out = tmp_path / "certs"
+        out.mkdir()
+        key = out / "executor.key"
+        key.write_bytes(b"GARBAGE-GARBAGE-GARBAGE" * 40)
+        key.chmod(0o644)
+        old = os.umask(0o022)
+        try:
+            assert self._register(tmp_path) == 0
+        finally:
+            os.umask(old)
+        data = key.read_bytes()
+        assert b"GARBAGE" not in data  # replaced, not merged
+        assert serialization.load_pem_private_key(data, password=None) is not None
+        assert stat.S_IMODE(key.stat().st_mode) == 0o600  # temp mode wins over old 0644

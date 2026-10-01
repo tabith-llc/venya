@@ -12,6 +12,7 @@ Tests cover:
 """
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -234,3 +235,67 @@ class TestGenerateAdminCert:
         )()
         result = cmd_admin_generate_admin_cert(args)
         assert result == 1
+
+
+class TestSecretFileCreationModes:
+    """#317: admin CA/admin key land 0600 at creation (atomic-create house
+    pattern — no post-write chmod) and fresh output dirs land 0700."""
+
+    def test_init_admin_ca_key_and_dir_modes_at_creation(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
+        out = tmp_path / "newca"
+        args = type("Args", (), {"output_dir": str(out)})()
+        old = os.umask(0o022)
+        try:
+            assert cmd_admin_init_admin_ca(args) == 0
+        finally:
+            os.umask(old)
+        assert stat.S_IMODE(out.stat().st_mode) == 0o700
+        assert stat.S_IMODE(Path(out, "admin-ca.key").stat().st_mode) == 0o600
+        assert stat.S_IMODE(Path(out, "admin-ca.crt").stat().st_mode) == 0o644  # public, unchanged
+        assert not list(out.glob(".venya-cakey-*"))
+
+    def test_generate_admin_cert_key_and_dir_modes_at_creation(self, admin_ca_initialized):
+        out = Path(admin_ca_initialized).parent / "admin-output-modes"
+        args = type(
+            "Args",
+            (),
+            {
+                "identity": "modes@example.com",
+                "ca_dir": admin_ca_initialized,
+                "output_dir": str(out),
+            },
+        )()
+        old = os.umask(0o022)
+        try:
+            assert cmd_admin_generate_admin_cert(args) == 0
+        finally:
+            os.umask(old)
+        assert stat.S_IMODE(out.stat().st_mode) == 0o700
+        assert stat.S_IMODE(Path(out, "admin.key").stat().st_mode) == 0o600
+        assert not list(out.glob(".venya-key-*"))
+
+    def test_generate_admin_cert_replaces_preexisting_key_target(self, admin_ca_initialized):
+        out = Path(admin_ca_initialized).parent / "admin-output-replace"
+        out.mkdir()
+        key = out / "admin.key"
+        key.write_bytes(b"GARBAGE" * 100)
+        key.chmod(0o644)
+        args = type(
+            "Args",
+            (),
+            {
+                "identity": "replace@example.com",
+                "ca_dir": admin_ca_initialized,
+                "output_dir": str(out),
+            },
+        )()
+        old = os.umask(0o022)
+        try:
+            assert cmd_admin_generate_admin_cert(args) == 0
+        finally:
+            os.umask(old)
+        data = key.read_bytes()
+        assert b"GARBAGE" not in data  # replaced whole, not merged
+        assert serialization.load_pem_private_key(data, password=None) is not None
+        assert stat.S_IMODE(key.stat().st_mode) == 0o600  # temp mode wins over 0644

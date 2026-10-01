@@ -16,7 +16,10 @@ kept passing for months precisely because construction was never live.
 """
 
 import datetime
+import json
+import os
 import ssl
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -285,3 +288,22 @@ class TestAdminMtlsClientCert:
         client = APIClient(config_file=tmp_path / "config.json")
 
         assert client.has_admin_mtls is False
+
+
+class TestConfigSaveModes:
+    """#317: a fresh config dir lands 0700 at creation (holds access_token)."""
+
+    def test_save_creates_dir_0700_file_0600_under_umask022(self, tmp_path):
+        cfg = tmp_path / "venya-cfg" / "config.json"
+        client = APIClient(config_file=cfg)
+        try:
+            old = os.umask(0o022)
+            try:
+                client.config.access_token = "tok_modes_check"  # setter calls save()
+            finally:
+                os.umask(old)
+        finally:
+            client.close()
+        assert stat.S_IMODE(cfg.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(cfg.stat().st_mode) == 0o600
+        assert json.loads(cfg.read_text())["access_token"] == "tok_modes_check"

@@ -792,7 +792,7 @@ def _install_stderr_tee():
         from .api_client import default_config_dir
 
         log_dir = default_config_dir()
-        log_dir.mkdir(parents=True, exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         log_path = log_dir / "venya.log"
         # ponytail: single-generation rotation at 1 MiB; a real retention
         # policy only if logs ever become operationally important.
