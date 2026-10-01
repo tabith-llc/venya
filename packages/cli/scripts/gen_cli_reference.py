@@ -129,7 +129,10 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
     ("admin", "set-command-policy"): [
         (["admin", "set-command-policy", "strict"], "allowlist-only execution policy"),
         (["admin", "set-command-policy", "balanced"], "default middle tier"),
-        (["admin", "set-command-policy", "permissive", "--custom", "policy.toml"], "custom policy file"),
+        (
+            ["admin", "set-command-policy", "permissive", "--custom-dangerous", "sudo, su"],
+            "replace the dangerous-pattern list (CSV; --custom-allowed for the allowlist)",
+        ),
     ],
     ("admin", "get-command-policy"): [
         (["admin", "get-command-policy"], "show the active executor command policy"),
