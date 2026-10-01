@@ -128,6 +128,67 @@ class TestSbxStrategyPrepare:
         result.cleanup()  # Should not raise
 
 
+class TestSbxStrategyPrepareSecretIdValidation:
+    """Ticket #320: server-issued secret_id lands in the host tmpfs join and
+    the container_path f-string — reject traversal/absolute/dot-only ids at
+    the boundary with nothing written (validation precedes any os.open).
+
+    Uses the conftest autouse base: SECRET_TMPFS_BASE = tmp_path/"shm".
+    """
+
+    SESSION_ID = "11111111-2222-3333-4444-555555555555"
+
+    @pytest.fixture
+    def strategy(self):
+        return SbxStrategy()
+
+    def test_traversal_id_rejected(self, strategy, tmp_path):
+        bundles = [SecretBundle(secret_id="../../escape", value=b"x", wrapped_value=b"")]
+        with pytest.raises(ValueError, match="unsafe secret_id"):
+            strategy.prepare(bundles, self.SESSION_ID)
+        # tmpfs base untouched (no session dir, no file) and nothing escaped
+        assert list((tmp_path / "shm").iterdir()) == []
+        assert not (tmp_path / "escape").exists()
+
+    def test_absolute_id_rejected(self, strategy, tmp_path):
+        bundles = [SecretBundle(secret_id="/tmp/venya320-pwn", value=b"x", wrapped_value=b"")]
+        with pytest.raises(ValueError, match="unsafe secret_id"):
+            strategy.prepare(bundles, self.SESSION_ID)
+        assert list((tmp_path / "shm").iterdir()) == []
+        assert not Path("/tmp/venya320-pwn").exists()
+
+    def test_dot_only_id_rejected(self, strategy, tmp_path):
+        """'.'/'..' are charset-legal but are traversal segments — must be
+        rejected so the id stays one plain file name."""
+        for bad in (".", ".."):
+            bundles = [SecretBundle(secret_id=bad, value=b"x", wrapped_value=b"")]
+            with pytest.raises(ValueError, match="unsafe secret_id"):
+                strategy.prepare(bundles, self.SESSION_ID)
+        assert list((tmp_path / "shm").iterdir()) == []
+
+    def test_rejection_after_valid_bundle_writes_nothing(self, strategy, tmp_path):
+        """No partial writes: first bundle is fine, second is malicious —
+        the pre-loop validation aborts before any os.open."""
+        bundles = [
+            SecretBundle(secret_id="42", value=b"good", wrapped_value=b""),
+            SecretBundle(secret_id="../bad", value=b"evil", wrapped_value=b""),
+        ]
+        with pytest.raises(ValueError, match="unsafe secret_id"):
+            strategy.prepare(bundles, self.SESSION_ID)
+        assert list((tmp_path / "shm").iterdir()) == []
+        assert strategy._session_dir is None
+
+    def test_int_shaped_id_accepted_unchanged(self, strategy, tmp_path):
+        """Server truth: ids are Integer PKs str()-cast by the daemon —
+        the canonical decimal form must pass both sinks untouched."""
+        bundles = [SecretBundle(secret_id="42", value=b"x", wrapped_value=b"")]
+        result = strategy.prepare(bundles, self.SESSION_ID)
+        mount = result.secret_mounts[0]
+        assert mount.secret_id == "42"
+        assert os.path.basename(mount.path) == "42"
+        assert mount.container_path == "/run/secrets/venya/42"
+
+
 class TestSbxStrategyCreateSandbox:
     @pytest.fixture
     def ws_base(self, monkeypatch, tmp_path):
