@@ -289,30 +289,96 @@ class TestPublicPaths:
 
 
 class TestExecutorSessionPathAuth:
-    """Truth table for the executor-session-path mTLS gate.
+    """Truth table for the executor-session-path gate on the crypto-forwarded
+    certificate (#314; original ticket sec-executor-session-path-no-auth):
+    caller=executor is granted ONLY on a Root-CA-verified certificate whose
+    identity is a registered, non-revoked executor. Paired negatives
+    throughout — the pre-fix code granted caller=executor to ANY anonymous
+    caller by URL regex alone; the header trio that replaced it is now itself
+    retired (forged headers are inert)."""
 
-    Ticket sec-executor-session-path-no-auth: caller=executor must be granted
-    ONLY on a verified client cert whose CN is a registered, non-revoked
-    executor. Paired negatives throughout — the pre-fix code granted
-    caller=executor to ANY anonymous caller by URL regex alone.
-    """
+    def _root_ca(self, tmp_path):
+        if not hasattr(self, "_ca_cache"):
+            self._ca_cache = {}
+        cache_key = str(tmp_path)
+        if cache_key not in self._ca_cache:
+            from server.ca import CAManager
+            from server.config import CASecurityConfig
 
-    EXEC_SUBJECT = "CN=venya-exec-1,O=Venya"
+            ca_dir = tmp_path / "ca"
+            ca_dir.mkdir(exist_ok=True)
+            mgr = CAManager(str(ca_dir), CASecurityConfig(key_passphrase_env="ABSENT_TEST_VAR"))
+            mgr.initialize()
+            ca_cert, ca_key = mgr.load_ca()
+            self._ca_cache[cache_key] = (mgr, ca_cert, ca_key)
+        return self._ca_cache[cache_key]
 
-    def _create_executor_app(self, backend=None):
+    def _exec_cert(self, tmp_path, cn="venya-exec-1", serial=1):
+        try:
+            from .conftest import make_leaf
+        except ImportError:
+            from conftest import make_leaf
+
+        _mgr, ca_cert, ca_key = self._root_ca(tmp_path)
+        return make_leaf(ca_cert, ca_key, cn=cn, serial=serial)
+
+    def _admin_ca_leaf(self, tmp_path, cn="admin@venya-core-1"):
+        """Cross-plane leaf: signed by a DIFFERENT (admin-shaped) CA."""
+        try:
+            from .conftest import make_leaf
+        except ImportError:
+            from conftest import make_leaf
+
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.hashes import SHA256
+        from cryptography.x509.oid import NameOID
+
+        key = ec.generate_private_key(ec.SECP256R1())
+        now = _dt.now(_UTC)
+        admin_ca = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Venya Admin CA")]))
+            .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Venya Admin CA")]))
+            .public_key(key.public_key())
+            .serial_number(9)
+            .not_valid_before(now - _td(days=1))
+            .not_valid_after(now + _td(days=365))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, SHA256())
+        )
+        return make_leaf(admin_ca, key, cn=cn)
+
+    def _create_executor_app(self, backend=None, tmp_path=None):
         """App with SessionMiddleware + stub executor-session routes."""
+        from server.config import InnerTLSConfig, ServerConfig
         from starlette.requests import Request
+
+        prefix = tmp_path / "certfiles" if tmp_path is not None else None
+        if prefix is not None:
+            prefix.mkdir(exist_ok=True)
+
+        config = ServerConfig(
+            recovery_code_pepper="test-pepper",
+            admin_mtls={"enabled": False},
+            inner_mtls=InnerTLSConfig(
+                enabled=True,
+                cert_file="/test/inner.crt",
+                key_file="/test/inner.key",
+                client_ca_file="/test/inner-ca.crt",
+                cert_path_prefix=str(prefix) if prefix is not None else None,
+            ),
+        )
 
         app = FastAPI()
         app.add_middleware(SessionMiddleware)
-        app.state.config = SimpleNamespace(
-            session=SimpleNamespace(
-                session_timeout=900,
-                access_token_ttl=300,
-                max_session_duration=14400,
-            ),
-            admin_mtls=SimpleNamespace(enabled=False),
-        )
+        app.state.config = config
+        if tmp_path is not None:
+            app.state.ca_manager = self._root_ca(tmp_path)[0]
         if backend is not None:
             app.state.backend = backend
 
@@ -362,183 +428,167 @@ class TestExecutorSessionPathAuth:
         crl_row = SimpleNamespace(revoked_at=datetime.now(UTC))
         return executor_row, cert_row, crl_row
 
-    def test_anonymous_filter_rejected_401_before_any_db_or_hashing(self):
-        """The oracle is dead pre-auth: no headers → 401, backend NEVER touched.
+    def _fwd(self, tmp_path, cert):
+        try:
+            from .conftest import forwarded_headers
+        except ImportError:
+            from conftest import forwarded_headers
 
-        Pre-fix this exact request was granted caller=executor and the route
-        decrypted secrets + hash-matched the attacker's candidate bytes.
-        """
+        return forwarded_headers(tmp_path / "certfiles", cert)
+
+    def test_anonymous_filter_rejected_401_before_any_db_or_hashing(self, tmp_path):
+        """The oracle is dead pre-auth: no forwarded cert → 401, backend NEVER touched."""
         backend, _db = self._make_executor_backend()
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/sessions/1/filter", json={"stdout": "", "stderr": ""})
         assert resp.status_code == 401
         assert resp.json()["detail"] == "Executor mTLS authentication required"
         backend.get_session.assert_not_called()
 
-    def test_anonymous_revoke_rejected_401(self):
+    def test_anonymous_revoke_rejected_401(self, tmp_path):
         """Paired negative on the second gated path (audit-forgery hole)."""
         backend, _ = self._make_executor_backend()
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/sessions/sess-1/secrets/revoke", json={"secret_ids": ["1"]})
         assert resp.status_code == 401
         backend.get_session.assert_not_called()
 
-    def test_client_verified_not_success_rejected_401(self):
-        """X-Client-Verified present but != SUCCESS (nginx verify failed)."""
+    def test_forged_header_trio_without_cert_rejected_401(self, tmp_path):
+        """The retired sentinel + subject headers, forged, with no forwarded
+        cert file → 401 (the trio is inert; crypto verification is the gate)."""
         executor_row, _, _ = self._rows()
         backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/sessions/1/filter",
-            json={"stdout": "", "stderr": ""},
-            headers={"X-Client-Verified": "FAILED", "X-Client-Subject": self.EXEC_SUBJECT},
-        )
-        assert resp.status_code == 401
-
-    def test_success_without_subject_rejected_401(self):
-        """SUCCESS sentinel but no X-Client-Subject → no identity → 401."""
-        executor_row, _, _ = self._rows()
-        backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/sessions/1/filter",
-            json={"stdout": "", "stderr": ""},
-            headers={"X-Client-Verified": "SUCCESS"},
-        )
-        assert resp.status_code == 401
-
-    def test_subject_without_cn_rejected_401(self):
-        """Subject DN with no CN component → 401."""
-        executor_row, _, _ = self._rows()
-        backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/sessions/1/filter",
-            json={"stdout": "", "stderr": ""},
-            headers={"X-Client-Verified": "SUCCESS", "X-Client-Subject": "O=Venya,OU=Executors"},
-        )
-        assert resp.status_code == 401
-
-    def test_unregistered_cn_rejected_403(self):
-        """Verified cert whose CN is not a registered Executor → 403.
-
-        This is the allowlist half: ANY Root-CA-signed cert (or an admin
-        cert) verifies at nginx but must still be refused here.
-        """
-        backend, _ = self._make_executor_backend(executor_row=None)
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/sessions/1/filter",
             json={"stdout": "", "stderr": ""},
             headers={
                 "X-Client-Verified": "SUCCESS",
-                "X-Client-Subject": "CN=ghost-executor,O=Venya",
+                "X-Client-Subject": "CN=venya-exec-1,O=Venya",
                 "X-Client-Serial": "0000000000000001",
             },
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
-    def test_admin_cert_cn_rejected_403(self):
-        """Verified admin-CA cert (CN=admin@...) is NOT an executor → 403."""
-        backend, _ = self._make_executor_backend(executor_row=None)
-        app = self._create_executor_app(backend=backend)
+    def test_cert_file_outside_prefix_rejected_401(self, tmp_path):
+        """Path guard: a cert-file path outside the configured prefix is
+        never read → 401 fail-closed."""
+        executor_row, _, _ = self._rows()
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        (tmp_path / "outside.pem").write_bytes(b"garbage")
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/sessions/1/filter",
             json={"stdout": "", "stderr": ""},
-            headers={
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Subject": "CN=admin@venya-core-1,OU=Admin,O=Venya",
-            },
+            headers={"x-client-cert-file": str(tmp_path / "outside.pem")},
+        )
+        assert resp.status_code == 401
+
+    def test_unparseable_cert_file_rejected_401(self, tmp_path):
+        """Garbage bytes behind the header → 401 (parse failure fails closed)."""
+        executor_row, _, _ = self._rows()
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        bogus = tmp_path / "certfiles" / "bogus.pem"
+        bogus.write_bytes(b"not a certificate")
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/sessions/1/filter",
+            json={"stdout": "", "stderr": ""},
+            headers={"x-client-cert-file": str(bogus)},
+        )
+        assert resp.status_code == 401
+
+    def test_unregistered_cn_rejected_403(self, tmp_path):
+        """Verified Root-CA cert whose CN is not a registered Executor → 403."""
+        backend, _ = self._make_executor_backend(executor_row=None)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        cert = self._exec_cert(tmp_path, cn="ghost-executor")
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/sessions/1/filter",
+            json={"stdout": "", "stderr": ""},
+            headers=self._fwd(tmp_path, cert),
         )
         assert resp.status_code == 403
 
-    def test_registered_executor_passes_with_identity(self):
-        """Full pass path: verified + registered + not revoked → caller state."""
-        executor_row, _, _ = self._rows()
-        backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
+    def test_admin_cert_cn_rejected_403(self, tmp_path):
+        """Cross-plane (ruled Q4): an Admin-CA cert presenting an
+        executor-shaped CN is refused at the chain check — no DB row lookup
+        needed; backend stays untouched (the former CN-discriminator path)."""
+        backend, _ = self._make_executor_backend(executor_row=None)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        cert = self._admin_ca_leaf(tmp_path, cn="venya-exec-1")
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/sessions/1/filter",
             json={"stdout": "", "stderr": ""},
-            headers={
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Subject": self.EXEC_SUBJECT,
-                "X-Client-Serial": "0000000000000001",
-            },
+            headers=self._fwd(tmp_path, cert),
+        )
+        assert resp.status_code == 401
+        backend.get_session.assert_not_called()
+
+    def test_registered_executor_passes_with_identity(self, tmp_path):
+        """Full pass path: crypto-verified + registered + not revoked → caller state."""
+        executor_row, _, _ = self._rows()
+        backend, _ = self._make_executor_backend(executor_row=executor_row)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        cert = self._exec_cert(tmp_path, serial=1)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/sessions/1/filter",
+            json={"stdout": "", "stderr": ""},
+            headers=self._fwd(tmp_path, cert),
         )
         assert resp.status_code == 200
         assert resp.json()["user"] == {
             "caller": "executor",
             "executor_id": "venya-exec-1",
-            "presented_serial": "0000000000000001",
+            "presented_serial": "1",
             "revoked": False,
         }
 
-    def test_identity_revoked_rejected_403(self):
+    def test_identity_revoked_rejected_403(self, tmp_path):
         """Executor.revoked_at set → identity-flag revocation, terminal."""
         executor_row, _, _ = self._rows(revoked_at=datetime.now(UTC))
         backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        cert = self._exec_cert(tmp_path, serial=1)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/sessions/1/filter",
             json={"stdout": "", "stderr": ""},
-            headers={
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Subject": self.EXEC_SUBJECT,
-                "X-Client-Serial": "0000000000000001",
-            },
+            headers=self._fwd(tmp_path, cert),
         )
         assert resp.status_code == 403
 
-    def test_presented_serial_revoked_rejected_403(self):
-        """Presented serial in the CRL → serial-history revocation."""
+    def test_presented_serial_revoked_rejected_403(self, tmp_path):
+        """The VERIFIED cert's serial is in the CRL → serial-history revocation."""
         executor_row, _, crl_row = self._rows()
         backend, _ = self._make_executor_backend(executor_row=executor_row, crl_row=crl_row)
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        cert = self._exec_cert(tmp_path, serial=2)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/sessions/1/filter",
             json={"stdout": "", "stderr": ""},
-            headers={
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Subject": self.EXEC_SUBJECT,
-                "X-Client-Serial": "0000000000000002",
-            },
+            headers=self._fwd(tmp_path, cert),
         )
         assert resp.status_code == 403
 
-    def test_missing_serial_header_falls_back_to_record_serial(self):
-        """Named decision: no X-Client-Serial (older nginx) → the revocation
-        helper falls back to the CURRENT ExecutorCert record serial — a
-        serial-form revocation of the current credential still refuses."""
-        executor_row, cert_row, crl_row = self._rows()
-        backend, _ = self._make_executor_backend(executor_row=executor_row, cert_row=cert_row, crl_row=crl_row)
-        app = self._create_executor_app(backend=backend)
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/sessions/1/filter",
-            json={"stdout": "", "stderr": ""},
-            headers={"X-Client-Verified": "SUCCESS", "X-Client-Subject": self.EXEC_SUBJECT},
-        )
-        assert resp.status_code == 403
-
-    def test_no_backend_fails_closed_403(self):
+    def test_no_backend_fails_closed_403(self, tmp_path):
         """Allowlist unverifiable (backend missing) → fail-closed 403."""
-        app = self._create_executor_app(backend=None)
+        app = self._create_executor_app(backend=None, tmp_path=tmp_path)
+        cert = self._exec_cert(tmp_path, serial=1)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/sessions/1/filter",
             json={"stdout": "", "stderr": ""},
-            headers={"X-Client-Verified": "SUCCESS", "X-Client-Subject": self.EXEC_SUBJECT},
+            headers=self._fwd(tmp_path, cert),
         )
         assert resp.status_code == 403
 
@@ -556,12 +606,12 @@ class TestExecutorSessionPathAuth:
 
     # --- Heartbeat gating (ticket sec-endpoint-ratelimit-hardening #7) ---
 
-    def test_heartbeat_no_cert_rejected_401(self):
-        """No X-Client-Verified → 401 BEFORE the route (the path was PUBLIC:
+    def test_heartbeat_no_cert_rejected_401(self, tmp_path):
+        """No forwarded cert → 401 BEFORE the route (the path was once PUBLIC:
         unauthenticated liveness stamping + revocation oracle)."""
         executor_row, _, _ = self._rows()
         backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",
@@ -569,120 +619,94 @@ class TestExecutorSessionPathAuth:
         )
         assert resp.status_code == 401
 
-    def test_heartbeat_verified_registered_passes(self):
+    def test_heartbeat_verified_registered_passes(self, tmp_path):
         """Verified cert + registered CN → through to the route with the
         middleware-set auth state (CN binding happens route-side)."""
         executor_row, _, _ = self._rows()
         backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        cert = self._exec_cert(tmp_path, serial=1)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",
             json={"executor_id": "venya-exec-1", "cert_fingerprint": "abc"},
-            headers={
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Subject": self.EXEC_SUBJECT,
-                "X-Client-Serial": "0000000000000001",
-            },
+            headers=self._fwd(tmp_path, cert),
         )
         assert resp.status_code == 200
         assert resp.json()["user"] == {
             "caller": "executor",
             "executor_id": "venya-exec-1",
-            "presented_serial": "0000000000000001",
+            "presented_serial": "1",
             "revoked": False,
         }
 
-    def test_heartbeat_revoked_identity_passes_through_for_advisory(self):
+    def test_heartbeat_revoked_identity_passes_through_for_advisory(self, tmp_path):
         """B1 RULING PIN: a revoked executor is NOT 403'd on the heartbeat
         path (contrast test_identity_revoked_rejected_403 on the session
         path) — it passes through for the advisory 200 {revoked:true} (F3
-        ride-along cooperative-stop channel); the route-side write-guard
-        skips the row stamp (pinned in test_executor_revocation_identity.py
-        ::test_identity_revoked_true)."""
+        ride-along cooperative-stop channel)."""
         executor_row, _, _ = self._rows(revoked_at=datetime.now(UTC))
         backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        cert = self._exec_cert(tmp_path, serial=1)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/heartbeat",
             json={"executor_id": "venya-exec-1", "cert_fingerprint": "abc"},
-            headers={
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Subject": self.EXEC_SUBJECT,
-                "X-Client-Serial": "0000000000000001",
-            },
+            headers=self._fwd(tmp_path, cert),
         )
         assert resp.status_code == 200
         assert resp.json()["user"]["caller"] == "executor"
         # audit-ingest-revoked-serial-flag-divergence: the admission verdict
         # + its input ride on auth_user for the route to share by construction.
         assert resp.json()["user"]["revoked"] is True
-        assert resp.json()["user"]["presented_serial"] == "0000000000000001"
+        assert resp.json()["user"]["presented_serial"] == "1"
 
     # --- Audit-forwarder ingest gating (ticket audit-forwarder-server-sink #307) ---
 
-    def test_audit_ingest_no_cert_rejected_401(self):
-        """No X-Client-Verified → 401 before the route: the sink writes
+    def test_audit_ingest_no_cert_rejected_401(self, tmp_path):
+        """No forwarded cert → 401 before the route: the sink writes
         ledger rows, so an anonymous POST is an audit-forgery attempt."""
         executor_row, _, _ = self._rows()
         backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/audit/ingest", content=b"x")
         assert resp.status_code == 401
         assert resp.json()["detail"] == "Executor mTLS authentication required"
 
-    def test_audit_ingest_verified_registered_passes(self):
+    def test_audit_ingest_verified_registered_passes(self, tmp_path):
         """Verified cert + registered CN → route with caller=executor state
         (route-side guard + provenance write pinned in test_audit.py)."""
         executor_row, _, _ = self._rows()
         backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        cert = self._exec_cert(tmp_path, serial=1)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/audit/ingest",
-            content=b"x",
-            headers={
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Subject": self.EXEC_SUBJECT,
-                "X-Client-Serial": "0000000000000001",
-            },
-        )
+        resp = client.post("/api/v1/audit/ingest", content=b"x", headers=self._fwd(tmp_path, cert))
         assert resp.status_code == 200
         assert resp.json()["user"] == {
             "caller": "executor",
             "executor_id": "venya-exec-1",
-            "presented_serial": "0000000000000001",
+            "presented_serial": "1",
             "revoked": False,
         }
 
-    def test_audit_ingest_revoked_identity_passes_through(self):
+    def test_audit_ingest_revoked_identity_passes_through(self, tmp_path):
         """D2 RULING PIN (#307): a revoked executor is NOT 403'd on the
         ingest path — its evidence still lands, route-side flagged
         sender_revoked=true (contrast test_identity_revoked_rejected_403
-        on the session path). The reject_revoked=False here is for
-        EVIDENCE PRESERVATION, a different purpose than the heartbeat's
-        cooperative-stop advisory channel."""
+        on the session path)."""
         executor_row, _, _ = self._rows(revoked_at=datetime.now(UTC))
         backend, _ = self._make_executor_backend(executor_row=executor_row)
-        app = self._create_executor_app(backend=backend)
+        app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
+        cert = self._exec_cert(tmp_path, serial=1)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post(
-            "/api/v1/audit/ingest",
-            content=b"x",
-            headers={
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Subject": self.EXEC_SUBJECT,
-                "X-Client-Serial": "0000000000000001",
-            },
-        )
+        resp = client.post("/api/v1/audit/ingest", content=b"x", headers=self._fwd(tmp_path, cert))
         assert resp.status_code == 200
         assert resp.json()["user"]["caller"] == "executor"
-        # audit-ingest-revoked-serial-flag-divergence: the admission verdict
-        # + its input ride on auth_user for the route to share by construction.
         assert resp.json()["user"]["revoked"] is True
-        assert resp.json()["user"]["presented_serial"] == "0000000000000001"
+        assert resp.json()["user"]["presented_serial"] == "1"
 
 
 class TestBareHealthAlias:

@@ -79,8 +79,14 @@ def _generate_test_csr(cn="test-exec"):
     return csr.public_bytes(serialization.Encoding.PEM).decode()
 
 
-def _make_mock_ca():
-    """Mock CA whose sign_csr yields certs with DISTINCT incrementing serials."""
+def _make_mock_ca(real_manager=None):
+    """Mock CA whose sign_csr yields certs with DISTINCT incrementing serials.
+
+    #314: when a real CAManager is supplied (env fixture), verification-side
+    surface (load_ca/get_ca_cert_pem) is REAL against the temp CA dir; only
+    the issuance serials stay scripted."""
+    if real_manager is not None:
+        return real_manager
     mock_ca = MagicMock()
     counter = itertools.count(0x5000)  # start clear of seeded test serials
 
@@ -116,12 +122,33 @@ def env(tmp_path):
     seed.commit()
     seed.close()
 
+    from server.ca import CAManager
+    from server.config import CASecurityConfig, InnerTLSConfig
+
+    ca_dir = tmp_path / "ca"
+    ca_dir.mkdir()
+    real_ca = CAManager(str(ca_dir), CASecurityConfig(key_passphrase_env="ABSENT_TEST_VAR"))
+    real_ca.initialize()
+    cert_prefix = tmp_path / "certfiles"
+    cert_prefix.mkdir()
+
     app = FastAPI()
     backend = MagicMock()
     backend.get_session.side_effect = lambda: SessionLocal()
     app.state.backend = backend
-    app.state.config = ServerConfig(recovery_code_pepper=PEPPER)
-    app.state.ca_manager = _make_mock_ca()
+    app.state.config = ServerConfig(
+        recovery_code_pepper=PEPPER,
+        ca_dir=str(ca_dir),
+        inner_mtls=InnerTLSConfig(
+            enabled=True,
+            cert_file="/test/inner.crt",
+            key_file="/test/inner.key",
+            client_ca_file="/test/inner-ca.crt",
+            cert_path_prefix=str(cert_prefix),
+        ),
+    )
+    app.state.ca_manager = _make_mock_ca(real_ca)
+    app.state.test_cert_prefix = cert_prefix
     app.state.core = MagicMock()
     app.state.core.encrypt.return_value = (b"wrapped_dek", b"nonce", b"ciphertext")
     app.dependency_overrides[get_backend] = lambda: backend
@@ -619,14 +646,42 @@ class TestDialGates:
 # C5/C6 are the ruled-named cells — pinned as NAMED tests (approval condition 2).
 
 
-def _incumbent_headers(serial, cn="exec-a", verified="SUCCESS"):
-    """nginx-forwarded client-cert headers ($ssl_client_serial is uppercase;
-    DER strips leading zero bytes — normalization is the server's job)."""
-    return {
-        "X-Client-Verified": verified,
-        "X-Client-Subject": f"O=Venya,CN={cn}",
-        "X-Client-Serial": serial,
-    }
+def _incumbent_headers(client_app, serial_hex, cn="exec-a"):
+    """Write a Root-CA-signed leaf (CN, fixed serial) into the fixture's
+    cert prefix and return the forwarded-cert-file header (#314 — the only
+    identity carrier; the old X-Client-* trio is retired)."""
+    try:
+        from .conftest import forwarded_headers, make_leaf
+    except ImportError:
+        from conftest import forwarded_headers, make_leaf
+
+    ca_cert, ca_key = client_app.state.ca_manager.load_ca()
+    cert = make_leaf(ca_cert, ca_key, cn=cn, serial=int(serial_hex, 16))
+    return forwarded_headers(client_app.state.test_cert_prefix, cert)
+
+
+def _foreign_ca_headers(client_app, serial_hex="0000000000001000", cn="exec-a"):
+    """Cross-plane leaf: signed by a DIFFERENT CA (admin-plane shape)."""
+    try:
+        from .conftest import forwarded_headers, make_leaf
+    except ImportError:
+        from conftest import forwarded_headers, make_leaf
+
+    admin_key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(UTC)
+    admin_ca = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Venya Admin CA")]))
+        .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Venya Admin CA")]))
+        .public_key(admin_key.public_key())
+        .serial_number(9)
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(admin_key, hashes.SHA256())
+    )
+    cert = make_leaf(admin_ca, admin_key, cn=cn, serial=int(serial_hex, 16))
+    return forwarded_headers(client_app.state.test_cert_prefix, cert)
 
 
 class TestIncumbentExemption:
@@ -648,7 +703,7 @@ class TestIncumbentExemption:
         client, SessionLocal = env
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000001000")
-        resp = _register(client, headers=_incumbent_headers("0000000000001000"))
+        resp = _register(client, headers=_incumbent_headers(client.app, "0000000000001000"))
         assert resp.status_code == 201
         assert resp.json()["serial_number"] != "0000000000001000"
         s = SessionLocal()
@@ -666,7 +721,7 @@ class TestIncumbentExemption:
         client, SessionLocal = env
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000001000")
-        resp = _register(client, headers=_incumbent_headers("0000000000002222"))
+        resp = _register(client, headers=_incumbent_headers(client.app, "0000000000002222"))
         assert resp.status_code == 400
         assert "Enrollment token required" in resp.json()["detail"]
 
@@ -676,7 +731,7 @@ class TestIncumbentExemption:
         client, SessionLocal = env
         _seed_executor(SessionLocal, revoked_at=datetime.now(UTC))
         _seed_cert(SessionLocal, serial="0000000000001000")
-        resp = _register(client, headers=_incumbent_headers("0000000000001000"))
+        resp = _register(client, headers=_incumbent_headers(client.app, "0000000000001000"))
         assert resp.status_code == 400
 
     def test_c4_crled_serial_no_exemption_even_on_record_match(self, env):
@@ -685,7 +740,7 @@ class TestIncumbentExemption:
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000001000")
         _seed_revocation(SessionLocal, "0000000000001000")
-        resp = _register(client, headers=_incumbent_headers("0000000000001000"))
+        resp = _register(client, headers=_incumbent_headers(client.app, "0000000000001000"))
         assert resp.status_code == 400
 
     def test_c5_revoked_then_re_enrolled_old_serial_no_exemption(self, env):
@@ -696,7 +751,7 @@ class TestIncumbentExemption:
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000009999")  # fresh record post re-enrollment
         _seed_revocation(SessionLocal, "0000000000001000", reason="Replaced by re-registration/rotation")
-        resp = _register(client, headers=_incumbent_headers("0000000000001000"))
+        resp = _register(client, headers=_incumbent_headers(client.app, "0000000000001000"))
         assert resp.status_code == 400
 
     def test_c6_revocation_precedes_record_match(self, env):
@@ -717,7 +772,7 @@ class TestIncumbentExemption:
             return real(db, executor_id, presented_serial=presented_serial, **kw)
 
         with patch.object(executors_routes, "executor_revocation_state", _spy):
-            resp = _register(client, headers=_incumbent_headers("0000000000001000"))
+            resp = _register(client, headers=_incumbent_headers(client.app, "0000000000001000"))
         assert resp.status_code == 400
         assert seen["presented"] == "0000000000001000"
 
@@ -730,13 +785,16 @@ class TestIncumbentExemption:
         assert resp.status_code == 400
         assert "Enrollment token required" in resp.json()["detail"]
 
-    def test_unverified_cert_no_exemption(self, env):
-        """Preserved negative: X-Client-Verified != SUCCESS → 400 even with a
-        perfect serial + CN (nginx only ever forwards SUCCESS for chain-verified certs)."""
+    def test_unparseable_cert_file_no_exemption(self, env):
+        """Preserved negative (was: X-Client-Verified != SUCCESS): garbage
+        behind the forwarded-cert header verifies as NOTHING → no exemption
+        even though the record serial + CN are perfect."""
         client, SessionLocal = env
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000001000")
-        resp = _register(client, headers=_incumbent_headers("0000000000001000", verified="FAILED"))
+        bogus = client.app.state.test_cert_prefix / "bogus.pem"
+        bogus.write_bytes(b"-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----")
+        resp = _register(client, headers={"x-client-cert-file": str(bogus)})
         assert resp.status_code == 400
 
     def test_cn_mismatch_no_exemption(self, env):
@@ -745,23 +803,37 @@ class TestIncumbentExemption:
         client, SessionLocal = env
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000001000")
-        resp = _register(client, headers=_incumbent_headers("0000000000001000", cn="exec-b"))
+        resp = _register(client, headers=_incumbent_headers(client.app, "0000000000001000", cn="exec-b"))
         assert resp.status_code == 400
 
-    def test_empty_serial_header_no_exemption(self, env):
-        """nginx drops an empty $ssl_client_serial; a forwarded "" must not exempt."""
+    def test_nonexistent_cert_file_no_exemption(self, env):
+        """(was: empty serial header) A path to a nonexistent file must not exempt."""
         client, SessionLocal = env
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000001000")
-        resp = _register(client, headers=_incumbent_headers(""))
+        resp = _register(client, headers={"x-client-cert-file": str(client.app.state.test_cert_prefix / "gone.pem")})
         assert resp.status_code == 400
 
-    def test_nginx_serial_case_and_padding_normalized(self, env):
-        """$ssl_client_serial is uppercase and DER strips leading zero bytes:
-        "ABCDEF" must match record "0000000000abcdef" (else ~1/16 of rotations
-        flake on a leading-zero serial)."""
+    def test_cert_outside_prefix_no_exemption(self, env):
+        """#314 path guard: a readable valid cert OUTSIDE the configured
+        prefix is never read → no exemption."""
+        import shutil
+
         client, SessionLocal = env
         _seed_executor(SessionLocal)
-        _seed_cert(SessionLocal, serial="0000000000abcdef")
-        resp = _register(client, headers=_incumbent_headers("ABCDEF"))
-        assert resp.status_code == 201
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        headers = _incumbent_headers(client.app, "0000000000001000")
+        src_path = headers["x-client-cert-file"]
+        outside = client.app.state.test_cert_prefix.parent / "outside.pem"
+        shutil.copyfile(src_path, outside)
+        resp = _register(client, headers={"x-client-cert-file": str(outside)})
+        assert resp.status_code == 400
+
+    def test_cross_plane_cert_no_exemption(self, env):
+        """#314 ruled-Q4 row: an Admin-CA (foreign-chain) cert with the exact
+        record serial + CN is refused at the executor-plane chain check."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial="0000000000001000")
+        resp = _register(client, headers=_foreign_ca_headers(client.app, "0000000000001000"))
+        assert resp.status_code == 400

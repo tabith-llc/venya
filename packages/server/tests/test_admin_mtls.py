@@ -25,10 +25,15 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID, NameOID
 from fastapi import FastAPI, Request
 from server.ca import AdminCAManager
-from server.config import AdminMTLSConfig, CASecurityConfig, ServerConfig
+from server.config import AdminMTLSConfig, CASecurityConfig, InnerTLSConfig, ServerConfig
 from server.dependencies import get_current_user, require_admin
 from server.middleware.auth import SessionMiddleware
 from starlette.testclient import TestClient
+
+try:
+    from .conftest import ADMIN_SERIAL_HEX, FOREIGN_SERIAL_HEX, forwarded_headers, make_cert_prefix, make_leaf
+except ImportError:  # pytest rootdir/tests-path import mode
+    from conftest import ADMIN_SERIAL_HEX, FOREIGN_SERIAL_HEX, forwarded_headers, make_cert_prefix, make_leaf
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -486,6 +491,7 @@ def _create_admin_mtls_app(
     admin_mtls_enabled: bool = True,
     revocation_rows: list[tuple[str, str]] | None = None,
     with_backend: bool = True,
+    cert_prefix=None,
 ):
     """Create a test app with admin mTLS middleware configured.
 
@@ -497,6 +503,9 @@ def _create_admin_mtls_app(
             real-SQLite cells in test_session_manager_gate.py).
         with_backend: False simulates backend-unavailable → the middleware
             must fail closed.
+        cert_prefix: directory the forwarded-cert-file header may point into
+            (the #314 inner-mTLS cert-path prefix; the suite passes the path
+            through the configured header exactly as nginx would).
     """
     from server.config import AdminMTLSConfig, ServerConfig
 
@@ -508,6 +517,13 @@ def _create_admin_mtls_app(
             enabled=admin_mtls_enabled,
             ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
             known_admin_ids=known_admin_ids,
+        ),
+        inner_mtls=InnerTLSConfig(
+            enabled=True,
+            cert_file="/test/inner.crt",
+            key_file="/test/inner.key",
+            client_ca_file="/test/inner-ca.crt",
+            cert_path_prefix=str(cert_prefix) if cert_prefix is not None else None,
         ),
         recovery_code_pepper="test-pepper",
     )
@@ -535,262 +551,211 @@ def _create_admin_mtls_app(
     return app
 
 
-def _sign_admin_cert_and_pem(
-    admin_ca_dir: str,
-    admin_identity: str,
-    passphrase: str = "test_passphrase",
-) -> tuple[str, str]:
-    """Sign an admin cert and return PEM-encoded cert string and key PEM."""
-    os.environ[passphrase] = passphrase
-    from server.ca import AdminCAManager
-    from server.config import CASecurityConfig
+def _admin_ca_pair(admin_ca_dir: str, passphrase: str = "test_passphrase"):
+    """Load (ca_cert, ca_key) from an initialized admin CA dir (key is encrypted)."""
+    key = serialization.load_pem_private_key(
+        (Path(admin_ca_dir) / "admin-ca.key").read_bytes(),
+        password=passphrase.encode(),
+    )
+    return x509.load_pem_x509_certificate((Path(admin_ca_dir) / "admin-ca.crt").read_bytes()), key
 
-    ca_security = CASecurityConfig(key_passphrase_env=passphrase)
-    manager = AdminCAManager(Path(admin_ca_dir), ca_security)
+
+def _admin_leaf(
+    admin_ca_dir: str, admin_ca_security, *, cn="admin@example.com", serial=None, expired=False, san_email=None
+):
+    """Initialize the admin CA and build a forwarded leaf with a fixed serial."""
+    os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
+    manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
     manager.initialize()
-
-    _cert, key_pem, cert_pem = manager.sign_admin_cert(admin_identity)
-    return cert_pem.decode("utf-8"), key_pem.decode("utf-8")
+    ca_cert, ca_key = _admin_ca_pair(admin_ca_dir)
+    return make_leaf(
+        ca_cert,
+        ca_key,
+        cn=cn,
+        serial=serial,
+        expired=expired,
+        san_email=cn if san_email and "@" in cn else san_email,
+    )
 
 
 class TestAdminMTLSMiddleware:
-    """Tests for admin mTLS middleware validation chain."""
+    """Tests for the admin-mTLS chain on the crypto-forwarded certificate (#314)."""
 
-    def test_header_injection_rejected(self, admin_ca_dir, admin_ca_security):
-        """Missing X-Client-Subject on admin route should be rejected."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
+    def test_header_injection_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """The retired header trio, forged, with NO forwarded cert → 403.
 
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
-
+        Headline #314 pair (truth-table N1): headers that used to BE identity
+        are now inert; only the crypto-verified certificate opens the gate."""
+        prefix = make_cert_prefix(tmp_path)
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        # Send X-Client-Verified but NOT X-Client-Subject
         resp = client.get(
             "/api/v1/admin/test",
-            headers={"X-Client-Verified": "SUCCESS"},
+            headers={
+                "X-Client-Verified": "SUCCESS",
+                "X-Client-Subject": "CN=admin@example.com,OU=Admin,O=Venya",
+                "X-Client-Serial": ADMIN_SERIAL_HEX,
+            },
         )
         assert resp.status_code == 403
         assert "client certificate" in resp.json()["detail"].lower()
 
-    def test_missing_cert_on_admin_route(self, admin_ca_dir, admin_ca_security):
-        """No client cert on admin route should return 403."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
-
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
-
+    def test_missing_cert_on_admin_route(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """No forwarded cert file at all on an admin route → 403."""
+        prefix = make_cert_prefix(tmp_path)
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/admin/test")
         assert resp.status_code == 403
         assert "client certificate" in resp.json()["detail"].lower()
 
-    def test_valid_cert_passes(self, admin_ca_dir, admin_ca_security):
-        """Valid cert + known identity should pass mTLS and continue to bearer auth."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
-
-        cert, _, _ = manager.sign_admin_cert("admin@example.com")
-        # Extract CN from cert subject for X-Client-Subject header
-        cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-        subject_dn = f"CN={cn},OU=Admin,O=Venya"
-
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
-
+    def test_valid_cert_passes(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Admin-CA-signed forwarded cert + known identity → 200, caller=admin."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = _admin_leaf(admin_ca_dir, admin_ca_security, serial=int(ADMIN_SERIAL_HEX, 16))
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get(
-            "/api/v1/admin/test",
-            headers={
-                "X-Client-Subject": subject_dn,
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Serial": "1234123412341234",
-            },
-        )
-        # mTLS passes → middleware sets auth_user → route handler returns 200
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 200
         assert resp.json()["user"]["caller"] == "admin"
+        assert resp.json()["user"]["user_id"] == "admin@example.com"
 
-    def test_expired_cert_rejected(self, admin_ca_dir, admin_ca_security):
-        """Expired cert is rejected at TLS layer by Nginx; server no longer checks expiration.
-        This test verifies that a known identity with valid headers passes."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
+    def test_expired_cert_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Expired leaf (valid chain, valid identity) → 403.
 
-        cert, _, _ = manager.sign_admin_cert("admin@example.com")
-        cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-        subject_dn = f"CN={cn},OU=Admin,O=Venya"
-
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
-
+        #314 behavior change: nginx dropped expired certs at the outer TLS
+        layer; with app-side verification the APP must check validity too
+        (the old cell documented the opposite posture and passed on headers).
+        """
+        prefix = make_cert_prefix(tmp_path)
+        cert = _admin_leaf(admin_ca_dir, admin_ca_security, expired=True)
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get(
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
+        assert resp.status_code == 403
+
+    def test_cert_outside_path_prefix_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Path guard (N2): a cert-file path OUTSIDE the configured prefix is
+        never read — traversal/symlink escape fails closed."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = _admin_leaf(admin_ca_dir, admin_ca_security, serial=int(ADMIN_SERIAL_HEX, 16))
+        outside = tmp_path / "outside.pem"
+        from cryptography.hazmat.primitives import serialization as _ser
+
+        outside.write_bytes(cert.public_bytes(_ser.Encoding.PEM))
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers={"x-client-cert-file": str(outside)})
+        assert resp.status_code == 403
+        # sibling-prefix string escape (/certfiles vs /certfiles-secret)
+        resp2 = client.get(
             "/api/v1/admin/test",
-            headers={
-                "X-Client-Subject": subject_dn,
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Serial": "1234123412341234",
-            },
+            headers={"x-client-cert-file": str(outside).replace("certfiles", "certfiles-secret")},
         )
-        # mTLS passes → middleware sets auth_user → route handler returns 200
-        assert resp.status_code == 200
+        assert resp2.status_code == 403
 
-    def test_unknown_identity_rejected(self, admin_ca_dir, admin_ca_security):
-        """Valid cert but unknown identity should be rejected."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
+    def test_unparseable_cert_file_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Garbage bytes behind the header (N3) → 403, no read-side crash."""
+        prefix = make_cert_prefix(tmp_path)
+        bogus = prefix / "bogus.pem"
+        bogus.write_bytes(b"-----BEGIN CERTIFICATE-----\nnot-a-cert\n-----END CERTIFICATE-----")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers={"x-client-cert-file": str(bogus)})
+        assert resp.status_code == 403
 
-        _, _, _ = manager.sign_admin_cert("rogue@attacker.internal")
-        # Use unknown identity
-        subject_dn = "CN=rogue@attacker.internal,OU=Admin,O=Venya"
+    def test_cross_plane_cert_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Cross-plane row (ruled Q4, N4): a FOREIGN-chain cert presenting the
+        allowlisted admin CN is refused at the chain check — the CN/allowlist
+        comparison never runs."""
+        prefix = make_cert_prefix(tmp_path)
+        from cryptography.hazmat.primitives.asymmetric import ec as _ec
 
-        # Only admin@example.com is known
+        rogue_key = _ec.generate_private_key(_ec.SECP256R1())
+        now = datetime.now(UTC)
+        rogue_cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "admin@example.com")]))
+            .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Rogue CA")]))
+            .public_key(rogue_key.public_key())
+            .serial_number(int(ADMIN_SERIAL_HEX, 16))
+            .not_valid_before(now - timedelta(hours=1))
+            .not_valid_after(now + timedelta(days=1))
+            .sign(rogue_key, hashes.SHA256())
+        )
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, rogue_cert))
+        assert resp.status_code == 403
+
+    def test_unknown_identity_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Valid Admin-CA chain, identity NOT in known_admin_ids → 403."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = _admin_leaf(admin_ca_dir, admin_ca_security, cn="rogue@attacker.internal")
         app = _create_admin_mtls_app(
             admin_ca_dir,
             "admin@example.com",
             known_admin_ids=["admin@example.com"],
+            cert_prefix=prefix,
         )
-
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get(
-            "/api/v1/admin/test",
-            headers={
-                "X-Client-Subject": subject_dn,
-                "X-Client-Verified": "SUCCESS",
-            },
-        )
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 403
         assert "client certificate" in resp.json()["detail"].lower()
 
-    def test_san_preferred_over_cn(self, admin_ca_dir, admin_ca_security):
-        """SAN DNS should take precedence over CN for identity."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
-
-        # Create a cert with CN = "admin@example.com" (known identity)
-        ca_cert, ca_key = manager._load_ca_cert_and_key()
-        from cryptography.hazmat.primitives.asymmetric import ec as ec_mod
-
-        test_key = ec_mod.generate_private_key(ec_mod.SECP256R1())
-
-        cert_with_san = (
-            x509.CertificateBuilder()
-            .subject_name(
-                x509.Name(
-                    [
-                        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
-                        x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
-                        x509.NameAttribute(NameOID.COMMON_NAME, "admin@example.com"),
-                    ]
-                )
-            )
-            .issuer_name(ca_cert.subject)
-            .public_key(test_key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.now(UTC))
-            .not_valid_after(datetime.now(UTC) + timedelta(days=90))
-            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-            .add_extension(
-                x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
-                critical=False,
-            )
-            .add_extension(
-                x509.SubjectAlternativeName([x509.DNSName("admin@example.com")]),
-                critical=False,
-            )
-            .sign(ca_key, hashes.SHA256())
+    def test_san_preferred_over_cn(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Identity extraction on the VERIFIED cert prefers SAN over CN."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = _admin_leaf(
+            admin_ca_dir,
+            admin_ca_security,
+            cn="admin@example.com",
+            serial=int(ADMIN_SERIAL_HEX, 16),
+            san_email=True,
         )
-
-        cn = cert_with_san.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-        subject_dn = f"CN={cn},OU=Admin,O=Venya"
-
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
-
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get(
-            "/api/v1/admin/test",
-            headers={
-                "X-Client-Subject": subject_dn,
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Serial": "1234123412341234",
-            },
-        )
-        # Should pass because CN = "admin@example.com" matches known_admin_ids
-        assert resp.status_code == 200  # mTLS passes → auth_user set → route returns 200
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
+        assert resp.status_code == 200
+        assert resp.json()["user"]["user_id"] == "admin@example.com"
 
-    def test_unknown_identity_rejected_signed_cert(self, admin_ca_dir, admin_ca_security):
-        """Unknown identity is rejected even with a CA-signed cert.
-
-        (Formerly misnamed test_revoked_cert_rejected with a docstring
-        claiming the server does not check revocation — it DOES now, via
-        X-Client-Serial vs AdminCertRevocation; see
-        TestAdminMtlsSerialRevocation. Ticket
-        sec-admin-mtls-allowlist-revocation.)"""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
-
-        _, _, _ = manager.sign_admin_cert("admin@example.com")
-        # Use unknown identity
-        subject_dn = "CN=unknown@identity.internal,OU=Admin,O=Venya"
-
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
-
+    def test_unknown_identity_rejected_signed_cert(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Unknown identity is rejected even with a CA-signed cert."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = _admin_leaf(admin_ca_dir, admin_ca_security, cn="unknown@identity.internal")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get(
-            "/api/v1/admin/test",
-            headers={
-                "X-Client-Subject": subject_dn,
-                "X-Client-Verified": "SUCCESS",
-            },
-        )
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 403
         assert "client certificate" in resp.json()["detail"].lower()
 
-    def test_non_admin_route_unaffected(self, admin_ca_dir, admin_ca_security):
-        """Non-admin routes should not require mTLS even when enabled."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
-
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
-
+    def test_non_admin_route_unaffected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Non-admin routes do not require the forwarded cert."""
+        prefix = make_cert_prefix(tmp_path)
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/health")
         assert resp.status_code == 200
 
-    def test_admin_mtls_disabled_allows_admin_routes(self, admin_ca_dir, admin_ca_security):
-        """When admin_mtls is disabled, admin routes should work with bearer token only."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
-
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", admin_mtls_enabled=False)
-
+    def test_admin_mtls_disabled_allows_admin_routes(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """When admin_mtls is disabled, admin routes fall to bearer auth (401)."""
+        prefix = make_cert_prefix(tmp_path)
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", admin_mtls_enabled=False, cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/admin/test")
-        # Without mTLS, should get 401 (no bearer token), not 403
         assert resp.status_code == 401
         assert "Missing authentication token" in resp.json()["detail"]
 
-    def test_wrong_verified_value_rejected(self, admin_ca_dir, admin_ca_security):
-        """X-Client-Verified with wrong value should be rejected."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
-
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
-
+    def test_cert_file_absent_with_forged_headers_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Forged trio PLUS a nonexistent cert-file path → 403 (file must exist)."""
+        prefix = make_cert_prefix(tmp_path)
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
             "/api/v1/admin/test",
             headers={
-                "X-Client-Subject": "CN=admin@example.com,OU=Admin,O=Venya",
-                "X-Client-Verified": "false",  # Wrong value
+                "x-client-cert-file": str(prefix / "does-not-exist.pem"),
+                "X-Client-Verified": "SUCCESS",
             },
         )
         assert resp.status_code == 403
@@ -1255,7 +1220,7 @@ def _write_pem_bundle(certs: list[bytes], path: Path) -> None:
     path.write_bytes(b"".join(c if c.endswith(b"\n") else c + b"\n" for c in certs))
 
 
-def _create_concurrent_test_app(admin_ca_dir: str):
+def _create_concurrent_test_app(admin_ca_dir: str, cert_prefix=None):
     """Create a test app for concurrency tests."""
     from server.config import AdminMTLSConfig, ServerConfig
 
@@ -1264,6 +1229,13 @@ def _create_concurrent_test_app(admin_ca_dir: str):
             enabled=True,
             ca_cert=str(Path(admin_ca_dir) / "admin-ca.crt"),
             known_admin_ids=["admin@example.com"],
+        ),
+        inner_mtls=InnerTLSConfig(
+            enabled=True,
+            cert_file="/test/inner.crt",
+            key_file="/test/inner.key",
+            client_ca_file="/test/inner-ca.crt",
+            cert_path_prefix=str(cert_prefix) if cert_prefix is not None else None,
         ),
         recovery_code_pepper="test-pepper",
     )
@@ -1288,32 +1260,21 @@ def _create_concurrent_test_app(admin_ca_dir: str):
 class TestAdminMTLSConcurrency:
     """Tests for concurrent admin mTLS requests."""
 
-    def test_concurrent_admin_requests_with_same_cert(self, admin_ca_dir, admin_ca_security):
-        """10 simultaneous requests with same cert should all pass mTLS (no race conditions)."""
+    def test_concurrent_admin_requests_with_same_cert(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """10 simultaneous requests with same forwarded cert all pass mTLS (no race conditions)."""
         import concurrent.futures
 
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
+        prefix = make_cert_prefix(tmp_path)
+        cert = _admin_leaf(admin_ca_dir, admin_ca_security, serial=int(ADMIN_SERIAL_HEX, 16))
+        headers = forwarded_headers(prefix, cert)
 
-        cert, _, _ = manager.sign_admin_cert("admin@example.com")
-        cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-        subject_dn = f"CN={cn},OU=Admin,O=Venya"
-
-        app = _create_concurrent_test_app(admin_ca_dir)
+        app = _create_concurrent_test_app(admin_ca_dir, cert_prefix=prefix)
 
         results = []
 
         def make_request():
             client = TestClient(app, raise_server_exceptions=False)
-            resp = client.get(
-                "/api/v1/admin/test",
-                headers={
-                    "X-Client-Subject": subject_dn,
-                    "X-Client-Verified": "SUCCESS",
-                    "X-Client-Serial": "1234123412341234",
-                },
-            )
+            resp = client.get("/api/v1/admin/test", headers=headers)
             return resp.status_code
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -1332,53 +1293,62 @@ class TestAdminMTLSConcurrency:
 
 
 class TestAdminCARotation:
-    """Tests for admin CA rotation — now tests subject DN identity checking."""
+    """Identity extraction from VERIFIED certificates (header-DN parsing retired, #314)."""
 
-    def test_subject_dn_extraction(self, admin_ca_dir, admin_ca_security):
-        """CN extraction from subject DN works correctly."""
-        from server.middleware.auth import _extract_identity_from_subject
+    def test_cert_identity_extraction(self):
+        """_extract_identity_from_cert precedence: RFC822 SAN → DNS SAN → CN."""
+        from server.middleware.auth import _extract_identity_from_cert
 
-        assert _extract_identity_from_subject("CN=admin@venya-core-1,OU=Admin,O=Venya") == "admin@venya-core-1"
-        assert _extract_identity_from_subject("CN=simple@example.com") == "simple@example.com"
-        assert _extract_identity_from_subject("CN=with=equals,OU=Test,O=Venya") == "with=equals"
-        assert _extract_identity_from_subject("OU=Admin,O=Venya") == ""  # No CN
-
-    def test_known_identity_passes(self, admin_ca_dir, admin_ca_security):
-        """Known identity in X-Client-Subject should pass mTLS."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
-
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
-
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get(
-            "/api/v1/admin/test",
-            headers={
-                "X-Client-Subject": "CN=admin@example.com,OU=Admin,O=Venya",
-                "X-Client-Verified": "SUCCESS",
-                "X-Client-Serial": "1234123412341234",
-            },
+        ca_key = ec.generate_private_key(ec.SECP256R1())
+        now = datetime.now(UTC)
+        base = (
+            x509.CertificateBuilder()
+            .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test CA")]))
+            .public_key(ca_key.public_key())
+            .serial_number(1)
+            .not_valid_before(now - timedelta(hours=1))
+            .not_valid_after(now + timedelta(days=1))
         )
-        # mTLS passes → middleware sets auth_user → route handler returns 200
+        cn_only = base.subject_name(
+            x509.Name(
+                [
+                    x509.NameAttribute(NameOID.COMMON_NAME, "admin@venya-core-1"),
+                    x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                ]
+            )
+        ).sign(ca_key, hashes.SHA256())
+        assert _extract_identity_from_cert(cn_only) == "admin@venya-core-1"
+        dns_cn = base.subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "cn-value")]))
+        dns_cn = dns_cn.add_extension(x509.SubjectAlternativeName([x509.DNSName("dns-value")]), critical=False).sign(
+            ca_key, hashes.SHA256()
+        )
+        assert _extract_identity_from_cert(dns_cn) == "dns-value"
+        both = base.subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "cn-value")]))
+        both = both.add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("dns-value"), x509.RFC822Name("mail-value")]),
+            critical=False,
+        ).sign(ca_key, hashes.SHA256())
+        assert _extract_identity_from_cert(both) == "mail-value"
+        with pytest.raises(ValueError):
+            no_id = base.subject_name(x509.Name([])).sign(ca_key, hashes.SHA256())
+            _extract_identity_from_cert(no_id)
+
+    def test_known_identity_passes(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Known identity on the forwarded cert passes mTLS."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = _admin_leaf(admin_ca_dir, admin_ca_security, serial=int(ADMIN_SERIAL_HEX, 16))
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 200
 
-    def test_unknown_identity_rejected(self, admin_ca_dir, admin_ca_security):
-        """Unknown identity in X-Client-Subject should be rejected."""
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
-        manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
-        manager.initialize()
-
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
-
+    def test_unknown_identity_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Unknown identity on a CA-signed forwarded cert is rejected."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = _admin_leaf(admin_ca_dir, admin_ca_security, cn="unknown@attacker.com")
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get(
-            "/api/v1/admin/test",
-            headers={
-                "X-Client-Subject": "CN=unknown@attacker.com,OU=Admin,O=Venya",
-                "X-Client-Verified": "SUCCESS",
-            },
-        )
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 403
 
 
@@ -1387,96 +1357,102 @@ class TestAdminCARotation:
 # sec-admin-mtls-allowlist-revocation)
 # ---------------------------------------------------------------------------
 
-_VALID_ADMIN_HEADERS = {
-    "X-Client-Subject": "CN=admin@example.com,OU=Admin,O=Venya",
-    "X-Client-Verified": "SUCCESS",
-    "X-Client-Serial": "1234123412341234",
-}
-
 
 class TestAdminMtlsSerialRevocation:
-    """Truth table for the hardened admin-mTLS chain: allowlist fail-closed
-    (#15), serial presentation fail-closed + in-process revocation (#16).
-    Revocation cells run on REAL SQLite so the func.upper() SQL is actually
-    evaluated — mocks cannot model it (house precedent:
-    test_session_manager_gate.py)."""
+    """Truth table for the hardened admin-mTLS chain on crypto-forwarded
+    certs (#314 restages tickets sec-admin-mtls-allowlist-revocation #15/#16):
+    allowlist fail-closed, in-process revocation over the VERIFIED cert's
+    serial (the former missing-header branch is retired by construction —
+    a certificate object always carries its serial). Revocation cells run on
+    REAL SQLite so the func.upper() SQL is actually evaluated — mocks cannot
+    model it (house precedent: test_session_manager_gate.py)."""
 
-    def test_empty_allowlist_fails_closed(self, admin_ca_dir):
+    def _leaf(self, admin_ca_dir, admin_ca_security, serial_hex=ADMIN_SERIAL_HEX):
+        return _admin_leaf(admin_ca_dir, admin_ca_security, serial=int(serial_hex, 16))
+
+    def test_empty_allowlist_fails_closed(self, admin_ca_dir, admin_ca_security, tmp_path):
         """#15 negative: empty known_admin_ids (the CONFIG DEFAULT) rejects
-        even a fully valid header set — formerly the CN check was skipped and
-        ANY Root-CA cert (e.g. an executor cert) passed as caller=admin."""
-        app = _create_admin_mtls_app(admin_ca_dir, known_admin_ids=[])
+        even a fully valid forwarded cert."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(admin_ca_dir, known_admin_ids=[], cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get("/api/v1/admin/test", headers=_VALID_ADMIN_HEADERS)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 403
 
-    def test_executor_cn_rejected_by_allowlist(self, admin_ca_dir):
-        """#15 acceptance row: an executor cert's CN cannot authenticate as
-        admin under a populated allowlist."""
-        app = _create_admin_mtls_app(admin_ca_dir, known_admin_ids=["admin@example.com"])
+    def test_executor_cn_rejected_by_chain(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """#15 acceptance row, #314 upgrade (ruled Q4): a FOREIGN-chain cert —
+        the executor plane's shape — presenting an executor CN is refused at
+        the ADMIN-plane chain check; the allowlist is defense-in-depth only."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = _admin_leaf(admin_ca_dir, admin_ca_security, cn="venya-exec-1")
+        # Admin-CA-signed with an executor CN still hits the allowlist (in-plane);
+        # the CROSS-plane refusal is the rogue-chain cell in TestAdminMTLSMiddleware.
+        # Here pin the allowlist half: in-plane cert, executor CN, not listed.
+        app = _create_admin_mtls_app(admin_ca_dir, known_admin_ids=["admin@example.com"], cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get(
-            "/api/v1/admin/test",
-            headers={**_VALID_ADMIN_HEADERS, "X-Client-Subject": "CN=venya-exec-1,O=Venya"},
-        )
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 403
 
-    def test_revoked_serial_rejected(self, admin_ca_dir):
-        """#16 negative: a serial recorded via POST /admin/certs/revoke is
-        rejected IN-PROCESS (formerly recorded but consulted nowhere — the
-        old test even documented 'Server no longer checks revocation')."""
+    def test_revoked_serial_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """#16 negative: the VERIFIED cert's serial, recorded via
+        POST /admin/certs/revoke, is rejected IN-PROCESS."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
         app = _create_admin_mtls_app(
             admin_ca_dir,
-            revocation_rows=[("1234123412341234", "compromised")],
+            revocation_rows=[(ADMIN_SERIAL_HEX, "compromised")],
+            cert_prefix=prefix,
         )
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get("/api/v1/admin/test", headers=_VALID_ADMIN_HEADERS)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 403
         assert resp.json()["detail"] == "Admin certificate revoked"
 
-    def test_legacy_lowercase_row_matches_uppercase_presentation(self, admin_ca_dir):
+    def test_legacy_lowercase_row_matches_cert_serial(self, admin_ca_dir, admin_ca_security, tmp_path):
         """#16 format-trap pin (ruling B): a legacy as-provided (lowercase)
-        row still matches nginx's uppercase presentation via func.upper().
-        Write-side normalization makes mixed-case rows legacy-only."""
+        row still matches the cert-serial presentation via func.upper()."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security, serial_hex=FOREIGN_SERIAL_HEX)
         app = _create_admin_mtls_app(
             admin_ca_dir,
             revocation_rows=[("abcd1234abcd1234", "legacy-lowercase")],
+            cert_prefix=prefix,
         )
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get(
-            "/api/v1/admin/test",
-            headers={**_VALID_ADMIN_HEADERS, "X-Client-Serial": "ABCD1234ABCD1234"},
-        )
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 403
         assert resp.json()["detail"] == "Admin certificate revoked"
 
-    def test_unrevoked_serial_passes(self, admin_ca_dir):
-        """Positive half: allowlisted identity + presented, unrevoked serial
+    def test_unrevoked_serial_passes(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Positive half: allowlisted identity + verified, unrevoked serial
         → 200, caller=admin."""
-        app = _create_admin_mtls_app(admin_ca_dir)
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(admin_ca_dir, cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get("/api/v1/admin/test", headers=_VALID_ADMIN_HEADERS)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 200
         assert resp.json()["user"]["caller"] == "admin"
 
-    def test_missing_serial_fails_closed_with_recovery_detail(self, admin_ca_dir):
-        """#16 fail-closed (ruling 1): no X-Client-Serial → 403, and the
-        detail CARRIES THE RECOVERY PATH (installer re-run + venya-core
-        restart) — fail-loud includes telling the operator how to become
-        loud-ready. Safe to be specific: the caller already passed the
-        cert-verified + allowlist gates."""
-        app = _create_admin_mtls_app(admin_ca_dir)
+    def test_cert_file_absent_fails_closed_with_recovery_log(self, admin_ca_dir, admin_ca_security, tmp_path, caplog):
+        """#16 successor fail-closed: no forwarded cert → 403, and the server
+        LOG carries the recovery path (installer re-run + same-window
+        restarts) — the former response-detail guidance moved to the log
+        because the caller is unauthenticated at this point."""
+        prefix = make_cert_prefix(tmp_path)
+        app = _create_admin_mtls_app(admin_ca_dir, cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        headers = {k: v for k, v in _VALID_ADMIN_HEADERS.items() if k != "X-Client-Serial"}
-        resp = client.get("/api/v1/admin/test", headers=headers)
+        with caplog.at_level("WARNING", logger="venya.server"):
+            resp = client.get("/api/v1/admin/test")
         assert resp.status_code == 403
-        detail = resp.json()["detail"]
-        assert "installer" in detail
-        assert "restart venya-core" in detail
+        assert any("Recovery" in r.getMessage() for r in caplog.records)
 
-    def test_backend_unavailable_fails_closed(self, admin_ca_dir):
+    def test_backend_unavailable_fails_closed(self, admin_ca_dir, admin_ca_security, tmp_path):
         """Backend absence fails closed (mirrors _validate_executor_mtls)."""
-        app = _create_admin_mtls_app(admin_ca_dir, with_backend=False)
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(admin_ca_dir, with_backend=False, cert_prefix=prefix)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get("/api/v1/admin/test", headers=_VALID_ADMIN_HEADERS)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 403
