@@ -166,9 +166,12 @@ class AuditEvent(Base):
     event_type = Column(String(64), nullable=False)
     user_id = Column(
         String(64),
-        ForeignKey("users.user_id"),
         nullable=True,
-        comment="Preserved on user deletion — append-only audit trail",
+        comment=(
+            "FK INTENTIONALLY absent (migration 022) — stores the auth "
+            "principal verbatim regardless of mechanism (incl. mTLS CNs), "
+            "preserved on user deletion"
+        ),
     )
     fields = Column(Text, nullable=True)
     timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
