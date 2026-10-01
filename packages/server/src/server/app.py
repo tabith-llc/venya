@@ -193,6 +193,76 @@ def _init_core(backend, passphrase):  # type: ignore[no-untyped-def]
         raise
 
 
+def _verify_kek_sentinel(backend) -> None:  # type: ignore[no-untyped-def]
+    """Fail startup loudly when the configured passphrase does not match stored key material (#304).
+
+    A wrong passphrase used to boot green: the KEK derives "successfully" from
+    passphrase + persisted salt and the mismatch surfaced only at the first
+    unwrap — while the wrong KEK could WRAP NEW DEKs, making those secrets
+    permanently unrecoverable when the right passphrase returned. Sentinel-
+    first: the stored envelope (fixed known plaintext under the KEK) is
+    unwrapped at every boot. Legacy installs without a sentinel fall back to
+    sampling stored DEK envelopes — the wrong-passphrase verdict requires ALL
+    samples to fail (one corrupt row must not brick boot). Fresh empty
+    installs: nothing to verify, nothing to corrupt — one loud WARNING.
+    Follows the _init_core abort pattern: log a CRITICAL operator-actionable
+    error and re-raise; lifespan propagates so uvicorn exits non-zero. Never
+    logs the passphrase, the sentinel plaintext, or any key material.
+    """
+    from core.engine.backend import KekPassphraseMismatchError, SentinelStatus, verify_kek_sentinel
+
+    kek = backend.config.kek
+    if kek is None:
+        raise KekPassphraseMismatchError("no KEK at sentinel verification — bootstrap_kek must run first")
+
+    session = backend.get_session()
+    try:
+        check = verify_kek_sentinel(session, kek)
+    finally:
+        session.close()
+
+    if check.status is SentinelStatus.MATCH:
+        return
+    if check.status is SentinelStatus.MISMATCH:
+        logger.critical(
+            "Startup aborted: configured encryption passphrase does not match stored key material "
+            "(KEK sentinel unwrap failed). Set VENYA_DB__PASSPHRASE in /opt/venya/.env to the "
+            "passphrase the stored key material was wrapped under and restart — booting on a "
+            "wrong passphrase would wrap NEW secrets under a KEK that can never recover the "
+            "existing ones."
+        )
+        raise KekPassphraseMismatchError("configured encryption passphrase does not match stored key material")
+    if check.status is SentinelStatus.LEGACY_MISMATCH:
+        logger.critical(
+            "Startup aborted: configured encryption passphrase does not match stored key material — "
+            "all %d sampled secret DEK envelopes failed to unwrap (no KEK sentinel yet, legacy "
+            "install). Set VENYA_DB__PASSPHRASE to the passphrase the stored secrets were wrapped "
+            "under and restart.",
+            check.samples,
+        )
+        raise KekPassphraseMismatchError("configured encryption passphrase does not match stored key material")
+    if check.status is SentinelStatus.LEGACY_OK:
+        if check.failures:
+            logger.critical(
+                "KEK sentinel missing (legacy install): %d of %d sampled secret DEK envelopes failed "
+                "to unwrap (possibly corrupt rows — boot continues). The sentinel is minted at the "
+                "next successful store.",
+                check.failures,
+                check.samples,
+            )
+        else:
+            logger.warning(
+                "KEK sentinel missing (legacy install): passphrase verified against %d sampled secret "
+                "DEK envelope(s); the sentinel is minted at the next successful store.",
+                check.samples,
+            )
+        return
+    logger.warning(
+        "No KEK sentinel and no stored secrets (fresh install): nothing to verify the configured "
+        "passphrase against, nothing to corrupt; the sentinel is minted at the first store/init."
+    )
+
+
 async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     """Lifespan context manager for FastAPI."""
     config: ServerConfig = app.state.config  # type: ignore[attr-defined]
@@ -255,6 +325,11 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
 
     core = _init_core(backend, config.db.passphrase)
     app.state.core = core  # type: ignore[attr-defined]
+
+    # #304: prove the configured passphrase against stored key material BEFORE
+    # serving — a wrong passphrase must never wrap new DEKs under an
+    # unrecoverable KEK. Loud CRITICAL + raise (uvicorn exits) on mismatch.
+    _verify_kek_sentinel(backend)
 
     # Initialize FIDO2 manager after DB is ready
     from .fido2.manager import Fido2Manager

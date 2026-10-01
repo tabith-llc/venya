@@ -90,6 +90,20 @@ Notable changes to Venya will be documented in this file.
   (`[audit] max_batch_lines`, default 500, bounded by `max_buffer_size`).
 
 ### Fixed
+- **Server: a wrong encryption passphrase no longer boots silently.** The KEK
+  derives from the passphrase plus a persisted salt, so a mismatch previously
+  surfaced only at the first decrypt — while the wrong KEK could already wrap
+  NEW DEKs, making secrets stored during that window permanently
+  unrecoverable. A single-row KEK sentinel (fixed known plaintext wrapped
+  with the SAME AES-256-KW envelope as secret DEKs — no new crypto format) is
+  now unwrapped at every startup; a mismatch logs a loud CRITICAL error and
+  aborts before any new wrapping can happen, value-free. Legacy installs
+  without a sentinel fall back to sampling up to 5 stored DEK envelopes —
+  only an all-fail verdict aborts, so one corrupt row cannot brick boot.
+  Fresh empty installs boot with one WARNING (nothing to verify, nothing to
+  corrupt). The sentinel is minted idempotently at the first successful
+  crypto use (the single wrap-convergence point, Core.encrypt). Adds Alembic
+  migration 032 (kek_sentinel table; model+migration together per repo rule).
 - **CLI: `venya audit --json` now prints parseable JSON when the audit log is
   empty.** With zero events the command printed the human string
   "No audit events found." even under `--json`, breaking scripted

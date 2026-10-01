@@ -6,15 +6,18 @@
 
 """Core facade: get/put/delete/list with RBAC enforcement and rate limiting."""
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy import or_
 
 from ..iam.models import Role, Secret, SecretRole, SessionSecret
-from .backend import Backend
+from .backend import Backend, ensure_kek_sentinel
 from .encryption import decrypt_secret as _decrypt_secret_impl
 from .rate_limiter import RateLimiter
+
+logger = logging.getLogger(__name__)
 
 
 class Caller(str):
@@ -446,6 +449,12 @@ class Core:
     def encrypt(self, value: bytes) -> tuple[bytes, bytes, bytes]:
         """Encrypt a value using the core's KEK.
 
+        Convergence point for the KEK-sentinel mint (#304): every KEK-wrapped
+        envelope in the system is created here (store-secret upsert and the
+        admin enrollment-token meta path), so the idempotent get-or-create
+        below lands the sentinel on the first successful crypto use of every
+        boot — legacy installs and fresh installs alike.
+
         Returns:
             Tuple of (wrapped_dek, nonce, ciphertext).
 
@@ -457,7 +466,22 @@ class Core:
 
         from .encryption import encrypt_secret
 
-        return encrypt_secret(self.kek, value)
+        result = encrypt_secret(self.kek, value)
+
+        # Sentinel mint after a successful wrap — best-effort: the wrap above
+        # is the customer's data path and must not be lost to a belt failure.
+        # The boot-time check (#304) falls back to DEK sampling if the row
+        # never lands, so a mint failure degrades detection, never security.
+        try:
+            session = self.backend.get_session()
+            try:
+                ensure_kek_sentinel(session, self.kek)
+            finally:
+                session.close()
+        except Exception:
+            logger.warning("KEK sentinel mint failed; startup verification falls back to DEK sampling", exc_info=True)
+
+        return result
 
     def decrypt_secret(self, secret: Secret) -> str:
         """Decrypt and return a secret value from a Secret ORM object."""
