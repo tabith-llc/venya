@@ -401,8 +401,13 @@ class ExecutorConfig(BaseSettings):
             return obj
 
         data = filter_none(data)
-        with open(path, "wb") as f:
-            tomli_w.dump(data, f)
+        # The toml can carry the [bootstrap] enrollment token — land it 0600
+        # atomically instead of a bare open() under the process umask (ticket
+        # executor-daemon-umask0-key-write-window). Local import: daemon
+        # imports config at module level, config must not import daemon back.
+        from .daemon import _atomic_write
+
+        _atomic_write(path, tomli_w.dumps(data).encode("utf-8"), 0o600)
 
     def model_post_init(self, _context, /):
         """Validate executor_id on initialization."""
