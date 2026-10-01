@@ -111,6 +111,13 @@ Notable changes to Venya will be documented in this file.
   every lifecycle event shares one construction path and one posture.
 
 ### Fixed
+- **Installer: interactive secret prompts now confirm at entry.** The core
+  install's server encryption passphrase, PostgreSQL password, and both CA
+  key passphrases, and the executor install's Docker access token, are read
+  twice (echo-off) and retried until the entries match — a mistyped single
+  entry can no longer silently become the stored secret. Unattended/env-supplied
+  paths, stored-reuse match-or-abort behavior, and non-TTY branches are
+  unchanged. (ticket 31-confirm-at-entry)
 - **Executor: audit-spool forwarding durability hardening.** Three related
   improvements to the audit forwarder (refs #310). (1) When an event is
   appended while a batch is in flight and the spool crosses its capacity,
