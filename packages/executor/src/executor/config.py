@@ -101,6 +101,14 @@ class CommandValidatorConfig(BaseModel):
     )
 
 
+# Mirror of the server's ingest line cap — server/routes/audit.py
+# symbol INGEST_MAX_LINES (#310). Deliberately NOT imported (no
+# server→executor import edge); the interlock test
+# tests/test_audit.py::TestForwarderIntegrity::test_TF_server_cap_interlock
+# parses the server file and pins the pairing.
+SERVER_INGEST_MAX_LINES = 2000
+
+
 class AuditForwarderConfig(BaseModel):
     """Audit log forwarder configuration."""
 
@@ -153,13 +161,21 @@ class AuditForwarderConfig(BaseModel):
 
     @model_validator(mode="after")
     def _batch_within_buffer(self) -> AuditForwarderConfig:
-        """#307 D3: a forwarded batch must fit the local buffer and stay
-        under the server's body-size middleware — a batch larger than the
-        spool is a config error, not a silent clamp."""
-        if not 1 <= self.max_batch_lines <= self.max_buffer_size:
+        """#307 D3 + #310: a forwarded batch must fit the local buffer AND
+        the server's ingest line cap (SERVER_INGEST_MAX_LINES, mirroring
+        server symbol INGEST_MAX_LINES). This boot clamp is the PRIMARY
+        brace — a hand-configured batch above the cap is a config error and
+        refuses to load (behavior change: pre-#310 such a config booted and
+        stalled, the server 413-ing every batch while drop-oldest evicted
+        the backlog). The SECONDARY brace is the forwarder's in-cycle 413
+        halve-and-retry (_forward_once), so a lowered server cap degrades to
+        split forwards, never to silent loss."""
+        limit = min(self.max_buffer_size, SERVER_INGEST_MAX_LINES)
+        if not 1 <= self.max_batch_lines <= limit:
             raise ValueError(
                 f"audit.max_batch_lines must satisfy 1 <= {self.max_batch_lines} <= "
-                f"max_buffer_size ({self.max_buffer_size})"
+                f"min(max_buffer_size ({self.max_buffer_size}), "
+                f"server ingest cap ({SERVER_INGEST_MAX_LINES}))"
             )
         return self
 

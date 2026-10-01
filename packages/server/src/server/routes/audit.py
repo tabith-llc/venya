@@ -22,8 +22,11 @@ logger = logging.getLogger("venya.server")
 router = APIRouter()
 
 # Ingest guards (#307): the executor forwarder batches are bounded by its
-# max_batch_lines (default 500, ceiling max_buffer_size 10 000) — this
-# server-side line cap is the SECOND guard (D3), and the byte budget is the
+# max_batch_lines (default 500) — #310 clamps that config to THIS cap at
+# executor boot and makes the forwarder halve-and-retry on 413
+# (executor config.py symbol SERVER_INGEST_MAX_LINES mirrors it; interlock-
+# tested, no import), so this server-side line cap is now a defense-in-
+# depth guard (D3), not a stall trigger. The byte budget is the
 # decompression-bomb brake checked BEFORE any DB write (the request-size
 # middleware bounds the COMPRESSED body; zstd can expand thousands-fold).
 INGEST_MAX_LINES = 2000

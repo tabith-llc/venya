@@ -467,3 +467,195 @@ class TestSpoolPermissions:
         lines = read_spool(spool_dir)
         assert lines[0]["event_type"] == "legacy"
         assert len(lines) == 2
+
+
+class TestForwarderIntegrity:
+    """#310 (owner ruling 2026-10-01, most-secure layered): content-addressed
+    success truncation (a line leaves the spool only if it was sent or
+    explicitly warned-dropped), 0600 on every create path, and the layered
+    batch-cap interlock (boot clamp <= server cap + in-cycle 413 halve-and-
+    retry). Mechanism record: defect-hunt-20261001-ultra.md UH4-01/4-02/1-03."""
+
+    @staticmethod
+    def _stop(log: AuditLogger) -> None:
+        log._shutdown = True
+        log._wakeup.set()
+        log._forwarder.join(timeout=2.0)
+
+    def _mock_client(self, side_effect) -> MagicMock:
+        client = MagicMock()
+        client.post.side_effect = side_effect
+        client.__enter__ = MagicMock(return_value=client)
+        client.__exit__ = MagicMock(return_value=False)
+        return client
+
+    def test_TA_interleaved_drop_loses_nothing_unsent(self, spool_dir: Path, caplog):
+        """T-A (UH4-01, RED pre-fix): emit crosses capacity DURING an
+        in-flight POST — the in-batch head is warned-dropped by emit's
+        drop-oldest, and count-truncation on success would blind-delete an
+        equal count of the NEWER, never-sent lines. Final rule under test:
+        every line is either sent, warned-dropped, or still in the spool."""
+        import threading
+
+        log = AuditLogger(
+            make_config(spool_dir, max_buffer_size=100, max_batch_lines=50),
+            session_id="s1",
+            client_cert=("/tmp/c.crt", "/tmp/c.key"),
+        )
+        self._stop(log)
+        log._config.remote_url = "https://sink.invalid/audit"
+        for i in range(50):
+            log.emit("command_executed", command=f"sent {i}", exit_code=0, duration_ms=1.0)
+
+        posted = threading.Event()
+        release = threading.Event()
+        ok_response = MagicMock()
+        ok_response.status_code = 200
+
+        def blocking_post(*_args, **_kwargs):
+            posted.set()
+            assert release.wait(timeout=10), "fixture released the POST"
+            return ok_response
+
+        client = self._mock_client(blocking_post)
+        outcome: dict = {}
+
+        def run() -> None:
+            with patch("executor.audit.httpx2.Client", return_value=client):
+                outcome["ok"] = log._forward_once()
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            assert posted.wait(timeout=10), "forwarder read the batch and entered POST"
+            # 60 appends cross the 100-line capacity: drop-oldest evicts 10
+            # of the IN-FLIGHT batch lines (each warned), then all stop.
+            with caplog.at_level("WARNING", logger="venya.executor.audit"):
+                for i in range(60):
+                    log.emit("command_executed", command=f"new {i}", exit_code=0, duration_ms=1.0)
+        finally:
+            release.set()
+            thread.join(timeout=30)
+        try:
+            assert not thread.is_alive(), "forwarder thread hung — STOP condition"
+            assert outcome["ok"] is True
+            lines = read_spool(spool_dir)
+            # The 50 sent lines are gone; the 10 warned-dropped are gone;
+            # ALL 60 never-sent appended lines survive, in order.
+            assert [l["command"] for l in lines] == [f"new {i}" for i in range(60)]
+            assert "dropped" in caplog.text
+        finally:
+            log.shutdown()
+
+    def test_TB_recreate_after_full_drain_is_0600(self, spool_dir: Path, success_mock: MagicMock):
+        """T-B (UH4-02, RED pre-fix): drain-to-empty then re-emit — the
+        re-created spool must be 0600, not umask-born world-readable."""
+        old_umask = os.umask(0o022)
+        try:
+            log = AuditLogger(
+                make_config(spool_dir),
+                session_id="s1",
+                client_cert=("/tmp/c.crt", "/tmp/c.key"),
+            )
+            try:
+                self._stop(log)
+                log._config.remote_url = "http://127.0.0.1:1/audit"
+                log.emit("credential_injected", strategy="memfd")
+                with patch("executor.audit.httpx2.Client", return_value=success_mock):
+                    assert log._forward_once() is True
+                assert read_spool(spool_dir) == []
+                log.emit("credential_injected", strategy="memfd")
+                mode = (spool_dir / "spool.jsonl").stat().st_mode & 0o777
+                assert mode == 0o600
+            finally:
+                log.shutdown()
+        finally:
+            os.umask(old_umask)
+
+    def test_TC_validator_clamps_batch_to_server_cap(self):
+        """T-C: the boot clamp refuses > SERVER cap (2000), accepts 2000/500."""
+        from pydantic import ValidationError
+
+        from executor.config import SERVER_INGEST_MAX_LINES
+
+        assert SERVER_INGEST_MAX_LINES == 2000
+        with pytest.raises(ValidationError):
+            AuditForwarderConfig(max_buffer_size=10_000, max_batch_lines=2001)
+        assert AuditForwarderConfig(max_buffer_size=10_000, max_batch_lines=2000).max_batch_lines == 2000
+        assert AuditForwarderConfig(max_buffer_size=10_000, max_batch_lines=500).max_batch_lines == 500
+        # buffer bound still applies below the server cap
+        with pytest.raises(ValidationError):
+            AuditForwarderConfig(max_buffer_size=100, max_batch_lines=101)
+
+    def test_TD_413_halves_batch_and_retries_in_cycle(self, spool_dir: Path, caplog):
+        """T-D (UH1-03/UH4-03 brace b): 413 → halve (floor) and re-POST in
+        the SAME drain cycle: two POSTs, second batch 1000 lines, accepted
+        prefix removed, remainder kept."""
+        import compression.zstd
+
+        log = AuditLogger(
+            make_config(spool_dir, max_buffer_size=10_000, max_batch_lines=2000),
+            session_id="s1",
+            client_cert=("/tmp/c.crt", "/tmp/c.key"),
+        )
+        try:
+            self._stop(log)
+            log._config.remote_url = "https://sink.invalid/audit"
+            for i in range(2000):
+                log.emit("command_executed", command=f"echo {i}", exit_code=0, duration_ms=1.0)
+            r413 = MagicMock()
+            r413.status_code = 413
+            r413.text = "cap"
+            r200 = MagicMock()
+            r200.status_code = 200
+            client = self._mock_client([r413, r200])
+            with caplog.at_level("WARNING", logger="venya.executor.audit"):
+                with patch("executor.audit.httpx2.Client", return_value=client):
+                    assert log._forward_once() is True
+            assert client.post.call_count == 2
+            second = compression.zstd.decompress(client.post.call_args_list[1][1]["content"]).decode()
+            assert len(second.splitlines()) == 1000
+            assert "splitting" in caplog.text
+            # accepted 1000 removed by content; the other 1000 kept
+            assert len(read_spool(spool_dir)) == 1000
+        finally:
+            log.shutdown()
+
+    def test_TE_content_truncate_head_moved_warns_no_count_delete(self, spool_dir: Path, caplog):
+        """T-E: success-truncation with the head already moved (two sent
+        lines warned-dropped in flight) → WARNING with counts, the REMAINING
+        sent content removed, every unsent line kept — never a blind
+        count-based delete."""
+        log = AuditLogger(make_config(spool_dir), session_id="s1")
+        self._stop(log)
+        try:
+            batch = [
+                json.dumps({"event_type": "command_executed", "session_id": "s1", "n": i}) + "\n" for i in range(5)
+            ]
+            # sent 0,1 already warned-dropped; sent 2,3,4 still at the head;
+            # two NEVER-SENT lines appended during the POST.
+            (spool_dir / "spool.jsonl").write_text(
+                "".join(batch[2:]) + '{"marker": "unsent-1"}\n{"marker": "unsent-2"}\n',
+                encoding="utf-8",
+            )
+            with caplog.at_level("WARNING", logger="venya.executor.audit"):
+                log._remove_sent_lines(batch)
+            assert "head moved" in caplog.text
+            kept = (spool_dir / "spool.jsonl").read_text(encoding="utf-8")
+            assert kept == '{"marker": "unsent-1"}\n{"marker": "unsent-2"}\n'
+        finally:
+            log.shutdown()
+
+    def test_TF_server_cap_interlock(self):
+        """T-F: the executor mirror constant MUST equal the server file's
+        INGEST_MAX_LINES (text-parsed — no cross-package import)."""
+        import re
+
+        from executor.config import SERVER_INGEST_MAX_LINES
+
+        server_audit = (
+            Path(__file__).resolve().parents[3] / "packages" / "server" / "src" / "server" / "routes" / "audit.py"
+        )
+        match = re.search(r"^INGEST_MAX_LINES\s*=\s*(\d+)", server_audit.read_text(encoding="utf-8"), re.MULTILINE)
+        assert match is not None, "server INGEST_MAX_LINES symbol not found — interlock is the check"
+        assert SERVER_INGEST_MAX_LINES == int(match.group(1))
