@@ -49,6 +49,20 @@ MEMBER_ADDED = "member_added"
 MEMBER_REMOVED = "member_removed"
 CREDENTIAL_ADDED = "credential_added"
 CREDENTIAL_REMOVED = "credential_removed"
+# Ticket adjacent-lifecycle-audit-families #301 (owner rulings Q1-Q7, 2026-10-01)
+KEY_VERSION_ROTATED = "key_version_rotated"
+KEY_VERSION_ROLLED_BACK = "key_version_rolled_back"
+KEY_VERSION_DEACTIVATED = "key_version_deactivated"
+KEY_VERSION_REVOKED = "key_version_revoked"
+ELEVATION_GRANTED = "elevation_granted"
+EXECUTOR_REVOKED = "executor_revoked"
+EXECUTOR_CERT_REVOKED = "executor_cert_revoked"
+ADMIN_CERT_REVOKED = "admin_cert_revoked"
+USER_REENROLLED = "user_reenrolled"
+ENROLLMENT_TOKEN_ISSUED = "enrollment_token_issued"  # nosec B105 — audit event name, not a password
+ENROLLMENT_TOKEN_REVOKED = "enrollment_token_revoked"  # nosec B105 — audit event name, not a password
+COMMAND_POLICY_CHANGED = "command_policy_changed"
+EXECUTOR_ENROLLMENT_TOKEN_CREATED = "executor_enrollment_token_created"  # nosec B105 — audit event name, not a password
 
 
 def _json_safe(value: Any) -> Any:
@@ -96,6 +110,19 @@ def audit_lifecycle(
         MEMBER_REMOVED,
         CREDENTIAL_ADDED,
         CREDENTIAL_REMOVED,
+        KEY_VERSION_ROTATED,
+        KEY_VERSION_ROLLED_BACK,
+        KEY_VERSION_DEACTIVATED,
+        KEY_VERSION_REVOKED,
+        ELEVATION_GRANTED,
+        EXECUTOR_REVOKED,
+        EXECUTOR_CERT_REVOKED,
+        ADMIN_CERT_REVOKED,
+        USER_REENROLLED,
+        ENROLLMENT_TOKEN_ISSUED,
+        ENROLLMENT_TOKEN_REVOKED,
+        COMMAND_POLICY_CHANGED,
+        EXECUTOR_ENROLLMENT_TOKEN_CREATED,
     }
     if event_type not in known:
         raise ValueError(f"unknown lifecycle event: {event_type}")

@@ -1129,7 +1129,11 @@ def _create_revoke_test_app():
         mock_db.query.side_effect = query_side_effect
 
         def add_side_effect(obj):
-            revocations.append(obj)
+            # #301 F3: the endpoint now also adds an AuditEvent row per
+            # revocation (and per duplicate attempt — Q3). This tracker is
+            # for REVOCATION records only.
+            if isinstance(obj, AdminCertRevocation):
+                revocations.append(obj)
 
         def commit_side_effect():
             pass

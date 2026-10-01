@@ -19,7 +19,24 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import metrics
-from ..audit_lifecycle import USER_CREATED, USER_DELETED, USER_UPDATED, audit_lifecycle
+from ..audit_lifecycle import (
+    ADMIN_CERT_REVOKED,
+    COMMAND_POLICY_CHANGED,
+    ENROLLMENT_TOKEN_ISSUED,
+    ENROLLMENT_TOKEN_REVOKED,
+    EXECUTOR_CERT_REVOKED,
+    EXECUTOR_ENROLLMENT_TOKEN_CREATED,
+    EXECUTOR_REVOKED,
+    KEY_VERSION_DEACTIVATED,
+    KEY_VERSION_REVOKED,
+    KEY_VERSION_ROLLED_BACK,
+    KEY_VERSION_ROTATED,
+    USER_CREATED,
+    USER_DELETED,
+    USER_REENROLLED,
+    USER_UPDATED,
+    audit_lifecycle,
+)
 from ..dependencies import enrollment_manager, get_current_user, get_db, require_admin
 from ..rate_limit import rate_limit_admin_token_gen
 from ..utils.executor_id import validate_executor_id
@@ -597,7 +614,7 @@ NO_REWRAP_NOTE = "no re-wrap: single-KEK alpha semantics"
 )
 async def admin_key_version_rotate(
     req: AdminKeyVersionRotateRequest,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminKeyVersionRotateResponse:
     """Rotate the active key version synchronously (admin only).
@@ -649,6 +666,16 @@ async def admin_key_version_rotate(
             completed_at=now,
         )
         db.add(job)
+        audit_lifecycle(
+            db,
+            KEY_VERSION_ROTATED,
+            admin.get("user_id"),
+            {
+                "old_key_version_id": old_id,
+                "new_key_version_id": new_version.id,
+                "rotation_job_id": job.id,
+            },
+        )
         db.commit()
     except IntegrityError:
         # Lost a concurrent-rotation race — the partial unique index caught
@@ -683,7 +710,7 @@ async def admin_key_version_rotate(
     )
 
 
-def _rollback_key_rotation(db: Session, job_id: int) -> int:
+def _rollback_key_rotation(db: Session, job_id: int, actor_user_id: str | None) -> int:
     """Flip the active key version back for a completed rotation job.
 
     Shared by both rollback routes. Under single-KEK semantics no secrets
@@ -744,6 +771,14 @@ def _rollback_key_rotation(db: Session, job_id: int) -> int:
     old_version.active = True
     job.status = "rolled_back"
     job.rolled_back_at = datetime.now(UTC)
+    # #301 Q6: single audit write inside the shared helper — both rollback
+    # routes ride it; the row rides the rollback's own commit (same txn).
+    audit_lifecycle(
+        db,
+        KEY_VERSION_ROLLED_BACK,
+        actor_user_id,
+        {"rotation_job_id": job.id, "reactivated_key_version_id": old_version.id},
+    )
     db.commit()
 
     logger.info(
@@ -763,7 +798,7 @@ def _rollback_key_rotation(db: Session, job_id: int) -> int:
 )
 async def admin_key_version_rollback(
     req: AdminKeyVersionRollbackRequest,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminKeyVersionRollbackResponse:
     """Roll back the most recent completed rotation (admin only).
@@ -774,7 +809,7 @@ async def admin_key_version_rollback(
     non-latest, or first-ever rotations.
     """
     try:
-        restored = _rollback_key_rotation(db, req.job_id)
+        restored = _rollback_key_rotation(db, req.job_id, admin.get("user_id"))
     except HTTPException:
         raise
     except Exception:
@@ -802,7 +837,7 @@ async def admin_set_command_policy(
 ) -> AdminSetCommandPolicyResponse:
     """Set executor command policy (admin only)."""
     try:
-        from core.iam.models import AuditEvent, CommandPolicy
+        from core.iam.models import CommandPolicy
 
         policy = db.query(CommandPolicy).filter(CommandPolicy.policy_name == "default").first()
 
@@ -820,23 +855,23 @@ async def admin_set_command_policy(
             policy.dangerous_patterns = json.dumps(req.custom_dangerous_patterns)
         policy.updated_at = datetime.now(UTC)
 
-        db.commit()
         # Audit the control-plane change (ticket
         # command-policy-no-server-executor-propagation): the row now ENFORCES
         # fleet-wide via heartbeat propagation, so who changed what and when
-        # is security-relevant, not cosmetic.
-        db.add(
-            AuditEvent(
-                event_type="command_policy_changed",
-                user_id=admin.get("user_id", "unknown"),
-                fields={
-                    "policy_name": "default",
-                    "preset": req.preset,
-                    "custom_allowed_commands": req.custom_allowed_commands,
-                    "custom_dangerous_patterns": req.custom_dangerous_patterns,
-                    "session_id": str(admin["session_id"]) if admin.get("session_id") else None,
-                },
-            )
+        # is security-relevant, not cosmetic. Migrated to the single writer
+        # (#301 Q5): same event string, same fields, and the row now RIDES
+        # the action's commit instead of trailing a second one.
+        audit_lifecycle(
+            db,
+            COMMAND_POLICY_CHANGED,
+            admin.get("user_id", "unknown"),
+            {
+                "policy_name": "default",
+                "preset": req.preset,
+                "custom_allowed_commands": req.custom_allowed_commands,
+                "custom_dangerous_patterns": req.custom_dangerous_patterns,
+                "session_id": str(admin["session_id"]) if admin.get("session_id") else None,
+            },
         )
         db.commit()
         return AdminSetCommandPolicyResponse(
@@ -918,7 +953,7 @@ async def admin_get_command_policy(
 )
 async def admin_add_allowed_command(
     req: AdminAddAllowedCommandRequest,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminAddAllowedCommandResponse:
     """Add a command to the allowlist (admin only)."""
@@ -927,6 +962,7 @@ async def admin_add_allowed_command(
 
         policy = db.query(CommandPolicy).filter(CommandPolicy.policy_name == "default").first()
 
+        already_present = False
         if policy is None:
             policy = CommandPolicy(
                 policy_name="default",
@@ -939,9 +975,21 @@ async def admin_add_allowed_command(
             if req.command_path not in allowed:
                 allowed.append(req.command_path)
                 policy.allowed_commands = json.dumps(allowed)
+            else:
+                already_present = True
 
             policy.updated_at = datetime.now(UTC)
 
+        audit_lifecycle(
+            db,
+            COMMAND_POLICY_CHANGED,
+            admin.get("user_id", "unknown"),
+            {
+                "change": "allowed_command_added",
+                "command_path": req.command_path,
+                "already_present": already_present,
+            },
+        )
         db.commit()
         return AdminAddAllowedCommandResponse(added=True, command_path=req.command_path)
     except Exception:
@@ -959,7 +1007,7 @@ async def admin_add_allowed_command(
 )
 async def admin_key_version_deactivate(
     version_id: int,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminKeyVersionDeactivateResponse:
     """Deactivate a key version (admin only).
@@ -976,7 +1024,14 @@ async def admin_key_version_deactivate(
                 detail=f"Key version {version_id} not found",
             )
 
+        was_active = version.active
         version.active = False
+        audit_lifecycle(
+            db,
+            KEY_VERSION_DEACTIVATED,
+            admin.get("user_id"),
+            {"key_version_id": version_id, "was_active": was_active},
+        )
         db.commit()
 
         logger.info("Deactivated key version: %s", version.version_label)
@@ -1002,7 +1057,7 @@ async def admin_key_version_deactivate(
 )
 async def admin_key_version_revoke(
     version_id: int,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminKeyVersionRevokeResponse:
     """Revoke a key version (admin only).
@@ -1029,6 +1084,12 @@ async def admin_key_version_revoke(
             )
 
         db.delete(version)
+        audit_lifecycle(
+            db,
+            KEY_VERSION_REVOKED,
+            admin.get("user_id"),
+            {"key_version_id": version_id},
+        )
         db.commit()
 
         logger.info("Revoked key version: %s", version.version_label)
@@ -1088,7 +1149,7 @@ async def admin_key_rotation_status(
 )
 async def admin_key_rotation_job_rollback(
     job_id: int,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminKeyRotationJobRollbackResponse:
     """Roll back a completed rotation by job id (admin only).
@@ -1099,7 +1160,7 @@ async def admin_key_rotation_job_rollback(
     first-ever rotation.
     """
     try:
-        restored = _rollback_key_rotation(db, job_id)
+        restored = _rollback_key_rotation(db, job_id, admin.get("user_id"))
     except HTTPException:
         raise
     except Exception:
@@ -1176,7 +1237,7 @@ async def admin_list_executors(
 async def admin_revoke_executor(
     executor_id: str,
     req: AdminRevokeExecutorRequest | None = Body(default=None),
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminRevokeExecutorResponse:
     """Revoke an executor certificate or identity (admin only).
@@ -1212,6 +1273,15 @@ async def admin_revoke_executor(
         serial_arg = serial_arg.casefold()
         existing = db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == serial_arg).first()
         if existing is not None:
+            # Q3 (#301): the ATTEMPT is the record — the duplicate still
+            # emits, with the no-op visible in fields.
+            audit_lifecycle(
+                db,
+                EXECUTOR_CERT_REVOKED,
+                admin.get("user_id"),
+                {"executor_id": executor_id, "serial_number": serial_arg, "already_revoked": True},
+            )
+            db.commit()
             return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=serial_arg)
         db.add(
             ExecutorCertRevocation(
@@ -1220,6 +1290,12 @@ async def admin_revoke_executor(
                 revoked_at=now,
                 reason="Admin revocation (serial form)",
             )
+        )
+        audit_lifecycle(
+            db,
+            EXECUTOR_CERT_REVOKED,
+            admin.get("user_id"),
+            {"executor_id": executor_id, "serial_number": serial_arg, "already_revoked": False},
         )
         db.commit()
         metrics.TOKEN_REVOKED.labels(reason="executor_serial_revoked").inc()
@@ -1255,12 +1331,24 @@ async def admin_revoke_executor(
                 reason="Admin revocation",
             )
         )
+    # Q3 (#301): record the attempt — an identity-form duplicate emits with
+    # already_revoked visible in fields.
+    audit_lifecycle(
+        db,
+        EXECUTOR_REVOKED,
+        admin.get("user_id"),
+        {
+            "executor_id": executor_id,
+            "form": "identity",
+            "already_revoked": already and existing_revocation is not None,
+        },
+    )
     db.commit()
 
     if already and existing_revocation is not None:
         return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=cert.serial_number)
 
-    metrics.TOKEN_REVOKED.labels(reason="executor_revoked").inc()
+    metrics.TOKEN_REVOKED.labels(reason=EXECUTOR_REVOKED).inc()  # same label string; single-writer pin (#301)
     logger.info(
         "Revoked executor identity (TERMINAL): executor_id=%s, record serial=%s",
         executor_id,
@@ -1299,7 +1387,7 @@ async def admin_enroll_executor(
             detail=str(e),
         )
 
-    from core.iam.models import AuditEvent, ExecutorEnrollmentToken
+    from core.iam.models import ExecutorEnrollmentToken
 
     try:
         config = getattr(request.app.state, "config", None)
@@ -1352,22 +1440,23 @@ async def admin_enroll_executor(
 
         db.flush()
 
-        audit_event = AuditEvent(
-            event_type="executor_enrollment_token_created",
-            user_id=admin_user_id,
-            fields={
+        # #301 Q5-class migration to the single writer; the owner extension
+        # (2026-10-01 ruling note) DROPS token_hash_preview — no hash
+        # material in audit fields.
+        audit_lifecycle(
+            db,
+            EXECUTOR_ENROLLMENT_TOKEN_CREATED,
+            admin_user_id,
+            {
                 "executor_id": executor_id,
                 "token_id": token.id,
-                "token_hash_preview": token_hash[:8],
                 "expires_at": expires_at.isoformat(),
                 "created_by_session_id": str(session_id) if session_id else None,
                 "created_from_ip": client_ip,
                 "created_from_user_agent": user_agent,
                 "token_created_at": now.isoformat(),
             },
-            timestamp=now,
         )
-        db.add(audit_event)
         db.commit()
         metrics.TOKEN_CREATED.labels(type="executor").inc()
 
@@ -1405,7 +1494,7 @@ async def admin_enroll_executor(
 async def admin_re_enroll(
     user_id: str,
     request: Request,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminReEnrollResponse:
     """Re-enroll a user who has lost all credentials (admin only).
@@ -1452,6 +1541,24 @@ async def admin_re_enroll(
         config = getattr(request.app.state, "config", None)
         if config and config.recovery_code_pepper:
             token.binding_hash = compute_binding_hash(user_id, plaintext, config.recovery_code_pepper)
+        # #301 F4: the reset AND its fresh token are audited value-free —
+        # counts and ids only, never the plaintext.
+        audit_lifecycle(
+            db,
+            USER_REENROLLED,
+            admin.get("user_id"),
+            {
+                "target_user_id": user_id,
+                "credentials_deactivated": deactivated,
+                "tokens_revoked": tokens_revoked,
+            },
+        )
+        audit_lifecycle(
+            db,
+            ENROLLMENT_TOKEN_ISSUED,
+            admin.get("user_id"),
+            {"target_user_id": user_id, "token_id": token.id, "previous_tokens_revoked": tokens_revoked},
+        )
         db.commit()
 
         logger.info(
@@ -1539,7 +1646,7 @@ async def admin_list_user_tokens(
 async def admin_create_user_token(
     user_id: str,
     request: Request,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminUserTokenCreateResponse:
     """Issue a new enrollment token for a user (admin only).
@@ -1566,6 +1673,13 @@ async def admin_create_user_token(
         config = getattr(request.app.state, "config", None)
         if config and config.recovery_code_pepper:
             token.binding_hash = compute_binding_hash(user_id, plaintext, config.recovery_code_pepper)
+        # #301 F4: issuance audited value-free (id, counts — never plaintext).
+        audit_lifecycle(
+            db,
+            ENROLLMENT_TOKEN_ISSUED,
+            admin.get("user_id"),
+            {"target_user_id": user_id, "token_id": token.id, "previous_tokens_revoked": tokens_revoked},
+        )
         db.commit()
 
         return AdminUserTokenCreateResponse(
@@ -1592,7 +1706,7 @@ async def admin_create_user_token(
 async def admin_revoke_token(
     token_id: int,
     request: Request,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminTokenRevokeResponse:
     """Revoke a specific enrollment token (admin only).
@@ -1602,6 +1716,14 @@ async def admin_revoke_token(
     try:
         em = enrollment_manager(db, request)
         revoked = em.revoke_token(token_id)
+        # Q3 (#301): the attempt is the record — a no-op revoke emits with
+        # revoked:false visible in fields.
+        audit_lifecycle(
+            db,
+            ENROLLMENT_TOKEN_REVOKED,
+            admin.get("user_id"),
+            {"token_id": token_id, "revoked": revoked},
+        )
         db.commit()
         if revoked:
             metrics.TOKEN_REVOKED.labels(reason="admin_revoked").inc()
@@ -1621,7 +1743,7 @@ async def admin_revoke_token(
 )
 async def admin_key_rotation(
     req: AdminKeyVersionRotateRequest,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminKeyVersionRotateResponse:
     """Rotate the active key version (alias for /admin/key-versions/rotate).
@@ -1629,7 +1751,7 @@ async def admin_key_rotation(
     Admin only. Synchronous label-boundary rotation; no secrets are
     re-wrapped (single-KEK alpha semantics).
     """
-    return await admin_key_version_rotate(req, _, db)
+    return await admin_key_version_rotate(req, admin, db)
 
 
 # --- Admin mTLS Certificate Revocation ---
@@ -1650,7 +1772,7 @@ class AdminRevokeCertResponse(BaseModel):
 @router.post("/admin/certs/revoke")
 async def admin_revoke_admin_cert(
     req: AdminRevokeCertRequest,
-    _: dict = Depends(require_admin),
+    admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminRevokeCertResponse:
     """Revoke an admin certificate by serial number.
@@ -1679,6 +1801,14 @@ async def admin_revoke_admin_cert(
     existing = db.query(AdminCertRevocation).filter(AdminCertRevocation.serial_number == serial).first()
 
     if existing:
+        # Q3 (#301): duplicate attempt still recorded, no-op visible.
+        audit_lifecycle(
+            db,
+            ADMIN_CERT_REVOKED,
+            admin.get("user_id"),
+            {"serial_number": serial, "reason": existing.reason, "already_revoked": True},
+        )
+        db.commit()
         logger.info("Admin cert %s already revoked (reason: %s)", serial, existing.reason)
         return AdminRevokeCertResponse(serial=serial, revoked=True, reason=existing.reason, already_revoked=True)
 
@@ -1686,6 +1816,12 @@ async def admin_revoke_admin_cert(
     now = datetime.now(UTC)
     revocation = AdminCertRevocation(serial_number=serial, reason=req.reason, revoked_at=now)
     db.add(revocation)
+    audit_lifecycle(
+        db,
+        ADMIN_CERT_REVOKED,
+        admin.get("user_id"),
+        {"serial_number": serial, "reason": req.reason, "already_revoked": False},
+    )
     db.commit()
 
     logger.info("Admin cert %s revoked (reason: %s)", serial, req.reason)

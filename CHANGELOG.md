@@ -88,6 +88,16 @@ Notable changes to Venya will be documented in this file.
   batches may duplicate rows). On the executor side the forwarder now presents
   its mTLS client certificate and drains in bounded batches
   (`[audit] max_batch_lines`, default 500, bounded by `max_buffer_size`).
+- **Server: the audit lifecycle tail is closed.** The remaining
+  control-plane writes now carry value-free `audit_events` rows in the same
+  transaction: key-version rotate/rollback/deactivate/revoke, every issued
+  elevation token (`elevation_granted`, mode and endpoint only), executor
+  and admin-certificate revocations (both forms; a duplicate attempt is
+  recorded with the no-op visible in fields), user re-enrollment and
+  enrollment-token issue/revoke (ids and counts — never the token
+  plaintext), and allowlist additions. The command-policy and executor
+  enrollment-token audit rows moved behind the single lifecycle writer, so
+  every lifecycle event shares one construction path and one posture.
 
 ### Fixed
 - **Server: a wrong encryption passphrase no longer boots silently.** The KEK

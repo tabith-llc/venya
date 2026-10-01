@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ..audit_lifecycle import ELEVATION_GRANTED, audit_lifecycle
 from ..dependencies import get_current_user, get_db
 from ..fido2.browser_adapter import browser_assertion_to_fido2, challenge_to_browser_options
 from ..fido2.manager import WebAuthnError
@@ -231,6 +232,14 @@ async def elevate_assert(
         expires_at=expires_at,
     )
     db.add(elevation_record)
+    # #301 F2 (Q2: emits on every grant): value-free — mode + endpoint only,
+    # never token/challenge/row-id material. Rides the issuance commit.
+    audit_lifecycle(
+        db,
+        ELEVATION_GRANTED,
+        user_info["user_id"],
+        {"mode": "cli", "endpoint": "/api/v1/auth/elevate/assert"},
+    )
     db.commit()
 
     return ElevationAssertResponse(
