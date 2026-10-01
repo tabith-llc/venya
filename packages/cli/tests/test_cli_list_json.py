@@ -6,8 +6,8 @@
 
 """`venya list --json` (ticket cli-list-json-output): byte-exact envelope
 passthrough of the GET /api/v1/secrets response — parseable even when the
-store is empty (branch BEFORE the empty check; the cmd_audit human-string
-quirk is flagged in-ticket, not copied)."""
+store is empty (branch BEFORE the empty check; cmd_audit uses the same
+ordering, ticket audit-json-empty-case-unparseable)."""
 
 import json
 from types import SimpleNamespace
@@ -41,7 +41,7 @@ def test_list_json_empty_is_parseable(capsys):
     rc = cmd_list(client, _args(json=True))
     assert rc == 0
     out = capsys.readouterr().out
-    # Paired negative vs the cmd_audit quirk: NOT the human string.
+    # Paired negative: NOT the human string.
     assert json.loads(out) == {"secrets": []}
     assert "No secrets found." not in out
 
