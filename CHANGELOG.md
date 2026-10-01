@@ -138,6 +138,15 @@ Notable changes to Venya will be documented in this file.
   ordering `venya list --json` already uses. Non-empty `--json` output is
   byte-identical to before, and the human path (empty and non-empty) is
   unchanged.
+- **CLI: `venya exec audit --json` now prints parseable JSON when the audit
+  log is empty.** With zero events the command printed the human string
+  "No audit events found for {executor_id}." even under `--json`, breaking
+  scripted consumption (e.g. `jq`). The `--json` branch now runs BEFORE the
+  empty check and passes the API envelope through verbatim, so an empty log
+  yields a parseable object with an empty `events` list — the same ordering
+  `venya list --json` and `venya audit --json` already use. Non-empty
+  `--json` output is byte-identical to before, and the human path (empty and
+  non-empty) is unchanged.
 - **Executor: the `[audit]` forwarder is no longer a dead knob.** With a
   configured `remote_url` the forwarder previously sent unauthenticated POSTs
   no server endpoint accepted, and without one it went silently inert; now a

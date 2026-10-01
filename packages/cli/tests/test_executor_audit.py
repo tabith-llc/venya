@@ -16,6 +16,7 @@ Tests cover:
 - executor_id extracted from fields JSON
 """
 
+import json
 from datetime import UTC
 from unittest.mock import MagicMock
 
@@ -173,6 +174,68 @@ class TestExecutorAudit:
         assert '"events"' in captured.out
         assert '"jump-1"' in captured.out
 
+    def test_audit_json_empty_output(self, tmp_path, capsys):
+        """Empty events + --json yields parseable JSON, not a human string
+        (ticket exec-audit-json-empty-case-unparseable)."""
+        mock_client = MagicMock()
+        envelope = {"events": [], "total": 0, "limit": 100, "offset": 0}
+        mock_client.get.return_value = envelope
+
+        args = MagicMock()
+        args.executor_id = "jump-1"
+        args.cert_path = str(tmp_path / "executor.crt")
+        args.hours = None
+        args.days = None
+        args.limit = 100
+        args.offset = 0
+        args.json = True
+
+        from venya_cli.commands import executor_audit
+
+        result = executor_audit(mock_client, args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)
+        assert parsed["events"] == []
+        assert captured.out == json.dumps(envelope, indent=2) + "\n"
+
+    def test_audit_json_nonempty_byte_pinned(self, tmp_path, capsys):
+        """Non-empty + --json is byte-identical to the pre-fix passthrough."""
+        mock_client = MagicMock()
+        envelope = {
+            "events": [
+                {
+                    "id": 142,
+                    "event_type": "heartbeat",
+                    "user_id": None,
+                    "fields": {"executor_id": "jump-1"},
+                    "timestamp": "2026-08-13T10:00:30Z",
+                },
+            ],
+            "total": 1,
+            "limit": 100,
+            "offset": 0,
+        }
+        mock_client.get.return_value = envelope
+
+        args = MagicMock()
+        args.executor_id = "jump-1"
+        args.cert_path = str(tmp_path / "executor.crt")
+        args.hours = None
+        args.days = None
+        args.limit = 100
+        args.offset = 0
+        args.json = True
+
+        from venya_cli.commands import executor_audit
+
+        result = executor_audit(mock_client, args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert captured.out == json.dumps(envelope, indent=2) + "\n"
+
     def test_audit_no_events(self, tmp_path, capsys):
         """No events returns clean message."""
         mock_client = MagicMock()
@@ -196,6 +259,29 @@ class TestExecutorAudit:
         captured = capsys.readouterr()
         assert "No audit events found" in captured.out
         assert "unknown-exec" in captured.out
+
+    def test_audit_no_events_exact_message(self, tmp_path, capsys):
+        """Empty WITHOUT --json still prints the human message verbatim
+        (paired negative: not JSON)."""
+        mock_client = MagicMock()
+        mock_client.get.return_value = {"events": [], "total": 0, "limit": 100, "offset": 0}
+
+        args = MagicMock()
+        args.executor_id = "jump-1"
+        args.cert_path = str(tmp_path / "executor.crt")
+        args.hours = None
+        args.days = None
+        args.limit = 100
+        args.offset = 0
+        args.json = False
+
+        from venya_cli.commands import executor_audit
+
+        result = executor_audit(mock_client, args)
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert captured.out == "No audit events found for jump-1.\n"
 
     def test_audit_auth_failure(self, tmp_path, capsys):
         """Authentication failure returns exit 1 with helpful message."""
