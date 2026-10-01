@@ -8,7 +8,7 @@
 
 Venya is the first platform that lets AI agents execute commands on remote infrastructure using stored credentials **without ever seeing those credentials**. The LLM discovers what secrets exist, constructs the command, and the executor injects the credential into a sandboxed environment. Output is filtered. Every action is audited. A human authorized the session with a physical security key.
 
-**This doesn't exist anywhere else.** Traditional secrets managers (HashiCorp Vault, CyberArk, cloud-native stores) store credentials — but they hand the plaintext to whatever process requests it. If you give an AI agent a Vault token, the agent can read every secret in plain text. Venya's zero-knowledge injection model means the agent never sees, handles, or can leak the credential value. It sees the result of the command — and nothing more. The same holds for the humans operating Venya: frontline operators authorize sessions, run commands, and read filtered output without ever seeing the credential values doing the work. Disclosure is a separate, deliberate act — FIDO2-elevated, single-use, audited — never part of normal operation.
+**This doesn't exist anywhere else.** Traditional secrets managers (HashiCorp Vault, CyberArk, cloud-native stores) store credentials — but they hand the plaintext to whatever process requests it. If you give an AI agent a Vault token, the agent can read every secret in plain text. Venya's zero-knowledge injection model means the agent never sees, handles, or can leak the credential value. It sees the result of the command — and nothing more. The same holds for the humans operating Venya: frontline operators authorize sessions, run commands, and read filtered output without ever seeing the credential values doing the work. Disclosure is a separate, deliberate act — FIDO2-elevated, single-use, audited — never part of normal operation. (Mechanized: values leave the server only through the elevation-gated unmask route or the mTLS executor-injection path; every disclosure is an audit event — see [docs/architecture.md](docs/architecture.md) "Secret lifecycle" and the Security Guarantees table below.)
 
 ---
 
@@ -18,7 +18,7 @@ Venya is the first platform that lets AI agents execute commands on remote infra
 
 ## Host Trust Model
 
-Venya's components carry deliberately different trust postures:
+Venya's components sit at deliberately different trust levels:
 
 - **The core server is the trust anchor — give it its own protected host.**
   Firewalled, minimally exposed, reachable only by its executors (mTLS) and
@@ -130,10 +130,10 @@ The AI agent never touches plaintext credentials. Not in its context window. Not
 **No other product does this.** Existing secrets managers hand plaintext to the requesting process. Venya doesn't.
 
 ### FIDO2 Hardware Key Binding
-Every session begins with a physical security key press. The AI agent cannot initiate a session — only a human pressing a FIDO2 key can authorize access. Sessions expire after 4 hours. Token refresh happens automatically, and an idle-expired session renews within the 4-hour hard cap — the cap is non-negotiable: past it, a human must re-authenticate with the FIDO2 key. When the session is past the cap, the AI gets an actionable error: *"Ask the user to re-authenticate."*
+Every session begins with a physical security key press. The AI agent cannot initiate a session — only a human pressing a FIDO2 key can authorize access. Sessions expire after 4 hours. Token refresh happens automatically, and an idle-expired session renews within the 4-hour hard cap — no token, refresh, or agent action can extend a session past the cap (operators can raise the cap only through the documented server setting; see [docs/ease-of-use.md](docs/ease-of-use.md)). When the session is past the cap, the AI gets an actionable error: *"Ask the user to re-authenticate."*
 
 ### mTLS Between Server and Executor
-The Venya server communicates with executor daemons over mutual TLS. Both sides verify each other's certificates. If an executor's certificate is revoked, the server refuses to relay commands. If someone spoofs an executor, the mTLS handshake fails before any secret is transmitted.
+The Venya server communicates with executor daemons over mutual TLS. Both sides verify each other's certificates: the executor's relay listener requires a client certificate (`CERT_REQUIRED`) chained to the core CA and allow-listed by CN, and the core dials the executor with its own client certificate. If an executor's certificate is revoked, the server refuses to relay commands. If someone spoofs an executor, the mTLS handshake fails before any secret is transmitted. Verification is per connection and per operation (session, role gate, single-use elevation token) — identity is never inferred from network position.
 
 ### Egress Control
 Commands run inside an sbx microVM with deny-by-default networking. The executor reads an operator-defined allowlist (`/etc/venya/egress-allowlist.txt`) and only permits connections to approved destinations. If a compromised command tries to phone home to an attacker's server, the connection is blocked at the sandbox level. DNS is restricted to the operator's resolver.
@@ -146,7 +146,7 @@ Every command execution is logged:
 - **When** it ran (timestamp)
 - **What secrets** were injected (secret IDs, never values)
 
-Both human operators (via `venya audit` CLI) and AI agents (via the `get_audit` MCP tool) can query the audit log. Callers holding admin or an auditor-tier role see the full log; all others see only their own events.
+Both human operators (via `venya audit` CLI) and AI agents (via the `get_audit` MCP tool) can query the audit log. Callers holding admin or an auditor-tier role see the full log; all others see only their own events. The log is append-only by database enforcement — a dedicated runtime role is revoked `UPDATE`/`DELETE` on the audit table (see the Security Guarantees table below and docs/deployment-config.md).
 
 ### MCP Protocol Native
 Venya speaks the Model Context Protocol — the open standard for connecting AI assistants to external tools. It works with Claude Code, Cursor, and any MCP-compatible client. No proprietary lock-in. No vendor-specific API.
@@ -364,7 +364,7 @@ No. The agent never receives plaintext: the secret is injected only inside the s
 Three layers of defense:
 1. **Egress control** — the sandbox blocks outbound connections to non-allowlisted destinations. Data can't leave.
 2. **Session cap** — sessions expire after 4 hours. The agent can't maintain indefinite access.
-3. **Audit trail** — every command is logged with the authorizing user's identity. Rogue behavior is immediately visible.
+3. **Audit trail** — every command is logged with the authorizing user's identity. Rogue behavior is recorded in full and reviewable in the audit trail — through review of the log, not live intrusion detection.
 
 **How is this different from HashiCorp Vault or CyberArk?**
 
