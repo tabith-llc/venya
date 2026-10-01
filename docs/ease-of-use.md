@@ -41,10 +41,11 @@ purpose.
 
 **The locked default (what you see when nothing is relaxed):** the run is
 refused before anything executes — the call comes back as a 503 and nothing
-left the sandbox. The refusal reason is written to the executor's journal
-and to the audit log as a `command_rejected` event, which names the pattern
-(`Dangerous pattern blocked: 'scp '`). That audit line is your proof the
-default worked, not a mystery.
+left the sandbox. The refusal reason is written to the executor's local
+journal and to the executor's local audit spool as a `command_rejected`
+event, which names the pattern (`Dangerous pattern blocked: 'scp '`).
+That local record is your proof the default worked, not a mystery; it does
+not currently appear in the server audit log.
 
 **Why it is blocked — exactly two enforceable layers:**
 
@@ -128,19 +129,21 @@ files.internal.example
 ### Verify
 
 - **Locked (paired negative):** with no relaxation, the run must fail with a
-  503 before anything connects, and the audit log must show a
-  `command_rejected` event naming the pattern. That combination is the
-  default working correctly.
+  503 before anything connects, and the executor's local audit spool must
+  show a `command_rejected` event naming the pattern. That combination is
+  the default working correctly.
 - **Relaxed:** after both steps, the command reaches the sandbox and runs.
-  A failure after relaxation is a different kind of event — the audit log
-  no longer shows `command_rejected`, and the executor journal shows a
-  connection or execution error instead. That difference is your
-  confirmation that the doors, and only the doors you opened, changed the
-  behavior. If the journal says the transfer client cannot be found, the
-  binary is absent from the pinned sandbox image itself — that is an
-  image-content question, not a policy one.
-- Both halves of the story are auditable: `command_rejected` events for
-  refusals and `command_policy_changed` for the policy change itself.
+  A failure after relaxation is a different kind of event — the executor's
+  local audit spool no longer shows `command_rejected`, and the executor
+  journal shows a connection or execution error instead. That difference
+  is your confirmation that the doors, and only the doors you opened,
+  changed the behavior. If the journal says the transfer client cannot be
+  found, the binary is absent from the pinned sandbox image itself — that
+  is an image-content question, not a policy one.
+- Both halves of the story are recorded: `command_rejected` events for
+  refusals live in the executor's local audit spool, and
+  `command_policy_changed` for the policy change itself lands in the
+  server audit log.
 
 ### What you gave up
 
