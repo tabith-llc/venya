@@ -100,6 +100,21 @@ Notable changes to Venya will be documented in this file.
   every lifecycle event shares one construction path and one posture.
 
 ### Fixed
+- **Executor: audit-spool forwarding durability hardening.** Three related
+  improvements to the audit forwarder (refs #310). (1) When an event is
+  appended while a batch is in flight and the spool crosses its capacity,
+  the accepted batch is now removed BY CONTENT instead of by count, so lines
+  that were never sent always survive the interleaving — a line leaves the
+  spool only if it was forwarded or explicitly reported by the spool-full
+  drop warning. (2) The spool is created 0600 on EVERY create path (previously
+  only at startup), so a drain-to-empty followed by a new event no longer
+  re-creates the file at the umask default. (3) Layered batch-cap interlock:
+  `audit.max_batch_lines` now also validates against the server's ingest line
+  cap (2000) at boot, and the forwarder additionally halves-and-retries a
+  batch if a sink answers 413, so a lowered server cap degrades to split
+  forwards rather than a stalled backlog. Behavior change to note: a
+  hand-configured `max_batch_lines` above 2000 now refuses to load at startup
+  with a clear error instead of booting into the retry-and-evict loop.
 - **Server: a wrong encryption passphrase no longer boots silently.** The KEK
   derives from the passphrase plus a persisted salt, so a mismatch previously
   surfaced only at the first decrypt — while the wrong KEK could already wrap

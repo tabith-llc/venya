@@ -16,11 +16,14 @@ Serialization failures are written as error-marker lines, never dropped.
 """
 
 # stdlib zstd compression (Python 3.14+, PEP 784)
+import contextlib
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
+from collections import Counter
 from compression import zstd
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -85,10 +88,13 @@ class AuditLogger:
       2. The background forwarder drains the spool in batches of
          min(max_buffer_size, max_batch_lines) lines (#307 D3),
          zstd-compresses, and POSTs to remote_url with the executor client
-         cert. On success the consumed prefix is truncated; on failure the
-         lines are kept and the backoff doubles (capped at retry_max_delay).
-         A configured remote without client_cert is a loud fail-closed
-         refusal, never a silent 401 loop (#307 D1).
+         cert. On success the sent lines are removed BY CONTENT — a line
+         leaves the spool only if it was sent or explicitly warned-dropped
+         (#310); on failure the lines are kept and the backoff doubles
+         (capped at retry_max_delay). A 413 halves the batch and retries
+         within the drain cycle (#310). A configured remote without
+         client_cert is a loud fail-closed refusal, never a silent 401 loop
+         (#307 D1).
       3. When the spool exceeds max_buffer_size lines the oldest lines are
          dropped (with a warning) so a long outage cannot grow it without
          bound.
@@ -116,7 +122,11 @@ class AuditLogger:
         # puts plaintext here) — create it 0600 and REPAIR a legacy
         # world-readable spool at startup. Pre-fix, .open("a") inherited the
         # umask (typically 0644) — ticket sec-secret-redaction-log-leaks #19.
-        self._spool_path.touch(exist_ok=True)
+        # #310: creation goes through the append helper so the mode lands AT
+        # CREATE on every re-create path (drain-to-empty + re-emit), not just
+        # at startup; the chmod below stays as the legacy-file repair.
+        with self._spool_append_handle():
+            pass
         os.chmod(self._spool_path, 0o600)
         self._forwarder = threading.Thread(target=self._forward_loop, daemon=True)
         self._forwarder.start()
@@ -132,6 +142,17 @@ class AuditLogger:
         return Path.home() / ".venya" / "audit-spool.jsonl"
 
     # -- write path (synchronous, local disk only, never network) ----------
+
+    def _spool_append_handle(self):
+        """Open the spool for append, CREATING IT 0600 when absent (#310).
+
+        ``os.open`` applies the mode at CREATE (umask can only remove bits,
+        and the usual 022 leaves 0600 intact), so a post-drain re-create is
+        never umask-born world-readable — the #19 hardening holds across the
+        file's whole lifetime, not just the startup repair window.
+        """
+        fd = os.open(self._spool_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        return os.fdopen(fd, "a", encoding="utf-8")
 
     def emit(self, event_type: str, **kwargs: Any) -> None:
         """DURABLY record an audit event.
@@ -168,7 +189,7 @@ class AuditLogger:
             )
 
         with self._lock:
-            with self._spool_path.open("a", encoding="utf-8") as f:
+            with self._spool_append_handle() as f:
                 f.write(line + "\n")
             count = self._count_lines()
             capacity = self._config.max_buffer_size
@@ -225,8 +246,16 @@ class AuditLogger:
     def _forward_once(self) -> bool:
         """Drain up to min(max_buffer_size, max_batch_lines) spool lines to the remote.
 
+        Success removes the batch BY CONTENT (``_remove_sent_lines``, #310) —
+        never by count, so an interleaved drop-oldest during the POST cannot
+        charge un-forwarded lines for the sent batch. On HTTP 413 the batch
+        is halved (floor 1) and re-POSTED within the same drain cycle until
+        accepted or a single line fails (#310 survivability brace; the boot
+        clamp in ``AuditForwarderConfig`` is the primary brace).
+
         Returns:
-            True if nothing was pending or the batch was accepted.
+            True if nothing was pending or the batch (or a split remainder
+            of it) was accepted.
             False if the remote failed/rejected the batch (lines are kept).
         """
         remote_url = self._config.remote_url
@@ -254,8 +283,6 @@ class AuditLogger:
             if not lines:
                 return True
 
-            payload = "".join(lines)
-            compressed = zstd.compress(payload.encode(), level=3)
             client = httpx2.Client(
                 # Fail closed: config validation guarantees ca_cert_path when
                 # remote_url is set; if validation is bypassed (direct
@@ -264,34 +291,47 @@ class AuditLogger:
                 cert=self._client_cert,
                 timeout=self._config.request_timeout_seconds,
             )
+            batch = lines
             with client:
-                response = client.post(
-                    remote_url,
-                    content=compressed,
-                    headers={
-                        "Content-Type": "application/x-ndjson",
-                        "Content-Encoding": "zstd",
-                    },
-                )
+                while True:
+                    compressed = zstd.compress("".join(batch).encode(), level=3)
+                    response = client.post(
+                        remote_url,
+                        content=compressed,
+                        headers={
+                            "Content-Type": "application/x-ndjson",
+                            "Content-Encoding": "zstd",
+                        },
+                    )
+                    if response.status_code < 400:
+                        break
+                    if response.status_code == 413 and len(batch) > 1:
+                        # #310: a sink line cap below our batch must never
+                        # mean silent loss — halve and retry in-cycle.
+                        halved = max(1, len(batch) // 2)
+                        logger.warning(
+                            "Audit sink 413 on %d-line batch — splitting to %d lines and retrying in this drain cycle",
+                            len(batch),
+                            halved,
+                        )
+                        batch = batch[:halved]
+                        continue
+                    logger.error(
+                        "Audit forward failed (HTTP %d): %s",
+                        response.status_code,
+                        response.text[:200],
+                    )
+                    return False
+            with self._lock:
+                self._remove_sent_lines(batch)
+            logger.debug("Forwarded %d audit events", len(batch))
+            return True
         except Exception as e:
             logger.warning("Audit forward error: %s", e)
             return False
         finally:
             with self._lock:
                 self._forwarding = False
-
-        if response.status_code < 400:
-            with self._lock:
-                self._truncate_prefix(len(lines))
-            logger.debug("Forwarded %d audit events", len(lines))
-            return True
-
-        logger.error(
-            "Audit forward failed (HTTP %d): %s",
-            response.status_code,
-            response.text[:200],
-        )
-        return False
 
     def _read_all_lines(self) -> list[str]:
         """Read all spool lines. Caller must hold the lock."""
@@ -301,20 +341,65 @@ class AuditLogger:
             return f.readlines()
 
     def _truncate_prefix(self, n: int) -> None:
-        """Remove the n oldest spool lines. Caller must hold the lock."""
+        """Remove the n oldest spool lines (the warned drop-oldest path —
+        count is legitimate there because every removal is logged by
+        ``_drop_oldest``). Caller must hold the lock."""
         lines = self._read_all_lines()
-        self._keep_latest(len(lines) - n)
+        self._rewrite_spool(lines[n:])
 
-    def _keep_latest(self, keep: int) -> None:
-        """Rewrite the spool keeping only its last `keep` lines. Caller must
-        hold the lock."""
-        lines = self._read_all_lines()
-        if keep <= 0:
-            if self._spool_path.exists():
-                self._spool_path.unlink()
+    def _remove_sent_lines(self, batch: list[str]) -> None:
+        """Content-addressed success truncation (#310): a line leaves the
+        spool only if it was SENT or was explicitly warned-dropped by
+        ``_drop_oldest``. Count-truncation is retired on the forward path —
+        an interleaved capacity drop during the POST moves the file head,
+        and ``len(batch)`` blind-removal would charge un-forwarded lines.
+
+        The batch's remaining lines are removed by CONTENT (one occurrence
+        per sent line, order preserved). If the head moved (part of the sent
+        batch was already warned-dropped in flight), that is logged with
+        counts, never guessed at. Caller must hold the lock.
+        """
+        current = self._read_all_lines()
+        if current[: len(batch)] == batch:
+            self._rewrite_spool(current[len(batch) :])
             return
-        with self._spool_path.open("w", encoding="utf-8") as f:
-            f.writelines(lines[-keep:])
+        # Head moved: remove exactly the sent content, wherever it remains.
+        remaining = Counter(batch)
+        kept: list[str] = []
+        for line in current:
+            if remaining.get(line, 0) > 0:
+                remaining[line] -= 1
+            else:
+                kept.append(line)
+        already_gone = sum(remaining.values())
+        logger.warning(
+            "Audit spool head moved during forward: %d of %d sent lines still present removed by content; "
+            "%d already warned-dropped in flight (see spool-full warnings) — never count-deleting",
+            len(batch) - already_gone,
+            len(batch),
+            already_gone,
+        )
+        self._rewrite_spool(kept)
+
+    def _rewrite_spool(self, lines: list[str]) -> None:
+        """Atomically replace the spool contents: temp file created 0600 in
+        the spool's own directory, then ``os.replace`` (#310). The file is
+        never unlinked-then-recreated, so no window exists for a umask-mode
+        spool between a full drain and the next append. Caller must hold
+        the lock."""
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self._spool_path.parent,
+            prefix=self._spool_path.name + ".",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:  # mkstemp creates 0600
+                f.writelines(lines)
+            os.replace(tmp_name, self._spool_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
+            raise
 
     def shutdown(self) -> None:
         """Run a bounded final drain and stop the forwarder thread."""
