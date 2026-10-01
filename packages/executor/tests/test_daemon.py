@@ -365,7 +365,10 @@ class TestRegisterErrors:
         with patch("executor.daemon.httpx2.Client") as MockClient:
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
-            with patch.object(Path, "write_bytes", side_effect=OSError(30, "Read-only file system")):
+            # #316: writes now land via _atomic_write, not Path.write_bytes —
+            # the injected failure moved to the real write seam (same contract:
+            # OSError during save -> actionable RuntimeError).
+            with patch("executor.daemon._atomic_write", side_effect=OSError(30, "Read-only file system")):
                 with pytest.raises(RuntimeError, match="could not be saved locally"):
                     cert_manager.register("test-executor")
 

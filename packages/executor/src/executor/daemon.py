@@ -15,6 +15,8 @@ Manages the persistent executor daemon lifecycle:
   - Signal handling
 """
 
+import contextlib
+import errno
 import hashlib
 import logging
 import os
@@ -60,6 +62,39 @@ logger = logging.getLogger("venya.executor.daemon")
 # ReadWritePaths; the toml [bootstrap] section remains a read-only-to-daemon
 # LEGACY location honored until old installs are cut over.
 BOOTSTRAP_TOKEN_PATH = Path("/var/lib/venya/executor/bootstrap-token")
+
+
+def _atomic_write(path: str | Path, payload: bytes, mode: int) -> None:
+    """Write ``payload`` to ``path`` atomically with the FINAL mode at CREATE.
+
+    House pattern (audit.py #310 spool rewrite): temp file created in the
+    target's own directory, then ``os.replace``. os.open applies ``mode`` at
+    create (umask can only remove bits) and O_CREAT|O_EXCL fails loud if
+    anything — including attacker-planted garbage — already sits at the temp
+    name; the temp is unlinked on every failure path. Unlike write-then-chmod,
+    the target never exists at a mode other than ``mode``, so secret material
+    has no umask-born world-writable window (ticket
+    executor-daemon-umask0-key-write-window).
+    """
+    path = str(path)
+    # Refuse BEFORE creating a temp when the target itself is not writable
+    # (EROFS / read-only file): keeps the erofs pre-write-refusal contract —
+    # an atomic replace would otherwise silently succeed over an RO target.
+    if os.path.exists(path) and not os.access(path, os.W_OK):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
+    tmp_name = f"{path}.tmp"
+    fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        # umask can only REMOVE bits at create; fchmod pins the exact final
+        # mode while the file is still invisible under the temp name.
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        os.replace(tmp_name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
+        raise
 
 
 def _dist_version() -> str:
@@ -279,19 +314,17 @@ class CertificateManager:
 
         # Save CA certificate, signed certificate, and private key
         try:
-            Path(self.ca_cert_path).write_bytes(ca_cert_pem)
+            _atomic_write(self.ca_cert_path, ca_cert_pem, 0o644)
             logger.info("Saved CA certificate to %s", self.ca_cert_path)
 
-            Path(self.cert_path).write_bytes(cert_pem)
-            os.chmod(self.cert_path, 0o644)
+            _atomic_write(self.cert_path, cert_pem, 0o644)
 
             key_pem = private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
                 encryption_algorithm=serialization.NoEncryption(),
             )
-            Path(self.key_path).write_bytes(key_pem)
-            os.chmod(self.key_path, 0o600)
+            _atomic_write(self.key_path, key_pem, 0o600)
         except OSError as e:
             msg = (
                 f"mTLS certificate write failed: {e}. The server accepted the "
@@ -403,19 +436,17 @@ class CertificateManager:
         validate_executor_certificate(cert_pem, ca_cert_pem, executor_id)
 
         # Replace on disk
-        Path(self.cert_path).write_bytes(cert_pem)
-        os.chmod(self.cert_path, 0o644)
+        _atomic_write(self.cert_path, cert_pem, 0o644)
 
         key_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         )
-        Path(self.key_path).write_bytes(key_pem)
-        os.chmod(self.key_path, 0o600)
+        _atomic_write(self.key_path, key_pem, 0o600)
 
         # Update CA cert from server response
-        Path(self.ca_cert_path).write_bytes(ca_cert_pem)
+        _atomic_write(self.ca_cert_path, ca_cert_pem, 0o644)
 
         # In-memory identity adopts the new serial ONLY after every disk write
         # succeeded — memory must never claim an identity disk doesn't hold
@@ -995,12 +1026,14 @@ class ExecutorDaemon:
                 del data["bootstrap"]
 
             try:
-                # tomli_w.dump requires BINARY mode — the pre-fix text-mode
+                # tomli_w.dump requires BINARY bytes — the pre-fix text-mode
                 # open was a latent TypeError on every successful clear
                 # (masked in production: hardened units hit EROFS first and
                 # installer-flow clears the toml as root before daemon boot).
-                with open(config_path, "wb") as f:
-                    tomli_w.dump(data, f)
+                # #316: land via the atomic 0600 writer — the toml is a
+                # credential-bearing file, never a umask-mode
+                # truncate-and-rewrite.
+                _atomic_write(config_path, tomli_w.dumps(data).encode("utf-8"), 0o600)
                 logger.info("Cleared enrollment token from config")
             except OSError as e:
                 logger.error(
@@ -1400,6 +1433,45 @@ class ExecutorDaemon:
             pass
 
 
+def _daemonize_detach() -> None:
+    """Double-fork + setsid detach for --daemonize (extracted for testability).
+
+    On return, the caller is the grandchild (daemon) process. Every parent
+    leg terminates inside this function (sys.exit / os._exit).
+    """
+    # First fork — detach from parent
+    pid = os.fork()
+    if pid > 0:
+        # Parent — exit
+        print(f"Daemon started with PID {pid}")
+        sys.exit(0)
+    # Child — create new session
+    os.setsid()
+    # umask 077, NOT 0: umask(0) left every implicit-mode creation (private
+    # keys pre-#316, the pid file, the rewritten config) world-writable until
+    # an explicit chmod landed — a race window on every boot (ticket
+    # executor-daemon-umask0-key-write-window). 077 is the standard daemon
+    # umask: new files start owner-only; sites needing a wider mode (certs
+    # at 0644) pass it explicitly at create — umask only removes bits.
+    os.umask(0o077)
+
+    # Second fork — prevent reacquiring controlling terminal
+    pid = os.fork()
+    if pid > 0:
+        os._exit(0)
+
+    # Change to root directory
+    os.chdir("/")
+
+    # Redirect stdin/stdout/stderr to /dev/null
+    devnull_fd = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull_fd, 0)
+    os.dup2(devnull_fd, 1)
+    os.dup2(devnull_fd, 2)
+    if devnull_fd > 2:
+        os.close(devnull_fd)
+
+
 def main() -> None:
     """Entry point for venya-executor CLI."""
     import argparse
@@ -1468,30 +1540,6 @@ def main() -> None:
     daemon = ExecutorDaemon(config)
 
     if config.daemonize:
-        # First fork — detach from parent
-        pid = os.fork()
-        if pid > 0:
-            # Parent — exit
-            print(f"Daemon started with PID {pid}")
-            sys.exit(0)
-        # Child — create new session
-        os.setsid()
-        os.umask(0)
-
-        # Second fork — prevent reacquiring controlling terminal
-        pid = os.fork()
-        if pid > 0:
-            os._exit(0)
-
-        # Change to root directory
-        os.chdir("/")
-
-        # Redirect stdin/stdout/stderr to /dev/null
-        devnull_fd = os.open(os.devnull, os.O_RDWR)
-        os.dup2(devnull_fd, 0)
-        os.dup2(devnull_fd, 1)
-        os.dup2(devnull_fd, 2)
-        if devnull_fd > 2:
-            os.close(devnull_fd)
+        _daemonize_detach()
 
     daemon.start()

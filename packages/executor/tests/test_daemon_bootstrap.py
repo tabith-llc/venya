@@ -223,7 +223,7 @@ class TestDaemonRegistrationTLSVerification:
         ), patch(
             "executor.daemon.Path"
         ) as MockPath, patch(
-            "executor.daemon.os.chmod"
+            "executor.daemon._atomic_write"
         ):
             MockPath.return_value.write_bytes = MagicMock()
             MockPath.return_value.exists.return_value = False
@@ -264,7 +264,7 @@ class TestDaemonRegistrationTLSVerification:
         ), patch(
             "executor.daemon.Path"
         ) as MockPath, patch(
-            "executor.daemon.os.chmod"
+            "executor.daemon._atomic_write"
         ):
             MockPath.return_value.write_bytes = MagicMock()
             MockPath.return_value.exists.return_value = False
@@ -304,7 +304,7 @@ class TestDaemonRegistrationTLSVerification:
         ), patch(
             "executor.daemon.Path"
         ) as MockPath, patch(
-            "executor.daemon.os.chmod"
+            "executor.daemon._atomic_write"
         ), caplog.at_level(
             "WARNING"
         ):
@@ -356,7 +356,7 @@ class TestDaemonRegistrationTLSVerification:
         ), patch(
             "executor.daemon.Path"
         ) as MockPath, patch(
-            "executor.daemon.os.chmod"
+            "executor.daemon._atomic_write"
         ):
             MockPath.return_value.write_bytes = MagicMock()
             MockPath.return_value.exists.return_value = False
@@ -424,7 +424,7 @@ class TestDaemonRegistrationTLSVerification:
         ), patch(
             "executor.daemon.Path"
         ) as MockPath, patch(
-            "executor.daemon.os.chmod"
+            "executor.daemon._atomic_write"
         ):
             MockPath.return_value.write_bytes = MagicMock()
             MockPath.return_value.exists.return_value = False
