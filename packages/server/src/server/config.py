@@ -271,6 +271,53 @@ class AdminMTLSConfig(BaseModel):
     )
 
 
+class InnerTLSConfig(BaseModel):
+    """Inner nginx→uvicorn mTLS channel (end-to-end-mtls-header-trust-removal).
+
+    When enabled, uvicorn terminates TLS itself on the loopback bind and
+    REQUIRES a verified client certificate (the nginx client cert) on every
+    connection — a direct connect to the app port dies at the TLS handshake.
+    Client identity arrives separately as the OUTER client certificate PEM
+    that nginx writes per connection (extfile) and forwards by path; the
+    middleware re-verifies that PEM cryptographically (no header trust).
+
+    No default here weakens anything: ``main()`` REFUSES to start when
+    ``enabled`` is set with any material path or the path prefix missing,
+    and the client-cert requirement is not disableable via this surface.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Serve the app over TLS with required client certs (inner mTLS channel)",
+    )
+    cert_file: str | None = Field(
+        default=None,
+        description="Server certificate presented by uvicorn on the inner listener",
+    )
+    key_file: str | None = Field(
+        default=None,
+        description="Private key for cert_file",
+    )
+    client_ca_file: str | None = Field(
+        default=None,
+        description="CA bundle used to VERIFY the nginx client certificate (TLS layer)",
+    )
+    cert_path_header: str = Field(
+        default="x-client-cert-file",
+        description="Header nginx writes carrying the per-connection client-cert PEM file path",
+    )
+    cert_path_prefix: str | None = Field(
+        default=None,
+        description="Only cert-file paths resolving under this directory are read (traversal guard)",
+    )
+    cert_max_bytes: int = Field(
+        default=16384,
+        ge=512,
+        le=65536,
+        description="Maximum size of a forwarded client-cert PEM file (bytes)",
+    )
+
+
 class NetworkConfig(BaseModel):
     """Network timeout configuration."""
 
@@ -351,6 +398,9 @@ class ServerConfig(BaseSettings):
 
     # Admin mTLS
     admin_mtls: AdminMTLSConfig = Field(default_factory=AdminMTLSConfig)
+
+    # Inner nginx→uvicorn mTLS channel (#314)
+    inner_mtls: InnerTLSConfig = Field(default_factory=InnerTLSConfig)
 
     # Clock skew tolerance
     clock_skew: ClockSkewConfig = Field(default_factory=ClockSkewConfig)

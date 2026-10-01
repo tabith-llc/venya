@@ -4,6 +4,17 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+- **End-to-end mTLS: client identity is crypto-verified at the app.** Admin
+  and executor mTLS now read identity from the client certificate the app
+  verifies itself (forwarded by nginx over the new inner nginx→uvicorn mTLS
+  channel as a per-connection certificate file), replacing the
+  `X-Client-Verified`/`X-Client-Subject`/`X-Client-Serial` header chain. The
+  app serves TLS with required client certificates when
+  `VENYA_INNER_MTLS__ENABLED=true`, so a direct app-port connection stops at
+  the handshake; per-plane CA binding (admin stage vs admin CA, executor
+  stage vs Root CA) refuses cross-plane certificates at the chain check.
+  Header-based identity reads no longer exist in the server package
+  (interlock test pins the posture). refs #314
 - **IAM: `auditor` permission tier.** Roles can now be created with
   `permissions="auditor"` (API, CLI `role create --permissions auditor`).
   Auditors keep the read-tier listings (secrets/roles/executors metadata)

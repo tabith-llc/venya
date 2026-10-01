@@ -37,7 +37,12 @@ from venya_contract import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, Relay
 from .. import metrics
 from ..ca import CAManager
 from ..dependencies import get_db, require_role
-from ..middleware.auth import _extract_identity_from_subject
+from ..middleware.auth import (
+    _executor_ca_certs,
+    _extract_identity_from_cert,
+    _forwarded_client_cert,
+    _verify_forwarded_cert,
+)
 from ..rate_limit import rate_limit_registration
 from ..revocation import executor_revocation_state
 from ..utils.executor_id import EXECUTOR_ID_PATTERN
@@ -389,30 +394,29 @@ def _dial_hostname_resolvable(hostname: str) -> bool:
 def _verified_incumbent_serial(request: Request, executor_id: str) -> str | None:
     """Extract the verified mTLS client-cert serial for the incumbent exemption.
 
-    Phase 2 (executor-rotation-require-token-400 ruling 2(a)). Trust boundary:
-    nginx verifies the client chain against client-ca-bundle.crt (Root CA +
-    Admin CA) and OVERWRITES X-Client-* from its own ssl variables — a
-    client-sent header of the same name never survives the proxy, and with no
-    (or an unverified) cert the serial variable is empty and nginx drops the
-    header. The CN match is a discriminator, not the authorization: an
-    Admin-CA cert CAN carry an executor-shaped CN, but only the true incumbent
-    can present the Root-CA-issued record serial (random 64-bit at signing,
-    no serial-chooser API exists). Returns the serial normalized to the
-    record format (lowercase, 16-hex zero-padded — nginx sends uppercase and
-    DER encoding may strip leading zero bytes), or None when no verified cert
-    for this executor_id was presented.
+    Phase 2 (executor-rotation-require-token-400 ruling 2(a)). Trust boundary
+    (end-to-end-mtls-header-trust-removal #314): the client certificate
+    nginx forwards over the inner mTLS channel is re-verified HERE against
+    the Root CA (the executor-plane anchor, ruled Q4) — no header participates.
+    The CN match is a discriminator, not the authorization: the per-plane
+    chain check already refuses an Admin-CA cert carrying an executor-shaped
+    CN, and only the true incumbent can present the Root-CA-issued record
+    serial (random 64-bit at signing, no serial-chooser API exists). Returns
+    the serial normalized to the record format (lowercase, 16-hex zero-padded),
+    or None when no crypto-verified cert for this executor_id was presented.
     """
-    if request.headers.get("x-client-verified") != "SUCCESS":
+    cert = _forwarded_client_cert(request)
+    if cert is None:
         return None
-    presented = request.headers.get("x-client-serial", "").strip()
-    if not presented:
-        return None
-    if _extract_identity_from_subject(request.headers.get("x-client-subject", "")) != executor_id:
+    executor_cas = _executor_ca_certs(request)
+    if executor_cas is None or not _verify_forwarded_cert(request, cert, executor_cas):
         return None
     try:
-        return format(int(presented, 16), "016x")
+        if _extract_identity_from_cert(cert) != executor_id:
+            return None
     except ValueError:
         return None
+    return format(cert.serial_number, "016x")
 
 
 def _incumbent_exemption_applies(db: Session, executor_id: str, presented_serial: str) -> bool:

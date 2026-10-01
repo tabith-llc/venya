@@ -9,6 +9,7 @@
 import asyncio
 import logging
 import time
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -411,6 +412,72 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     logger.info("Server shut down")
 
 
+def build_uvicorn_kwargs(app: Any, config: ServerConfig) -> dict:
+    """Assemble the uvicorn.run kwargs, including the inner-mTLS guard (#314).
+
+    Extracted from main() so the CERT_REQUIRED pin and the fail-closed
+    startup guard are unit-testable without booting a server (the pinned
+    uvicorn 0.52.1 default is ``ssl_cert_reqs=CERT_NONE`` — passing
+    ``ssl_ca_certs`` alone does NOT require client certs; and
+    ``ssl_cert_reqs`` is int-typed there, so a future signature change
+    trips the verification cells rather than silently weakening the
+    listener — ruled Q7 drift pin).
+    """
+    kwargs = {
+        "app": app,
+        "host": config.host,
+        "port": config.port,
+        "log_level": "debug" if config.debug else "info",
+        # Trust X-Forwarded-* from the configured proxies so that, behind nginx,
+        # request.client.host resolves to the real caller address (not the
+        # 127.0.0.1 loopback peer). nginx forwards X-Forwarded-For on every
+        # proxied request; the immediate peer is 127.0.0.1, which is in the
+        # trusted list by default.
+        "proxy_headers": True,
+        "forwarded_allow_ips": config.trusted_proxies,
+    }
+
+    inner = config.inner_mtls
+    if inner.enabled:
+        missing = [
+            name
+            for name, value in (
+                ("VENYA_INNER_MTLS__CERT_FILE", inner.cert_file),
+                ("VENYA_INNER_MTLS__KEY_FILE", inner.key_file),
+                ("VENYA_INNER_MTLS__CLIENT_CA_FILE", inner.client_ca_file),
+                ("VENYA_INNER_MTLS__CERT_PATH_PREFIX", inner.cert_path_prefix),
+            )
+            if not value
+        ]
+        if missing:
+            raise RuntimeError(
+                "inner_mtls.enabled requires " + ", ".join(missing) + " — refusing to start "
+                "with a half-wired inner mTLS channel (end-to-end-mtls-header-trust-removal)."
+            )
+        if config.host not in ("127.0.0.1", "::1", "localhost"):
+            raise RuntimeError(
+                "inner_mtls.enabled requires loopback bind address (127.0.0.1 or ::1); "
+                "the inner channel is nginx→uvicorn on localhost only."
+            )
+        import ssl as _ssl
+
+        kwargs["ssl_certfile"] = inner.cert_file
+        kwargs["ssl_keyfile"] = inner.key_file
+        kwargs["ssl_ca_certs"] = inner.client_ca_file
+        # EXPLICIT: uvicorn's ssl_cert_reqs default is CERT_NONE.
+        kwargs["ssl_cert_reqs"] = _ssl.CERT_REQUIRED
+        logger.info("Inner mTLS listener enabled (cert: %s)", inner.cert_file)
+        return kwargs
+
+    if config.ssl_cert and config.ssl_key:
+        kwargs["ssl_certfile"] = config.ssl_cert
+        kwargs["ssl_keyfile"] = config.ssl_key
+        logger.info("Starting server with HTTPS (SSL cert: %s)", config.ssl_cert)
+    else:
+        logger.info("Starting server with HTTP (no SSL configured)")
+    return kwargs
+
+
 def main() -> None:
     """Run the server."""
     import logging
@@ -451,25 +518,4 @@ def main() -> None:
         start_http_server(port, addr="127.0.0.1")
         logger.info("Prometheus metrics server started on 127.0.0.1:%d", port)
 
-    uvicorn_kwargs = {
-        "app": app,
-        "host": config.host,
-        "port": config.port,
-        "log_level": "debug" if config.debug else "info",
-        # Trust X-Forwarded-* from the configured proxies so that, behind nginx,
-        # request.client.host resolves to the real caller address (not the
-        # 127.0.0.1 loopback peer). nginx forwards X-Forwarded-For on every
-        # proxied request; the immediate peer is 127.0.0.1, which is in the
-        # trusted list by default.
-        "proxy_headers": True,
-        "forwarded_allow_ips": config.trusted_proxies,
-    }
-
-    if config.ssl_cert and config.ssl_key:
-        uvicorn_kwargs["ssl_certfile"] = config.ssl_cert
-        uvicorn_kwargs["ssl_keyfile"] = config.ssl_key
-        logger.info("Starting server with HTTPS (SSL cert: %s)", config.ssl_cert)
-    else:
-        logger.info("Starting server with HTTP (no SSL configured)")
-
-    uvicorn.run(**uvicorn_kwargs)
+    uvicorn.run(**build_uvicorn_kwargs(app, config))

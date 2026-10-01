@@ -248,13 +248,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         INVARIANT (named, shared): rightmost is trustworthy IFF the app is
         reachable through EXACTLY ONE trusted appending proxy hop — the same
-        loopback-only-backend deployment invariant the X-Client-* mTLS header
-        chain rests on (installer BIND_ADDRESS=127.0.0.1; see the
-        _validate_admin_mtls / _validate_executor_mtls docstrings — two
-        controls now share this invariant). A client hitting the app port
-        directly spoofs rightmost trivially; a SECOND proxy layer silently
-        invalidates it. Do not change the topology without changing this
-        function.
+        loopback-only-backend topology the inner mTLS channel seals
+        (end-to-end-mtls-header-trust-removal #314: uvicorn now REQUIRES the
+        nginx client cert, so a direct app-port connect dies at the TLS
+        handshake instead of merely spoofs; the single-append fact this
+        function depends on is unchanged). See the _validate_admin_mtls /
+        _validate_executor_mtls docstrings — two controls share this
+        invariant. A SECOND proxy layer would still silently invalidate it.
+        Do not change the topology without changing this function.
         """
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:

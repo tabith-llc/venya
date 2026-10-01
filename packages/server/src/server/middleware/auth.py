@@ -7,16 +7,25 @@
 """Session validation middleware.
 
 Validates bearer tokens against active sessions and attaches
-user info to request state. Supports mTLS-based admin endpoint
-authentication via Nginx-layer client certificate verification.
+user info to request state. Admin and executor mTLS identity is
+crypto-verified HERE (end-to-end-mtls-header-trust-removal #314): the
+client certificate nginx forwards over the inner mTLS channel (extfile
+path header) is re-verified against the CA the app holds itself. No
+request header is ever identity — the X-Client-* header chain is
+retired; no reads of those headers remain in this package (grep
+interlock: tests/test_header_trust_interlock.py).
 """
 
 import logging
-from datetime import UTC, datetime
+import os
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from cryptography import x509
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+from cryptography.x509 import load_pem_x509_certificates
 from cryptography.x509.oid import ExtensionOID, NameOID
 from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -55,40 +64,145 @@ def _extract_identity_from_cert(cert: x509.Certificate) -> str:
     raise ValueError("Certificate has neither SAN nor CN")
 
 
-def _extract_identity_from_subject(subject_dn: str) -> str:
-    """Extract the CN value from a subject DN string.
+def _inner_tls_cfg(request: Request) -> Any:
+    """Return the InnerTLSConfig when fully wired for forwarded-cert reads, else None.
 
-    Example: 'CN=admin@venya-core-1,OU=Admin,O=Venya' -> 'admin@venya-core-1'
-
-    Args:
-        subject_dn: The subject DN string from the X-Client-Subject header.
-
-    Returns:
-        The CN value, or empty string if not found.
+    An incomplete surface (no config, disabled, or no cert_path_prefix) reads
+    as "no certificate" everywhere — the mTLS gates then fail closed. There is
+    deliberately NO header fallback (ruled Q5): a half-configured inner
+    channel rejects, it does not downgrade.
     """
-    for field in subject_dn.split(","):
-        field = field.strip()
-        if field.upper().startswith("CN="):
-            return field[3:]
-    return ""
+    config = getattr(request.app.state, "config", None)
+    inner = getattr(config, "inner_mtls", None) if config is not None else None
+    if inner is None or not inner.enabled or not inner.cert_path_header or not inner.cert_path_prefix:
+        return None
+    return inner
 
 
-def _verify_cert_against_ca(cert: x509.Certificate, ca_cert: x509.Certificate) -> bool:
-    """Verify a certificate was signed by the admin CA.
+def _forwarded_client_cert(request: Request) -> x509.Certificate | None:
+    """Read the nginx-forwarded OUTER client certificate PEM (unverified yet).
 
-    Args:
-        cert: The certificate to verify.
-        ca_cert: The admin CA certificate.
+    nginx writes the verified client cert to a per-connection temp file
+    (``$ssl_client_certificate_path`` extfile) and passes the PATH in the
+    configured header. Guards, each failing closed to None: the inner-mTLS
+    surface must be fully wired; the path must resolve INSIDE the configured
+    prefix (symlink/traversal escape rejected); the file must be within the
+    size ceiling; the bytes must parse as one PEM certificate.
 
-    Returns:
-        True if the signature is valid.
+    Why the app re-verifies the PEM even though nginx verified the chain at
+    the outer TLS layer: end-to-end-mtls-header-trust-removal (#314) removes
+    trust in nginx's forwarding entirely — the app's own crypto decision is
+    the gate. Q6 invariant: uvicorn (0.52.1, pinned) discards the INNER peer
+    certificate after verifying it, so nothing here — and nothing anywhere —
+    can assert the nginx-peer identity at the app layer; the inner channel is
+    an ingress seal, not an identity carrier.
     """
-    ca_public_key = ca_cert.public_key()
-    ca_public_key.verify(
-        cert.signature,
-        cert.tbs_certificate_bytes,
-        ec.ECDSA(cert.signature_hash_algorithm),
-    )
+    inner = _inner_tls_cfg(request)
+    if inner is None:
+        return None
+    raw_path = request.headers.get(inner.cert_path_header)
+    if not raw_path:
+        return None
+    try:
+        prefix = Path(inner.cert_path_prefix).resolve()
+        resolved = Path(raw_path).resolve()
+        if os.path.commonpath([prefix, resolved]) != str(prefix):
+            logger.warning("Forwarded cert path %r escapes prefix %s — rejected", raw_path, prefix)
+            return None
+        if resolved.stat().st_size > inner.cert_max_bytes:
+            logger.warning("Forwarded cert file %s exceeds size ceiling — rejected", resolved)
+            return None
+        data = resolved.read_bytes()
+    except (OSError, ValueError):
+        return None
+    try:
+        return x509.load_pem_x509_certificate(data)
+    except Exception:
+        return None
+
+
+def _admin_ca_certs(request: Request) -> list[x509.Certificate] | None:
+    """Admin-plane trust anchors: startup-loaded bundle, else the configured CA file."""
+    loaded = getattr(request.app.state, "admin_trusted_cas", None)
+    if loaded:
+        return list(loaded)
+    config = getattr(request.app.state, "config", None)
+    ca_cert = getattr(getattr(config, "admin_mtls", None), "ca_cert", None)
+    if not ca_cert:
+        return None
+    try:
+        return load_pem_x509_certificates(Path(ca_cert).read_bytes())
+    except Exception:
+        logger.exception("Cannot load admin CA bundle from %s — admin mTLS fails closed", ca_cert)
+        return None
+
+
+def _executor_ca_certs(request: Request) -> list[x509.Certificate] | None:
+    """Executor-plane trust anchors: the Root CA the CA manager already holds."""
+    ca_manager = getattr(request.app.state, "ca_manager", None)
+    if ca_manager is not None:
+        try:
+            return load_pem_x509_certificates(ca_manager.get_ca_cert_pem())
+        except Exception:
+            logger.exception("Cannot read Root CA from the CA manager — executor mTLS fails closed")
+            return None
+    config = getattr(request.app.state, "config", None)
+    ca_dir = getattr(config, "ca_dir", None)
+    if not ca_dir:
+        return None
+    try:
+        return load_pem_x509_certificates((Path(ca_dir) / "ca.crt").read_bytes())
+    except Exception:
+        return None
+
+
+def _verify_forwarded_cert(request: Request, cert: x509.Certificate, ca_certs: list[x509.Certificate]) -> bool:
+    """Crypto-verify a forwarded leaf against its PLANE's CA set (per-plane binding, ruled Q4).
+
+    Checks, every miss returning False (fail-closed): the issuer is a
+    presented trust anchor whose BasicConstraints says CA; the leaf's
+    validity window holds (plus the configured clock-skew tolerance — nginx
+    dropped expired certs at the outer TLS layer; end-to-end the app must
+    check too, since app-side verification is now the gate); and the
+    signature verifies against that anchor.
+
+    cryptography 50.0.0 (the pin) exposes NO public X.509 path builder
+    (``hazmat.primitives.verification`` is absent from the wheel — verified
+    against the installed version), so the leaf→single-anchor check is
+    explicit. Every CA we issue (root, admin, executor leaves) is one
+    signature link under a CA-flagged anchor; multi-hop chains are not an
+    issued shape in this product.
+    """
+    config = getattr(request.app.state, "config", None)
+    tolerance = getattr(getattr(config, "clock_skew", None), "cert_tolerance_seconds", 0) or 0
+    now = datetime.now(UTC)
+    if now < cert.not_valid_before_utc - timedelta(seconds=tolerance):
+        return False
+    if now > cert.not_valid_after_utc + timedelta(seconds=tolerance):
+        return False
+    issuer = next((ca for ca in ca_certs if ca.subject == cert.issuer), None)
+    if issuer is None:
+        return False
+    try:
+        if not issuer.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+            return False
+    except x509.ExtensionNotFound:
+        return False
+    public_key = issuer.public_key()
+    try:
+        if isinstance(public_key, ec.EllipticCurvePublicKey):
+            public_key.verify(cert.signature, cert.tbs_certificate_bytes, ec.ECDSA(cert.signature_hash_algorithm))
+        elif isinstance(public_key, rsa.RSAPublicKey):
+            public_key.verify(
+                cert.signature,
+                cert.tbs_certificate_bytes,
+                PKCS1v15(),
+                cert.signature_hash_algorithm,
+            )
+        else:
+            return False
+    except Exception:
+        return False
     return True
 
 
@@ -155,20 +269,27 @@ class SessionMiddleware(BaseHTTPMiddleware):
         return path.startswith("/api/v1/admin/")
 
     async def _validate_admin_mtls(self, request: Request) -> JSONResponse | None:
-        """Validate mTLS client certificate for admin routes.
+        """Validate the crypto-forwarded client certificate for admin routes.
 
         When admin_mtls is enabled and the path is an admin route, this
-        performs a 3-step validation chain:
-        1. Check X-Client-Verified sentinel header
-        2. Extract identity from X-Client-Subject DN, check against
+        performs the validation chain (identity read ONLY from a
+        cryptographically verified certificate — #314 retired the header
+        chain; ruled Q4 binds this plane to the ADMIN CA set, so a Root-CA
+        cert — e.g. an executor cert — is refused at the chain check before
+        any identity comparison):
+        1. Read the nginx-forwarded client-cert PEM (_forwarded_client_cert
+           guards) and verify it against the admin trust anchors — missing,
+           unparseable, path-escaping, expired, or foreign-chain all fail
+           closed 403.
+        2. Extract identity from the VERIFIED certificate (SAN RFC822 → SAN
+           DNS → CN, _extract_identity_from_cert), check against
            known_admin_ids — an EMPTY allowlist FAILS CLOSED (ticket
            sec-admin-mtls-allowlist-revocation #15)
-        3. Check X-Client-Serial against AdminCertRevocation — in-process
-           revocation enforcement, fail-closed on missing serial / backend /
-           lookup error (ticket sec-admin-mtls-allowlist-revocation #16)
-
-        Nginx verifies the cert chain and expiration at the TLS layer
-        (verify_if_given/require_and_verify). This middleware checks identity.
+        3. Check the verified certificate's serial against
+           AdminCertRevocation — in-process revocation enforcement,
+           fail-closed on backend / lookup error (ticket
+           sec-admin-mtls-allowlist-revocation #16; a forwarded cert always
+           carries a serial, so the former missing-header branch is gone).
 
         Args:
             request: The FastAPI request.
@@ -184,39 +305,39 @@ class SessionMiddleware(BaseHTTPMiddleware):
         if not self._is_admin_route(path):
             return None
 
-        # Step 1: Check X-Client-Verified sentinel header
-        verified = request.headers.get("x-client-verified")
-        if verified != "SUCCESS":
-            logger.warning("Admin route %s: missing or invalid X-Client-Verified header", path)
+        # Step 1: crypto-verified client cert against the ADMIN-plane anchors
+        cert = _forwarded_client_cert(request)
+        admin_cas = _admin_ca_certs(request) if cert is not None else None
+        if cert is None or admin_cas is None or not _verify_forwarded_cert(request, cert, admin_cas):
+            logger.warning(
+                "Admin route %s: no crypto-verified client certificate — failing closed. "
+                "Recovery: ensure the installer regenerated the nginx site (inner mTLS channel "
+                "forwards the client cert file) and both nginx and venya-core restarted in the "
+                "SAME maintenance window.",
+                path,
+            )
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": "Admin access requires valid client certificate"},
             )
 
-        # Step 2: Extract identity from X-Client-Subject header
-        subject_dn = request.headers.get("x-client-subject", "")
-        if not subject_dn:
-            logger.warning("Admin route %s: missing X-Client-Subject header", path)
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={"detail": "Admin access requires valid client certificate"},
-            )
-
-        identity = _extract_identity_from_subject(subject_dn)
-        if not identity:
-            logger.warning("Admin route %s: could not extract identity from subject DN", path)
+        # Step 2: identity = SAN (RFC822 → DNS) or CN of the VERIFIED cert
+        try:
+            identity = _extract_identity_from_cert(cert)
+        except ValueError:
+            logger.warning("Admin route %s: verified certificate has neither SAN nor CN", path)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={"detail": "Admin access requires valid client certificate"},
             )
 
         # Allowlist FAILS CLOSED when empty (ticket
-        # sec-admin-mtls-allowlist-revocation #15): the nginx trust bundle
-        # carries Root CA + Admin CA — architecturally forced, the executor
-        # session path shares it — so an empty allowlist would admit ANY
-        # Root-CA cert (e.g. an executor cert) as caller=admin. The 403 detail
-        # stays generic here (the caller may be any cert holder); recovery
-        # guidance goes to the server-side log.
+        # sec-admin-mtls-allowlist-revocation #15). Ruled-Q4 per-plane anchors
+        # already refuse Root-CA certs at the chain check above, but the
+        # allowlist stays a defense-in-depth layer (any Admin-CA cert must
+        # still name an enumerated identity). The 403 detail stays generic
+        # here (the caller may be any cert holder); recovery guidance goes to
+        # the server-side log.
         known_ids = config.admin_mtls.known_admin_ids  # type: ignore[union-attr]
         if not known_ids:
             logger.warning(
@@ -236,35 +357,16 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Admin access requires valid client certificate"},
             )
 
-        # Step 3: serial presentation + in-process revocation check (ticket
-        # sec-admin-mtls-allowlist-revocation #16). POST /admin/certs/revoke
-        # recorded AdminCertRevocation rows that nothing consulted in-process
-        # (CRL generation only; nginx has no ssl_crl). Missing serial FAILS
-        # CLOSED (user ruling 2026-09-20): warn-open would leave the
-        # revocation bypass alive on every pre-header nginx config, silently.
-        # The caller at this point is an allowlisted admin identity, so the
-        # detail carries the recovery path. Serial match is case-insensitive:
-        # legacy rows store the serial as-provided, nginx $ssl_client_serial
-        # is uppercase; new writes normalize at the storage boundary (admin.py).
-        presented_serial = (request.headers.get("x-client-serial") or "").strip()
-        if not presented_serial:
-            logger.warning(
-                "Admin route %s: X-Client-Serial missing — failing closed. "
-                "Recovery: re-run the core installer (idempotent) to regenerate "
-                "the nginx site config, then `systemctl restart venya-core` in "
-                "the SAME maintenance window and re-verify an admin mTLS call "
-                "(installer re-runs do NOT restart a running core — ticket "
-                "installer-rerun-no-service-restart).",
-                path,
-            )
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={
-                    "detail": "Admin mTLS misconfigured: certificate serial not presented. "
-                    "Recovery: re-run the core installer to regenerate the nginx site "
-                    "config, then restart venya-core and retry."
-                },
-            )
+        # Step 3: in-process revocation check on the VERIFIED cert's serial
+        # (ticket sec-admin-mtls-allowlist-revocation #16). POST
+        # /admin/certs/revoke records AdminCertRevocation rows; nginx has no
+        # ssl_crl, so this lookup is the enforcement point. The serial can no
+        # longer be "absent" (it comes from the certificate object, not a
+        # header) — the former missing-header fail-closed branch is retired by
+        # construction; backend-absence and lookup-error still fail closed.
+        # Serial match is case-insensitive: legacy rows store the serial
+        # as-provided; new writes normalize at the storage boundary (admin.py).
+        presented_serial = format(cert.serial_number, "x")
 
         backend = getattr(request.app.state, "backend", None)
         if backend is None:
@@ -402,23 +504,22 @@ class SessionMiddleware(BaseHTTPMiddleware):
     async def _validate_executor_mtls(self, request: Request, reject_revoked: bool = True) -> JSONResponse | None:
         """Validate executor mTLS identity for executor session paths.
 
-        Grants ``caller=executor`` ONLY on a verified client cert whose CN is
-        a registered, non-revoked executor. Trust model mirrors
-        ``_validate_admin_mtls``: nginx terminates TLS (``ssl_verify_client
-        optional`` against the Root+Admin CA bundle) and OVERWRITES the
-        X-Client-* headers via ``proxy_set_header``; the app binds
-        loopback-only (installer ``BIND_ADDRESS=127.0.0.1``), so nginx is the
-        only ingress and the headers cannot be client-spoofed. That loopback
-        bind is a SHARED DEPLOYMENT INVARIANT with the admin-mTLS path —
-        exposing the app port directly defeats both gates.
+        Grants ``caller=executor`` ONLY on a client certificate that the APP
+        cryptographically verifies against the Root CA (ruled Q4 binds this
+        plane to the executor/root anchors — an Admin-CA cert presenting an
+        executor-shaped CN is refused at the chain check, the former
+        CN-discriminator path). Identity and serial are read from the
+        verified certificate object; the X-Client-* header chain is retired
+        (#314). Forwarding rides the inner mTLS channel: the direct app-port
+        connect dies at the TLS handshake (uvicorn ``ssl_cert_reqs=
+        CERT_REQUIRED``), and with no inner channel the forwarded cert file
+        simply never arrives — both halves fail closed, no header fallback
+        (ruled Q5).
 
-        Serial handling (deliberate, named decision): X-Client-Serial is
-        passed through when present. When absent/empty (e.g. an nginx config
-        predating the Phase-2 header addition), ``executor_revocation_state``
-        falls back to the current ExecutorCert record serial per its ruled
-        semantics — identity-flag and current-credential serial revocations
-        still apply; only a rotated-away predecessor serial needs the
-        presented header. Missing serial never fails open past those.
+        Serial handling: the presented serial now ALWAYS comes from the
+        verified certificate (never "absent"). ``executor_revocation_state``
+        still defines the no-serial fallback semantics for the other callers
+        (dial/heartbeat/display); this path simply cannot exercise it.
 
         Args:
             request: The FastAPI request.
@@ -434,20 +535,21 @@ class SessionMiddleware(BaseHTTPMiddleware):
         detail = "Executor mTLS authentication required"
         path = request.url.path
 
-        # Step 1: nginx TLS-layer verification sentinel
-        verified = request.headers.get("x-client-verified")
-        if verified != "SUCCESS":
-            logger.warning("Executor session path %s: X-Client-Verified missing or not SUCCESS", path)
+        # Step 1: crypto-verified client cert against the EXECUTOR-plane anchors
+        cert = _forwarded_client_cert(request)
+        executor_cas = _executor_ca_certs(request) if cert is not None else None
+        if cert is None or executor_cas is None or not _verify_forwarded_cert(request, cert, executor_cas):
+            logger.warning("Executor session path %s: no crypto-verified client certificate", path)
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": detail},
             )
 
-        # Step 2: executor identity = CN of the verified client cert
-        subject_dn = request.headers.get("x-client-subject", "")
-        executor_id = _extract_identity_from_subject(subject_dn)
-        if not executor_id:
-            logger.warning("Executor session path %s: could not extract CN from X-Client-Subject", path)
+        # Step 2: executor identity = SAN/CN of the VERIFIED cert
+        try:
+            executor_id = _extract_identity_from_cert(cert)
+        except ValueError:
+            logger.warning("Executor session path %s: verified certificate has neither SAN nor CN", path)
             return JSONResponse(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 content={"detail": detail},
@@ -477,7 +579,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
                     content={"detail": detail},
                 )
 
-            presented_serial = request.headers.get("x-client-serial") or None
+            presented_serial = format(cert.serial_number, "x")
             rev = executor_revocation_state(db, executor_id, presented_serial=presented_serial, executor_row=row)
             if rev.revoked:
                 if reject_revoked:
