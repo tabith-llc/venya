@@ -1214,8 +1214,11 @@ class TestAdminIdentityCapture:
 
         fields = json.loads(audit_event.fields)
         assert fields["token_id"] == 42
-        assert "token_hash_preview" in fields
-        assert len(fields["token_hash_preview"]) == 8
+        # #301 owner extension (2026-10-01 ruling): the site moved behind the
+        # single writer and the 8-hex token_hash_preview was DROPPED — no
+        # hash material in audit fields.
+        assert "token_hash_preview" not in fields
+        assert "token_hash" not in fields
         assert "expires_at" in fields
         assert fields["created_by_session_id"] == "42"
         assert fields["created_from_ip"] is not None

@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from .. import metrics
 from ..audit_lifecycle import (
+    ELEVATION_GRANTED,
     SESSION_ENDED,
     SESSION_STARTED,
     audit_lifecycle,
@@ -665,6 +666,14 @@ async def browser_elevate_assert(
             expires_at=expires_at,
         )
         db.add(elevation_record)
+        # #301 F2 (Q2: emits on every grant): value-free — mode + endpoint
+        # only. Rides the issuance commit (same txn).
+        audit_lifecycle(
+            db,
+            ELEVATION_GRANTED,
+            session.user_id,
+            {"mode": "browser", "endpoint": "/api/v1/auth/elevate/browser/assert"},
+        )
         db.commit()
 
         logger.info(
