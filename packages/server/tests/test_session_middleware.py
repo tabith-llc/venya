@@ -475,7 +475,12 @@ class TestExecutorSessionPathAuth:
             },
         )
         assert resp.status_code == 200
-        assert resp.json()["user"] == {"caller": "executor", "executor_id": "venya-exec-1"}
+        assert resp.json()["user"] == {
+            "caller": "executor",
+            "executor_id": "venya-exec-1",
+            "presented_serial": "0000000000000001",
+            "revoked": False,
+        }
 
     def test_identity_revoked_rejected_403(self):
         """Executor.revoked_at set → identity-flag revocation, terminal."""
@@ -581,7 +586,12 @@ class TestExecutorSessionPathAuth:
             },
         )
         assert resp.status_code == 200
-        assert resp.json()["user"] == {"caller": "executor", "executor_id": "venya-exec-1"}
+        assert resp.json()["user"] == {
+            "caller": "executor",
+            "executor_id": "venya-exec-1",
+            "presented_serial": "0000000000000001",
+            "revoked": False,
+        }
 
     def test_heartbeat_revoked_identity_passes_through_for_advisory(self):
         """B1 RULING PIN: a revoked executor is NOT 403'd on the heartbeat
@@ -605,6 +615,10 @@ class TestExecutorSessionPathAuth:
         )
         assert resp.status_code == 200
         assert resp.json()["user"]["caller"] == "executor"
+        # audit-ingest-revoked-serial-flag-divergence: the admission verdict
+        # + its input ride on auth_user for the route to share by construction.
+        assert resp.json()["user"]["revoked"] is True
+        assert resp.json()["user"]["presented_serial"] == "0000000000000001"
 
     # --- Audit-forwarder ingest gating (ticket audit-forwarder-server-sink #307) ---
 
@@ -636,7 +650,12 @@ class TestExecutorSessionPathAuth:
             },
         )
         assert resp.status_code == 200
-        assert resp.json()["user"] == {"caller": "executor", "executor_id": "venya-exec-1"}
+        assert resp.json()["user"] == {
+            "caller": "executor",
+            "executor_id": "venya-exec-1",
+            "presented_serial": "0000000000000001",
+            "revoked": False,
+        }
 
     def test_audit_ingest_revoked_identity_passes_through(self):
         """D2 RULING PIN (#307): a revoked executor is NOT 403'd on the
@@ -660,6 +679,10 @@ class TestExecutorSessionPathAuth:
         )
         assert resp.status_code == 200
         assert resp.json()["user"]["caller"] == "executor"
+        # audit-ingest-revoked-serial-flag-divergence: the admission verdict
+        # + its input ride on auth_user for the route to share by construction.
+        assert resp.json()["user"]["revoked"] is True
+        assert resp.json()["user"]["presented_serial"] == "0000000000000001"
 
 
 class TestBareHealthAlias:
