@@ -87,6 +87,17 @@ Notable changes to Venya will be documented in this file.
   user and partial memberships (complete-or-nothing — no phantom user, no
   phantom lifecycle audit row), records the same `auditor_sod_denied` event as
   the sibling path, and answers 409 with the same message.
+- **Core: dropped the phantom FK on `executor_enrollment_tokens.created_by`
+  (#303).** The model still declared
+  `ForeignKey("users.user_id", ondelete="CASCADE")` although migration 022
+  deliberately dropped `fk_executor_enrollment_tokens_created_by` (the
+  column stores the auth principal verbatim regardless of mechanism —
+  mTLS CNs have no `users` row); any future autogenerate/migration diff
+  would hallucinate re-adding the dropped-by-ruling FK (sibling of #299).
+  The declaration is removed (column stays `String(64)`, `nullable=False`);
+  a pin test plus a sweep test that replays every FK drop in
+  `alembic/versions` and asserts no dropped column re-declares an FK in a
+  model close the whole drift class.
 - **Core: dropped the phantom FK on `audit_events.user_id` (#299).** The
   model still declared `ForeignKey("users.user_id")` on `AuditEvent.user_id`
   although migration 022 deliberately dropped `audit_events_user_id_fkey`
