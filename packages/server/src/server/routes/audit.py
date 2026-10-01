@@ -304,9 +304,16 @@ async def audit_ingest(
             )
         parsed.append((event_type, _spool_timestamp(obj.get("timestamp")), obj))
 
-    from ..revocation import executor_revocation_state
+    # Flag and admission share one derivation by construction (audit-ingest-revoked-serial-flag-divergence):
+    # read the middleware's stashed verdict; re-derive only if the key is
+    # absent (defense against unseen caller shapes), and then WITH the serial.
+    sender_revoked = caller.get("revoked")
+    if sender_revoked is None:
+        from ..revocation import executor_revocation_state
 
-    sender_revoked = executor_revocation_state(db, executor_id).revoked
+        sender_revoked = executor_revocation_state(
+            db, executor_id, presented_serial=caller.get("presented_serial")
+        ).revoked
 
     _write_forwarded_events(db, executor_id, sender_revoked, parsed)
     db.commit()

@@ -429,7 +429,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         Returns:
             JSONResponse (401/403) on failure, None if all checks pass
-            (auth_user set with caller + executor_id).
+            (auth_user set with caller, executor_id, presented_serial, revoked).
         """
         detail = "Executor mTLS authentication required"
         path = request.url.path
@@ -501,7 +501,15 @@ class SessionMiddleware(BaseHTTPMiddleware):
                     rev.reason,
                 )
 
-            request.state.auth_user = {"caller": "executor", "executor_id": executor_id}  # type: ignore[attr-defined]
+            request.state.auth_user = {
+                "caller": "executor",
+                "executor_id": executor_id,
+                # Stash the admission inputs + verdict so downstream routes
+                # (audit ingest) share ONE derivation by construction —
+                # ticket audit-ingest-revoked-serial-flag-divergence, option (a).
+                "presented_serial": presented_serial,
+                "revoked": rev.revoked,
+            }  # type: ignore[attr-defined]
             return None
         finally:
             db.close()

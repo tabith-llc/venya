@@ -1334,13 +1334,22 @@ class TestIsAdminHelper:
 from core.iam import models as audit_models
 
 EXEC_CN = "venya-exec-1"
+LIVE_SERIAL = "0000000000000001"
+PRESENTED_SERIAL = "00000000000000ff"
 
 
-def _sqlite_ingest_backend(revoked: bool = False):
+def _sqlite_ingest_backend(
+    revoked: bool = False,
+    cert_serial: str | None = None,
+    revoked_serial: str | None = None,
+):
     """Real in-memory SQLite backend: AuditEvent + revocation tables, so
     ingest rows LAND for real and are readable back (not mock-chain
-    theater). revoked=True sets the identity flag (Executor.revoked_at)."""
-    from datetime import datetime
+    theater). revoked=True sets the identity flag (Executor.revoked_at).
+    cert_serial seeds the CURRENT ExecutorCert record; revoked_serial seeds
+    a serial-only revocation (identity stays live) — the
+    audit-ingest-revoked-serial-flag-divergence shape."""
+    from datetime import datetime, timedelta
 
     from core.iam.models import AuditEvent, Executor, ExecutorCert, ExecutorCertRevocation
     from sqlalchemy import create_engine
@@ -1360,13 +1369,26 @@ def _sqlite_ingest_backend(revoked: bool = False):
     ):
         table.create(engine)
     session = sessionmaker(bind=engine)()
+    now = datetime.now(UTC)
     session.add(
         Executor(
             id=EXEC_CN,
             hostname="venya-exec-1",
-            revoked_at=datetime.now(UTC) if revoked else None,
+            revoked_at=now if revoked else None,
         )
     )
+    if cert_serial is not None:
+        session.add(
+            ExecutorCert(
+                executor_id=EXEC_CN,
+                serial_number=cert_serial,
+                not_before=now - timedelta(days=1),
+                not_after=now + timedelta(days=365),
+                fingerprint="fp-current",
+            )
+        )
+    if revoked_serial is not None:
+        session.add(ExecutorCertRevocation(serial_number=revoked_serial, executor_id=EXEC_CN))
     session.commit()
     backend = MagicMock()
     backend.get_session.side_effect = lambda: sessionmaker(bind=engine)()
@@ -1534,6 +1556,52 @@ class TestAuditIngest:
         s = sm()
         row = s.query(audit_models.AuditEvent).one()
         assert row.event_type == "command_rejected"
+        assert json.loads(row.fields)["sender_revoked"] is True
+        s.close()
+
+    def test_P_serial_stash_presented_revoked_lands_flagged(self):
+        """P (audit-ingest-revoked-serial-flag-divergence): identity NOT
+        flagged, CURRENT cert live, but the PRESENTED serial is in the
+        revocation table — admission (reject_revoked=False) stashes that
+        verdict and the ingest route must write it. Pre-fix the route
+        re-derived WITHOUT the serial → rows landed unflagged. Expected
+        RED pre-fix."""
+        backend, sm, _engine = _sqlite_ingest_backend(cert_serial=LIVE_SERIAL, revoked_serial=PRESENTED_SERIAL)
+        auth = {"caller": "executor", "executor_id": EXEC_CN, "presented_serial": PRESENTED_SERIAL, "revoked": True}
+        app = _ingest_app(auth, backend)
+        resp = _post_ingest(app, _ndjson_zstd([_rejection_line()]))
+        assert resp.status_code == 200
+        s = sm()
+        row = s.query(audit_models.AuditEvent).one()
+        assert json.loads(row.fields)["sender_revoked"] is True
+        s.close()
+
+    def test_N_stash_nonrevoked_serial_lands_unflagged(self):
+        """N (paired with P-serial): the same request via a NON-revoked
+        presented serial → flag false, rows parseable — the stash never
+        hard-codes the flag."""
+        backend, sm, _engine = _sqlite_ingest_backend(cert_serial=LIVE_SERIAL, revoked_serial=PRESENTED_SERIAL)
+        auth = {"caller": "executor", "executor_id": EXEC_CN, "presented_serial": LIVE_SERIAL, "revoked": False}
+        app = _ingest_app(auth, backend)
+        resp = _post_ingest(app, _ndjson_zstd([_rejection_line()]))
+        assert resp.status_code == 200
+        s = sm()
+        row = s.query(audit_models.AuditEvent).one()
+        assert json.loads(row.fields)["sender_revoked"] is False
+        s.close()
+
+    def test_N_fallback_absent_stash_recomputes_with_serial(self):
+        """Defense-in-depth half: a caller dict WITHOUT the stashed
+        "revoked" key must fall back to a fresh derivation that still
+        carries the presented serial — never the pre-fix no-serial call
+        (which would miss a serial-only revocation of a live identity)."""
+        backend, sm, _engine = _sqlite_ingest_backend(cert_serial=LIVE_SERIAL, revoked_serial=PRESENTED_SERIAL)
+        auth = {"caller": "executor", "executor_id": EXEC_CN, "presented_serial": PRESENTED_SERIAL}
+        app = _ingest_app(auth, backend)
+        resp = _post_ingest(app, _ndjson_zstd([_rejection_line()]))
+        assert resp.status_code == 200
+        s = sm()
+        row = s.query(audit_models.AuditEvent).one()
         assert json.loads(row.fields)["sender_revoked"] is True
         s.close()
 
