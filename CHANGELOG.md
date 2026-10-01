@@ -55,6 +55,14 @@ Notable changes to Venya will be documented in this file.
   Shamir CA shares + backups + reinstall is still the last-resort path.
 
 ### Fixed
+- **Core: dropped the phantom FK on `audit_events.user_id` (#299).** The
+  model still declared `ForeignKey("users.user_id")` on `AuditEvent.user_id`
+  although migration 022 deliberately dropped `audit_events_user_id_fkey`
+  (the column stores the auth principal verbatim regardless of mechanism —
+  mTLS CNs have no `users` row); any future autogenerate/migration diff
+  would hallucinate re-adding the dropped-by-ruling FK. The declaration is
+  removed (column stays `String(64)`, `nullable=True`); a pin test inspects
+  the model so the drift class cannot re-widen.
 - **CLI: CA-key custody round-trip works on encrypted-at-rest installs
   (#297).** Since encrypt-at-rest (4218ec1/3667c6e), `venya admin
   export-ca-key` / `split-ca-key` read `ca.key` as plaintext, exporting/
