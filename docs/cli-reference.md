@@ -128,7 +128,7 @@ venya store <KEY> [VALUE] --roles ROLES [OPTIONS]
 |----------|----------|----------------|---------|-------------|
 | `KEY` (positional) | **yes** | string | — | Secret key |
 | `VALUE` (positional, nargs=?) | no | string | — | Secret value; '-' or omitted reads stdin BYTE-EXACT, incl. any trailing newline (interactive TTY: hidden prompt; use 'printf %s' when piping single-line values) |
-| `--roles` | **yes** | repeatable/space-separated list | — | Role(s) to scope the secret to |
+| `--roles` | **yes** | repeatable/space-separated list | — | Role(s) to scope the secret to (comma- and/or space-separated) |
 | `--key-version` | no | string | — | Key version ID to encrypt with (default: server's active key version) |
 | `--metadata`, `-m` | no | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |
 | `--shape` | no | string | — | How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name) |

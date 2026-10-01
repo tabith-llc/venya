@@ -88,7 +88,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--roles",
         nargs="+",
         required=True,
-        help="Role(s) to scope the secret to",
+        help="Role(s) to scope the secret to (comma- and/or space-separated)",
     )
     store_parser.add_argument(
         "--key-version",
