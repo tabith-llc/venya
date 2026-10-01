@@ -250,8 +250,7 @@ else
     if { [ -z "$DOCKER_USER" ] || [ -z "$DOCKER_KEY" ]; } && [ -t 0 ]; then
         [ -z "$DOCKER_USER" ] && read -r -p "Docker username (sbx template pulls): " DOCKER_USER
         if [ -z "$DOCKER_KEY" ]; then
-            read -r -s -p "Docker API key / access token (input hidden): " DOCKER_KEY
-            echo
+            venya_read_secret_confirm "Docker API key / access token" DOCKER_KEY
         fi
     fi
     if [ -n "$DOCKER_USER" ] && [ -n "$DOCKER_KEY" ]; then

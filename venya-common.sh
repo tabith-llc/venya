@@ -621,6 +621,41 @@ venya_resolve_dns_resolver() {
     fi
 }
 
+# --- 14d. Secret prompt with confirm-at-entry (ticket 31-confirm-at-entry) ---
+
+# venya_read_secret_confirm <PROMPT_TEXT> <VAR_NAME>
+# Reads a secret twice from the TTY (echo-off) and retries until both
+# entries match and are non-empty. A mistyped single entry no longer
+# becomes the stored secret — the typo is caught at the keyboard instead
+# of at recovery time. TTY-only by contract: callers keep their
+# non-TTY error/random branches. The value is assigned via nameref to
+# <VAR_NAME> in the caller scope; it is never echoed.
+venya_read_secret_confirm() {
+    local _venya_prompt="$1"
+    local _venya_out="$2"
+    # shellcheck disable=SC2155
+    local -n _venya_ref="$_venya_out"
+    local _venya_first _venya_second
+    while :; do
+        printf '%s: ' "$_venya_prompt" >&2
+        IFS= read -rs _venya_first
+        printf '\n' >&2
+        printf '%s (confirm): ' "$_venya_prompt" >&2
+        IFS= read -rs _venya_second
+        printf '\n' >&2
+        if [ -z "$_venya_first" ]; then
+            warn "Value cannot be empty."
+            continue
+        fi
+        if [ "$_venya_first" != "$_venya_second" ]; then
+            warn "Entries did not match — re-enter."
+            continue
+        fi
+        _venya_ref="$_venya_first"
+        return 0
+    done
+}
+
 # --- 15. Service start retry loop ---
 
 venya_service_retry() {

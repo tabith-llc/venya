@@ -113,13 +113,7 @@ if [ -n "$STORED_DB_PASSPHRASE" ]; then
     info "Existing install: reusing stored server passphrase from $STORED_ENV_FILE."
 elif [ -z "$DB_PASSPHRASE" ]; then
     if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
-        while :; do
-            echo -n "Enter server encryption passphrase: "
-            IFS= read -rs DB_PASSPHRASE
-            echo ""
-            [ -n "$DB_PASSPHRASE" ] && break
-            warn "Passphrase cannot be empty."
-        done
+            venya_read_secret_confirm "Enter server encryption passphrase" DB_PASSPHRASE
     else
         error "VENYA_DB_PASSPHRASE is required for unattended install (stdin is not a TTY)."
         exit 1
@@ -179,13 +173,7 @@ if [ -z "${VENYA_DB_PASSWORD:-}" ] && [ -f "$STORED_ENV_FILE" ]; then
 fi
 if [ -z "${VENYA_DB_PASSWORD:-}" ]; then
     if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
-        while :; do
-            echo -n "Enter PostgreSQL password for venya user: "
-            IFS= read -rs VENYA_DB_PASSWORD
-            echo ""
-            [ -n "$VENYA_DB_PASSWORD" ] && break
-            warn "Password cannot be empty."
-        done
+            venya_read_secret_confirm "Enter PostgreSQL password for venya user" VENYA_DB_PASSWORD
     else
         error "VENYA_DB_PASSWORD is required for unattended install (stdin is not a TTY)."
         exit 1
@@ -301,13 +289,7 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     fi
     if [ -z "$ADMIN_CA_PASSPHRASE" ]; then
         if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
-            while :; do
-                echo -n "Admin CA key passphrase: "
-                IFS= read -rs ADMIN_CA_PASSPHRASE
-                echo ""
-                [ -n "$ADMIN_CA_PASSPHRASE" ] && break
-                warn "Passphrase cannot be empty."
-            done
+                venya_read_secret_confirm "Admin CA key passphrase" ADMIN_CA_PASSPHRASE
         else
             ADMIN_CA_PASSPHRASE=$(openssl rand -base64 32)
             info "Unattended install: generated a random admin CA passphrase."
@@ -447,13 +429,7 @@ if [ -z "$CA_KEY_PASSPHRASE" ] && [ -f /etc/venya/venya-core.env ]; then
 fi
 if [ -z "$CA_KEY_PASSPHRASE" ]; then
     if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
-        while :; do
-            echo -n "Root CA key passphrase: "
-            IFS= read -rs CA_KEY_PASSPHRASE
-            echo ""
-            [ -n "$CA_KEY_PASSPHRASE" ] && break
-            warn "Passphrase cannot be empty."
-        done
+            venya_read_secret_confirm "Root CA key passphrase" CA_KEY_PASSPHRASE
     else
         CA_KEY_PASSPHRASE=$(openssl rand -base64 32)
         info "Unattended install: generated a random root CA passphrase."
