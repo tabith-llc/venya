@@ -55,6 +55,20 @@ Notable changes to Venya will be documented in this file.
   Shamir CA shares + backups + reinstall is still the last-resort path.
 
 ### Fixed
+- **CLI: CA-key custody round-trip works on encrypted-at-rest installs
+  (#297).** Since encrypt-at-rest (4218ec1/3667c6e), `venya admin
+  export-ca-key` / `split-ca-key` read `ca.key` as plaintext, exporting/
+  splitting the at-rest ciphertext instead of the key, and `restore-ca-key`
+  could never re-install its own export (the #39 validator correctly aborted
+  — the documented custody escrow promise was unfulfillable; DR drill R6-b).
+  Export/split now unwrap the server's PKCS#8 at-rest envelope (in memory,
+  plaintext never persisted) before wrapping/sharding; restore re-encrypts
+  into the envelope with an atomic write (temp + rename, 0600, ownership
+  preserved, byte-identity on abort). Server passphrase acquisition: hidden
+  getpass primary, `VENYA_CA_KEY_PASSPHRASE` /
+  `VENYA_ADMIN_CA_KEY_PASSPHRASE` env override for automation; paths are
+  key-agnostic (`ca.key` or `admin-ca.key` via `--ca-dir`). Wrong server
+  passphrase is LOUD at all three sites with zero writes/zero shards.
 - **CLI: role subcommands honor their "Role ID or name" promise.** `venya
   role get|delete|members|add-member|remove-member` previously interpolated
   the raw `role_id` argument into the int-validated `/api/v1/roles/{role_id}`

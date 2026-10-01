@@ -23,11 +23,23 @@ def _boom(*_a, **_k):
     raise AssertionError("secret-material prompt regressed to echoed input()")
 
 
+def _real_key_pem() -> bytes:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    return ec.generate_private_key(ec.SECP256R1()).private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
 class TestCaKeyPromptsHidden:
     def test_export_uses_getpass_and_encrypts(self, tmp_path):
         ca_dir = tmp_path / "ca"
         ca_dir.mkdir()
-        (ca_dir / "ca.key").write_bytes(b"DUMMY-CA-KEY-BYTES\n")
+        key = _real_key_pem()
+        (ca_dir / "ca.key").write_bytes(key)
         out = tmp_path / "export" / "ca.key.enc"
         args = SimpleNamespace(output=str(out), ca_dir=str(ca_dir))
         with patch("builtins.input", _boom), patch(
@@ -37,13 +49,13 @@ class TestCaKeyPromptsHidden:
         assert rc == 0
         assert gp.call_count == 2  # prompt + confirm, both hidden
         data = out.read_bytes()
-        assert b"DUMMY-CA-KEY-BYTES" not in data  # actually encrypted
+        assert key not in data  # actually encrypted
         assert out.stat().st_mode & 0o777 == 0o600
 
     def test_export_mismatch_reprompts(self, tmp_path):
         ca_dir = tmp_path / "ca"
         ca_dir.mkdir()
-        (ca_dir / "ca.key").write_bytes(b"K\n")
+        (ca_dir / "ca.key").write_bytes(_real_key_pem())
         args = SimpleNamespace(output=str(tmp_path / "o.enc"), ca_dir=str(ca_dir))
         with patch("builtins.input", _boom), patch(
             "venya_cli.commands.getpass.getpass", side_effect=["a", "b", "pw", "pw"]
@@ -56,7 +68,7 @@ class TestCaKeyPromptsHidden:
         """Negative half: empty passphrase must fail, not export an empty-key file."""
         ca_dir = tmp_path / "ca"
         ca_dir.mkdir()
-        (ca_dir / "ca.key").write_bytes(b"K\n")
+        (ca_dir / "ca.key").write_bytes(_real_key_pem())
         out = tmp_path / "o.enc"
         args = SimpleNamespace(output=str(out), ca_dir=str(ca_dir))
         with patch("builtins.input", _boom), patch("venya_cli.commands.getpass.getpass", side_effect=["", ""]):

@@ -31,10 +31,6 @@ from unittest.mock import patch
 from venya_cli.commands import cmd_admin_export_ca_key, cmd_admin_restore_ca_key
 
 MAGIC = b"VENYACA1"
-KEY = b"-----BEGIN PRIVATE KEY-----\nreal-ca-key-bytes\n-----END PRIVATE KEY-----\n"  # pragma: allowlist secret
-# ^^ DUMMY test constant — a PEM-shaped placeholder, NOT key material (the
-# Private Key plugin fires on the header string; pragma keeps the false
-# positive out of the baseline).
 
 
 def _mint_legacy_cbc(plaintext: bytes, passphrase: str) -> bytes:
@@ -99,6 +95,13 @@ def _real_key_pem() -> bytes:
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     )
+
+
+# #297: the module fixture key must be a REAL parseable PEM — custody paths
+# now unwrap-and-validate the at-rest file, so the old PEM-shaped dummy
+# ("real-ca-key-bytes") fails closed. One generated EC key stands in for the
+# old dummy constant everywhere it was used as opaque blob content too.
+KEY = _real_key_pem()  # pragma: allowlist secret
 
 
 # Deterministic valid-PKCS7-tail negative constants (found offline 2026-09-30,

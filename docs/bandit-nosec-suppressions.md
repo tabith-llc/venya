@@ -11,10 +11,11 @@ justification. Rows are keyed on file + line content (line numbers drift and are
 deliberately not recorded). Scope = `packages/*/src` — the same tree the pre-commit
 bandit hook scans (tests dirs are hook-excluded).
 
-**58 suppression lines across 17 files.**
+**59 suppression lines across 18 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
+| `packages/cli/src/venya_cli/at_rest_key.py` | `return "VENYA_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/cli/src/venya_cli/cli.py` | `except Exception:  # noqa: S110  # nosec B110 — logging must never break the command` |
 | `packages/cli/src/venya_cli/cli.py` | `except Exception:  # noqa: S110  # nosec B110` |
 | `packages/cli/src/venya_cli/cli.py` | `except Exception:  # nosec B110 — unwritable config dir must not break the CLI` |

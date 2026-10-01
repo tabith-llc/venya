@@ -28,6 +28,14 @@ from .api_client import (
     APIClientError,
     execution_timeout,
 )
+from .at_rest_key import (
+    acquire_server_passphrase,
+    atomic_write_key,
+    resolve_ca_key_path,
+    restore_at_rest_bytes,
+    server_passphrase_env_for,
+    unwrap_at_rest,
+)
 
 
 def run_command(args: Any) -> int:
@@ -2796,7 +2804,8 @@ def _decrypt_ca_backup(data: bytes, passphrase: str) -> bytes:
     only the last padding byte's RANGE). Padding alone is NOT authenticated,
     though: a wrong passphrase can pass strict PKCS7 by coincidence (~1/256),
     so the reconstructed bytes are additionally content-validated as a parseable
-    PEM private key at the single restore write site by `_validate_ca_key_pem`.
+    PEM private key by `_validate_ca_key_pem` at all three custody entry
+    sites (#297: export read, split pre-shard, restore reconstruct).
     """
     from cryptography.exceptions import InvalidTag
     from cryptography.hazmat.primitives import ciphers
@@ -2829,12 +2838,13 @@ def _decrypt_ca_backup(data: bytes, passphrase: str) -> bytes:
 
 
 def _validate_ca_key_pem(data: bytes) -> bytes:
-    """Fail closed unless `data` parses as a PEM private key.
+    """Fail closed unless `data` parses as a PLAINTEXT PEM private key.
 
     Compensating control for the unauthenticated legacy CBC reader: a wrong
     passphrase that coincidentally passes PKCS7 (~1/256) would otherwise be
-    written to disk as ca.key behind a success banner. Applied to EVERY
-    restore write path (backup + shares modes) at the single write site.
+    written to disk as ca.key behind a success banner. Applied at ALL THREE
+    custody entry-path sites (#297 ruling Q3): export source read, split
+    pre-shard, restore reconstruct — one function, no per-site variants.
     """
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
@@ -2859,7 +2869,7 @@ def cmd_admin_export_ca_key(args: Any) -> int:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
     ca_dir = _resolve_ca_dir(args)
-    ca_key_path = Path(ca_dir) / "ca.key"
+    ca_key_path = resolve_ca_key_path(ca_dir)
     output_path = Path(args.output)
 
     if not ca_key_path.exists():
@@ -2867,8 +2877,21 @@ def cmd_admin_export_ca_key(args: Any) -> int:
         print("Run 'venya init' on the server to generate the CA.", file=sys.stderr)
         return 1
 
-    # Read the plaintext key
-    plaintext_key = ca_key_path.read_bytes()
+    # Unwrap the at-rest envelope (#297): the file is PKCS#8-encrypted PEM on
+    # every install since 4218ec1/3667c6e — the old raw read exported
+    # ciphertext-of-ciphertext. Legacy plaintext files pass through; anything
+    # that is neither fails LOUD with zero output written.
+    raw_at_rest = ca_key_path.read_bytes()
+    server_env_var = server_passphrase_env_for(ca_key_path)
+    try:
+        try:
+            plaintext_key = unwrap_at_rest(raw_at_rest)
+        except ValueError:
+            plaintext_key = unwrap_at_rest(raw_at_rest, acquire_server_passphrase(server_env_var))
+        plaintext_key = _validate_ca_key_pem(plaintext_key)  # entry-path validator, site 1
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     # Prompt for passphrase (twice for confirmation)
     passphrase1 = None
@@ -2917,7 +2940,7 @@ def cmd_admin_split_ca_key(args: Any) -> int:
     from .shamir import split
 
     ca_dir = _resolve_ca_dir(args)
-    ca_key_path = Path(ca_dir) / "ca.key"
+    ca_key_path = resolve_ca_key_path(ca_dir)
     output_dir = Path(args.output_dir)
 
     if not ca_key_path.exists():
@@ -2925,7 +2948,23 @@ def cmd_admin_split_ca_key(args: Any) -> int:
         print("Run 'venya init' on the server to generate the CA.", file=sys.stderr)
         return 1
 
-    plaintext_key = ca_key_path.read_bytes()
+    # Unwrap the at-rest envelope BEFORE sharding (#297, Q2): pre-fix this
+    # silently split the at-rest ciphertext into plausible-looking shares.
+    # A wrong server passphrase or garbage file dies LOUDLY here — zero
+    # shards written. Shares then carry the plaintext PEM (the #39 validator
+    # semantics applied pre-shard, entry-path site 2 of 3).
+    raw_at_rest = ca_key_path.read_bytes()
+    server_env_var = server_passphrase_env_for(ca_key_path)
+    try:
+        try:
+            plaintext_key = unwrap_at_rest(raw_at_rest)
+        except ValueError:
+            plaintext_key = unwrap_at_rest(raw_at_rest, acquire_server_passphrase(server_env_var))
+        plaintext_key = _validate_ca_key_pem(plaintext_key)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
     threshold = args.threshold
     num_shares = args.shares
 
@@ -2964,7 +3003,7 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
     from .shamir import combine
 
     ca_dir = _resolve_ca_dir(args)
-    ca_key_path = Path(ca_dir) / "ca.key"
+    ca_key_path = resolve_ca_key_path(ca_dir)
     mode = args.mode
 
     if mode == "shares":
@@ -3033,15 +3072,17 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
         return 1
 
     try:
-        _validate_ca_key_pem(reconstructed)
+        reconstructed = _validate_ca_key_pem(reconstructed)  # entry-path validator, site 3
+        # Re-encrypt into the at-rest envelope before writing (#297): target-
+        # format preserving, probe-verified against the current encrypted
+        # file (wrong server passphrase -> LOUD, ZERO writes, byte-identity),
+        # plaintext never persisted where the envelope is expected.
+        at_rest_bytes = restore_at_rest_bytes(ca_key_path, reconstructed)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    # Write the restored key
-    ca_key_path.parent.mkdir(parents=True, exist_ok=True)
-    ca_key_path.write_bytes(reconstructed)
-    ca_key_path.chmod(0o600)
+    atomic_write_key(ca_key_path, at_rest_bytes)
 
     print(f"CA key restored to {ca_key_path}")
     print("WARNING: All existing executor certificates signed by this CA are now valid again.")
