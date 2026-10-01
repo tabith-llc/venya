@@ -1024,7 +1024,12 @@ class ExecutorDaemon:
             dns_resolver=self.config.dns_resolver,
             egress_allowlist_path=self.config.egress_allowlist_path,
         )
-        audit_logger = AuditLogger(self.config.audit, session_id)
+        # #307 D1: the audit sink is executor-mTLS-gated — forward with the
+        # same client cert material the daemon client uses (existence is the
+        # installer's job; config values are the gate, no stat checks).
+        mtls = self.config.mtls
+        audit_client_cert = (mtls.cert, mtls.key) if mtls.cert and mtls.key else None
+        audit_logger = AuditLogger(self.config.audit, session_id, client_cert=audit_client_cert)
         return Executor(
             command_validator=self.command_validator,
             session_id=session_id,

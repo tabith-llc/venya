@@ -54,6 +54,7 @@ NO_ROLE_ROUTES = frozenset(
         "/api/v1/executors/certs/revocation-list",  # CRL pulled by executors
         "/api/v1/executors/certs/crl",
         "/api/v1/heartbeat",
+        "/api/v1/audit/ingest",  # executor mTLS audit-forwarder sink (#307)
         "/api/v1/sessions/{session_id}/secrets/revoke",  # executor mTLS
         "/api/v1/sessions/{session_id}/filter",  # executor mTLS
         # --- self-service, own-user scoped: bearer auth + ownership, not a role ---

@@ -69,14 +69,26 @@ class AuditEvent:
 class AuditLogger:
     """Durable audit event spool with asynchronous remote forwarding.
 
+    The forwarder presents the executor mTLS client certificate (client_cert,
+    wired by the daemon) — the server sink authenticates it and writes the
+    events to the core audit ledger.
+
+    Delivery is AT-LEAST-ONCE below capacity and LOSSY above it: a failed
+    batch is kept and retried (duplicates possible server-side, tolerated by
+    ruling), but a spool that exceeds max_buffer_size drops its OLDEST lines
+    (#307 R2 honesty — any no-loss claim must state this ceiling).
+
     Lifetime of an event:
       1. emit() serializes the event (a failed serialization is written as
          an error line) and appends it to the spool file under the lock —
          synchronous, local disk only, no network.
       2. The background forwarder drains the spool in batches of
-         max_buffer_size lines, zstd-compresses, and POSTs to remote_url.
-         On success the consumed prefix is truncated; on failure the lines
-         are kept and the backoff doubles (capped at retry_max_delay).
+         min(max_buffer_size, max_batch_lines) lines (#307 D3),
+         zstd-compresses, and POSTs to remote_url with the executor client
+         cert. On success the consumed prefix is truncated; on failure the
+         lines are kept and the backoff doubles (capped at retry_max_delay).
+         A configured remote without client_cert is a loud fail-closed
+         refusal, never a silent 401 loop (#307 D1).
       3. When the spool exceeds max_buffer_size lines the oldest lines are
          dropped (with a warning) so a long outage cannot grow it without
          bound.
@@ -85,8 +97,14 @@ class AuditLogger:
     drain and stops the forwarder thread.
     """
 
-    def __init__(self, config: AuditForwarderConfig, session_id: str) -> None:
+    def __init__(
+        self,
+        config: AuditForwarderConfig,
+        session_id: str,
+        client_cert: tuple[str, str] | None = None,
+    ) -> None:
         self._config = config
+        self._client_cert = client_cert
         self._session_id = session_id
         self._lock = threading.Lock()
         self._wakeup = threading.Event()
@@ -205,7 +223,7 @@ class AuditLogger:
                 backoff = min(backoff * 2, self._config.retry_max_delay)
 
     def _forward_once(self) -> bool:
-        """Drain up to max_buffer_size spool lines to the remote.
+        """Drain up to min(max_buffer_size, max_batch_lines) spool lines to the remote.
 
         Returns:
             True if nothing was pending or the batch was accepted.
@@ -215,13 +233,24 @@ class AuditLogger:
         if not remote_url:
             return True
 
+        # Fail closed (#307 D1): the sink is executor-mTLS-gated — a batch
+        # without the client cert is a guaranteed 401 retry loop (loud
+        # deaf-boot class). Refuse LOUDLY here instead of hammering the sink.
+        if self._client_cert is None:
+            logger.error(
+                "Audit forwarder configured without client certificate — "
+                "target requires executor mTLS; events will be refused (401)"
+            )
+            return False
+
         with self._lock:
             if self._forwarding:
                 return True
             self._forwarding = True
         try:
             with self._lock:
-                lines = self._read_all_lines()[: self._config.max_buffer_size]
+                cap = min(self._config.max_buffer_size, self._config.max_batch_lines)
+                lines = self._read_all_lines()[:cap]
             if not lines:
                 return True
 
@@ -232,6 +261,7 @@ class AuditLogger:
                 # remote_url is set; if validation is bypassed (direct
                 # mutation), fall back to the system trust store — never False.
                 verify=self._config.ca_cert_path if self._config.ca_cert_path else True,
+                cert=self._client_cert,
                 timeout=self._config.request_timeout_seconds,
             )
             with client:

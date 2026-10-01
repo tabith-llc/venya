@@ -6,7 +6,8 @@
 
 """Tests for audit log endpoints."""
 
-from datetime import UTC
+import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -1323,3 +1324,310 @@ class TestIsAdminHelper:
         db = MagicMock()
         db.query.return_value = MockQuery()
         assert audit_routes._is_admin(db, "alice") is False
+
+
+# ---------------------------------------------------------------------------
+# POST /audit/ingest — executor-mTLS audit forwarder sink (#307)
+# ---------------------------------------------------------------------------
+
+
+from core.iam import models as audit_models
+
+EXEC_CN = "venya-exec-1"
+
+
+def _sqlite_ingest_backend(revoked: bool = False):
+    """Real in-memory SQLite backend: AuditEvent + revocation tables, so
+    ingest rows LAND for real and are readable back (not mock-chain
+    theater). revoked=True sets the identity flag (Executor.revoked_at)."""
+    from datetime import datetime
+
+    from core.iam.models import AuditEvent, Executor, ExecutorCert, ExecutorCertRevocation
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_engine(
+        "sqlite://",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    for table in (
+        AuditEvent.__table__,
+        Executor.__table__,
+        ExecutorCert.__table__,
+        ExecutorCertRevocation.__table__,
+    ):
+        table.create(engine)
+    session = sessionmaker(bind=engine)()
+    session.add(
+        Executor(
+            id=EXEC_CN,
+            hostname="venya-exec-1",
+            revoked_at=datetime.now(UTC) if revoked else None,
+        )
+    )
+    session.commit()
+    backend = MagicMock()
+    backend.get_session.side_effect = lambda: sessionmaker(bind=engine)()
+    return backend, sessionmaker(bind=engine), engine
+
+
+def _ingest_app(auth_user, backend):
+    """Real audit router + middleware that injects the executor auth state
+    the SessionMiddleware would set (mirrors test_filter_endpoint's
+    injection pattern; the REAL middleware branch is pinned in
+    test_session_middleware.py). auth_user=None simulates a request that
+    reached the route without executor identity (route-side guard half)."""
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+
+    app = FastAPI()
+    app.state.backend = backend
+    app.include_router(audit_routes.router, prefix="/api/v1")
+
+    class _AuthUserMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            if auth_user is not None:
+                request.state.auth_user = dict(auth_user)
+            return await call_next(request)
+
+    app.add_middleware(_AuthUserMiddleware)
+    return app
+
+
+def _ndjson_zstd(lines: list[str]) -> bytes:
+    from compression import zstd
+
+    return zstd.compress(("\n".join(lines) + "\n").encode(), level=3)
+
+
+def _rejection_line(**over) -> str:
+    import json
+
+    payload = {
+        "event_type": "command_rejected",
+        "session_id": "sess-9",
+        "timestamp": "2026-10-01T10:00:00+00:00",
+        "command": "scp secrets.txt host2:/tmp/",
+        "reason": "blocked pattern: scp",
+    }
+    payload.update(over)
+    return json.dumps(payload)
+
+
+def _executor_auth() -> dict:
+    return {"caller": "executor", "executor_id": EXEC_CN}
+
+
+def _post_ingest(app, body: bytes, headers: dict | None = None):
+    hdrs = {
+        "Content-Type": "application/x-ndjson",
+        "Content-Encoding": "zstd",
+    }
+    if headers is not None:
+        hdrs.update(headers)
+    return TestClient(app, raise_server_exceptions=False).post(
+        "/api/v1/audit/ingest",
+        content=body,
+        headers=hdrs,
+    )
+
+
+class TestAuditIngest:
+    """Truth table for the #307 sink: forwarded executor events land with
+    provenance; every refusal is paired with its succeeding twin."""
+
+    def test_P1_valid_batch_lands_and_visible_to_get(self):
+        """P: authenticated 2-line batch (incl. command_rejected with command
+        text) → 200, rows land with CN + provenance fields; GET with
+        event_type filter sees the rejection; fields carry executor_id
+        (the GET executor_id filter's key — sqlite cast variant is
+        PostgreSQL-only, so the key is asserted directly via the sqlite
+        ->> operator; physical halves are cells F1/F3)."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        line2 = json.dumps(
+            {
+                "event_type": "command_executed",
+                "session_id": "sess-9",
+                "timestamp": "2026-10-01T10:00:05+00:00",
+                "command": "ls -la",
+                "exit_code": 0,
+                "duration_ms": 3.2,
+            }
+        )
+        resp = _post_ingest(app, _ndjson_zstd([_rejection_line(), line2]))
+        assert resp.status_code == 200
+        assert resp.json() == {"accepted": 2}
+
+        s = sm()
+        rows = {r.event_type: r for r in s.query(audit_models.AuditEvent).all()}
+        assert set(rows) == {"command_rejected", "command_executed"}
+        rej = rows["command_rejected"]
+        assert rej.user_id == EXEC_CN  # migration-022: mTLS CN verbatim
+        fields = json.loads(rej.fields)
+        assert fields["executor_id"] == EXEC_CN
+        assert fields["sender_revoked"] is False
+        assert fields["forwarded"] is True
+        assert fields["command"] == "scp secrets.txt host2:/tmp/"  # UNMASKED by design
+        assert fields["reason"] == "blocked pattern: scp"
+        # spool timestamp preserved (SQLite drops the offset on read —
+        # compare wall value; a wall-clock fallback would not match)
+        assert rej.timestamp.replace(tzinfo=UTC) == datetime(2026, 10, 1, 10, 0, 0, tzinfo=UTC)
+        # executor_id readable via the JSON operator (GET filter's key)
+        from sqlalchemy import text
+
+        got = s.execute(
+            text("SELECT fields ->> 'executor_id' FROM audit_events WHERE event_type='command_rejected'")
+        ).scalar()
+        assert got == EXEC_CN
+        s.close()
+
+        # auditor-tier GET visibility (event_type equality filter is real SQL,
+        # works on sqlite) — same engine behind the standard GET harness.
+        get_backend = MagicMock()
+        get_backend.get_session.side_effect = lambda: sm()
+        get_app = _create_test_app(backend=get_backend)
+        client = TestClient(get_app, raise_server_exceptions=False)
+        g = client.get("/api/v1/audit", params={"event_type": "command_rejected"})
+        assert g.status_code == 200
+        data = g.json()
+        assert data["total"] == 1
+        assert data["events"][0]["event_type"] == "command_rejected"
+        assert data["events"][0]["user_id"] == EXEC_CN
+
+    def test_P2_unknown_but_valid_event_type_lands(self):
+        """P (D4 pin): forward-compat — unknown-but-well-formed type lands
+        (String(64) no-CHECK is deliberate)."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        line = json.dumps(
+            {"event_type": "future_executor_event", "session_id": "s1", "timestamp": "2026-10-01T10:00:00+00:00"}
+        )
+        resp = _post_ingest(app, _ndjson_zstd([line]))
+        assert resp.status_code == 200
+        s = sm()
+        assert s.query(audit_models.AuditEvent).filter_by(event_type="future_executor_event").count() == 1
+        s.close()
+
+    def test_N1_no_executor_identity_refused_zero_rows(self):
+        """N (paired with P1): request without executor auth state → 403,
+        nothing written (route-side guard; the middleware 401 half is
+        pinned in test_session_middleware.py)."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(None, backend)
+        resp = _post_ingest(app, _ndjson_zstd([_rejection_line()]))
+        assert resp.status_code == 403
+        s = sm()
+        assert s.query(audit_models.AuditEvent).count() == 0
+        s.close()
+
+    def test_N2_revoked_sender_rows_land_flagged(self):
+        """N/D2 (paired with P1): REVOKED registered executor's batch LANDS
+        with sender_revoked=true — evidence preservation ruling; never a
+        403 retry loop, never a silent drop."""
+        backend, sm, _engine = _sqlite_ingest_backend(revoked=True)
+        app = _ingest_app(_executor_auth(), backend)
+        resp = _post_ingest(app, _ndjson_zstd([_rejection_line()]))
+        assert resp.status_code == 200
+        s = sm()
+        row = s.query(audit_models.AuditEvent).one()
+        assert row.event_type == "command_rejected"
+        assert json.loads(row.fields)["sender_revoked"] is True
+        s.close()
+
+    def test_N3_malformed_line_rejects_whole_batch_zero_rows(self):
+        """N/D4 (twin: the same batch WITHOUT the garbage succeeds):
+        a garbage line mid-batch → 400, ZERO rows — no partial write,
+        forwarder keeps its lines and the server log names the line."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        # twin half: clean batch first
+        good = _ndjson_zstd([_rejection_line(), _rejection_line(session_id="sess-10")])
+        assert _post_ingest(app, good).status_code == 200
+        s = sm()
+        assert s.query(audit_models.AuditEvent).count() == 2
+        s.close()
+        # poison half: same batch + a garbage line
+        bad = _ndjson_zstd(
+            [_rejection_line(session_id="sess-11"), "NOT-JSON{{{", _rejection_line(session_id="sess-12")]
+        )
+        resp = _post_ingest(app, bad)
+        assert resp.status_code == 400
+        s = sm()
+        assert s.query(audit_models.AuditEvent).count() == 2  # zero NEW rows
+        s.close()
+
+    def test_N4_missing_zstd_encoding_refused(self):
+        """N (paired with P1): uncompressed upload → 400, nothing written."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        resp = _post_ingest(
+            app,
+            (_rejection_line() + "\n").encode(),
+            headers={"Content-Encoding": "identity"},
+        )
+        assert resp.status_code == 400
+        s = sm()
+        assert s.query(audit_models.AuditEvent).count() == 0
+        s.close()
+
+    def test_N5_line_count_over_cap_refused(self):
+        """N (paired with P1): > INGEST_MAX_LINES lines → 4xx, zero rows
+        (server-side second guard, D3)."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        over = audit_routes.INGEST_MAX_LINES + 1
+        line = json.dumps({"event_type": "command_executed", "session_id": "s"})
+        resp = _post_ingest(app, _ndjson_zstd([line] * over))
+        assert 400 <= resp.status_code < 500
+        s = sm()
+        assert s.query(audit_models.AuditEvent).count() == 0
+        s.close()
+
+    def test_N6_empty_body_refused(self):
+        """N (paired with P1): empty body → 400 (forwarder never sends one;
+        pins the contract)."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        resp = _post_ingest(app, b"")
+        assert resp.status_code == 400
+        s = sm()
+        assert s.query(audit_models.AuditEvent).count() == 0
+        s.close()
+
+    def test_missing_ndjson_content_type_refused(self):
+        """N (paired with P1): zstd body but wrong Content-Type → 400."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        resp = _post_ingest(app, _ndjson_zstd([_rejection_line()]), headers={"Content-Type": "application/json"})
+        assert resp.status_code == 400
+        s = sm()
+        assert s.query(audit_models.AuditEvent).count() == 0
+        s.close()
+
+    def test_blank_lines_tolerated_line_still_counted(self):
+        """Twin guard for N5's boundary: trailing blank lines (the spool's
+        newline-terminated shape) never trip the cap or poison the batch."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        resp = _post_ingest(app, _ndjson_zstd([_rejection_line(), ""]))
+        assert resp.status_code == 200
+        assert resp.json() == {"accepted": 1}
+        s = sm()
+        assert s.query(audit_models.AuditEvent).count() == 1
+        s.close()
+
+    def test_event_type_over_64_chars_or_empty_rejected(self):
+        """N/D4 (twin = P2): structural bounds — empty or >64-char event_type
+        is a producer bug → whole-batch 400."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        for bad_type in ("", "x" * 65):
+            line = json.dumps({"event_type": bad_type, "session_id": "s"})
+            resp = _post_ingest(app, _ndjson_zstd([line]))
+            assert resp.status_code == 400
+        s = sm()
+        assert s.query(audit_models.AuditEvent).count() == 0
+        s.close()
