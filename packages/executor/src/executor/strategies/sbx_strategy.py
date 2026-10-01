@@ -62,6 +62,27 @@ SBX_TIMEOUT = 3600  # 1 hour
 # template at enrollment) is tracked in `venya-dev/tickets/sbx-cold-start-prepull.md`.
 SBX_CREATE_TIMEOUT = 240
 
+# Server-issued secret ids land in path joins (host tmpfs file name and the
+# sandbox container_path), so each id must be ONE safe path segment. Server
+# truth: core Secret.id / SessionSecret.secret_id are Integer PKs and the
+# daemon str()-casts them (executor.py), so at runtime ids are decimal;
+# the bundle field is a free str, so the boundary enforces the segment
+# charset instead of trusting the int shape.
+_SECRET_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def _validated_secret_id(secret_id: object) -> str:
+    """Validate a server-issued secret_id for path use; return canonical text.
+
+    Raises ValueError (no partial writes — callers validate before the first
+    os.open) for ids with path separators, leading '/', over-length ids, or
+    dot-only names ("." / "..") that the charset alone would allow.
+    """
+    text = str(secret_id)
+    if not _SECRET_ID_PATTERN.fullmatch(text) or set(text) == {"."}:
+        raise ValueError(f"unsafe secret_id for path use: {text!r}")
+    return text
+
 
 def sweep_workspace_base(base: str = WORKSPACE_BASE) -> int:
     """Delete orphaned ws_* workspace directories from dead daemon runs.
@@ -176,6 +197,10 @@ class SbxStrategy(InjectionStrategy):
         Returns:
             InjectionResult with secret mounts and cleanup functions.
         """
+        # Boundary check BEFORE any filesystem write: a malformed id aborts
+        # with nothing created on tmpfs (no session dir, no partial mounts).
+        secret_ids = [_validated_secret_id(bundle.secret_id) for bundle in secrets]
+
         # Create unique session directory on tmpfs (base is self-provisioned —
         # a fresh install has no /dev/shm/venya-secrets)
         os.makedirs(SECRET_TMPFS_BASE, mode=0o700, exist_ok=True)
@@ -185,8 +210,8 @@ class SbxStrategy(InjectionStrategy):
         mounts: list[SecretMount] = []
         cleanup_funcs: list[Callable[[], None]] = []
 
-        for bundle in secrets:
-            secret_path = os.path.join(self._session_dir, str(bundle.secret_id))
+        for bundle, secret_id in zip(secrets, secret_ids):
+            secret_path = os.path.join(self._session_dir, secret_id)
 
             # Write secret to tmpfs file
             fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT, 0o400)
@@ -199,15 +224,15 @@ class SbxStrategy(InjectionStrategy):
             os.chmod(secret_path, 0o400)
 
             mount = SecretMount(
-                secret_id=bundle.secret_id,
+                secret_id=secret_id,
                 path=secret_path,
-                container_path=f"{CONTAINER_SECRET_DIR}/{bundle.secret_id}",
+                container_path=f"{CONTAINER_SECRET_DIR}/{secret_id}",
             )
             mounts.append(mount)
 
             logger.debug(
                 "Wrote secret %s to tmpfs: %s -> %s",
-                bundle.secret_id,
+                secret_id,
                 secret_path,
                 mount.container_path,
             )
