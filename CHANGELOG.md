@@ -77,6 +77,12 @@ Notable changes to Venya will be documented in this file.
   visibility promise is built on.
 
 ### Fixed
+- **Server: browser logout no longer swallows session-revocation failures.**
+  When revoking the session fails, the server now logs the error, records a
+  `session_ended` lifecycle audit row with `revoked: false`, and answers 503
+  without clearing the session cookie — the user keeps the cookie as a retry
+  handle instead of being told they logged out while the session stays live.
+  Successful logout is unchanged (200, cookie cleared, `revoked: true`).
 - **Server: admin create-user can no longer bypass the auditor separation-of-duties
   control (#302).** `POST /admin/users` minted role memberships by direct ORM,
   skipping the one enforcement point (core `RoleManager.add_member`), so a

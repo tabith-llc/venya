@@ -472,6 +472,21 @@ class TestLogoutEvents:
         assert rows[0].user_id == USER_ID
         assert _f(rows[0]) == {"mode": "browser", "session_jti": "jti-out", "revoked": True}
 
+    def test_logout_success_clears_cookie(self):
+        db = MagicMock()
+        app, session_mock, user_info, _ = self._app_with_logout(db)
+        with (
+            patch.object(auth_browser_routes, "_get_session_from_cookie", return_value=(db, session_mock, user_info)),
+            patch("core.iam.session_manager.SessionManager") as sm,
+        ):
+            sm.return_value.revoke_session.return_value = None
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/api/v1/auth/logout/browser")
+        assert resp.status_code == 200
+        set_cookie = resp.headers.get("set-cookie") or ""
+        assert auth_browser_routes.COOKIE_NAME in set_cookie
+        assert "Max-Age=0" in set_cookie
+
     def test_session_ended_revoked_false_on_swallowed_failure(self):
         db = MagicMock()
         app, session_mock, user_info, _ = self._app_with_logout(db)
@@ -482,12 +497,27 @@ class TestLogoutEvents:
             sm.return_value.revoke_session.side_effect = RuntimeError("db down")
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/api/v1/auth/logout/browser")
-        # logout-swallows-revoke-failure owns the swallowed failure — this
-        # leg must NOT change control flow:
-        assert resp.status_code == 200
+        # logout-swallows-revoke-failure OWNS this leg (ruling 2026-10-01,
+        # fail-closed): a failed revoke returns 503, claims no logout, and
+        # does NOT clear the cookie — the client keeps it as retry handle.
+        assert resp.status_code == 503
+        assert resp.json()["revoked"] is False
+        set_cookie = resp.headers.get("set-cookie") or ""
+        assert f"{auth_browser_routes.COOKIE_NAME}=" not in set_cookie
         rows = _by_type(_lifecycle_events(db), "session_ended")
         assert len(rows) == 1
         assert _f(rows[0])["revoked"] is False
+
+    def test_logout_no_session_path_still_200_and_clears_cookie(self):
+        db = MagicMock()
+        app, *_ = self._app_with_logout(db)
+        with patch.object(auth_browser_routes, "_get_session_from_cookie", return_value=None):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/api/v1/auth/logout/browser")
+        assert resp.status_code == 200
+        set_cookie = resp.headers.get("set-cookie") or ""
+        assert auth_browser_routes.COOKIE_NAME in set_cookie
+        assert not _lifecycle_events(db)
 
 
 # ---------------------------------------------------------------------------

@@ -388,6 +388,7 @@ async def browser_logout(
     db, session, user_info = result
     actor_user_id = user_info.get("user_id") if isinstance(user_info, dict) else user_info
     session_jti = getattr(session, "access_token_jti", None)
+    revoked_ok = True
     try:
         from core.iam.session_manager import SessionConfig, SessionManager
 
@@ -409,12 +410,25 @@ async def browser_logout(
         db.commit()
     except Exception:
         db.rollback()
-        # Pre-existing swallow (logout-swallows-revoke-failure owns the fix):
-        # control flow unchanged, but
-        # the observable failure now leaves its revoked=False row behind.
+        # Fail-closed (logout-swallows-revoke-failure, ruling 2026-10-01):
+        # the revoke failure is loud, the revoked=False row lands, and the
+        # response refuses to claim logout.
+        logger.exception("Browser logout session revocation failed (jti=%s)", session_jti)
         record_session_end_failure(request, db, actor_user_id, session_jti)
+        revoked_ok = False
     finally:
         db.close()
+
+    if not revoked_ok:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "revoked": False,
+                "detail": "session revocation failed; retry logout",
+            },
+            media_type="application/json",
+        )
 
     response = Response(
         content='{"status": "ok"}',
