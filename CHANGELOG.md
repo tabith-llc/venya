@@ -77,6 +77,16 @@ Notable changes to Venya will be documented in this file.
   visibility promise is built on.
 
 ### Fixed
+- **Server: admin create-user can no longer bypass the auditor separation-of-duties
+  control (#302).** `POST /admin/users` minted role memberships by direct ORM,
+  skipping the one enforcement point (core `RoleManager.add_member`), so a
+  mixed {auditor + anything} grant succeeded through the admin path while the
+  role-members endpoint refused the identical mixture — silently breaking the
+  shipped AC-5 exclusivity control through the front door. Grants now flow
+  through the chokepoint inside a savepoint: a refusal rolls back the pending
+  user and partial memberships (complete-or-nothing — no phantom user, no
+  phantom lifecycle audit row), records the same `auditor_sod_denied` event as
+  the sibling path, and answers 409 with the same message.
 - **Core: dropped the phantom FK on `executor_enrollment_tokens.created_by`
   (#303).** The model still declared
   `ForeignKey("users.user_id", ondelete="CASCADE")` although migration 022
