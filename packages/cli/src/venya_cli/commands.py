@@ -2652,12 +2652,16 @@ def executor_audit(client: APIClient, args: Any) -> int:
         result = client.get("/api/v1/audit", params={**params, "executor_id": executor_id})
         events = result.get("events", [])
 
-        if not events:
-            print(f"No audit events found for {executor_id}.")
-            return 0
-
+        # --json: byte-exact passthrough of the API envelope. BEFORE the
+        # empty check: an empty log must still emit parseable JSON
+        # ({"events": []}) — same ordering as cmd_list / cmd_audit (ticket
+        # exec-audit-json-empty-case-unparseable).
         if getattr(args, "json", False):
             print(json.dumps(result, indent=2))
+            return 0
+
+        if not events:
+            print(f"No audit events found for {executor_id}.")
             return 0
 
         print(f"Audit Events for {executor_id}")
