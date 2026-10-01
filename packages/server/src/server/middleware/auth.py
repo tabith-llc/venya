@@ -346,6 +346,23 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 return executor_result
             return await call_next(request)
 
+        # Audit-forwarder ingest: executor mTLS (ticket
+        # audit-forwarder-server-sink #307). Runs with reject_revoked=False
+        # per D2 ruling (owner 2026-10-01): a REVOKED registered executor's
+        # forwarded evidence still LANDS, route-side flagged
+        # fields.sender_revoked=true — pre-revocation rejections may be the
+        # evidence motivating the revocation. NOTE the purpose differs from
+        # the heartbeat's reject_revoked=False: there it is the advisory
+        # cooperative-stop channel (ruling B1); here it is EVIDENCE
+        # PRESERVATION — a 403-retry loop would end in the forwarder's
+        # drop-oldest spool loss. Forged/unregistered senders still get the
+        # full 401/403 refusal; the route re-checks caller == "executor".
+        if request.url.path == "/api/v1/audit/ingest":
+            executor_result = await self._validate_executor_mtls(request, reject_revoked=False)
+            if executor_result is not None:
+                return executor_result
+            return await call_next(request)
+
         # Admin mTLS validation (before bearer token auth)
         if (
             getattr(request.app.state, "config", None)

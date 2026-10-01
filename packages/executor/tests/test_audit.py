@@ -21,6 +21,7 @@ def make_config(spool_dir: Path, **overrides) -> AuditForwarderConfig:
     base = {
         "remote_url": None,
         "max_buffer_size": 100,
+        "max_batch_lines": 50,
         "alert_threshold": 0.8,
         "retry_base_delay": 60.0,
         "retry_max_delay": 120.0,
@@ -28,6 +29,8 @@ def make_config(spool_dir: Path, **overrides) -> AuditForwarderConfig:
         "spool_path": str(spool_dir / "spool.jsonl"),
     }
     base.update(overrides)
+    # keep the harness valid under the #307 D3 validator (batch <= buffer)
+    base["max_batch_lines"] = min(base["max_batch_lines"], base["max_buffer_size"])
     return AuditForwarderConfig(**base)
 
 
@@ -165,7 +168,13 @@ class TestForward:
         log._forwarder.join(timeout=2.0)
 
     def _logger_prepped(self, spool_dir: Path, **overrides) -> AuditLogger:
-        log = AuditLogger(make_config(spool_dir, **overrides), session_id="s1")
+        # client_cert present because these cells exercise the POST path;
+        # _forward_once fail-closes without it (#307 D1, T2 pins that).
+        log = AuditLogger(
+            make_config(spool_dir, **overrides),
+            session_id="s1",
+            client_cert=("/tmp/c.crt", "/tmp/c.key"),
+        )
         self._stop_forwarder(log)
         log._config.remote_url = "http://127.0.0.1:1/audit"
         return log
@@ -220,6 +229,7 @@ class TestForward:
         log = AuditLogger(
             make_config(spool_dir, remote_url="https://sink.invalid/audit", ca_cert_path=str(ca)),
             session_id="s1",
+            client_cert=("/tmp/c.crt", "/tmp/c.key"),
         )
         self._stop_forwarder(log)
         log.emit("credential_injected", strategy="memfd")
@@ -240,11 +250,16 @@ class TestForward:
             assert log._forward_once() is True
         assert cls.call_args.kwargs["verify"] is True
 
-    def test_forward_noop_without_remote_url(self, spool_dir: Path):
+    def test_forward_noop_without_remote_url(self, spool_dir: Path, success_mock: MagicMock):
+        """T5 pin (#307): no remote_url ⇒ inert-by-absence — True, spool
+        kept, and NO transport ever constructed (early-return half of the
+        #307 truth table; do not regress into the fail-loud branch)."""
         log = AuditLogger(make_config(spool_dir), session_id="s1")
         log.emit("credential_injected", strategy="memfd")
         try:
-            assert log._forward_once() is True
+            with patch("executor.audit.httpx2.Client", return_value=success_mock) as cls:
+                assert log._forward_once() is True
+            cls.assert_not_called()
         finally:
             log.shutdown()
         assert len(read_spool(spool_dir)) == 1
@@ -273,6 +288,83 @@ class TestForward:
         import compression.zstd
 
         assert len(content) < len(compression.zstd.decompress(content))
+
+
+class TestForwarderClientCert:
+    """#307 D1: the forwarder must present the executor mTLS client cert —
+    the sink is executor-mTLS-gated, so a cert-less forwarder is a deaf
+    dead-knob (401 retry loop). Configured remote WITHOUT client cert is a
+    loud fail-closed refusal, never a silent POST."""
+
+    @staticmethod
+    def _stop(log: AuditLogger) -> None:
+        log._shutdown = True
+        log._wakeup.set()
+        log._forwarder.join(timeout=2.0)
+
+    def test_T1_client_cert_passed_to_httpx(self, spool_dir: Path, success_mock: MagicMock):
+        """T1: client_cert set → httpx2.Client gets cert=(cert, key)."""
+        log = AuditLogger(
+            make_config(spool_dir),
+            session_id="s1",
+            client_cert=("/tmp/executor.crt", "/tmp/executor.key"),
+        )
+        self._stop(log)
+        log._config.remote_url = "https://sink.invalid/audit"
+        log.emit("credential_injected", strategy="memfd")
+        with patch("executor.audit.httpx2.Client", return_value=success_mock) as cls:
+            assert log._forward_once() is True
+        assert cls.call_args.kwargs["cert"] == ("/tmp/executor.crt", "/tmp/executor.key")
+        assert read_spool(spool_dir) == []
+
+    def test_T2_remote_without_client_cert_fails_loud_no_post(self, spool_dir: Path, caplog):
+        """T2: remote_url set, client_cert None → ERROR log, NO POST,
+        False (lines kept). The loud-deaf-boot class must not regress."""
+        log = AuditLogger(make_config(spool_dir), session_id="s1")
+        self._stop(log)
+        log._config.remote_url = "https://sink.invalid/audit"
+        log.emit("credential_injected", strategy="memfd")
+        with (
+            caplog.at_level("ERROR", logger="venya.executor.audit"),
+            patch("executor.audit.httpx2.Client") as cls,
+        ):
+            assert log._forward_once() is False
+        cls.assert_not_called()
+        assert "without client certificate" in caplog.text
+        assert len(read_spool(spool_dir)) == 1
+
+    def test_T3_batch_cap_drains_max_batch_lines_only(self, spool_dir: Path, success_mock: MagicMock):
+        """T3 (D3): >max_batch_lines spool lines → exactly max_batch_lines
+        per POST, remainder kept in the spool."""
+        log = AuditLogger(
+            make_config(spool_dir, max_buffer_size=1000, max_batch_lines=500),
+            session_id="s1",
+            client_cert=("/tmp/c.crt", "/tmp/c.key"),
+        )
+        self._stop(log)
+        log._config.remote_url = "https://sink.invalid/audit"
+        for i in range(600):
+            log.emit("command_executed", command=f"echo {i}", exit_code=0, duration_ms=1.0)
+        with patch("executor.audit.httpx2.Client", return_value=success_mock) as cls:
+            assert log._forward_once() is True
+        import compression.zstd
+
+        content = cls.return_value.__enter__.return_value.post.call_args[1]["content"]
+        posted = compression.zstd.decompress(content).decode().splitlines()
+        assert len(posted) == 500
+        assert len(read_spool(spool_dir)) == 100
+
+    def test_T4_max_batch_lines_validator(self):
+        """T4: max_batch_lines bounded to 1..max_buffer_size at config load."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            AuditForwarderConfig(max_batch_lines=0)
+        with pytest.raises(ValidationError):
+            AuditForwarderConfig(max_buffer_size=100, max_batch_lines=101)
+        # positive twin: valid values load
+        cfg = AuditForwarderConfig(max_buffer_size=100, max_batch_lines=50)
+        assert cfg.max_batch_lines == 50
 
 
 class TestSpoolBounds:
@@ -308,7 +400,7 @@ class TestShutdown:
     """shutdown(): bounded final drain + flag."""
 
     def test_shutdown_flushes_remaining(self, spool_dir: Path, success_mock: MagicMock):
-        log = AuditLogger(make_config(spool_dir), session_id="s1")
+        log = AuditLogger(make_config(spool_dir), session_id="s1", client_cert=("/tmp/c.crt", "/tmp/c.key"))
         log.emit("credential_injected", strategy="memfd")
         log._config.remote_url = "http://127.0.0.1:1/audit"
         with patch("executor.audit.httpx2.Client", return_value=success_mock) as cls:
@@ -340,6 +432,7 @@ class TestForwarderThread:
                 retry_max_delay=0.1,
             ),
             session_id="s1",
+            client_cert=("/tmp/c.crt", "/tmp/c.key"),
         )
         log.emit("credential_injected", strategy="memfd")
         try:
