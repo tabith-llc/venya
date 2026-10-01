@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import metrics
+from ..audit_lifecycle import USER_CREATED, USER_DELETED, USER_UPDATED, audit_lifecycle
 from ..dependencies import enrollment_manager, get_current_user, get_db, require_admin
 from ..rate_limit import rate_limit_admin_token_gen
 from ..utils.executor_id import validate_executor_id
@@ -250,7 +251,7 @@ class AdminExecutorListResponse(BaseModel):
 async def admin_enroll(
     req: AdminEnrollRequest,
     request: Request,
-    _: dict = Depends(require_admin),
+    auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminEnrollResponse:
     """Enroll a new user (admin only).
@@ -284,6 +285,16 @@ async def admin_enroll(
         config = getattr(request.app.state, "config", None)
         if config and config.recovery_code_pepper:
             token.binding_hash = compute_binding_hash(req.user_id, plaintext, config.recovery_code_pepper)
+        audit_lifecycle(
+            db,
+            USER_CREATED,
+            auth_user.get("user_id"),
+            {
+                "target_user_id": req.user_id,
+                "roles": [],
+                "enrollment_token_created": True,
+            },
+        )
         db.commit()
 
         return AdminEnrollResponse(
@@ -315,7 +326,7 @@ async def admin_enroll(
 async def admin_create_user(
     req: AdminCreateUserRequest,
     request: Request,
-    _: dict = Depends(require_admin),
+    auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminCreateUserResponse:
     """Create a new user and enrollment token (admin only).
@@ -357,6 +368,16 @@ async def admin_create_user(
         config = getattr(request.app.state, "config", None)
         if config and config.recovery_code_pepper:
             token.binding_hash = compute_binding_hash(req.username, plaintext, config.recovery_code_pepper)
+        audit_lifecycle(
+            db,
+            USER_CREATED,
+            auth_user.get("user_id"),
+            {
+                "target_user_id": req.username,
+                "roles": list(req.roles or []),
+                "enrollment_token_created": True,
+            },
+        )
         db.commit()
         metrics.TOKEN_CREATED.labels(type="user").inc()
 
@@ -395,7 +416,7 @@ async def admin_create_user(
 )
 async def admin_remove(
     user_id: str,
-    _: dict = Depends(require_admin),
+    auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminRemoveResponse:
     """Remove a user (admin only)."""
@@ -410,15 +431,26 @@ async def admin_remove(
             )
 
         # Remove role memberships
-        db.query(RoleMember).filter(RoleMember.user_id == user_id).delete()
+        memberships_removed = db.query(RoleMember).filter(RoleMember.user_id == user_id).delete()
         # Remove sessions
-        db.query(Session).filter(Session.user_id == user_id).delete()
+        sessions_revoked = db.query(Session).filter(Session.user_id == user_id).delete()
         # Remove enrollment tokens (user_id is String FK to users.user_id)
         from core.iam.models import EnrollmentToken
 
-        db.query(EnrollmentToken).filter(EnrollmentToken.user_id == user.user_id).delete()
+        tokens_revoked = db.query(EnrollmentToken).filter(EnrollmentToken.user_id == user.user_id).delete()
         # Remove the user
         db.delete(user)
+        audit_lifecycle(
+            db,
+            USER_DELETED,
+            auth_user.get("user_id"),
+            {
+                "target_user_id": user_id,
+                "memberships_removed": memberships_removed,
+                "sessions_revoked": sessions_revoked,
+                "tokens_revoked": tokens_revoked,
+            },
+        )
         db.commit()
 
         logger.info("Admin removed user: %s", user_id)
@@ -467,7 +499,7 @@ async def admin_configure_user(
     user_id: str,
     req: AdminConfigureUserRequest,
     request: Request,
-    _: dict = Depends(require_admin),
+    auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminConfigureUserResponse:
     """Configure user settings (admin only)."""
@@ -481,15 +513,26 @@ async def admin_configure_user(
                 detail=f"User not found: {user_id}",
             )
 
+        changed_fields: list[str] = []
         if req.display_name is not None:
             user.display_name = req.display_name
+            changed_fields.append("display_name")
         if req.status is not None:
             user.status = req.status
+            changed_fields.append("status")
         if req.auth_mode is not None:
             user.auth_mode = req.auth_mode
+            changed_fields.append("auth_mode")
         if req.session_timeout is not None:
             user.session_timeout = req.session_timeout
+            changed_fields.append("session_timeout")
 
+        audit_lifecycle(
+            db,
+            USER_UPDATED,
+            auth_user.get("user_id"),
+            {"target_user_id": user_id, "changed_fields": changed_fields},
+        )
         db.commit()
         return AdminConfigureUserResponse(configured=True, user_id=user_id)
     except HTTPException:

@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .. import metrics
+from ..audit_lifecycle import SESSION_STARTED, audit_lifecycle, record_login_failure
 from ..dependencies import get_db
 from ..fido2.manager import WebAuthnError
 
@@ -108,6 +109,7 @@ async def auth_login_complete(
         result = fido2_manager.finish_authentication(req.challenge_id, req.response)
     except WebAuthnError as e:
         metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="failure").inc()
+        record_login_failure(request, "cli", "assertion")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(e),
@@ -115,6 +117,7 @@ async def auth_login_complete(
     except ValueError:
         metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="failure").inc()
         logger.exception("Login verification failed (internal)")
+        record_login_failure(request, "cli", "internal")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Login verification failed",
@@ -152,10 +155,17 @@ async def auth_login_complete(
         # reason is logged server-side only.
         metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="failure").inc()
         logger.warning("Login refused for user_id=%s: session gate (user missing or not active)", result["user_id"])
+        record_login_failure(request, "cli", "status_gate")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Login verification failed",
         ) from None
+    audit_lifecycle(
+        db,
+        SESSION_STARTED,
+        result["user_id"],
+        {"mode": "cli", "session_jti": getattr(_session, "access_token_jti", None)},
+    )
     db.commit()
     metrics.AUTH_LOGIN_TOTAL.labels(mode="webauthn", result="success").inc()
 
