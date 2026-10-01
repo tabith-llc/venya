@@ -6,8 +6,10 @@
 
 """PostgreSQL backend for the core."""
 
+import enum
 import os
-from typing import Any, Self
+from dataclasses import dataclass
+from typing import Any, Final, Self
 
 from sqlalchemy import (
     Engine,
@@ -39,6 +41,105 @@ class KekSaltMissingError(BackendError):
     without the salt, so previously-stored secrets cannot be unwrapped. The
     deployment must be restored from a pre-restart backup.
     """
+
+
+class KekPassphraseMismatchError(BackendError):
+    """The configured encryption passphrase does not match stored key material (#304).
+
+    A wrong passphrase derives a working KEK for NEW wrappings but can never
+    unwrap existing envelopes — left unchecked, secrets stored during the
+    wrong-passphrase window are permanently unrecoverable. The startup check
+    raises this instead of booting: loud, before any new wrapping can happen.
+    """
+
+
+SENTINEL_KEY: Final[str] = "kek_sentinel"
+# Fixed known plaintext wrapped under the KEK at mint and unwrapped at every
+# boot. Exactly DEK_SIZE so it reuses the AES-256-KW envelope verbatim — no
+# new crypto format (wrap_key/unwrap_key are the same primitives secret DEKs
+# use). Value-free: this is a public constant, not secret material.
+SENTINEL_PLAINTEXT: Final[bytes] = b"kek-sentinel-known-plaintext-v1!"
+LEGACY_SAMPLE_LIMIT: Final[int] = 5
+
+
+class SentinelStatus(enum.Enum):
+    """Outcome of the boot-time passphrase proof (#304)."""
+
+    MATCH = "match"  # sentinel present and unwraps under the configured KEK
+    MISMATCH = "mismatch"  # sentinel present, unwrap failed -> hard exit
+    LEGACY_OK = "legacy_ok"  # no sentinel, >=1 sampled DEK envelope unwraps -> boot
+    LEGACY_MISMATCH = "legacy_mismatch"  # no sentinel, ALL sampled envelopes fail -> hard exit
+    FRESH_EMPTY = "fresh_empty"  # no sentinel, no secrets: nothing to verify, nothing to corrupt
+
+
+@dataclass(frozen=True)
+class SentinelCheck:
+    """Result of verify_kek_sentinel: status plus legacy sampling tallies."""
+
+    status: SentinelStatus
+    samples: int = 0
+    failures: int = 0
+
+
+def ensure_kek_sentinel(session: Session, kek: bytes) -> None:
+    """Idempotent get-or-create of the single sentinel row.
+
+    Minted at the one convergence point every KEK-wrapped envelope funnels
+    through (Core.encrypt) — first successful crypto use after boot/store
+    lands it, legacy and fresh installs alike. The ``key`` primary key
+    resolves the concurrent-mint race exactly like ensure_kek_salt does:
+    the loser's IntegrityError means the winner already stored an equivalent
+    envelope, so the rollback-and-ignore IS the correct outcome.
+    """
+    from core.iam.models import KekSentinel
+
+    from .encryption import wrap_key
+
+    existing = session.query(KekSentinel).filter(KekSentinel.key == SENTINEL_KEY).first()
+    if existing is not None:
+        return
+    session.add(KekSentinel(key=SENTINEL_KEY, wrapped_sentinel=wrap_key(kek, SENTINEL_PLAINTEXT)))
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+
+
+def verify_kek_sentinel(session: Session, kek: bytes) -> SentinelCheck:
+    """Prove the configured passphrase against stored key material.
+
+    Sentinel-first (the ruling's posture: anything else leaves the
+    wrong-KEK-wraps-new-DEKs window): unwrap the sentinel envelope and compare
+    against the fixed plaintext. Legacy installs (sentinel absent but secrets
+    present) fall back to sampling up to LEGACY_SAMPLE_LIMIT stored DEK
+    envelopes — the wrong-passphrase verdict requires ALL samples to fail, so
+    one corrupt row cannot brick boot. Fresh empty installs report
+    FRESH_EMPTY: there is nothing stored to corrupt yet.
+    """
+    from core.iam.models import KekSentinel, Secret
+
+    from .encryption import EncryptionError, unwrap_key
+
+    row = session.query(KekSentinel).filter(KekSentinel.key == SENTINEL_KEY).first()
+    if row is not None:
+        try:
+            ok = unwrap_key(kek, row.wrapped_sentinel) == SENTINEL_PLAINTEXT
+        except EncryptionError:
+            ok = False
+        return SentinelCheck(SentinelStatus.MATCH if ok else SentinelStatus.MISMATCH)
+
+    envelopes = [r[0] for r in session.query(Secret.wrapped_dek).limit(LEGACY_SAMPLE_LIMIT).all()]
+    if not envelopes:
+        return SentinelCheck(SentinelStatus.FRESH_EMPTY)
+
+    failures = 0
+    for wrapped_dek in envelopes:
+        try:
+            unwrap_key(kek, wrapped_dek)
+        except EncryptionError:
+            failures += 1
+    status = SentinelStatus.LEGACY_MISMATCH if failures == len(envelopes) else SentinelStatus.LEGACY_OK
+    return SentinelCheck(status, samples=len(envelopes), failures=failures)
 
 
 class BackendConfig:

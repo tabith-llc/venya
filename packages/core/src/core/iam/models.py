@@ -6,9 +6,9 @@
 
 """SQLAlchemy ORM models for the core database.
 
-19 tables covering IAM, secrets, sessions, key rotation, rate limiting,
-command policies, executor certificates, elevation tokens, WebAuthn credentials,
-and execution relay.
+20 tables covering IAM, secrets, sessions, key rotation, rate limiting,
+command policies, executor certificates, elevation tokens, WebAuthn
+credentials, execution relay, and the KEK boot-sentinel.
 
 Schema is created via Alembic migrations on install. Models are the ORM interface.
 """
@@ -532,4 +532,22 @@ class VenyaConfig(Base):
 
     key = Column(String(64), primary_key=True, nullable=False)
     value = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+
+
+class KekSentinel(Base):
+    """Boot-time proof that the encryption passphrase matches stored key material (#304).
+
+    One logical row (fixed key ``kek_sentinel``): a fixed known plaintext
+    wrapped under the KEK with the SAME AES-256-KW envelope used for secret
+    DEKs (40 bytes). The server unwraps it at every startup — a wrong
+    passphrase previously booted silently (lazy KEK) and could then WRAP NEW
+    DEKs under an unrecoverable KEK. The wrapped envelope is the only stored
+    material: no passphrase, no plaintext.
+    """
+
+    __tablename__ = "kek_sentinel"
+
+    key = Column(String(64), primary_key=True, nullable=False)
+    wrapped_sentinel = Column(LargeBinary, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
