@@ -125,6 +125,10 @@ class ExecuteHandler(BaseHTTPRequestHandler):
             self._reply(400, {"detail": f"malformed request: {exc}"})
             return
         session_id = req.session_id
+        # argv list, verbatim from the frozen contract (ticket
+        # execution-command-wire-unstructured-string #322, ruling Q1=A1):
+        # boundaries are preserved into the engine; the engine reconstitutes
+        # the sh -c display string itself (C1 floor, leg B switches posture).
         command = req.command
         secrets = [
             {

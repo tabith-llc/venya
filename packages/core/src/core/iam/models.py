@@ -426,7 +426,22 @@ class ExecutionSession(Base):
         nullable=False,
     )
     executor_id = Column(String, ForeignKey("executors.id"), nullable=False)
-    command = Column(Text, nullable=True)
+    command = Column(
+        Text,
+        nullable=True,
+        comment=(
+            "Rendered display text of the command (shlex.join of argv). "
+            "Pre-#322 rows carry the raw wire string; display readers only."
+        ),
+    )
+    command_argv = Column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+        comment=(
+            "True argument list as submitted (ticket execution-command-wire-unstructured-string #322). "
+            "NULL = pre-change row — carried the string form only, args not recoverable."
+        ),
+    )
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     completed_at = Column(DateTime(timezone=True), nullable=True)

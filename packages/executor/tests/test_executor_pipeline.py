@@ -7,6 +7,7 @@
 """Tests for Executor pipeline: execute(), _prepare_injections(), _capture_output(), _cleanup_injections()."""
 
 import base64
+import shlex
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -96,7 +97,7 @@ class TestExecute:
 
     def test_execute_valid_command_succeeds(self, executor: Executor):
         """Valid command executes and returns result."""
-        result = executor.execute("/usr/bin/echo hello", [_make_secret("s1", b"secret-value")])
+        result = executor.execute(["/usr/bin/echo", "hello"], [_make_secret("s1", b"secret-value")])
 
         assert isinstance(result, CommandResult)
         assert result.exit_code == 0
@@ -105,12 +106,12 @@ class TestExecute:
     def test_execute_rejects_invalid_command(self, executor: Executor):
         """Invalid command raises ValueError."""
         with pytest.raises(ValueError, match="Command rejected"):
-            executor.execute("rm -rf /", [_make_secret("s1", b"secret")])
+            executor.execute(["rm", "-rf", "/"], [_make_secret("s1", b"secret")])
 
     def test_execute_validates_command_first(self, executor: Executor):
         """Validation happens before injection preparation."""
         with pytest.raises(ValueError, match="Command rejected"):
-            executor.execute("sudo cat /etc/shadow", [_make_secret("s1", b"secret")])
+            executor.execute(["sudo", "cat", "/etc/shadow"], [_make_secret("s1", b"secret")])
 
     def test_execute_cleanup_runs_even_on_error(self, executor: Executor):
         """Cleanup runs even if command fails."""
@@ -118,7 +119,7 @@ class TestExecute:
 
         # This will fail validation, but cleanup should still be attempted
         with pytest.raises(ValueError):
-            executor.execute("invalid-command", secrets)
+            executor.execute(["invalid-command"], secrets)
 
     def test_execute_revoke_tokens_called(self, executor: Executor, mock_http_client: httpx2.Client):
         """revoke_tokens is called after execution."""
@@ -126,7 +127,7 @@ class TestExecute:
 
         secrets = [_make_secret("db-pass", b"password123")]
 
-        executor.execute("/usr/bin/echo test", secrets)
+        executor.execute(["/usr/bin/echo", "test"], secrets)
 
         # revoke_tokens is called once after execution
         assert mock_http_client.post.call_count == 1
@@ -142,7 +143,7 @@ class TestExecute:
             _make_secret("s3", b"three"),
         ]
 
-        result = executor.execute("/usr/bin/echo done", secrets)
+        result = executor.execute(["/usr/bin/echo", "done"], secrets)
 
         assert result.exit_code == 0
         assert result.output_truncated is False
@@ -150,7 +151,7 @@ class TestExecute:
     def test_execute_with_env_override(self, executor: Executor):
         """Environment override is applied."""
         result = executor.execute(
-            "/usr/bin/printenv MY_VAR",
+            ["/usr/bin/printenv", "MY_VAR"],
             [],
             env_override={"MY_VAR": "custom_value"},
         )
@@ -163,7 +164,7 @@ class TestExecute:
         work_dir.mkdir()
         (work_dir / "test.txt").write_text("hello from work dir")
 
-        result = executor.execute("/usr/bin/cat test.txt", [], cwd=str(work_dir))
+        result = executor.execute(["/usr/bin/cat", "test.txt"], [], cwd=str(work_dir))
 
         assert b"hello from work dir" in result.stdout
 
@@ -529,101 +530,66 @@ class TestConstants:
 
 
 class TestValidateCommandStructure:
-    """Tests for _validate_command_structure metacharacter rejection."""
+    """Per-element metacharacter rejection for _validate_command_structure over
+    argv lists (ticket execution-command-wire-unstructured-string #322, ruling
+    Q2-B1: the gate checks INSIDE every element — stricter than the old
+    whole-string scan; a metachar packed into ONE argument dies there)."""
 
-    def test_accepts_simple_command(self):
+    def test_accepts_simple_argv(self):
         from executor.executor import _validate_command_structure
 
-        result = _validate_command_structure("/usr/bin/echo hello")
+        result = _validate_command_structure(["/usr/bin/echo", "hello"])
         assert result == ["/usr/bin/echo", "hello"]
 
-    def test_accepts_command_with_quoted_args(self):
+    def test_accepts_arg_with_spaces(self):
+        """#322 headline: whitespace inside ONE argument is data, not a
+        separator — the arg survives as one token (positive pair of the
+        per-element rejection cells)."""
         from executor.executor import _validate_command_structure
 
-        result = _validate_command_structure('/usr/bin/echo "hello world"')
-        assert result == ["/usr/bin/echo", "hello world"]
+        result = _validate_command_structure(["grep", "error message", "app.log"])
+        assert result == ["grep", "error message", "app.log"]
 
-    def test_accepts_command_with_single_quotes(self):
+    def test_accepts_args_containing_quotes(self):
         from executor.executor import _validate_command_structure
 
-        result = _validate_command_structure("/usr/bin/echo 'hello world'")
-        assert result == ["/usr/bin/echo", "hello world"]
+        result = _validate_command_structure(["/usr/bin/echo", "it's", '"quoted "'])
+        assert result == ["/usr/bin/echo", "it's", '"quoted "']
 
-    def test_rejects_pipe(self):
-        from executor.executor import _validate_command_structure
-
-        with pytest.raises(ValueError, match="Shell metacharacters"):
-            _validate_command_structure("/usr/bin/ls | /usr/bin/cat")
-
-    def test_rejects_semicolon(self):
-        from executor.executor import _validate_command_structure
-
-        with pytest.raises(ValueError, match="Shell metacharacters"):
-            _validate_command_structure("/usr/bin/ls; /usr/bin/cat")
-
-    def test_rejects_dollar_paren(self):
+    @pytest.mark.parametrize(
+        "metachar_arg", ["a|b", "a;b", "a$(whoami)", "a`id`", "a$HOME", "a>b", "a&b", "a*.txt", "a|;b", "x\ny"]
+    )
+    def test_rejects_metachar_inside_single_element(self, metachar_arg):
+        """Negative half of the truth table: |/;/$()/backtick/&/>/glob/newline
+        INSIDE a single argv element are all rejected."""
         from executor.executor import _validate_command_structure
 
         with pytest.raises(ValueError, match="Shell metacharacters"):
-            _validate_command_structure("/usr/bin/echo $(whoami)")
+            _validate_command_structure(["/usr/bin/echo", metachar_arg])
 
-    def test_rejects_backtick(self):
+    def test_rejects_metachar_in_program_element(self):
         from executor.executor import _validate_command_structure
 
         with pytest.raises(ValueError, match="Shell metacharacters"):
-            _validate_command_structure("/usr/bin/echo `id`")
+            _validate_command_structure(["/usr/bin/ls|cat"])
 
-    def test_rejects_dollar_var(self):
+    def test_rejects_fused_less_than_element(self):
         from executor.executor import _validate_command_structure
 
         with pytest.raises(ValueError, match="Shell metacharacters"):
-            _validate_command_structure("/usr/bin/echo $HOME")
-
-    def test_rejects_redirect(self):
-        from executor.executor import _validate_command_structure
-
-        with pytest.raises(ValueError, match="Shell metacharacters"):
-            _validate_command_structure("/usr/bin/ls > /tmp/out")
-
-    def test_rejects_ampersand(self):
-        from executor.executor import _validate_command_structure
-
-        with pytest.raises(ValueError, match="Shell metacharacters"):
-            _validate_command_structure("/usr/bin/ls &")
-
-    def test_rejects_glob(self):
-        from executor.executor import _validate_command_structure
-
-        with pytest.raises(ValueError, match="Shell metacharacters"):
-            _validate_command_structure("/usr/bin/ls *.txt")
-
-    def test_rejects_newline(self):
-        from executor.executor import _validate_command_structure
-
-        with pytest.raises(ValueError, match="Shell metacharacters"):
-            _validate_command_structure("/usr/bin/echo hello\n/usr/bin/echo world")
-
-    def test_rejects_quoted_metachar_from_cli_interim_join(self):
-        """sweep3a-low-hygiene-batch S3A-15 (interim): the CLI now passes
-        metachar-containing args shlex.quoted — the gate is a whole-STRING
-        scan, not quote-aware, so the quoted shape is rejected exactly as
-        the unquoted form. Pairs with test_rejects_pipe."""
-        from executor.executor import _validate_command_structure
-
-        with pytest.raises(ValueError, match="Shell metacharacters"):
-            _validate_command_structure("/usr/bin/echo 'a|b'")
+            _validate_command_structure(["a<b"])
 
     def test_rejects_empty_command(self):
         from executor.executor import _validate_command_structure
 
         with pytest.raises(ValueError, match="Empty command"):
-            _validate_command_structure("")
+            _validate_command_structure([])
 
-    def test_rejects_whitespace_only(self):
+    def test_rejects_metachar_only_element(self):
         from executor.executor import _validate_command_structure
 
-        with pytest.raises(ValueError, match="Empty command"):
-            _validate_command_structure("   ")
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            _validate_command_structure(["|"])
 
 
 class TestStage2NoSecretMaterial:
@@ -686,7 +652,7 @@ class TestTruncatedAudit:
 
 class TestStructuralGate:
     """Solution A (ruled 2026-09-16, ticket executor-sbx-skips-shell-metachar-validation):
-    unconditional WHOLE-STRING structural gate in execute() step 1a — before
+    unconditional PER-ELEMENT structural gate in execute() step 1a (argv list, ticket #322 Q2-B1) — before
     the policy gate, before any strategy dispatch. The production sbx path
     hands the command string to `sh -c` inside the sandbox; metacharacters
     must never reach it. Truth table: alphabet rejection through production
@@ -717,7 +683,7 @@ class TestStructuralGate:
         rejected BEFORE any strategy call (acceptance: sbx path guarded)."""
         ex, strategy = self._executor()
         with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
-            ex.execute(f"/usr/bin/echo hi{ch}tail", [])
+            ex.execute(["/usr/bin/echo", f"hi{ch}tail"], [])
         strategy.create_sandbox.assert_not_called()
         strategy.execute_command.assert_not_called()
 
@@ -728,7 +694,7 @@ class TestStructuralGate:
         distinguish local vs remote interpretation here."""
         ex, _strategy = self._executor()
         with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
-            ex.execute('/usr/bin/echo "a; b"', [])
+            ex.execute(["/usr/bin/echo", "a; b"], [])
 
     def test_structural_gate_precedes_policy(self):
         """Ordering ruling: the reason string proves the structural gate got
@@ -736,7 +702,7 @@ class TestStructuralGate:
         'Dangerous pattern' (sudo sits in the same command)."""
         ex, _strategy = self._executor()
         with pytest.raises(ValueError) as exc:
-            ex.execute("/usr/bin/sudo ls; rm x", [])
+            ex.execute(["/usr/bin/sudo", "ls;", "rm", "x"], [])
         assert "metacharacters" in str(exc.value)
         assert "Dangerous pattern" not in str(exc.value)
 
@@ -745,7 +711,7 @@ class TestStructuralGate:
         True early in the policy layer, yet metachars are still rejected."""
         ex, strategy = self._executor(preset="permissive")
         with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
-            ex.execute("/usr/bin/echo hi; rm x", [])
+            ex.execute(["/usr/bin/echo", "hi;", "rm", "x"], [])
         strategy.execute_command.assert_not_called()
 
     def test_structural_rejection_emits_command_rejected_audit(self):
@@ -753,13 +719,13 @@ class TestStructuralGate:
         silent structural rejection = F11-class bug."""
         audit = MagicMock()
         ex, _strategy = self._executor(audit=audit)
-        cmd = "/usr/bin/echo hi; tail"
+        cmd = ["/usr/bin/echo", "hi;", "tail"]
         with pytest.raises(ValueError):
             ex.execute(cmd, [])
         audit.emit.assert_called_once()
         args, kwargs = audit.emit.call_args
         assert args == ("command_rejected",)
-        assert kwargs["command"] == cmd
+        assert kwargs["command"] == shlex.join(cmd)
         assert "metacharacters" in kwargs["reason"]
 
     def test_policy_rejection_audits_with_distinct_reason(self):
@@ -768,7 +734,7 @@ class TestStructuralGate:
         audit = MagicMock()
         ex, _strategy = self._executor(audit=audit)
         with pytest.raises(ValueError, match="Dangerous pattern"):
-            ex.execute("/usr/bin/sudo ls", [])
+            ex.execute(["/usr/bin/sudo", "ls"], [])
         args, kwargs = audit.emit.call_args
         assert args == ("command_rejected",)
         assert "metacharacters" not in kwargs["reason"]
@@ -779,7 +745,7 @@ class TestStructuralGate:
         guardrail) and rejects the same shapes."""
         ex, _strategy = self._executor()
         with pytest.raises(ValueError, match="Shell metacharacters"):
-            ex._run_command_direct("/usr/bin/echo hi; tail", [], None, None)
+            ex._run_command_direct(["/usr/bin/echo", "hi;", "tail"], [], None, None)
 
     def test_clean_command_passes_structural_gate(self):
         """Control: a metachar-free command flows through execute() to the
@@ -787,7 +753,7 @@ class TestStructuralGate:
         ex, strategy = self._executor()
         strategy.execute_command.return_value = MagicMock(returncode=0, stdout=b"ok", stderr=b"")
         with patch("executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])):
-            result = ex.execute("/usr/bin/echo hello", [])
+            result = ex.execute(["/usr/bin/echo", "hello"], [])
         assert result.exit_code == 0
         strategy.execute_command.assert_called_once()
 
@@ -821,11 +787,21 @@ class TestRedirectAllowance:
         # remote sudo swallows the next token as its prompt string (misparse →
         # usage error, exit 1). Field-proven 2026-09-25 on tvc/tve; the sudo
         # prompt text appearing in stderr is harmless (carries no secret).
-        cmd = (
-            "/usr/bin/sshpass -f /run/secrets/venya/1 /usr/bin/ssh bot@target-1 "
-            "/usr/bin/sudo -S systemctl restart httpd < /run/secrets/venya/2"
-        )
-        canned = CommandResult(command=cmd, exit_code=0, stdout=b"ok", stderr=b"")
+        cmd = [
+            "/usr/bin/sshpass",
+            "-f",
+            "/run/secrets/venya/1",
+            "/usr/bin/ssh",
+            "bot@target-1",
+            "/usr/bin/sudo",
+            "-S",
+            "systemctl",
+            "restart",
+            "httpd",
+            "<",
+            "/run/secrets/venya/2",
+        ]
+        canned = CommandResult(command=shlex.join(cmd), exit_code=0, stdout=b"ok", stderr=b"")
         with patch.object(Executor, "_run_command_sbx", return_value=canned) as m:
             result = ex.execute(cmd, secrets)
         assert result.exit_code == 0
@@ -834,7 +810,18 @@ class TestRedirectAllowance:
     def test_unbound_secret_path_redirect_rejected(self):
         ex, strategy = self._executor()
         secrets = [_make_secret("1", b"ssh-pass")]
-        cmd = "/usr/bin/sshpass -f /run/secrets/venya/1 /usr/bin/ssh bot@t /usr/bin/sudo -S id < /run/secrets/venya/2"
+        cmd = [
+            "/usr/bin/sshpass",
+            "-f",
+            "/run/secrets/venya/1",
+            "/usr/bin/ssh",
+            "bot@t",
+            "/usr/bin/sudo",
+            "-S",
+            "id",
+            "<",
+            "/run/secrets/venya/2",
+        ]
         with pytest.raises(ValueError, match="SESSION-BOUND"):
             ex.execute(cmd, secrets)
         strategy.create_sandbox.assert_not_called()
@@ -842,7 +829,7 @@ class TestRedirectAllowance:
     def test_nonsecret_path_redirect_rejected(self):
         ex, _strategy = self._executor()
         with pytest.raises(ValueError, match="SESSION-BOUND"):
-            ex.execute("/usr/bin/sort < /etc/passwd", [_make_secret("1", b"x")])
+            ex.execute(["/usr/bin/sort", "<", "/etc/passwd"], [_make_secret("1", b"x")])
 
     def test_prefix_trick_and_relative_paths_rejected(self):
         ex, _strategy = self._executor()
@@ -854,43 +841,43 @@ class TestRedirectAllowance:
             "/run/secrets/venya/",
         ):
             with pytest.raises(ValueError, match="SESSION-BOUND"):
-                ex.execute(f"/usr/bin/cat x < {target}", secrets)
+                ex.execute(["/usr/bin/cat", "x", "<", target], secrets)
 
     def test_fused_and_heredoc_forms_rejected_with_metachar_message(self):
         ex, _strategy = self._executor()
         secrets = [_make_secret("4", b"x")]
         for form in ("<<", "<>", "<&3", "a<b"):
             with pytest.raises(ValueError, match="Shell metacharacters"):
-                ex.execute(f"/usr/bin/echo hi {form} /run/secrets/venya/4", secrets)
+                ex.execute(["/usr/bin/echo", "hi", form, "/run/secrets/venya/4"], secrets)
 
     def test_trailing_redirect_rejected(self):
         ex, _strategy = self._executor()
         with pytest.raises(ValueError, match="SESSION-BOUND"):
-            ex.execute("/usr/bin/sort <", [_make_secret("4", b"x")])
+            ex.execute(["/usr/bin/sort", "<"], [_make_secret("4", b"x")])
 
     def test_output_redirect_still_rejected(self):
         ex, _strategy = self._executor()
         with pytest.raises(ValueError, match="Shell metacharacters"):
-            ex.execute("/usr/bin/echo hi > /tmp/x", [_make_secret("4", b"x")])
+            ex.execute(["/usr/bin/echo", "hi", ">", "/tmp/x"], [_make_secret("4", b"x")])
 
     def test_multiple_redirects_all_must_be_bound(self):
-        both = "/usr/bin/cmd1 < /run/secrets/venya/1 < /run/secrets/venya/2"
+        both = ["/usr/bin/cmd1", "<", "/run/secrets/venya/1", "<", "/run/secrets/venya/2"]
         toks = _validate_command_structure(both, frozenset({"/run/secrets/venya/1", "/run/secrets/venya/2"}))
         assert "<" in toks
-        mixed = "/usr/bin/cmd1 < /run/secrets/venya/1 < /run/secrets/venya/9"
+        mixed = ["/usr/bin/cmd1", "<", "/run/secrets/venya/1", "<", "/run/secrets/venya/9"]
         with pytest.raises(ValueError, match="SESSION-BOUND"):
             _validate_command_structure(mixed, frozenset({"/run/secrets/venya/1"}))
 
     def test_no_secrets_means_no_redirect_ever(self):
         ex, _strategy = self._executor()
         with pytest.raises(ValueError, match="SESSION-BOUND"):
-            ex.execute("/usr/bin/sort < /run/secrets/venya/4", [])
+            ex.execute(["/usr/bin/sort", "<", "/run/secrets/venya/4"], [])
 
     def test_rejection_audits_command_rejected(self):
         audit = MagicMock()
         ex, _strategy = self._executor(audit=audit)
         with pytest.raises(ValueError):
-            ex.execute("/usr/bin/sort < /etc/passwd", [])
+            ex.execute(["/usr/bin/sort", "<", "/etc/passwd"], [])
         args, kwargs = audit.emit.call_args
         assert args == ("command_rejected",)
         assert "SESSION-BOUND" in kwargs["reason"]

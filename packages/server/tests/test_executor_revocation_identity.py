@@ -637,7 +637,7 @@ class TestDialGates:
         db.query.side_effect = _q
 
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/executors/exec-a/execute", json={"session_id": "sess-1", "command": "id"})
+        resp = client.post("/api/v1/executors/exec-a/execute", json={"session_id": "sess-1", "command": ["id"]})
         assert resp.status_code == 403 and "revoked" in resp.json()["detail"].lower()
 
 

@@ -174,14 +174,14 @@ class _FakeExec:
     def __init__(self, result: CommandResult | None = None, exc: BaseException | None = None):
         self._result = result
         self._exc = exc
-        self.command: str | None = None
+        self.command: list[str] | None = None
         self.secrets: object = None
         self.env_vars: object = "UNSET"
         self.askpass_helper: object = "UNSET"
 
     def execute(
         self,
-        command: str,
+        command: list[str],
         secrets: list,
         env_vars: list | None = None,
         askpass_helper: bool = False,
@@ -278,7 +278,7 @@ class TestRelayListener:
         listener, pk, fake, sessions = started
         payload = {
             "session_id": "s1",
-            "command": "echo hi",
+            "command": ["echo", "hi"],
             "secrets": [{"secret_id": 7, "wrapped_value": "[VENYA:deadbeef]aaa[/VENYA]"}],
         }
         with _client(pk.ca_a, pk.c_ok) as client:
@@ -291,7 +291,7 @@ class TestRelayListener:
         assert data["masked_count"] == 1
         # B0.2 wiring: engine got the right command, session id, and BYTES
         assert sessions == ["s1"]
-        assert fake.command == "echo hi"
+        assert fake.command == ["echo", "hi"]
         assert fake.secrets[0]["secret_id"] == 7
         assert fake.secrets[0]["wrapped_value"] == b"[VENYA:deadbeef]aaa[/VENYA]"
 
@@ -300,10 +300,10 @@ class TestRelayListener:
         # No client certificate -> the CERT_REQUIRED handshake must fail.
         with _client(pk.ca_a, None) as client:
             with pytest.raises(httpx2.RequestError):
-                client.post(_url(listener), json={"session_id": "x", "command": "true"})
+                client.post(_url(listener), json={"session_id": "x", "command": ["true"]})
         # A bad peer must not wedge the listener: the next valid request still works.
         with _client(pk.ca_a, pk.c_ok) as client:
-            resp = client.post(_url(listener), json={"session_id": "x", "command": "true"})
+            resp = client.post(_url(listener), json={"session_id": "x", "command": ["true"]})
         assert resp.status_code == 200
 
     def test_wrong_ca_rejected(self, started):
@@ -311,13 +311,13 @@ class TestRelayListener:
         # Client cert signed by a CA the executor does not trust.
         with _client(pk.ca_a, pk.c_foreign) as client:
             with pytest.raises(httpx2.RequestError):
-                client.post(_url(listener), json={"session_id": "x", "command": "true"})
+                client.post(_url(listener), json={"session_id": "x", "command": ["true"]})
 
     def test_unknown_identity_rejected(self, started):
         listener, pk, _fake, _sessions = started
         # Valid CA, but CN is not in relay_client_ids -> clean 403 (B0.3).
         with _client(pk.ca_a, pk.c_ban) as client:
-            resp = client.post(_url(listener), json={"session_id": "x", "command": "true"})
+            resp = client.post(_url(listener), json={"session_id": "x", "command": ["true"]})
         assert resp.status_code == 403
 
     def test_cn_comparison_is_case_sensitive(self, started):
@@ -326,7 +326,7 @@ class TestRelayListener:
         # normalization PR cannot silently widen the set.
         listener, pk, _fake, _sessions = started
         with _client(pk.ca_a, pk.c_case) as client:
-            resp = client.post(_url(listener), json={"session_id": "x", "command": "true"})
+            resp = client.post(_url(listener), json={"session_id": "x", "command": ["true"]})
         assert resp.status_code == 403
 
     def test_malformed_body_rejected(self, started):
@@ -347,7 +347,7 @@ class TestRelayListener:
         listener = _start(pk.config, _factory(fake, sessions), [ALLOWED])
         try:
             with _client(pk.ca_a, pk.c_ok) as client:
-                resp = client.post(_url(listener), json={"session_id": "x", "command": "sleep 300"})
+                resp = client.post(_url(listener), json={"session_id": "x", "command": ["sleep", "300"]})
         finally:
             listener.stop()
         assert resp.status_code == 503
@@ -437,9 +437,10 @@ class TestRelayBodyCapAndTimeout:
     def test_cl_at_cap_accepted(self, started):
         """Boundary (inclusive): a valid JSON body of EXACTLY the cap → 200."""
         listener, pk, _fake, sessions = started
-        overhead = len(json.dumps({"session_id": "s1", "command": "", "secrets": []}).encode())
+        overhead = len(json.dumps({"session_id": "s1", "command": [], "secrets": []}).encode())
+        # [] (2 bytes) -> ["AAAA..."] grows the value by n + 2 (brackets).
         body = json.dumps(
-            {"session_id": "s1", "command": "A" * (MAX_RELAY_BODY_BYTES - overhead), "secrets": []}
+            {"session_id": "s1", "command": ["A" * (MAX_RELAY_BODY_BYTES - overhead - 2)], "secrets": []}
         ).encode()
         assert len(body) == MAX_RELAY_BODY_BYTES
         with _client(pk.ca_a, pk.c_ok) as client:
@@ -512,7 +513,7 @@ class TestRelayBodyCapAndTimeout:
         a request stretched past the timeout in small steady chunks succeeds."""
         listener, pk, _fake, sessions = started
         monkeypatch.setattr(ExecuteHandler, "timeout", 1.0)
-        body = json.dumps({"session_id": "s1", "command": "echo hi", "secrets": []}).encode()
+        body = json.dumps({"session_id": "s1", "command": ["echo", "hi"], "secrets": []}).encode()
         req = _post(str(len(body)), body)
         status, _resp, elapsed = _raw_exchange(
             listener, pk, req, client_timeout=10.0, dribble_chunks=8, dribble_interval=0.4
@@ -525,7 +526,7 @@ class TestRelayBodyCapAndTimeout:
         """Guardrail must not touch the legitimate path (acceptance #3)."""
         listener, pk, _fake, sessions = started
         with _client(pk.ca_a, pk.c_ok) as client:
-            resp = client.post(_url(listener), json={"session_id": "s1", "command": "true", "secrets": []})
+            resp = client.post(_url(listener), json={"session_id": "s1", "command": ["true"], "secrets": []})
         assert resp.status_code == 200
         assert sessions == ["s1"]
 
@@ -540,7 +541,7 @@ def test_env_and_askpass_pass_through_to_engine(started):
     body = json.dumps(
         {
             "session_id": "s-env",
-            "command": "printenv TOKEN",
+            "command": ["printenv", "TOKEN"],
             "secrets": [{"secret_id": 7, "wrapped_value": "[VENYA:abcd1234]cHc=[/VENYA]"}],
             "env": [{"var_name": "TOKEN", "secret_id": 7}],
             "askpass_helper": True,
@@ -549,7 +550,7 @@ def test_env_and_askpass_pass_through_to_engine(started):
     with _client(pk.ca_a, pk.c_ok) as client:
         resp = client.post(_url(listener), content=body, headers={"Content-Type": "application/json"})
     assert resp.status_code == 200
-    assert fake.command == "printenv TOKEN"
+    assert fake.command == ["printenv", "TOKEN"]
     assert fake.secrets[0]["secret_id"] == 7
     assert fake.env_vars == [{"var_name": "TOKEN", "secret_id": 7, "literal_value": None}]
     assert fake.askpass_helper is True
@@ -559,7 +560,7 @@ def test_old_wire_payload_reaches_engine_without_env(started):
     """Compat direction 2: an OLD server's payload (no env/askpass keys)
     reaches execute() as env_vars=None / askpass_helper=False."""
     listener, pk, fake, _sessions = started
-    body = json.dumps({"session_id": "s-old", "command": "echo hi", "secrets": []}).encode()
+    body = json.dumps({"session_id": "s-old", "command": ["echo", "hi"], "secrets": []}).encode()
     with _client(pk.ca_a, pk.c_ok) as client:
         resp = client.post(_url(listener), content=body, headers={"Content-Type": "application/json"})
     assert resp.status_code == 200

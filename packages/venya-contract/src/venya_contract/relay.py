@@ -92,12 +92,18 @@ class RelayRequest(BaseModel):
     ``askpass_helper=true``) to an executor older than 0.1.0a13 — old daemons
     run ``extra="forbid"`` and would reject the field; the server version-gates
     on the heartbeat-reported ``executors.version`` before dialing.
+
+    ``command`` is an argv ``list[str]`` (ticket execution-command-wire-unstructured-
+    string #322, ruling Q1=A1): argument boundaries cross the wire as structured
+    data, the string field is REMOVED — a coordinated breaking change (server +
+    executor + contract land together; no compat shim, stale peers fail loud
+    BY RULING).
     """
 
     model_config = ConfigDict(extra="forbid")
 
     session_id: str
-    command: str
+    command: list[str]
     secrets: list[RelaySecret] = Field(default_factory=list)
     env: list[RelayEnvVar] = Field(default_factory=list)
     askpass_helper: bool = False

@@ -366,7 +366,7 @@ class TestRunCommandStage2:
                                 MagicMock(secret_id="s1", value=b"secret1"),
                                 MagicMock(secret_id="s2", value=b"secret2"),
                             ]
-                            result = executor._run_command_direct("echo test", injections, None, None)
+                            result = executor._run_command_direct(["echo", "test"], injections, None, None)
 
         # Stage 2 output should be used
         assert result.stdout == stage2_stdout
@@ -401,7 +401,7 @@ class TestRunCommandStage2:
                             )
 
                             injections = [MagicMock(secret_id="s1", value=b"secret1")]
-                            result = executor._run_command_direct("echo test", injections, None, None)
+                            result = executor._run_command_direct(["echo", "test"], injections, None, None)
 
         # Should fall back to Stage 1
         assert result.stdout == stage1_stdout
@@ -433,7 +433,7 @@ class TestRunCommandStage2:
                             executor.http_client = None
 
                             injections = [MagicMock(secret_id="s1", value=b"secret1")]
-                            result = executor._run_command_direct("echo test", injections, None, None)
+                            result = executor._run_command_direct(["echo", "test"], injections, None, None)
 
         # Should use Stage 1 results directly
         assert result.stdout == stage1_stdout
@@ -497,7 +497,7 @@ class TestEnvCwdThreadThrough:
                             with patch(
                                 "executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])
                             ):
-                                ex._run_command_direct("ls", [], env_override={"FOO": "bar"}, cwd="/tmp")
+                                ex._run_command_direct(["ls"], [], env_override={"FOO": "bar"}, cwd="/tmp")
         env = popen.call_args[1]["env"]
         assert env["FOO"] == "bar"
         assert popen.call_args[1]["cwd"] == "/tmp"
@@ -572,7 +572,7 @@ class TestSbxTruncationAccounting:
                             with patch(
                                 "executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])
                             ):
-                                result = ex._run_command_direct("ls", [], None, None)
+                                result = ex._run_command_direct(["ls"], [], None, None)
 
         assert result.output_truncated is True
         assert result.original_stdout_size == MAX_OUTPUT_BYTES + 999
