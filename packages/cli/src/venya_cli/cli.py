@@ -241,7 +241,24 @@ def create_parser() -> argparse.ArgumentParser:
         choices=["strict", "balanced", "permissive"],
         help="Policy preset",
     )
-    set_policy_parser.add_argument("--custom", help="Path to custom policy file")
+    # --custom (ticket cli-set-policy-custom-key-mismatch #289) REMOVED: it
+    # posted a dead key the API silently dropped. Each list below maps 1:1 to
+    # a real AdminSetCommandPolicyRequest field and REPLACES that stored list
+    # (replace-not-union) — an omitted flag leaves the stored list untouched.
+    set_policy_parser.add_argument(
+        "--custom-allowed",
+        nargs="+",
+        default=None,
+        metavar="COMMAND",
+        help="Allowed-commands list (comma- and/or space-separated); REPLACES the stored list",
+    )
+    set_policy_parser.add_argument(
+        "--custom-dangerous",
+        nargs="+",
+        default=None,
+        metavar="PATTERN",
+        help="Dangerous-patterns list (comma- and/or space-separated); REPLACES the stored list",
+    )
 
     # admin get-command-policy
     get_policy_parser = admin_sub.add_parser("get-command-policy", help="Get current executor command policy")

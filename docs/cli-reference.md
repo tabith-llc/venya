@@ -397,14 +397,15 @@ venya admin set-command-policy {strict|balanced|permissive} [OPTIONS]
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `PRESET` (positional) | **yes** | one of: `strict`, `balanced`, `permissive` | — | Policy preset |
-| `--custom` | no | string | — | Path to custom policy file |
+| `--custom-allowed` | no | repeatable/space-separated list | — | Allowed-commands list (comma- and/or space-separated); REPLACES the stored list |
+| `--custom-dangerous` | no | repeatable/space-separated list | — | Dangerous-patterns list (comma- and/or space-separated); REPLACES the stored list |
 
 **Examples**
 
 ```bash
 venya admin set-command-policy strict  # allowlist-only execution policy
 venya admin set-command-policy balanced  # default middle tier
-venya admin set-command-policy permissive --custom policy.toml  # custom policy file
+venya admin set-command-policy permissive --custom-dangerous 'sudo, su'  # replace the dangerous-pattern list (CSV; --custom-allowed for the allowlist)
 ```
 
 ### `venya admin get-command-policy`
