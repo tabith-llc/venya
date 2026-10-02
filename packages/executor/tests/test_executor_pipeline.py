@@ -1019,3 +1019,30 @@ class TestRedirectReRender332:
         # so — a second bounds-checked lookup means a copy of the condition grew.
         assert src.count("in allowed_redirect_paths") == 1
         assert src.count("if i + 1 < len(command)") == 1
+
+
+class TestValidateCommandStructureStrictUtf8:
+    """Gate layer for ticket argv-surrogate-executes-then-crashes-audit-write
+    (#334, posture B): a lone surrogate cannot be executed faithfully nor
+    audited losslessly — the per-element gate rejects it with the same
+    ValueError -> command_rejected path that carries every other structural
+    rejection (including #333's NUL set-entry, now landed), before any
+    strategy dispatch."""
+
+    def test_rejects_lone_surrogate_element(self):
+        with pytest.raises(ValueError, match="not valid strict UTF-8"):
+            _validate_command_structure(["/usr/bin/touch", "bad\ud800name"])
+
+    def test_error_names_index_never_echoes_value(self):
+        """Actionable (index) without echoing argv content (#325-class hygiene:
+        the element may carry user-sensitive text)."""
+        with pytest.raises(ValueError) as exc:
+            _validate_command_structure(["ls", "\udfff"])
+        assert "Argument 1" in str(exc.value)
+        assert "\udfff" not in str(exc.value)
+
+    def test_accepts_full_unicode_positive(self):
+        """Paired positive: astral-plane text (emoji, CJK, accents) is strict-
+        encodable and must sail through the gate unchanged."""
+        argv = ["/usr/bin/echo", "héllo", "🔐🚀", "日本", "\u00e9\u00e8"]
+        assert _validate_command_structure(argv) == argv

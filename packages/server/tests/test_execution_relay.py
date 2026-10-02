@@ -58,6 +58,11 @@ def _create_test_app(backend=None):
     app.state.core.get_for_injection.return_value = (1, "s3cret-value", {})
 
     app.include_router(executors_routes.router, prefix="/api/v1")
+    # #334: same sanitized-422 handler production wires in create_app
+    from fastapi.exceptions import RequestValidationError
+    from server.app import _validation_error_handler
+
+    app.add_exception_handler(RequestValidationError, _validation_error_handler)
 
     app.dependency_overrides[get_current_user] = lambda: TEST_USER
 
@@ -1373,3 +1378,87 @@ class TestVersionTuple:
     def test_final_sorts_above_every_spelling(self):
         assert _version_tuple("0.1.0") > _version_tuple("0.1.0alpha99")
         assert _version_tuple("0.1.0") > _version_tuple("0.1.0rc2")
+
+
+class TestExecuteRequestStrictUtf8:
+    r"""#334 layer 2 (posture B): argv elements must be strict-UTF-8 encodable
+    at REQUEST VALIDATION — a lone surrogate that reached the relay would
+    execute and then kill the completion audit write (side effects kept,
+    record lost). FastAPI's body-validation 422 fires before the handler
+    resolves, so session state never moves. Tripwire below proves the
+    ordering: the completion-audit write cannot receive such a payload.
+    No runtime sanitizer — deny on ambiguity, per the fail-closed mandate;
+    the byte-faithful relaxation is ticketed (#335).
+
+    NOTE on delivery: the surrogate is sent as RAW escaped JSON bytes
+    (``content=``), exactly how the MCP/LLM seam (ticket #324) carries
+    ``\udXXX`` — TestClient's own json serializer would refuse to build
+    such a request, which is not the server's concern."""
+
+    @staticmethod
+    def _surrogate_body(**overrides):
+        import json as _json
+
+        body = {"session_id": "sess-1", "command": ["touch", "bad\ud800name"]}
+        body.update(overrides)
+        return _json.dumps(body).encode("ascii")
+
+    def _client_missing_session(self):
+        app, backend = _create_test_app()
+        mock_session = MagicMock()
+        mock_q = MagicMock()
+        mock_q.filter.return_value.first.return_value = None
+        mock_session.query.return_value = mock_q
+        backend.get_session.return_value = mock_session
+        return TestClient(app, raise_server_exceptions=False), mock_session
+
+    def test_surrogate_element_422s_before_session(self):
+        client, db = self._client_missing_session()
+        resp = client.post(
+            "/api/v1/executors/exec-1/execute",
+            content=self._surrogate_body(),
+            headers={"Content-Type": "application/json"},
+        )
+        assert resp.status_code == 422
+        msg = str(resp.json()["detail"])
+        # names the offending index; the value is NEVER echoed
+        assert "argv element 1" in msg
+        assert "\ud800" not in resp.text  # neither raw nor escaped echo
+        # zero session state: the handler never ran — not even the lookup
+        db.query.assert_not_called()
+        db.commit.assert_not_called()
+
+    def test_tripwire_completion_audit_write_unreachable(self):
+        """Ordering proof: the 422 short-circuits the handler, so the
+        completion-audit writer (_mark_execution_session_completed, the very
+        call that died on PG encoding in #334's trace) is never reached."""
+        client, _db = self._client_missing_session()
+        with patch.object(executors_routes, "_mark_execution_session_completed") as audit_write:
+            resp = client.post(
+                "/api/v1/executors/exec-1/execute",
+                content=self._surrogate_body(command=["echo", "\udfff"]),
+                headers={"Content-Type": "application/json"},
+            )
+        assert resp.status_code == 422
+        audit_write.assert_not_called()
+
+    def test_normal_unicode_passes_validation(self):
+        """Paired positive: astral-plane text (emoji/CJK/accents) validates
+        cleanly and the request reaches the handler (404 = unknown session in
+        this mock, proving the validator did NOT reject it)."""
+        client, _db = self._client_missing_session()
+        resp = client.post(
+            "/api/v1/executors/exec-1/execute",
+            json={"session_id": "sess-1", "command": ["echo", "h\u00e9llo \U0001f510\U0001f680 \u65e5\u672c"]},
+        )
+        assert resp.status_code == 404
+
+    def test_plain_argv_proceeds_to_session_lookup(self):
+        """Discipline check: the gate is scoped to the argv list only — a
+        plain valid request flows into the handler's session lookup."""
+        client, _db = self._client_missing_session()
+        resp = client.post(
+            "/api/v1/executors/exec-1/execute",
+            json={"session_id": "sess-1", "command": ["ls"]},
+        )
+        assert resp.status_code == 404
