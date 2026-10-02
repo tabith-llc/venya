@@ -23,11 +23,11 @@ router = APIRouter()
 
 
 class RecoveryRequest(BaseModel):
-    # #357 ruled exemption: SHIPPED CLIs leak their local --force/--confirm
-    # flags into this body (caught by the sweep; client-side fix is ticket
-    # #367). Stays exempt — extra keys ignored, break-glass recovery keeps
-    # working — until #367 lands; re-sweep this model in that leg.
-    model_config = {"extra": "ignore"}
+    # Re-swept (#371): the #357 exemption existed only while shipped CLIs
+    # leaked --force/--confirm into this body; #367 made the client send
+    # just the declared fields, so the condition is discharged and the
+    # silent-drop class dies here like the rest of the sweep.
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
     code: str = Field(..., description="Break-glass recovery code")
     new_user_id: str = Field(..., description="New admin user ID")

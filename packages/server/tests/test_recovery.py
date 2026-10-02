@@ -134,6 +134,23 @@ class TestRecovery:
         assert resp.status_code == 401
         assert "Invalid recovery code" in resp.json()["detail"]
 
+    def test_recovery_undeclared_body_key_422(self):
+        """Paired negative for the #371 re-sweep: the #357 exemption of this
+        model existed ONLY while shipped CLIs leaked --force/--confirm into
+        the body; #367 made the client send just the declared fields, so the
+        condition is discharged and an undeclared key must now be a loud 422
+        (never the silent-drop again). Validation-layer reject — the handler
+        (and any code/hash check) never runs, hence empty mocks."""
+        backend = MagicMock()
+        app = _create_test_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/recovery",
+            json={"code": "c", "new_user_id": "newadmin", "force": True},
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"][0]["type"] == "extra_forbidden"
+
     def test_recovery_user_exists(self):
         """POST /recovery should return 400 if user already exists."""
         import hashlib
