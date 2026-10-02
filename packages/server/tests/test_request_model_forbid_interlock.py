@@ -25,10 +25,9 @@ NAMED EXEMPTIONS (ruled — no self-granting; new candidates STOP-and-report):
     the 2026-09-20 plaintext-signoff compat ruling STANDS (lead call
     forwarded on #357); old daemons send the dead `secrets` key, must keep
     getting 200 (cell: test_legacy_payload_with_secrets_field_tolerated_and_dropped).
-  * RecoveryRequest (recovery.py, extra='ignore'): shipped CLIs leak their
-    local --force/--confirm flags into the recovery body (the sweep caught
-    this live at test_recovery_e2e_full_loop). Exempt until ticket #367
-    lands the client-side fix; re-sweep in that leg.
+    (RecoveryRequest was the third exemption; the #367 client fix discharged
+    its condition and the #371 leg re-swept it — forbidden count is now 37 of
+    the 38 defined, exemptions 2.)
 
 ORPHAN FLAG (listed, NOT deleted — separate-surface policy per ruling-inputs):
   * BrowserLogoutRequest (auth_browser.py): defined, zero consumers.
@@ -51,7 +50,6 @@ EXEMPT = {
     # Policy prose below — no credentials (detect-secrets keyword false positives).
     "SecretMetadata": "deliberate pass-through store (ruled #357; wave-3B note)",  # pragma: allowlist secret
     "FilterRequest": "legacy-tolerant filter wire (ruled #357: 2026-09-20 compat ruling stands; old daemons send the dead `secrets` key and must keep getting 200)",  # pragma: allowlist secret
-    "RecoveryRequest": "shipped CLIs leak local --force/--confirm into this body (#367 owns the client fix); re-sweep when that lands",
 }
 ORPHANS = {
     "BrowserLogoutRequest": "defined, zero consumers (listed per ruling-inputs; deletion is separate-surface policy)",
@@ -156,7 +154,13 @@ def test_inventory_count_pin():
     """Non-vacuity: the definition walk must find the ruled 38 *Request
     models — a broken walk (import failure, module renamed) must not pass
     silently."""
-    assert len(_defined_request_models()) == EXPECTED_DEFINED_REQUEST_MODELS
+    defined = _defined_request_models()
+    assert len(defined) == EXPECTED_DEFINED_REQUEST_MODELS
+    # #371 re-sweep pins the split: 37 of the 38 defined forbid, the ruled
+    # exemptions are exactly SecretMetadata + FilterRequest (2).
+    assert len(EXEMPT) == 2, "exemption list grew/shrank — new candidates are STOP-and-report, not list edits"
+    forbidden = [n for n, m in defined.items() if m.model_config.get("extra") == "forbid"]
+    assert len(forbidden) == 37, f"forbidden defined models: {len(forbidden)} != 37 (post-#371)"
 
 
 def test_orphan_flag_still_listed():
