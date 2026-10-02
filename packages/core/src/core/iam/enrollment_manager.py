@@ -18,6 +18,7 @@ import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from core.utils.entropy import get_secure_token
@@ -67,8 +68,21 @@ class EnrollmentManager:
             The plaintext token is returned only once and never stored.
         """
         # Check for active (non-expired, non-completed, non-revoked) tokens
-        # Use FOR UPDATE to prevent race condition: two concurrent calls
-        # must not both see active_count < 3 and both succeed.
+        # Two guards, both needed (ticket enrollment-token-cap-lock-vacuous-empty-set #339):
+        # 1. pg_advisory_xact_lock keyed on user_id — FOR UPDATE locks only MATCHED
+        #    rows, so it locks nothing when the active set is empty; the advisory
+        #    lock serializes concurrent first-creates for the same user. Released
+        #    at transaction end. hashtext runs PG-side; user_id travels as a bind
+        #    param, never interpolated. On non-PG backends (tests on SQLite) the
+        #    statement is still constructed identically but the function is
+        #    backend-specific.
+        # 2. FOR UPDATE on the active set — belt for the rows that DO exist.
+        # Together: two concurrent calls must not both see active_count < 3 and
+        # both succeed.
+        self.db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:user_id))"),
+            {"user_id": user_id},
+        )
         now_minus_tolerance = datetime.now(UTC) - timedelta(seconds=self.config.clock_skew_tolerance_seconds)
         active_tokens = (
             self.db.query(EnrollmentToken)
