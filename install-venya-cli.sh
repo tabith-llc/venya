@@ -29,6 +29,8 @@ set -euo pipefail
 #   VENYA_TARBALL_SHA256  - Pin the expected sha256 (recommended: strict integrity).
 #                           If unset, the installer fetches <tarball-url>.sha256 from
 #                           the same origin as a corruption guardrail; fail-closed.
+#                           REQUIRED (no sidecar fallback) when the tarball source is
+#                           NOT https (file:// or plain http://) — #375/#327.
 ###############################################################################
 
 # --- Defaults ---

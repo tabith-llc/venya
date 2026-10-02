@@ -36,6 +36,8 @@
                               integrity). If unset, the installer fetches
                               <tarball-url>.sha256 from the same origin as a
                               corruption guardrail; fail-closed.
+                              REQUIRED (no sidecar fallback) when the tarball source
+                              is NOT https (file:/// or plain http://) — #375/#328.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install-venya-cli.ps1
@@ -106,6 +108,20 @@ $UvSha256  = 'a252121d5b59398fcb137c6ea448176459a44010f33f67e0072305a637119ca7' 
 
 $tarballUrl = if ($env:VENYA_TARBALL) { $env:VENYA_TARBALL } else {
     'https://github.com/tabith-llc/venya/releases/latest/download/venya-cli-install.tar.gz'
+}
+
+# --- #375/#328 integrity boundary: the same-origin sidecar is trusted ONLY over
+# https. On file:/// or plain-http sources the .sha256 would be fetched from the
+# SAME (unauthenticated or attacker-writable) origin - self-attesting, not
+# integrity. Require the operator-pinned hash out-of-band. Guard runs BEFORE the
+# confirmation prompt, workDir creation, and any download: zero-state abort.
+if (($tarballUrl -notmatch '^https://') -and (-not $env:VENYA_TARBALL_SHA256)) {
+    Fail @"
+Tarball source '$tarballUrl' is not an https URL and VENYA_TARBALL_SHA256 is not set.
+The .sha256 sidecar would be fetched from the SAME origin (self-attesting, #375/#328).
+Set VENYA_TARBALL_SHA256 to the operator-pinned hash (the serve script prints it),
+or use an https:// source. Aborting.
+"@
 }
 
 Info "Installing Venya CLI machine-wide into $Base"
