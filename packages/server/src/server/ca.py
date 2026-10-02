@@ -402,7 +402,7 @@ class CAManager:
         """
         return self.ca_key_path.read_bytes()
 
-    def generate_crl(self, db_session, max_entries: int = 1000) -> bytes:
+    def generate_crl(self, db_session, max_entries: int = 1000, revocations=None) -> bytes:
         """Generate a DER-encoded Certificate Revocation List.
 
         Queries the database for revoked certificate serial numbers,
@@ -411,6 +411,12 @@ class CAManager:
         Args:
             db_session: SQLAlchemy session for querying revocations.
             max_entries: Maximum number of revocations to include.
+            revocations: Pre-fetched revocation rows to embed (ticket
+                crl-cap-etag-divergence #337, ruled A). The CRL endpoint fetches
+                the capped rows ONCE and passes them here so the served body and
+                the conditional-GET ETag describe the SAME population — a second
+                internal query would re-open the snapshot gap the cap fix closes.
+                None keeps the historical self-queried behavior.
 
         Returns:
             DER-encoded CRL bytes.
@@ -421,12 +427,13 @@ class CAManager:
         ca_cert, ca_key = self.load_ca()
         now = datetime.now(UTC)
 
-        revocations = (
-            db_session.query(ExecutorCertRevocation)
-            .order_by(desc(ExecutorCertRevocation.revoked_at))
-            .limit(max_entries)
-            .all()
-        )
+        if revocations is None:
+            revocations = (
+                db_session.query(ExecutorCertRevocation)
+                .order_by(desc(ExecutorCertRevocation.revoked_at))
+                .limit(max_entries)
+                .all()
+            )
 
         builder = x509.CertificateRevocationListBuilder()
         builder = builder.issuer_name(ca_cert.subject)

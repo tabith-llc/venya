@@ -58,6 +58,12 @@ from .secrets import wrap_with_sentinel
 # actionable upgrade error (fail-loudly rule).
 _ENV_SHAPE_MIN_VERSION = (0, 1, 0, "a", 13)
 
+# CRL served-population ceiling (ticket crl-cap-etag-divergence #337). The
+# endpoint fetches the newest N revocations for the body AND computes the
+# conditional-GET ETag over exactly those N serials, so cache and bytes always
+# describe the same population; anything beyond trips the fail-loud signal.
+MAX_CRL_ENTRIES = 1000
+
 
 _PRE_CANONICAL = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc"}
 
@@ -879,18 +885,48 @@ async def get_crl(
     Supports conditional GET via ETag for caching.
     """
     from core.iam.models import ExecutorCertRevocation
+    from sqlalchemy import asc, desc
 
     ca_manager = _get_ca_manager(request)
-    crl_der = ca_manager.generate_crl(db)
+
+    # #337 (ruled A+B): ONE fetch defines the served population — the body and
+    # the ETag are computed from these same capped rows, so a cached CRL can
+    # never omit a revocation the ETag claims is present. History beyond the
+    # ceiling is refused SILENTLY no more: count-vs-cap trips a loud warning,
+    # a metric, and response headers on every path (200 and 304).
+    crl_rows = (
+        db.query(ExecutorCertRevocation)
+        .order_by(desc(ExecutorCertRevocation.revoked_at), asc(ExecutorCertRevocation.serial_number))
+        .limit(MAX_CRL_ENTRIES)
+        .all()
+    )
+    total_revocations = int(db.query(ExecutorCertRevocation).count())
+    crl_der = ca_manager.generate_crl(db, revocations=crl_rows)
     metrics.CA_CRL_GENERATED_TOTAL.inc()
 
-    # ETag based on serial numbers only (CRL timestamps change every request)
-    serials = sorted([r.serial_number for r in db.query(ExecutorCertRevocation).all()])
+    # ETag over the SERVED capped serial set (stable across requests while the
+    # population is; CRL timestamps deliberately excluded).
+    serials = sorted([r.serial_number for r in crl_rows])
     etag_payload = json.dumps(serials, sort_keys=True).encode()
     etag = f'"{hashlib.sha256(etag_payload).hexdigest()}"'
 
+    truncated_headers: dict[str, str] = {}
+    if total_revocations > MAX_CRL_ENTRIES:
+        logger.warning(
+            "CRL body capped: %d revocations in history exceed the %d-entry ceiling — "
+            "the oldest beyond the cap are NOT in the served CRL (refs #337)",
+            total_revocations,
+            MAX_CRL_ENTRIES,
+        )
+        metrics.CRL_TRUNCATED_TOTAL.inc()
+        truncated_headers = {
+            "X-CRL-Truncated": "true",
+            "X-CRL-Revocations-Total": str(total_revocations),
+            "X-CRL-Revocations-Served": str(len(crl_rows)),
+        }
+
     if request.headers.get("if-none-match") == etag:
-        return Response(status_code=304, headers={"ETag": etag})
+        return Response(status_code=304, headers={"ETag": etag, **truncated_headers})
 
     # Lazy zstd import with Accept-Encoding validation and graceful fallback
     accept_encoding = request.headers.get("Accept-Encoding", "")
@@ -913,6 +949,7 @@ async def get_crl(
                 "ETag": etag,
                 "Cache-Control": "max-age=30",
                 "Vary": "Accept-Encoding",
+                **truncated_headers,
             },
         )
     else:
@@ -923,6 +960,7 @@ async def get_crl(
                 "ETag": etag,
                 "Cache-Control": "max-age=30",
                 "Vary": "Accept-Encoding",
+                **truncated_headers,
             },
         )
 
