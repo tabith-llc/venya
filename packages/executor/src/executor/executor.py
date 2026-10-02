@@ -213,7 +213,8 @@ def _resolve_env_vars(
     also be injected, so its fingerprints are registered — an env var is never
     a masking blind spot); ``literal_value`` specs pass verbatim (paths,
     usernames, helper constants). The line-based env-file format rejects
-    CR/LF in values loudly (forged-line defense). Legacy ``env_override``
+    CR/LF/NUL in values loudly (forged-line defense; NUL entry per
+    relay-env-value-nul-ungated — mirrors the argv gate posture). Legacy ``env_override``
     dicts merge underneath (direct-call callers). Ticket
     secret-shape-env-injection.
     """
@@ -235,9 +236,9 @@ def _resolve_env_vars(
                 ) from exc
         else:
             value = spec.get("literal_value") or ""
-        if "\n" in value or "\r" in value:
+        if "\n" in value or "\r" in value or "\x00" in value:
             raise ValueError(
-                f"env var {name}: value contains a newline — the env-file format is line-based; "
+                f"env var {name}: value contains a newline or NUL — the env-file format is line-based; "
                 "use a file shape for multi-line credentials"
             )
         env_final[name] = value
