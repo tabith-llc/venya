@@ -61,5 +61,9 @@ class TestCorsEnvWiring:
         from pathlib import Path
 
         installer = (Path(__file__).resolve().parents[3] / "install-venya-core.sh").read_text()
-        assert 'VENYA_CORS__ORIGINS=["https://$CORE_HOSTNAME"]' in installer
-        assert "VENYA_CORS_ORIGINS=" not in installer.replace("VENYA_CORS__ORIGINS=", "")
+        assert (
+            'VENYA_CORS__ORIGINS=["https://%s"]' in installer
+        )  # printf writer (config-injection batch, #326) replaced the heredoc spelling; same runtime bytes
+        assert "VENYA_CORS_ORIGINS=" not in installer.replace(
+            "VENYA_CORS__ORIGINS=", ""
+        )  # flat-name negative half unchanged
