@@ -268,22 +268,62 @@ class TestRegister:
         assert saved_ca.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == "Venya Root CA"
 
     def test_register_skips_when_cert_exists(self, cert_manager: CertificateManager):
-        """Registration is skipped if cert and key already exist on disk."""
+        """Skip path (paired negative, #361): cert+key on disk AND the core
+        RECOGNIZES the identity (heartbeat probe 200) -> skip registration,
+        no CSR churn — but the probe itself must have been asked."""
         # Pre-create cert and key files
         Path(cert_manager.cert_path).write_bytes(b"-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----")
         Path(cert_manager.key_path).write_bytes(b"-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----")
 
-        with patch("executor.daemon.httpx2.Client") as MockClient:
-            cert_manager.register("test-executor")
-            MockClient.assert_not_called()
+        ok = MagicMock(spec=httpx2.Response)
+        ok.status_code = 200
+        ok.json.return_value = {"revoked": False, "new_cert_required": False}
 
-        # Serial should be loaded from existing cert (even if fake, no error)
-        # With a fake cert, _load_metadata will fail, but register should
-        # still skip the server call
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = ok
+            cert_manager.register("test-executor")
+
+        posted_url = MockClient.return_value.post.call_args[0][0]
+        assert posted_url.endswith("/api/v1/heartbeat")
+        assert "/executors/register" not in MockClient.return_value.post.call_args_list[0][0][0]
 
 
 class TestRegisterErrors:
     """Error cases for CertificateManager.register()."""
+
+    def _seed_existing_cert(self, cert_manager: CertificateManager):
+        Path(cert_manager.cert_path).write_bytes(b"-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----")
+        Path(cert_manager.key_path).write_bytes(b"-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----")
+
+    def test_register_ghost_identity_refuses_boot(self, cert_manager: CertificateManager):
+        """#361 ruled A: core does not recognize the on-disk cert (403-class on
+        the probe) -> fail-closed RuntimeError naming the re-enroll path;
+        boot aborts BEFORE any CSR/token consumption (criterion 3)."""
+        self._seed_existing_cert(cert_manager)
+        deny = MagicMock(spec=httpx2.Response)
+        deny.status_code = 403
+        deny.json.return_value = {"detail": "Executor mTLS authentication required"}
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = deny
+            with pytest.raises(RuntimeError, match="ghost identity") as ei:
+                cert_manager.register("test-executor")
+        msg = str(ei.value)
+        assert "VENYA_EXECUTOR_ENROLLMENT_TOKEN" in msg
+        assert "venya admin executor-enroll" in msg
+        assert not any("/executors/register" in c[0][0] for c in MockClient.return_value.post.call_args_list)
+
+    def test_register_probe_outage_proceeds(self, cert_manager: CertificateManager):
+        """#361 paired negative: a transport failure on the probe is NOT an
+        unknown identity — skip proceeds (the heartbeat loop re-checks);
+        an outage must not strand a legitimately enrolled executor."""
+        self._seed_existing_cert(cert_manager)
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.side_effect = httpx2.ConnectError("core down")
+            cert_manager.register("test-executor")  # must NOT raise
+        assert "register" not in MockClient.return_value.post.call_args[0][0]
 
     def test_register_server_error(self, cert_manager: CertificateManager):
         """Registration raises HTTPError when server returns error."""
