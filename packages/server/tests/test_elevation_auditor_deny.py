@@ -116,7 +116,7 @@ class TestElevateAssertAuditorDeny:
 def _browser_app(user_id="user1", session_id="sess-1"):
     app = FastAPI()
     app.state.fido2_manager = MagicMock()
-    app.state._elevation_challenges = {"c1": {"session_id": session_id}}
+    app.state._elevation_challenges = {"c1": {"session_id": session_id, "created_at": datetime.now(UTC)}}
     app.include_router(auth_browser_routes.router, prefix="/api/v1")
     db = MagicMock()
     session = SimpleNamespace(id=session_id, user_id=user_id)
@@ -145,9 +145,12 @@ class TestBrowserElevateAssertAuditorDeny:
     deny alone would leave the browser elevation path issuing tokens to
     auditor-only callers."""
 
-    def test_auditor_only_denied_403_challenge_untouched(self):
+    def test_auditor_only_denied_403_challenge_consumed(self):
         """Browser twin deny (P3): 403, one value-free auditor_elevation_
-        denied event committed, no token add, challenge not consumed."""
+        denied event committed, no token add. #345 flipped this pin: the
+        assert pops the challenge up-front, so the denial consumes the
+        entry — the pre-fix "denied ceremony slot stays live" residue is
+        exactly what the ruling retired."""
         app, db, session = _browser_app()
         resp = _assert_browser(app, db, session, {1: "auditor"})
         assert resp.status_code == 403
@@ -158,8 +161,8 @@ class TestBrowserElevateAssertAuditorDeny:
         assert events[0].user_id == "user1"
         assert "elevation_token" not in events[0].fields
         db.commit.assert_called_once()
-        # Deny precedes the challenge cleanup — nothing mutated.
-        assert "c1" in app.state._elevation_challenges
+        # Pop-up-front (#345): the denial path leaves no live entry.
+        assert "c1" not in app.state._elevation_challenges
 
     def test_read_write_issue_passes(self):
         app, db, session = _browser_app()

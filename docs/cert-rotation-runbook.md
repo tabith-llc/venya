@@ -252,7 +252,6 @@ diff /tmp/k.pub /tmp/c.pub && echo "PAIRING OK" || echo "CORRUPT RESTORE — do 
 
 ```bash
 venya admin rotate-key                      # server generates the new KEK
-venya admin rotate-key --new-key /secure/kek.bin
 venya admin key-version rotate-status       # rotation job progress
 venya admin key-version rollback <job-id>   # roll back a FAILED rotation job
 venya admin key-version list --json         # versions + active flag

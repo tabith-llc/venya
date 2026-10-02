@@ -916,13 +916,14 @@ def cmd_admin_key_version(client: APIClient, args: Any) -> int:
 
 
 def cmd_admin_rotate_key(client: APIClient, args: Any) -> int:
-    """Rotate key."""
-    try:
-        payload = {}
-        if args.new_key:
-            payload["new_key_path"] = args.new_key
+    """Rotate key.
 
-        result = client.post("/api/v1/admin/key-rotation", json=payload)
+    Single-KEK bookkeeping rotation — takes no parameters (#355: the former
+    --new-key flag posted new_key_path, which the server model never read;
+    the flag is retired with the model now validating extra="forbid").
+    """
+    try:
+        result = client.post("/api/v1/admin/key-rotation", json={})
         print(f"Key rotation started: {result.get('job_id', 'N/A')}")
         return 0
     except APIClientError as e:

@@ -80,3 +80,30 @@ def test_lock_keyed_per_user_not_constant():
     assert binds[0] == {"user_id": "alice"}
     assert binds[1] == {"user_id": "bob"}
     assert binds[0] != binds[1]
+
+
+def test_full_create_mint_on_real_sqlite_session(tmp_path):
+    """#366 regression cell — a REAL user-create + token-mint through the
+    full path on the SQLite harness. The statement pins above never execute
+    SQL (a fake db records it), so a runtime dialect landmine —
+    pg_advisory_xact_lock/hashtext are PostgreSQL-only functions — slipped
+    past them and 500'd every real SQLite mint. Guarded, this path must
+    mint end to end; unguarded it dies with
+    'no such function: hashtext' (RED at the #339 tip)."""
+    import hashlib
+
+    from core.iam.models import Base, EnrollmentToken, User
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'mint.db'}")
+    Base.metadata.create_all(engine)
+    with sessionmaker(bind=engine)() as s:
+        s.add(User(user_id="bob-1", status="pending_enrollment"))
+        s.commit()
+        token, plaintext = EnrollmentManager(s).create_enrollment_token("bob-1")
+        s.commit()
+        assert token.user_id == "bob-1"
+        stored = s.query(EnrollmentToken).filter_by(user_id="bob-1").one()
+        assert stored.state == "created"
+        assert stored.token_hash == hashlib.sha256(plaintext.encode("utf-8")).hexdigest()

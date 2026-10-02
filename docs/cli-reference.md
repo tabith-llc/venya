@@ -553,18 +553,15 @@ venya admin key-version rollback JOB_ID  # roll back a failed rotation job by ID
 Rotate the key encryption key
 
 ```
-venya admin rotate-key [OPTIONS]
+venya admin rotate-key
 ```
 
-| Argument | Required | Type / choices | Default | Description |
-|----------|----------|----------------|---------|-------------|
-| `--new-key` | no | string | — | Path to new KEK file |
+*Takes no arguments.*
 
 **Examples**
 
 ```bash
 venya admin rotate-key  # rotate the key-encryption key (server generates the new KEK)
-venya admin rotate-key --new-key /secure/kek.bin  # rotate to a specific KEK file
 ```
 
 ### `venya admin revoke-executor`

@@ -79,10 +79,21 @@ class EnrollmentManager:
         # 2. FOR UPDATE on the active set — belt for the rows that DO exist.
         # Together: two concurrent calls must not both see active_count < 3 and
         # both succeed.
-        self.db.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:user_id))"),
-            {"user_id": user_id},
-        )
+        # Dialect guard (#366): pg_advisory_xact_lock/hashtext are
+        # PostgreSQL-only — on SQLite the same statement is a runtime
+        # 'no such function' 500 (test-harness class). The lock is taken only
+        # on a PostgreSQL bind; a session that cannot report its dialect
+        # (e.g. a recording fake) is treated as PostgreSQL so the statement
+        # contract above stays pinned. SQLite fallback, honestly: the advisory
+        # lock is SKIPPED — concurrency serialization is a PG-production
+        # property; the FOR UPDATE belt still covers existing rows, and the
+        # test harness is single-process.
+        bind = self.db.get_bind() if hasattr(self.db, "get_bind") else None
+        if bind is None or bind.dialect.name == "postgresql":
+            self.db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:user_id))"),
+                {"user_id": user_id},
+            )
         now_minus_tolerance = datetime.now(UTC) - timedelta(seconds=self.config.clock_skew_tolerance_seconds)
         active_tokens = (
             self.db.query(EnrollmentToken)

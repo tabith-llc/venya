@@ -136,10 +136,6 @@ class CASecurityConfig(BaseModel):
         default="VENYA_CA_KEY_PASSPHRASE",
         description="Environment variable containing the CA key passphrase.",
     )
-    require_in_production: bool = Field(
-        default=True,
-        description="Require passphrase in production (warn if unset).",
-    )
 
 
 class ExecutorEnrollmentConfig(BaseModel):

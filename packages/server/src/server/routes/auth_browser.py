@@ -45,6 +45,7 @@ from ..fido2.browser_adapter import (
     challenge_to_browser_options,
 )
 from ..fido2.manager import WebAuthnError
+from .auth_elevation import _cleanup_stale_challenges
 
 logger = logging.getLogger("venya.server")
 
@@ -493,12 +494,19 @@ def _create_elevation_challenge(db, session, fido2_manager, request):
 
     # Store the session ID with the challenge so we can verify it matches
     # The fido2 manager already stores challenge_id -> options mapping
-    # We attach session_id via app state temporarily
+    # We attach session_id via app state temporarily. created_at + the sweep
+    # reuse the CLI twin's pattern (#345): abandoned ceremonies are pruned
+    # on the next touch instead of lingering until restart.
     if not hasattr(request.app.state, "_elevation_challenges"):
         request.app.state._elevation_challenges = {}
+    _cleanup_stale_challenges(
+        request.app.state._elevation_challenges,
+        ELEVATION_TOKEN_TTL_SECONDS * 5,
+    )
     request.app.state._elevation_challenges[challenge_id] = {
         "session_id": session.id,
         "user_id": session.user_id,
+        "created_at": datetime.now(UTC),
     }
 
     return challenge_id, browser_options
@@ -583,9 +591,13 @@ async def browser_elevate_assert(
                 detail="FIDO2 manager not initialized",
             )
 
-        # Verify the challenge was issued for this session
+        # Verify the challenge was issued for this session. Pop-up-front
+        # (#345, CLI twin's pattern): EVERY assert path — success, WebAuthn
+        # error, session mismatch, or auditor denial — consumes the entry,
+        # so a denied or abandoned ceremony never leaves a live slot.
         elevation_challenges = getattr(request.app.state, "_elevation_challenges", {})
-        challenge_info = elevation_challenges.get(req.challenge_id)
+        _cleanup_stale_challenges(elevation_challenges, ELEVATION_TOKEN_TTL_SECONDS * 5)
+        challenge_info = elevation_challenges.pop(req.challenge_id, None)
 
         if challenge_info is None:
             raise HTTPException(
@@ -659,9 +671,6 @@ async def browser_elevate_assert(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="insufficient role: auditor cannot elevate",
             )
-
-        # Clean up the challenge
-        del elevation_challenges[req.challenge_id]
 
         # Create elevation token
         import secrets as secrets_module

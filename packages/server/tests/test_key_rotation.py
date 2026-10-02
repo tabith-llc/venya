@@ -251,6 +251,17 @@ def test_alias_route_same_contract(tmp_path):
         assert s.query(KeyVersion).filter(KeyVersion.active.is_(True)).count() == 1
 
 
+def test_rotate_rejects_unknown_fields_422(tmp_path):
+    """Paired negative for extra='forbid' (#355): the CLI's former dead
+    new_key_path key must be a loud 422, never a silently-discarded
+    rotation intent (direct #289 precedent — same control-plane contract)."""
+    client, _, _ = _build_app(tmp_path)
+    resp = client.post("/api/v1/admin/key-rotation", json={"new_key_path": "/secure/kek.bin"})
+    assert resp.status_code == 422
+    resp2 = client.post("/api/v1/admin/key-versions/rotate", json={"new_key_path": "/x"})
+    assert resp2.status_code == 422, "alias route binds the same model — forbid covers both"
+
+
 def test_concurrent_rotate_integrity_maps_to_409():
     """Route-level paired negative: a lost DB race (IntegrityError from the
     partial unique index on commit) surfaces as 409 — never a 500, never a

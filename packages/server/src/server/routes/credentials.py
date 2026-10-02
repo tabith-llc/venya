@@ -16,7 +16,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ..audit_lifecycle import CREDENTIAL_ADDED, CREDENTIAL_REMOVED, audit_lifecycle
@@ -36,7 +36,24 @@ router = APIRouter()
 
 
 class CredentialAddStartRequest(BaseModel):
-    label: str = Field(..., description="Credential label (e.g. 'Backup key')")
+    # Bounded pattern field (#356): credentials.label is String(64)
+    # (models.py:511) — over-width and lone surrogates reject 422 pre-DB,
+    # never a psycopg 500 after side-effects (#334 posture B, reused).
+    label: str = Field(
+        ...,
+        description="Credential label (e.g. 'Backup key')",
+        max_length=64,
+        min_length=1,
+    )
+
+    @field_validator("label")
+    @classmethod
+    def _label_strict_utf8(cls, v: str) -> str:
+        try:
+            v.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("label is not valid strict UTF-8 (lone surrogate) — rejected pre-DB") from None
+        return v
 
 
 class CredentialAddStartResponse(BaseModel):
@@ -47,7 +64,16 @@ class CredentialAddStartResponse(BaseModel):
 class CredentialAddCompleteRequest(BaseModel):
     challenge_id: str = Field(..., description="Challenge ID from start response")
     response: dict[str, Any] = Field(..., description="WebAuthn attestation response")
-    label: str = Field(..., description="Credential label")
+    label: str = Field(..., description="Credential label", max_length=64, min_length=1)
+
+    @field_validator("label")
+    @classmethod
+    def _label_strict_utf8(cls, v: str) -> str:
+        try:
+            v.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("label is not valid strict UTF-8 (lone surrogate) — rejected pre-DB") from None
+        return v
 
 
 class CredentialRemoveResponse(BaseModel):
