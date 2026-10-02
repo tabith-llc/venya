@@ -33,7 +33,6 @@ _FULL = {
     "cert_file": "/etc/venya/tls/inner.crt",
     "key_file": "/etc/venya/tls/inner.key",
     "client_ca_file": "/var/lib/venya/ca/ca.crt",
-    "cert_path_prefix": "/var/lib/nginx/tmp",
 }
 
 
@@ -57,11 +56,12 @@ def test_enabled_sets_cert_required_explicitly():
 
 @pytest.mark.parametrize(
     "missing",
-    ["cert_file", "key_file", "client_ca_file", "cert_path_prefix"],
+    ["cert_file", "key_file", "client_ca_file"],
 )
 def test_half_wired_inner_mtls_refuses_startup(missing):
-    """Fail-closed guard: enabled + ANY material/prefix missing raises — the
-    app never serves with a half-wired inner channel."""
+    """Fail-closed guard: enabled + ANY material path missing raises — the
+    app never serves with a half-wired inner channel. (The old cert_path_prefix
+    case is gone: content transport has no filesystem path to wire.)"""
     kwargs = dict(_FULL)
     kwargs[missing] = None
     with pytest.raises(RuntimeError, match="refusing to start"):

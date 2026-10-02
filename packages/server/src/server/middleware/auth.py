@@ -17,7 +17,7 @@ interlock: tests/test_header_trust_interlock.py).
 """
 
 import logging
-import os
+import urllib.parse
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -67,14 +67,14 @@ def _extract_identity_from_cert(cert: x509.Certificate) -> str:
 def _inner_tls_cfg(request: Request) -> Any:
     """Return the InnerTLSConfig when fully wired for forwarded-cert reads, else None.
 
-    An incomplete surface (no config, disabled, or no cert_path_prefix) reads
+    An incomplete surface (no config, disabled, or no cert_pem_header) reads
     as "no certificate" everywhere — the mTLS gates then fail closed. There is
     deliberately NO header fallback (ruled Q5): a half-configured inner
     channel rejects, it does not downgrade.
     """
     config = getattr(request.app.state, "config", None)
     inner = getattr(config, "inner_mtls", None) if config is not None else None
-    if inner is None or not inner.enabled or not inner.cert_path_header or not inner.cert_path_prefix:
+    if inner is None or not inner.enabled or not inner.cert_pem_header:
         return None
     return inner
 
@@ -82,12 +82,15 @@ def _inner_tls_cfg(request: Request) -> Any:
 def _forwarded_client_cert(request: Request) -> x509.Certificate | None:
     """Read the nginx-forwarded OUTER client certificate PEM (unverified yet).
 
-    nginx writes the verified client cert to a per-connection temp file
-    (``$ssl_client_certificate_path`` extfile) and passes the PATH in the
-    configured header. Guards, each failing closed to None: the inner-mTLS
-    surface must be fully wired; the path must resolve INSIDE the configured
-    prefix (symlink/traversal escape rejected); the file must be within the
-    size ceiling; the bytes must parse as one PEM certificate.
+    nginx forwards the verified client cert as HEADER CONTENT: the stock
+    ``ssl_client_escaped_cert`` variable (nginx >=1.13.5) emits the PEM
+    URL-encoded, and the app percent-decodes it. There is NO filesystem
+    read, NO path, NO prefix — the content itself is the carrier, so there
+    is no traversal surface at all. Guards, each failing closed to None: the
+    inner-mTLS surface must be fully wired; the header must be non-empty; the
+    decoded bytes must be within the size ceiling; the payload must contain
+    EXACTLY one PEM certificate block (concatenation tricks rejected); and
+    the bytes must parse as a certificate.
 
     Why the app re-verifies the PEM even though nginx verified the chain at
     the outer TLS layer: end-to-end-mtls-header-trust-removal (#314) removes
@@ -100,20 +103,15 @@ def _forwarded_client_cert(request: Request) -> x509.Certificate | None:
     inner = _inner_tls_cfg(request)
     if inner is None:
         return None
-    raw_path = request.headers.get(inner.cert_path_header)
-    if not raw_path:
+    raw = request.headers.get(inner.cert_pem_header)
+    if not raw:
         return None
-    try:
-        prefix = Path(inner.cert_path_prefix).resolve()
-        resolved = Path(raw_path).resolve()
-        if os.path.commonpath([prefix, resolved]) != str(prefix):
-            logger.warning("Forwarded cert path %r escapes prefix %s — rejected", raw_path, prefix)
-            return None
-        if resolved.stat().st_size > inner.cert_max_bytes:
-            logger.warning("Forwarded cert file %s exceeds size ceiling — rejected", resolved)
-            return None
-        data = resolved.read_bytes()
-    except (OSError, ValueError):
+    data = urllib.parse.unquote_to_bytes(raw)
+    if len(data) > inner.cert_max_bytes:
+        logger.warning("Forwarded cert PEM exceeds size ceiling — rejected")
+        return None
+    if data.count(b"BEGIN CERTIFICATE") != 1:
+        logger.warning("Forwarded cert PEM is not exactly one certificate block — rejected")
         return None
     try:
         return x509.load_pem_x509_certificate(data)

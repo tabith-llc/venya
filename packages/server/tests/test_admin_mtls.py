@@ -523,7 +523,6 @@ def _create_admin_mtls_app(
             cert_file="/test/inner.crt",
             key_file="/test/inner.key",
             client_ca_file="/test/inner-ca.crt",
-            cert_path_prefix=str(cert_prefix) if cert_prefix is not None else None,
         ),
         recovery_code_pepper="test-pepper",
     )
@@ -634,34 +633,32 @@ class TestAdminMTLSMiddleware:
         resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 403
 
-    def test_cert_outside_path_prefix_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
-        """Path guard (N2): a cert-file path OUTSIDE the configured prefix is
-        never read — traversal/symlink escape fails closed."""
-        prefix = make_cert_prefix(tmp_path)
+    def test_cert_over_size_ceiling_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Content guard (N2): a forwarded PEM whose DECODED bytes exceed
+        cert_max_bytes is refused before parsing — the ceiling is a real
+        guard in the transport, not a filesystem artifact."""
         cert = _admin_leaf(admin_ca_dir, admin_ca_security, serial=int(ADMIN_SERIAL_HEX, 16))
-        outside = tmp_path / "outside.pem"
-        from cryptography.hazmat.primitives import serialization as _ser
-
-        outside.write_bytes(cert.public_bytes(_ser.Encoding.PEM))
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
+        app.state.config.inner_mtls.cert_max_bytes = 64  # below any real PEM
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get("/api/v1/admin/test", headers={"x-client-cert-file": str(outside)})
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(tmp_path, cert))
         assert resp.status_code == 403
-        # sibling-prefix string escape (/certfiles vs /certfiles-secret)
-        resp2 = client.get(
-            "/api/v1/admin/test",
-            headers={"x-client-cert-file": str(outside).replace("certfiles", "certfiles-secret")},
-        )
-        assert resp2.status_code == 403
 
-    def test_unparseable_cert_file_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
-        """Garbage bytes behind the header (N3) → 403, no read-side crash."""
-        prefix = make_cert_prefix(tmp_path)
-        bogus = prefix / "bogus.pem"
-        bogus.write_bytes(b"-----BEGIN CERTIFICATE-----\nnot-a-cert\n-----END CERTIFICATE-----")
-        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com", cert_prefix=prefix)
+    def test_unparseable_cert_pem_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """Garbage bytes (URL-encoded) behind the header (N3) → 403, no
+        read-side crash. A filesystem path sent as content is also not PEM."""
+        import urllib.parse
+
+        app = _create_admin_mtls_app(admin_ca_dir, "admin@example.com")
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get("/api/v1/admin/test", headers={"x-client-cert-file": str(bogus)})
+        resp = client.get(
+            "/api/v1/admin/test",
+            headers={
+                "x-client-cert-pem": urllib.parse.quote_from_bytes(
+                    b"-----BEGIN CERTIFICATE-----\nnot-a-cert\n-----END CERTIFICATE-----"
+                )
+            },
+        )
         assert resp.status_code == 403
 
     def test_cross_plane_cert_rejected(self, admin_ca_dir, admin_ca_security, tmp_path):
@@ -1262,7 +1259,6 @@ def _create_concurrent_test_app(admin_ca_dir: str, cert_prefix=None):
             cert_file="/test/inner.crt",
             key_file="/test/inner.key",
             client_ca_file="/test/inner-ca.crt",
-            cert_path_prefix=str(cert_prefix) if cert_prefix is not None else None,
         ),
         recovery_code_pepper="test-pepper",
     )

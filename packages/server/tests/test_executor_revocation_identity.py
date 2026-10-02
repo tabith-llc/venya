@@ -144,7 +144,6 @@ def env(tmp_path):
             cert_file="/test/inner.crt",
             key_file="/test/inner.key",
             client_ca_file="/test/inner-ca.crt",
-            cert_path_prefix=str(cert_prefix),
         ),
     )
     app.state.ca_manager = _make_mock_ca(real_ca)
@@ -785,16 +784,18 @@ class TestIncumbentExemption:
         assert resp.status_code == 400
         assert "Enrollment token required" in resp.json()["detail"]
 
-    def test_unparseable_cert_file_no_exemption(self, env):
-        """Preserved negative (was: X-Client-Verified != SUCCESS): garbage
-        behind the forwarded-cert header verifies as NOTHING → no exemption
-        even though the record serial + CN are perfect."""
+    def test_unparseable_cert_pem_no_exemption(self, env):
+        """Preserved negative: garbage behind the forwarded-cert header
+        verifies as NOTHING → no exemption even though the record serial + CN
+        are perfect. #314 content transport: the header carries URL-encoded
+        PEM, so the guard here is parse failure (not a filesystem read)."""
+        import urllib.parse
+
         client, SessionLocal = env
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000001000")
-        bogus = client.app.state.test_cert_prefix / "bogus.pem"
-        bogus.write_bytes(b"-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----")
-        resp = _register(client, headers={"x-client-cert-file": str(bogus)})
+        bogus = urllib.parse.quote_from_bytes(b"-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----")
+        resp = _register(client, headers={"x-client-cert-pem": bogus})
         assert resp.status_code == 400
 
     def test_cn_mismatch_no_exemption(self, env):
@@ -806,27 +807,31 @@ class TestIncumbentExemption:
         resp = _register(client, headers=_incumbent_headers(client.app, "0000000000001000", cn="exec-b"))
         assert resp.status_code == 400
 
-    def test_nonexistent_cert_file_no_exemption(self, env):
-        """(was: empty serial header) A path to a nonexistent file must not exempt."""
+    def test_empty_cert_pem_header_no_exemption(self, env):
+        """An empty forwarded-cert-pem header must not exempt (fails closed)."""
         client, SessionLocal = env
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000001000")
-        resp = _register(client, headers={"x-client-cert-file": str(client.app.state.test_cert_prefix / "gone.pem")})
+        resp = _register(client, headers={"x-client-cert-pem": ""})
         assert resp.status_code == 400
 
-    def test_cert_outside_prefix_no_exemption(self, env):
-        """#314 path guard: a readable valid cert OUTSIDE the configured
-        prefix is never read → no exemption."""
-        import shutil
+    def test_concatenated_cert_pem_no_exemption(self, env):
+        """#314 content guard: two concatenated PEM blocks (BEGIN count != 1)
+        are refused — a stack of certs is never treated as one identity."""
+        import urllib.parse
+
+        try:
+            from .conftest import make_leaf, pem_bytes
+        except ImportError:
+            from conftest import make_leaf, pem_bytes
 
         client, SessionLocal = env
         _seed_executor(SessionLocal)
         _seed_cert(SessionLocal, serial="0000000000001000")
-        headers = _incumbent_headers(client.app, "0000000000001000")
-        src_path = headers["x-client-cert-file"]
-        outside = client.app.state.test_cert_prefix.parent / "outside.pem"
-        shutil.copyfile(src_path, outside)
-        resp = _register(client, headers={"x-client-cert-file": str(outside)})
+        ca_cert, ca_key = client.app.state.ca_manager.load_ca()
+        one = pem_bytes(make_leaf(ca_cert, ca_key, cn="exec-a", serial=int("0000000000001000", 16)))
+        stacked = urllib.parse.quote_from_bytes(one + one)
+        resp = _register(client, headers={"x-client-cert-pem": stacked})
         assert resp.status_code == 400
 
     def test_cross_plane_cert_no_exemption(self, env):

@@ -278,12 +278,13 @@ class InnerTLSConfig(BaseModel):
     REQUIRES a verified client certificate (the nginx client cert) on every
     connection — a direct connect to the app port dies at the TLS handshake.
     Client identity arrives separately as the OUTER client certificate PEM
-    that nginx writes per connection (extfile) and forwards by path; the
-    middleware re-verifies that PEM cryptographically (no header trust).
+    that nginx forwards as HEADER CONTENT (URL-encoded, via the stock
+    ssl_client_escaped_cert variable); the middleware percent-decodes it and
+    re-verifies it cryptographically (no header trust, no filesystem path).
 
     No default here weakens anything: ``main()`` REFUSES to start when
-    ``enabled`` is set with any material path or the path prefix missing,
-    and the client-cert requirement is not disableable via this surface.
+    ``enabled`` is set with any material path missing, and the
+    client-cert requirement is not disableable via this surface.
     """
 
     enabled: bool = Field(
@@ -302,19 +303,17 @@ class InnerTLSConfig(BaseModel):
         default=None,
         description="CA bundle used to VERIFY the nginx client certificate (TLS layer)",
     )
-    cert_path_header: str = Field(
-        default="x-client-cert-file",
-        description="Header nginx writes carrying the per-connection client-cert PEM file path",
-    )
-    cert_path_prefix: str | None = Field(
-        default=None,
-        description="Only cert-file paths resolving under this directory are read (traversal guard)",
+    cert_pem_header: str = Field(
+        default="x-client-cert-pem",
+        description=(
+            "Header nginx forwards carrying the URL-encoded verified client-cert " "PEM (content, never a path)"
+        ),
     )
     cert_max_bytes: int = Field(
         default=16384,
         ge=512,
         le=65536,
-        description="Maximum size of a forwarded client-cert PEM file (bytes)",
+        description="Maximum size of the PERCENT-DECODED forwarded client-cert PEM (bytes)",
     )
 
 

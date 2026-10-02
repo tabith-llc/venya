@@ -374,7 +374,6 @@ class TestExecutorSessionPathAuth:
                 cert_file="/test/inner.crt",
                 key_file="/test/inner.key",
                 client_ca_file="/test/inner-ca.crt",
-                cert_path_prefix=str(prefix) if prefix is not None else None,
             ),
         )
 
@@ -477,33 +476,35 @@ class TestExecutorSessionPathAuth:
         )
         assert resp.status_code == 401
 
-    def test_cert_file_outside_prefix_rejected_401(self, tmp_path):
-        """Path guard: a cert-file path outside the configured prefix is
-        never read → 401 fail-closed."""
+    def test_path_value_cert_pem_rejected_401(self, tmp_path):
+        """Content transport guard: a filesystem-path string sent as the
+        forwarded-cert PEM is not valid PEM → 401 fail-closed (there is no
+        filesystem read, so a planted path grants nothing)."""
+        import urllib.parse
+
         executor_row, _, _ = self._rows()
         backend, _ = self._make_executor_backend(executor_row=executor_row)
         app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
-        (tmp_path / "outside.pem").write_bytes(b"garbage")
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/sessions/1/filter",
             json={"stdout": "", "stderr": ""},
-            headers={"x-client-cert-file": str(tmp_path / "outside.pem")},
+            headers={"x-client-cert-pem": urllib.parse.quote_from_bytes(str(tmp_path / "outside.pem").encode())},
         )
         assert resp.status_code == 401
 
-    def test_unparseable_cert_file_rejected_401(self, tmp_path):
-        """Garbage bytes behind the header → 401 (parse failure fails closed)."""
+    def test_unparseable_cert_pem_rejected_401(self, tmp_path):
+        """Garbage bytes (URL-encoded) behind the header → 401 (parse fails closed)."""
+        import urllib.parse
+
         executor_row, _, _ = self._rows()
         backend, _ = self._make_executor_backend(executor_row=executor_row)
         app = self._create_executor_app(backend=backend, tmp_path=tmp_path)
-        bogus = tmp_path / "certfiles" / "bogus.pem"
-        bogus.write_bytes(b"not a certificate")
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post(
             "/api/v1/sessions/1/filter",
             json={"stdout": "", "stderr": ""},
-            headers={"x-client-cert-file": str(bogus)},
+            headers={"x-client-cert-pem": urllib.parse.quote_from_bytes(b"not a certificate")},
         )
         assert resp.status_code == 401
 

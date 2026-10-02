@@ -248,9 +248,11 @@ fi
 
 # Ensure sbx state directory exists with correct ownership (runs every install;
 # sbx daemon fails as venya if root-owned from a prior degraded install)
-mkdir -p /home/venya/.local/share/sandboxes
-chown venya:venya /home/venya/.local/share/sandboxes
-chmod 700 /home/venya/.local/share/sandboxes
+# #358: same pin class as the uv tree — under the entry umask 077 a root
+# mkdir -p here left .local/share 0700 root:root, blocking the venya sbx
+# daemon traversal; parents pinned 0750 root:venya, leaf 0770 venya:venya.
+install -d -m 0750 -g venya /home/venya/.local /home/venya/.local/share
+install -d -m 0770 -o venya -g venya /home/venya/.local/share/sandboxes
 
 # --- Docker auth (sbx template pulls) + sandboxd daemon ---
 # sbx runs microVMs via KVM but pulls its agent template from Docker and

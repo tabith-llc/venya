@@ -332,13 +332,16 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     venya_guard_injection "ADMIN_IDENTITY" "$ADMIN_IDENTITY" '"' '\'
 
 
-    # Create directories
-    mkdir -p "$ADMIN_CA_DIR"
-    chmod 700 "$ADMIN_CA_DIR"
-    chown venya:venya "$ADMIN_CA_DIR"
-    mkdir -p "$ADMIN_CERT_DIR"
-    chmod 700 "$ADMIN_CERT_DIR"
-    chown venya:venya "$ADMIN_CERT_DIR"
+    # Create directories (#358: pinned parents the sudo -u venya children
+    # below must traverse — bare mkdir -p under the entry umask 077 left
+    # /var/lib/venya and /etc/venya 0700 root:root; the leaf pins keep the
+    # old chmod 700 + chown venya semantics). The later
+    # "install -d -m 0755 /etc/venya" (#317 status-quo pin) re-pins that
+    # parent's mode after this block; idempotent.
+    install -d -m 0750 -g venya /var/lib/venya /var/lib/venya/ca
+    install -d -m 0770 -o venya -g venya "$ADMIN_CA_DIR"
+    install -d -m 0750 -g venya /etc/venya
+    install -d -m 0770 -o venya -g venya "$ADMIN_CERT_DIR"
 
     # Generate admin CA. The passphrase crosses the sudo boundary on STDIN —
     # never via export (sudo's env_reset strips it) and never on argv (visible
@@ -485,7 +488,7 @@ venya_guard_injection "CA_KEY_PASSPHRASE" "$CA_KEY_PASSPHRASE"
 # in an existing .env (e.g. VENYA_SESSION__* tuning) is captured here and
 # re-appended after the template blocks. The five SECRETS keep their own
 # stored-reuse blocks above — this is for non-secret operator config.
-MANAGED_ENV_KEYS="VENYA_HOST VENYA_DB_URL VENYA_DB__DATABASE_URL VENYA_DB__PASSPHRASE VENYA_FIDO2__RP_ID VENYA_FIDO2__RP_NAME VENYA_CORS__ORIGINS VENYA_RECOVERY_CODE_PEPPER VENYA_ADMIN_MTLS__ENABLED VENYA_ADMIN_MTLS__CA_CERT VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS VENYA_MTLS_CERT VENYA_MTLS_KEY VENYA_INNER_MTLS__ENABLED VENYA_INNER_MTLS__CERT_FILE VENYA_INNER_MTLS__KEY_FILE VENYA_INNER_MTLS__CLIENT_CA_FILE VENYA_INNER_MTLS__CERT_PATH_PREFIX"
+MANAGED_ENV_KEYS="VENYA_HOST VENYA_DB_URL VENYA_DB__DATABASE_URL VENYA_DB__PASSPHRASE VENYA_FIDO2__RP_ID VENYA_FIDO2__RP_NAME VENYA_CORS__ORIGINS VENYA_RECOVERY_CODE_PEPPER VENYA_ADMIN_MTLS__ENABLED VENYA_ADMIN_MTLS__CA_CERT VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS VENYA_MTLS_CERT VENYA_MTLS_KEY VENYA_INNER_MTLS__ENABLED VENYA_INNER_MTLS__CERT_FILE VENYA_INNER_MTLS__KEY_FILE VENYA_INNER_MTLS__CLIENT_CA_FILE"
 PRESERVED_ENV_LINES=""
 if [ -f "$STORED_ENV_FILE" ]; then
     PRESERVED_ENV_LINES=$(awk -F= -v managed="$MANAGED_ENV_KEYS" '
@@ -757,7 +760,6 @@ VENYA_INNER_MTLS__ENABLED=true
 VENYA_INNER_MTLS__CERT_FILE=/etc/venya/tls/inner.crt
 VENYA_INNER_MTLS__KEY_FILE=/etc/venya/tls/inner.key
 VENYA_INNER_MTLS__CLIENT_CA_FILE=/var/lib/venya/ca/ca.crt
-VENYA_INNER_MTLS__CERT_PATH_PREFIX=/var/lib/nginx
 EOF
 
 # Install Venya CA into system trust store
@@ -827,7 +829,7 @@ server {
     # for a command that actually ran (and may retry -> double execution). 330s = the
     # 300s relay ceiling + 30s margin, so the server's own clean 503 "Executor timed
     # out" surfaces rather than an nginx 504 at the boundary. Set at server level so it
-    # covers every proxied location without duplicating the X-Client-Cert-File header below
+    # covers every proxied location without duplicating the X-Client-Cert-PEM header below
     # (ticket relay-cold-start-nginx-proxy-timeout).
     proxy_read_timeout 330s;
     proxy_send_timeout 330s;
@@ -856,11 +858,12 @@ server {
         proxy_ssl_verify on;
         proxy_ssl_verify_depth 2;
         proxy_ssl_name localhost;
-        # ...and forwards the OUTER verified client cert as a per-connection
-        # PEM file path ($ssl_client_certificate_path writes the PEM under the
-        # client-body temp path, then reaps it; the app reads it in-request,
-        # re-verifies it against its own CA, and no header is identity).
-        proxy_set_header X-Client-Cert-File \$ssl_client_certificate_path;
+        # ...and forwards the OUTER verified client cert as HEADER CONTENT: the
+        # stock nginx 1.13.5+ ssl_client_escaped_cert variable emits the PEM
+        # URL-encoded. The app percent-decodes it and re-verifies it against its
+        # own CA — content, never a path, so there is no filesystem/traversal
+        # surface and no header is trusted as identity (crypto decision is the gate).
+        proxy_set_header X-Client-Cert-PEM \$ssl_client_escaped_cert;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }

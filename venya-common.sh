@@ -267,8 +267,15 @@ venya_install_python314() {
         exit 1
     fi
 
-    mkdir -p "$INSTALL_DIR/.local/share/uv/python"
-    chown venya:venya "$INSTALL_DIR/.local/share/uv/python"
+    # #358: the entry umask 077 makes a root mkdir -p create the parent chain
+    # 0700 root:root, and the venya uv run below cannot traverse it (physically
+    # proven 2026-10-02: fresh core install aborted at Python-3.14, os error 13
+    # on /opt/venya/.local/share/uv/python). Explicit pins: 0750 root:venya on
+    # traverse-only parents (no runtime reader of /opt/venya besides venya —
+    # the shipped nginx config has no location under it; server + venv steps
+    # run as venya = group), 0770 venya:venya on the managed-python leaf.
+    install -d -m 0750 -g venya "$INSTALL_DIR" "$INSTALL_DIR/.local" "$INSTALL_DIR/.local/share" "$INSTALL_DIR/.local/share/uv"
+    install -d -m 0770 -o venya -g venya "$INSTALL_DIR/.local/share/uv/python"
 
     # CRITICAL: Must run as venya (sudo -H -u venya) so uv resolves its config
     # path from getpwuid(getuid()) → /home/venya, not /home/bot (the SSH login
