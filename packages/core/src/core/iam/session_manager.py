@@ -150,6 +150,9 @@ class SessionManager:
             expires_at=expires_at,
             access_token=access_token.token,
             access_token_jti=access_token.jti,
+            # #342: persist the advertised bearer life so validation can
+            # enforce it (the dataclass alone was invisible to the middleware).
+            access_token_expires_at=access_token.expires_at,
         )
         self.db.add(session)
         self.db.flush()
@@ -246,6 +249,8 @@ class SessionManager:
 
         session.access_token = new_token.token
         session.access_token_jti = new_token.jti
+        # #342: refresh rotates the persisted bearer expiry with the token.
+        session.access_token_expires_at = new_token.expires_at
         self.db.flush()
 
         return new_token

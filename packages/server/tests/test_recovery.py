@@ -458,6 +458,8 @@ def _build_reissue_app(tmp_path, pepper="test-pepper", session=None):
                 access_token_jti=f"jti-{session_user}",
                 created_at=datetime.now(UTC),
                 expires_at=datetime.now(UTC) + timedelta(minutes=15),
+                # #342: fresh bearer-tier expiry (gate rejects NULL/aged).
+                access_token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
             )
         )
     s.add_all(members)
@@ -810,6 +812,8 @@ def _build_reissue_middleware_app(tmp_path, *, bearer="valid-bearer", session_ex
                 access_token_jti="jti-r340",
                 created_at=datetime.now(UTC),
                 expires_at=session_expires or datetime.now(UTC) + timedelta(minutes=15),
+                # #342: fresh bearer-tier expiry (gate rejects NULL/aged).
+                access_token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
             ),
         ]
     )

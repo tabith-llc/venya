@@ -733,6 +733,21 @@ class SessionMiddleware(BaseHTTPMiddleware):
             if not manager.check_expiry(session):
                 return None
 
+            # #342: bearer-tier gate. The advertised access_token_ttl is
+            # enforced here on the persisted expiry, immediately after the
+            # session gates and before the user-status gate. FAIL-CLOSED:
+            # NULL (pre-migration rows) or a past timestamp -> reject via
+            # the existing 401 path. SQLite test rows arrive naive; PG is
+            # aware — normalize to aware UTC before comparing.
+            token_expiry = getattr(session, "access_token_expires_at", None)
+            if token_expiry is None:
+                logger.info("Bearer token for session %s rejected: no persisted token expiry", session.id)
+                return None
+            if token_expiry.tzinfo is None:
+                token_expiry = token_expiry.replace(tzinfo=UTC)
+            if token_expiry < datetime.now(UTC):
+                return None
+
             # Get user info
             user = session.user
 
