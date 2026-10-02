@@ -395,3 +395,114 @@ def test_crl_endpoint_cache_control(ca_manager):
     response = client.get("/api/v1/executors/certs/crl")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "max-age=30"
+
+
+# ---------------------------------------------------------------------------
+# #337 — ETag over the SERVED capped population + fail-loud at the ceiling
+# ---------------------------------------------------------------------------
+
+
+def _revocation_rows(n: int, start: int = 1):
+    now = datetime.now(UTC)
+    return [
+        MockRevocation(serial_number=format(i, "016x"), revoked_at=now - timedelta(days=i))
+        for i in range(start, start + n)
+    ]
+
+
+def _crl_app(ca_manager, total: int, capped_rows):
+    """Endpoint app whose DB mock mirrors BOTH route shapes: the ordered+limited
+    query yields the SERVED rows, an unqualified .all() yields the FULL history
+    (what the pre-#337 ETag hashed), and .count() yields the full count."""
+    all_rows = list(capped_rows)
+    extra = total - len(capped_rows)
+    if extra > 0:
+        all_rows += _revocation_rows(extra, start=1001)  # the older tail beyond the cap
+    db = MagicMock()
+    query = db.query.return_value
+    query.order_by.return_value.limit.return_value.all.return_value = list(capped_rows)
+    query.count.return_value = total
+    query.all.return_value = all_rows
+    return _crl_app_with_db(ca_manager, db)
+
+
+def _crl_app_with_db(ca_manager, db):
+    app = FastAPI()
+    backend = MagicMock()
+    backend.get_session.return_value = db
+    app.state.backend = backend
+    app.state.ca_manager = ca_manager
+    app.state.config = ServerConfig(crl=CRLConfig(crl_retention_days=90), recovery_code_pepper="test-pepper")
+    app.include_router(executors_routes.router, prefix="/api/v1")
+    return app
+
+
+def _expected_capped_etag(rows) -> str:
+    import hashlib
+    import json as _json
+
+    serials = sorted(r.serial_number for r in rows)
+    return f'"{hashlib.sha256(_json.dumps(serials, sort_keys=True).encode()).hexdigest()}"'
+
+
+class TestCrlCapEtagDivergence337:
+    """RED at base: the ETag hashed the UNBOUNDED serial history while the body
+    carried only the newest-1000 — two different populations behind one cache
+    key. Fix (ruled A+B): ETag over the served capped set + loud ceiling signal."""
+
+    def test_etag_describes_served_capped_population(self, ca_manager):
+        """1005 revocations: the served population is the newest 1000; the ETag
+        must hash THAT set, not the 1005-entry history."""
+        capped = _revocation_rows(1000)  # newest-first slice the route serves
+        app = _crl_app(ca_manager, total=1005, capped_rows=capped)
+        client = TestClient(app)
+
+        response = client.get("/api/v1/executors/certs/crl")
+        assert response.status_code == 200
+        assert response.headers["etag"] == _expected_capped_etag(capped)
+
+    def test_ceiling_signal_is_loud(self, ca_manager):
+        """count > max_entries must surface: X-CRL-Truncated header + totals."""
+        capped = _revocation_rows(1000)
+        app = _crl_app(ca_manager, total=1001, capped_rows=capped)
+        client = TestClient(app)
+
+        response = client.get("/api/v1/executors/certs/crl")
+        assert response.headers["x-crl-truncated"] == "true"
+        assert response.headers["x-crl-revocations-total"] == "1001"
+        assert response.headers["x-crl-revocations-served"] == "1000"
+
+    def test_ceiling_signal_survives_conditional_get(self, ca_manager):
+        """The truncation warning must not disappear on the 304 path."""
+        capped = _revocation_rows(1000)
+        app = _crl_app(ca_manager, total=1001, capped_rows=capped)
+        client = TestClient(app)
+
+        etag = client.get("/api/v1/executors/certs/crl").headers["etag"]
+        response = client.get("/api/v1/executors/certs/crl", headers={"If-None-Match": etag})
+        assert response.status_code == 304
+        assert response.headers["x-crl-truncated"] == "true"
+
+    # paired negatives — what must NOT change
+    def test_below_cap_etag_equals_population_and_stays_silent(self, ca_manager):
+        """Under the ceiling, body and history ARE the same population; no
+        truncation headers must appear."""
+        rows = _revocation_rows(5)
+        app = _crl_app(ca_manager, total=5, capped_rows=rows)
+        client = TestClient(app)
+
+        response = client.get("/api/v1/executors/certs/crl")
+        assert response.status_code == 200
+        assert response.headers["etag"] == _expected_capped_etag(rows)
+        assert "x-crl-truncated" not in response.headers
+
+    def test_history_trim_beyond_cap_does_not_move_etag(self, ca_manager):
+        """Two histories sharing the newest-1000 must yield the SAME ETag
+        (base hashes the full history, so trimming old rows churned the cache)."""
+        capped = _revocation_rows(1000)
+        app_a = _crl_app(ca_manager, total=1005, capped_rows=capped)
+        app_b = _crl_app(ca_manager, total=1000, capped_rows=capped)
+
+        etag_a = TestClient(app_a).get("/api/v1/executors/certs/crl").headers["etag"]
+        etag_b = TestClient(app_b).get("/api/v1/executors/certs/crl").headers["etag"]
+        assert etag_a == etag_b

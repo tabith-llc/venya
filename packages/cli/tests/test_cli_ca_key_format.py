@@ -249,35 +249,43 @@ class TestCanonicalNegatives:
 
 
 class TestCrossCompatContract:
-    """Byte-level contract: CLI-produced blobs restore server-side and vice
-    versa (the divergence this ticket closes). The CLI has no `core` dep, so
-    the two implementations are aligned copies — these cells are the interlock."""
+    """Byte-level contract on the canonical envelope. #336 ruling A deleted the
+    server-side export/restore pair (test-only callers, raw-envelope defect), so
+    both directions are re-founded HERE at the CLI layer — no server import:
+    (1) an independent decoder built from the frozen format spec decrypts a
+    CLI-produced blob to exactly the on-disk PEM — the single-envelope pin (the
+    deleted pair's defect was re-wrapping the encrypted at-rest file; an
+    aligned sibling implementation must see one envelope of key bytes);
+    (2) a reference-minted canonical blob (the exact byte shape any aligned
+    implementation produces) restores CLI-side to byte-identical real keys."""
 
-    def test_cli_export_server_restore(self, tmp_path):
-        from server.ca import CAManager
-
-        _ca, out = _export(tmp_path, pw="xpw")
-        srv_dir = tmp_path / "srv-ca"
-        srv_dir.mkdir()
-        manager = CAManager(str(srv_dir))
-        manager.restore_ca_key(out.read_bytes(), "xpw")
-        assert (srv_dir / "ca.key").read_bytes() == KEY
-
-    def test_server_export_cli_restore(self, tmp_path):
-        from server.ca import CAManager
+    def test_cli_export_independent_decoder_roundtrip(self, tmp_path):
+        """Direction 1, re-founded (refs #336): CLI export -> independent
+        canonical decode yields the key PEM itself, not a re-wrapped envelope."""
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
         key = _real_key_pem()
-        srv_dir = tmp_path / "srv-ca"
-        srv_dir.mkdir()
-        (srv_dir / "ca.key").write_bytes(key)
-        manager = CAManager(str(srv_dir))
-        blob = manager.export_ca_key("xpw")
+        ca, out = _export(tmp_path, pw="xpw", key=key)
+        blob = out.read_bytes()
         assert blob.startswith(MAGIC)
+        body = blob[len(MAGIC) :]
+        salt, nonce, ciphertext = body[:16], body[16:28], body[28:]
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600_000)
+        inner = AESGCM(kdf.derive(b"xpw")).decrypt(nonce, ciphertext, None)
+        assert inner == key
+        assert inner == (ca / "ca.key").read_bytes()
 
-        cli_dir = _ca_dir(tmp_path / "cli")
+    def test_minted_canonical_blob_cli_restore(self, tmp_path):
+        """Direction 2, re-founded (refs #336): the minted canonical form — the
+        exact bytes the deleted server export produced when correct — restores
+        CLI-side unchanged."""
+        key = _real_key_pem()
+        cli_dir = _ca_dir(tmp_path / "cli", key=key)
         (cli_dir / "ca.key").unlink()
         blob_path = tmp_path / "srv.enc"
-        blob_path.write_bytes(blob)
+        blob_path.write_bytes(_mint_canonical_gcm(key, "xpw"))
         assert _restore(cli_dir, blob_path, "xpw") == 0
         assert (cli_dir / "ca.key").read_bytes() == key
 

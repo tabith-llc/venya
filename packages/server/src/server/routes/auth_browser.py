@@ -52,7 +52,9 @@ logger = logging.getLogger("venya.server")
 router = APIRouter()
 
 COOKIE_NAME = "venya_access_token"
-COOKIE_MAX_AGE = 300  # 5 minutes
+# Cookie life is the OPERATOR-CONFIGURED session timeout (ticket
+# browser-session-hardcoded-300s-cookie #341): callers pass
+# config.session.session_timeout (seconds) — no hardcoded constant here.
 
 
 # --- Request/Response models ---
@@ -107,12 +109,14 @@ class BrowserElevateCompleteRequest(BaseModel):
 # --- Helpers ---
 
 
-def _set_session_cookie(response: Response, access_token: str) -> None:
+def _set_session_cookie(response: Response, access_token: str, max_age: int) -> None:
     """Set the session access token cookie.
 
     Args:
         response: FastAPI Response object.
         access_token: The access token string.
+        max_age: Cookie lifetime in seconds — the configured session_timeout
+            (same units; #341).
     """
     response.set_cookie(
         key=COOKIE_NAME,
@@ -120,7 +124,7 @@ def _set_session_cookie(response: Response, access_token: str) -> None:
         httponly=True,
         secure=True,
         samesite="lax",
-        max_age=COOKIE_MAX_AGE,
+        max_age=max_age,
         path="/",
     )
 
@@ -295,7 +299,7 @@ async def browser_login_assert(
         metrics.AUTH_LOGIN_TOTAL.labels(mode="browser", result="success").inc()
 
         response = JSONResponse(content={"status": "ok"})
-        _set_session_cookie(response, access_token.token)
+        _set_session_cookie(response, access_token.token, sc.session_timeout)
         return response
     except UserNotActiveError:
         # Status gate refused (ticket sec-unauth-webauthn-registration-takeover).
@@ -370,7 +374,7 @@ async def browser_refresh(
         content='{"status": "ok"}',
         media_type="application/json",
     )
-    _set_session_cookie(response, new_token.token)
+    _set_session_cookie(response, new_token.token, sc.session_timeout)
     return response
 
 

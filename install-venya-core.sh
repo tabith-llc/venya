@@ -424,6 +424,7 @@ sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya_audit'" 
 PG_MAIN_DIR=$(ls -d /etc/postgresql/*/main 2>/dev/null | head -n1)
 if [ -z "$PG_MAIN_DIR" ]; then
     error "PostgreSQL main config dir not found — cannot install the venya_audit peer map."
+    exit 1
 fi
 # pg_ident peer map: OS user 'venya' -> DB role 'venya_audit' (marker-guarded idempotent).
 if ! grep -q "^venya_map venya venya_audit" "$PG_MAIN_DIR/pg_ident.conf" 2>/dev/null; then
@@ -819,6 +820,8 @@ server {
 
     ssl_certificate /etc/venya/tls/server.crt;
     ssl_certificate_key /etc/venya/tls/server.key;
+    # GitLab #323: floor the TLS handshake at 1.2 (nginx default allows 1.0/1.1).
+    ssl_protocols TLSv1.2 TLSv1.3;
     ssl_client_certificate /etc/nginx/ssl/client-ca-bundle.crt;
     ssl_verify_client optional;
 
