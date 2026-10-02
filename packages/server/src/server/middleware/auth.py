@@ -225,6 +225,12 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/api/v1/auth/login/browser/challenge",
             "/api/v1/auth/login/browser/assert",
             "/api/v1/auth/refresh",
+            # #341: the cookie-plane refresh twin. Public BY DESIGN — the
+            # handler self-gates (get_current_session returns None -> 401
+            # "Invalid or expired session" in browser_refresh); an
+            # idle-expired cookie session stays refreshable until the hard
+            # cap, exactly like the bearer tier.
+            "/api/v1/auth/refresh/browser",
             "/api/v1/init",
             "/api/v1/init/complete",
             "/api/v1/init/reset",
@@ -537,7 +543,25 @@ class SessionMiddleware(BaseHTTPMiddleware):
             )
 
         request.state.auth_user = user_info  # type: ignore[attr-defined]
-        return await call_next(request)
+        response = await call_next(request)
+        # #341: if this request slid the session row forward AND the credential
+        # rode the browser cookie plane, re-issue the SAME-value cookie with a
+        # fresh max_age = configured session_timeout. Without this the DB row
+        # slides but the browser still drops the cookie at its stale expiry.
+        # Bearer (CLI/MCP) requests carry no cookie and are untouched.
+        if getattr(request.state, "session_extended", False) and request.cookies.get(self.ACCESS_TOKEN_COOKIE):
+            session_cfg = getattr(getattr(request.app.state, "config", None), "session", None)
+            if session_cfg is not None:
+                response.set_cookie(
+                    key=self.ACCESS_TOKEN_COOKIE,
+                    value=token,
+                    httponly=True,
+                    secure=True,
+                    samesite="lax",
+                    max_age=session_cfg.session_timeout,
+                    path="/",
+                )
+        return response
 
     async def _validate_executor_mtls(self, request: Request, reject_revoked: bool = True) -> JSONResponse | None:
         """Validate executor mTLS identity for executor session paths.
@@ -743,6 +767,9 @@ class SessionMiddleware(BaseHTTPMiddleware):
             if session.expires_at < now + timedelta(minutes=5):
                 manager.extend_session(session.id)
                 db.commit()
+                # #341: dispatch re-issues the cookie plane's Set-Cookie when
+                # the row was slid forward on this very request.
+                request.state.session_extended = True
 
             return user_info
         finally:
