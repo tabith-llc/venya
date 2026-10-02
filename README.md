@@ -131,7 +131,7 @@ The AI agent never touches plaintext credentials. Not in its context window. Not
 
 **To our knowledge, no other platform pairs this with the other four elements.** Existing secrets managers hand plaintext to the requesting process; several agent-credential tools now achieve this one element on its own — the [published comparison](docs/security-landscape.md) names them. Venya's difference is the combination.
 
-### FIDO2 Hardware Key Binding
+### FIDO2 Security Key Binding
 Every session begins with a physical security key press. The AI agent cannot initiate a session — only a human pressing a FIDO2 key can authorize access. Sessions expire after 4 hours. Token refresh happens automatically, and an idle-expired session renews within the 4-hour hard cap — no token, refresh, or agent action can extend a session past the cap (operators can raise the cap only through the documented server setting; see [docs/ease-of-use.md](docs/ease-of-use.md)). When the session is past the cap, the AI gets an actionable error: *"Ask the user to re-authenticate."*
 
 ### mTLS Between Server and Executor
@@ -160,7 +160,7 @@ Venya speaks the Model Context Protocol — the open standard for connecting AI 
 | Guarantee | How It's Enforced |
 |-----------|-------------------|
 | AI never sees plaintext credentials | Server-side wrapping + executor-side unwrapping + Rust output filter |
-| Sessions require human authorization | FIDO2 hardware key binding (WebAuthn) |
+| Sessions require human authorization | FIDO2 security key binding (WebAuthn) |
 | Sessions are time-limited | 4-hour hard cap, 15-minute idle window, 5-minute access tokens |
 | Executor identity is verified | Mutual TLS with certificate chain validation |
 | Compromised executors are blocked | Revoked certs rejected at the executor's next revocation poll |
