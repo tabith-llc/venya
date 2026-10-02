@@ -443,7 +443,7 @@ fi
 # in an existing .env (e.g. VENYA_SESSION__* tuning) is captured here and
 # re-appended after the template blocks. The five SECRETS keep their own
 # stored-reuse blocks above — this is for non-secret operator config.
-MANAGED_ENV_KEYS="VENYA_HOST VENYA_DB_URL VENYA_DB__DATABASE_URL VENYA_DB__PASSPHRASE VENYA_FIDO2__RP_ID VENYA_FIDO2__RP_NAME VENYA_CORS__ORIGINS VENYA_RECOVERY_CODE_PEPPER VENYA_ADMIN_MTLS__ENABLED VENYA_ADMIN_MTLS__CA_CERT VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS VENYA_MTLS_CERT VENYA_MTLS_KEY"
+MANAGED_ENV_KEYS="VENYA_HOST VENYA_DB_URL VENYA_DB__DATABASE_URL VENYA_DB__PASSPHRASE VENYA_FIDO2__RP_ID VENYA_FIDO2__RP_NAME VENYA_CORS__ORIGINS VENYA_RECOVERY_CODE_PEPPER VENYA_ADMIN_MTLS__ENABLED VENYA_ADMIN_MTLS__CA_CERT VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS VENYA_MTLS_CERT VENYA_MTLS_KEY VENYA_INNER_MTLS__ENABLED VENYA_INNER_MTLS__CERT_FILE VENYA_INNER_MTLS__KEY_FILE VENYA_INNER_MTLS__CLIENT_CA_FILE VENYA_INNER_MTLS__CERT_PATH_PREFIX"
 PRESERVED_ENV_LINES=""
 if [ -f "$STORED_ENV_FILE" ]; then
     PRESERVED_ENV_LINES=$(awk -F= -v managed="$MANAGED_ENV_KEYS" '
@@ -650,11 +650,68 @@ fi
 
 info "Relay client certificate signed and verified: CN=${CORE_HOSTNAME}-relay (client Yes / server No)"
 
+# --- Inner mTLS channel keypair (#314 end-to-end-mtls-header-trust-removal) ---
+# One keypair, BOTH roles: nginx presents it as a CLIENT to uvicorn
+# (proxy_ssl_certificate) and uvicorn's SERVER cert is the same file (nginx
+# verifies it via proxy_ssl_trusted_certificate). CN/subjectAltName identify
+# the loopback channel only; no app-layer identity is asserted from it (ruled
+# Q6 — uvicorn discards the inner peer after TLS verification).
+INNER_DIR="/etc/venya/tls"
+
+openssl ecparam -genkey -name prime256v1 -noout -out "$INNER_DIR/inner.key"
+chown venya:venya "$INNER_DIR/inner.key"
+chmod 600 "$INNER_DIR/inner.key"
+
+INNER_CSR=$(mktemp /tmp/venya-inner-XXXXXX.csr)   # #317: static /tmp name = symlink-clobber hazard
+openssl req -new -key "$INNER_DIR/inner.key" \
+    -out "$INNER_CSR" \
+    -subj "/O=Venya/CN=${CORE_HOSTNAME}-inner"
+
+# SKI + AKI non-optional (F1: Python 3.14 ssl rejects AKI-less chains; lenient
+# s_client masks it). extfile newline-separated (F2). EKU BOTH roles (the
+# relay-cert single-purpose convention deliberately does NOT carry over —
+# this leaf serves and authenticates on the same loopback channel).
+VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in "$INNER_CSR" \
+    -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
+    -passin env:VENYA_CA_KEY_PASSPHRASE \
+    -CAcreateserial -out "$INNER_DIR/inner.crt" -days 365 \
+    -extfile <(printf 'extendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:localhost,DNS:%s,IP:127.0.0.1\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n' "${CORE_HOSTNAME}")
+
+chown venya:venya "$INNER_DIR/inner.crt"
+chmod 644 "$INNER_DIR/inner.crt"
+rm -f "$INNER_CSR"
+
+# F1-F4 self-checks — strict mechanism, never a lenient smoke:
+if ! openssl verify -CAfile /var/lib/venya/ca/ca.crt "$INNER_DIR/inner.crt" >/dev/null 2>&1; then
+    error "Inner channel cert failed verification against the Venya CA"
+    exit 1
+fi
+ACTUAL_INNER_CN=$(openssl x509 -in "$INNER_DIR/inner.crt" -noout -subject -nameopt multiline | sed -n 's/^ *commonName *= *//p')
+if [ "$ACTUAL_INNER_CN" != "${CORE_HOSTNAME}-inner" ]; then
+    error "Inner channel cert CN mismatch: expected '${CORE_HOSTNAME}-inner', got '${ACTUAL_INNER_CN}'"
+    exit 1
+fi
+PURPOSE_OUT=$(openssl x509 -in "$INNER_DIR/inner.crt" -noout -purpose 2>/dev/null)
+printf '%s\n' "$PURPOSE_OUT" | grep -qE '^[[:space:]]*SSL client[[:space:]]+: Yes' || { error "Inner cert purpose: expected 'SSL client : Yes'"; exit 1; }
+printf '%s\n' "$PURPOSE_OUT" | grep -qE '^[[:space:]]*SSL server[[:space:]]+: Yes' || { error "Inner cert purpose: expected 'SSL server : Yes'"; exit 1; }
+
+# F1 application at the RUNTIME verifier (uvicorn is Python ssl, not openssl):
+# loopback handshake smoke with python3 -m ssl is unavailable; the functional
+# proof is the post-restart health fetch (P4's final step). Install-time this
+# cell is the openssl verify above; the PYTHON-side verification smoke happens
+# FLEET-WINDOW as the first nginx→uvicorn fetch (see FLEET checklist).
+info "Inner mTLS keypair signed and verified: CN=${CORE_HOSTNAME}-inner (client Yes / server Yes)"
+
 # Functional wiring: the server reads .env at runtime. The appended values are
 # non-secret paths only.
 cat >> "$INSTALL_DIR/.env" << EOF
 VENYA_MTLS_CERT=$RELAY_DIR/relay-client.crt
 VENYA_MTLS_KEY=$RELAY_DIR/relay-client.key
+VENYA_INNER_MTLS__ENABLED=true
+VENYA_INNER_MTLS__CERT_FILE=/etc/venya/tls/inner.crt
+VENYA_INNER_MTLS__KEY_FILE=/etc/venya/tls/inner.key
+VENYA_INNER_MTLS__CLIENT_CA_FILE=/var/lib/venya/ca/ca.crt
+VENYA_INNER_MTLS__CERT_PATH_PREFIX=/var/lib/nginx
 EOF
 
 # Install Venya CA into system trust store
@@ -686,10 +743,22 @@ else
     ADMIN_CA_PATH=""
 fi
 
-# Create CA bundle: Venya Root CA + Admin CA.
+# Create CA bundle: Venya Root CA + Admin CA (when admin mTLS is on).
 # Nginx needs both to verify admin client certs (Admin CA) and executor certs (Root CA).
-cat /var/lib/venya/ca/ca.crt /etc/nginx/ssl/client-ca.crt > /etc/nginx/ssl/client-ca-bundle.crt 2>/dev/null || true
-chmod 644 /etc/nginx/ssl/client-ca-bundle.crt 2>/dev/null || true
+# #314 F7 (owner ruling Q1(b)): fail loud, scoped per admin-mTLS state — the old
+# "|| true" silently produced an empty/truncated bundle when an input was missing.
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    if ! cat /var/lib/venya/ca/ca.crt /etc/nginx/ssl/client-ca.crt > /etc/nginx/ssl/client-ca-bundle.crt; then
+        error "Failed to build /etc/nginx/ssl/client-ca-bundle.crt — client-CA inputs missing/unreadable"
+        exit 1
+    fi
+else
+    if ! cat /var/lib/venya/ca/ca.crt > /etc/nginx/ssl/client-ca-bundle.crt; then
+        error "Failed to build /etc/nginx/ssl/client-ca-bundle.crt — root CA missing/unreadable"
+        exit 1
+    fi
+fi
+chmod 644 /etc/nginx/ssl/client-ca-bundle.crt
 
 cat > /etc/nginx/sites-available/venya << EOF
 server {
@@ -709,7 +778,7 @@ server {
     # for a command that actually ran (and may retry -> double execution). 330s = the
     # 300s relay ceiling + 30s margin, so the server's own clean 503 "Executor timed
     # out" surfaces rather than an nginx 504 at the boundary. Set at server level so it
-    # covers every proxied location without duplicating the X-Client-* headers below
+    # covers every proxied location without duplicating the X-Client-Cert-File header below
     # (ticket relay-cold-start-nginx-proxy-timeout).
     proxy_read_timeout 330s;
     proxy_send_timeout 330s;
@@ -720,14 +789,29 @@ server {
     }
 
     location /api/v1/health {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass https://127.0.0.1:8080;
+        proxy_ssl_certificate /etc/venya/tls/inner.crt;
+        proxy_ssl_certificate_key /etc/venya/tls/inner.key;
+        proxy_ssl_trusted_certificate /var/lib/venya/ca/ca.crt;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 2;
+        proxy_ssl_name localhost;
     }
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header X-Client-Verified \$ssl_client_verify;
-        proxy_set_header X-Client-Subject \$ssl_client_s_dn;
-        proxy_set_header X-Client-Serial \$ssl_client_serial;
+        proxy_pass https://127.0.0.1:8080;
+        # Inner mTLS channel (#314): nginx authenticates to uvicorn...
+        proxy_ssl_certificate /etc/venya/tls/inner.crt;
+        proxy_ssl_certificate_key /etc/venya/tls/inner.key;
+        proxy_ssl_trusted_certificate /var/lib/venya/ca/ca.crt;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 2;
+        proxy_ssl_name localhost;
+        # ...and forwards the OUTER verified client cert as a per-connection
+        # PEM file path ($ssl_client_certificate_path writes the PEM under the
+        # client-body temp path, then reaps it; the app reads it in-request,
+        # re-verifies it against its own CA, and no header is identity).
+        proxy_set_header X-Client-Cert-File \$ssl_client_certificate_path;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }
