@@ -7,6 +7,7 @@
 """Tests for Executor pipeline: execute(), _prepare_injections(), _capture_output(), _cleanup_injections()."""
 
 import base64
+import inspect
 import shlex
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -66,39 +67,61 @@ def _make_secret(secret_id: str, value: bytes, wrapped: bool = True) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def mock_sbx_run(self, command, injections, env_override, cwd, askpass_helper=False, argv: list[str] | None = None):
+    """Stand-in for Executor._run_command_sbx: runs the rendered command via
+    subprocess directly (module-level so the signature-compat cell can
+    inspect it; #378). Ignores argv by design — the real function's argv
+    behavior is pinned by the #322 cells in test_sbx_strategy.py."""
+    import os
+    import subprocess as _real_subprocess
+
+    try:
+        env = os.environ.copy()
+        if env_override:
+            env.update(env_override)
+        result = _real_subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+            env=env,
+            cwd=cwd,
+        )
+        return CommandResult(
+            command=command,
+            exit_code=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+    except Exception:
+        return CommandResult(command=command, exit_code=1, stdout=b"", stderr=b"mock error")
+
+
+def test_mock_sbx_run_signature_is_call_compatible():
+    """#378 truth-table half: the pipeline calls _run_command_sbx with keyword
+    arguments (argv included, #322 LEG B) and the fixture mock replaces the
+    method wholesale. If the mock's parameter set ever falls behind the real
+    signature the swap dies TypeError ONLY on sbx-present hosts — montana
+    errors earlier at the strategy boundary and never reaches the mock. Pin
+    the mock to accept every parameter the real method declares (values may
+    be ignored; argv behavior itself stays pinned by the #322 cells).
+    Module-level: inside TestExecute the autouse patch would make the
+    comparison self-referential."""
+    real_params = inspect.signature(Executor._run_command_sbx).parameters
+    mock_params = inspect.signature(mock_sbx_run).parameters
+    missing = [name for name in real_params if name not in mock_params]
+    assert not missing, (
+        f"mock_sbx_run misses real-parameter(s) {missing} — pipeline call sites TypeError on sbx-present runs"
+    )
+
+
 class TestExecute:
     """Tests for Executor.execute() full pipeline."""
 
     @pytest.fixture(autouse=True)
     def _mock_sbx(self):
         """Mock _run_command_sbx to return a basic CommandResult."""
-        import os
-
-        def mock_sbx_run(self, command, injections, env_override, cwd, askpass_helper=False):
-            import subprocess as _real_subprocess
-
-            try:
-                env = os.environ.copy()
-                if env_override:
-                    env.update(env_override)
-                result = _real_subprocess.run(
-                    command,
-                    shell=True,
-                    capture_output=True,
-                    timeout=5,
-                    check=False,
-                    env=env,
-                    cwd=cwd,
-                )
-                return CommandResult(
-                    command=command,
-                    exit_code=result.returncode,
-                    stdout=result.stdout,
-                    stderr=result.stderr,
-                )
-            except Exception:
-                return CommandResult(command=command, exit_code=1, stdout=b"", stderr=b"mock error")
-
         with patch.object(Executor, "_run_command_sbx", mock_sbx_run):
             yield
 
