@@ -8,6 +8,13 @@
 
 set -euo pipefail
 
+# #317: close every create-then-chmod window (install-venya-core.sh writes
+# secrets at :454/:493/:565/:605/:807 before their chmod lands). Deliberate
+# world-readables (public certs, nginx-served CA copy) all carry explicit
+# chmod 644/755 lines and still win. Child processes inherit; sudo does NOT
+# reset the caller umask — covered.
+umask 077
+
 ###############################################################################
 # Venya Core Installer
 #
@@ -192,6 +199,21 @@ elif [ -f "$STORED_ENV_FILE" ]; then
     fi
 fi
 
+# --- Fail-closed config-injection gate (ticket #326) ---
+# These operator values interpolate into the runtime .env (pydantic
+# BaseSettings): a newline-bearing value splits into EXTRA VENYA_* lines,
+# quotes/backslashes break the CORS/JSON arrays and the admin-CA python -c
+# child, and a raw '@' truncates the postgresql:// userinfo (sqlalchemy
+# _parse_url: password group [^@]*). None of these characters are valid in
+# these fields: reject LOUD, exit 1, BEFORE any sink write.
+venya_guard_injection "CORE_HOSTNAME" "$CORE_HOSTNAME" '"' '\' ' '
+venya_guard_injection "VENYA_DB_PASSWORD" "$VENYA_DB_PASSWORD" '@'
+venya_guard_injection "VENYA_DB_PASSPHRASE" "$DB_PASSPHRASE"
+venya_guard_injection "VENYA_RECOVERY_PEPPER" "$RECOVERY_PEPPER"
+if [ -n "$ADMIN_IDENTITY" ]; then
+    venya_guard_injection "VENYA_ADMIN_IDENTITY" "$ADMIN_IDENTITY" '"' '\'
+fi
+
 # --- Create venya service account (no password, nologin, locked) ---
 venya_create_user
 
@@ -296,10 +318,19 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
         fi
     fi
 
+    # #326 F-1: gate the finalized admin passphrase (covers explicit env +
+    # stored-reuse; prompt/random are line-based). Runs BEFORE the python
+    # admin-CA child and before the EnvironmentFile write.
+    venya_guard_injection "ADMIN_CA_PASSPHRASE" "$ADMIN_CA_PASSPHRASE"
+
     # Derive default identity
     if [ -z "$ADMIN_IDENTITY" ]; then
         ADMIN_IDENTITY="admin@${CORE_HOSTNAME}"
     fi
+    # Derived identity gets the same gate (#326: composition runs AFTER the
+    # entry guard when VENYA_ADMIN_IDENTITY was unset).
+    venya_guard_injection "ADMIN_IDENTITY" "$ADMIN_IDENTITY" '"' '\'
+
 
     # Create directories
     mkdir -p "$ADMIN_CA_DIR"
@@ -338,17 +369,18 @@ else:
         IFS= read -r VENYA_ADMIN_CA_KEY_PASSPHRASE
         export VENYA_ADMIN_CA_KEY_PASSPHRASE
         exec python -c "
+import sys
 from pathlib import Path
 from server.ca import AdminCAManager
 from server.config import CASecurityConfig
 cm = AdminCAManager(Path(\"$1\"), CASecurityConfig(key_passphrase_env=\"VENYA_ADMIN_CA_KEY_PASSPHRASE\"))
-cert, key_pem, cert_pem = cm.sign_admin_cert(\"$3\")
+cert, key_pem, cert_pem = cm.sign_admin_cert(sys.argv[1])
 Path(\"$2/admin.crt\").write_bytes(cert_pem)
 Path(\"$2/admin.key\").write_bytes(key_pem)
 Path(\"$2/admin.crt\").chmod(0o644)
 Path(\"$2/admin.key\").chmod(0o600)
-print(\"Admin cert generated for $3\")
-"
+print(\"Admin cert generated for \" + sys.argv[1])
+" "$3"
     ' _ "$ADMIN_CA_DIR" "$ADMIN_CERT_DIR" "$ADMIN_IDENTITY" <<<"$ADMIN_CA_PASSPHRASE"
 
     info "Admin CA and first admin cert generated for $ADMIN_IDENTITY"
@@ -368,8 +400,10 @@ systemctl enable postgresql
 # Create the venya DB role if missing. Password is fed to psql on stdin (here-doc)
 # so it never appears on any process's /proc/*/cmdline (M-59, same pattern as M-56).
 if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya'" 2>/dev/null | grep -q 1; then
+    VENYA_DB_PASSWORD_SQL=${VENYA_DB_PASSWORD//\'/\'\'}
     sudo -u postgres psql > /dev/null 2>&1 <<PSL_EOT
-CREATE USER venya WITH PASSWORD '$VENYA_DB_PASSWORD';
+SET standard_conforming_strings = on;
+CREATE USER venya WITH PASSWORD '$VENYA_DB_PASSWORD_SQL';
 PSL_EOT
 fi
 
@@ -409,7 +443,10 @@ info "Server will bind to: $BIND_ADDRESS (Nginx handles TLS)"
 # /etc/venya holds runtime files (venya-core.env, tls/). The server reads config
 # from /opt/venya/.env only — server.toml was never read at runtime and is no longer
 # written (core-server-toml-inert).
-mkdir -p /etc/venya
+# #317 umask 077 guard: /etc/venya is root-owned and the venya daemon must
+# traverse it (its inner dirs/files are individually protected) — pin the
+# mode the old inherited 0755 provided, explicitly.
+install -d -m 0755 /etc/venya
 
 # --- Root/executor CA key passphrase (VENYA_CA_KEY_PASSPHRASE) ---
 # The root CA signs executor certs, so its key must be encrypted at rest
@@ -436,6 +473,11 @@ if [ -z "$CA_KEY_PASSPHRASE" ]; then
     fi
 fi
 
+# #326 F-1: gate the finalized root-CA passphrase (explicit env + stored
+# reuse branches; prompt/random are line-based). Runs before the
+# EnvironmentFile write and before every openssl/python consumer.
+venya_guard_injection "CA_KEY_PASSPHRASE" "$CA_KEY_PASSPHRASE"
+
 # --- Write .env (core-specific) ---
 # Operator-added config keys survive regeneration (ticket
 # installer-rerun-env-custom-keys-clobbered): the template below owns
@@ -443,7 +485,7 @@ fi
 # in an existing .env (e.g. VENYA_SESSION__* tuning) is captured here and
 # re-appended after the template blocks. The five SECRETS keep their own
 # stored-reuse blocks above — this is for non-secret operator config.
-MANAGED_ENV_KEYS="VENYA_HOST VENYA_DB_URL VENYA_DB__DATABASE_URL VENYA_DB__PASSPHRASE VENYA_FIDO2__RP_ID VENYA_FIDO2__RP_NAME VENYA_CORS__ORIGINS VENYA_RECOVERY_CODE_PEPPER VENYA_ADMIN_MTLS__ENABLED VENYA_ADMIN_MTLS__CA_CERT VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS VENYA_MTLS_CERT VENYA_MTLS_KEY"
+MANAGED_ENV_KEYS="VENYA_HOST VENYA_DB_URL VENYA_DB__DATABASE_URL VENYA_DB__PASSPHRASE VENYA_FIDO2__RP_ID VENYA_FIDO2__RP_NAME VENYA_CORS__ORIGINS VENYA_RECOVERY_CODE_PEPPER VENYA_ADMIN_MTLS__ENABLED VENYA_ADMIN_MTLS__CA_CERT VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS VENYA_MTLS_CERT VENYA_MTLS_KEY VENYA_INNER_MTLS__ENABLED VENYA_INNER_MTLS__CERT_FILE VENYA_INNER_MTLS__KEY_FILE VENYA_INNER_MTLS__CLIENT_CA_FILE VENYA_INNER_MTLS__CERT_PATH_PREFIX"
 PRESERVED_ENV_LINES=""
 if [ -f "$STORED_ENV_FILE" ]; then
     PRESERVED_ENV_LINES=$(awk -F= -v managed="$MANAGED_ENV_KEYS" '
@@ -451,26 +493,26 @@ if [ -f "$STORED_ENV_FILE" ]; then
         /^VENYA_/ && !($1 in skip)
     ' "$STORED_ENV_FILE")
 fi
-cat > "$INSTALL_DIR/.env" << EOF
-VENYA_HOST=127.0.0.1
-VENYA_DB_URL=postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya
-VENYA_DB__DATABASE_URL=postgresql://venya_audit@/venya?host=/var/run/postgresql
-VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
-VENYA_FIDO2__RP_ID=$CORE_HOSTNAME
-VENYA_FIDO2__RP_NAME=Venya Core
-VENYA_CORS__ORIGINS=["https://$CORE_HOSTNAME"]
-VENYA_RECOVERY_CODE_PEPPER=$RECOVERY_PEPPER
-EOF
+{
+    printf 'VENYA_HOST=127.0.0.1\n'
+    printf 'VENYA_DB_URL=postgresql://venya:%s@localhost/venya\n' "$VENYA_DB_PASSWORD"  # pragma: allowlist secret
+    printf 'VENYA_DB__DATABASE_URL=postgresql://venya_audit@/venya?host=/var/run/postgresql\n'
+    printf 'VENYA_DB__PASSPHRASE=%s\n' "$DB_PASSPHRASE"
+    printf 'VENYA_FIDO2__RP_ID=%s\n' "$CORE_HOSTNAME"
+    printf 'VENYA_FIDO2__RP_NAME=Venya Core\n'
+    printf 'VENYA_CORS__ORIGINS=["https://%s"]\n' "$CORE_HOSTNAME"
+    printf 'VENYA_RECOVERY_CODE_PEPPER=%s\n' "$RECOVERY_PEPPER"
+} > "$INSTALL_DIR/.env"
 
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     # NOTE: the admin passphrase is NOT written to .env. pydantic reads .env into
     # the settings object, not into os.environ — and ca.py/app.py read os.environ.
     # Passphrases reach the daemon via the 0640 EnvironmentFile below.
-    cat >> "$INSTALL_DIR/.env" << EOF
-VENYA_ADMIN_MTLS__ENABLED=true
-VENYA_ADMIN_MTLS__CA_CERT="$ADMIN_CA_DIR/admin-ca.crt"
-VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS=["$ADMIN_IDENTITY"]
-EOF
+    {
+        printf 'VENYA_ADMIN_MTLS__ENABLED=true\n'
+        printf 'VENYA_ADMIN_MTLS__CA_CERT="%s/admin-ca.crt"\n' "$ADMIN_CA_DIR"
+        printf 'VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS=["%s"]\n' "$ADMIN_IDENTITY"
+    } >> "$INSTALL_DIR/.env"
 fi
 
 if [ -n "$PRESERVED_ENV_LINES" ]; then
@@ -490,11 +532,13 @@ fi
 # root CA is generated unconditionally and signs executor certs at runtime); the
 # ADMIN CA passphrase is appended only when admin mTLS is enabled. Written before
 # the CA-gen/openssl-signing below so a re-run can reuse it (idempotency above).
-cat > /etc/venya/venya-core.env << EOF
-VENYA_CA_KEY_PASSPHRASE=$CA_KEY_PASSPHRASE
-EOF
+# #326 F-1: printf writers — values pass as ARGUMENTS (Layer 2), the
+# newline/CR split that made this a systemd Environment= injection sink
+# is rejected at finalization above (Layer 1; fail-closed cannot brick:
+# a newline-bearing passphrase could never round-trip this file anyway).
+printf 'VENYA_CA_KEY_PASSPHRASE=%s\n' "$CA_KEY_PASSPHRASE" > /etc/venya/venya-core.env
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
-    echo "VENYA_ADMIN_CA_KEY_PASSPHRASE=$ADMIN_CA_PASSPHRASE" >> /etc/venya/venya-core.env
+    printf 'VENYA_ADMIN_CA_KEY_PASSPHRASE=%s\n' "$ADMIN_CA_PASSPHRASE" >> /etc/venya/venya-core.env
 fi
 chown root:venya /etc/venya/venya-core.env
 chmod 0640 /etc/venya/venya-core.env
@@ -568,10 +612,11 @@ openssl ecparam -genkey -name prime256v1 -noout -out /etc/venya/tls/server.key
 chown venya:venya /etc/venya/tls/server.key
 chmod 600 /etc/venya/tls/server.key
 
-openssl req -new -key /etc/venya/tls/server.key -out /tmp/server.csr \
+SERVER_CSR=$(mktemp /tmp/venya-server-XXXXXX.csr)   # #317: static /tmp name = symlink-clobber hazard
+openssl req -new -key /etc/venya/tls/server.key -out "$SERVER_CSR" \
     -subj "/O=Venya/CN=$CORE_HOSTNAME"
 
-VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/server.csr \
+VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in "$SERVER_CSR" \
     -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
     -passin env:VENYA_CA_KEY_PASSPHRASE \
     -CAcreateserial -out /etc/venya/tls/server.crt -days 365 \
@@ -579,7 +624,7 @@ VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/server.c
 
 chown venya:venya /etc/venya/tls/server.crt
 chmod 644 /etc/venya/tls/server.crt
-rm -f /tmp/server.csr
+rm -f "$SERVER_CSR"
 
 info "Server TLS certificate signed with Venya CA"
 
@@ -606,15 +651,16 @@ openssl ecparam -genkey -name prime256v1 -noout -out "$RELAY_DIR/relay-client.ke
 chown venya:venya "$RELAY_DIR/relay-client.key"
 chmod 600 "$RELAY_DIR/relay-client.key"
 
+RELAY_CSR=$(mktemp /tmp/venya-relay-XXXXXX.csr)   # #317: static /tmp name = symlink-clobber hazard
 openssl req -new -key "$RELAY_DIR/relay-client.key" \
-    -out /tmp/relay-client.csr \
+    -out "$RELAY_CSR" \
     -subj "/O=Venya/CN=${CORE_HOSTNAME}-relay"
 
 # SKI + AKI are non-optional: Python 3.14 ssl rejects a chain without an
 # Authority Key Identifier (33bc4b4); a lenient s_client smoke masks the
 # absence. EKU is clientAuth-only: the core relay cert never serves a server
 # role (the executor leaf is dual-purpose by design — do not "unify").
-VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/relay-client.csr \
+VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in "$RELAY_CSR" \
     -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
     -passin env:VENYA_CA_KEY_PASSPHRASE \
     -CAcreateserial -out "$RELAY_DIR/relay-client.crt" -days 365 \
@@ -622,7 +668,7 @@ VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/relay-cl
 
 chown venya:venya "$RELAY_DIR/relay-client.crt"
 chmod 644 "$RELAY_DIR/relay-client.crt"
-rm -f /tmp/relay-client.csr
+rm -f "$RELAY_CSR"
 
 # Self-check: fail the install loudly on a half-wired relay cert.
 if ! openssl verify -CAfile /var/lib/venya/ca/ca.crt "$RELAY_DIR/relay-client.crt" >/dev/null 2>&1; then
@@ -650,11 +696,68 @@ fi
 
 info "Relay client certificate signed and verified: CN=${CORE_HOSTNAME}-relay (client Yes / server No)"
 
+# --- Inner mTLS channel keypair (#314 end-to-end-mtls-header-trust-removal) ---
+# One keypair, BOTH roles: nginx presents it as a CLIENT to uvicorn
+# (proxy_ssl_certificate) and uvicorn's SERVER cert is the same file (nginx
+# verifies it via proxy_ssl_trusted_certificate). CN/subjectAltName identify
+# the loopback channel only; no app-layer identity is asserted from it (ruled
+# Q6 — uvicorn discards the inner peer after TLS verification).
+INNER_DIR="/etc/venya/tls"
+
+openssl ecparam -genkey -name prime256v1 -noout -out "$INNER_DIR/inner.key"
+chown venya:venya "$INNER_DIR/inner.key"
+chmod 600 "$INNER_DIR/inner.key"
+
+INNER_CSR=$(mktemp /tmp/venya-inner-XXXXXX.csr)   # #317: static /tmp name = symlink-clobber hazard
+openssl req -new -key "$INNER_DIR/inner.key" \
+    -out "$INNER_CSR" \
+    -subj "/O=Venya/CN=${CORE_HOSTNAME}-inner"
+
+# SKI + AKI non-optional (F1: Python 3.14 ssl rejects AKI-less chains; lenient
+# s_client masks it). extfile newline-separated (F2). EKU BOTH roles (the
+# relay-cert single-purpose convention deliberately does NOT carry over —
+# this leaf serves and authenticates on the same loopback channel).
+VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in "$INNER_CSR" \
+    -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
+    -passin env:VENYA_CA_KEY_PASSPHRASE \
+    -CAcreateserial -out "$INNER_DIR/inner.crt" -days 365 \
+    -extfile <(printf 'extendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:localhost,DNS:%s,IP:127.0.0.1\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n' "${CORE_HOSTNAME}")
+
+chown venya:venya "$INNER_DIR/inner.crt"
+chmod 644 "$INNER_DIR/inner.crt"
+rm -f "$INNER_CSR"
+
+# F1-F4 self-checks — strict mechanism, never a lenient smoke:
+if ! openssl verify -CAfile /var/lib/venya/ca/ca.crt "$INNER_DIR/inner.crt" >/dev/null 2>&1; then
+    error "Inner channel cert failed verification against the Venya CA"
+    exit 1
+fi
+ACTUAL_INNER_CN=$(openssl x509 -in "$INNER_DIR/inner.crt" -noout -subject -nameopt multiline | sed -n 's/^ *commonName *= *//p')
+if [ "$ACTUAL_INNER_CN" != "${CORE_HOSTNAME}-inner" ]; then
+    error "Inner channel cert CN mismatch: expected '${CORE_HOSTNAME}-inner', got '${ACTUAL_INNER_CN}'"
+    exit 1
+fi
+PURPOSE_OUT=$(openssl x509 -in "$INNER_DIR/inner.crt" -noout -purpose 2>/dev/null)
+printf '%s\n' "$PURPOSE_OUT" | grep -qE '^[[:space:]]*SSL client[[:space:]]+: Yes' || { error "Inner cert purpose: expected 'SSL client : Yes'"; exit 1; }
+printf '%s\n' "$PURPOSE_OUT" | grep -qE '^[[:space:]]*SSL server[[:space:]]+: Yes' || { error "Inner cert purpose: expected 'SSL server : Yes'"; exit 1; }
+
+# F1 application at the RUNTIME verifier (uvicorn is Python ssl, not openssl):
+# loopback handshake smoke with python3 -m ssl is unavailable; the functional
+# proof is the post-restart health fetch (P4's final step). Install-time this
+# cell is the openssl verify above; the PYTHON-side verification smoke happens
+# FLEET-WINDOW as the first nginx→uvicorn fetch (see FLEET checklist).
+info "Inner mTLS keypair signed and verified: CN=${CORE_HOSTNAME}-inner (client Yes / server Yes)"
+
 # Functional wiring: the server reads .env at runtime. The appended values are
 # non-secret paths only.
 cat >> "$INSTALL_DIR/.env" << EOF
 VENYA_MTLS_CERT=$RELAY_DIR/relay-client.crt
 VENYA_MTLS_KEY=$RELAY_DIR/relay-client.key
+VENYA_INNER_MTLS__ENABLED=true
+VENYA_INNER_MTLS__CERT_FILE=/etc/venya/tls/inner.crt
+VENYA_INNER_MTLS__KEY_FILE=/etc/venya/tls/inner.key
+VENYA_INNER_MTLS__CLIENT_CA_FILE=/var/lib/venya/ca/ca.crt
+VENYA_INNER_MTLS__CERT_PATH_PREFIX=/var/lib/nginx
 EOF
 
 # Install Venya CA into system trust store
@@ -668,7 +771,10 @@ update-ca-certificates > /dev/null 2>&1
 info "Venya CA installed to system trust store"
 
 # Copy CA cert to servable path for executor bootstrap
+# #317 umask 077 guard: nginx WORKERS (www-data) serve this dir — the file
+# inside already gets explicit chmod 644; the DIR needs the traverse bit.
 mkdir -p /var/www/.well-known
+chmod 755 /var/www/.well-known
 cp /var/lib/venya/ca/ca.crt /var/www/.well-known/venya-ca.crt
 chmod 644 /var/www/.well-known/venya-ca.crt
 info "CA cert served at /.well-known/venya-ca.crt"
@@ -686,10 +792,22 @@ else
     ADMIN_CA_PATH=""
 fi
 
-# Create CA bundle: Venya Root CA + Admin CA.
+# Create CA bundle: Venya Root CA + Admin CA (when admin mTLS is on).
 # Nginx needs both to verify admin client certs (Admin CA) and executor certs (Root CA).
-cat /var/lib/venya/ca/ca.crt /etc/nginx/ssl/client-ca.crt > /etc/nginx/ssl/client-ca-bundle.crt 2>/dev/null || true
-chmod 644 /etc/nginx/ssl/client-ca-bundle.crt 2>/dev/null || true
+# #314 F7 (owner ruling Q1(b)): fail loud, scoped per admin-mTLS state — the old
+# "|| true" silently produced an empty/truncated bundle when an input was missing.
+if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
+    if ! cat /var/lib/venya/ca/ca.crt /etc/nginx/ssl/client-ca.crt > /etc/nginx/ssl/client-ca-bundle.crt; then
+        error "Failed to build /etc/nginx/ssl/client-ca-bundle.crt — client-CA inputs missing/unreadable"
+        exit 1
+    fi
+else
+    if ! cat /var/lib/venya/ca/ca.crt > /etc/nginx/ssl/client-ca-bundle.crt; then
+        error "Failed to build /etc/nginx/ssl/client-ca-bundle.crt — root CA missing/unreadable"
+        exit 1
+    fi
+fi
+chmod 644 /etc/nginx/ssl/client-ca-bundle.crt
 
 cat > /etc/nginx/sites-available/venya << EOF
 server {
@@ -709,7 +827,7 @@ server {
     # for a command that actually ran (and may retry -> double execution). 330s = the
     # 300s relay ceiling + 30s margin, so the server's own clean 503 "Executor timed
     # out" surfaces rather than an nginx 504 at the boundary. Set at server level so it
-    # covers every proxied location without duplicating the X-Client-* headers below
+    # covers every proxied location without duplicating the X-Client-Cert-File header below
     # (ticket relay-cold-start-nginx-proxy-timeout).
     proxy_read_timeout 330s;
     proxy_send_timeout 330s;
@@ -720,14 +838,29 @@ server {
     }
 
     location /api/v1/health {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass https://127.0.0.1:8080;
+        proxy_ssl_certificate /etc/venya/tls/inner.crt;
+        proxy_ssl_certificate_key /etc/venya/tls/inner.key;
+        proxy_ssl_trusted_certificate /var/lib/venya/ca/ca.crt;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 2;
+        proxy_ssl_name localhost;
     }
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header X-Client-Verified \$ssl_client_verify;
-        proxy_set_header X-Client-Subject \$ssl_client_s_dn;
-        proxy_set_header X-Client-Serial \$ssl_client_serial;
+        proxy_pass https://127.0.0.1:8080;
+        # Inner mTLS channel (#314): nginx authenticates to uvicorn...
+        proxy_ssl_certificate /etc/venya/tls/inner.crt;
+        proxy_ssl_certificate_key /etc/venya/tls/inner.key;
+        proxy_ssl_trusted_certificate /var/lib/venya/ca/ca.crt;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 2;
+        proxy_ssl_name localhost;
+        # ...and forwards the OUTER verified client cert as a per-connection
+        # PEM file path ($ssl_client_certificate_path writes the PEM under the
+        # client-body temp path, then reaps it; the app reads it in-request,
+        # re-verifies it against its own CA, and no header is identity).
+        proxy_set_header X-Client-Cert-File \$ssl_client_certificate_path;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }

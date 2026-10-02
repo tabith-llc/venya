@@ -48,6 +48,28 @@ venya_print_colors() {
     error() { echo -e "${RED}[ERROR]${NC} $*"; }
 }
 
+# --- Config-injection fail-closed gate (ticket #326) ---
+# Shared by the core and executor installers: operator values that
+# interpolate into installer-written config files must not contain
+# newline/CR (splits into EXTRA config lines) or the listed characters.
+venya_guard_injection() {
+    # usage: venya_guard_injection LABEL VALUE [FORBIDDEN_CHAR ...]
+    local label="$1" value="$2" bad
+    shift 2
+    case "$value" in
+        *$'\n'*|*$'\r'*)
+            error "$label must not contain newline/CR — it would inject extra config lines."
+            exit 1 ;;
+    esac
+    for bad in "$@"; do
+        case "$value" in
+            *"$bad"*)
+                error "$label must not contain the character: $bad"
+                exit 1 ;;
+        esac
+    done
+}
+
 # --- 2. Root check ---
 
 venya_check_root() {
@@ -276,14 +298,24 @@ venya_download_tarball() {
     # Args: $1 = tarball_type (core|executor)
     local tarball_type="${1:-core}"
     if [ -z "$TARBALL_URL" ]; then
-        if [ -f "/tmp/venya-install.tar.gz" ]; then
+        if [ -f "/tmp/venya-${tarball_type}-install.tar.gz" ]; then
             TARBALL_URL="file:///tmp/venya-${tarball_type}-install.tar.gz"
-        elif [ -f "/opt/venya-install.tar.gz" ]; then
+        elif [ -f "/opt/venya-${tarball_type}-install.tar.gz" ]; then
             TARBALL_URL="file:///opt/venya-${tarball_type}-install.tar.gz"
         else
-            error "No tarball found. Set VENYA_TARBALL to a URL or place venya-${tarball_type}-install.tar.gz in /tmp/"
+            error "No tarball found. Set VENYA_TARBALL to a URL, or place venya-${tarball_type}-install.tar.gz in /tmp/ AND set VENYA_TARBALL_SHA256 (#327)."
             exit 1
         fi
+    fi
+
+    if [[ "$TARBALL_URL" == file://* && -L "${TARBALL_URL#file://}" ]]; then
+        error "Tarball source is a symlink: ${TARBALL_URL#file://} — refusing to follow it (#327)."
+        exit 1
+    fi
+    if [[ "$TARBALL_URL" == file://* && -z "${VENYA_TARBALL_SHA256:-}" ]]; then
+        error "Offline file:// install without VENYA_TARBALL_SHA256: the .sha256 sidecar would come from the same (attacker-writable) origin — self-attesting, not integrity (#327)."
+        error "Set VENYA_TARBALL_SHA256 out-of-band to the operator-pinned hash to install from a local file."
+        exit 1
     fi
 
     info "Downloading tarball from $TARBALL_URL..."
@@ -305,6 +337,10 @@ venya_download_tarball() {
     #     guardrail, NOT a security boundary — whoever controls the origin
     #     controls both files. (A piped install already grants the origin code
     #     execution, so a same-origin hash adds no attacker protection.)
+    #   - file:// sources (offline fallback, VENYA_TARBALL=file://...): the
+    #     sidecar would be read from the SAME local (attacker-writable) origin
+    #     — self-attesting. An operator-supplied VENYA_TARBALL_SHA256 pin is
+    #     REQUIRED on the file:// path (#327); guarded above, before any write.
     # Sidecar fetch failure or empty sidecar aborts — never install unverified.
     EXPECTED_SHA256="${VENYA_TARBALL_SHA256:-}"
     if [ -z "$EXPECTED_SHA256" ]; then
@@ -524,7 +560,9 @@ venya_validate_egress_entry() {
 
 venya_write_egress_allowlist() {
     EGRESS_ALLOWLIST="/etc/venya/egress-allowlist.txt"
-    mkdir -p /etc/venya
+    # #317 umask 077 guard: parent-script umask is inherited into common
+    # helpers; pin the traverse bit the old inherited dir mode provided.
+    install -d -m 0755 /etc/venya
 
     if [ -f "$EGRESS_ALLOWLIST" ]; then
         info "Egress allowlist already exists at $EGRESS_ALLOWLIST — not overwriting"

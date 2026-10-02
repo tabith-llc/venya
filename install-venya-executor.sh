@@ -8,6 +8,10 @@
 
 set -euo pipefail
 
+# #317: close create-then-chmod windows (executor.toml :435->613, bootstrap-token
+# :600->602). Deliberate world-readables carry explicit chmod lines.
+umask 077
+
 ###############################################################################
 # Venya Executor Installer
 #
@@ -78,6 +82,20 @@ if [ -z "${VENYA_SERVER_URL:-}" ]; then
     exit 1
 fi
 SERVER_URL="$VENYA_SERVER_URL"
+
+# --- Fail-closed config-injection gate (ticket #326, F-2) ---
+# These values interpolate raw into installer-written config files:
+# /etc/venya/executor.toml (TOML basic strings) below. Newline/CR splits a
+# value into EXTRA config lines (built-in rejection); a double quote
+# terminates the TOML basic string (same-line key breakout); a backslash
+# starts an escape or eats the closing quote. Space and '#', '@', '%' are
+# TOML-safe INSIDE the quoted values this file writes, so they stay
+# accepted (minimal contract — cannot brick a working re-run). DNS_RESOLVER
+# needs no call: venya_resolve_dns_resolver strict-IPv4-validates it;
+# CA_BUNDLE_PATH is a script constant; the enrollment token is written by
+# a single-quoted printf and never interpolated.
+venya_guard_injection "SERVER_URL" "$SERVER_URL" '"' '\'
+venya_guard_injection "EXECUTOR_ID" "$EXECUTOR_ID" '"' '\'
 
 venya_resolve_dns_resolver
 
@@ -212,14 +230,15 @@ chown venya:adm /var/log/venya 2>/dev/null || chown venya:venya /var/log/venya
 info "Installing Docker Sandboxes (sbx) CLI..."
 if ! command -v sbx &>/dev/null; then
     SBX_SCRIPT=$(mktemp /tmp/docker-sbx-install-XXXXXX.sh)
+    SBX_LOG=$(mktemp /tmp/venya-sbx-repo-XXXXXX.log)   # #317: static name = root symlink-clobber
     curl -fsSL https://get.docker.com -o "$SBX_SCRIPT"
-    if ! REPO_ONLY=1 sh "$SBX_SCRIPT" > /tmp/venya-sbx-repo.log 2>&1; then
+    if ! REPO_ONLY=1 sh "$SBX_SCRIPT" > "$SBX_LOG" 2>&1; then
         error "Docker sbx apt-repo setup failed; last 25 lines:"
-        tail -25 /tmp/venya-sbx-repo.log >&2
-        rm -f "$SBX_SCRIPT"
+        tail -25 "$SBX_LOG" >&2
+        rm -f "$SBX_SCRIPT" "$SBX_LOG"
         exit 1
     fi
-    rm -f "$SBX_SCRIPT"
+    rm -f "$SBX_SCRIPT" "$SBX_LOG"
     venya_apt install -y -qq docker-sbx
     usermod -aG kvm venya 2>/dev/null || true
     info "sbx CLI installed. venya user added to kvm group."
@@ -357,6 +376,13 @@ fi
 # (a diverged CN surfaces as relay 403 with nothing in the install output).
 CORE_HOSTNAME="${VENYA_CORE_HOSTNAME:-$(printf '%s' "$SERVER_URL" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#/.*$##; s#:.*$##')}"
 
+# #326 F-2: gate the composed CORE_HOSTNAME — explicit VENYA_CORE_HOSTNAME
+# bypasses the SERVER_URL entry guard, and the URL-derived path can carry a
+# newline when it appears AFTER the first '/'. Quote/backslash/space match
+# the core installer's identical CORE_HOSTNAME contract (this value seeds
+# the relay CN + a /etc/hosts entry).
+venya_guard_injection "CORE_HOSTNAME" "$CORE_HOSTNAME" '"' '\' ' '
+
 # Ensure the core hostname is resolvable in /etc/hosts (skip IP hosts: an IP
 # needs no resolution, and writing an IP "name" would misroute).
 # Resolution precedence (fail-closed — no hardcoded default IP; guessing one
@@ -429,29 +455,35 @@ else
 fi
 
 # --- Write executor config (after CA installation so ca_bundle path is valid) ---
+# #317 umask 077 guard: root-owned /etc/venya needs the inherited 0755 traverse
+# bit for the venya daemon (inner files/dirs individually protected as before).
+install -d -m 0755 /etc/venya
 mkdir -p /etc/venya/executor
 mkdir -p /var/log/venya
 
-cat > /etc/venya/executor.toml << EOF
-server_url = "$SERVER_URL"
-executor_id = "$EXECUTOR_ID"
-log_level = "info"
-daemonize = false
-injection_method = "sbx"
-secret_base_fd = 100
-ca_bundle = "$CA_BUNDLE_PATH"
-dns_resolver = "$DNS_RESOLVER"
-
-# Relay CN allowlist — MUST stay top-level (not under [mtls]). Value mirrors
-# the core's relay-client cert CN (core installer). 'venya exec register'
-# writes only cert files, so this line survives registration.
-relay_client_ids = ["${CORE_HOSTNAME}-relay"]
-
-[mtls]
-ca_cert = "/etc/venya/executor/ca.crt"
-cert = "/etc/venya/executor/executor.crt"
-key = "/etc/venya/executor/executor.key"
-EOF
+# #326 F-2: printf writer — interpolated values pass as ARGUMENTS (no
+# format-string exposure, no implicit expansion in the sink body); static
+# lines keep their exact bytes and order.
+{
+    printf 'server_url = "%s"\n' "$SERVER_URL"
+    printf 'executor_id = "%s"\n' "$EXECUTOR_ID"
+    printf 'log_level = "info"\n'
+    printf 'daemonize = false\n'
+    printf 'injection_method = "sbx"\n'
+    printf 'secret_base_fd = 100\n'
+    printf 'ca_bundle = "%s"\n' "$CA_BUNDLE_PATH"
+    printf 'dns_resolver = "%s"\n' "$DNS_RESOLVER"
+    printf '\n'
+    printf '# Relay CN allowlist — MUST stay top-level (not under [mtls]). Value mirrors\n'
+    printf '# the core'\''s relay-client cert CN (core installer). %s\n' "'venya exec register'"
+    printf '# writes only cert files, so this line survives registration.\n'
+    printf 'relay_client_ids = ["%s-relay"]\n' "$CORE_HOSTNAME"
+    printf '\n'
+    printf '[mtls]\n'
+    printf 'ca_cert = "/etc/venya/executor/ca.crt"\n'
+    printf 'cert = "/etc/venya/executor/executor.crt"\n'
+    printf 'key = "/etc/venya/executor/executor.key"\n'
+} > /etc/venya/executor.toml
 
 info "Executor config written to /etc/venya/executor.toml"
 info "Sandbox DNS resolver: $DNS_RESOLVER"
@@ -596,7 +628,10 @@ fi
 # crash-loop the boot. The daemon still honors a hand-placed legacy section
 # (loud non-fatal clear failure) until old installs are cut over.
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ] && [ "$CA_INSTALLED" != true ]; then
-    install -d -m 0755 -o venya -g venya /var/lib/venya/executor
+    # #317: 0750 not 0755 — readers are the daemon (User=venya = owner) and
+    # root only; the token file lands 0600, but the old world-traversable dir
+    # plus the :600->602 chmod window made that token locally readable.
+    install -d -m 0750 -o venya -g venya /var/lib/venya/executor
     printf '%s\n' "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" > /var/lib/venya/executor/bootstrap-token
     chown venya:venya /var/lib/venya/executor/bootstrap-token
     chmod 600 /var/lib/venya/executor/bootstrap-token
