@@ -71,11 +71,13 @@ SBX_TIMEOUT = 3600  # 1 hour max
 # The command crosses the wire as a structured argv list (ticket
 # execution-command-wire-unstructured-string #322, ruling Q1=A1), so the gate
 # checks every metacharacter INSIDE every argv element — a `|` packed into one
-# element can never be misread as a separator. The production sbx path still
-# hands an executor-reconstituted string to `sh -c` inside the sandbox (the
-# memfd/direct path's shell=False is the exception, not the rule); rejection
-# at the gate means these characters never reach any shell. Users needing
-# pipes, redirects, or other shell features should provide a script file.
+# element can never be misread as a separator. The production sbx path runs
+# the validated argv DIRECT (no shell — ticket #322 ruling Q3=C3); the one
+# exception is the ruled session-bound `<` redirect case, where the guest
+# shell must perform the redirect so the reconstituted string rides `sh -c`.
+# Rejection at the gate means these characters never reach any shell. Users
+# needing pipes, redirects, or other shell features should provide a script
+# file.
 # NUL (\x00) joins the set per ticket argv-nul-gate-reject (#333): it is
 # never valid in argv (execve contract) — an element carrying it must take
 # this audited rejection path, not ride to execve and surface as an opaque
@@ -329,15 +331,20 @@ class Executor:
                 self.audit_logger.emit("command_rejected", command=shlex.join(command), reason=str(exc))
             raise ValueError(f"Command rejected: {exc}") from None
 
-        # EXECUTION POSTURE — the validated argv is reconstituted and fed to
-        # the EXISTING sh -c sbx path. render_command quotes every element
-        # exactly like shlex.join EXCEPT the ruled session-bound redirect pair,
-        # which it re-emits RAW so the guest shell performs a real redirect
-        # (ticket redirect-allowance-neutralized-by-quoting #332: the plain
-        # shlex.join quoted the pair into inertness, silently killing
-        # sudo-remote option (a) since the #319 quoting fix). The ruled C3
-        # argv-direct switch is LEG B, gated on the fleet sbx argv-boundary
-        # probe; this render is the ruled C1 floor with the allowance restored.
+        # EXECUTION POSTURE (ticket #322 ruling Q3=C3, owner 2026-10-02; fleet
+        # C5 probe grounded): the common case runs the VALIDATED ARGV LIST
+        # DIRECT in the sandbox (no shell — boundaries are the list's, nothing
+        # re-parses them, mirroring the memfd path's shell=False posture). The
+        # ONE exception is a command carrying the ruled session-bound redirect
+        # pair: the guest shell must perform the redirect, so that case keeps
+        # the rendered string through `sh -c`. render_command quotes every
+        # element exactly like shlex.join EXCEPT the accepted pair, which it
+        # re-emits RAW (ticket redirect-allowance-neutralized-by-quoting #332:
+        # the plain shlex.join quoted the pair into inertness, silently killing
+        # sudo-remote option (a) since the #319 quoting fix). The rendered
+        # string is also the policy-gate input and the audit/display form in
+        # BOTH postures — byte-identical to shlex.join when no pair is present.
+        has_redirect_pair = any(_redirect_pair(command, i, allowed_redirects) for i in range(len(command)))
         command_str = render_command(command, allowed_redirects)
 
         # Step 1b: POLICY gate — dangerous patterns / preset checks (string-
@@ -374,9 +381,15 @@ class Executor:
                 }
                 self.audit_logger.emit("credential_injected", **audit_data)
 
-            # Step 3: Execute with injected secrets (sbx only)
+            # Step 3: Execute with injected secrets (sbx only). argv is handed
+            # to the guest DIRECT unless the ruled `<` pair needs the shell.
             result = self._run_command_sbx(
-                command_str, injections, env_final or None, cwd, askpass_helper=askpass_helper
+                command_str,
+                injections,
+                env_final or None,
+                cwd,
+                askpass_helper=askpass_helper,
+                argv=None if has_redirect_pair else command,
             )
 
             # Audit: command_executed
@@ -648,8 +661,15 @@ class Executor:
         env_override: dict[str, str] | None,
         cwd: str | None,
         askpass_helper: bool = False,
+        argv: list[str] | None = None,
     ) -> CommandResult:
         """Run command inside a Docker Sandbox (microVM).
+
+        ``argv`` (ticket #322 ruling Q3=C3): when not None, the guest runs
+        these tokens DIRECT (no shell). ``command`` then stays the display/
+        audit string only. None keeps the ``sh -c`` posture — used solely for
+        the ruled session-bound ``<`` redirect case, where the guest shell
+        must perform the redirect.
 
         Key security properties:
         - Network egress controlled by allowlist file via sbx policy
@@ -702,7 +722,7 @@ class Executor:
         try:
             # Execute command inside sandbox
             logger.info("Executing in sandbox: %s", command)
-            result = strategy.execute_command(command, env_override=env_override, cwd=cwd)
+            result = strategy.execute_command(command, env_override=env_override, cwd=cwd, argv=argv)
 
             # Record true pre-slice sizes BEFORE capping — truncation
             # metadata must describe the real output, not the sliced copy

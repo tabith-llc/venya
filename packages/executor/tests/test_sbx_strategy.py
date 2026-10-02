@@ -573,6 +573,82 @@ class TestSbxStrategyExecuteCommand:
             strategy.execute_command("echo hello")
 
 
+class TestSbxStrategyArgvDirect322:
+    """C3 execution posture (ticket execution-command-wire-unstructured-string
+    #322, owner ruling 2026-10-02; fleet C5 probe grounded: argv boundaries
+    survive render->sh, direct-argv PATH-resolves bare names). When the caller
+    passes `argv`, the guest runs those tokens DIRECT (no `sh -c` wrapper) —
+    boundaries are the list's, nothing re-parses them. `sh -c` remains ONLY for
+    the ruled session-bound `<` sudo-redirect case, which is exactly when the
+    caller omits argv (the guest shell must perform the redirect)."""
+
+    def _strategy(self):
+        strategy = SbxStrategy()
+        strategy._sandbox_name = "venya-test123"
+        return strategy
+
+    def _run(self, strategy, **kwargs):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=b"out", stderr=b"")
+            strategy.execute_command("display string", **kwargs)
+            return mock_run.call_args[0][0]
+
+    def test_argv_tokens_run_direct_no_shell(self):
+        """Positive: argv present -> sbx receives the tokens verbatim after the
+        sandbox name; NO 'sh'/'-c' wrapper anywhere in the command."""
+        argv = self._run(self._strategy(), argv=["/usr/bin/echo", "hello"])
+        assert argv == ["sbx", "exec", "venya-test123", "/usr/bin/echo", "hello"]
+        assert "sh" not in argv and "-c" not in argv
+
+    def test_argv_boundaries_survive_as_single_tokens(self):
+        """C5 fixtures (space/tab/quote forms that passed the probe): each
+        element stays ONE token in the sbx command — no quoting, no splitting."""
+        tricky = ["two words", "ta\tb", "quote'd", 'double"d']
+        argv = self._run(self._strategy(), argv=["/bin/echo", *tricky])
+        assert argv[-4:] == tricky
+        assert argv[:3] == ["sbx", "exec", "venya-test123"]
+
+    def test_argv_none_keeps_shell_path_for_redirect_case(self):
+        """Ruled exception regression pin: the `<` sudo-redirect command
+        (caller omits argv) still crosses as `sh -c <rendered>` with the pair
+        RAW — the guest shell performs the redirect (#332 posture)."""
+        rendered = "cat < /run/secrets/venya/2"
+        strategy = self._strategy()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+            strategy.execute_command(rendered)
+        assert mock_run.call_args[0][0] == ["sbx", "exec", "venya-test123", "sh", "-c", rendered]
+
+    def test_empty_argv_rejected_before_exec(self):
+        """Empty list is a caller bug, not an exec: fail loud BEFORE any sbx
+        call (an empty token list would leave sbx exec with no command)."""
+        strategy = self._strategy()
+        with patch("subprocess.run") as mock_run:
+            with pytest.raises(ValueError, match="empty"):
+                strategy.execute_command("display", argv=[])
+            mock_run.assert_not_called()
+
+    def test_argv_direct_with_env_file_and_cwd(self):
+        """Flag matrix: --env-file/-w still ride BEFORE the sandbox name
+        (values never in argv); the direct tokens follow the name."""
+        strategy = self._strategy()
+        strategy._session_dir = "/tmp/venya-argv-test"
+        with patch.object(SbxStrategy, "_write_env_file", return_value="/tmp/venya-argv-test/venya-env"):
+            with patch.object(SbxStrategy, "_destroy_env_file"):
+                argv = self._run(strategy, env_override={"A": "1"}, cwd="/work", argv=["ls", "-l"])
+        assert argv == [
+            "sbx",
+            "exec",
+            "--env-file",
+            "/tmp/venya-argv-test/venya-env",
+            "-w",
+            "/work",
+            "venya-test123",
+            "ls",
+            "-l",
+        ]
+
+
 class TestSbxStrategyRemoveSandbox:
     def test_remove_sandbox_calls_sbx_rm(self):
         strategy = SbxStrategy()
