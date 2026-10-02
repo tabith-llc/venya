@@ -2518,15 +2518,23 @@ def executor_cert_renew(args: Any) -> int:
         print("Renewal failed: no certificate returned", file=sys.stderr)
         return 1
 
-    # Atomic write: write to temp files, then rename
-    cert_tmp = Path(cert_path).with_suffix(".pem.tmp")
+    # Atomic write: random-name temp files + os.replace (#352 — the predictable
+    # '<cert>.pem.tmp' name let a symlink planted in a co-writable dir hijack
+    # the rename target; same pattern as the key path below, #317 second
+    # application).
+    cert_tmp_name: str | None = None
+    ca_tmp_name: str | None = None
     key_tmp_name: str | None = None
     try:
         output_dir = str(Path(cert_path).parent)
         Path(output_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
         ensure_secret_dir(Path(output_dir))
 
-        cert_tmp.write_bytes(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
+        with tempfile.NamedTemporaryFile(dir=output_dir, prefix=".venya-cert-", suffix=".pem", delete=False) as fd:
+            cert_tmp_name = fd.name
+            fd.write(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
+            fd.flush()
+            os.fchmod(fd.fileno(), 0o600)
 
         key_pem = new_private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -2542,23 +2550,26 @@ def executor_cert_renew(args: Any) -> int:
         key_tmp_name = None
 
         if ca_cert_pem:
-            ca_cert_path = Path(cert_path).with_name("ca.crt")  # type: ignore[assignment]
-            ca_tmp = ca_cert_path.with_suffix(".pem.tmp")  # type: ignore[attr-defined]
-            ca_tmp.write_bytes(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
-            ca_tmp.rename(ca_cert_path)
+            ca_dir = str(Path(cert_path).parent)
+            ca_cert_path = Path(ca_dir) / "ca.crt"  # type: ignore[assignment]
+            with tempfile.NamedTemporaryFile(dir=ca_dir, prefix=".venya-ca-", suffix=".pem", delete=False) as fd:
+                ca_tmp_name = fd.name
+                fd.write(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o600)
+            os.replace(ca_tmp_name, str(ca_cert_path))
+            ca_tmp_name = None
 
-        cert_tmp.rename(cert_path)
+        os.replace(cert_tmp_name, cert_path)
+        cert_tmp_name = None
     except OSError as e:
-        # Clean up temp files on failure
-        try:
-            cert_tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        if key_tmp_name is not None:
-            try:
-                os.unlink(key_tmp_name)
-            except OSError:
-                pass
+        # Clean up any staged temp on failure
+        for leftover in (cert_tmp_name, ca_tmp_name, key_tmp_name):
+            if leftover is not None:
+                try:
+                    os.unlink(leftover)
+                except OSError:
+                    pass
         print(f"Failed to save certificate: {e}", file=sys.stderr)
         return 1
 

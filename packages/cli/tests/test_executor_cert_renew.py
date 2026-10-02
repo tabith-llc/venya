@@ -564,3 +564,77 @@ class TestRenewSecretFileModes:
             os.umask(old)
         assert planted.read_bytes() == b"ATTACKER-PLANTED"  # untouched
         assert serialization.load_pem_private_key(key_path.read_bytes(), password=None) is not None
+
+
+class TestRenewTempHygiene352:
+    """#352 ruling: cert/CA staging uses random-name temp files + os.replace
+    (the #317 pattern, second application). The predictable '<cert>.pem.tmp'
+    name + rename let a symlink planted in a co-writable dir hijack the
+    rename target."""
+
+    def _renew_args(self, cert_path):
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+        return args
+
+    def test_symlink_at_predictable_tmp_name_is_not_followed(self, tmp_path):
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+        victim = tmp_path / "pwn-target"
+        victim.write_text("original")
+        planted = cert_path.with_suffix(".pem.tmp")  # the old predictable name
+        planted.symlink_to(victim)
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=_make_mock_httpx_client()):
+            from venya_cli.commands import executor_cert_renew
+
+            rc = executor_cert_renew(self._renew_args(cert_path))
+
+        assert rc == 0  # paired positive: the renewal itself lands
+        assert victim.read_text() == "original"  # the planted symlink is never used
+        assert b"CERTIFICATE" in cert_path.read_bytes()  # real file, not the symlink
+
+    def test_staging_sources_are_random_names_across_runs(self, tmp_path):
+        # NOTE: the mock renew response carries a NOT-parsable PEM blob (harness
+        # fixture), so each run gets its own fresh cert dir — the pre-check
+        # re-parses the on-disk cert at entry.
+        srcs: list[str] = []
+        real_replace = os.replace
+
+        def spy_replace(src, dst):
+            srcs.append(str(src))
+            return real_replace(src, dst)
+
+        for run in range(2):
+            run_dir = tmp_path / f"run{run}"
+            run_dir.mkdir()
+            cert_path, _key_path, _ = _setup_cert_files(run_dir)
+            with (
+                patch("venya_cli.commands.httpx2.Client", return_value=_make_mock_httpx_client()),
+                patch("venya_cli.commands.os.replace", side_effect=spy_replace),
+            ):
+                from venya_cli.commands import executor_cert_renew
+
+                assert executor_cert_renew(self._renew_args(cert_path)) == 0
+
+        cert_srcs = [s for s in srcs if "cert" in os.path.basename(s)]
+        assert len(cert_srcs) == 2  # cert staging went through os.replace both runs
+        assert cert_srcs[0] != cert_srcs[1]  # names unpredictable (random suffix)
+        assert all(not s.endswith(".pem.tmp") for s in srcs)
+        leftovers = [p for d in tmp_path.iterdir() for p in d.iterdir() if p.name.startswith(".venya-cert-")]
+        assert leftovers == []
+
+    def test_failure_path_leaves_no_temp_files(self, tmp_path):
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+        with (
+            patch("venya_cli.commands.httpx2.Client", return_value=_make_mock_httpx_client()),
+            patch("venya_cli.commands.os.replace", side_effect=OSError("disk full")),
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            rc = executor_cert_renew(self._renew_args(cert_path))
+
+        assert rc == 1
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith((".venya-cert-", ".venya-key-"))]
+        assert leftovers == []
