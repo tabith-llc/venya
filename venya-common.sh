@@ -48,6 +48,28 @@ venya_print_colors() {
     error() { echo -e "${RED}[ERROR]${NC} $*"; }
 }
 
+# --- Config-injection fail-closed gate (ticket #326) ---
+# Shared by the core and executor installers: operator values that
+# interpolate into installer-written config files must not contain
+# newline/CR (splits into EXTRA config lines) or the listed characters.
+venya_guard_injection() {
+    # usage: venya_guard_injection LABEL VALUE [FORBIDDEN_CHAR ...]
+    local label="$1" value="$2" bad
+    shift 2
+    case "$value" in
+        *$'\n'*|*$'\r'*)
+            error "$label must not contain newline/CR — it would inject extra config lines."
+            exit 1 ;;
+    esac
+    for bad in "$@"; do
+        case "$value" in
+            *"$bad"*)
+                error "$label must not contain the character: $bad"
+                exit 1 ;;
+        esac
+    done
+}
+
 # --- 2. Root check ---
 
 venya_check_root() {

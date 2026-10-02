@@ -199,6 +199,21 @@ elif [ -f "$STORED_ENV_FILE" ]; then
     fi
 fi
 
+# --- Fail-closed config-injection gate (ticket #326) ---
+# These operator values interpolate into the runtime .env (pydantic
+# BaseSettings): a newline-bearing value splits into EXTRA VENYA_* lines,
+# quotes/backslashes break the CORS/JSON arrays and the admin-CA python -c
+# child, and a raw '@' truncates the postgresql:// userinfo (sqlalchemy
+# _parse_url: password group [^@]*). None of these characters are valid in
+# these fields: reject LOUD, exit 1, BEFORE any sink write.
+venya_guard_injection "CORE_HOSTNAME" "$CORE_HOSTNAME" '"' '\' ' '
+venya_guard_injection "VENYA_DB_PASSWORD" "$VENYA_DB_PASSWORD" '@'
+venya_guard_injection "VENYA_DB_PASSPHRASE" "$DB_PASSPHRASE"
+venya_guard_injection "VENYA_RECOVERY_PEPPER" "$RECOVERY_PEPPER"
+if [ -n "$ADMIN_IDENTITY" ]; then
+    venya_guard_injection "VENYA_ADMIN_IDENTITY" "$ADMIN_IDENTITY" '"' '\'
+fi
+
 # --- Create venya service account (no password, nologin, locked) ---
 venya_create_user
 
@@ -303,10 +318,19 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
         fi
     fi
 
+    # #326 F-1: gate the finalized admin passphrase (covers explicit env +
+    # stored-reuse; prompt/random are line-based). Runs BEFORE the python
+    # admin-CA child and before the EnvironmentFile write.
+    venya_guard_injection "ADMIN_CA_PASSPHRASE" "$ADMIN_CA_PASSPHRASE"
+
     # Derive default identity
     if [ -z "$ADMIN_IDENTITY" ]; then
         ADMIN_IDENTITY="admin@${CORE_HOSTNAME}"
     fi
+    # Derived identity gets the same gate (#326: composition runs AFTER the
+    # entry guard when VENYA_ADMIN_IDENTITY was unset).
+    venya_guard_injection "ADMIN_IDENTITY" "$ADMIN_IDENTITY" '"' '\'
+
 
     # Create directories
     mkdir -p "$ADMIN_CA_DIR"
@@ -449,6 +473,11 @@ if [ -z "$CA_KEY_PASSPHRASE" ]; then
     fi
 fi
 
+# #326 F-1: gate the finalized root-CA passphrase (explicit env + stored
+# reuse branches; prompt/random are line-based). Runs before the
+# EnvironmentFile write and before every openssl/python consumer.
+venya_guard_injection "CA_KEY_PASSPHRASE" "$CA_KEY_PASSPHRASE"
+
 # --- Write .env (core-specific) ---
 # Operator-added config keys survive regeneration (ticket
 # installer-rerun-env-custom-keys-clobbered): the template below owns
@@ -464,26 +493,26 @@ if [ -f "$STORED_ENV_FILE" ]; then
         /^VENYA_/ && !($1 in skip)
     ' "$STORED_ENV_FILE")
 fi
-cat > "$INSTALL_DIR/.env" << EOF
-VENYA_HOST=127.0.0.1
-VENYA_DB_URL=postgresql://venya:$VENYA_DB_PASSWORD@localhost/venya
-VENYA_DB__DATABASE_URL=postgresql://venya_audit@/venya?host=/var/run/postgresql
-VENYA_DB__PASSPHRASE=$DB_PASSPHRASE
-VENYA_FIDO2__RP_ID=$CORE_HOSTNAME
-VENYA_FIDO2__RP_NAME=Venya Core
-VENYA_CORS__ORIGINS=["https://$CORE_HOSTNAME"]
-VENYA_RECOVERY_CODE_PEPPER=$RECOVERY_PEPPER
-EOF
+{
+    printf 'VENYA_HOST=127.0.0.1\n'
+    printf 'VENYA_DB_URL=postgresql://venya:%s@localhost/venya\n' "$VENYA_DB_PASSWORD"  # pragma: allowlist secret
+    printf 'VENYA_DB__DATABASE_URL=postgresql://venya_audit@/venya?host=/var/run/postgresql\n'
+    printf 'VENYA_DB__PASSPHRASE=%s\n' "$DB_PASSPHRASE"
+    printf 'VENYA_FIDO2__RP_ID=%s\n' "$CORE_HOSTNAME"
+    printf 'VENYA_FIDO2__RP_NAME=Venya Core\n'
+    printf 'VENYA_CORS__ORIGINS=["https://%s"]\n' "$CORE_HOSTNAME"
+    printf 'VENYA_RECOVERY_CODE_PEPPER=%s\n' "$RECOVERY_PEPPER"
+} > "$INSTALL_DIR/.env"
 
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     # NOTE: the admin passphrase is NOT written to .env. pydantic reads .env into
     # the settings object, not into os.environ — and ca.py/app.py read os.environ.
     # Passphrases reach the daemon via the 0640 EnvironmentFile below.
-    cat >> "$INSTALL_DIR/.env" << EOF
-VENYA_ADMIN_MTLS__ENABLED=true
-VENYA_ADMIN_MTLS__CA_CERT="$ADMIN_CA_DIR/admin-ca.crt"
-VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS=["$ADMIN_IDENTITY"]
-EOF
+    {
+        printf 'VENYA_ADMIN_MTLS__ENABLED=true\n'
+        printf 'VENYA_ADMIN_MTLS__CA_CERT="%s/admin-ca.crt"\n' "$ADMIN_CA_DIR"
+        printf 'VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS=["%s"]\n' "$ADMIN_IDENTITY"
+    } >> "$INSTALL_DIR/.env"
 fi
 
 if [ -n "$PRESERVED_ENV_LINES" ]; then
@@ -503,11 +532,13 @@ fi
 # root CA is generated unconditionally and signs executor certs at runtime); the
 # ADMIN CA passphrase is appended only when admin mTLS is enabled. Written before
 # the CA-gen/openssl-signing below so a re-run can reuse it (idempotency above).
-cat > /etc/venya/venya-core.env << EOF
-VENYA_CA_KEY_PASSPHRASE=$CA_KEY_PASSPHRASE
-EOF
+# #326 F-1: printf writers — values pass as ARGUMENTS (Layer 2), the
+# newline/CR split that made this a systemd Environment= injection sink
+# is rejected at finalization above (Layer 1; fail-closed cannot brick:
+# a newline-bearing passphrase could never round-trip this file anyway).
+printf 'VENYA_CA_KEY_PASSPHRASE=%s\n' "$CA_KEY_PASSPHRASE" > /etc/venya/venya-core.env
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
-    echo "VENYA_ADMIN_CA_KEY_PASSPHRASE=$ADMIN_CA_PASSPHRASE" >> /etc/venya/venya-core.env
+    printf 'VENYA_ADMIN_CA_KEY_PASSPHRASE=%s\n' "$ADMIN_CA_PASSPHRASE" >> /etc/venya/venya-core.env
 fi
 chown root:venya /etc/venya/venya-core.env
 chmod 0640 /etc/venya/venya-core.env
