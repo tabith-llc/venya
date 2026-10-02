@@ -274,6 +274,12 @@ def _url(listener: RelayListener) -> str:
 
 
 class TestRelayListener:
+    def test_ssl_context_pins_tls_floor(self, pk):
+        # GitLab #323: the relay listener's context must floor at TLSv1.2.
+        listener = RelayListener(pk.config, lambda _sid: None, allowed_client_ids=[ALLOWED])
+        ctx = listener._build_ssl_context()
+        assert ctx.minimum_version == ssl.TLSVersion.TLSv1_2
+
     def test_valid_mtls_request_returns_result(self, started):
         listener, pk, fake, sessions = started
         payload = {

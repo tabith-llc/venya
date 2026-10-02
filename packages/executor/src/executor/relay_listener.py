@@ -240,6 +240,8 @@ class RelayListener:
         # the core's relaying client cert. ``CERT_REQUIRED`` enforces the client
         # half of the handshake.
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        # GitLab #323: floor the relay at TLSv1.2 (reject TLSv1.0/1.1 pre-handshake).
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(self._config.mtls.cert, self._config.mtls.key)
         context.load_verify_locations(self._config.mtls.ca_cert)
         context.verify_mode = ssl.CERT_REQUIRED
