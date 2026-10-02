@@ -75,10 +75,13 @@ class TestSecretGetUnmaskElevation:
 
     def test_get_forwards_extra_headers_to_request(self):
         """Wire shape: APIClient.get() must forward extra_headers to _request
-        (the cmd_get fix depends on it; post() already had this parameter)."""
+        (the cmd_get fix depends on it; post() already had this parameter).
+        timeout is forwarded too (#324 advisory fetch), mirroring post()."""
         from venya_cli.api_client import APIClient
 
         client = APIClient.__new__(APIClient)  # no __init__ (no config/HTTP needed)
         with patch.object(APIClient, "_request", return_value={}) as mock_req:
             client.get("/p", params={"a": 1}, extra_headers={"X-Elevation-Token": "t"})
-        mock_req.assert_called_once_with("GET", "/p", params={"a": 1}, extra_headers={"X-Elevation-Token": "t"})
+        mock_req.assert_called_once_with(
+            "GET", "/p", params={"a": 1}, extra_headers={"X-Elevation-Token": "t"}, timeout=None
+        )

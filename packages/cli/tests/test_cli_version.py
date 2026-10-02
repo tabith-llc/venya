@@ -74,7 +74,10 @@ class TestExecListRendering:
         assert "0.2.0" in out
         # condition 3: NULL renders explicitly, never blank
         assert "unknown (pre-B daemon)" in out
-        client.get.assert_called_once_with("/api/v1/admin/executors")
+        # #324: table mode also consults the fenced /health for the core version
+        # (warning pass) — the admin-list fetch itself must still happen.
+        paths = [c.args[0] for c in client.get.call_args_list]
+        assert "/api/v1/admin/executors" in paths
 
     def test_json_mode_passes_through(self, capsys):
         import json

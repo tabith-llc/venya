@@ -1356,3 +1356,20 @@ class TestVersionTuple:
     def test_unparseable_fails_closed(self):
         for bad in (None, "", "garbage", "0.1", "v0.1.0a13", "0.1.0a13+local"):
             assert _version_tuple(bad) is None, bad
+
+    def test_spelled_out_prerelease_canonicalized(self):
+        """#324 latent sort bug, pinned fixed: pyproject ships ``0.1.0alphaNN``.
+
+        A raw ``alpha`` pre_kind sorted lexicographically ABOVE every
+        single-letter tag (``"alpha" > "a"``), so ``alpha2`` wrongly passed the
+        ``a13`` env-shape gate. Canonicalization must land alpha/beta on the
+        PEP 440 short forms.
+        """
+        assert _version_tuple("0.1.0alpha2") < _ENV_SHAPE_MIN_VERSION  # THE bug cell
+        assert _version_tuple("0.1.0alpha13") == _ENV_SHAPE_MIN_VERSION
+        assert _version_tuple("0.1.0alpha16") > _ENV_SHAPE_MIN_VERSION
+        assert _version_tuple("0.1.0beta1") == _version_tuple("0.1.0b1")
+
+    def test_final_sorts_above_every_spelling(self):
+        assert _version_tuple("0.1.0") > _version_tuple("0.1.0alpha99")
+        assert _version_tuple("0.1.0") > _version_tuple("0.1.0rc2")

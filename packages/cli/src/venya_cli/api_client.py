@@ -18,6 +18,7 @@ Token model (per plan section 5.1):
 
 import logging
 import os
+import re
 import ssl
 import sys
 import tempfile
@@ -79,6 +80,42 @@ def execution_timeout() -> float:
             f"Invalid VENYA_EXECUTION_TIMEOUT value: '{raw}'. Must be a positive integer number of seconds."
         )
     return float(value)
+
+
+def cli_version() -> str:
+    """Single-sourced CLI version (feature/version-surfaces condition 1): dist
+    metadata (pyproject) is the only truth — never a string literal. Lives here
+    so commands.py can compare it against server-reported versions without a
+    circular import through cli.py."""
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        return _pkg_version("venya-cli")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+_PRE_CANONICAL = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc"}
+
+
+def version_tuple(reported: str | None) -> tuple | None:
+    """Parse a PEP 440 version (``X.Y.Z`` + optional prerelease) into a
+    comparable tuple; spelled-out tags (alpha/beta) canonicalize to the PEP 440
+    short forms so ``alpha2`` sorts BELOW ``a13`` (the dist metadata of an
+    ``0.1.0alphaNN`` pyproject reports the spelled form, heartbeat-reported
+    executor versions may report either — ticket #324). Unparseable or None →
+    None (callers fail closed: no version advice, never a wrong-side nudge).
+    Mirrors ``server.routes.executors._version_tuple``; the CLI ships standalone
+    and must not import server code."""
+    if not reported:
+        return None
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:([a-z]+)(\d+))?$", reported.strip())
+    if not m:
+        return None
+    pre_kind = m.group(4)
+    pre_kind = _PRE_CANONICAL.get(pre_kind, pre_kind) if pre_kind else "z"
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), pre_kind, int(m.group(5) or 0))
 
 
 class APIClientError(Exception):
@@ -479,9 +516,10 @@ class APIClient:
         path: str,
         params: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
-        """Send a GET request."""
-        return self._request("GET", path, params=params, extra_headers=extra_headers)
+        """Send a GET request (timeout: per-request override, seconds)."""
+        return self._request("GET", path, params=params, extra_headers=extra_headers, timeout=timeout)
 
     def post(
         self,

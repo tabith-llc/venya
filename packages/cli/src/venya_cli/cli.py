@@ -10,17 +10,7 @@ import argparse
 import sys
 from datetime import UTC
 
-
-def _cli_version() -> str:
-    """Single-sourced version (feature/version-surfaces condition 1): dist
-    metadata (pyproject) is the only truth — never a string literal."""
-    from importlib.metadata import PackageNotFoundError
-    from importlib.metadata import version as _pkg_version
-
-    try:
-        return _pkg_version("venya-cli")
-    except PackageNotFoundError:
-        return "unknown"
+from venya_cli.api_client import cli_version as _cli_version
 
 
 def create_parser() -> argparse.ArgumentParser:

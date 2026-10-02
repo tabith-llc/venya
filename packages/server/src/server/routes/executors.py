@@ -59,12 +59,19 @@ from .secrets import wrap_with_sentinel
 _ENV_SHAPE_MIN_VERSION = (0, 1, 0, "a", 13)
 
 
-def _version_tuple(reported: str | None) -> tuple | None:
-    """Parse a heartbeat-reported PEP 440 normalized version into a comparable tuple.
+_PRE_CANONICAL = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc"}
 
-    ``X.Y.Z`` optionally followed by a prerelease tag (``a13``/``b1``/``rc2``) →
-    ``(X, Y, Z, pre_kind, pre_n)``; final releases get pre_kind ``"z"`` so they
-    sort after every prerelease tag. Unparseable or None → None (callers
+
+def _version_tuple(reported: str | None) -> tuple | None:
+    """Parse a heartbeat-reported PEP 440 version into a comparable tuple.
+
+    ``X.Y.Z`` optionally followed by a prerelease tag (``a13``/``alpha13``/
+    ``b1``/``beta1``/``rc2``) → ``(X, Y, Z, pre_kind, pre_n)``; spelled-out
+    tags are canonicalized to PEP 440 short forms FIRST (ticket #324: pyproject
+    ships ``0.1.0alphaNN``, and a raw ``alpha`` pre_kind compared
+    lexicographically sorts above every single-letter tag, so ``alpha2``
+    wrongly passed the ``a13`` gate). Final releases get pre_kind ``"z"`` so
+    they sort after every prerelease tag. Unparseable or None → None (callers
     fail closed — never send new wire fields to an executor of unknown age).
     """
     if not reported:
@@ -72,7 +79,9 @@ def _version_tuple(reported: str | None) -> tuple | None:
     m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:([a-z]+)(\d+))?$", reported.strip())
     if not m:
         return None
-    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) or "z", int(m.group(5) or 0))
+    pre_kind = m.group(4)
+    pre_kind = _PRE_CANONICAL.get(pre_kind, pre_kind) if pre_kind else "z"
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), pre_kind, int(m.group(5) or 0))
 
 
 logger = logging.getLogger("venya.server")

@@ -27,7 +27,9 @@ from .api_client import (
     APIClient,
     APIClientAuthenticationError,
     APIClientError,
+    cli_version,
     execution_timeout,
+    version_tuple,
 )
 from .at_rest_key import (
     acquire_server_passphrase,
@@ -38,6 +40,58 @@ from .at_rest_key import (
     server_passphrase_env_for,
     unwrap_at_rest,
 )
+
+# --- Version-mismatch advisory (ticket cli-version-mismatch-upgrade-nudge) ---
+# Ruled design (#324 D1-D4): nudge only, never a gate; one /health fetch per
+# CLI process; offline -> silent skip; the unauthenticated health fence serves
+# the core version and NEVER grows (executor versions ride the authenticated
+# executor lists only). Wording names the OUT-OF-DATE side and never advises
+# downgrading a server.
+
+_SERVER_VERSION_UNCHECKED = object()
+_server_version_cache: Any = _SERVER_VERSION_UNCHECKED
+
+
+def get_server_version(client: APIClient) -> str | None:
+    """Core's dist version from the fenced /health ``version`` field, fetched
+    ONCE per process (module cache). None = unknown (offline, old server
+    without the field, unparseable) — every caller stays silent on None."""
+    global _server_version_cache
+    if _server_version_cache is _SERVER_VERSION_UNCHECKED:
+        try:
+            body = client.get("/api/v1/health", timeout=5.0)
+            raw = body.get("version") if isinstance(body, dict) else None
+            _server_version_cache = raw if isinstance(raw, str) and version_tuple(raw) else None
+        except Exception:
+            # D1 offline rule: a failed advisory fetch must never add a second
+            # error to the run — the real command surfaces its own honest error.
+            _server_version_cache = None
+    return _server_version_cache  # type: ignore[return-value]
+
+
+def version_advisory(client: APIClient) -> None:
+    """Compare the CLI dist version to the core version once per process and
+    print a one-line advisory naming the out-of-date side. Equal (PEP 440
+    normalized, so 0.1.0alpha16 == 0.1.0a16) or unknown -> silence."""
+    server_ver = get_server_version(client)
+    cli_ver = cli_version()
+    if server_ver is None:
+        return
+    server_vt, cli_vt = version_tuple(server_ver), version_tuple(cli_ver)
+    if server_vt is None or cli_vt is None or server_vt == cli_vt:
+        return
+    if cli_vt < server_vt:
+        print(
+            f"Note: CLI version {cli_ver} is older than the core server {server_ver} — "
+            "update the CLI (re-run the CLI installer).",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"Note: CLI version {cli_ver} is newer than the core server {server_ver} — "
+            "the core is the out-of-date side; update the core (re-run the core installer).",
+            file=sys.stderr,
+        )
 
 
 def run_command(args: Any) -> int:
@@ -87,6 +141,10 @@ def run_command(args: Any) -> int:
             print(f"Authentication failed: {e}", file=sys.stderr)
             client.close()
             return 1
+
+    # Version-mismatch advisory: one fenced /health fetch per process, silent
+    # offline, warn-only (#324 D1/D2 — no request the server would serve is blocked).
+    version_advisory(client)
 
     try:
         if command == "init":
@@ -1911,7 +1969,9 @@ def executor_list(client: APIClient, args: Any) -> int:
     heartbeat (single-sourced from package metadata). NULL renders as
     'unknown (pre-B daemon)' — the explicit "has not reported yet" signal,
     never a blank cell (feature/version-surfaces condition 3). Observability
-    only: no version gating anywhere in this path (scope guard).
+    only: no version gating anywhere in this path (scope guard). Table mode
+    adds a warn-only per-executor line (stderr) when a reported version
+    disagrees with the core's (#324) — display only, never a gate.
     """
     try:
         result = client.get("/api/v1/admin/executors")
@@ -1947,6 +2007,25 @@ def executor_list(client: APIClient, args: Any) -> int:
         print(fmt.format(*["-" * w for w in widths]))
         for row in rows:
             print(fmt.format(*row))
+
+        # Version-mismatch warning (#324 D3): executor versions already ride
+        # this authenticated list (zero server change); compare each against
+        # the core's fenced /health version. Warn-only — no behavior gate, and
+        # a version we cannot parse (NULL daemon) gets no verdict, never a
+        # wrong-side nudge.
+        core_ver = get_server_version(client)
+        core_vt = version_tuple(core_ver) if core_ver else None
+        if core_vt is not None:
+            for e in executors:
+                exec_ver = e.get("version")
+                exec_vt = version_tuple(exec_ver) if exec_ver else None
+                if exec_vt is not None and exec_vt != core_vt:
+                    print(
+                        f"Warning: executor '{e.get('executor_id')}' reports version {exec_ver}, "
+                        f"core is {core_ver} — upgrade the out-of-date side (installer re-run); "
+                        "mismatched versions are unsupported.",
+                        file=sys.stderr,
+                    )
         return 0
     except Exception as e:
         print(f"List failed: {e}", file=sys.stderr)
