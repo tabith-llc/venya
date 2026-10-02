@@ -214,22 +214,26 @@ Notes: the executor tarball is byte-identical to the core tarball by design (who
 
 The build script serves the tag-built tarballs + scripts on the build host's
 network. Point installs at that mirror with `VENYA_TARBALL` (the scripts
-self-fetch `venya-common.sh` from the same origin):
+self-fetch `venya-common.sh` from the same origin). The serve script prints
+the hashes; non-https origins require the pin (#375, #328):
 
 ```bash
 MIRROR=http://<build-host>:8080
 
 # Core VM
 curl -fsSL $MIRROR/install-venya-core.sh | sudo \
-  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=$MIRROR/venya-core-install.tar.gz bash
+  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=$MIRROR/venya-core-install.tar.gz \
+  VENYA_TARBALL_SHA256=<sha256> bash
 
 # Executor VM
 curl -fsSL $MIRROR/install-venya-executor.sh | sudo \
-  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=$MIRROR/venya-executor-install.tar.gz bash
+  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=$MIRROR/venya-executor-install.tar.gz \
+  VENYA_TARBALL_SHA256=<sha256> bash
 
 # Operator workstation (no sudo)
 curl -fsSL $MIRROR/install-venya-cli.sh | \
-  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=$MIRROR/venya-cli-install.tar.gz bash
+  VENYA_SKIP_PROMPT=yes VENYA_TARBALL=$MIRROR/venya-cli-install.tar.gz \
+  VENYA_TARBALL_SHA256=<sha256> bash
 
 # Stop the mirror server (on the build host)
 pkill -f 'python3 -m http.server 8080'
