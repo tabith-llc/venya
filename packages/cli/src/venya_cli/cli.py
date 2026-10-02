@@ -765,6 +765,50 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# --- #351 ruling A: argv redaction for the support log -----------------------
+# Secret payloads (store values, enrollment tokens, recovery codes, KEK paths)
+# must not persist verbatim in venya.log. Positionals that carry secret
+# material in the store/enroll/recovery family are replaced with <redacted>
+# and known secret-flag VALUES are masked; everything else stays verbatim so
+# the log keeps its forensic value for non-secret ops. The tee runs BEFORE
+# argparse, so this is a raw-argv heuristic: subcommand = first non-flag
+# token; positional indexes count the non-flag tokens after it (unusual
+# flag/value orderings may over-redact a neighbor — the safe direction).
+_SECRET_POSITIONALS: dict[str, set[int]] = {
+    "store": {1},  # store KEY [VALUE] — key stays (ticket cell), value goes
+    "enroll": {0},  # enroll TOKEN
+    "recovery": {0},  # recovery CODE [NEW_USER_ID]
+}
+_SECRET_FLAGS = frozenset({"--enrollment-token", "--new-key"})
+_ARGV_REDACTED = "<redacted>"
+
+
+def _redact_argv(argv: list[str]) -> list[str]:
+    """Return argv with secret-bearing positionals and secret-flag values masked."""
+    out = list(argv)
+    nonflag = [i for i, tok in enumerate(out) if not tok.startswith("-")]
+    if nonflag:
+        cmd = out[nonflag[0]]
+        idxs = _SECRET_POSITIONALS.get(cmd)
+        if idxs:
+            for pos, i in enumerate(nonflag[1:]):
+                if pos in idxs:
+                    out[i] = _ARGV_REDACTED
+    i = 0
+    while i < len(out):
+        tok = out[i]
+        if tok in _SECRET_FLAGS and i + 1 < len(out):
+            out[i + 1] = _ARGV_REDACTED
+            i += 2
+            continue
+        out[i] = next(
+            (f"{f}={_ARGV_REDACTED}" for f in _SECRET_FLAGS if tok.startswith(f + "=")),
+            tok,
+        )
+        i += 1
+    return out
+
+
 def _install_stderr_tee():
     """Append a copy of everything written to stderr into <config_dir>/venya.log.
 
@@ -794,7 +838,7 @@ def _install_stderr_tee():
         except FileNotFoundError:
             pass
         logf = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 — lives for the process lifetime
-        logf.write(f"\n=== {datetime.now(UTC).isoformat()} argv={sys.argv[1:]} ===\n")
+        logf.write(f"\n=== {datetime.now(UTC).isoformat()} argv={_redact_argv(sys.argv[1:])} ===\n")
         logf.flush()
         original = sys.stderr
 

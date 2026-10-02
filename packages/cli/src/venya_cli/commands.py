@@ -17,6 +17,7 @@ import tempfile
 from datetime import UTC
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx2
 from cryptography import x509
@@ -457,7 +458,7 @@ def cmd_get(client: APIClient, args: Any) -> int:
             print("Re-authenticating with security key for elevation...")
             get_kwargs["extra_headers"] = {"X-Elevation-Token": _elevate(client)}
         result = client.get(
-            f"/api/v1/secrets/{args.key}",
+            f"/api/v1/secrets/{quote(args.key, safe='')}",
             **get_kwargs,
         )
         if args.unmask:
@@ -530,7 +531,7 @@ def cmd_list(client: APIClient, args: Any) -> int:
 def cmd_delete(client: APIClient, args: Any) -> int:
     """Delete a secret."""
     try:
-        client.delete(f"/api/v1/secrets/{args.key}")
+        client.delete(f"/api/v1/secrets/{quote(args.key, safe='')}")
         print(f"Secret '{args.key}' deleted.")
         return 0
     except APIClientError as e:
@@ -565,7 +566,7 @@ def cmd_update_metadata(client: APIClient, args: Any) -> int:
             )
             return 1
 
-        resp = client.patch(f"/api/v1/secrets/{args.key}/metadata", json={"metadata": meta_dict})
+        resp = client.patch(f"/api/v1/secrets/{quote(args.key, safe='')}/metadata", json={"metadata": meta_dict})
         if isinstance(resp, dict):
             for w in resp.get("metadata_warnings") or []:
                 print(f"warning: {w}", file=sys.stderr)
@@ -706,7 +707,7 @@ def cmd_admin_enroll(client: APIClient, args: Any) -> int:
 def cmd_admin_remove(client: APIClient, args: Any) -> int:
     """Remove a user."""
     try:
-        client.delete(f"/api/v1/admin/users/{args.user_id}")
+        client.delete(f"/api/v1/admin/users/{quote(args.user_id, safe='')}")
         print(f"User '{args.user_id}' removed.")
         return 0
     except APIClientError as e:
@@ -725,7 +726,7 @@ def cmd_admin_configure(client: APIClient, args: Any) -> int:
             config["session_timeout"] = args.timeout
 
         client.put(
-            f"/api/v1/admin/users/{args.user_id}",
+            f"/api/v1/admin/users/{quote(args.user_id, safe='')}",
             json=config,
         )
         print(f"User '{args.user_id}' configured.")
@@ -1063,7 +1064,7 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
 def cmd_admin_list_tokens(client: APIClient, args: Any) -> int:
     """List all enrollment tokens for a user."""
     try:
-        result = client.get(f"/api/v1/admin/users/{args.user_id}/enrollment-tokens")
+        result = client.get(f"/api/v1/admin/users/{quote(args.user_id, safe='')}/enrollment-tokens")
         tokens = result.get("tokens", [])
 
         if not tokens:
@@ -1109,7 +1110,7 @@ def cmd_admin_list_tokens(client: APIClient, args: Any) -> int:
 def cmd_admin_issue_token(client: APIClient, args: Any) -> int:
     """Revoke old tokens and issue a new enrollment token for a user."""
     try:
-        result = client.post(f"/api/v1/admin/users/{args.user_id}/enrollment-tokens")
+        result = client.post(f"/api/v1/admin/users/{quote(args.user_id, safe='')}/enrollment-tokens")
 
         if getattr(args, "json", False):
             print(json.dumps(result, indent=2))
@@ -1148,7 +1149,7 @@ def cmd_admin_revoke_token(client: APIClient, args: Any) -> int:
 def cmd_admin_re_enroll(client: APIClient, args: Any) -> int:
     """Deactivate credentials, revoke tokens, and issue a new enrollment token."""
     try:
-        result = client.post(f"/api/v1/admin/users/{args.user_id}/re-enroll")
+        result = client.post(f"/api/v1/admin/users/{quote(args.user_id, safe='')}/re-enroll")
 
         if getattr(args, "json", False):
             print(json.dumps(result, indent=2))
@@ -1346,7 +1347,7 @@ def cmd_role_remove_member(client: APIClient, args: Any) -> int:
     """Remove user from role."""
     try:
         role_id = _resolve_role_id(client, args.role_id)
-        client.delete(f"/api/v1/roles/{role_id}/members/{args.user_id}")
+        client.delete(f"/api/v1/roles/{quote(role_id, safe='')}/members/{quote(args.user_id, safe='')}")
         print(f"User '{args.user_id}' removed from role '{args.role_id}'.")
         return 0
     except APIClientError as e:
@@ -2518,15 +2519,23 @@ def executor_cert_renew(args: Any) -> int:
         print("Renewal failed: no certificate returned", file=sys.stderr)
         return 1
 
-    # Atomic write: write to temp files, then rename
-    cert_tmp = Path(cert_path).with_suffix(".pem.tmp")
+    # Atomic write: random-name temp files + os.replace (#352 — the predictable
+    # '<cert>.pem.tmp' name let a symlink planted in a co-writable dir hijack
+    # the rename target; same pattern as the key path below, #317 second
+    # application).
+    cert_tmp_name: str | None = None
+    ca_tmp_name: str | None = None
     key_tmp_name: str | None = None
     try:
         output_dir = str(Path(cert_path).parent)
         Path(output_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
         ensure_secret_dir(Path(output_dir))
 
-        cert_tmp.write_bytes(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
+        with tempfile.NamedTemporaryFile(dir=output_dir, prefix=".venya-cert-", suffix=".pem", delete=False) as fd:
+            cert_tmp_name = fd.name
+            fd.write(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
+            fd.flush()
+            os.fchmod(fd.fileno(), 0o600)
 
         key_pem = new_private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -2542,23 +2551,26 @@ def executor_cert_renew(args: Any) -> int:
         key_tmp_name = None
 
         if ca_cert_pem:
-            ca_cert_path = Path(cert_path).with_name("ca.crt")  # type: ignore[assignment]
-            ca_tmp = ca_cert_path.with_suffix(".pem.tmp")  # type: ignore[attr-defined]
-            ca_tmp.write_bytes(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
-            ca_tmp.rename(ca_cert_path)
+            ca_dir = str(Path(cert_path).parent)
+            ca_cert_path = Path(ca_dir) / "ca.crt"  # type: ignore[assignment]
+            with tempfile.NamedTemporaryFile(dir=ca_dir, prefix=".venya-ca-", suffix=".pem", delete=False) as fd:
+                ca_tmp_name = fd.name
+                fd.write(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o600)
+            os.replace(ca_tmp_name, str(ca_cert_path))
+            ca_tmp_name = None
 
-        cert_tmp.rename(cert_path)
+        os.replace(cert_tmp_name, cert_path)
+        cert_tmp_name = None
     except OSError as e:
-        # Clean up temp files on failure
-        try:
-            cert_tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        if key_tmp_name is not None:
-            try:
-                os.unlink(key_tmp_name)
-            except OSError:
-                pass
+        # Clean up any staged temp on failure
+        for leftover in (cert_tmp_name, ca_tmp_name, key_tmp_name):
+            if leftover is not None:
+                try:
+                    os.unlink(leftover)
+                except OSError:
+                    pass
         print(f"Failed to save certificate: {e}", file=sys.stderr)
         return 1
 
@@ -3413,6 +3425,32 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
         return 1
 
 
+# #353 ruling R2 (owner batch-yes 2026-10-02): forgery-charset gate on the
+# admin identity before CA signing. CN/SAN interpolate the identity verbatim;
+# structural characters — comma, double quote, backslash, equals, and control
+# characters incl. CR/LF — would forge X.509 RDN/SAN structure in a cert this
+# CA signs. REJECT, don't escape (ruled posture). Everything else is allowed:
+# plain hostnames AND the shipped email-form identities (the server identity
+# extractor prefers SAN RFC822) are untouched.
+_IDENTITY_FORGERY_CHARS = frozenset(',"\\=') | {chr(c) for c in range(0x20)} | {chr(0x7F)}
+
+
+def _identity_forgery_error(identity: str) -> str | None:
+    """Return an actionable error string if the identity carries RDN/SAN
+    structural forgery characters (or is empty); None when allowed."""
+    if not identity:
+        return "Invalid identity: must be a non-empty string"
+    bad = sorted({c for c in identity if c in _IDENTITY_FORGERY_CHARS})
+    if bad:
+        shown = ", ".join(repr(c) for c in bad)
+        return (
+            f"Invalid identity {identity!r}: contains structural character(s) {shown}. "
+            "Comma, double quote, backslash, equals, and control characters can forge "
+            "X.509 RDN/SAN structure. Use a plain hostname or an email-style identity."
+        )
+    return None
+
+
 def cmd_admin_generate_admin_cert(args: Any) -> int:
     """Sign an admin client certificate using the admin CA.
 
@@ -3429,6 +3467,10 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
     from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
     identity = args.identity
+    problem = _identity_forgery_error(identity)
+    if problem is not None:
+        print(f"Error: {problem}", file=sys.stderr)
+        return 1
     output_dir = Path(args.output_dir)
 
     # Resolve admin CA directory

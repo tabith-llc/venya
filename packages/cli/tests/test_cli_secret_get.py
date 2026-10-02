@@ -42,7 +42,7 @@ class TestSecretGetUnmaskElevation:
         assert rc == 0
         mock_elev.assert_called_once_with(client)
         client.get.assert_called_once_with(
-            "/api/v1/secrets/db/password",
+            "/api/v1/secrets/db%2Fpassword",  # #354: slash keys cross as one encoded segment
             params={"unmask": True},
             extra_headers={"X-Elevation-Token": "elev_token_xyz"},
         )
@@ -58,7 +58,7 @@ class TestSecretGetUnmaskElevation:
         assert rc == 0
         mock_elev.assert_not_called()
         client.get.assert_called_once_with(
-            "/api/v1/secrets/db/password",
+            "/api/v1/secrets/db%2Fpassword",  # #354: slash keys cross as one encoded segment
             params={"unmask": False},
         )
 
