@@ -456,3 +456,57 @@ def test_tool_descriptions_teach_shape_and_file_path() -> None:
     rc_desc = by_name["run_command"].description
     assert "sshpass -f /run/secrets/venya/" in rc_desc
     assert "'usage' template" in rc_desc
+
+
+# --- SDK validation-seam pin (ticket mcp-validation-seam-untested #350) ---
+
+
+async def test_sdk_wrapper_rejects_extra_key_before_handler() -> None:
+    """#350 seam pin: an EXTRA KEY on run_command must be rejected by the
+    SDK jsonschema pass INSIDE the @app.call_tool() wrapper — driven
+    through the SDK's own in-memory session harness (mcp.shared.memory),
+    i.e. the runtime dispatch path, never the undecorated handler. The
+    handler-mock spy proves the rejection lands BEFORE the handler runs."""
+    from mcp.shared.memory import create_connected_server_and_client_session
+    from mcp.types import CallToolResult
+    from venya_mcp.server import app
+
+    mock = _make_mock_client()
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        async with create_connected_server_and_client_session(app) as session:
+            await session.initialize()
+            result = await session.call_tool(
+                "run_command",
+                {
+                    "executor_id": "web-3",
+                    "command": "ls",
+                    "secret_keys": [],
+                    "bogus_extra": "x",
+                },
+            )
+    assert isinstance(result, CallToolResult)
+    assert result.isError is True
+    assert "Input validation error" in result.content[0].text
+    mock.run_command.assert_not_awaited()
+
+
+async def test_sdk_wrapper_passes_clean_call_to_handler() -> None:
+    """#350 paired negative: the SAME harness with a schema-clean call must
+    reach the handler and succeed — proves the rejection cell is not
+    vacuous (a wrapper that rejected EVERYTHING would fail this half)."""
+    from mcp.shared.memory import create_connected_server_and_client_session
+    from mcp.types import CallToolResult
+    from venya_mcp.server import app
+
+    mock = _make_mock_client()
+    with patch("venya_mcp.server.get_client", return_value=mock):
+        async with create_connected_server_and_client_session(app) as session:
+            await session.initialize()
+            result = await session.call_tool(
+                "run_command",
+                {"executor_id": "web-3", "command": "ls", "secret_keys": []},
+            )
+    assert isinstance(result, CallToolResult)
+    assert not result.isError
+    assert "exited with code 0" in result.content[0].text
+    mock.run_command.assert_awaited_once()
