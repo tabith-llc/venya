@@ -325,6 +325,82 @@ class TestRegisterErrors:
             cert_manager.register("test-executor")  # must NOT raise
         assert "register" not in MockClient.return_value.post.call_args[0][0]
 
+    def test_register_ghost_nginx_ssl_400_refuses_boot_with_ruled_message(self, cert_manager: CertificateManager):
+        """#369: an alien-CA cert is rejected at the TLS terminator — nginx
+        answers 400 'The SSL certificate error' before the app probe sees
+        401/403. That reject is ghost evidence: the ruled re-enroll message
+        must print (HEAD instead died on a generic raise_for_status traceback)
+        and the boot must abort before any register POST (zero token burn)."""
+        self._seed_existing_cert(cert_manager)
+        reject = MagicMock(spec=httpx2.Response)
+        reject.status_code = 400
+        reject.text = "<html><head><title>400 The SSL certificate error</title></head></html>"
+        reject.raise_for_status.side_effect = httpx2.HTTPStatusError(
+            "400 Bad Request", request=MagicMock(), response=reject
+        )
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = reject
+            with pytest.raises(RuntimeError, match="ghost identity") as ei:
+                cert_manager.register("test-executor")
+        msg = str(ei.value)
+        assert "Refusing to run as a ghost identity" in msg
+        assert "VENYA_EXECUTOR_ENROLLMENT_TOKEN" in msg
+        assert "venya admin executor-enroll" in msg
+        assert not any("/executors/register" in c[0][0] for c in MockClient.return_value.post.call_args_list)
+
+    def test_register_ghost_tls_handshake_failure_refuses_boot_with_ruled_message(
+        self, cert_manager: CertificateManager
+    ):
+        """#369: a connection-level TLS failure (the terminator aborts the
+        handshake over the client certificate) is ghost evidence too —
+        ruled message + exit, not the inconclusive warn+proceed."""
+        self._seed_existing_cert(cert_manager)
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.side_effect = httpx2.ConnectError(
+                "[SSL: TLSV1_ALERT_ACCESS_DENIED] tlsv1 alert access denied"
+            )
+            with pytest.raises(RuntimeError, match="ghost identity") as ei:
+                cert_manager.register("test-executor")
+        msg = str(ei.value)
+        assert "Refusing to run as a ghost identity" in msg
+        assert "VENYA_EXECUTOR_ENROLLMENT_TOKEN" in msg
+        assert not any("/executors/register" in c[0][0] for c in MockClient.return_value.post.call_args_list)
+
+    def test_register_probe_timeout_stays_inconclusive_warn_proceed(self, cert_manager: CertificateManager, caplog):
+        """#369 paired negative — the INCONCLUSIVE class stays distinct from
+        the ghost classes: a timeout carries no certificate verdict, so the
+        probe warns and proceeds (an outage must not strand a real identity)
+        and the ruled ghost message must NOT print."""
+        import logging
+
+        self._seed_existing_cert(cert_manager)
+        with caplog.at_level(logging.WARNING):
+            with patch("executor.daemon.httpx2.Client") as MockClient:
+                MockClient.return_value.__enter__.return_value = MockClient.return_value
+                MockClient.return_value.post.side_effect = httpx2.ConnectTimeout("timed out")
+                cert_manager.register("test-executor")  # must NOT raise
+        assert "proceeding on the existing certificate" in caplog.text
+        assert "ghost identity" not in caplog.text
+
+    def test_register_probe_plain_400_still_raises_loud(self, cert_manager: CertificateManager):
+        """#369 paired negative — the 400 widening is body-gated: a plain
+        application 400 (no SSL certificate error text) is NOT ghost
+        evidence and still propagates loud via raise_for_status."""
+        self._seed_existing_cert(cert_manager)
+        reject = MagicMock(spec=httpx2.Response)
+        reject.status_code = 400
+        reject.text = '{"detail":"Invalid payload"}'
+        reject.raise_for_status.side_effect = httpx2.HTTPStatusError(
+            "400 Bad Request", request=MagicMock(), response=reject
+        )
+        with patch("executor.daemon.httpx2.Client") as MockClient:
+            MockClient.return_value.__enter__.return_value = MockClient.return_value
+            MockClient.return_value.post.return_value = reject
+            with pytest.raises(httpx2.HTTPStatusError):
+                cert_manager.register("test-executor")
+
     def test_register_server_error(self, cert_manager: CertificateManager):
         """Registration raises HTTPError when server returns error."""
         mock_response = MagicMock(spec=httpx2.Response)

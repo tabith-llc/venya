@@ -173,6 +173,39 @@ def _token_required_error(exc: httpx2.HTTPStatusError, *, rotation: bool = False
     return RuntimeError(msg)
 
 
+_TLS_ERROR_KEYWORDS = ("ssl", "certificate", "tls", "verif")
+
+
+def _is_tls_handshake_failure(exc: BaseException) -> bool:
+    """True when a transport error is a TLS-level rejection, not plain connectivity.
+
+    httpx2 wraps ssl.SSLError as ConnectError — check the exception chain and
+    the message for TLS keywords (same classification register() applies).
+    """
+    node: BaseException | None = exc
+    seen: set[int] = set()
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        if isinstance(node, ssl.SSLError):
+            return True
+        node = node.__cause__ or node.__context__
+    return any(t in str(exc).lower() for t in _TLS_ERROR_KEYWORDS)
+
+
+def _ghost_identity_error(reason: str) -> RuntimeError:
+    """Ruled ghost-abort error (#361/#369): log it loud and return it for the
+    caller to raise — boot stops before any CSR/token consumption."""
+    msg = (
+        f"Core refused the existing certificate ({reason}) — this "
+        "executor's identity is unknown server-side (a rebuilt core mints a new CA). "
+        "Refusing to run as a ghost identity. Re-enroll by re-running the executor "
+        "installer with a fresh VENYA_EXECUTOR_ENROLLMENT_TOKEN (mint with: "
+        "venya admin executor-enroll <executor-id>)."
+    )
+    logger.error("%s", msg)
+    return RuntimeError(msg)
+
+
 class CertificateManager:
     """Manages executor mTLS certificate lifecycle.
 
@@ -301,8 +334,7 @@ class CertificateManager:
 
             # Determine if this is a TLS failure by inspecting the exception chain
             # httpx2 wraps ssl.SSLError as ConnectError — check the message for TLS keywords
-            err_str = str(e).lower()
-            if any(t in err_str for t in ("ssl", "certificate", "tls", "verif")):
+            if any(t in str(e).lower() for t in _TLS_ERROR_KEYWORDS):
                 raise RuntimeError(
                     f"Registration failed: TLS verification error — {e}. " "Verify server CA is trusted."
                 ) from e
@@ -357,14 +389,24 @@ class CertificateManager:
     def _verify_cert_recognized(self, executor_id: str) -> None:
         """Probe the core's heartbeat with the on-disk mTLS pair (raises RuntimeError on rejection).
 
-        401/403 means the core cannot map this certificate to a known, active
-        identity (superseded CA after a core rebuild, revoked row, ...) — the
-        ghost state. Any TRANSPORT failure is inconclusive, not a rejection:
-        warn and proceed (the daemon's own heartbeat loop keeps checking, and a
-        core outage must not strand a legitimately enrolled executor). Other
-        status classes propagate loud via raise_for_status. Full TLS
-        verification per house policy (same VENYA_TLS_VERIFY knob register
-        honors; dev-fleet only).
+        Ghost evidence comes in three shapes, all aborting the boot with the
+        same ruled re-enroll message (#361 ruled A, widened by #369):
+        1. 401/403 from the app — the core cannot map this certificate to a
+           known, active identity (superseded CA after a core rebuild, revoked
+           row, ...).
+        2. A TLS-terminating 400 whose body is nginx's "The SSL certificate
+           error" page — with a certificate from an UNRELATED CA, nginx
+           rejects the handshake and answers before the request reaches the
+           app, so the app never gets to say 401/403.
+        3. A connection-level TLS failure (the terminator aborts the handshake
+           over our client certificate) — keywords checked through the
+           exception chain, same shape register() classifies.
+        Any OTHER transport failure (timeout, refused, DNS) carries no
+        certificate verdict: it stays INCONCLUSIVE — warn and proceed (the
+        daemon's own heartbeat loop keeps checking, and a core outage must
+        not strand a legitimately enrolled executor). Other status classes
+        propagate loud via raise_for_status. Full TLS verification per house
+        policy (same VENYA_TLS_VERIFY knob register honors; dev-fleet only).
         """
         url = f"{self.config.server_url}/api/v1/heartbeat"
         tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
@@ -375,6 +417,8 @@ class CertificateManager:
             with httpx2.Client(cert=(self.cert_path, self.key_path), verify=verify, timeout=10.0) as client:
                 response = client.post(url, json={"executor_id": executor_id})
         except httpx2.TransportError as exc:
+            if _is_tls_handshake_failure(exc):
+                raise _ghost_identity_error(f"TLS handshake rejected the certificate: {exc}") from None
             logger.warning(
                 "Identity probe to %s unreachable (%s) — proceeding on the existing certificate; "
                 "the heartbeat loop will re-check continuously",
@@ -383,15 +427,9 @@ class CertificateManager:
             )
             return
         if response.status_code in (401, 403):
-            msg = (
-                f"Core refused the existing certificate ({response.status_code} on {url}) — this "
-                "executor's identity is unknown server-side (a rebuilt core mints a new CA). "
-                "Refusing to run as a ghost identity. Re-enroll by re-running the executor "
-                "installer with a fresh VENYA_EXECUTOR_ENROLLMENT_TOKEN (mint with: "
-                "venya admin executor-enroll <executor-id>)."
-            )
-            logger.error("%s", msg)
-            raise RuntimeError(msg) from None
+            raise _ghost_identity_error(f"{response.status_code} on {url}") from None
+        if response.status_code == 400 and "ssl certificate error" in str(getattr(response, "text", "")).lower():
+            raise _ghost_identity_error(f"400 TLS-terminator reject ({url}: The SSL certificate error)") from None
         response.raise_for_status()
 
     def needs_rotation(self) -> bool:
