@@ -8,6 +8,13 @@
 
 set -euo pipefail
 
+# #317: close every create-then-chmod window (install-venya-core.sh writes
+# secrets at :454/:493/:565/:605/:807 before their chmod lands). Deliberate
+# world-readables (public certs, nginx-served CA copy) all carry explicit
+# chmod 644/755 lines and still win. Child processes inherit; sudo does NOT
+# reset the caller umask — covered.
+umask 077
+
 ###############################################################################
 # Venya Core Installer
 #
@@ -409,7 +416,10 @@ info "Server will bind to: $BIND_ADDRESS (Nginx handles TLS)"
 # /etc/venya holds runtime files (venya-core.env, tls/). The server reads config
 # from /opt/venya/.env only — server.toml was never read at runtime and is no longer
 # written (core-server-toml-inert).
-mkdir -p /etc/venya
+# #317 umask 077 guard: /etc/venya is root-owned and the venya daemon must
+# traverse it (its inner dirs/files are individually protected) — pin the
+# mode the old inherited 0755 provided, explicitly.
+install -d -m 0755 /etc/venya
 
 # --- Root/executor CA key passphrase (VENYA_CA_KEY_PASSPHRASE) ---
 # The root CA signs executor certs, so its key must be encrypted at rest
@@ -568,10 +578,11 @@ openssl ecparam -genkey -name prime256v1 -noout -out /etc/venya/tls/server.key
 chown venya:venya /etc/venya/tls/server.key
 chmod 600 /etc/venya/tls/server.key
 
-openssl req -new -key /etc/venya/tls/server.key -out /tmp/server.csr \
+SERVER_CSR=$(mktemp /tmp/venya-server-XXXXXX.csr)   # #317: static /tmp name = symlink-clobber hazard
+openssl req -new -key /etc/venya/tls/server.key -out "$SERVER_CSR" \
     -subj "/O=Venya/CN=$CORE_HOSTNAME"
 
-VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/server.csr \
+VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in "$SERVER_CSR" \
     -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
     -passin env:VENYA_CA_KEY_PASSPHRASE \
     -CAcreateserial -out /etc/venya/tls/server.crt -days 365 \
@@ -579,7 +590,7 @@ VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/server.c
 
 chown venya:venya /etc/venya/tls/server.crt
 chmod 644 /etc/venya/tls/server.crt
-rm -f /tmp/server.csr
+rm -f "$SERVER_CSR"
 
 info "Server TLS certificate signed with Venya CA"
 
@@ -606,15 +617,16 @@ openssl ecparam -genkey -name prime256v1 -noout -out "$RELAY_DIR/relay-client.ke
 chown venya:venya "$RELAY_DIR/relay-client.key"
 chmod 600 "$RELAY_DIR/relay-client.key"
 
+RELAY_CSR=$(mktemp /tmp/venya-relay-XXXXXX.csr)   # #317: static /tmp name = symlink-clobber hazard
 openssl req -new -key "$RELAY_DIR/relay-client.key" \
-    -out /tmp/relay-client.csr \
+    -out "$RELAY_CSR" \
     -subj "/O=Venya/CN=${CORE_HOSTNAME}-relay"
 
 # SKI + AKI are non-optional: Python 3.14 ssl rejects a chain without an
 # Authority Key Identifier (33bc4b4); a lenient s_client smoke masks the
 # absence. EKU is clientAuth-only: the core relay cert never serves a server
 # role (the executor leaf is dual-purpose by design — do not "unify").
-VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/relay-client.csr \
+VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in "$RELAY_CSR" \
     -CA /var/lib/venya/ca/ca.crt -CAkey /var/lib/venya/ca/ca.key \
     -passin env:VENYA_CA_KEY_PASSPHRASE \
     -CAcreateserial -out "$RELAY_DIR/relay-client.crt" -days 365 \
@@ -622,7 +634,7 @@ VENYA_CA_KEY_PASSPHRASE="$CA_KEY_PASSPHRASE" openssl x509 -req -in /tmp/relay-cl
 
 chown venya:venya "$RELAY_DIR/relay-client.crt"
 chmod 644 "$RELAY_DIR/relay-client.crt"
-rm -f /tmp/relay-client.csr
+rm -f "$RELAY_CSR"
 
 # Self-check: fail the install loudly on a half-wired relay cert.
 if ! openssl verify -CAfile /var/lib/venya/ca/ca.crt "$RELAY_DIR/relay-client.crt" >/dev/null 2>&1; then
@@ -725,7 +737,10 @@ update-ca-certificates > /dev/null 2>&1
 info "Venya CA installed to system trust store"
 
 # Copy CA cert to servable path for executor bootstrap
+# #317 umask 077 guard: nginx WORKERS (www-data) serve this dir — the file
+# inside already gets explicit chmod 644; the DIR needs the traverse bit.
 mkdir -p /var/www/.well-known
+chmod 755 /var/www/.well-known
 cp /var/lib/venya/ca/ca.crt /var/www/.well-known/venya-ca.crt
 chmod 644 /var/www/.well-known/venya-ca.crt
 info "CA cert served at /.well-known/venya-ca.crt"

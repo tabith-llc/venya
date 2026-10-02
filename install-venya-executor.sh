@@ -8,6 +8,10 @@
 
 set -euo pipefail
 
+# #317: close create-then-chmod windows (executor.toml :435->613, bootstrap-token
+# :600->602). Deliberate world-readables carry explicit chmod lines.
+umask 077
+
 ###############################################################################
 # Venya Executor Installer
 #
@@ -212,14 +216,15 @@ chown venya:adm /var/log/venya 2>/dev/null || chown venya:venya /var/log/venya
 info "Installing Docker Sandboxes (sbx) CLI..."
 if ! command -v sbx &>/dev/null; then
     SBX_SCRIPT=$(mktemp /tmp/docker-sbx-install-XXXXXX.sh)
+    SBX_LOG=$(mktemp /tmp/venya-sbx-repo-XXXXXX.log)   # #317: static name = root symlink-clobber
     curl -fsSL https://get.docker.com -o "$SBX_SCRIPT"
-    if ! REPO_ONLY=1 sh "$SBX_SCRIPT" > /tmp/venya-sbx-repo.log 2>&1; then
+    if ! REPO_ONLY=1 sh "$SBX_SCRIPT" > "$SBX_LOG" 2>&1; then
         error "Docker sbx apt-repo setup failed; last 25 lines:"
-        tail -25 /tmp/venya-sbx-repo.log >&2
-        rm -f "$SBX_SCRIPT"
+        tail -25 "$SBX_LOG" >&2
+        rm -f "$SBX_SCRIPT" "$SBX_LOG"
         exit 1
     fi
-    rm -f "$SBX_SCRIPT"
+    rm -f "$SBX_SCRIPT" "$SBX_LOG"
     venya_apt install -y -qq docker-sbx
     usermod -aG kvm venya 2>/dev/null || true
     info "sbx CLI installed. venya user added to kvm group."
@@ -429,6 +434,9 @@ else
 fi
 
 # --- Write executor config (after CA installation so ca_bundle path is valid) ---
+# #317 umask 077 guard: root-owned /etc/venya needs the inherited 0755 traverse
+# bit for the venya daemon (inner files/dirs individually protected as before).
+install -d -m 0755 /etc/venya
 mkdir -p /etc/venya/executor
 mkdir -p /var/log/venya
 
@@ -596,7 +604,10 @@ fi
 # crash-loop the boot. The daemon still honors a hand-placed legacy section
 # (loud non-fatal clear failure) until old installs are cut over.
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ] && [ "$CA_INSTALLED" != true ]; then
-    install -d -m 0755 -o venya -g venya /var/lib/venya/executor
+    # #317: 0750 not 0755 — readers are the daemon (User=venya = owner) and
+    # root only; the token file lands 0600, but the old world-traversable dir
+    # plus the :600->602 chmod window made that token locally readable.
+    install -d -m 0750 -o venya -g venya /var/lib/venya/executor
     printf '%s\n' "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" > /var/lib/venya/executor/bootstrap-token
     chown venya:venya /var/lib/venya/executor/bootstrap-token
     chmod 600 /var/lib/venya/executor/bootstrap-token

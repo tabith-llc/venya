@@ -524,7 +524,9 @@ venya_validate_egress_entry() {
 
 venya_write_egress_allowlist() {
     EGRESS_ALLOWLIST="/etc/venya/egress-allowlist.txt"
-    mkdir -p /etc/venya
+    # #317 umask 077 guard: parent-script umask is inherited into common
+    # helpers; pin the traverse bit the old inherited dir mode provided.
+    install -d -m 0755 /etc/venya
 
     if [ -f "$EGRESS_ALLOWLIST" ]; then
         info "Egress allowlist already exists at $EGRESS_ALLOWLIST — not overwriting"
