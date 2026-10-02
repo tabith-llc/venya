@@ -819,6 +819,8 @@ server {
 
     ssl_certificate /etc/venya/tls/server.crt;
     ssl_certificate_key /etc/venya/tls/server.key;
+    # GitLab #323: floor the TLS handshake at 1.2 (nginx default allows 1.0/1.1).
+    ssl_protocols TLSv1.2 TLSv1.3;
     ssl_client_certificate /etc/nginx/ssl/client-ca-bundle.crt;
     ssl_verify_client optional;
 
