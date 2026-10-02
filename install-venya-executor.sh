@@ -72,11 +72,11 @@ else
     # neither (raw-checkout bytes without embedding), fall back to the origin
     # sidecar; if that is unobtainable too, abort FAIL-CLOSED — an unverified
     # library is never sourced as root (mirrors the #327 tarball guard).
-    EXPECTED_COMMON_SHA="${VENYA_COMMON_SHA256:-__VENYA_COMMON_SHA256__}"
     # #368: the placeholder-as-literal NEVER appears contiguous outside the
     # assignment default — the split-quote idiom below is invisible to the
     # serve-time sed, so only the ${VENYA_COMMON_SHA256:-...} default is
     # substituted and the guard cannot self-null into self-attestation.
+    EXPECTED_COMMON_SHA="${VENYA_COMMON_SHA256:-__VENYA_COMMON_SHA256__}"
     if [ "$EXPECTED_COMMON_SHA" = '__VENYA''_COMMON_SHA256__' ]; then
         EXPECTED_COMMON_SHA=""
     fi
@@ -249,7 +249,8 @@ venya_write_egress_allowlist
 
 # --- Harden log dir (executor-specific) ---
 # NOTE: /etc/venya/executor.toml + /etc/venya/executor creds are hardened AFTER they are
-# written (see "Harden executor credentials" block near the end). Hardening them here was
+# written (see "Harden executor credentials", right after registration and before the
+# Docker gate — #370). Hardening them here was
 # a no-op — the dir/files do not exist yet at this point.
 chmod 750 /var/log/venya
 chown venya:adm /var/log/venya 2>/dev/null || chown venya:venya /var/log/venya
@@ -555,6 +556,26 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ] && [ "$CA_INSTALLED" != true ];
     info "trigger/retry registration with: sudo systemctl restart venya-executor"
 fi
 
+# Reordered AFTER enrollment (#363 ruled A, executor-docker-gate-before-enrollment):
+# the CSR/register section runs first so a certificate/identity ALWAYS lands even
+# when the optional Docker chain aborts or degrades below.
+# Moved BEFORE the Docker gate (#370 ruled, executor-installer-docker-abort-before-
+# harden-leaves-root-owned-keys): hardening ran after the whole Docker chain, so a
+# creds-less abort left root-owned /etc/venya/executor keys and a crash-looping
+# daemon until a completing re-run. Hardening right after cert creation means any
+# later abort leaves a bootable degraded install (sandbox 503s, daemon runs).
+# --- Harden executor credentials (executor-specific) ---
+# chown venya:venya (not just chmod 600): venya-executor.service runs User=venya
+# with ReadOnlyPaths=/etc/venya and must READ these — a root-owned 600 file would
+# EACCES and break mTLS.
+chown venya:venya /etc/venya/executor.toml
+chmod 600 /etc/venya/executor.toml
+chown -R venya:venya /etc/venya/executor
+chmod 700 /etc/venya/executor
+find /etc/venya/executor -name '*.key' -exec   chmod 600 {} \; 2>/dev/null || true
+find /etc/venya/executor -name '*.crt' -exec   chmod 644 {} \; 2>/dev/null || true
+info "Executor credentials hardened (venya:venya, dir 700, key 600, cert 644)"
+
 # --- Docker auth (sbx template pulls) + sandboxd daemon ---
 # sbx runs microVMs via KVM but pulls its agent template from Docker and
 # requires a per-user sandboxd daemon. Without auth the executor installs
@@ -670,20 +691,9 @@ else
     fi
 fi
 
-# Reordered AFTER enrollment (#363 ruled A, executor-docker-gate-before-enrollment):
-# the CSR/register section runs first so a certificate/identity ALWAYS lands even
-# when the optional Docker chain aborts or degrades below.
-# --- Harden executor credentials (executor-specific) ---
-# Runs AFTER the config + any registered certs exist. chown venya:venya (not just chmod
-# 600): venya-executor.service runs User=venya with ReadOnlyPaths=/etc/venya and must READ
-# these — a root-owned 600 file would EACCES and break mTLS.
-chown venya:venya /etc/venya/executor.toml
-chmod 600 /etc/venya/executor.toml
-chown -R venya:venya /etc/venya/executor
-chmod 700 /etc/venya/executor
-find /etc/venya/executor -name '*.key' -exec   chmod 600 {} \; 2>/dev/null || true
-find /etc/venya/executor -name '*.crt' -exec   chmod 644 {} \; 2>/dev/null || true
-info "Executor credentials hardened (venya:venya, dir 700, key 600, cert 644)"
+# NOTE: executor credential hardening ("Harden executor credentials") runs
+# immediately after registration and BEFORE the Docker gate (#370) — an abort
+# in the optional Docker chain below must leave a bootable degraded install.
 
 # --- Install systemd service and mount unit (executor-specific) ---
 info "Installing systemd service..."
