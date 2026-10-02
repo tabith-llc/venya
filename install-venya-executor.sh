@@ -254,121 +254,6 @@ fi
 install -d -m 0750 -g venya /home/venya/.local /home/venya/.local/share
 install -d -m 0770 -o venya -g venya /home/venya/.local/share/sandboxes
 
-# --- Docker auth (sbx template pulls) + sandboxd daemon ---
-# sbx runs microVMs via KVM but pulls its agent template from Docker and
-# requires a per-user sandboxd daemon. Without auth the executor installs
-# fine but every sandbox create fails 503 ("Not authenticated to Docker").
-# The API key travels stdin-only (never argv, never written by this script;
-# sbx stores it in its own credential store under /home/venya).
-if [ "${VENYA_SKIP_DOCKER_LOGIN:-}" = "yes" ]; then
-    warn "VENYA_SKIP_DOCKER_LOGIN=yes — skipping Docker auth."
-    warn "Sandbox execution will fail (503) until: sudo -H -u venya sbx login"
-elif sudo -H -u venya sbx ls < /dev/null > /dev/null 2>&1; then
-    info "sbx already authenticated (sbx ls OK)"
-else
-    DOCKER_USER="${VENYA_DOCKER_USERNAME:-}"
-    DOCKER_KEY="${VENYA_DOCKER_API_KEY:-}"
-    if { [ -z "$DOCKER_USER" ] || [ -z "$DOCKER_KEY" ]; } && [ -t 0 ]; then
-        [ -z "$DOCKER_USER" ] && read -r -p "Docker username (sbx template pulls): " DOCKER_USER
-        if [ -z "$DOCKER_KEY" ]; then
-            venya_read_secret_confirm "Docker API key / access token" DOCKER_KEY
-        fi
-    fi
-    if [ -n "$DOCKER_USER" ] && [ -n "$DOCKER_KEY" ]; then
-        info "Authenticating sbx to Docker as '${DOCKER_USER}' (token via stdin)..."
-        if printf '%s' "$DOCKER_KEY" | sudo -H -u venya sbx login --username "$DOCKER_USER" --password-stdin > /dev/null 2>&1; then
-            info "Docker auth OK"
-        else
-            error "sbx login failed for '${DOCKER_USER}'. Check the API key/token."
-            error "Re-run the installer with corrected VENYA_DOCKER_USERNAME/VENYA_DOCKER_API_KEY."
-            exit 1
-        fi
-    else
-        error "Docker credentials are required for sandbox execution."
-        error "Set VENYA_DOCKER_USERNAME + VENYA_DOCKER_API_KEY (token; stdin-only handling),"
-        error "or run this installer interactively to be prompted."
-        error "Degraded install (executor runs, sandbox executes fail 503): VENYA_SKIP_DOCKER_LOGIN=yes"
-        exit 1
-    fi
-fi
-
-# --- sandboxd daemon (system-managed, persists across reboots) ---
-cat > /etc/systemd/system/venya-sandboxd.service <<'SANDBOXD_UNIT'
-[Unit]
-Description=Venya sbx sandboxd (Docker Sandboxes daemon, user venya)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-Restart=on-failure
-RestartSec=5
-User=venya
-Environment=HOME=/home/venya
-ExecStart=/usr/bin/sbx daemon start
-TimeoutStartSec=60
-
-[Install]
-WantedBy=multi-user.target
-SANDBOXD_UNIT
-# Executor ordering drop-in (does not touch the vendored unit template)
-mkdir -p /etc/systemd/system/venya-executor.service.d
-cat > /etc/systemd/system/venya-executor.service.d/10-sandboxd.conf <<'DROPIN'
-[Unit]
-Wants=venya-sandboxd.service
-After=venya-sandboxd.service
-DROPIN
-systemctl daemon-reload
-systemctl enable venya-sandboxd.service > /dev/null 2>&1
-systemctl restart venya-sandboxd.service
-sleep 2
-if systemctl is-active --quiet venya-sandboxd.service && sudo -H -u venya sbx daemon status < /dev/null > /dev/null 2>&1; then
-    info "sandboxd running (venya-sandboxd.service, enabled)"
-else
-    warn "sandboxd not healthy yet — check: journalctl -u venya-sandboxd; sudo -H -u venya sbx diagnose"
-fi
-
-# --- sbx global network policy (required before any sandbox create) ---
-# deny-all baseline; per-sandbox allow rules are applied from the egress
-# allowlist at execution time. Without this, every sbx create fails with
-# "global network policy has not been initialized".
-if sudo -H -u venya sbx policy init deny-all < /dev/null > /dev/null 2>&1; then
-    info "sbx global network policy initialized (deny-all)"
-else
-    warn "sbx policy init deny-all failed or policy already initialized — verify manually if sandbox creates fail"
-fi
-
-# --- sbx agent-template warm (ticket sbx-cold-start-prepull) ---
-# The first `sbx create` on a fresh host pulls the multi-GiB `shell` agent
-# template inside the first relayed command's request path (~60-90 s on a
-# fast uplink; longer on slow links). Warm the cache here with a throwaway
-# sandbox so every real command takes the ~5 s cached path. Prereq order is
-# load-bearing: Docker auth + sandboxd + deny-all policy init all precede
-# this (a create without the global policy fails). Failure is NON-FATAL by
-# design: the product still works, the first run is merely slow (the pre-fix
-# behavior) — warn loudly and continue. Skipped under the documented
-# degraded install (no Docker auth → the pull cannot work).
-if [ "${VENYA_SKIP_DOCKER_LOGIN:-}" = "yes" ]; then
-    info "Skipping agent-template warm (VENYA_SKIP_DOCKER_LOGIN=yes — no Docker auth)."
-else
-    info "Warming sbx agent template (throwaway sandbox; multi-GiB pull on a fresh host can take several minutes)..."
-    WARM_SANDBOX="venya-install-warm"
-    sudo -H -u venya mkdir -p /home/venya/.venya-workspaces 2>/dev/null || true
-    WARM_WS="$(sudo -H -u venya mktemp -d /home/venya/.venya-workspaces/warm.XXXXXX 2>/dev/null || true)"
-    # Clear a stale warm sandbox from a previous failed run (create would refuse the name).
-    sudo -H -u venya sbx rm --force "$WARM_SANDBOX" < /dev/null > /dev/null 2>&1 || true
-    if [ -n "$WARM_WS" ] && timeout 1800 sudo -H -u venya sbx create --name "$WARM_SANDBOX" shell "$WARM_WS" < /dev/null > /dev/null 2>&1; then
-        info "Agent template warm (first sandbox create is now seconds-scale)"
-    else
-        warn "Agent-template warm FAILED — the first sandbox execution will pull the template itself (~60-90 s+; slow but within the timeout chain). Check disk free (>= ~3.5 GiB), Docker auth, and: sudo -H -u venya sbx diagnose"
-        warn "Manual warm: sudo -H -u venya sbx create --name warm shell <existing-empty-dir> && sudo -H -u venya sbx rm --force warm"
-    fi
-    sudo -H -u venya sbx rm --force "$WARM_SANDBOX" < /dev/null > /dev/null 2>&1 || true
-    if [ -n "$WARM_WS" ]; then
-        sudo -H -u venya rmdir "$WARM_WS" < /dev/null 2>/dev/null || true
-    fi
-fi
-
 # --- Resolve Core Hostname ---
 # CORE_HOSTNAME is the relay CN-derivation base: the core signs its
 # relay-client cert with CN="${CORE_HOSTNAME}-relay". Formula: explicit
@@ -642,6 +527,124 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ] && [ "$CA_INSTALLED" != true ];
     info "trigger/retry registration with: sudo systemctl restart venya-executor"
 fi
 
+# --- Docker auth (sbx template pulls) + sandboxd daemon ---
+# sbx runs microVMs via KVM but pulls its agent template from Docker and
+# requires a per-user sandboxd daemon. Without auth the executor installs
+# fine but every sandbox create fails 503 ("Not authenticated to Docker").
+# The API key travels stdin-only (never argv, never written by this script;
+# sbx stores it in its own credential store under /home/venya).
+if [ "${VENYA_SKIP_DOCKER_LOGIN:-}" = "yes" ]; then
+    warn "VENYA_SKIP_DOCKER_LOGIN=yes — skipping Docker auth."
+    warn "Sandbox execution will fail (503) until: sudo -H -u venya sbx login"
+elif sudo -H -u venya sbx ls < /dev/null > /dev/null 2>&1; then
+    info "sbx already authenticated (sbx ls OK)"
+else
+    DOCKER_USER="${VENYA_DOCKER_USERNAME:-}"
+    DOCKER_KEY="${VENYA_DOCKER_API_KEY:-}"
+    if { [ -z "$DOCKER_USER" ] || [ -z "$DOCKER_KEY" ]; } && [ -t 0 ]; then
+        [ -z "$DOCKER_USER" ] && read -r -p "Docker username (sbx template pulls): " DOCKER_USER
+        if [ -z "$DOCKER_KEY" ]; then
+            venya_read_secret_confirm "Docker API key / access token" DOCKER_KEY
+        fi
+    fi
+    if [ -n "$DOCKER_USER" ] && [ -n "$DOCKER_KEY" ]; then
+        info "Authenticating sbx to Docker as '${DOCKER_USER}' (token via stdin)..."
+        if printf '%s' "$DOCKER_KEY" | sudo -H -u venya sbx login --username "$DOCKER_USER" --password-stdin > /dev/null 2>&1; then
+            info "Docker auth OK"
+        else
+            error "sbx login failed for '${DOCKER_USER}'. Check the API key/token."
+            error "Re-run the installer with corrected VENYA_DOCKER_USERNAME/VENYA_DOCKER_API_KEY."
+            exit 1
+        fi
+    else
+        error "Docker credentials are required for sandbox execution."
+        error "Set VENYA_DOCKER_USERNAME + VENYA_DOCKER_API_KEY (token; stdin-only handling),"
+        error "or run this installer interactively to be prompted."
+        error "Degraded install (executor runs, sandbox executes fail 503): VENYA_SKIP_DOCKER_LOGIN=yes"
+        exit 1
+    fi
+fi
+
+# --- sandboxd daemon (system-managed, persists across reboots) ---
+cat > /etc/systemd/system/venya-sandboxd.service <<'SANDBOXD_UNIT'
+[Unit]
+Description=Venya sbx sandboxd (Docker Sandboxes daemon, user venya)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=5
+User=venya
+Environment=HOME=/home/venya
+ExecStart=/usr/bin/sbx daemon start
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
+SANDBOXD_UNIT
+# Executor ordering drop-in (does not touch the vendored unit template)
+mkdir -p /etc/systemd/system/venya-executor.service.d
+cat > /etc/systemd/system/venya-executor.service.d/10-sandboxd.conf <<'DROPIN'
+[Unit]
+Wants=venya-sandboxd.service
+After=venya-sandboxd.service
+DROPIN
+systemctl daemon-reload
+systemctl enable venya-sandboxd.service > /dev/null 2>&1
+systemctl restart venya-sandboxd.service
+sleep 2
+if systemctl is-active --quiet venya-sandboxd.service && sudo -H -u venya sbx daemon status < /dev/null > /dev/null 2>&1; then
+    info "sandboxd running (venya-sandboxd.service, enabled)"
+else
+    warn "sandboxd not healthy yet — check: journalctl -u venya-sandboxd; sudo -H -u venya sbx diagnose"
+fi
+
+# --- sbx global network policy (required before any sandbox create) ---
+# deny-all baseline; per-sandbox allow rules are applied from the egress
+# allowlist at execution time. Without this, every sbx create fails with
+# "global network policy has not been initialized".
+if sudo -H -u venya sbx policy init deny-all < /dev/null > /dev/null 2>&1; then
+    info "sbx global network policy initialized (deny-all)"
+else
+    warn "sbx policy init deny-all failed or policy already initialized — verify manually if sandbox creates fail"
+fi
+
+# --- sbx agent-template warm (ticket sbx-cold-start-prepull) ---
+# The first `sbx create` on a fresh host pulls the multi-GiB `shell` agent
+# template inside the first relayed command's request path (~60-90 s on a
+# fast uplink; longer on slow links). Warm the cache here with a throwaway
+# sandbox so every real command takes the ~5 s cached path. Prereq order is
+# load-bearing: Docker auth + sandboxd + deny-all policy init all precede
+# this (a create without the global policy fails). Failure is NON-FATAL by
+# design: the product still works, the first run is merely slow (the pre-fix
+# behavior) — warn loudly and continue. Skipped under the documented
+# degraded install (no Docker auth → the pull cannot work).
+if [ "${VENYA_SKIP_DOCKER_LOGIN:-}" = "yes" ]; then
+    info "Skipping agent-template warm (VENYA_SKIP_DOCKER_LOGIN=yes — no Docker auth)."
+else
+    info "Warming sbx agent template (throwaway sandbox; multi-GiB pull on a fresh host can take several minutes)..."
+    WARM_SANDBOX="venya-install-warm"
+    sudo -H -u venya mkdir -p /home/venya/.venya-workspaces 2>/dev/null || true
+    WARM_WS="$(sudo -H -u venya mktemp -d /home/venya/.venya-workspaces/warm.XXXXXX 2>/dev/null || true)"
+    # Clear a stale warm sandbox from a previous failed run (create would refuse the name).
+    sudo -H -u venya sbx rm --force "$WARM_SANDBOX" < /dev/null > /dev/null 2>&1 || true
+    if [ -n "$WARM_WS" ] && timeout 1800 sudo -H -u venya sbx create --name "$WARM_SANDBOX" shell "$WARM_WS" < /dev/null > /dev/null 2>&1; then
+        info "Agent template warm (first sandbox create is now seconds-scale)"
+    else
+        warn "Agent-template warm FAILED — the first sandbox execution will pull the template itself (~60-90 s+; slow but within the timeout chain). Check disk free (>= ~3.5 GiB), Docker auth, and: sudo -H -u venya sbx diagnose"
+        warn "Manual warm: sudo -H -u venya sbx create --name warm shell <existing-empty-dir> && sudo -H -u venya sbx rm --force warm"
+    fi
+    sudo -H -u venya sbx rm --force "$WARM_SANDBOX" < /dev/null > /dev/null 2>&1 || true
+    if [ -n "$WARM_WS" ]; then
+        sudo -H -u venya rmdir "$WARM_WS" < /dev/null 2>/dev/null || true
+    fi
+fi
+
+# Reordered AFTER enrollment (#363 ruled A, executor-docker-gate-before-enrollment):
+# the CSR/register section runs first so a certificate/identity ALWAYS lands even
+# when the optional Docker chain aborts or degrades below.
 # --- Harden executor credentials (executor-specific) ---
 # Runs AFTER the config + any registered certs exist. chown venya:venya (not just chmod
 # 600): venya-executor.service runs User=venya with ReadOnlyPaths=/etc/venya and must READ
