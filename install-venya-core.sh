@@ -860,7 +860,7 @@ server {
         proxy_ssl_verify_depth 2;
         proxy_ssl_name localhost;
         # ...and forwards the OUTER verified client cert as a per-connection
-        # PEM file path ($ssl_client_certificate_path writes the PEM under the
+        # PEM file path (the ssl_client_certificate_path variable writes the PEM under
         # client-body temp path, then reaps it; the app reads it in-request,
         # re-verifies it against its own CA, and no header is identity).
         proxy_set_header X-Client-Cert-File \$ssl_client_certificate_path;
