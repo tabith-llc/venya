@@ -6,9 +6,9 @@
 
 ### AI agents manage infrastructure securely.
 
-Venya is the first platform that lets AI agents execute commands on remote infrastructure using stored credentials **without ever seeing those credentials**. The LLM discovers what secrets exist, constructs the command, and the executor injects the credential into a sandboxed environment. Output is filtered. Every action is audited. A human authorized the session with a physical security key.
+**First.** To our knowledge, the first platform where AI agents act with real credentials and never see one — zero-knowledge injection, FIDO2-elevated single-use disclosure, execution inside a fail-closed sandbox, and an audit trail that is append-only because the database makes it so, on infrastructure you host yourself. No other platform on the comparison we publish combines all five — [docs/security-landscape.md](docs/security-landscape.md). The LLM discovers what secrets exist, constructs the command, and the executor injects the credential into a sandboxed environment. Output is filtered. Every action is audited. A human authorized the session with a physical security key.
 
-**This doesn't exist anywhere else.** Traditional secrets managers (HashiCorp Vault, CyberArk, cloud-native stores) store credentials — but they hand the plaintext to whatever process requests it. If you give an AI agent a Vault token, the agent can read every secret in plain text. Venya's zero-knowledge injection model means the agent never sees, handles, or can leak the credential value. It sees the result of the command — and nothing more. The same holds for the humans operating Venya: frontline operators authorize sessions, run commands, and read filtered output without ever seeing the credential values doing the work. Disclosure is a separate, deliberate act — FIDO2-elevated, single-use, audited — never part of normal operation. (Mechanized: values leave the server only through the elevation-gated unmask route or the mTLS executor-injection path; every disclosure is an audit event — see [docs/architecture.md](docs/architecture.md) "Secret lifecycle" and the Security Guarantees table below.)
+**To our knowledge, this combination ships nowhere else** — the side-by-side comparison is published in [docs/security-landscape.md](docs/security-landscape.md). Traditional secrets managers (HashiCorp Vault, CyberArk, cloud-native stores) store credentials — but they hand the plaintext to whatever process requests it. If you give an AI agent a Vault token, the agent can read every secret in plain text. Venya's zero-knowledge injection model means the agent never sees, handles, or can leak the credential value. It sees the result of the command — and nothing more. The same holds for the humans operating Venya: frontline operators authorize sessions, run commands, and read filtered output without ever seeing the credential values doing the work. Disclosure is a separate, deliberate act — FIDO2-elevated, single-use, audited — never part of normal operation. (Mechanized: values leave the server only through the elevation-gated unmask route or the mTLS executor-injection path; every disclosure is an audit event — see [docs/architecture.md](docs/architecture.md) "Secret lifecycle" and the Security Guarantees table below.)
 
 ---
 
@@ -46,8 +46,10 @@ The following are planned for future releases:
   hybridized with WebAuthn hardware-key binding — passwords for identity,
   physical keys for privileged operations.
 - **FIDO2 hardware attestation.** At enrollment, verify that security keys are
-  genuine FIDO2-certified authenticators (attestation checked against trusted
-  metadata) — not merely holders of a registered credential.
+  genuine FIDO2-certified authenticators — checking attestation statements
+  against FIDO Alliance metadata (make, model, and certification level), a
+  depth beyond the enrollment-time attestation-CA allow/deny checks some
+  products ship today — not merely holders of a registered credential.
 - **PIV smart-card support.** FIPS 201 (PIV) certificate authentication for
   federal and regulated environments — a secondary login method alongside
   WebAuthn using dual-credential keys (FIDO2 + PIV, e.g. YubiKey 5-series),
@@ -127,7 +129,7 @@ When the first probe fails, the agent adapts — switches executors, escalates, 
 ### Zero-Knowledge Secret Injection
 The AI agent never touches plaintext credentials. Not in its context window. Not in transit. Not in output. The secret is decrypted server-side, wrapped with sentinel markers, relayed over mTLS, and unwrapped only inside the executor's sandboxed process. The Rust filter ensures that even if a command accidentally echoes a credential in its output, it's replaced with `[REDACTED:<id>]` before the AI ever sees it.
 
-**No other product does this.** Existing secrets managers hand plaintext to the requesting process. Venya doesn't.
+**To our knowledge, no other platform pairs this with the other four elements.** Existing secrets managers hand plaintext to the requesting process; several agent-credential tools now achieve this one element on its own — the [published comparison](docs/security-landscape.md) names them. Venya's difference is the combination.
 
 ### FIDO2 Hardware Key Binding
 Every session begins with a physical security key press. The AI agent cannot initiate a session — only a human pressing a FIDO2 key can authorize access. Sessions expire after 4 hours. Token refresh happens automatically, and an idle-expired session renews within the 4-hour hard cap — no token, refresh, or agent action can extend a session past the cap (operators can raise the cap only through the documented server setting; see [docs/ease-of-use.md](docs/ease-of-use.md)). When the session is past the cap, the AI gets an actionable error: *"Ask the user to re-authenticate."*
