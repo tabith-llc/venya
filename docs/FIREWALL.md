@@ -34,7 +34,7 @@ install steps see [installation.md](installation.md).
 
 | Port | Proto | Binding | Why it stays local |
 |------|-------|---------|--------------------|
-| 8080/tcp | HTTP | `127.0.0.1` | The uvicorn/FastAPI backend. nginx proxies to it (`proxy_pass http://127.0.0.1:8080`). As shipped it has no TLS of its own — exposing it would bypass TLS + mTLS. Caveat: the optional inner-mTLS channel (`InnerTLSConfig` in `server/config.py`, env `VENYA_INNER_MTLS__*`, disabled by default) makes uvicorn terminate TLS itself on this loopback bind; exposing that port would still bypass the outer nginx TLS + admin-mTLS layer. |
+| 8080/tcp | HTTPS | `127.0.0.1` | The uvicorn/FastAPI backend. Installer-installed cores serve it over the inner-mTLS channel (`VENYA_INNER_MTLS__ENABLED=true` written at install; `InnerTLSConfig` in `server/config.py`, env `VENYA_INNER_MTLS__*` — the bare config default remains disabled): uvicorn terminates TLS on this loopback bind and requires the nginx client certificate, and nginx proxies to it over HTTPS with `proxy_ssl_verify on`. Exposing this port would still bypass the outer nginx TLS + admin-mTLS layer. |
 | 5432/tcp | PostgreSQL | `localhost` | The `venya` database (connection string `postgresql://venya:…@localhost/venya`). Stock Ubuntu PostgreSQL listens on loopback; keep it that way. |
 
 A host firewall on the core needs **443/tcp inbound** (from workstations, executors, and
