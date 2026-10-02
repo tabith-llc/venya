@@ -22,15 +22,6 @@ from typing import Any
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-# Canonical CA-key backup envelope magic (ticket fido2-device-layer-sweep-findings
-# finding 5, canonical-format ruling 2026-09-21): VENYACA1 + PBKDF2 salt(16) +
-# GCM nonce(12) + AES-256-GCM ciphertext+tag. Byte-identical to the CLI envelope
-# (the CLI has no `core` dependency — aligned implementations, pinned by the
-# cross-compat contract tests in packages/cli/tests/test_cli_ca_key_format.py).
-_CA_BLOB_MAGIC = b"VENYACA1"
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.serialization import (
     BestAvailableEncryption,
     PrivateFormat,
@@ -398,103 +389,6 @@ class CAManager:
             Hex-encoded serial string.
         """
         return format(serial, "016x")
-
-    def export_ca_key(self, passphrase: str) -> bytes:
-        """Export the CA private key, encrypted with a passphrase.
-
-        Reads the CA private key from disk, encrypts it using AES-256-GCM
-        with a user-provided passphrase, and returns the encrypted blob.
-
-        The plaintext key is zeroized from memory immediately after use.
-
-        Args:
-            passphrase: The passphrase to encrypt with.
-
-        Returns:
-            Encrypted key bytes: b"VENYACA1" magic + salt (16) + nonce (12) +
-            encrypted data (GCM tag appended) — the canonical envelope shared
-            with the CLI (finding-5 ruling).
-        """
-        private_key_pem = self.ca_key_path.read_bytes()
-
-        # Derive encryption key from passphrase using PBKDF2
-        salt = os.urandom(16)
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=600_000,
-        )
-        key = kdf.derive(passphrase.encode())
-
-        # Encrypt with AES-256-GCM (nonce 12 bytes, tag auto-appended)
-        nonce = os.urandom(12)
-        cipher = AESGCM(key)
-        encrypted = cipher.encrypt(nonce, private_key_pem, None)
-
-        # NOTE: True memory zeroization is not achievable in Python — bytes are
-        # immutable, and the cryptography library holds internal C-level copies.
-        # This overwrite is best-effort and does not guarantee the plaintext key
-        # is purged from all memory. For production hardening, consider running
-        # the CA key operations in a separate process or using an HSM.
-        private_key_pem = b"\x00" * len(private_key_pem)
-        del private_key_pem
-
-        return _CA_BLOB_MAGIC + salt + nonce + encrypted
-
-    def restore_ca_key(self, encrypted_key: bytes, passphrase: str) -> None:
-        """Restore the CA private key from encrypted data.
-
-        Decrypts the provided encrypted key data and writes it to disk
-        with restrictive permissions (0600).
-
-        Args:
-            encrypted_key: Canonical envelope (VENYACA1 magic + salt + nonce +
-                ciphertext). A pre-canonical HEADERLESS GCM blob (salt + nonce +
-                ciphertext — the alpha server format) is also accepted so old
-                exports are never stranded. Legacy CLI CBC blobs are NOT read
-                here — the CLI restore is the dual-format reader for those.
-            passphrase: The passphrase used to encrypt the key.
-        """
-        from cryptography.exceptions import InvalidTag
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
-        encrypted_key = encrypted_key.removeprefix(_CA_BLOB_MAGIC)
-
-        if len(encrypted_key) < 29:
-            raise ValueError("Encrypted key data too small")
-
-        salt = encrypted_key[:16]
-        nonce = encrypted_key[16:28]
-        ciphertext = encrypted_key[28:]
-
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=600_000,
-        )
-        key = kdf.derive(passphrase.encode())
-
-        # Decrypt with AES-256-GCM (fails cleanly on tampering via tag check)
-        try:
-            cipher = AESGCM(key)
-            private_key_pem = cipher.decrypt(nonce, ciphertext, None)
-        except InvalidTag:
-            raise ValueError("Invalid passphrase or corrupted data")
-
-        # Write to disk
-        self.ca_key_path.write_bytes(private_key_pem)
-        os.chmod(str(self.ca_key_path), 0o600)
-
-        # NOTE: True memory zeroization is not achievable in Python — bytes are
-        # immutable, and the cryptography library holds internal C-level copies.
-        # This overwrite is best-effort and does not guarantee the plaintext key
-        # is purged from all memory. For production hardening, consider running
-        # the CA key operations in a separate process or using an HSM.
-        private_key_pem = b"\x00" * len(private_key_pem)
-        del private_key_pem
 
     def get_ca_key_pem(self) -> bytes:
         """Get the CA private key in PEM format.
