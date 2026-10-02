@@ -1364,10 +1364,12 @@ def cmd_recovery(client: APIClient, args: Any) -> int:
         client.post(
             "/api/v1/recovery",
             json={
+                # #367: only the declared RecoveryRequest fields cross;
+                # --force/--confirm are LOCAL flags (servers dropped them via
+                # extra="ignore"; under any future forbid they would 422 the
+                # break-glass path).
                 "code": args.code,
                 "new_user_id": args.new_user_id,
-                "force": getattr(args, "force", False),
-                "confirm": getattr(args, "confirm", False),
             },
         )
         print("Recovery completed successfully.")
