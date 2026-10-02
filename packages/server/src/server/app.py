@@ -108,7 +108,6 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         credentials,
         debug,
         enroll,
-        enrollment,
         executors,
         health,
         recovery,
@@ -135,7 +134,6 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(recovery.router, prefix="/api/v1")
     app.include_router(secrets.router, prefix="/api/v1")
     app.include_router(roles.router, prefix="/api/v1")
-    app.include_router(enrollment.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
     app.include_router(debug.router, prefix="/api/v1/admin")
     app.include_router(credentials.router, prefix="/api/v1")
