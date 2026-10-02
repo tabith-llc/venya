@@ -211,8 +211,17 @@ class CertificateManager:
             httpx2.HTTPError: If the network request fails.
         """
         if os.path.exists(self.cert_path) and os.path.exists(self.key_path):
-            logger.info("Certificate already exists — skipping registration for: %s", executor_id)
             self._load_metadata()
+            # #361 ruled A (executor-stale-cert-ghost-identity): local file
+            # presence alone used to gate the skip — after a core rebuild
+            # (fresh CA + empty executors table) the daemon booted as a GHOST
+            # identity, silently refused by the core forever. Ask the core to
+            # recognize this certificate BEFORE skipping; a server-side
+            # refusal aborts the boot with the named re-enroll path. The
+            # decision to re-register stays with the installer/token ceremony
+            # — the daemon never self-mints (no token here, no CSR here).
+            self._verify_cert_recognized(executor_id)
+            logger.info("Certificate already exists — skipping registration for: %s", executor_id)
             return
 
         # Fail before the HTTP call if a cert directory is not writable (e.g.
@@ -344,6 +353,46 @@ class CertificateManager:
         # (ticket command-policy-no-server-executor-propagation — the
         # daemon owns the validator; CertificateManager only carries bytes).
         self.last_command_policy = data.get("command_policy")
+
+    def _verify_cert_recognized(self, executor_id: str) -> None:
+        """Probe the core's heartbeat with the on-disk mTLS pair (raises RuntimeError on rejection).
+
+        401/403 means the core cannot map this certificate to a known, active
+        identity (superseded CA after a core rebuild, revoked row, ...) — the
+        ghost state. Any TRANSPORT failure is inconclusive, not a rejection:
+        warn and proceed (the daemon's own heartbeat loop keeps checking, and a
+        core outage must not strand a legitimately enrolled executor). Other
+        status classes propagate loud via raise_for_status. Full TLS
+        verification per house policy (same VENYA_TLS_VERIFY knob register
+        honors; dev-fleet only).
+        """
+        url = f"{self.config.server_url}/api/v1/heartbeat"
+        tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
+        verify: bool | str = tls_verify_env.lower() != "false"
+        if not verify:
+            logger.warning("VENYA_TLS_VERIFY=false — identity probe skips TLS verification (dev only)")
+        try:
+            with httpx2.Client(cert=(self.cert_path, self.key_path), verify=verify, timeout=10.0) as client:
+                response = client.post(url, json={"executor_id": executor_id})
+        except httpx2.TransportError as exc:
+            logger.warning(
+                "Identity probe to %s unreachable (%s) — proceeding on the existing certificate; "
+                "the heartbeat loop will re-check continuously",
+                url,
+                exc,
+            )
+            return
+        if response.status_code in (401, 403):
+            msg = (
+                f"Core refused the existing certificate ({response.status_code} on {url}) — this "
+                "executor's identity is unknown server-side (a rebuilt core mints a new CA). "
+                "Refusing to run as a ghost identity. Re-enroll by re-running the executor "
+                "installer with a fresh VENYA_EXECUTOR_ENROLLMENT_TOKEN (mint with: "
+                "venya admin executor-enroll <executor-id>)."
+            )
+            logger.error("%s", msg)
+            raise RuntimeError(msg) from None
+        response.raise_for_status()
 
     def needs_rotation(self) -> bool:
         """Check if the certificate needs rotation.

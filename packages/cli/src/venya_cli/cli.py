@@ -821,12 +821,20 @@ def _install_stderr_tee():
     (TTY echo-off), so no secret material lands in the file.
     """
     try:
+        import os
         from datetime import datetime
+        from pathlib import Path
 
         from .api_client import default_config_dir
         from .at_rest_key import ensure_secret_dir
 
-        log_dir = default_config_dir()
+        # #365: honor the role-dir isolation standard — when VENYA_CONFIG points
+        # the active config elsewhere, the tee follows it (parent of the config
+        # file), so role runs never leak argv/error copies into the personal
+        # default dir. Unset keeps the historical default_config_dir() behavior.
+        # Mirrors api_client.Config.__init__'s env branch; contents policy is #351.
+        env_cfg = os.environ.get("VENYA_CONFIG")
+        log_dir = Path(env_cfg).parent if env_cfg else default_config_dir()
         log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         ensure_secret_dir(log_dir)
         log_path = log_dir / "venya.log"

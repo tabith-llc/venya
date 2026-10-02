@@ -40,5 +40,10 @@ def test_installer_template_warm_is_gated_and_nonfatal() -> None:
 def test_installer_template_warm_runs_after_policy_init() -> None:
     # F7 prerequisite order: Docker auth -> sandboxd -> deny-all policy -> warm.
     assert INSTALLER.index("sbx policy init deny-all") < INSTALLER.index("WARM_SANDBOX=")
-    # And inside the sbx-prereq region (before the network/hostname section).
-    assert INSTALLER.index("WARM_SANDBOX=") < INSTALLER.index("Resolve Core Hostname")
+    # #363 (executor-docker-gate-before-enrollment, ruled A) moved the whole
+    # sbx-prereq chain to AFTER enrollment so cert/identity lands first. The
+    # warm's load-bearing predecessor is the deny-all policy (asserted above);
+    # it now also runs after registration, and still before the service unit is
+    # installed (so a restarted service finds a warm cache, never a cold pull).
+    assert INSTALLER.index("Register mTLS certificate") < INSTALLER.index("WARM_SANDBOX=")
+    assert INSTALLER.index("WARM_SANDBOX=") < INSTALLER.index("Install systemd service")

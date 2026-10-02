@@ -616,8 +616,39 @@ class TestErrorLog:
 
     Truth table: capture works; rotation at 1 MiB; unwritable config dir
     degrades to no-logging without breaking the CLI; non-zero exit prints the
-    log-path hint.
+    log-path hint; the tee honors VENYA_CONFIG role-dir isolation (#365).
     """
+
+    def test_venya_config_role_dir_honored(self, tmp_path, monkeypatch):
+        """#365 paired positive: VENYA_CONFIG=/role/config.json -> the tee writes
+        <role>/venya.log, NOT the personal default dir."""
+        import sys
+
+        from venya_cli.cli import _install_stderr_tee
+
+        role = tmp_path / "role"
+        role.mkdir()
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("VENYA_CONFIG", str(role / "config.json"))
+        monkeypatch.setattr(sys, "stderr", sys.stderr)
+        log_path = _install_stderr_tee()
+        assert log_path == role / "venya.log"
+        print("role-marker", file=sys.stderr)
+        assert "role-marker" in (role / "venya.log").read_text()
+        assert not (tmp_path / ".config" / "venya" / "venya.log").exists()
+
+    def test_tee_control_no_venya_config_uses_default(self, tmp_path, monkeypatch):
+        """#365 paired negative (control): unset VENYA_CONFIG -> default
+        ~/.config/venya/venya.log behavior is unchanged."""
+        import sys
+
+        from venya_cli.cli import _install_stderr_tee
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("VENYA_CONFIG", raising=False)
+        monkeypatch.setattr(sys, "stderr", sys.stderr)
+        log_path = _install_stderr_tee()
+        assert log_path == tmp_path / ".config" / "venya" / "venya.log"
 
     def test_tee_captures_stderr(self, tmp_path, monkeypatch):
         import sys

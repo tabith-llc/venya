@@ -68,6 +68,30 @@ else
     trap 'rm -rf "$FETCH_DIR"' EXIT
     echo "Fetching shared installer library from ${TARBALL_URL%/*}/venya-common.sh" >&2
     curl -fsSL "${TARBALL_URL%/*}/venya-common.sh" -o "$FETCH_DIR/venya-common.sh" || exit 1
+    # #360 (installer-common-self-fetch-unhashed): VERIFY before source. The
+    # serve-time runner sed-embeds the expected sha256 into the placeholder
+    # below; VENYA_COMMON_SHA256 is the operator pin and wins over it. With
+    # neither (raw-checkout bytes without embedding), fall back to the origin
+    # sidecar; if that is unobtainable too, abort FAIL-CLOSED — an unverified
+    # library is never sourced as root (mirrors the #327 tarball guard).
+    EXPECTED_COMMON_SHA="${VENYA_COMMON_SHA256:-__VENYA_COMMON_SHA256__}"
+    if [ "$EXPECTED_COMMON_SHA" = "__VENYA_COMMON_SHA256__" ]; then
+        EXPECTED_COMMON_SHA=""
+    fi
+    if [ -z "$EXPECTED_COMMON_SHA" ]; then
+        echo "No embedded/pinned common-library hash — fetching sidecar ${TARBALL_URL%/*}/venya-common.sh.sha256" >&2
+        curl -fsSL "${TARBALL_URL%/*}/venya-common.sh.sha256" -o "$FETCH_DIR/venya-common.sh.sha256" || {
+            echo "[ERROR] VENYA_COMMON_SHA256 unset and no hash sidecar at the origin — refusing to source an unverified library." >&2
+            exit 1
+        }
+        EXPECTED_COMMON_SHA="$(awk '{print $1}' "$FETCH_DIR/venya-common.sh.sha256")"
+    fi
+    ACTUAL_COMMON_SHA="$(sha256sum "$FETCH_DIR/venya-common.sh" | awk '{print $1}')"
+    if [ "$ACTUAL_COMMON_SHA" != "$EXPECTED_COMMON_SHA" ]; then
+        echo "[ERROR] venya-common.sh SHA-256 MISMATCH — expected $EXPECTED_COMMON_SHA, got $ACTUAL_COMMON_SHA. Refusing to source." >&2
+        exit 1
+    fi
+    echo "venya-common.sh verified (sha256 $ACTUAL_COMMON_SHA)" >&2
     source "$FETCH_DIR/venya-common.sh"
 fi
 
@@ -910,13 +934,26 @@ echo "==============================================================="
 echo "  EXECUTOR ENROLLMENT"
 echo "==============================================================="
 echo ""
-echo "To register an executor, run on this core server:"
+echo "To register an executor, mint an enrollment token. On this HEADLESS core the"
+echo "CLI must use the admin-mTLS form (a plain 'venya admin ...' falls back to an"
+echo "interactive FIDO2 login and dies without a workstation key):"
 echo ""
-echo "  sudo -u venya PATH='$INSTALL_DIR/.venv/bin:\$PATH' \\"
+echo "  sudo -u venya env PATH=\"$INSTALL_DIR/.venv/bin:\$PATH\" \\"
+echo "    VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt \\"
+echo "    VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \\"
 echo "    $INSTALL_DIR/.venv/bin/venya admin executor-enroll <executor-id>"
+echo ""
+echo "  One-time first-use setup for that command — point the venya user's CLI at"
+echo "  this core and trust its CA:"
+echo "    sudo -u venya $INSTALL_DIR/.venv/bin/venya config set-server https://$CORE_HOSTNAME"
+echo "    sudo mkdir -p /home/venya/.config/venya"
+echo "    sudo cp /var/lib/venya/ca/ca.crt /home/venya/.config/venya/ca.crt"
+echo "    sudo chown venya:venya /home/venya/.config/venya/ca.crt"
 echo ""
 echo "Then pass the printed token to the executor operator."
 echo "The token is consumed on first use and cannot be reused."
+echo "The <executor-id> must RESOLVE from this core (it is the relay dial hostname"
+echo "and the client-cert SAN) — registration and relay calls fail otherwise."
 echo ""
 echo "  Relay: the core relay-client cert was auto-provisioned at install"
 echo "  (/etc/venya/relay/relay-client.crt, CN=${CORE_HOSTNAME}-relay)."
