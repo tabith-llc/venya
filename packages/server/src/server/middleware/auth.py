@@ -245,6 +245,19 @@ class SessionMiddleware(BaseHTTPMiddleware):
     # Prefixes that don't require authentication
     PUBLIC_PREFIXES = ("/static/",)  # static assets (CSS, JS, images)
 
+    # Session-demanding admin paths (ticket recovery-reissue-mtls-identity-
+    # collision #340, ruled A): when admin-mTLS is enabled the cert is only
+    # ONE of two credentials — these routes must ALSO authenticate the
+    # presented bearer/cookie session, so the admin-mTLS branch verifies the
+    # cert, marks request.state.admin_cert_verified, and falls through to
+    # the session branch instead of short-circuiting. Exact strings only;
+    # every other admin path keeps the cert-only short-circuit byte-for-byte.
+    SESSION_REQUIRED_ADMIN_PATHS = frozenset(
+        {
+            "/api/v1/admin/recovery-code/reissue",
+        }
+    )
+
     ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password
 
     def __init__(self, app: Any = None, max_token_age: float = 300.0) -> None:
@@ -256,6 +269,16 @@ class SessionMiddleware(BaseHTTPMiddleware):
         """
         super().__init__(app)
         self.max_token_age = max_token_age
+
+    def _extract_session_token(self, request: Request) -> str | None:
+        """Session token from cookie (browser priority) or Bearer header (CLI)."""
+        token = request.cookies.get(self.ACCESS_TOKEN_COOKIE)
+        if token:
+            return token
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            return auth_header[7:]
+        return None
 
     def _is_admin_route(self, path: str) -> bool:
         """Check if path is an admin endpoint.
@@ -475,14 +498,29 @@ class SessionMiddleware(BaseHTTPMiddleware):
             if mtls_result is not None:
                 return mtls_result
             # mTLS validation passed — _validate_admin_mtls already set auth_user with identity
+            if path in self.SESSION_REQUIRED_ADMIN_PATHS:
+                # #340 ruled A: the verified cert opens the CHANNEL; the
+                # human session is the second credential. Mark the channel
+                # and run any presented bearer/cookie token through the same
+                # validation the session branch below performs, so auth_user
+                # becomes the session. With NO token the cert identity stays
+                # and the route's session guard denies 401 (cert-alone
+                # never mints); the route additionally requires the flag
+                # below, so a session-alone request never mints either.
+                request.state.admin_cert_verified = True
+                session_token = self._extract_session_token(request)
+                if session_token:
+                    session_user = await self._validate_token(request, session_token)
+                    if session_user is None:
+                        return JSONResponse(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            content={"detail": "Invalid or expired token"},
+                        )
+                    request.state.auth_user = session_user
             return await call_next(request)
 
         # Extract token: cookie (browser) takes priority, then bearer header (CLI)
-        token = request.cookies.get(self.ACCESS_TOKEN_COOKIE)
-        if not token:
-            auth_header = request.headers.get("authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[7:]
+        token = self._extract_session_token(request)
 
         if not token:
             return JSONResponse(

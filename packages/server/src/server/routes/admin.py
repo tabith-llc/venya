@@ -1878,6 +1878,25 @@ async def admin_reissue_recovery_code(
 
     from ..recovery_codes import generate_recovery_code, hash_recovery_code
 
+    # Second credential (ticket recovery-reissue-mtls-identity-collision
+    # #340, ruled A): when admin-mTLS is enabled the mint additionally
+    # requires the cert-verified-channel flag the SessionMiddleware sets
+    # AFTER crypto-verifying the presented certificate (its
+    # SESSION_REQUIRED_ADMIN_PATHS fall-through). Absent flag == absent
+    # cert: a session that never crossed the cert gate is refused here
+    # (defense-in-depth mirror of the middleware — the middleware already
+    # 403s no-cert requests when enabled).
+    config_state = getattr(request.app.state, "config", None)
+    if (
+        config_state is not None
+        and getattr(getattr(config_state, "admin_mtls", None), "enabled", False)
+        and not getattr(request.state, "admin_cert_verified", False)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Certificate-verified channel required to reissue a recovery code",
+        )
+
     user_id = user_info.get("user_id")
     if not user_id or user_info.get("caller") in ("admin", "executor"):
         raise HTTPException(
