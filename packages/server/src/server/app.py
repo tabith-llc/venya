@@ -479,7 +479,6 @@ def build_uvicorn_kwargs(app: Any, config: ServerConfig) -> dict:
                 ("VENYA_INNER_MTLS__CERT_FILE", inner.cert_file),
                 ("VENYA_INNER_MTLS__KEY_FILE", inner.key_file),
                 ("VENYA_INNER_MTLS__CLIENT_CA_FILE", inner.client_ca_file),
-                ("VENYA_INNER_MTLS__CERT_PATH_PREFIX", inner.cert_path_prefix),
             )
             if not value
         ]

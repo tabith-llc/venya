@@ -57,12 +57,32 @@ def test_retired_identity_helpers_stay_deleted():
         assert not _HELPER_RE.search(content), f"{filename}: retired helper resurrected"
 
 
-def test_cert_file_header_default_is_the_only_client_header_surface():
+def test_cert_pem_header_default_is_the_only_client_header_surface():
     """config default pins the single forwarded header name; the middleware
     reads it ONLY through the config value (no hardcoded magic string)."""
     from server.config import InnerTLSConfig
 
-    assert InnerTLSConfig().cert_path_header == "x-client-cert-file"
+    assert InnerTLSConfig().cert_pem_header == "x-client-cert-pem"
     auth_src = (SRC_ROOT / "middleware" / "auth.py").read_text(encoding="utf-8")
-    assert 'headers.get("x-client-cert-file")' not in auth_src
-    assert "headers.get(inner.cert_path_header)" in auth_src
+    assert 'headers.get("x-client-cert-pem")' not in auth_src
+    assert "headers.get(inner.cert_pem_header)" in auth_src
+
+
+def test_no_cert_path_extfile_residue():
+    """Fleet-HALT-3 regression pin: the #314 extfile transport named an nginx
+    variable that never existed in stock nginx (nginx -t: unknown variable —
+    dead front-end on every fresh core). The path transport and its header are
+    DELETED: neither identifier may appear in the installer scripts or the
+    server source, in any spelling of the retired header."""
+    repo = Path(__file__).resolve().parents[3]
+    surfaces = [
+        repo / "install-venya-core.sh",
+        repo / "install-venya-executor.sh",
+        repo / "venya-common.sh",
+    ]
+    surfaces += sorted((repo / "packages" / "server" / "src").rglob("*.py"))
+    forbidden = ("ssl_client_certificate_path", "x-client-cert-file", "X-Client-Cert-File")
+    for path in surfaces:
+        content = path.read_text(encoding="utf-8")
+        for needle in forbidden:
+            assert needle not in content, f"{path}: retired cert-path surface {needle!r} resurrected"
