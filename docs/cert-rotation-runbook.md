@@ -76,11 +76,14 @@ equals the current `ExecutorCert` record serial for that executor_id (ruled orde
 revocation check FIRST). New identities and bootstrap installs still require a token. A
 rotation 400 under the exemption means the presented cert is not the record credential
 (revoked, diverged, or replaced) — re-register with a fresh token per §3 before expiry.
-**Trust boundary:** the exemption consumes the nginx-forwarded `X-Client-Verified` /
-`X-Client-Subject` / `X-Client-Serial` headers; nginx verifies the client chain against
-`/etc/nginx/ssl/client-ca-bundle.crt` (Root CA + Admin CA) and OVERWRITES these headers
-with its own TLS-layer values — client-sent headers of the same name never survive the
-proxy, and with no client cert the serial header is absent. The CN match is a
+**Trust boundary:** the exemption consumes the outer client certificate that nginx
+forwards as HEADER CONTENT (`X-Client-Cert-PEM`, URL-encoded PEM via the stock
+`$ssl_client_escaped_cert` variable, #314 — the former `X-Client-Verified` /
+`X-Client-Subject` / `X-Client-Serial` header chain is retired); nginx verifies the
+client chain against `/etc/nginx/ssl/client-ca-bundle.crt` (Root CA + Admin CA), and the
+app percent-decodes the PEM and re-verifies it cryptographically — identity and serial
+are read from the verified certificate object, no forwarded header is trusted as
+identity, and with no client cert the exemption simply never applies. The CN match is a
 discriminator, not the authorization: the authorization is the Root-CA-issued record
 serial (random 64-bit at signing, no serial-chooser API exists), which an Admin-CA cert
 — even one shaped with an executor CN — cannot carry. Both phases ship in the same

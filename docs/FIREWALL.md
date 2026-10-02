@@ -27,14 +27,14 @@ install steps see [installation.md](installation.md).
 
 | Dir | Port | Proto | From / To | Purpose |
 |-----|------|-------|-----------|---------|
-| **inbound** | **443/tcp** | HTTPS (TLS versions as configured upstream; no floor is pinned in the installer as of this writing) | workstations, executors, admins | The only inbound service. nginx terminates TLS and proxies to the local backend. Admin API paths additionally require an mTLS **client certificate** (`ssl_verify_client optional` at the listener; enforced per-path) chained to the per-install Admin CA. |
+| **inbound** | **443/tcp** | HTTPS (the installer-generated site config floors the handshake at TLS 1.2/1.3 — `ssl_protocols TLSv1.2 TLSv1.3`, so the protocol floor is ours, not inherited) | workstations, executors, admins | The only inbound service. nginx terminates TLS and proxies to the local backend. Admin API paths additionally require an mTLS **client certificate** (`ssl_verify_client optional` at the listener; enforced per-path) chained to the per-install Admin CA. |
 | **outbound** | **8443/tcp** | HTTPS (mTLS) | core → each executor | The relay: the core **dials** the executor's relay listener to run a command, presenting its `<core-host>-relay` client certificate. |
 
 **Localhost-only — never expose these:**
 
 | Port | Proto | Binding | Why it stays local |
 |------|-------|---------|--------------------|
-| 8080/tcp | HTTP | `127.0.0.1` | The uvicorn/FastAPI backend. nginx proxies to it (`proxy_pass http://127.0.0.1:8080`). As shipped it has no TLS of its own — exposing it would bypass TLS + mTLS. Caveat: the optional inner-mTLS channel (`InnerTLSConfig` in `server/config.py`, env `VENYA_INNER_MTLS__*`, disabled by default) makes uvicorn terminate TLS itself on this loopback bind; exposing that port would still bypass the outer nginx TLS + admin-mTLS layer. |
+| 8080/tcp | HTTPS | `127.0.0.1` | The uvicorn/FastAPI backend. Installer-installed cores serve it over the inner-mTLS channel (`VENYA_INNER_MTLS__ENABLED=true` written at install; `InnerTLSConfig` in `server/config.py`, env `VENYA_INNER_MTLS__*` — the bare config default remains disabled): uvicorn terminates TLS on this loopback bind and requires the nginx client certificate, and nginx proxies to it over HTTPS with `proxy_ssl_verify on`. Exposing this port would still bypass the outer nginx TLS + admin-mTLS layer. |
 | 5432/tcp | PostgreSQL | `localhost` | The `venya` database (connection string `postgresql://venya:…@localhost/venya`). Stock Ubuntu PostgreSQL listens on loopback; keep it that way. |
 
 A host firewall on the core needs **443/tcp inbound** (from workstations, executors, and
