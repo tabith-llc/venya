@@ -1209,6 +1209,33 @@ class TestRevokeAdminCertEndpoint:
         )
         assert resp.status_code == 400
 
+    def test_revoke_reason_at_column_bound_accepted(self):
+        """revoke-cert-reason-length-unguarded: a 64-char reason (the
+        AdminCertRevocation.reason String(64) width) writes through."""
+        app, _backend, revocations = _create_revoke_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        reason = "r" * 64
+        resp = client.post(
+            "/api/v1/admin/certs/revoke",
+            json={"serial": "ab12ab12ab12ab12", "reason": reason},
+        )
+        assert resp.status_code == 200
+        assert revocations[0].reason == reason
+
+    def test_revoke_reason_over_column_bound_422_no_db_touch(self):
+        """65 chars dies at validation — the handler never runs, so no
+        revocation record is ever added."""
+        app, _backend, revocations = _create_revoke_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/admin/certs/revoke",
+            json={"serial": "ab12ab12ab12ab12", "reason": "r" * 65},
+        )
+        assert resp.status_code == 422
+        assert revocations == []
+
 
 # ---------------------------------------------------------------------------
 # Tests: Phase 7 — Integration Tests

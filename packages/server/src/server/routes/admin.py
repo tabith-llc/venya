@@ -1759,7 +1759,7 @@ async def admin_key_rotation(
 
 class AdminRevokeCertRequest(BaseModel):
     serial: str = Field(..., description="Hex serial number of certificate to revoke")
-    reason: str = Field(default="unspecified", description="Revocation reason")
+    reason: str = Field(default="unspecified", description="Revocation reason", max_length=64)
 
 
 class AdminRevokeCertResponse(BaseModel):
