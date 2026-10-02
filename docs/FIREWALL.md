@@ -27,7 +27,7 @@ install steps see [installation.md](installation.md).
 
 | Dir | Port | Proto | From / To | Purpose |
 |-----|------|-------|-----------|---------|
-| **inbound** | **443/tcp** | HTTPS (TLS versions as configured upstream; no floor is pinned in the installer as of this writing) | workstations, executors, admins | The only inbound service. nginx terminates TLS and proxies to the local backend. Admin API paths additionally require an mTLS **client certificate** (`ssl_verify_client optional` at the listener; enforced per-path) chained to the per-install Admin CA. |
+| **inbound** | **443/tcp** | HTTPS (the installer-generated site config floors the handshake at TLS 1.2/1.3 — `ssl_protocols TLSv1.2 TLSv1.3`, so the protocol floor is ours, not inherited) | workstations, executors, admins | The only inbound service. nginx terminates TLS and proxies to the local backend. Admin API paths additionally require an mTLS **client certificate** (`ssl_verify_client optional` at the listener; enforced per-path) chained to the per-install Admin CA. |
 | **outbound** | **8443/tcp** | HTTPS (mTLS) | core → each executor | The relay: the core **dials** the executor's relay listener to run a command, presenting its `<core-host>-relay` client certificate. |
 
 **Localhost-only — never expose these:**
