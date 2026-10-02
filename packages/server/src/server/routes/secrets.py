@@ -36,6 +36,8 @@ SECRET_KEY_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"  # nosec B105 — charset patter
 
 
 class SecretCreateRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     key: str = Field(
         ...,
         description="Secret key",
@@ -200,6 +202,8 @@ def _validate_shape_metadata(meta: dict[str, Any]) -> list[str]:
 
 
 class SecretUpdateRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     value: str | None = None
     roles: list[str] | None = None
     metadata: SecretMetadata | None = None
@@ -222,6 +226,8 @@ class SecretDeleteResponse(BaseModel):
 
 class RevokeSecretsRequest(BaseModel):
     """Request body for secret credential revocation."""
+
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
     secret_ids: list[str] = Field(
         ...,

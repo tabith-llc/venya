@@ -73,6 +73,8 @@ PolicyPreset = Literal["strict", "balanced", "permissive"]
 
 
 class AdminEnrollRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     user_id: str = Field(..., description="User ID to enroll", pattern=USER_ID_PATTERN)
     auth_mode: AdminAuthMode = Field("security-key", description="Auth mode")
 
@@ -85,6 +87,8 @@ class AdminEnrollResponse(BaseModel):
 
 
 class AdminCreateUserRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     username: str = Field(..., description="User ID (e.g. 'jsmith')", pattern=USER_ID_PATTERN)
     display_name: str | None = Field(None, description="Human-readable name")
     roles: list[str] = Field(default_factory=list, description="Role names to assign")
@@ -122,6 +126,8 @@ class AdminTokenRevokeResponse(BaseModel):
 
 
 class AdminRemoveRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     user_id: str = Field(..., description="User ID to remove", pattern=USER_ID_PATTERN)
 
 
@@ -135,6 +141,8 @@ class AdminUserListResponse(BaseModel):
 
 
 class AdminConfigureUserRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     display_name: str | None = None
     status: UserStatus | None = None
     auth_mode: AdminAuthMode | None = None
@@ -174,6 +182,8 @@ class AdminKeyVersionRotateResponse(BaseModel):
 
 
 class AdminKeyVersionRollbackRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     job_id: int
 
 
@@ -202,6 +212,8 @@ class AdminSetCommandPolicyResponse(BaseModel):
 
 
 class AdminAddAllowedCommandRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     command_path: str = Field(..., description="Absolute path to allowed command")
 
 
@@ -236,6 +248,8 @@ class AdminKeyRotationStatusResponse(BaseModel):
 
 
 class AdminKeyRotationJobRollbackRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     job_id: int
 
 
@@ -247,6 +261,8 @@ class AdminKeyRotationJobRollbackResponse(BaseModel):
 
 class AdminRevokeExecutorRequest(BaseModel):
     """Optional body for the serial form of executor revocation."""
+
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
     serial: str | None = Field(
         default=None,
@@ -1787,6 +1803,8 @@ async def admin_key_rotation(
 
 
 class AdminRevokeCertRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     serial: str = Field(..., description="Hex serial number of certificate to revoke")
     reason: str = Field(default="unspecified", description="Revocation reason", max_length=64)
 

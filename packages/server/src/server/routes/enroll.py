@@ -38,6 +38,8 @@ router = APIRouter()
 
 
 class BrowserEnrollStartRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     enrollment_token: str = Field(..., description="Plaintext enrollment token")
 
 
@@ -47,6 +49,8 @@ class BrowserEnrollStartResponse(BaseModel):
 
 
 class BrowserEnrollCompleteRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     enrollment_token: str = Field(..., description="Plaintext enrollment token")
     challenge_id: str = Field(..., description="Challenge ID from start response")
     response: dict[str, Any] = Field(..., description="WebAuthn attestation response")

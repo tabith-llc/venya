@@ -129,6 +129,8 @@ router = APIRouter()
 class ExecutorRegisterRequest(BaseModel):
     """Request body for executor registration."""
 
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     executor_id: str = Field(
         ...,
         description="Unique executor identifier (lowercase alphanumeric + hyphens)",
@@ -234,6 +236,8 @@ class RevocationListResponse(BaseModel):
 class HeartbeatRequest(BaseModel):
     """Request body for heartbeat ping."""
 
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     executor_id: str = Field(
         ...,
         description="Executor identifier",
@@ -294,6 +298,8 @@ class ExecutorsListResponse(BaseModel):
 class SessionCreateRequest(BaseModel):
     """Request body for creating an execution session."""
 
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     executor_id: str = Field(
         ...,
         description="Target executor ID",
@@ -329,6 +335,8 @@ class ExecuteRequest(BaseModel):
     string #322, ruling Q1=A1) — it relays onward as the structured list; audit
     stores the rendered display text (``shlex.join``) plus the true argv list.
     """
+
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
     session_id: str = Field(..., description="Execution session ID")
     command: list[str] = Field(..., description="Command as an argv list")

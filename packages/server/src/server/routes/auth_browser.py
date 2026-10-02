@@ -61,6 +61,8 @@ COOKIE_NAME = "venya_access_token"
 
 
 class BrowserChallengeRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     user_id: str | None = Field(
         None,
         description="Optional user ID to target specific credentials",
@@ -73,20 +75,22 @@ class BrowserChallengeResponse(BaseModel):
 
 
 class BrowserAssertionRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     challenge_id: str
     response: dict[str, Any]
 
 
 class BrowserRefreshRequest(BaseModel):
-    pass
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
 
 class BrowserLogoutRequest(BaseModel):
-    pass
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
 
 class BrowserElevateRequest(BaseModel):
-    pass
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
 
 class BrowserElevateResponse(BaseModel):
@@ -102,6 +106,8 @@ class AuthMeResponse(BaseModel):
 
 
 class BrowserElevateCompleteRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     challenge_id: str
     response: dict[str, Any]
 

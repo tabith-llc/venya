@@ -41,6 +41,12 @@ class FilterRequest(BaseModel):
     test_legacy_payload_with_secrets_field_tolerated_and_dropped).
     """
 
+    # #357 ruled exemption (explicit, was implicit default): legacy daemons
+    # MUST keep getting 200 with the dead `secrets` key (2026-09-20
+    # compat ruling stands — no override). Extra keys drop loudly-by-test,
+    # never by surprise.
+    model_config = {"extra": "ignore"}
+
     stdout: str = Field(..., description="Base64-encoded stdout bytes")
     stderr: str = Field(..., description="Base64-encoded stderr bytes")
 

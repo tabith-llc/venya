@@ -28,6 +28,8 @@ logger = logging.getLogger("venya.server")
 
 
 class InitRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     user_id: str = Field(..., description="User ID for first admin")
 
 
@@ -38,6 +40,8 @@ class InitResponse(BaseModel):
 
 
 class InitCompleteRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     user_id: str = Field(..., description="User ID for first admin")
     challenge_id: str = Field(..., description="FIDO2 challenge ID")
     response: dict = Field(..., description="FIDO2 attestation response")
