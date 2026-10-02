@@ -3425,6 +3425,32 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
         return 1
 
 
+# #353 ruling R2 (owner batch-yes 2026-10-02): forgery-charset gate on the
+# admin identity before CA signing. CN/SAN interpolate the identity verbatim;
+# structural characters — comma, double quote, backslash, equals, and control
+# characters incl. CR/LF — would forge X.509 RDN/SAN structure in a cert this
+# CA signs. REJECT, don't escape (ruled posture). Everything else is allowed:
+# plain hostnames AND the shipped email-form identities (the server identity
+# extractor prefers SAN RFC822) are untouched.
+_IDENTITY_FORGERY_CHARS = frozenset(',"\\=') | {chr(c) for c in range(0x20)} | {chr(0x7F)}
+
+
+def _identity_forgery_error(identity: str) -> str | None:
+    """Return an actionable error string if the identity carries RDN/SAN
+    structural forgery characters (or is empty); None when allowed."""
+    if not identity:
+        return "Invalid identity: must be a non-empty string"
+    bad = sorted({c for c in identity if c in _IDENTITY_FORGERY_CHARS})
+    if bad:
+        shown = ", ".join(repr(c) for c in bad)
+        return (
+            f"Invalid identity {identity!r}: contains structural character(s) {shown}. "
+            "Comma, double quote, backslash, equals, and control characters can forge "
+            "X.509 RDN/SAN structure. Use a plain hostname or an email-style identity."
+        )
+    return None
+
+
 def cmd_admin_generate_admin_cert(args: Any) -> int:
     """Sign an admin client certificate using the admin CA.
 
@@ -3441,6 +3467,10 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
     from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
     identity = args.identity
+    problem = _identity_forgery_error(identity)
+    if problem is not None:
+        print(f"Error: {problem}", file=sys.stderr)
+        return 1
     output_dir = Path(args.output_dir)
 
     # Resolve admin CA directory
