@@ -29,6 +29,13 @@ def _executor_ids_resolvable(monkeypatch):
 # ---------------------------------------------------------------------------
 # #314 end-to-end mTLS test helpers — forwarded-PEM plumbing shared by the
 # admin-mTLS, session-middleware, and executor-identity suites.
+#
+# TRANSPORT = CONTENT (nginx 1.13.5+ ssl_client_escaped_cert): the verified
+# client cert is URL-encoded into the header value. The old filesystem-path
+# "extfile" transport never existed in stock nginx (fleet HALT 3) — there is no
+# prefix, no temp file, and nothing to traverse. The `prefix`/`cert_prefix`
+# args kept on these helpers are VESTIGIAL (callers still pass tmp dirs); the
+# helpers ignore them and forward CONTENT.
 # ---------------------------------------------------------------------------
 
 #: Serial for the standard forwarded admin leaf (revocation-row fixtures use
@@ -40,35 +47,44 @@ ADMIN_SERIAL_HEX = "1234123412341234"
 FOREIGN_SERIAL_HEX = "abcd1234abcd1234"
 
 
+def pem_bytes(cert):
+    """Serialize a cert to its PEM bytes (the payload nginx URL-encodes)."""
+    from cryptography.hazmat.primitives import serialization
+
+    return cert.public_bytes(serialization.Encoding.PEM)
+
+
+def cert_pem_header_value(cert):
+    """The header value the app expects: the cert PEM, URL-encoded.
+
+    Mirrors nginx's ssl_client_escaped_cert so unquote_to_bytes round-trips.
+    """
+    import urllib.parse
+
+    return urllib.parse.quote_from_bytes(pem_bytes(cert))
+
+
 def make_cert_prefix(tmp_path):
-    """Create a unique per-test directory the middleware may read certs from."""
+    """Vestigial: the content transport needs no directory. Kept so callers
+    that still pass tmp_path-derived prefixes keep working; returns the dir."""
     prefix = tmp_path / "certfiles"
     prefix.mkdir(parents=True, exist_ok=True)
     return prefix
 
 
-def write_cert_file(prefix, cert):
-    """Write a certificate PEM as a nginx-extfile-style path inside prefix.
+def forwarded_headers(prefix, cert, header="x-client-cert-pem"):
+    """Header set carrying the forwarded client cert as URL-encoded PEM content.
 
-    Randomized file name: nginx's temp names are per-connection; tests must
-    not rely on (or collide across) a fixed name.
+    The `prefix` arg is ignored (content transport); kept for call-site parity
+    with the old extfile suites.
     """
-    import uuid as _uuid
+    import urllib.parse
 
-    from cryptography.hazmat.primitives import serialization
-
-    path = prefix / f"cert-{_uuid.uuid4().hex}.pem"
-    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    return str(path)
+    return {header: urllib.parse.quote_from_bytes(pem_bytes(cert))}
 
 
-def forwarded_headers(prefix, cert, header="x-client-cert-file"):
-    """Header set carrying the forwarded-cert path (the ONLY identity header left)."""
-    return {header: write_cert_file(prefix, cert)}
-
-
-def inner_tls_config(prefix):
-    """InnerTLSConfig wired for unit tests (enabled + full material + prefix)."""
+def inner_tls_config(prefix=None):
+    """InnerTLSConfig wired for unit tests (enabled + full material)."""
     from server.config import InnerTLSConfig
 
     return InnerTLSConfig(
@@ -76,7 +92,6 @@ def inner_tls_config(prefix):
         cert_file="/test/inner.crt",
         key_file="/test/inner.key",
         client_ca_file="/test/inner-ca.crt",
-        cert_path_prefix=str(prefix),
     )
 
 
