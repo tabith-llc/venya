@@ -27,6 +27,8 @@ logger = logging.getLogger("venya.server")
 
 
 class SecretCreateRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     key: str = Field(..., description="Secret key")
     value: str = Field(..., description="Secret value (plaintext)")
     roles: list[str] = Field(..., description="Role names to scope the secret to")
@@ -185,6 +187,8 @@ def _validate_shape_metadata(meta: dict[str, Any]) -> list[str]:
 
 
 class SecretUpdateRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     value: str | None = None
     roles: list[str] | None = None
     metadata: SecretMetadata | None = None
@@ -207,6 +211,8 @@ class SecretDeleteResponse(BaseModel):
 
 class RevokeSecretsRequest(BaseModel):
     """Request body for secret credential revocation."""
+
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
     secret_ids: list[str] = Field(
         ...,

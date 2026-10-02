@@ -42,6 +42,8 @@ class ElevationChallengeResponse(BaseModel):
 
 
 class ElevationAssertRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     challenge_id: str = Field(..., description="Challenge ID from the challenge response")
     response: dict = Field(..., description="WebAuthn assertion response")
 

@@ -36,6 +36,8 @@ router = APIRouter()
 
 
 class CredentialAddStartRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     # Bounded pattern field (#356): credentials.label is String(64)
     # (models.py:511) — over-width and lone surrogates reject 422 pre-DB,
     # never a psycopg 500 after side-effects (#334 posture B, reused).
@@ -62,6 +64,8 @@ class CredentialAddStartResponse(BaseModel):
 
 
 class CredentialAddCompleteRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     challenge_id: str = Field(..., description="Challenge ID from start response")
     response: dict[str, Any] = Field(..., description="WebAuthn attestation response")
     label: str = Field(..., description="Credential label", max_length=64, min_length=1)

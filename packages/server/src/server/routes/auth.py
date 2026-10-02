@@ -35,6 +35,8 @@ router = APIRouter()
 
 
 class AuthenticationStartRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     user_id: str | None = Field(None, description="Optional user ID to target")
 
 
@@ -44,6 +46,8 @@ class AuthenticationStartResponse(BaseModel):
 
 
 class AuthenticationCompleteRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     challenge_id: str
     response: dict[str, Any]
 

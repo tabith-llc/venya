@@ -64,6 +64,8 @@ def _audit_sod_denied(db: Session, actor: dict, action: str, error: SeparationOf
 
 
 class RoleCreateRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     name: str = Field(..., min_length=1, pattern=r"^[a-zA-Z0-9_-]+$", description="Role name (unique)")
     permissions: Literal["read", "read-write", "auditor"] = Field(
         "read", description='Permission tier: "read", "read-write", or "auditor"'
@@ -72,6 +74,8 @@ class RoleCreateRequest(BaseModel):
 
 
 class RoleUpdateRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     name: str | None = Field(None, min_length=1, pattern=r"^[a-zA-Z0-9_-]+$", description="New role name")
     permissions: Literal["read", "read-write", "auditor"] | None = Field(
         None, description='New permission tier: "read", "read-write", or "auditor"'
@@ -104,6 +108,8 @@ class RoleDeleteResponse(BaseModel):
 
 
 class RoleMemberAddRequest(BaseModel):
+    model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
+
     user_id: str = Field(..., description="User ID to add")
 
 

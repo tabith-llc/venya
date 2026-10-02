@@ -23,6 +23,12 @@ router = APIRouter()
 
 
 class RecoveryRequest(BaseModel):
+    # #357 ruled exemption: SHIPPED CLIs leak their local --force/--confirm
+    # flags into this body (caught by the sweep; client-side fix is ticket
+    # #367). Stays exempt — extra keys ignored, break-glass recovery keeps
+    # working — until #367 lands; re-sweep this model in that leg.
+    model_config = {"extra": "ignore"}
+
     code: str = Field(..., description="Break-glass recovery code")
     new_user_id: str = Field(..., description="New admin user ID")
 
