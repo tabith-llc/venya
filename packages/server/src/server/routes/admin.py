@@ -11,9 +11,10 @@ import hmac
 import json
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Annotated, Literal
 
 from core.utils.entropy import get_secure_token
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -49,9 +50,31 @@ logger = logging.getLogger("venya.server")
 # --- Request/Response models ---
 
 
+# --- Admin-plane string validation (#356, ruled 2026-10-02) ---------------
+# Enumerated from source (values that writers/consumers actually use):
+#   status: users lifecycle values — session_manager.is_user_active gates on
+#     "active"; "pending_enrollment" is set by enroll/create paths; "disabled"
+#     has no other writer (admin configure-user IS the disable mechanism).
+#   auth_mode (admin-plane request models): "security-key" (init/recovery/
+#     default) and "webauthn" (enroll completion). "mtls" is daemon-set on the
+#     executor registration path (executors.py) by direct ORM — intentionally
+#     NOT operator-assignable here (fail-closed: it would hand a human row a
+#     mode whose auth depends on a cert-header the caller cannot present).
+#   preset: the values the executor actually enforces (command_validator.py).
+#   user_id pattern: mirrors the alembic-009 CHECK on users.user_id
+#     (EXECUTOR_ID_PATTERN; String(64)). Route-layer reject = 422 PRE-commit,
+#     never the 500 class where junk dies inside the transaction (#289/#334
+#     lineage).
+USER_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"
+USER_ID_PATH = Annotated[str, Path(pattern=USER_ID_PATTERN)]
+UserStatus = Literal["pending_enrollment", "active", "disabled"]
+AdminAuthMode = Literal["security-key", "webauthn"]
+PolicyPreset = Literal["strict", "balanced", "permissive"]
+
+
 class AdminEnrollRequest(BaseModel):
-    user_id: str = Field(..., description="User ID to enroll")
-    auth_mode: str = Field("security-key", description="Auth mode")
+    user_id: str = Field(..., description="User ID to enroll", pattern=USER_ID_PATTERN)
+    auth_mode: AdminAuthMode = Field("security-key", description="Auth mode")
 
 
 class AdminEnrollResponse(BaseModel):
@@ -62,7 +85,7 @@ class AdminEnrollResponse(BaseModel):
 
 
 class AdminCreateUserRequest(BaseModel):
-    username: str = Field(..., description="User ID (e.g. 'jsmith')")
+    username: str = Field(..., description="User ID (e.g. 'jsmith')", pattern=USER_ID_PATTERN)
     display_name: str | None = Field(None, description="Human-readable name")
     roles: list[str] = Field(default_factory=list, description="Role names to assign")
 
@@ -99,7 +122,7 @@ class AdminTokenRevokeResponse(BaseModel):
 
 
 class AdminRemoveRequest(BaseModel):
-    user_id: str = Field(..., description="User ID to remove")
+    user_id: str = Field(..., description="User ID to remove", pattern=USER_ID_PATTERN)
 
 
 class AdminRemoveResponse(BaseModel):
@@ -113,8 +136,8 @@ class AdminUserListResponse(BaseModel):
 
 class AdminConfigureUserRequest(BaseModel):
     display_name: str | None = None
-    status: str | None = None
-    auth_mode: str | None = None
+    status: UserStatus | None = None
+    auth_mode: AdminAuthMode | None = None
     session_timeout: int | None = None
 
 
@@ -167,7 +190,7 @@ class AdminSetCommandPolicyRequest(BaseModel):
     # 422, never a no-op.
     model_config = {"extra": "forbid"}
 
-    preset: str = Field("balanced", description="Policy preset: strict, balanced, permissive")
+    preset: PolicyPreset = Field("balanced", description="Policy preset: strict, balanced, permissive")
     custom_allowed_commands: list[str] | None = None
     custom_dangerous_patterns: list[str] | None = None
 
@@ -456,7 +479,7 @@ async def admin_create_user(
     status_code=status.HTTP_200_OK,
 )
 async def admin_remove(
-    user_id: str,
+    user_id: USER_ID_PATH,
     auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminRemoveResponse:
@@ -537,7 +560,7 @@ async def admin_list_users(
     response_model=AdminConfigureUserResponse,
 )
 async def admin_configure_user(
-    user_id: str,
+    user_id: USER_ID_PATH,
     req: AdminConfigureUserRequest,
     request: Request,
     auth_user: dict = Depends(require_admin),
@@ -1498,7 +1521,7 @@ async def admin_enroll_executor(
     status_code=status.HTTP_200_OK,
 )
 async def admin_re_enroll(
-    user_id: str,
+    user_id: USER_ID_PATH,
     request: Request,
     admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),
@@ -1606,7 +1629,7 @@ async def admin_re_enroll(
     status_code=status.HTTP_200_OK,
 )
 async def admin_list_user_tokens(
-    user_id: str,
+    user_id: USER_ID_PATH,
     _: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminUserTokenListResponse:
@@ -1650,7 +1673,7 @@ async def admin_list_user_tokens(
     status_code=status.HTTP_201_CREATED,
 )
 async def admin_create_user_token(
-    user_id: str,
+    user_id: USER_ID_PATH,
     request: Request,
     admin: dict = Depends(require_admin),
     db: Session = Depends(get_db),

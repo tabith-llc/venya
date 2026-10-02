@@ -266,7 +266,7 @@ class TestAdminConfigureUser:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.put(
             "/api/v1/admin/users/user1",
-            json={"auth_mode": "platform", "session_timeout": 1800},
+            json={"auth_mode": "webauthn", "session_timeout": 1800},
         )
         assert resp.status_code == 200
         assert resp.json()["configured"] is True
@@ -290,7 +290,7 @@ class TestAdminConfigureUser:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.put(
             "/api/v1/admin/users/missing",
-            json={"auth_mode": "platform"},
+            json={"auth_mode": "webauthn"},
         )
         assert resp.status_code == 404
 
