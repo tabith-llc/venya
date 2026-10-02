@@ -30,7 +30,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from venya_contract import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, RelayResponse, RelaySecret
@@ -325,6 +325,29 @@ class ExecuteRequest(BaseModel):
 
     session_id: str = Field(..., description="Execution session ID")
     command: list[str] = Field(..., description="Command as an argv list")
+
+    @field_validator("command")
+    @classmethod
+    def _command_strict_utf8(cls, v: list[str]) -> list[str]:
+        """Reject argv elements that are not strict-UTF-8 encodable (ticket
+        argv-surrogate-executes-then-crashes-audit-write #334, posture B):
+        a lone surrogate (e.g. ``\\ud800``) survives JSON round-trips as a
+        Python str, executes, and THEN dies on the completion audit write —
+        side effects kept, record lost. Denied at request validation instead:
+        FastAPI answers 422 before the handler runs, so no session state
+        moves and no relay dials. The error names the offending index only —
+        argv can carry user-sensitive text, the value is never echoed.
+        Posture: deny on ambiguity (fail-closed mandate); byte-faithful
+        handling is ticketed for post-beta (#335)."""
+        for i, elem in enumerate(v):
+            try:
+                elem.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError(
+                    f"argv element {i} is not valid strict UTF-8 (a lone surrogate cannot "
+                    "be executed faithfully or audited losslessly) — command rejected"
+                )
+        return v
 
 
 # The relay response shape (executor -> server, and server -> client) is owned by

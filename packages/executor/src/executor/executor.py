@@ -166,6 +166,21 @@ def _validate_command_structure(command: list[str], allowed_redirect_paths: froz
     # unconditional per-element rejection.
     metachars = SHELL_METACHARS - {"<"}
     for i, elem in enumerate(command):
+        # Strict-UTF-8 gate (#334, posture B): a lone surrogate is unencodable,
+        # unexecutable-faithfully and unauditable-losslessly. Shares this loop
+        # and the ValueError -> command_rejected path with the #333 NUL entry
+        # (NUL rides the SHELL_METACHARS set-join; a surrogate is a character
+        # CLASS, not a fixed codepoint, so its predicate is the strict-encode
+        # probe — one loop, one rejection mechanism, no parallel block). The
+        # element value is never echoed. Byte-faithful handling is ticketed
+        # for post-beta (#335).
+        try:
+            elem.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError(
+                f"Argument {i} is not valid strict UTF-8 (a lone surrogate cannot be "
+                "executed faithfully or audited losslessly) — command rejected."
+            )
         if "<" in elem:
             if elem != "<":
                 raise ValueError(

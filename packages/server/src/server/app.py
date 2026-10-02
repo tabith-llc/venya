@@ -12,11 +12,40 @@ import time
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .config import CASecurityConfig, ServerConfig
 
 logger = logging.getLogger("venya.server")
+
+
+async def _validation_error_handler(request: Any, exc: RequestValidationError) -> JSONResponse:
+    """Sanitized 422 body for request-validation failures (ticket
+    argv-surrogate-executes-then-crashes-audit-write #334, posture B).
+
+    FastAPI's DEFAULT validation error embeds the rejected input value in the
+    response body — and when the payload carries a lone surrogate, encoding
+    THAT response dies too: the client gets a bare 500 and the actionable
+    "element N is not valid strict UTF-8" message is lost. Serve only
+    ``loc``/``type``/``msg`` (our messages never echo values); ``input``/``ctx``
+    are dropped by construction. Same handler is wired in ``create_app`` and
+    reused by route-level test apps — one mechanism, no drift.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "loc": list(err.get("loc", [])),
+                    "type": err.get("type", ""),
+                    "msg": err.get("msg", ""),
+                }
+                for err in exc.errors()
+            ]
+        },
+    )
 
 
 def _admin_ca_security(config: ServerConfig) -> CASecurityConfig:
@@ -97,6 +126,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     # Store config on app state
     app.state.config = config  # type: ignore[attr-defined]
+
+    # #334 posture B: sanitized validation-error responses (see
+    # _validation_error_handler) — a surrogate-bearing argv must surface as a
+    # clean 422, never as a 500 from the error responder itself.
+    app.add_exception_handler(RequestValidationError, _validation_error_handler)
 
     # Register routes at creation time (needed for OpenAPI docs)
     from .routes import (

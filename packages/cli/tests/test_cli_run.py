@@ -121,3 +121,61 @@ class TestRunArgWhitespace:
         _rc, _command = _run(["grep", "error message", "app.log"])
         out = capsys.readouterr().out
         assert f"Executing: {shlex.join(['grep', 'error message', 'app.log'])}" in out
+
+
+class TestRunArgvStrictUtf8Gate:
+    """#334 layer 1 (posture B): a lone surrogate in argv EXECUTES on the
+    remote side and then kills the server's completion audit write — worst
+    failure order (side effects kept, record lost). The CLI must refuse
+    LOCALLY, before any network: no client construction, no session call,
+    no /health advisory. Actionable error names the offending index; the
+    value is never echoed (argv may carry user-sensitive text). The
+    byte-faithful relaxation path is ticketed for post-beta (#335)."""
+
+    def test_surrogate_element_exits_before_any_client(self):
+        from unittest.mock import patch
+
+        from venya_cli.commands import run_command
+
+        args = SimpleNamespace(command="run", command_args=["/usr/bin/touch", "a\ud800b"])
+        with patch("venya_cli.commands.APIClient") as client_cls:
+            rc = run_command(args)
+        assert rc == 1
+        client_cls.assert_not_called()  # zero HTTP: no client object was ever built
+
+    def test_error_names_index_not_value(self, capsys):
+        from unittest.mock import patch
+
+        from venya_cli.commands import run_command
+
+        args = SimpleNamespace(command="run", command_args=["ls", "ok", "\udfff"])
+        with patch("venya_cli.commands.APIClient"):
+            rc = run_command(args)
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "argument 2" in err
+        assert "refused locally" in err.lower() or "nothing was sent" in err.lower()
+        assert "\udfff" not in err and "\ud800" not in err  # no value echo
+
+    def test_normal_unicode_and_emoji_pass_the_gate(self):
+        """Paired positive: astral-plane text (emoji/CJK/accents) is strict-
+        encodable — the gate must let it through to the client (construction
+        proves we reached the normal path; no network is actually made here
+        because APIClient is mocked)."""
+        from unittest.mock import patch
+
+        from venya_cli.commands import run_command
+
+        args = SimpleNamespace(
+            command="run",
+            command_args=["/usr/bin/echo", "héllo 🔐🚀 日本"],
+            user_id=None,
+            executor_id=None,
+            secrets=None,
+        )
+        with patch("venya_cli.commands.APIClient") as client_cls:
+            client_cls.return_value.config.access_token = "tok"
+            client_cls.return_value.post.return_value = {"session_id": "s1"}
+            rc = run_command(args)
+        client_cls.assert_called_once()  # gate passed; normal dispatch proceeded
+        assert rc in (0, 1)  # whatever the mocked dispatch returns, the gate did not fire

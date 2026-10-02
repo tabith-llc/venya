@@ -94,6 +94,25 @@ def version_advisory(client: APIClient) -> None:
         )
 
 
+def _run_argv_strict_utf8_error(command_args: Any) -> int | None:
+    """Return the first argv index that is not strict-UTF-8 encodable, else None.
+
+    Ticket argv-surrogate-executes-then-crashes-audit-write #334 (posture B):
+    a lone surrogate (e.g. ``\\ud800``) rides JSON and fsencode round-trips as
+    a Python str, EXECUTES, and then dies on the server's completion audit
+    write — side effects kept, record lost. The CLI refuses locally BEFORE any
+    network: the probe is the default-strict ``encode("utf-8")``. The offending
+    element's value is never echoed (argv may carry user-sensitive text) — only
+    its index. Byte-faithful handling is ticketed for post-beta (#335).
+    """
+    for i, elem in enumerate(command_args or []):
+        try:
+            elem.encode("utf-8")
+        except UnicodeEncodeError:
+            return i
+    return None
+
+
 def run_command(args: Any) -> int:
     """Run a CLI command.
 
@@ -103,6 +122,20 @@ def run_command(args: Any) -> int:
     Returns:
         Exit code (0 for success, 1 for error).
     """
+    # Layer-1 strict-UTF-8 gate for the run path (#334, posture B): probe
+    # every captured argv element BEFORE the client exists — no session, no
+    # relay, no HTTP of any kind happens with a non-encodable element.
+    if getattr(args, "command", None) == "run":
+        bad_index = _run_argv_strict_utf8_error(getattr(args, "command_args", None))
+        if bad_index is not None:
+            print(
+                f"Error: argument {bad_index} is not valid UTF-8 text — a lone surrogate "
+                "cannot be executed faithfully or audited losslessly. "
+                "Command refused locally; nothing was sent.",
+                file=sys.stderr,
+            )
+            return 1
+
     # Server URL precedence (matches the --server-url help text and the
     # revoke-admin-cert handler): explicit flag > VENYA_SERVER_URL env >
     # config.json (APIClient fallback). Empty env falls through (ticket
