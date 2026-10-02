@@ -66,6 +66,30 @@ else
     trap 'rm -rf "$FETCH_DIR"' EXIT
     echo "Fetching shared installer library from ${TARBALL_URL%/*}/venya-common.sh" >&2
     curl -fsSL "${TARBALL_URL%/*}/venya-common.sh" -o "$FETCH_DIR/venya-common.sh" || exit 1
+    # #360 (installer-common-self-fetch-unhashed): VERIFY before source. The
+    # serve-time runner sed-embeds the expected sha256 into the placeholder
+    # below; VENYA_COMMON_SHA256 is the operator pin and wins over it. With
+    # neither (raw-checkout bytes without embedding), fall back to the origin
+    # sidecar; if that is unobtainable too, abort FAIL-CLOSED — an unverified
+    # library is never sourced as root (mirrors the #327 tarball guard).
+    EXPECTED_COMMON_SHA="${VENYA_COMMON_SHA256:-__VENYA_COMMON_SHA256__}"
+    if [ "$EXPECTED_COMMON_SHA" = "__VENYA_COMMON_SHA256__" ]; then
+        EXPECTED_COMMON_SHA=""
+    fi
+    if [ -z "$EXPECTED_COMMON_SHA" ]; then
+        echo "No embedded/pinned common-library hash — fetching sidecar ${TARBALL_URL%/*}/venya-common.sh.sha256" >&2
+        curl -fsSL "${TARBALL_URL%/*}/venya-common.sh.sha256" -o "$FETCH_DIR/venya-common.sh.sha256" || {
+            echo "[ERROR] VENYA_COMMON_SHA256 unset and no hash sidecar at the origin — refusing to source an unverified library." >&2
+            exit 1
+        }
+        EXPECTED_COMMON_SHA="$(awk '{print $1}' "$FETCH_DIR/venya-common.sh.sha256")"
+    fi
+    ACTUAL_COMMON_SHA="$(sha256sum "$FETCH_DIR/venya-common.sh" | awk '{print $1}')"
+    if [ "$ACTUAL_COMMON_SHA" != "$EXPECTED_COMMON_SHA" ]; then
+        echo "[ERROR] venya-common.sh SHA-256 MISMATCH — expected $EXPECTED_COMMON_SHA, got $ACTUAL_COMMON_SHA. Refusing to source." >&2
+        exit 1
+    fi
+    echo "venya-common.sh verified (sha256 $ACTUAL_COMMON_SHA)" >&2
     source "$FETCH_DIR/venya-common.sh"
 fi
 
