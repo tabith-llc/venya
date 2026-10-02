@@ -332,13 +332,16 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     venya_guard_injection "ADMIN_IDENTITY" "$ADMIN_IDENTITY" '"' '\'
 
 
-    # Create directories
-    mkdir -p "$ADMIN_CA_DIR"
-    chmod 700 "$ADMIN_CA_DIR"
-    chown venya:venya "$ADMIN_CA_DIR"
-    mkdir -p "$ADMIN_CERT_DIR"
-    chmod 700 "$ADMIN_CERT_DIR"
-    chown venya:venya "$ADMIN_CERT_DIR"
+    # Create directories (#358: pinned parents the sudo -u venya children
+    # below must traverse — bare mkdir -p under the entry umask 077 left
+    # /var/lib/venya and /etc/venya 0700 root:root; the leaf pins keep the
+    # old chmod 700 + chown venya semantics). The later
+    # "install -d -m 0755 /etc/venya" (#317 status-quo pin) re-pins that
+    # parent's mode after this block; idempotent.
+    install -d -m 0750 -g venya /var/lib/venya /var/lib/venya/ca
+    install -d -m 0770 -o venya -g venya "$ADMIN_CA_DIR"
+    install -d -m 0750 -g venya /etc/venya
+    install -d -m 0770 -o venya -g venya "$ADMIN_CERT_DIR"
 
     # Generate admin CA. The passphrase crosses the sudo boundary on STDIN —
     # never via export (sudo's env_reset strips it) and never on argv (visible
