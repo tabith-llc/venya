@@ -1115,6 +1115,101 @@ class TestArgvDirectPosture322:
         strategy.execute_command.assert_not_called()
 
 
+class TestDirectPathGuardParity374:
+    """Ticket direct-path-inner-guard-drift-trap (#374, ruling ALIGN
+    2026-10-02): the redundant inner guard in _run_command_direct must
+    compute the IDENTICAL ruled decision as execute() step 1a — derived from
+    this path's own injections via the shared bound-path helper. The bound
+    pair ACCEPTS (under shell=False the pair never reaches a shell: the '<'
+    and the path are separate inert argv elements); every other metachar /
+    '<' shape still rejects BEFORE any Popen. The guard stays (fail-closed
+    redundancy per the 2026-09-16 ruling) — it may no longer contradict the
+    ruled '<` posture."""
+
+    BOUND = "/run/secrets/venya/2"
+
+    def _executor(self):
+        from executor.strategies.sbx_strategy import SbxStrategy
+
+        strategy = MagicMock(spec=SbxStrategy)
+        ex = Executor(
+            command_validator=CommandValidator(),
+            session_id="s-374",
+            injection_strategy=strategy,
+        )
+        ex.http_client = None
+        ex._injection_result = None
+        return ex
+
+    def _proc(self):
+        proc = MagicMock()
+        proc.stdin.fileno.return_value = 3
+        proc.stdout.fileno.return_value = 4
+        proc.stderr.fileno.return_value = 5
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        return proc
+
+    def _bundle(self):
+        return [MagicMock(secret_id="2", value=b"pw")]
+
+    def _direct(self, ex, cmd, popen):
+        """Existing direct-path test idiom: process machinery mocked, Popen
+        recorded."""
+        with patch("executor.executor.subprocess.Popen", popen):
+            with patch("executor.executor.select.select", return_value=([], [], [])):
+                with patch("executor.executor.scan_open_fds", return_value=[0, 1, 2]):
+                    with patch("executor.executor.set_cloexec"):
+                        with patch("executor.executor.verify_fd_whitelist", return_value=[]):
+                            with patch(
+                                "executor.executor.filter_and_redact",
+                                side_effect=lambda o, e, s: (o, e, [], []),
+                            ):
+                                ex._run_command_direct(cmd, self._bundle(), None, None)
+
+    def test_bound_pair_accepts_as_inert_argv(self):
+        """RED at base (the drift itself): the ruled posture accepts the
+        standalone '<' followed by the bound path this session's bundles
+        name — both arrive at execve as SEPARATE literal argv elements
+        (inert data, shell=False)."""
+        popen = MagicMock(return_value=self._proc())
+        cmd = ["/bin/cat", "<", self.BOUND]
+        self._direct(self._executor(), cmd, popen)
+        popen.assert_called_once()
+        assert popen.call_args[0][0] == cmd  # '<' and path stay distinct elements
+        assert popen.call_args[1]["shell"] is False
+
+    def test_metachar_element_rejected_before_popen(self):
+        popen = MagicMock(return_value=self._proc())
+        with pytest.raises(ValueError, match="Shell metacharacters"):
+            self._direct(self._executor(), ["/bin/echo", "hi;tail"], popen)
+        popen.assert_not_called()
+
+    def test_unbound_redirect_rejected_before_popen(self):
+        """Same '<`-plus-path shape, path NOT named by any bundle: SESSION-BOUND
+        rejection — the guard's allowance is data-derived, never free-standing."""
+        popen = MagicMock(return_value=self._proc())
+        with pytest.raises(ValueError, match="SESSION-BOUND"):
+            self._direct(self._executor(), ["/bin/cat", "<", "/etc/shadow"], popen)
+        popen.assert_not_called()
+
+    def test_lone_trailing_redirect_rejected_before_popen(self):
+        popen = MagicMock(return_value=self._proc())
+        with pytest.raises(ValueError, match="SESSION-BOUND"):
+            self._direct(self._executor(), ["/bin/cat", "<"], popen)
+        popen.assert_not_called()
+
+    def test_gate_call_count_drift_guard(self):
+        """#332 single-source idiom: the structural gate exists at exactly
+        def + the two aligned sites (execute() step 1a, direct inner). A
+        fourth hit means a third gate — or a stray call — grew; a third
+        would mean the aligned inner guard was removed without a ruling."""
+        import inspect
+
+        src = inspect.getsource(inspect.getmodule(Executor))
+        assert src.count("_validate_command_structure(") == 3
+
+
 class TestValidateCommandStructureStrictUtf8:
     """Gate layer for ticket argv-surrogate-executes-then-crashes-audit-write
     (#334, posture B): a lone surrogate cannot be executed faithfully nor

@@ -25,6 +25,7 @@ import shlex
 import subprocess  # nosec B404 — executor requires subprocess to run commands
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,7 +41,7 @@ from .injector import (
     verify_fd_whitelist,
 )
 from .strategies.base import InjectionResult, InjectionStrategy
-from .strategies.sbx_strategy import SbxStrategy
+from .strategies.sbx_strategy import CONTAINER_SECRET_DIR, SbxStrategy
 
 logger = logging.getLogger("venya.executor")
 
@@ -100,6 +101,23 @@ def _redirect_pair(command: list[str], i: int, allowed_redirect_paths: frozenset
         return False
     nxt = command[i + 1] if i + 1 < len(command) else None
     return nxt is not None and nxt in allowed_redirect_paths
+
+
+def _bound_secret_paths(secret_ids: Iterable[str]) -> frozenset[str]:
+    """The session-bound allowed-redirect path set for a command's own secret
+    ids (ticket secret-shape-sudo-remote option (a)).
+
+    Single source for the in-sandbox secret PATH TEMPLATE (the
+    ``CONTAINER_SECRET_DIR`` constant from the sbx strategy — the same
+    directory the secrets are copied into): both structural-gate call sites
+    (``execute()`` step 1a and the direct-path inner guard) derive their
+    allowed set here, from their own secrets/injections, so the two gates can
+    compute no decision but the identical ruled one (ticket
+    direct-path-inner-guard-drift-trap #374, ruling ALIGN — the #332
+    single-source discipline extended from the pair CONDITION to the path
+    TEMPLATE).
+    """
+    return frozenset(f"{CONTAINER_SECRET_DIR}/{secret_id}" for secret_id in secret_ids)
 
 
 def render_command(command: list[str], allowed_redirect_paths: frozenset[str] = frozenset()) -> str:
@@ -322,8 +340,9 @@ class Executor:
         # vs remote interpretation here; the sandbox shell sees the whole
         # string. Shell features must use the script-file path.
         # Session-bound secret paths are the ONLY legal redirect targets
-        # (ticket secret-shape-sudo-remote option (a)).
-        allowed_redirects = frozenset(f"/run/secrets/venya/{s['secret_id']}" for s in secrets if "secret_id" in s)
+        # (ticket secret-shape-sudo-remote option (a)); the path template is
+        # derived via the shared helper (#374).
+        allowed_redirects = _bound_secret_paths(s["secret_id"] for s in secrets if "secret_id" in s)
         try:
             _validate_command_structure(command, allowed_redirects)
         except ValueError as exc:
@@ -495,10 +514,15 @@ class Executor:
             pass_fds.update(self._injection_result.extra_fds)
 
         # Validate command structure (rejects shell metacharacters).
-        # REDUNDANT with execute() step 1a's whole-string gate — kept
-        # deliberately: refactor-5 guardrails lock memfd/sbx coexistence and
-        # this path must not diverge if reached directly (ruled 2026-09-16).
-        args = _validate_command_structure(command)
+        # REDUNDANT with execute() step 1a's gate — kept deliberately:
+        # refactor-5 guardrails lock memfd/sbx coexistence and this path must
+        # not diverge if reached directly (ruled 2026-09-16). ALIGNED to the
+        # ruled posture per ticket direct-path-inner-guard-drift-trap #374
+        # (ruling ALIGN): the allowed set comes from this path's own
+        # injections through the SAME helper execute() uses, so a bound-pair
+        # argv (inert data under shell=False) is accepted here exactly when
+        # the ruled gate accepts it — the redundancy stays fail-closed.
+        args = _validate_command_structure(command, _bound_secret_paths(b.secret_id for b in injections))
 
         # Create subprocess — shell=False for security
         process = subprocess.Popen(
