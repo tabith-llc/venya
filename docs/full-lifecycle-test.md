@@ -266,20 +266,23 @@ SHA-256 hashes and writes `<tarball>.sha256` sidecars. Capture: `CORE_SHA`,
 `pkill -f` has self-matched and killed the operator's own shell — twice).
 
 Installer env vars (all three installers): `VENYA_TARBALL_SHA256` is
-**recommended** — if unset, the installer fetches the `<tarball>.sha256`
-sidecar from the same origin (fail-closed: aborts on fetch failure or
-mismatch). `VENYA_SKIP_PROMPT=yes`
+**REQUIRED for the http mirror origins used below and recommended everywhere
+else** — if unset on an https origin, the installer fetches the
+`<tarball>.sha256` sidecar from the same origin (fail-closed: aborts on fetch
+failure or mismatch); unset on a non-https origin, it aborts before any fetch
+or write (#375, #328). `VENYA_SKIP_PROMPT=yes`
 disables interactive prompts (required for piped installs).
 
 > **`VENYA_TARBALL` must be set explicitly for dev-state installs.** The
 > built-in default points at the **GitHub latest release** — without the
 > override the installer downloads stale published bytes, not the tarballs
 > just built (this has bitten real runs). Always pass
-> `VENYA_TARBALL=http://$BUILD_HOST_IP:8080/<tarball>`. Belt-and-braces: with
-> `VENYA_TARBALL_SHA256` set to the local sidecar hash, a GitHub artifact
-> fails verification and aborts; the shared `venya-common.sh` library is
-> self-fetched from the same origin as `VENYA_TARBALL`, so the override keeps
-> that local too.
+> `VENYA_TARBALL=http://$BUILD_HOST_IP:8080/<tarball>` — and with it
+> `VENYA_TARBALL_SHA256` set to the local sidecar hash, which non-https
+> origins now REQUIRE (the installer aborts before any fetch or write without
+> it, #375/#328); a GitHub artifact then fails verification and aborts; the
+> shared `venya-common.sh` library is self-fetched from the same origin as
+> `VENYA_TARBALL`, so the override keeps that local too.
 
 ### B.2 Install core (independent)
 

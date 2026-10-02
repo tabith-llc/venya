@@ -56,9 +56,11 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 value must MATCH it).
 
 The installer is SHA-256-gated and fail-closed: with `VENYA_TARBALL_SHA256`
-set it verifies against that pin (strict integrity — recommended); unset, it
+set it verifies against that pin (strict integrity — required on every
+non-https origin, recommended everywhere else); unset on an https origin, it
 fetches the `.sha256` sidecar from the same origin as the tarball (corruption
-guardrail). Any fetch failure or mismatch aborts the install.
+guardrail); unset on a non-https origin, it aborts before any fetch or write
+(#375, #328). Any fetch failure or mismatch aborts the install.
 
 What it creates: locked `venya` service account; nginx TLS termination
 (internal CA-signed cert, admin mTLS enforcement); PostgreSQL role/database;
@@ -72,7 +74,7 @@ Key environment variables (all optional):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VENYA_TARBALL_SHA256` | (sidecar fetch) | integrity gate — recommended; if unset, the installer fetches the `.sha256` sidecar from the same origin and aborts on fetch failure or mismatch. Required (no sidecar fallback) when the tarball source is a file:// path (#327) |
+| `VENYA_TARBALL_SHA256` | (sidecar fetch) | integrity gate — recommended; if unset, the installer fetches the `.sha256` sidecar from the same origin and aborts on fetch failure or mismatch. Required (no sidecar fallback) whenever the tarball origin is not https:// — file:// paths (#327) and plain-http:// sources alike (#375, #328). |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL password |
 | `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-20); on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts |
 | `CORE_HOSTNAME` | `$(hostname)` | TLS cert SAN and relay CN base |
@@ -429,11 +431,13 @@ installers fetch Python toolchains and package dependencies at install time.
 For air-gapped alpha sites, contact info@tabith.com — a local mirror
 procedure exists but is not yet packaged.
 
-The offline tarball path (`file://` source or `/tmp`/`/opt` fallback) requires
-an out-of-band `VENYA_TARBALL_SHA256` pin — a hash read from the same local
-origin would be self-attesting (#327). Supply-chain boundary: pinned hash =
-integrity+authenticity; same-origin `.sha256` sidecar (http) = corruption
-guardrail only, not a security boundary.
+The offline tarball path (`file://` source or `/tmp`/`/opt` fallback) and any
+plain-`http://` source require an out-of-band `VENYA_TARBALL_SHA256` pin — a
+hash read from the same origin would be self-attesting (#327, widened to every
+non-https origin by #375/#328: the installers abort before any fetch or
+write). Supply-chain boundary: pinned hash = integrity+authenticity;
+same-origin `.sha256` sidecar (https origins only) = corruption guardrail
+only, not a security boundary.
 
 ## Troubleshooting
 

@@ -109,7 +109,9 @@ During installation the host fetches the installer script + tarball. In producti
 come from **GitHub Releases over 443/tcp** (`github.com` / `objects.githubusercontent.com`).
 In a dev/air-gapped setup they may come from a local tarball server (the reference dev
 environment uses `http://<build-host>:8080`) — that is a build-host service, **not** a
-venya runtime port, and should not exist in production. sbx additionally needs Docker Hub
+venya runtime port, and should not exist in production. Installers pointed at
+such an http mirror must pass `VENYA_TARBALL_SHA256` — non-https origins
+without the pin abort before any fetch or write (#375, #328). sbx additionally needs Docker Hub
 (443/tcp) at executor install for the agent template, plus `apt`/package mirrors unless
 you install from a local package cache.
 
