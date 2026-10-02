@@ -160,7 +160,6 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
     ],
     ("admin", "rotate-key"): [
         (["admin", "rotate-key"], "rotate the key-encryption key (server generates the new KEK)"),
-        (["admin", "rotate-key", "--new-key", "/secure/kek.bin"], "rotate to a specific KEK file"),
     ],
     ("admin", "revoke-executor"): [
         (

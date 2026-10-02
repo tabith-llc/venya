@@ -133,7 +133,13 @@ class AdminKeyVersionRotateRequest(BaseModel):
     The former ``new_key`` field advertised per-version key material that
     never existed (the KEK derives from the install passphrase); removed
     with the option-2 ruling — zero callers existed.
+
+    extra="forbid" (#355, the #289 house fix): the CLI's former
+    ``new_key_path`` post was silently discarded under the default
+    ignore — unknown keys on this control-plane route are a loud 422.
     """
+
+    model_config = {"extra": "forbid"}
 
 
 class AdminKeyVersionRotateResponse(BaseModel):

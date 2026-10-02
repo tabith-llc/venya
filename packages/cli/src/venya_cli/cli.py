@@ -281,8 +281,7 @@ def create_parser() -> argparse.ArgumentParser:
     rollback_parser.add_argument("job_id", help="Rotation job ID")
 
     # admin rotate-key
-    rotate_parser = admin_sub.add_parser("rotate-key", help="Rotate the key encryption key")
-    rotate_parser.add_argument("--new-key", help="Path to new KEK file")
+    admin_sub.add_parser("rotate-key", help="Rotate the key encryption key")
 
     # admin revoke-executor
     revoke_executor_parser = admin_sub.add_parser("revoke-executor", help="Revoke an executor certificate")
