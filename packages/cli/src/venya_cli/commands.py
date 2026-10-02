@@ -17,6 +17,7 @@ import tempfile
 from datetime import UTC
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx2
 from cryptography import x509
@@ -457,7 +458,7 @@ def cmd_get(client: APIClient, args: Any) -> int:
             print("Re-authenticating with security key for elevation...")
             get_kwargs["extra_headers"] = {"X-Elevation-Token": _elevate(client)}
         result = client.get(
-            f"/api/v1/secrets/{args.key}",
+            f"/api/v1/secrets/{quote(args.key, safe='')}",
             **get_kwargs,
         )
         if args.unmask:
@@ -530,7 +531,7 @@ def cmd_list(client: APIClient, args: Any) -> int:
 def cmd_delete(client: APIClient, args: Any) -> int:
     """Delete a secret."""
     try:
-        client.delete(f"/api/v1/secrets/{args.key}")
+        client.delete(f"/api/v1/secrets/{quote(args.key, safe='')}")
         print(f"Secret '{args.key}' deleted.")
         return 0
     except APIClientError as e:
@@ -565,7 +566,7 @@ def cmd_update_metadata(client: APIClient, args: Any) -> int:
             )
             return 1
 
-        resp = client.patch(f"/api/v1/secrets/{args.key}/metadata", json={"metadata": meta_dict})
+        resp = client.patch(f"/api/v1/secrets/{quote(args.key, safe='')}/metadata", json={"metadata": meta_dict})
         if isinstance(resp, dict):
             for w in resp.get("metadata_warnings") or []:
                 print(f"warning: {w}", file=sys.stderr)
@@ -706,7 +707,7 @@ def cmd_admin_enroll(client: APIClient, args: Any) -> int:
 def cmd_admin_remove(client: APIClient, args: Any) -> int:
     """Remove a user."""
     try:
-        client.delete(f"/api/v1/admin/users/{args.user_id}")
+        client.delete(f"/api/v1/admin/users/{quote(args.user_id, safe='')}")
         print(f"User '{args.user_id}' removed.")
         return 0
     except APIClientError as e:
@@ -725,7 +726,7 @@ def cmd_admin_configure(client: APIClient, args: Any) -> int:
             config["session_timeout"] = args.timeout
 
         client.put(
-            f"/api/v1/admin/users/{args.user_id}",
+            f"/api/v1/admin/users/{quote(args.user_id, safe='')}",
             json=config,
         )
         print(f"User '{args.user_id}' configured.")
@@ -1063,7 +1064,7 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
 def cmd_admin_list_tokens(client: APIClient, args: Any) -> int:
     """List all enrollment tokens for a user."""
     try:
-        result = client.get(f"/api/v1/admin/users/{args.user_id}/enrollment-tokens")
+        result = client.get(f"/api/v1/admin/users/{quote(args.user_id, safe='')}/enrollment-tokens")
         tokens = result.get("tokens", [])
 
         if not tokens:
@@ -1109,7 +1110,7 @@ def cmd_admin_list_tokens(client: APIClient, args: Any) -> int:
 def cmd_admin_issue_token(client: APIClient, args: Any) -> int:
     """Revoke old tokens and issue a new enrollment token for a user."""
     try:
-        result = client.post(f"/api/v1/admin/users/{args.user_id}/enrollment-tokens")
+        result = client.post(f"/api/v1/admin/users/{quote(args.user_id, safe='')}/enrollment-tokens")
 
         if getattr(args, "json", False):
             print(json.dumps(result, indent=2))
@@ -1148,7 +1149,7 @@ def cmd_admin_revoke_token(client: APIClient, args: Any) -> int:
 def cmd_admin_re_enroll(client: APIClient, args: Any) -> int:
     """Deactivate credentials, revoke tokens, and issue a new enrollment token."""
     try:
-        result = client.post(f"/api/v1/admin/users/{args.user_id}/re-enroll")
+        result = client.post(f"/api/v1/admin/users/{quote(args.user_id, safe='')}/re-enroll")
 
         if getattr(args, "json", False):
             print(json.dumps(result, indent=2))
@@ -1346,7 +1347,7 @@ def cmd_role_remove_member(client: APIClient, args: Any) -> int:
     """Remove user from role."""
     try:
         role_id = _resolve_role_id(client, args.role_id)
-        client.delete(f"/api/v1/roles/{role_id}/members/{args.user_id}")
+        client.delete(f"/api/v1/roles/{quote(role_id, safe='')}/members/{quote(args.user_id, safe='')}")
         print(f"User '{args.user_id}' removed from role '{args.role_id}'.")
         return 0
     except APIClientError as e:

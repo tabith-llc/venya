@@ -11,9 +11,10 @@ import hashlib
 import logging
 import re
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import Path as ApiPath
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -22,12 +23,26 @@ from server.dependencies import get_db, require_role
 router = APIRouter()
 logger = logging.getLogger("venya.server")
 
+# #354 (owner batch-yes 2026-10-02, charset per RULING-INPUTS): the secret key
+# is an authorization input (RBAC scoping namespace) and rides URL path params;
+# '/' can never reach a handler under this pattern, so the whole '..'/encode
+# path-rewrite family is refused at every secrets route. '..' and '.' remain
+# legal literal key NAMES (no path consumer — pinned by
+# tests/test_secret_key_path_validation_354.py).
+SECRET_KEY_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"  # nosec B105 — charset pattern, not a password
+
 
 # --- Request/Response models ---
 
 
 class SecretCreateRequest(BaseModel):
-    key: str = Field(..., description="Secret key")
+    key: str = Field(
+        ...,
+        description="Secret key",
+        pattern=SECRET_KEY_PATTERN,
+        min_length=1,
+        max_length=128,
+    )
     value: str = Field(..., description="Secret value (plaintext)")
     roles: list[str] = Field(..., description="Role names to scope the secret to")
     key_version_id: str = Field(..., description="Key version ID for encryption")
@@ -346,7 +361,9 @@ async def secrets_create(
     response_model=SecretGetResponse,
 )
 async def secrets_get(
-    key: str,
+    key: Annotated[
+        str, ApiPath(pattern=SECRET_KEY_PATTERN, max_length=128, description="Secret key (validated, #354)")
+    ],
     request: Request,
     unmask: bool = False,
     user_info: dict = Depends(require_role("read")),
@@ -632,7 +649,9 @@ async def secrets_list(
     status_code=status.HTTP_200_OK,
 )
 async def secrets_delete(
-    key: str,
+    key: Annotated[
+        str, ApiPath(pattern=SECRET_KEY_PATTERN, max_length=128, description="Secret key (validated, #354)")
+    ],
     request: Request,
     user_info: dict = Depends(require_role("read-write")),
 ) -> SecretDeleteResponse:
@@ -668,7 +687,9 @@ async def secrets_delete(
     status_code=status.HTTP_200_OK,
 )
 async def update_secret_metadata(
-    key: str,
+    key: Annotated[
+        str, ApiPath(pattern=SECRET_KEY_PATTERN, max_length=128, description="Secret key (validated, #354)")
+    ],
     req: SecretUpdateRequest,
     request: Request,
     user_info: dict = Depends(require_role("read-write")),

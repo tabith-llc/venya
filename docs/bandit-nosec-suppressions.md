@@ -11,7 +11,7 @@ justification. Rows are keyed on file + line content (line numbers drift and are
 deliberately not recorded). Scope = `packages/*/src` — the same tree the pre-commit
 bandit hook scans (tests dirs are hook-excluded).
 
-**62 suppression lines across 19 files.**
+**63 suppression lines across 20 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -73,6 +73,7 @@ bandit hook scans (tests dirs are hook-excluded).
 | `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort JSON parse, None falls through  # noqa: S110` |
 | `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort DB query, None falls through  # noqa: S110` |
 | `packages/server/src/server/routes/auth_browser.py` | `except Exception:  # nosec B110 — rollback best-effort before raising HTTPException` |
+| `packages/server/src/server/routes/secrets.py` | `SECRET_KEY_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"  # nosec B105 — charset pattern, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/utils/disk_encryption.py` | `import subprocess  # nosec B404 — disk encryption check requires subprocess for system commands` |
 | `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |
 | `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |
