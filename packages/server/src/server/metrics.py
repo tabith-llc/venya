@@ -139,6 +139,12 @@ CA_REVOCATIONS_PURGED_TOTAL = Counter(
     [],
 )
 
+CRL_TRUNCATED_TOTAL = Counter(
+    "venya_crl_truncated_total",
+    "CRL responses served while revocation history exceeds the entry ceiling (refs #337)",
+    [],
+)
+
 # --- Core metrics ---
 
 CORE_OPERATIONS_TOTAL = Counter(
