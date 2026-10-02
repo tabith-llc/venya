@@ -6,10 +6,10 @@
 
 """#367 wire hygiene — recovery posts only the declared RecoveryRequest fields.
 
-force/confirm are LOCAL CLI flags; RecoveryRequest never declared them (servers
-silently dropped them via extra="ignore"). Under any future extra="forbid" that
-pin would break the shipped break-glass path — so the body must not carry them.
-Paired positive: the declared fields still cross.
+force/confirm were LOCAL CLI flags that RecoveryRequest never declared (servers
+silently dropped them via extra="ignore"); shipping extra="forbid" would have 422'd
+the break-glass path — so the body must not carry them. The flags themselves retired
+with #377. Paired positive: the declared fields still cross.
 """
 
 from types import SimpleNamespace

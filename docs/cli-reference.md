@@ -990,21 +990,18 @@ venya role remove-member app jsmith  # revoke the role from a user
 Break-glass recovery
 
 ```
-venya recovery <CODE> <NEW_USER_ID> [OPTIONS]
+venya recovery <CODE> <NEW_USER_ID>
 ```
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `CODE` (positional) | **yes** | string | — | Recovery code |
 | `NEW_USER_ID` (positional) | **yes** | string | — | New user ID |
-| `--force` | no | flag | false (flag) | Force operation |
-| `--confirm` | no | flag | false (flag) | Confirm recovery action |
 
 **Examples**
 
 ```bash
 venya recovery RECOVERY-CODE newadmin  # break-glass: restore admin access with the one-shot recovery code
-venya recovery RECOVERY-CODE newadmin --confirm  # skip the interactive confirmation prompt
 ```
 
 ## `venya run`

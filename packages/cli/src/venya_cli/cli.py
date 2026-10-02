@@ -527,8 +527,6 @@ def create_parser() -> argparse.ArgumentParser:
     recovery_parser = subparsers.add_parser("recovery", help="Break-glass recovery")
     recovery_parser.add_argument("code", help="Recovery code")
     recovery_parser.add_argument("new_user_id", help="New user ID")
-    recovery_parser.add_argument("--force", action="store_true", help="Force operation")
-    recovery_parser.add_argument("--confirm", action="store_true", help="Confirm recovery action")
 
     # run (formerly exec)
     run_parser = subparsers.add_parser("run", help="Execute a command via executor (Stage 1 + Stage 2 filtering)")

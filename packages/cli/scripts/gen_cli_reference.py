@@ -78,7 +78,6 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
             ["recovery", "RECOVERY-CODE", "newadmin"],
             "break-glass: restore admin access with the one-shot recovery code",
         ),
-        (["recovery", "RECOVERY-CODE", "newadmin", "--confirm"], "skip the interactive confirmation prompt"),
     ],
     ("run",): [
         (["run", "--", "/usr/bin/true"], "smoke-test an executor round trip"),
