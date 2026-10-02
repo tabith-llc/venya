@@ -76,7 +76,11 @@ SBX_TIMEOUT = 3600  # 1 hour max
 # memfd/direct path's shell=False is the exception, not the rule); rejection
 # at the gate means these characters never reach any shell. Users needing
 # pipes, redirects, or other shell features should provide a script file.
-SHELL_METACHARS = set("|;&$`(){}<>!*?\n\r")
+# NUL (\x00) joins the set per ticket argv-nul-gate-reject (#333): it is
+# never valid in argv (execve contract) — an element carrying it must take
+# this audited rejection path, not ride to execve and surface as an opaque
+# transport 500 with no command_rejected event.
+SHELL_METACHARS = set("\x00|;&$`(){}<>!*?\n\r")
 
 
 def _validate_command_structure(command: list[str], allowed_redirect_paths: frozenset[str] = frozenset()) -> list[str]:

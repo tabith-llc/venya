@@ -757,6 +757,37 @@ class TestStructuralGate:
         assert result.exit_code == 0
         strategy.execute_command.assert_called_once()
 
+    @pytest.mark.parametrize("elem", ["\x00start", "hi\x00middle", "tail\x00"])
+    def test_nul_element_rejected_audited_before_side_effects(self, elem):
+        """Ticket argv-nul-gate-reject (#333): NUL is never valid in argv
+        (execve contract). Negative half — NUL at start/middle/end of one
+        element takes the standard rejection path: ValueError before the
+        policy gate, BEFORE any sandbox touch (strategy spy uncalled) and
+        before secret materialization (step 2, unreached), with one
+        command_rejected audit whose reason is the fixed message (value-
+        free)."""
+        audit = MagicMock()
+        ex, strategy = self._executor(audit=audit)
+        with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
+            ex.execute(["/usr/bin/echo", elem], [{"secret_id": "00000000-0000-0000-0000-000000000001"}])
+        strategy.create_sandbox.assert_not_called()
+        strategy.execute_command.assert_not_called()
+        audit.emit.assert_called_once()
+        args, kwargs = audit.emit.call_args
+        assert args == ("command_rejected",)
+        assert "metacharacters" in kwargs["reason"]
+        assert "\x00" not in kwargs["reason"]
+
+    def test_nul_paired_positive_unicode_and_normal_pass(self):
+        """Paired positive (truth-table rule): emoji/unicode/normal elements
+        are not collaterally rejected by the NUL class-member."""
+        ex, strategy = self._executor()
+        strategy.execute_command.return_value = MagicMock(returncode=0, stdout=b"ok", stderr=b"")
+        with patch("executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])):
+            result = ex.execute(["/usr/bin/echo", "emoji😀🚀", "naïve-café", "plain-arg"], [])
+        assert result.exit_code == 0
+        strategy.execute_command.assert_called_once()
+
 
 class TestRedirectAllowance:
     """Narrow redirect allowance (ticket secret-shape-sudo-remote, option (a),
