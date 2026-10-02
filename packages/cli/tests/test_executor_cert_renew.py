@@ -638,3 +638,74 @@ class TestRenewTempHygiene352:
         assert rc == 1
         leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith((".venya-cert-", ".venya-key-"))]
         assert leftovers == []
+
+
+class TestRenewHardening373:
+    """#373 paired: a root-context renew hands the credential dir and every
+    staged temp to the venya service account before os.replace publishes them;
+    a user-context renew attempts no chown at all (paired control)."""
+
+    @staticmethod
+    def _renew_args(tmp_path):
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+        return cert_path, args
+
+    def test_root_renew_hands_dir_and_temps_to_service_account(self, tmp_path):
+        from types import SimpleNamespace
+
+        cert_path, args = self._renew_args(tmp_path)
+        chown_calls: list = []
+        fchown_calls: list = []
+
+        def spy_chown(path, uid, gid):
+            chown_calls.append((str(path), uid, gid))
+
+        def spy_fchown(fd, uid, gid):
+            fchown_calls.append((uid, gid))
+
+        mock_client = _make_mock_httpx_client()
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client), patch(
+            "venya_cli.commands.os.geteuid", return_value=0
+        ), patch("venya_cli.commands.os.chown", side_effect=spy_chown), patch(
+            "venya_cli.commands.os.fchown", side_effect=spy_fchown
+        ), patch(
+            "pwd.getpwnam", return_value=SimpleNamespace(pw_uid=4444)
+        ), patch(
+            "grp.getgrnam", return_value=SimpleNamespace(gr_gid=5555)
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            assert executor_cert_renew(args) == 0
+
+        assert (str(cert_path.parent), 4444, 5555) in chown_calls
+        # cert, key and ca temps each handed over BEFORE os.replace (#317 window)
+        assert fchown_calls == [(4444, 5555)] * 3
+
+    def test_user_renew_leaves_ownership_unchanged(self, tmp_path):
+        cert_path, args = self._renew_args(tmp_path)
+        chown_calls: list = []
+        fchown_calls: list = []
+
+        def spy_chown(path, uid, gid):
+            chown_calls.append((str(path), uid, gid))
+
+        def spy_fchown(fd, uid, gid):
+            fchown_calls.append((uid, gid))
+
+        mock_client = _make_mock_httpx_client()
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client), patch(
+            "venya_cli.commands.os.geteuid", return_value=1000
+        ), patch("venya_cli.commands.os.chown", side_effect=spy_chown), patch(
+            "venya_cli.commands.os.fchown", side_effect=spy_fchown
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            assert executor_cert_renew(args) == 0
+
+        assert chown_calls == []
+        assert fchown_calls == []
+        assert cert_path.exists()  # renew completed as before; only ownership is untouched

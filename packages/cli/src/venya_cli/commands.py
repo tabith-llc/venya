@@ -2076,6 +2076,58 @@ def executor_list(client: APIClient, args: Any) -> int:
 # Test seam + single source of truth for the executor host-config path
 # (installer writes it; register/URL fallbacks read it).
 EXECUTOR_TOML_PATH = "/etc/venya/executor.toml"
+EXECUTOR_SERVICE_USER = "venya"
+
+
+def _executor_service_ids(output_path: Path) -> tuple[int, int] | None:
+    """Ownership target for root-context executor-credential self-hardening (#373).
+
+    A root-context ``venya exec register``/``cert renew`` used to leave the
+    credential dir (0700) and the key inside it (0600) root-owned; the
+    venya-executor service (User=venya) cannot read either and crash-loops
+    Errno 13 until the installer's "Executor credentials hardened" block
+    (chown -R venya:venya) is applied manually. Root-context writes now
+    self-harden at the creation site, following the #317 atomic-create
+    precedent (at_rest_key.atomic_write_key chowns the temp before
+    os.replace): when this returns (uid, gid), the caller chowns the output
+    dir right after the mkdir and each staged temp before it is published.
+
+    Returns None — writes stay as they are, zero behavior change — when:
+    - the process is not root (chown would EPERM; daemon hosts provision and
+      re-register via sudo, and the installer block owns ownership there);
+    - no ``venya`` account exists (workstation/CI hosts have no daemon —
+      warn LOUD with the exact chown remedy instead of failing a registration
+      that already succeeded).
+    """
+    if os.geteuid() != 0:
+        return None
+    import grp
+    import pwd
+
+    try:
+        return (pwd.getpwnam(EXECUTOR_SERVICE_USER).pw_uid, grp.getgrnam(EXECUTOR_SERVICE_USER).gr_gid)
+    except KeyError:
+        print(
+            f"WARNING: user '{EXECUTOR_SERVICE_USER}' not found — {output_path} stays root-owned. "
+            f"If the venya-executor service runs on this machine, hand it over before starting: "
+            f"sudo chown -R {EXECUTOR_SERVICE_USER}:{EXECUTOR_SERVICE_USER} {output_path}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _chown_secret_temp(fileno: int, service_ids: tuple[int, int] | None) -> None:
+    """Chown a staged secret temp to the service account BEFORE it is published
+    (#373, closing the create-then-chown window in the #317 shape). Best-effort
+    like at_rest_key.atomic_write_key: a failure costs only the service user's
+    read of that file — warned loudly, the installer hardening block stays the
+    remedy."""
+    if service_ids is None:
+        return
+    try:
+        os.fchown(fileno, *service_ids)
+    except OSError as e:
+        print(f"WARNING: cannot hand a staged temp file to {EXECUTOR_SERVICE_USER}: {e}", file=sys.stderr)
 
 
 def executor_register(client: APIClient, args: Any) -> int:
@@ -2217,6 +2269,15 @@ def executor_register(client: APIClient, args: Any) -> int:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True, mode=0o700)
         ensure_secret_dir(output_path)
+        # #373: a root-context register hands the dirs to the service account
+        # at the creation site (None for non-root or account-less hosts).
+        service_ids = _executor_service_ids(output_path)
+        if service_ids is not None:
+            try:
+                os.chown(output_path, *service_ids)
+            except OSError as e:
+                print(f"WARNING: cannot hand {output_path} to {EXECUTOR_SERVICE_USER}: {e}", file=sys.stderr)
+                service_ids = None
 
         # Save private key
         key_path = output_path / "executor.key"
@@ -2232,6 +2293,7 @@ def executor_register(client: APIClient, args: Any) -> int:
                 fd.write(key_pem)
                 fd.flush()
                 os.fchmod(fd.fileno(), 0o600)
+                _chown_secret_temp(fd.fileno(), service_ids)
             os.replace(key_tmp, key_path)
         except BaseException:
             if key_tmp is not None:
@@ -2252,6 +2314,7 @@ def executor_register(client: APIClient, args: Any) -> int:
                 fd.write(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
                 fd.flush()
                 os.fchmod(fd.fileno(), 0o644)
+                _chown_secret_temp(fd.fileno(), service_ids)
             os.replace(cert_tmp, cert_path)
         except BaseException:
             if cert_tmp is not None:
@@ -2271,6 +2334,7 @@ def executor_register(client: APIClient, args: Any) -> int:
                     fd.write(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
                     fd.flush()
                     os.fchmod(fd.fileno(), 0o644)
+                    _chown_secret_temp(fd.fileno(), service_ids)
                 os.replace(ca_tmp, ca_cert_path)
             except BaseException:
                 if ca_tmp is not None:
@@ -2279,6 +2343,9 @@ def executor_register(client: APIClient, args: Any) -> int:
                     except OSError:
                         pass
                 raise
+
+        # All three staged temps (key, cert, ca) are handed to the service
+        # account BEFORE os.replace — no post-publish chown window (#373).
 
         print(f"Certificate saved to {cert_path}")
         print(f"Private key saved to {key_path} (permissions: 600)")
@@ -2567,12 +2634,22 @@ def executor_cert_renew(args: Any) -> int:
         output_dir = str(Path(cert_path).parent)
         Path(output_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
         ensure_secret_dir(Path(output_dir))
+        # #373: same root-context self-hardening as executor_register — a
+        # root renew that leaves the key root-owned crash-loops the daemon.
+        service_ids = _executor_service_ids(Path(output_dir))
+        if service_ids is not None:
+            try:
+                os.chown(output_dir, *service_ids)
+            except OSError as e:
+                print(f"WARNING: cannot hand {output_dir} to {EXECUTOR_SERVICE_USER}: {e}", file=sys.stderr)
+                service_ids = None
 
         with tempfile.NamedTemporaryFile(dir=output_dir, prefix=".venya-cert-", suffix=".pem", delete=False) as fd:
             cert_tmp_name = fd.name
             fd.write(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
             fd.flush()
             os.fchmod(fd.fileno(), 0o600)
+            _chown_secret_temp(fd.fileno(), service_ids)
 
         key_pem = new_private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -2584,6 +2661,7 @@ def executor_cert_renew(args: Any) -> int:
             fd.write(key_pem)
             fd.flush()
             os.fchmod(fd.fileno(), 0o600)
+            _chown_secret_temp(fd.fileno(), service_ids)
         os.replace(key_tmp_name, key_path)
         key_tmp_name = None
 
@@ -2595,6 +2673,7 @@ def executor_cert_renew(args: Any) -> int:
                 fd.write(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
                 fd.flush()
                 os.fchmod(fd.fileno(), 0o600)
+                _chown_secret_temp(fd.fileno(), service_ids)
             os.replace(ca_tmp_name, str(ca_cert_path))
             ca_tmp_name = None
 

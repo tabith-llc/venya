@@ -1110,3 +1110,133 @@ class TestExecutorRegisterFileModes:
         assert stat.S_IMODE((out / "executor.key").stat().st_mode) == 0o600
         x509.load_pem_x509_certificate((out / "ca.crt").read_bytes())
         assert not list(out.glob(".venya-*"))
+
+
+class TestRegisterDirHardening373:
+    """#373: a root-context register hands the output dir and staged key to the
+    venya service account at the creation site — the daemon (User=venya) reads
+    its credentials without the installer hardening block being re-applied as a
+    repair. A user-context register attempts no chown at all (paired control)."""
+
+    @staticmethod
+    def _register(tmp_path):
+        from venya_cli.commands import executor_register
+
+        private_key = _generate_test_keypair()
+        cert = _generate_test_cert(private_key, "venya-exec", validity_days=30)
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode()
+
+        args = MagicMock()
+        args.executor_id = "venya-exec"
+        args.core_url = "https://core.example.com"
+        args.output_dir = str(tmp_path / "certs")
+
+        client, config_file = _make_mock_client()
+        mock_response = _make_mock_response(
+            status_code=201,
+            json_data={
+                "executor_id": "venya-exec",
+                "cert_pem": cert_pem,
+                "ca_cert_pem": cert_pem,
+                "serial_number": "01:23:45",
+                "not_after": "2026-09-13T00:00:00+00:00",
+            },
+        )
+        try:
+            with patch("venya_cli.api_client.httpx2.Client") as MockClient:
+                MockClient.return_value.__enter__.return_value = MockClient.return_value
+                MockClient.return_value.post.return_value = mock_response
+                result = executor_register(client, args)
+        finally:
+            client.close()
+        config_file.unlink(missing_ok=True)
+        return result
+
+    def test_root_register_hands_dirs_to_service_account(self, tmp_path):
+        chown_calls: list = []
+        fchown_calls: list = []
+
+        def spy_chown(path, uid, gid):
+            chown_calls.append((str(path), uid, gid))
+
+        def spy_fchown(fd, uid, gid):
+            fchown_calls.append((uid, gid))
+
+        with patch("venya_cli.commands.os.geteuid", return_value=0), patch(
+            "venya_cli.commands.os.chown", side_effect=spy_chown
+        ), patch("venya_cli.commands.os.fchown", side_effect=spy_fchown), patch(
+            "pwd.getpwnam", return_value=SimpleNamespace(pw_uid=4444)
+        ), patch(
+            "grp.getgrnam", return_value=SimpleNamespace(gr_gid=5555)
+        ):
+            assert self._register(tmp_path) == 0
+
+        out = tmp_path / "certs"
+        assert chown_calls == [(str(out), 4444, 5555)]
+        # key, cert and ca temps each handed over BEFORE os.replace (#317 window)
+        assert fchown_calls == [(4444, 5555)] * 3
+        assert (out / "executor.key").exists()
+
+    def test_user_register_leaves_ownership_unchanged(self, tmp_path):
+        chown_calls: list = []
+        fchown_calls: list = []
+
+        def spy_chown(path, uid, gid):
+            chown_calls.append((str(path), uid, gid))
+
+        def spy_fchown(fd, uid, gid):
+            fchown_calls.append((uid, gid))
+
+        with patch("venya_cli.commands.os.geteuid", return_value=1000), patch(
+            "venya_cli.commands.os.chown", side_effect=spy_chown
+        ), patch("venya_cli.commands.os.fchown", side_effect=spy_fchown):
+            assert self._register(tmp_path) == 0
+
+        assert chown_calls == []
+        assert fchown_calls == []
+        assert (tmp_path / "certs" / "executor.key").exists()
+
+    def test_root_register_without_service_account_warns_with_remedy(self, tmp_path, capsys):
+        chown_calls: list = []
+        fchown_calls: list = []
+
+        def spy_chown(path, uid, gid):
+            chown_calls.append((str(path), uid, gid))
+
+        def spy_fchown(fd, uid, gid):
+            fchown_calls.append((uid, gid))
+
+        with patch("venya_cli.commands.os.geteuid", return_value=0), patch(
+            "venya_cli.commands.os.chown", side_effect=spy_chown
+        ), patch("venya_cli.commands.os.fchown", side_effect=spy_fchown), patch(
+            "pwd.getpwnam", side_effect=KeyError("venya")
+        ):
+            assert self._register(tmp_path) == 0
+
+        err = capsys.readouterr().err
+        assert "user 'venya' not found" in err
+        assert f"sudo chown -R venya:venya {tmp_path / 'certs'}" in err
+        assert chown_calls == []
+        assert fchown_calls == []
+        assert (tmp_path / "certs" / "executor.key").exists()
+
+    def test_root_register_chown_failure_warns_not_aborts(self, tmp_path, capsys):
+        fchown_calls: list = []
+
+        def spy_fchown(fd, uid, gid):
+            fchown_calls.append((uid, gid))
+
+        with patch("venya_cli.commands.os.geteuid", return_value=0), patch(
+            "venya_cli.commands.os.chown", side_effect=PermissionError(13, "Permission denied")
+        ), patch("venya_cli.commands.os.fchown", side_effect=spy_fchown), patch(
+            "pwd.getpwnam", return_value=SimpleNamespace(pw_uid=4444)
+        ), patch(
+            "grp.getgrnam", return_value=SimpleNamespace(gr_gid=5555)
+        ):
+            assert self._register(tmp_path) == 0
+
+        err = capsys.readouterr().err
+        assert "cannot hand" in err
+        # dir hand-over failed -> the key temp is left alone (no half-hardened state)
+        assert fchown_calls == []
+        assert (tmp_path / "certs" / "executor.key").exists()
