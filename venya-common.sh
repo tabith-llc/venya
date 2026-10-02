@@ -319,9 +319,9 @@ venya_download_tarball() {
         error "Tarball source is a symlink: ${TARBALL_URL#file://} — refusing to follow it (#327)."
         exit 1
     fi
-    if [[ "$TARBALL_URL" == file://* && -z "${VENYA_TARBALL_SHA256:-}" ]]; then
-        error "Offline file:// install without VENYA_TARBALL_SHA256: the .sha256 sidecar would come from the same (attacker-writable) origin — self-attesting, not integrity (#327)."
-        error "Set VENYA_TARBALL_SHA256 out-of-band to the operator-pinned hash to install from a local file."
+    if [[ "$TARBALL_URL" != https://* && -z "${VENYA_TARBALL_SHA256:-}" ]]; then
+        error "Tarball origin '$TARBALL_URL' is not https and VENYA_TARBALL_SHA256 is not set: the .sha256 sidecar would come from the SAME (unauthenticated or attacker-writable) origin — self-attesting, not integrity (#375, #327)."
+        error "Pass VENYA_TARBALL_SHA256=<sha256> — the serve script prints it — or use an https:// source. Aborting before any fetch or write."
         exit 1
     fi
 
@@ -344,10 +344,12 @@ venya_download_tarball() {
     #     guardrail, NOT a security boundary — whoever controls the origin
     #     controls both files. (A piped install already grants the origin code
     #     execution, so a same-origin hash adds no attacker protection.)
-    #   - file:// sources (offline fallback, VENYA_TARBALL=file://...): the
-    #     sidecar would be read from the SAME local (attacker-writable) origin
-    #     — self-attesting. An operator-supplied VENYA_TARBALL_SHA256 pin is
-    #     REQUIRED on the file:// path (#327); guarded above, before any write.
+    #   - Non-https origins (file://, plain http://, anything whose scheme is
+    #     not https): the sidecar would be read from the SAME unauthenticated
+    #     (possibly attacker-writable) origin — self-attesting. An
+    #     operator-supplied VENYA_TARBALL_SHA256 pin is REQUIRED on every
+    #     non-https source (#375, extending #327's file:// rule to http);
+    #     guarded above, BEFORE any fetch or write, with no sidecar fallback.
     # Sidecar fetch failure or empty sidecar aborts — never install unverified.
     EXPECTED_SHA256="${VENYA_TARBALL_SHA256:-}"
     if [ -z "$EXPECTED_SHA256" ]; then

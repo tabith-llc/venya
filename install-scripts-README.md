@@ -36,7 +36,7 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 | `VENYA_DB_PASSPHRASE` | (reuse / prompt) | Server encryption passphrase — no default. Re-run: reused from `$INSTALL_DIR/.env`; an explicit value must match the stored one or the install aborts. Fresh install: prompted (interactive) or required (unattended) |
 | `VENYA_RECOVERY_PEPPER` | (reuse / random) | Recovery-code pepper — reused from `.env` on re-run (mismatch aborts); strong random when unset on a fresh install |
 | `VENYA_TARBALL` | `https://github.com/tabith-llc/venya/releases/latest/download/venya-core-install.tar.gz` | Tarball URL |
-| `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed. Required (no sidecar fallback) when the tarball source is a file:// path (#327) |
+| `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed. Required (no sidecar fallback, abort before any fetch/write) when the tarball source is NOT https — file:// or plain http:// (#375, extending #327) |
 | `CORE_HOSTNAME` | `$(hostname)` | Hostname for TLS/Nginx (auto-detected by default) |
 | `TLS_MODE` | `internal` | Nginx TLS mode (internal = self-signed, manual = provide certs) |
 | `VENYA_ADMIN_MTLS_ENABLED` | `true` | Enforce admin mTLS (admin client cert required) |
@@ -78,7 +78,7 @@ run it from an interactive session so the key is entered at the hidden prompt
 | `VENYA_INSTALL_DIR` | `/opt/venya` | Install location |
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompts |
 | `VENYA_TARBALL` | `https://github.com/tabith-llc/venya/releases/latest/download/venya-executor-install.tar.gz` | Tarball URL |
-| `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed. Required (no sidecar fallback) when the tarball source is a file:// path (#327) |
+| `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed. Required (no sidecar fallback, abort before any fetch/write) when the tarball source is NOT https — file:// or plain http:// (#375, extending #327) |
 | `VENYA_EXECUTOR_ID` | `venya-exec-1` | Executor identifier — CONTRACT: used as the relay dial hostname + client-cert SAN; must be resolvable from every core |
 | `VENYA_SERVER_URL` | (required — no default) | Core server URL; unset aborts with an actionable error (the server hostname cannot be guessed) |
 | `VENYA_EXECUTOR_ENROLLMENT_TOKEN` | (empty) | Bootstrap enrollment token — enables mTLS cert registration and heartbeat bootstrap at install time |
@@ -109,7 +109,7 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompt |
 | `VENYA_INSTALL_MCP` | `yes` | Set to `no` to install only the CLI (skip `venya-mcp`) |
 | `VENYA_TARBALL` | `https://github.com/tabith-llc/venya/releases/latest/download/venya-cli-install.tar.gz` | Tarball URL (workstation bundle: `packages/cli` + `packages/mcp`) |
-| `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed. Required (no sidecar fallback) when the tarball source is a file:// path (#327) |
+| `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed. Required (no sidecar fallback, abort before any fetch/write) when the tarball source is NOT https — file:// or plain http:// (#375, extending #327) |
 
 ### `install-venya-cli.ps1` (Windows)
 
