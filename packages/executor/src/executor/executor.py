@@ -79,6 +79,51 @@ SBX_TIMEOUT = 3600  # 1 hour max
 SHELL_METACHARS = set("|;&$`(){}<>!*?\n\r")
 
 
+def _redirect_pair(command: list[str], i: int, allowed_redirect_paths: frozenset[str]) -> bool:
+    """The ONE shared condition for the ruled session-bound redirect pair
+    (secret-shape-sudo-remote option (a), user ruling 2026-09-21): element i is
+    EXACTLY ``<`` and element i+1 is EXACTLY a session-bound secret path.
+
+    SINGLE SOURCE (ticket redirect-allowance-neutralized-by-quoting #332):
+    the structural gate calls this to decide acceptance, and
+    ``render_command`` calls it to re-emit accepted pairs raw — two copies
+    of this condition drifting is the second-order bug class, so there is
+    exactly one.
+    """
+    if command[i] != "<":
+        return False
+    nxt = command[i + 1] if i + 1 < len(command) else None
+    return nxt is not None and nxt in allowed_redirect_paths
+
+
+def render_command(command: list[str], allowed_redirect_paths: frozenset[str] = frozenset()) -> str:
+    """Reconstitute a gate-validated argv list into the ``sh -c`` payload.
+
+    Every element is ``shlex.quote``'d EXCEPT a redirect pair accepted by the
+    shared ``_redirect_pair`` helper: its ``<`` and bound secret path are
+    emitted RAW so the guest shell performs a real redirect
+    (hunt-wave2 FIND-1: the plain ``shlex.join`` re-quoted the ruled pair into
+    inertness, silently killing sudo-remote option (a)). Inputs that contain
+    no accepted pair render byte-identically to ``shlex.join`` — the common
+    path has zero drift.
+
+    The renderer mirrors the gate's condition, never a broader one: elements
+    reach it only after ``_validate_command_structure`` accepted them.
+    """
+    tokens: list[str] = []
+    i = 0
+    n = len(command)
+    while i < n:
+        if _redirect_pair(command, i, allowed_redirect_paths):
+            tokens.append(command[i])
+            tokens.append(command[i + 1])
+            i += 2
+        else:
+            tokens.append(shlex.quote(command[i]))
+            i += 1
+    return " ".join(tokens)
+
+
 def _validate_command_structure(command: list[str], allowed_redirect_paths: frozenset[str] = frozenset()) -> list[str]:
     """Reject shell metacharacters in any argv element (no join, no shlex).
 
@@ -112,8 +157,9 @@ def _validate_command_structure(command: list[str], allowed_redirect_paths: froz
     if not command:
         raise ValueError("Empty command")
 
-    # '<' handled per-element (standalone + session-bound target only); every
-    # other metacharacter keeps the unconditional per-element rejection.
+    # '<' handled per-element via the shared _redirect_pair helper (standalone
+    # + session-bound target only); every other metacharacter keeps the
+    # unconditional per-element rejection.
     metachars = SHELL_METACHARS - {"<"}
     for i, elem in enumerate(command):
         if "<" in elem:
@@ -122,8 +168,7 @@ def _validate_command_structure(command: list[str], allowed_redirect_paths: froz
                     "Shell metacharacters are not permitted. "
                     "Wrap complex commands in a script file and execute that instead."
                 )
-            nxt = command[i + 1] if i + 1 < len(command) else None
-            if nxt is None or nxt not in allowed_redirect_paths:
+            if not _redirect_pair(command, i, allowed_redirect_paths):
                 raise ValueError(
                     "Redirect '<' is only permitted when immediately followed by a "
                     "SESSION-BOUND secret path (/run/secrets/venya/<id> for a secret "
@@ -264,16 +309,16 @@ class Executor:
                 self.audit_logger.emit("command_rejected", command=shlex.join(command), reason=str(exc))
             raise ValueError(f"Command rejected: {exc}") from None
 
-        # EXECUTION POSTURE — UNCHANGED by the wire fix (ticket
-        # execution-command-wire-unstructured-string #322). The validated argv
-        # is reconstituted with shlex.join and fed to the EXISTING sh -c sbx
-        # path byte-identically to the pre-#322 wire text (shlex.join == the
-        # per-arg quoting the CLI used to bake in, so the sh -c payload is the
-        # same string production runs today). The ruled C3 argv-direct switch
-        # is LEG B, gated on the fleet sbx argv-boundary probe; this join is
-        # the ruled C1 floor. Shipping the posture change on an unverified
-        # probe is prohibited.
-        command_str = shlex.join(command)
+        # EXECUTION POSTURE — the validated argv is reconstituted and fed to
+        # the EXISTING sh -c sbx path. render_command quotes every element
+        # exactly like shlex.join EXCEPT the ruled session-bound redirect pair,
+        # which it re-emits RAW so the guest shell performs a real redirect
+        # (ticket redirect-allowance-neutralized-by-quoting #332: the plain
+        # shlex.join quoted the pair into inertness, silently killing
+        # sudo-remote option (a) since the #319 quoting fix). The ruled C3
+        # argv-direct switch is LEG B, gated on the fleet sbx argv-boundary
+        # probe; this render is the ruled C1 floor with the allowance restored.
+        command_str = render_command(command, allowed_redirects)
 
         # Step 1b: POLICY gate — dangerous patterns / preset checks (string-
         # typed throughout; sees the rendered form, same bytes as today).
