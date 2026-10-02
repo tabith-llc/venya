@@ -15,7 +15,14 @@ import httpx2
 import pytest
 
 from executor.command_validator import CommandValidator
-from executor.executor import SHELL_METACHARS, CommandResult, Executor, SecretBundle, _validate_command_structure
+from executor.executor import (
+    SHELL_METACHARS,
+    CommandResult,
+    Executor,
+    SecretBundle,
+    _validate_command_structure,
+    render_command,
+)
 from executor.injector import wrap_with_sentinel
 
 # ---------------------------------------------------------------------------
@@ -912,3 +919,103 @@ class TestRedirectAllowance:
         args, kwargs = audit.emit.call_args
         assert args == ("command_rejected",)
         assert "SESSION-BOUND" in kwargs["reason"]
+
+
+class TestRedirectReRender332:
+    """Ruled pair re-emission (ticket redirect-allowance-neutralized-by-quoting
+    #332, hunt-wave2 FIND-1): the gate accepts the session-bound '<' pair but
+    the plain shlex.join re-quoted it into inertness — sudo-remote option (a)
+    was silently dead at tip. render_command re-emits accepted pairs RAW and
+    must agree with the gate via the ONE shared _redirect_pair helper."""
+
+    def _executor(self, audit=None):
+        from executor.strategies.sbx_strategy import SbxStrategy
+
+        strategy = MagicMock(spec=SbxStrategy)
+        ex = Executor(
+            command_validator=CommandValidator(),
+            session_id="s-332",
+            injection_strategy=strategy,
+            audit_logger=audit,
+        )
+        ex.http_client = None
+        return ex, strategy
+
+    def test_accepted_pair_renders_raw_string(self):
+        # Cell (a): string-level assert — the ruled pair crosses UNQUOTED.
+        bound = "/run/secrets/venya/2"
+        rendered = render_command(["/usr/bin/sort", "<", bound], frozenset({bound}))
+        assert rendered == "/usr/bin/sort < /run/secrets/venya/2"
+        assert "'<'" not in rendered
+
+    def test_real_shell_executes_restored_redirect(self, tmp_path):
+        # Cell (b) positive: honest simulation — a tmp_path file is SUBSTITUTED
+        # for the in-sandbox secret path (same bytes on both sides of render).
+        import subprocess
+
+        secret = tmp_path / "2"
+        secret.write_text("s3cr3t\n")
+        bound = str(secret)
+        rendered = render_command(["cat", "<", bound], frozenset({bound}))
+        out = subprocess.run(["sh", "-c", rendered], capture_output=True, text=True, check=False)
+        assert out.returncode == 0
+        assert out.stdout == "s3cr3t\n"
+
+    def test_inert_join_form_is_the_regression_pin(self, tmp_path):
+        # Cell (b) paired negative: the pre-#332 rendering (plain shlex.join)
+        # is INERT — '<' arrives as a literal ARGUMENT and cat fails to open
+        # a file named '<'. This is exactly the dead-feature shape #332 fixes.
+        import subprocess
+
+        secret = tmp_path / "2"
+        secret.write_text("s3cr3t\n")
+        inert = shlex.join(["cat", "<", str(secret)])
+        out = subprocess.run(["sh", "-c", inert], capture_output=True, text=True, check=False)
+        assert out.returncode != 0
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["ls", "-la", "/tmp"],
+            ["echo", "a b"],
+            ["echo", "a'b"],
+            ["echo", 'a"b'],
+            ["echo", "a\\b"],
+            ["echo", ""],
+            ["prog", "--flag=x"],
+            ["echo", "é"],
+            ["echo", "a\tb"],
+            ["cat", "/run/secrets/venya/9", "<"],  # bound-ish names WITHOUT a pair: still quoted
+        ],
+    )
+    def test_non_allowance_input_matches_shlex_join(self, argv):
+        # Cell (c): common path zero-drift — byte-identical to shlex.join for
+        # every input without an accepted pair, with or without a bound set.
+        assert render_command(argv) == shlex.join(argv)
+        assert render_command(argv, frozenset({"/run/secrets/venya/9"})) == shlex.join(argv)
+
+    def test_gate_rejects_unbound_pair_before_render(self):
+        # Cell (d): order is gate-then-render — a '<' NOT followed by a bound
+        # path raises with NO audit of execution and render never invoked.
+        audit = MagicMock()
+        ex, strategy = self._executor(audit=audit)
+        with patch("executor.executor.render_command") as render:
+            with pytest.raises(ValueError, match="SESSION-BOUND"):
+                ex.execute(["/usr/bin/sort", "<", "/etc/passwd"], [_make_secret("1", b"x")])
+        render.assert_not_called()
+        strategy.create_sandbox.assert_not_called()
+        args, _kwargs = audit.emit.call_args
+        assert args == ("command_rejected",)
+
+    def test_single_source_condition_drift_guard(self):
+        # Cell (e): the pair condition lives ONCE — in _redirect_pair. The
+        # gate and the renderer must not re-grow their own copies (#332's
+        # second-order bug class). Source-text grep assertion, stable per-def.
+        import inspect
+
+        src = inspect.getsource(inspect.getmodule(render_command))
+        # the pair MEMBERSHIP condition exists exactly once (in _redirect_pair);
+        # the renderer may READ command[i+1] raw but only after the helper says
+        # so — a second bounds-checked lookup means a copy of the condition grew.
+        assert src.count("in allowed_redirect_paths") == 1
+        assert src.count("if i + 1 < len(command)") == 1
