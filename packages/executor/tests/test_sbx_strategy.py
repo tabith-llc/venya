@@ -713,6 +713,22 @@ class TestSbxStrategyExecuteEnvCwd:
             strategy.execute_command("cmd", env_override={"A": "x\nFORGED=1"})
         assert not (tmp_path / "venya-env").exists()
 
+    def test_nul_env_value_rejected(self, tmp_path):
+        """relay-env-value-nul-ungated: write side rejects NUL before the
+        env file exists (byte-consistent with the resolver's guard)."""
+        strategy = self._strategy(tmp_path)
+        with pytest.raises(ValueError, match="NUL"):
+            strategy.execute_command("cmd", env_override={"A": "x\x00y"})
+        assert not (tmp_path / "venya-env").exists()
+
+    def test_cr_env_value_rejection_unchanged(self, tmp_path):
+        """Paired negative: the pre-existing CR half still rejects after the
+        NUL extension."""
+        strategy = self._strategy(tmp_path)
+        with pytest.raises(ValueError, match="multi-line or NUL"):
+            strategy.execute_command("cmd", env_override={"A": "x\ry"})
+        assert not (tmp_path / "venya-env").exists()
+
 
 class TestAskpassHelper:
     """write_askpass_helper (ticket secret-shape-askpass-helpers): static 0555

@@ -497,7 +497,7 @@ class SbxStrategy(InjectionStrategy):
         Consumed via `sbx exec --env-file` (native flag, spike-verified on
         exec-1 2026-09-21) — values never ride host argv, unlike the former
         `-e K=V` form which exposed them in `/proc/<pid>/cmdline` for the
-        command's duration. The format is line-based: CR/LF in a value is
+        command's duration. The format is line-based: CR/LF/NUL in a value is
         rejected here as the last line of defense against forging extra
         env-file lines (callers validate too).
         """
@@ -508,8 +508,8 @@ class SbxStrategy(InjectionStrategy):
         for name, value in env.items():
             if not self._ENV_NAME_RE.match(name):
                 raise ValueError(f"invalid env var name: {name!r}")
-            if "\n" in value or "\r" in value:
-                raise ValueError(f"env var {name}: multi-line values cannot ride the env-file format")
+            if "\n" in value or "\r" in value or "\x00" in value:
+                raise ValueError(f"env var {name}: multi-line or NUL values cannot ride the env-file format")
             lines.append(f"{name}={value}\n")
         path = os.path.join(self._session_dir, "venya-env")
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

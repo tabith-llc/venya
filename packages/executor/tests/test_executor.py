@@ -624,6 +624,18 @@ class TestResolveEnvVars:
     def test_none_spec_noop(self):
         assert _resolve_env_vars(None, [], None) == {}
 
+    def test_nul_value_rejected(self):
+        """relay-env-value-nul-ungated: NUL is the same forged-line class as
+        CR/LF — the #333 argv posture now covers env values at both ends."""
+        with pytest.raises(ValueError, match="NUL"):
+            _resolve_env_vars([{"var_name": "T", "secret_id": 7}], [self._bundle(7, b"pa\x00ss")], None)
+
+    def test_carriage_return_rejection_unchanged(self):
+        """Paired negative: the pre-existing CR half of the guard still rejects
+        after the NUL extension."""
+        with pytest.raises(ValueError, match="newline or NUL"):
+            _resolve_env_vars([{"var_name": "T", "literal_value": "a\rb"}], [], None)
+
 
 class TestSendToStage2FailClosed:
     """Non-200 from the definitive masker raises a NAMED RuntimeError — the
