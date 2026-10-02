@@ -121,7 +121,11 @@ async def list_tools() -> list[Tool]:
                     },
                     "command": {
                         "type": "string",
-                        "description": "Shell command to execute on the remote host",
+                        "description": (
+                            "Command to execute on the remote host "
+                            "(tokens run directly — no shell; shell "
+                            "metacharacters are rejected)"
+                        ),
                     },
                     "secret_keys": {
                         "type": "array",
