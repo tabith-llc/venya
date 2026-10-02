@@ -297,7 +297,8 @@ class SessionCreateRequest(BaseModel):
     )
     secret_keys: list[str] = Field(
         default_factory=list,
-        description="Secret keys to resolve, wrap, and inject (server-side)",
+        max_length=32,
+        description="Secret keys to resolve, wrap, and inject (server-side; bounded at 32)",
     )
 
 

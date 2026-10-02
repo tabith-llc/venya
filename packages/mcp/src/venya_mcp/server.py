@@ -126,6 +126,7 @@ async def list_tools() -> list[Tool]:
                     "secret_keys": {
                         "type": "array",
                         "items": {"type": "string"},
+                        "maxItems": 32,
                         "description": (
                             "Secret keys to inject into the sandbox. "
                             "Use list_secrets to discover available keys. "
@@ -153,6 +154,7 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Look back this many hours (default: 1)",
                         "default": 1,
+                        "minimum": 0,
                     },
                     "limit": {
                         "type": "integer",

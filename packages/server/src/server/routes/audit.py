@@ -65,7 +65,7 @@ async def audit_list(
     start_date: str | None = Query(None, description="Start date (ISO 8601)"),
     end_date: str | None = Query(None, description="End date (ISO 8601)"),
     days: int | None = Query(None, description="Last N days"),
-    hours: int | None = Query(None, description="Last N hours"),
+    hours: int | None = Query(None, ge=0, le=8760, description="Last N hours (0..8760 = one year)"),
     event_type: str | None = Query(None, description="Filter by event type"),
     executor_id: str | None = Query(None, description="Filter by executor ID"),
     limit: int = Query(100, ge=1, le=1000, description="Max results"),
