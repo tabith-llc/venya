@@ -57,6 +57,10 @@ def _make_session_mock(user_id="user1", expires_at=None, access_token_jti="token
         expires_at=expires_at,
         user=user_mock,
         access_token_jti=access_token_jti,
+        # #342: bearer-tier expiry — fresh by default so the session-tier
+        # cells test what they always tested. NULL/aged is pinned in
+        # tests/test_access_token_expiry_gate.py.
+        access_token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
     )
 
 
@@ -766,6 +770,10 @@ class TestSessionExtension:
             expires_at=expires_at,
             user=user_mock,
             access_token=access_token,
+            # #342: fresh bearer-tier expiry by default so these session-tier
+            # cells exercise what they always did; NULL/aged pinned in
+            # tests/test_access_token_expiry_gate.py.
+            access_token_expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
 
     def _make_backend(self, session=None, db=None):

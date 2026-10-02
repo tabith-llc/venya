@@ -152,6 +152,10 @@ class Session(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
     access_token = Column(String(128), nullable=True, unique=True)
     access_token_jti = Column(String(64), nullable=True, unique=True)
+    # #342: persisted bearer-token expiry (now + access_token_ttl at issue).
+    # Validated fail-closed by the middleware; NULL means "no timestamp" ->
+    # rejected. Old rows pre-migration carry NULL by design.
+    access_token_expires_at = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     user = relationship("User", back_populates="sessions")
