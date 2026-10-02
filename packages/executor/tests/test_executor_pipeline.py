@@ -1021,6 +1021,100 @@ class TestRedirectReRender332:
         assert src.count("if i + 1 < len(command)") == 1
 
 
+class TestArgvDirectPosture322:
+    """C3 hybrid posture (ticket execution-command-wire-unstructured-string
+    #322, owner ruling 2026-10-02 Q3=C3; fleet C5 probe grounded): execute()
+    hands the gate-validated argv list DIRECT to the strategy for the common
+    case (no shell re-parses it); a command carrying the ruled session-bound
+    `<` pair keeps the rendered `sh -c` form (argv=None) because the guest
+    shell must perform the redirect. Truth table: both positives plus the
+    paired gate-negatives — dispatch happens ONLY after the per-element gate
+    has passed, and the gate is never weakened by the switch."""
+
+    def _executor(self):
+        from executor.strategies.sbx_strategy import SbxStrategy
+
+        strategy = MagicMock(spec=SbxStrategy)
+        strategy.execute_command.return_value = MagicMock(returncode=0, stdout=b"ok", stderr=b"")
+        ex = Executor(
+            command_validator=CommandValidator(),
+            session_id="s-argv322",
+            injection_strategy=strategy,
+        )
+        ex.http_client = None
+        return ex, strategy
+
+    def _execute(self, ex, cmd, secrets=None):
+        with patch("executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])):
+            return ex.execute(cmd, secrets or [])
+
+    def test_plain_command_dispatched_argv_direct(self):
+        """Positive: metachar-free argv arrives at the strategy as the SAME
+        list (boundaries intact, element-for-element); the positional payload
+        stays the shlex.join display string (audit/response shape unchanged)."""
+        ex, strategy = self._executor()
+        cmd = ["/usr/bin/echo", "two words", "quote'd"]
+        result = self._execute(ex, cmd)
+        assert result.exit_code == 0
+        args, kwargs = strategy.execute_command.call_args
+        assert kwargs["argv"] == cmd
+        assert args[0] == shlex.join(cmd)
+
+    def test_ruled_redirect_pair_keeps_shell_path(self):
+        """`<`-case regression pin (the ruled exception must keep WORKING):
+        a command with a session-bound pair dispatches with argv=None and the
+        pair RAW in the sh -c payload — identical bytes to the pre-switch
+        posture for this case (#332 re-emission preserved)."""
+        ex, strategy = self._executor()
+        bound = "/run/secrets/venya/2"
+        cmd = [
+            "/usr/bin/sshpass",
+            "-f",
+            "/run/secrets/venya/1",
+            "/usr/bin/ssh",
+            "bot@target-1",
+            "/usr/bin/sudo",
+            "-S",
+            "id",
+            "<",
+            bound,
+        ]
+        self._execute(ex, cmd, [_make_secret("1", b"ssh-pass"), _make_secret("2", b"sudo-pass")])
+        args, kwargs = strategy.execute_command.call_args
+        assert kwargs["argv"] is None
+        assert args[0].endswith(f"< {bound}")
+        assert "'<'" not in args[0]
+
+    def test_metachar_element_rejected_before_any_dispatch(self):
+        """Paired negative: a per-element metachar dies at the gate BEFORE the
+        strategy sees it — the argv-direct switch adds no path around the
+        gate (relay maps this class to the existing 503 idiom, unchanged)."""
+        ex, strategy = self._executor()
+        with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
+            self._execute(ex, ["/usr/bin/echo", "hi; touch /tmp/pwned"])
+        strategy.execute_command.assert_not_called()
+        strategy.create_sandbox.assert_not_called()
+
+    def test_unbound_redirect_rejected_before_any_dispatch(self):
+        """Paired negative on the new branch's condition: a '<' NOT followed
+        by a bound path never reaches the posture decision — rejected with
+        SESSION-BOUND, zero dispatch."""
+        ex, strategy = self._executor()
+        with pytest.raises(ValueError, match="SESSION-BOUND"):
+            self._execute(ex, ["/usr/bin/cat", "<", "/etc/shadow"], [_make_secret("2", b"pw")])
+        strategy.execute_command.assert_not_called()
+        strategy.create_sandbox.assert_not_called()
+
+    def test_policy_rejection_still_precedes_dispatch(self):
+        """Gate ordering unchanged by the switch: the policy gate still sees
+        the rendered string and still vetoes dispatch (sudo + Dangerous
+        pattern shape from the policy preset)."""
+        ex, strategy = self._executor()
+        with pytest.raises(ValueError, match="Dangerous pattern"):
+            self._execute(ex, ["/usr/bin/sudo", "ls"])
+        strategy.execute_command.assert_not_called()
+
+
 class TestValidateCommandStructureStrictUtf8:
     """Gate layer for ticket argv-surrogate-executes-then-crashes-audit-write
     (#334, posture B): a lone surrogate cannot be executed faithfully nor

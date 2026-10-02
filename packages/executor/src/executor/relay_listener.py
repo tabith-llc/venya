@@ -127,8 +127,9 @@ class ExecuteHandler(BaseHTTPRequestHandler):
         session_id = req.session_id
         # argv list, verbatim from the frozen contract (ticket
         # execution-command-wire-unstructured-string #322, ruling Q1=A1):
-        # boundaries are preserved into the engine; the engine reconstitutes
-        # the sh -c display string itself (C1 floor, leg B switches posture).
+        # boundaries are preserved into the engine, which runs them DIRECT
+        # in the sandbox; the sh -c form is kept only for the ruled
+        # session-bound `<` case (ruling Q3=C3, leg B landed).
         command = req.command
         secrets = [
             {

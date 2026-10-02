@@ -607,8 +607,17 @@ class SbxStrategy(InjectionStrategy):
         command: str,
         env_override: dict[str, str] | None = None,
         cwd: str | None = None,
+        argv: list[str] | None = None,
     ) -> subprocess.CompletedProcess:
         """Execute a command inside the sandbox.
+
+        Execution posture (ticket execution-command-wire-unstructured-string
+        #322, ruling Q3=C3): with ``argv`` the guest runs those tokens DIRECT
+        — ``sbx exec <sandbox> <argv...>``, no shell, boundaries preserved
+        element-for-element (fleet C5 probe: boundaries survive render->sh,
+        bare names PATH-resolve execvp-style). Without it the rendered string
+        rides ``sh -c`` — retained ONLY for the ruled session-bound ``<``
+        sudo-redirect case, where the guest shell must perform the redirect.
 
         env_override rides as a 0600 `--env-file` on the host session tmpfs
         (NEVER `-e K=V` argv — that exposed values in host /proc for the
@@ -621,15 +630,19 @@ class SbxStrategy(InjectionStrategy):
         per command without conflicting with the mount.
 
         Args:
-            command: The command to execute inside the sandbox.
+            command: The command string for the `sh -c` posture (argv=None).
             env_override: Environment variables to set (0600 env-file).
             cwd: Per-command working directory inside the sandbox (-w).
+            argv: Direct token list for the no-shell posture (ticket #322
+                C3); takes precedence over `command` when given.
 
         Returns:
             CompletedProcess with stdout, stderr, and returncode.
         """
         if not self._sandbox_name:
             raise RuntimeError("Sandbox not created yet")
+        if argv is not None and not argv:
+            raise ValueError("argv must not be empty — nothing to exec in the sandbox")
 
         cmd = ["sbx", "exec"]
         env_file = self._write_env_file(env_override) if env_override else None
@@ -637,7 +650,10 @@ class SbxStrategy(InjectionStrategy):
             cmd += ["--env-file", env_file]
         if cwd:
             cmd += ["-w", cwd]
-        cmd += [self._sandbox_name, "sh", "-c", command]
+        if argv is not None:
+            cmd += [self._sandbox_name, *argv]
+        else:
+            cmd += [self._sandbox_name, "sh", "-c", command]
 
         try:
             result = subprocess.run(  # nosec
