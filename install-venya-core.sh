@@ -345,17 +345,18 @@ else:
         IFS= read -r VENYA_ADMIN_CA_KEY_PASSPHRASE
         export VENYA_ADMIN_CA_KEY_PASSPHRASE
         exec python -c "
+import sys
 from pathlib import Path
 from server.ca import AdminCAManager
 from server.config import CASecurityConfig
 cm = AdminCAManager(Path(\"$1\"), CASecurityConfig(key_passphrase_env=\"VENYA_ADMIN_CA_KEY_PASSPHRASE\"))
-cert, key_pem, cert_pem = cm.sign_admin_cert(\"$3\")
+cert, key_pem, cert_pem = cm.sign_admin_cert(sys.argv[1])
 Path(\"$2/admin.crt\").write_bytes(cert_pem)
 Path(\"$2/admin.key\").write_bytes(key_pem)
 Path(\"$2/admin.crt\").chmod(0o644)
 Path(\"$2/admin.key\").chmod(0o600)
-print(\"Admin cert generated for $3\")
-"
+print(\"Admin cert generated for \" + sys.argv[1])
+" "$3"
     ' _ "$ADMIN_CA_DIR" "$ADMIN_CERT_DIR" "$ADMIN_IDENTITY" <<<"$ADMIN_CA_PASSPHRASE"
 
     info "Admin CA and first admin cert generated for $ADMIN_IDENTITY"
@@ -375,8 +376,10 @@ systemctl enable postgresql
 # Create the venya DB role if missing. Password is fed to psql on stdin (here-doc)
 # so it never appears on any process's /proc/*/cmdline (M-59, same pattern as M-56).
 if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya'" 2>/dev/null | grep -q 1; then
+    VENYA_DB_PASSWORD_SQL=${VENYA_DB_PASSWORD//\'/\'\'}
     sudo -u postgres psql > /dev/null 2>&1 <<PSL_EOT
-CREATE USER venya WITH PASSWORD '$VENYA_DB_PASSWORD';
+SET standard_conforming_strings = on;
+CREATE USER venya WITH PASSWORD '$VENYA_DB_PASSWORD_SQL';
 PSL_EOT
 fi
 
