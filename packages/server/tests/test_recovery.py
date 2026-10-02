@@ -380,27 +380,46 @@ def _seed_token(SessionLocal, token: str, user_id: str, *, used=False, valid=Tru
 
 
 def _build_reissue_app(tmp_path, pepper="test-pepper", session=None):
-    """Real Backend over SQLite; admin + recovery routers; session bearer
-    shape injected via the get_current_user override (the mTLS middleware is
-    its own tested surface — this class pins the route-internal gates).
-    Zero-mock doctrine per TestRecoveryBurnRealDB: replace/burn/rollback/
-    audit persistence cannot be observed through mocks."""
+    """Real Backend over SQLite + REAL SessionMiddleware with admin-mTLS
+    ENABLED (the #340 rework — the old plant injected a session dict through
+    a get_current_user override, an identity production cannot produce on
+    this path when admin-mTLS is enabled). `session={"user_id": X}` now
+    seeds a REAL Session row and default-authenticates the client as X's
+    bearer; with admin-mTLS enabled every mint here is a genuine
+    dual-credential call (cert forwarded through the #314 extfile harness).
+    Zero-mock doctrine per TestRecoveryBurnRealDB unchanged."""
     import hashlib
+    import os
 
     from core.engine.backend import Backend, BackendConfig
     from core.engine.encryption import KEK_SIZE
     from core.iam.models import Base, Role, RoleMember, User
     from fastapi import FastAPI
-    from server.dependencies import get_current_user
+    from server.config import AdminMTLSConfig, ServerConfig
+    from server.middleware.auth import SessionMiddleware
     from server.routes import admin as admin_routes
     from server.routes import recovery as recovery_routes
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from starlette.testclient import TestClient
 
+    try:
+        from .conftest import forwarded_headers, inner_tls_config, make_cert_prefix
+    except ImportError:
+        from conftest import forwarded_headers, inner_tls_config, make_cert_prefix
+
+    prefix = make_cert_prefix(tmp_path)
+    _old_pp = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
+    _ca_dir, leaf = _r340_ca_and_leaf(tmp_path)
+    if _old_pp is None:
+        os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
+    else:
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = _old_pp
+
     db_path = tmp_path / "reissue.db"
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
+    _sqlite_utc_loader()
     SessionLocal = sessionmaker(bind=engine)
 
     initial_hash = hashlib.sha256((pepper + "OLD-CODE").encode()).hexdigest()
@@ -413,20 +432,35 @@ def _build_reissue_app(tmp_path, pepper="test-pepper", session=None):
             admin_role,
             read_role,
             audit_role,
-            User(user_id="admin-user", recovery_code_hash=initial_hash),
-            User(user_id="plain-user", recovery_code_hash=initial_hash),
-            User(user_id="admin-nohash", recovery_code_hash=None),
-            User(user_id="auditor-user", recovery_code_hash=initial_hash),
+            User(user_id="admin-user", status="active", recovery_code_hash=initial_hash),
+            User(user_id="plain-user", status="active", recovery_code_hash=initial_hash),
+            User(user_id="admin-nohash", status="active", recovery_code_hash=None),
+            User(user_id="auditor-user", status="active", recovery_code_hash=initial_hash),
         ]
     )
     s.flush()
-    s.add_all(
-        [
-            RoleMember(user_id="admin-user", role_id=admin_role.id),
-            RoleMember(user_id="admin-nohash", role_id=admin_role.id),
-            RoleMember(user_id="auditor-user", role_id=audit_role.id),
-        ]
-    )
+    members = [
+        RoleMember(user_id="admin-user", role_id=admin_role.id),
+        RoleMember(user_id="admin-nohash", role_id=admin_role.id),
+        RoleMember(user_id="auditor-user", role_id=audit_role.id),
+    ]
+    session_user = (session or {}).get("user_id")
+    if session_user is not None:
+        # Real Session row — the bearer shape _validate_token actually reads.
+        from datetime import UTC, datetime, timedelta
+
+        from core.iam.models import Session as SessionModel
+
+        members.append(
+            SessionModel(
+                user_id=session_user,
+                access_token=f"bearer-{session_user}",
+                access_token_jti=f"jti-{session_user}",
+                created_at=datetime.now(UTC),
+                expires_at=datetime.now(UTC) + timedelta(minutes=15),
+            )
+        )
+    s.add_all(members)
     s.commit()
     s.close()
 
@@ -434,14 +468,25 @@ def _build_reissue_app(tmp_path, pepper="test-pepper", session=None):
     backend._engine = engine
     backend._session_factory = SessionLocal
 
+    config = ServerConfig(
+        admin_mtls=AdminMTLSConfig(
+            enabled=True,
+            ca_cert=str(_ca_dir / "admin-ca.crt"),
+            known_admin_ids=["admin@example.com"],
+        ),
+        inner_mtls=inner_tls_config(prefix),
+        recovery_code_pepper=pepper,
+    )
     app = FastAPI()
+    app.add_middleware(SessionMiddleware)
     app.state.backend = backend
-    app.state.config = SimpleNamespace(recovery_code_pepper=pepper)
+    app.state.config = config
     app.include_router(admin_routes.router, prefix="/api/v1")
     app.include_router(recovery_routes.router, prefix="/api/v1")
-    if session is not None:
-        app.dependency_overrides[get_current_user] = lambda: dict(session)
-    return TestClient(app, raise_server_exceptions=False), SessionLocal, initial_hash
+    default_headers = forwarded_headers(prefix, leaf)
+    if session_user is not None:
+        default_headers["Authorization"] = f"Bearer bearer-{session_user}"
+    return TestClient(app, raise_server_exceptions=False, headers=default_headers), SessionLocal, initial_hash
 
 
 class TestRecoveryCodeReissue:
@@ -518,16 +563,19 @@ class TestRecoveryCodeReissue:
 
     def test_n1_no_session_bearer_401(self, tmp_path):
         """N1: no bearer, no injected session -> 401 at the auth dep."""
-        client, _SessionLocal, _ = _build_reissue_app(tmp_path)  # no override
+        client, _SessionLocal, _ = _build_reissue_app(tmp_path)  # cert-only, no bearer
         resp = client.post(REISSUE_PATH, json={})
         assert resp.status_code == 401
 
     def test_n1b_mtls_admin_identity_cannot_pass(self, tmp_path):
-        """Q2 ruling: cert-CN identities arrive as caller=admin dicts with no
-        user_id and hold no memberships — they must NOT reach the mint."""
-        client, _SessionLocal, _ = _build_reissue_app(tmp_path, session={"caller": "admin", "admin_identity": "cn"})
+        """Q2 ruling, #340-reworked onto the real stack: a cert-only call
+        (no bearer) is EXACTLY how a cert-CN identity reaches this route —
+        the middleware hands the handler caller=admin with no user_id, and
+        the session guard must deny 401 (cert alone never mints)."""
+        client, _SessionLocal, _ = _build_reissue_app(tmp_path)
         resp = client.post(REISSUE_PATH, json={})
         assert resp.status_code == 401
+        assert "session authentication required" in resp.json()["detail"].lower()
 
     def test_n2_non_admin_session_403_with_denied_audit(self, tmp_path):
         """N2: session WITHOUT admin membership -> 403; token stays UNUSED
@@ -657,3 +705,241 @@ class TestRecoveryCodeReissue:
         assert resp.status_code == 200
         code = resp.json()["recovery_code"]
         assert code not in caplog.text, "code material reached a log record — BANNED design"
+
+
+def _sqlite_utc_loader():
+    """Re-stamp UTC on naive datetimes read back from SQLite.
+
+    SQLite has no timestamptz (the model's timezone=True is a PG-only flag),
+    so check_expiry's aware-now comparison TypeErrors on round-tripped naive
+    rows. Production (PostgreSQL) always returns aware values, where this
+    listener is a no-op. Registered once per process by the #340 real-stack
+    builders.
+    """
+    from core.iam.models import Session as SessionModel
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session as ORMSession  # noqa: F401 (doc anchor)
+
+    if getattr(SessionModel, "_r340_utc_loader", False):
+        return
+    SessionModel._r340_utc_loader = True
+
+    @event.listens_for(SessionModel, "load")
+    def _localize(obj, *event_args):  # signature varies across SQLAlchemy releases
+        from datetime import UTC
+
+        for field in ("created_at", "expires_at"):
+            value = getattr(obj, field)
+            if value is not None and value.tzinfo is None:
+                setattr(obj, field, value.replace(tzinfo=UTC))
+
+
+# ---------------------------------------------------------------------------
+# #340 ruled A: session-demanding admin routes verify the cert AND the
+# presented session — the reissue mint is reachable ONLY with both.
+# Real middleware stack (SessionMiddleware + forwarded-cert file per
+# conftest, the #314 harness): NO bare-router plant (the legacy lesson
+# this class exists to close).
+# ---------------------------------------------------------------------------
+
+import os
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+
+try:  # package-relative import (pytest package mode)
+    from .conftest import ADMIN_SERIAL_HEX, forwarded_headers, inner_tls_config, make_cert_prefix, make_leaf
+except ImportError:  # flat import fallback (matches test_admin_mtls.py)
+    from conftest import ADMIN_SERIAL_HEX, forwarded_headers, inner_tls_config, make_cert_prefix, make_leaf
+
+
+def _r340_ca_and_leaf(tmp_path):
+    """Initialize a real Admin CA in tmp and mint an admin@example.com leaf."""
+    from server.ca import AdminCAManager
+    from server.config import CASecurityConfig
+
+    ca_dir = tmp_path / "r340-admin-ca"
+    os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
+    AdminCAManager(ca_dir, CASecurityConfig(key_passphrase_env="VENYA_ADMIN_CA_KEY_PASSPHRASE")).initialize()
+    ca_cert = x509.load_pem_x509_certificate((ca_dir / "admin-ca.crt").read_bytes())
+    ca_key = serialization.load_pem_private_key((ca_dir / "admin-ca.key").read_bytes(), password=b"test_passphrase")
+    return ca_dir, make_leaf(ca_cert, ca_key, cn="admin@example.com", serial=int(ADMIN_SERIAL_HEX, 16))
+
+
+def _build_reissue_middleware_app(tmp_path, *, bearer="valid-bearer", session_expires=None):
+    """Reissue route + SessionMiddleware + admin-mTLS config + real SQLite.
+
+    Seeds what production seeds: an ACTIVE admin user, a REAL Session row
+    (access_token looked up by _validate_token), and the admin router under
+    its production prefix. Nothing is injected through
+    dependency_overrides — every identity on this stack is one the
+    middleware can actually produce.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from core.engine.backend import Backend, BackendConfig
+    from core.engine.encryption import KEK_SIZE
+    from core.iam.models import Base, Role, RoleMember, User
+    from core.iam.models import Session as SessionModel
+    from fastapi import FastAPI, Request
+    from server.config import AdminMTLSConfig, ServerConfig
+    from server.middleware.auth import SessionMiddleware
+    from server.routes import admin as admin_routes
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from starlette.testclient import TestClient
+
+    prefix = make_cert_prefix(tmp_path)
+    db_path = tmp_path / "reissue-mw.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    _sqlite_utc_loader()
+    SessionLocal = sessionmaker(bind=engine)
+    s = SessionLocal()
+    admin_role = Role(name="admin", permissions="read-write")
+    s.add(admin_role)
+    s.flush()
+    s.add_all(
+        [
+            User(user_id="admin-user", status="active", recovery_code_hash=None),
+            RoleMember(user_id="admin-user", role_id=admin_role.id),
+            SessionModel(
+                user_id="admin-user",
+                access_token=bearer,
+                access_token_jti="jti-r340",
+                created_at=datetime.now(UTC),
+                expires_at=session_expires or datetime.now(UTC) + timedelta(minutes=15),
+            ),
+        ]
+    )
+    s.commit()
+    s.close()
+
+    backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=b"k" * KEK_SIZE))
+    backend._engine = engine
+    backend._session_factory = SessionLocal
+
+    config = ServerConfig(
+        admin_mtls=AdminMTLSConfig(
+            enabled=True,
+            ca_cert=str(tmp_path / "r340-admin-ca" / "admin-ca.crt"),
+            known_admin_ids=["admin@example.com"],
+        ),
+        inner_mtls=inner_tls_config(prefix),
+        recovery_code_pepper="test-pepper",
+    )
+    app = FastAPI()
+    app.add_middleware(SessionMiddleware)
+    app.state.config = config
+    app.state.backend = backend
+
+    @app.get("/api/v1/admin/probe")
+    def probe(request: Request):
+        return {"auth_user": getattr(request.state, "auth_user", None)}
+
+    app.include_router(admin_routes.router, prefix="/api/v1")
+    return TestClient(app, raise_server_exceptions=False), SessionLocal, prefix
+
+
+class TestReissueDualCredentialMiddleware:
+    """#340 truth table, both halves, real middleware stack."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_passphrase_env(self):
+        old = os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
+        yield
+        if old is not None:
+            os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = old
+
+    def test_t1_cert_plus_session_mints(self, tmp_path):
+        """T1 DUAL CREDS: valid cert + valid session bearer -> 200, one new
+        code, one success audit event. RED pre-#340-fix: the admin-mTLS
+        short-circuit makes the middleware return before the bearer branch,
+        so auth_user is the cert identity and the handler guard 401s."""
+        _, leaf = _r340_ca_and_leaf(tmp_path)
+        client, SessionLocal, prefix = _build_reissue_middleware_app(tmp_path)
+        elev = _seed_token(SessionLocal, "elev-t1", "admin-user")
+
+        resp = client.post(
+            REISSUE_PATH,
+            json={},
+            headers={
+                **forwarded_headers(prefix, leaf),
+                "Authorization": "Bearer valid-bearer",
+                "X-Elevation-Token": elev,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["user_id"] == "admin-user"
+        _assert_code_shape(body["recovery_code"])
+
+        from core.iam.models import AuditEvent
+
+        with SessionLocal() as s:
+            events = s.query(AuditEvent).filter(AuditEvent.event_type == "recovery_code_reissued").all()
+            assert len(events) == 1
+            assert body["recovery_code"] not in str(events[0].fields)
+
+    def test_t2_cert_only_still_denied(self, tmp_path):
+        """T2 cert-only at the mint -> 401 'session authentication
+        required' (cert identity still cannot pass — ruling A half 1)."""
+        _, leaf = _r340_ca_and_leaf(tmp_path)
+        client, _SessionLocal, prefix = _build_reissue_middleware_app(tmp_path)
+
+        resp = client.post(REISSUE_PATH, json={}, headers=forwarded_headers(prefix, leaf))
+        assert resp.status_code == 401
+        assert "session authentication required" in resp.json()["detail"].lower()
+
+    def test_t3_session_only_channel_refused(self, tmp_path):
+        """T3 valid session, NO cert -> 403: the cert-verified channel is
+        required when admin-mTLS is enabled (ruling A half 2)."""
+        client, _SessionLocal, _prefix = _build_reissue_middleware_app(tmp_path)
+        elev = _seed_token(_SessionLocal, "elev-t3", "admin-user")
+
+        resp = client.post(
+            REISSUE_PATH, json={}, headers={"Authorization": "Bearer valid-bearer", "X-Elevation-Token": elev}
+        )
+        assert resp.status_code == 403
+        assert "client certificate" in resp.json()["detail"].lower()
+
+    def test_t4_cert_only_control_route_unchanged(self, tmp_path):
+        """T4 control: cert-only on a NORMAL admin path still 200 with
+        caller=admin — the reissue fall-through must not disturb it."""
+        _, leaf = _r340_ca_and_leaf(tmp_path)
+        client, _SessionLocal, prefix = _build_reissue_middleware_app(tmp_path)
+
+        resp = client.get("/api/v1/admin/probe", headers=forwarded_headers(prefix, leaf))
+        assert resp.status_code == 200
+        assert resp.json()["auth_user"]["caller"] == "admin"
+
+    def test_t5_idle_expired_session_no_mint(self, tmp_path):
+        """T5 idle-expired bearer + valid cert -> 401 invalid-or-expired
+        from the session half; no mint, no success audit event."""
+        from datetime import UTC, datetime, timedelta
+
+        _, leaf = _r340_ca_and_leaf(tmp_path)
+        client, SessionLocal, prefix = _build_reissue_middleware_app(
+            tmp_path,
+            bearer="expired-bearer",
+            session_expires=datetime.now(UTC) - timedelta(minutes=1),
+        )
+        elev = _seed_token(SessionLocal, "elev-t5", "admin-user")
+
+        resp = client.post(
+            REISSUE_PATH,
+            json={},
+            headers={
+                **forwarded_headers(prefix, leaf),
+                "Authorization": "Bearer expired-bearer",
+                "X-Elevation-Token": elev,
+            },
+        )
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Invalid or expired token"
+
+        from core.iam.models import AuditEvent
+
+        with SessionLocal() as s:
+            assert s.query(AuditEvent).filter(AuditEvent.event_type == "recovery_code_reissued").count() == 0
