@@ -424,6 +424,7 @@ sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya_audit'" 
 PG_MAIN_DIR=$(ls -d /etc/postgresql/*/main 2>/dev/null | head -n1)
 if [ -z "$PG_MAIN_DIR" ]; then
     error "PostgreSQL main config dir not found — cannot install the venya_audit peer map."
+    exit 1
 fi
 # pg_ident peer map: OS user 'venya' -> DB role 'venya_audit' (marker-guarded idempotent).
 if ! grep -q "^venya_map venya venya_audit" "$PG_MAIN_DIR/pg_ident.conf" 2>/dev/null; then

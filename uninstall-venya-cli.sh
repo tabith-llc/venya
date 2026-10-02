@@ -13,13 +13,15 @@ set -euo pipefail
 #
 # Removes what install-venya-cli.sh created for the CURRENT user:
 #   - the venya-cli and venya-mcp uv tools (shims in ~/.local/bin)
-#   - optionally ~/.config/venya (config + stored access token)
+#   - optionally the platform config dir (config + stored access token):
 #
 # No sudo. Refuses to run as root — the tool is per-user.
 #
 # Environment variables:
 #   VENYA_SKIP_PROMPT  - Set to "yes" to skip the confirmation prompt
-#   VENYA_PURGE_CONFIG - Set to "yes" to also delete ~/.config/venya
+#   VENYA_PURGE_CONFIG - Set to "yes" to also delete the platform config
+#                        dir (~/.config/venya on Linux, ~/Library/Application Support/venya
+#                        on macOS)
 #                        (default: ask; without a TTY, config is KEPT)
 ###############################################################################
 
@@ -57,11 +59,11 @@ fi
 PURGE="${VENYA_PURGE_CONFIG:-}"
 if [ -z "$PURGE" ]; then
     if [ -t 0 ]; then
-        read -r -p "Also delete ~/.config/venya (server URL + stored access token)? [y/N] " answer
+        read -r -p "Also delete the venya config dir (server URL + stored access token)? [y/N] " answer
         [[ "$answer" =~ ^[Yy] ]] && PURGE=yes || PURGE=no
     else
         PURGE=no
-        info "Non-interactive: keeping ~/.config/venya (set VENYA_PURGE_CONFIG=yes to remove)."
+        info "Non-interactive: keeping the venya config dir (set VENYA_PURGE_CONFIG=yes to remove)."
     fi
 fi
 
@@ -75,8 +77,18 @@ else
 fi
 
 if [ "$PURGE" = "yes" ]; then
-    rm -rf "$HOME/.config/venya"
-    info "Removed ~/.config/venya."
+    # Platform matrix must match the installer (install-venya-cli.sh Darwin/
+    # Linux branch) and venya_cli.api_client.default_config_dir():
+    #   Darwin -> $HOME/Library/Application Support/venya
+    #   Linux/other -> $HOME/.config/venya
+    # (Windows tokens live in %APPDATA%\venya and are removed by
+    #  uninstall-venya-cli.ps1 — this bash script never runs there.)
+    case "$(uname -s)" in
+        Darwin) VENYA_CONFIG_DIR="$HOME/Library/Application Support/venya" ;;
+        *)      VENYA_CONFIG_DIR="$HOME/.config/venya" ;;
+    esac
+    rm -rf "$VENYA_CONFIG_DIR"
+    info "Removed $VENYA_CONFIG_DIR."
 fi
 
 if command -v venya > /dev/null 2>&1; then
