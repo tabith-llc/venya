@@ -73,7 +73,11 @@ else
     # sidecar; if that is unobtainable too, abort FAIL-CLOSED — an unverified
     # library is never sourced as root (mirrors the #327 tarball guard).
     EXPECTED_COMMON_SHA="${VENYA_COMMON_SHA256:-__VENYA_COMMON_SHA256__}"
-    if [ "$EXPECTED_COMMON_SHA" = "__VENYA_COMMON_SHA256__" ]; then
+    # #368: the placeholder-as-literal NEVER appears contiguous outside the
+    # assignment default — the split-quote idiom below is invisible to the
+    # serve-time sed, so only the ${VENYA_COMMON_SHA256:-...} default is
+    # substituted and the guard cannot self-null into self-attestation.
+    if [ "$EXPECTED_COMMON_SHA" = '__VENYA''_COMMON_SHA256__' ]; then
         EXPECTED_COMMON_SHA=""
     fi
     if [ -z "$EXPECTED_COMMON_SHA" ]; then
