@@ -58,3 +58,19 @@ def test_degraded_knob_still_named_at_the_gate():
     src = _source()
     abort = src.index(DOCKER_ABORT_MARKER)
     assert SKIP_KNOB_MARKER in src[abort : abort + 1200]
+
+
+HARDEN_MARKER = "# --- Harden executor credentials"
+
+
+def test_harden_precedes_docker_gate():
+    """#370: credential hardening must run BEFORE the Docker-auth gate — an
+    abort at the creds gate has already registered + created
+    /etc/venya/executor; if hardening followed, the keys stay root-owned and
+    the daemon crash-loops until a completing re-run."""
+    src = _source()
+    harden = src.index(HARDEN_MARKER)
+    abort = src.index(DOCKER_ABORT_MARKER)
+    assert harden < abort, "harden block must precede the Docker-creds gate (#370)"
+    # ...and still after enrollment, so the certs exist when it runs (#363 holds)
+    assert harden > src.index(REGISTER_MARKER), "harden must run after registration (#363)"
