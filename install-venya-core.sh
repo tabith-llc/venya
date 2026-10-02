@@ -432,7 +432,28 @@ systemctl enable postgresql
 
 # Create the venya DB role if missing. Password is fed to psql on stdin (here-doc)
 # so it never appears on any process's /proc/*/cmdline (M-59, same pattern as M-56).
-if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya'" 2>/dev/null | grep -q 1; then
+# #379 auth probe (unconditional on file state; URL-parameterized): a partial wipe
+# (DROP DATABASE without DROP ROLE) leaves the cluster-wide role alive on its old
+# password while a fresh install carries a new one; the stored-.env mismatch guard
+# above cannot see that (the .env is gone). Prove authentication BEFORE any
+# mutation; rotation stays a deliberate manual act. dbname=postgres deliberately —
+# the target DB may not exist yet. PGPASSWORD travels as env, never argv.
+VENYA_DB_HOST=localhost           # HA re-sources this one knob
+VENYA_DB_PORT=5432
+if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya'" 2>/dev/null | grep -q 1; then
+    if ! PGPASSWORD="$VENYA_DB_PASSWORD" psql "host=$VENYA_DB_HOST port=$VENYA_DB_PORT user=venya dbname=postgres" \
+            -tAc 'SELECT 1' > /dev/null 2>&1; then
+        error "The PostgreSQL role 'venya' exists but does not authenticate with the password this install will use."
+        error "A partial wipe can leave the cluster role on its previous password; proceeding would"
+        error "diverge .env from the role and break server DB auth. Aborting — no changes made."
+        error "To continue, either:"
+        error "  1. Re-run with the role's actual password, or"
+        error "  2. Rotate deliberately: sudo -u postgres psql -c \"ALTER USER venya WITH PASSWORD '<new>'\""
+        error "     then re-run the installer with VENYA_DB_PASSWORD='<new>'."
+        exit 1
+    fi
+    info "Existing PostgreSQL role 'venya' authenticated with the supplied password — proceeding."
+else
     VENYA_DB_PASSWORD_SQL=${VENYA_DB_PASSWORD//\'/\'\'}
     sudo -u postgres psql > /dev/null 2>&1 <<PSL_EOT
 SET standard_conforming_strings = on;
