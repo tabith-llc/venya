@@ -1076,3 +1076,37 @@ class TestExecutorRegisterFileModes:
         assert b"GARBAGE" not in data  # replaced, not merged
         assert serialization.load_pem_private_key(data, password=None) is not None
         assert stat.S_IMODE(key.stat().st_mode) == 0o600  # temp mode wins over old 0644
+
+    def test_cert_and_ca_modes_pinned_under_umask077(self, tmp_path):
+        """#376 D-1: the register certs are public material pinned 0644 under a
+        restrictive umask TOO — at base they inherit 0600 (umask-driven drift vs
+        the installer/daemon 0644 posture; three outcomes one path class).
+        Key stays 0600 (already-pinned control in the same flow), cert parses,
+        no temp residue."""
+        old = os.umask(0o077)
+        try:
+            assert self._register(tmp_path) == 0
+        finally:
+            os.umask(old)
+        out = tmp_path / "certs"
+        assert stat.S_IMODE((out / "executor.crt").stat().st_mode) == 0o644
+        assert stat.S_IMODE((out / "ca.crt").stat().st_mode) == 0o644
+        assert stat.S_IMODE((out / "executor.key").stat().st_mode) == 0o600
+        x509.load_pem_x509_certificate((out / "executor.crt").read_bytes())
+        assert not list(out.glob(".venya-*"))
+
+    def test_cert_and_ca_modes_pinned_under_umask022(self, tmp_path):
+        """#376 paired half: observed modes identical under a permissive umask —
+        umask-independence is what the pin buys (and content unchanged: the
+        paired negative of #317 AC-1)."""
+        old = os.umask(0o022)
+        try:
+            assert self._register(tmp_path) == 0
+        finally:
+            os.umask(old)
+        out = tmp_path / "certs"
+        assert stat.S_IMODE((out / "executor.crt").stat().st_mode) == 0o644
+        assert stat.S_IMODE((out / "ca.crt").stat().st_mode) == 0o644
+        assert stat.S_IMODE((out / "executor.key").stat().st_mode) == 0o600
+        x509.load_pem_x509_certificate((out / "ca.crt").read_bytes())
+        assert not list(out.glob(".venya-*"))

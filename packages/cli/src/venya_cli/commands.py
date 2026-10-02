@@ -1525,7 +1525,11 @@ def cmd_setup(client: APIClient, args: Any) -> int:
 
     ca_path = client.config.ca_path
     try:
-        ca_path.parent.mkdir(parents=True, exist_ok=True)
+        # Pinned secret-dir idiom (#376 D-3): mode=0o700 at create +
+        # ensure_secret_dir for pre-existing dirs — matching every sibling
+        # CLI secret-dir site.
+        ca_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ensure_secret_dir(ca_path.parent)
         tmp_path: str | None = None
         try:
             with tempfile.NamedTemporaryFile(dir=ca_path.parent, prefix=".venya-ca-", delete=False) as fd:
@@ -2237,14 +2241,44 @@ def executor_register(client: APIClient, args: Any) -> int:
                     pass
             raise
 
-        # Save signed certificate
+        # Save signed certificate — atomic create pinned 0644 (#376: certs are
+        # public material; pre-fix the mode was umask-inherited — 0600 under a
+        # restrictive umask, diverging from the installer/daemon posture).
         cert_path = output_path / "executor.crt"
-        cert_path.write_bytes(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
+        cert_tmp: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=output_path, prefix=".venya-cert-", delete=False) as fd:
+                cert_tmp = fd.name
+                fd.write(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o644)
+            os.replace(cert_tmp, cert_path)
+        except BaseException:
+            if cert_tmp is not None:
+                try:
+                    os.unlink(cert_tmp)
+                except OSError:
+                    pass
+            raise
 
-        # Save CA certificate
+        # Save CA certificate — same pinned 0644 public-material posture (#376).
         ca_cert_path = output_path / "ca.crt"
         if ca_cert_pem:
-            ca_cert_path.write_bytes(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
+            ca_tmp: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=output_path, prefix=".venya-ca-", delete=False) as fd:
+                    ca_tmp = fd.name
+                    fd.write(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
+                    fd.flush()
+                    os.fchmod(fd.fileno(), 0o644)
+                os.replace(ca_tmp, ca_cert_path)
+            except BaseException:
+                if ca_tmp is not None:
+                    try:
+                        os.unlink(ca_tmp)
+                    except OSError:
+                        pass
+                raise
 
         print(f"Certificate saved to {cert_path}")
         print(f"Private key saved to {key_path} (permissions: 600)")

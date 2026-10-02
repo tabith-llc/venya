@@ -215,3 +215,46 @@ class TestFido2CaPrecedence:
         with patch.dict(os.environ, {"SSL_CERT_FILE": "/tmp/venya-ca.crt"}, clear=True):
             auth = Fido2Auth("https://core", ca_path=ca)
         assert auth._verify is True
+
+
+class TestSetupCaDirPermission376:
+    """#376 D-3: the setup CA-dir site (commands.py, `ca_path.parent.mkdir`)
+    was the one CLI secret-dir site missing both mode=0o700 and the
+    ensure_secret_dir pinned idiom every sibling site uses."""
+
+    def test_setup_tightens_preexisting_loose_ca_dir(self, tmp_path: Path, ca_pem: bytes):
+        """RED half: a pre-existing loose config dir (upgrade-install shape)
+        must land 0700 — bare exist_ok mkdir never re-pins an existing dir;
+        content unchanged (CA still 0600, byte-exact)."""
+        cfg_dir = tmp_path / "loose"
+        cfg_dir.mkdir()
+        cfg_dir.chmod(0o755)
+        client = APIClient(config_file=cfg_dir / "config.json")
+        with patch("venya_cli.commands.httpx2.get", return_value=_resp(200, ca_pem)):
+            old = os.umask(0o022)
+            try:
+                rc = commands_mod.cmd_setup(client, _args("venya-core-1"))
+            finally:
+                os.umask(old)
+        assert rc == 0
+        assert stat.S_IMODE(cfg_dir.stat().st_mode) == 0o700
+        ca = client.config.ca_path
+        assert stat.S_IMODE(os.stat(ca).st_mode) == 0o600
+        assert ca.read_bytes() == ca_pem
+        assert not list(cfg_dir.glob(".venya-ca-*"))
+
+    def test_setup_fresh_dir_modes_under_umask077(self, tmp_path: Path, ca_pem: bytes):
+        """Paired control: fresh dir under a restrictive umask — dir 0700,
+        ca.crt 0600 byte-exact; the pin must not LOOSEN anything."""
+        cfg_dir = tmp_path / "fresh"
+        client = APIClient(config_file=cfg_dir / "config.json")
+        with patch("venya_cli.commands.httpx2.get", return_value=_resp(200, ca_pem)):
+            old = os.umask(0o077)
+            try:
+                rc = commands_mod.cmd_setup(client, _args("venya-core-1"))
+            finally:
+                os.umask(old)
+        assert rc == 0
+        assert stat.S_IMODE(cfg_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(client.config.ca_path).st_mode) == 0o600
+        assert client.config.ca_path.read_bytes() == ca_pem
