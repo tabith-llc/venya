@@ -108,10 +108,6 @@ class Fido2Config(BaseModel):
         default=15,
         description="Enrollment token lifetime in minutes",
     )
-    unmask_auto_hide_timeout: int = Field(
-        default=30,
-        description="Seconds before unmasked secret auto-masks",
-    )
 
 
 class CRLConfig(BaseModel):
@@ -313,23 +309,6 @@ class InnerTLSConfig(BaseModel):
     )
 
 
-class NetworkConfig(BaseModel):
-    """Network timeout configuration."""
-
-    request_timeout_seconds: int = Field(
-        default=30,
-        ge=5,
-        le=120,
-        description="Default timeout for server API calls in seconds (5-120)",
-    )
-    registration_timeout_seconds: int = Field(
-        default=30,
-        ge=5,
-        le=120,
-        description="Timeout for executor registration/rotation in seconds (5-120)",
-    )
-
-
 class ServerConfig(BaseSettings):
     """Server configuration.
 
@@ -366,10 +345,6 @@ class ServerConfig(BaseSettings):
     fido2: Fido2Config = Field(default_factory=Fido2Config)
 
     # mTLS (executor communication)
-    mtls_ca_cert: str | None = Field(
-        default=None, description="Path to CA certificate for mTLS (verifying executor certs)"
-    )
-    mtls_ca_key: str | None = Field(default=None, description="Path to CA private key (signing executor certs)")
     mtls_cert: str | None = Field(default=None, description="Path to server mTLS certificate")
     mtls_key: str | None = Field(default=None, description="Path to server mTLS private key")
     ca_dir: str = Field(
@@ -400,9 +375,6 @@ class ServerConfig(BaseSettings):
     # Clock skew tolerance
     clock_skew: ClockSkewConfig = Field(default_factory=ClockSkewConfig)
 
-    # Network timeouts
-    network: NetworkConfig = Field(default_factory=NetworkConfig)
-
     # Trusted proxies for X-Forwarded-* handling (passed to FastAPI forwarded_allow_ips).
     # pydantic-settings parses a JSON list from env, e.g. VENYA_TRUSTED_PROXIES='["192.0.2.1"]'
     trusted_proxies: list[str] = Field(
@@ -417,10 +389,6 @@ class ServerConfig(BaseSettings):
         le=104_857_600,
         description="Maximum request body size in bytes (1024–104857600, default 1MB)",
     )
-
-    # Audit forwarding
-    audit_remote_url: str | None = Field(default=None, description="Remote syslog URL (tls://host:port)")
-    audit_local_retention_days: int = Field(default=90, description="Local audit log retention days")
 
     # Recovery code pepper (server-side secret for hashing break-glass recovery codes)
     # REQUIRED — deployment fails if not set. Only one pepper version supported;
