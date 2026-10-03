@@ -52,6 +52,13 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 
 if [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+    # #399: read on a closed/EOF stdin aborts under set -e with zero output.
+    # Gate the non-TTY case loudly first, before any removal — same contract
+    # as the #389 install-side gate. Deletion is destructive: no auto-proceed.
+    if [ ! -t 0 ]; then
+        error "non-interactive session: set VENYA_SKIP_PROMPT=yes to confirm removal"
+        exit 1
+    fi
     read -r -p "Remove the venya CLI for user $(id -un)? [Y/n] " answer
     [[ "$answer" =~ ^[Nn] ]] && { info "Aborted."; exit 0; }
 fi

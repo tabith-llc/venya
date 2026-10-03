@@ -57,6 +57,13 @@ venya_print_colors
 venya_check_root
 
 if [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+    # #399: read on a closed/EOF stdin aborts under set -e with zero output.
+    # Gate the non-TTY case loudly first, before any removal — same contract
+    # as the #389 install-side gate. Deletion is destructive: no auto-proceed.
+    if [ ! -t 0 ]; then
+        error "non-interactive session: set VENYA_SKIP_PROMPT=yes to confirm removal"
+        exit 1
+    fi
     echo "This will REMOVE Venya Core from $(hostname): service, /opt/venya,"
     echo "/etc/venya, /var/lib/venya (CA keys!), nginx site, trust entries,"
     read -r -p "the PostgreSQL database 'venya', and the venya user. Proceed? [y/N] " answer
