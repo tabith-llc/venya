@@ -388,7 +388,11 @@ class TestDaemonRegistrationTLSVerification:
 
         with patch("executor.daemon.httpx2.Client") as MockClient, patch(
             "executor.daemon._generate_ecdsa_p256_keypair"
-        ), patch("executor.daemon._create_csr", return_value=b"CSR"), patch("executor.daemon.Path") as MockPath:
+        ), patch("executor.daemon._create_csr", return_value=b"CSR"), patch("executor.daemon.Path") as MockPath, patch(
+            "executor.daemon.time.sleep"
+        ):
+            # #24: non-TLS unreachability now retries in-process with backoff —
+            # sleep patched; the final raise + verify kwargs are unchanged.
             MockPath.return_value.exists.return_value = False
 
             MockClient.return_value.__enter__.return_value = MockClient.return_value
