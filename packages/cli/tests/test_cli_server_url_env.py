@@ -60,3 +60,48 @@ class TestServerUrlEnvResolution:
     def test_empty_env_treated_as_unset(self):
         """VENYA_SERVER_URL='' must not become the server URL."""
         assert _resolve(env="") is None
+
+
+def _resolve_exec(*, core_flag=None, env=None):
+    """Drive run_command for the exec-register shape (flag dest=core_url);
+    return the server_url it passes to APIClient."""
+    client = MagicMock()
+    client.config.access_token = "tok"  # skip the auth gate; not under test
+    client.has_admin_mtls = False
+    fields = {"command": "exec", "exec_command": "register"}
+    if core_flag is not None:
+        fields["core_url"] = core_flag
+    args = SimpleNamespace(**fields)
+    environ = {} if env is None else {"VENYA_SERVER_URL": env}
+    with (
+        patch("venya_cli.commands.APIClient", return_value=client) as mock_client,
+        patch("venya_cli.commands.cmd_exec_group", return_value=0),
+        patch.dict(os.environ, environ, clear=True),
+    ):
+        rc = run_command(args)
+    assert rc == 0
+    return mock_client.call_args.kwargs.get("server_url")
+
+
+class TestExecRegisterCoreUrlAlias387:
+    """#387: the exec-family parsers bind --core-url to dest=core_url, so the
+    chokepoint must read that alias too — otherwise `exec register`'s
+    post-save verify call silently targets the config default (Errno 111 on
+    config-less hosts) while the CSR POST went to the flag URL."""
+
+    def test_core_url_flag_reaches_client(self):
+        """THE FIX: --core-url (dest=core_url) becomes the client base URL."""
+        assert _resolve_exec(core_flag="https://venya-core-3") == "https://venya-core-3"
+
+    def test_core_url_beats_env(self):
+        """Paired negative: the explicit flag outranks VENYA_SERVER_URL."""
+        assert _resolve_exec(core_flag="https://flag.example", env="https://env.example") == "https://flag.example"
+
+    def test_no_flag_passes_none_config_path_unchanged(self):
+        """Control: no --core-url anywhere -> None, APIClient falls back to
+        config.json exactly as before this fix."""
+        assert _resolve_exec() is None
+
+    def test_empty_core_url_treated_as_unset(self):
+        """--core-url '' must not become the server URL (empty = unset)."""
+        assert _resolve_exec(core_flag="") is None
