@@ -48,9 +48,10 @@ Re-run from an elevated terminal: right-click PowerShell -> Run as administrator
 "@
 }
 
-$Base   = if ($env:VENYA_INSTALL_DIR) { $env:VENYA_INSTALL_DIR } else { 'C:\Program Files\Venya' }
-$BinDir = Join-Path $Base 'bin'
-$cfgDir = Join-Path $env:APPDATA 'venya'
+$Base    = if ($env:VENYA_INSTALL_DIR) { $env:VENYA_INSTALL_DIR } else { 'C:\Program Files\Venya' }
+$BinDir  = Join-Path $Base 'bin'
+$ToolDir = Join-Path $Base 'uv-tools'
+$cfgDir  = Join-Path $env:APPDATA 'venya'
 
 Info "Removing the machine-wide Venya CLI from $Base"
 
@@ -72,7 +73,8 @@ if (-not $purge) {
 
 if (Test-Path $Base) {
     Remove-Item -LiteralPath $Base -Recurse -Force
-    Info "Removed $Base"
+    # No "Removed" claim here: #402 gates every success claim on the
+    # verify-absent loop below (the #396 bash contract).
 } else {
     Warn "Install root $Base not present - nothing to remove there."
 }
@@ -96,11 +98,21 @@ if ($purge -eq 'yes') {
     if (Test-Path $legacy) { Remove-Item -LiteralPath $legacy -Recurse -Force; Info "Removed $legacy (pre-%APPDATA% build)" }
 }
 
-# Fail loudly if a shim still resolves anywhere - mirrors the .sh contract.
-foreach ($s in 'venya.exe','venya-mcp.exe') {
-    $p = Join-Path $BinDir $s
-    if (Test-Path $p) { Fail "$s still present at $p - inspect manually." }
+# #402 verify-absent (mirrors the #396 bash contract): re-test every declared
+# removal site after the fact; a survivor - e.g. a locked file left by a
+# partial removal - fails loud naming its path. The success claim below is
+# reachable only through this loop. The uv tool list probe is not cheaply
+# applicable here: the pinned uv.exe lives under $Base, so a verified-absent
+# $Base leaves no machine-wide tool entries to list, and a surviving $Base
+# already fails the loop.
+foreach ($p in @($Base,
+                 (Join-Path $ToolDir 'venya-cli'),
+                 (Join-Path $ToolDir 'venya-mcp'),
+                 (Join-Path $BinDir 'venya.exe'),
+                 (Join-Path $BinDir 'venya-mcp.exe'))) {
+    if (Test-Path -LiteralPath $p) { Fail "Still present after removal: $p - inspect manually." }
 }
+# Fail loudly if a shim still resolves anywhere - mirrors the .sh contract.
 $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
 foreach ($s in 'venya','venya-mcp') {
     $c = Get-Command $s -ErrorAction SilentlyContinue
