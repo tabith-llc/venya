@@ -81,17 +81,41 @@ venya_check_root() {
 
 # --- 3. Determine install directory ---
 
+# Prompt gate (ticket skip-prompt-prints-before-check-389). Every confirmation
+# caller must run this BEFORE printing its question:
+#   return 0 -> VENYA_SKIP_PROMPT=yes: caller silently takes its documented
+#               default (NO question line is ever printed).
+#   return 1 -> interactive TTY: caller prints the question and reads, exactly
+#               as before (#389 changes the TTY path not at all).
+#   exit 1   -> non-TTY without the skip flag: fail loud with guidance instead
+#               of consuming EOF defaults silently (the piped-idiom accident
+#               class this ticket was born from).
+# $1 is the question text, used ONLY in the error message — never printed here.
+# This gate NEVER touches the #203/EXEC co-location hard stop below it: that
+# block is a design boundary, not a confirmation, and stays prompt-free and
+# un-skipable.
+venya_prompt_gate() {
+    if [ "${VENYA_SKIP_PROMPT:-}" = "yes" ]; then
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        error "Not a terminal and VENYA_SKIP_PROMPT is not set — refusing to answer '$1' from EOF."
+        error "For an unattended run set VENYA_SKIP_PROMPT=yes (documented idiom), or run this installer interactively."
+        exit 1
+    fi
+    return 1
+}
+
 venya_determine_install_dir() {
     local default_dir="${1:-/opt/venya}"
     INSTALL_DIR="${VENYA_INSTALL_DIR:-}"
     reply=""
 
     if [ -z "$INSTALL_DIR" ]; then
-        echo -n "Install to $default_dir? [Y/n] "
-        if [ "${VENYA_SKIP_PROMPT:-}" = "yes" ]; then
-            echo ""
+        if venya_prompt_gate "Install to $default_dir? [Y/n]"; then
             reply="y"
         else
+            echo -n "Install to $default_dir? [Y/n] "
             read -r reply || reply=""
         fi
         if [ -z "$reply" ] || [ "$reply" = "y" ] || [ "$reply" = "Y" ]; then
@@ -111,11 +135,10 @@ venya_check_existing() {
     reply=""
     if [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/pyproject.toml" ]; then
         warn "Existing installation found at $INSTALL_DIR"
-        echo -n "Reinstall? [y/N] "
-        if [ "${VENYA_SKIP_PROMPT:-}" = "yes" ]; then
-            echo ""
+        if venya_prompt_gate "Reinstall? [y/N]"; then
             reply="y"
         else
+            echo -n "Reinstall? [y/N] "
             read -r reply || reply=""
         fi
         if [ -z "$reply" ] || [ "$reply" = "n" ] || [ "$reply" = "N" ]; then

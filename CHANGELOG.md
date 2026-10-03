@@ -290,6 +290,13 @@ Notable changes to Venya will be documented in this file.
   minting guidance (`venya admin executor-enroll <id>`, single-use, ~30-min
   TTL) before any system write, mirroring the `VENYA_SERVER_URL` Require
   block; re-runs over an existing certificate proceed tokenless as before.
+ - **Installer: confirm questions no longer print before the skip check
+   (#389).** `venya_prompt_gate` now runs before `Install to ...? [Y/n]` and
+   `Reinstall? [y/N]` are emitted: with `VENYA_SKIP_PROMPT=yes` the documented
+   default is taken silently with zero question lines; a non-TTY run without
+   the flag exits loud with guidance instead of consuming EOF defaults; the
+   interactive TTY path is unchanged. The #203/EXEC co-location hard stop is
+   untouched and still refuses regardless of the skip flag.
 
 ## [0.1.0alpha16] - 2026-09-27
 
