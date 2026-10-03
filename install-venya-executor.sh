@@ -46,6 +46,9 @@ umask 077
 #                            always wins over an existing hosts entry)
 #   VENYA_VENYA_CA_FILE    - Path to pre-copied Venya CA cert (offline/air-gapped deployments)
 #   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
+#                                    (REQUIRED on a fresh install — no executor
+#                                    certificate yet; not needed to re-run over an
+#                                    existing certificate)
 #   VENYA_DOCKER_USERNAME  - Docker account for sbx agent-template pulls (prompted if TTY)
 #   VENYA_DOCKER_API_KEY   - Docker access token — handled stdin-only, never argv/disk
 #                            (required unless already authenticated or skipped)
@@ -112,6 +115,19 @@ if [ -z "${VENYA_SERVER_URL:-}" ]; then
     exit 1
 fi
 SERVER_URL="$VENYA_SERVER_URL"
+
+# --- Require VENYA_EXECUTOR_ENROLLMENT_TOKEN on a fresh install (ticket #28) ---
+# Mirrors the VENYA_SERVER_URL Require block above: fail loudly BEFORE any
+# system write (apt/venv/toml) instead of letting an empty token ride through
+# to the daemon, where it surfaced minutes later as a boot failure. A re-run
+# with an existing executor certificate legitimately needs no token (the
+# register section skips itself there), so cert incumbency gates the need.
+if [ ! -s /etc/venya/executor/executor.crt ] && [ -z "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
+    error "VENYA_EXECUTOR_ENROLLMENT_TOKEN is required for a fresh executor install."
+    error "Mint one from an admin workstation: venya admin executor-enroll $EXECUTOR_ID"
+    error "Tokens are single-use with a ~30-minute TTL — mint immediately before re-running the installer."
+    exit 1
+fi
 
 # --- Fail-closed config-injection gate (ticket #326, F-2) ---
 # These values interpolate raw into installer-written config files:
@@ -530,9 +546,13 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
         echo ""
     fi
 else
-    warn "mTLS registration SKIPPED — VENYA_EXECUTOR_ENROLLMENT_TOKEN is empty."
-    warn "The server rejects tokenless registration (executor_enrollment.require_token, enforced by default); the daemon will exit 1 on boot with an actionable error."
-    warn "Re-run the installer with VENYA_EXECUTOR_ENROLLMENT_TOKEN set (admin mints one: venya admin executor-enroll <executor-id>)."
+    if [ -s /etc/venya/executor/executor.crt ]; then
+        info "Existing executor certificate found — registration skipped (no token needed on re-run)."
+    else
+        warn "mTLS registration SKIPPED — VENYA_EXECUTOR_ENROLLMENT_TOKEN is empty."
+        warn "The server rejects tokenless registration (executor_enrollment.require_token, enforced by default); the daemon will exit 1 on boot with an actionable error."
+        warn "Re-run the installer with VENYA_EXECUTOR_ENROLLMENT_TOKEN set (admin mints one: venya admin executor-enroll <executor-id>)."
+    fi
 fi
 
 # --- #380 (option a): UNCONDITIONAL daemon ReadWritePath pin -----------
