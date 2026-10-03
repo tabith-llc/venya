@@ -244,6 +244,16 @@ if [ -n "$ADMIN_IDENTITY" ]; then
     venya_guard_injection "VENYA_ADMIN_IDENTITY" "$ADMIN_IDENTITY" '"' '\'
 fi
 
+# Ignored-knob notice (ticket core-install-silently-ignores-egress-allow-knob
+# #382): VENYA_EGRESS_ALLOW seeds the EXECUTOR installer's egress allowlist —
+# it is consumed only by the venya_write_egress_allowlist call in
+# install-venya-executor.sh. A core run that carries it (copy-pasted executor
+# recipe) drops the value silently; warn once, change nothing (fail-open UX,
+# no behavior delta — shape (a), lead rec).
+if [ -n "${VENYA_EGRESS_ALLOW:-}" ]; then
+    warn "VENYA_EGRESS_ALLOW applies to the executor installer only — ignoring on core."
+fi
+
 # --- Create venya service account (no password, nologin, locked) ---
 venya_create_user
 
