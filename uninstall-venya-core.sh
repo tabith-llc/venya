@@ -15,6 +15,7 @@ set -euo pipefail
 #   - venya-core systemd service + unit
 #   - Nginx site (sites-available/enabled + client-CA files) and reload
 #   - /opt/venya, /etc/venya, /var/lib/venya, /var/log/venya
+#   - /var/backups/venya (pre-upgrade pg_dump snapshots from installer re-runs)
 #   - /var/www/.well-known/venya-ca.crt
 #   - Venya CA trust-store entries (+ update-ca-certificates)
 #   - PostgreSQL database + role (venya)
@@ -84,6 +85,8 @@ update-ca-certificates > /dev/null 2>&1 || true
 
 info "Removing directories..."
 rm -rf /opt/venya /etc/venya /var/lib/venya /var/log/venya
+rm -rf /var/backups/venya
+info "Removed /var/backups/venya (pre-upgrade database backups)."
 rm -f /var/www/.well-known/venya-ca.crt
 
 info "Dropping PostgreSQL database and role..."
