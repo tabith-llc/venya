@@ -70,11 +70,20 @@ fi
 if command -v uv > /dev/null 2>&1; then
     uv tool uninstall venya-cli > /dev/null 2>&1 || warn "uv tool uninstall reported nothing to remove (venya-cli)."
     uv tool uninstall venya-mcp > /dev/null 2>&1 || true
+    UV_TOOLS_DIR="$(uv tool dir 2>/dev/null)" || UV_TOOLS_DIR=""
 else
     warn "uv not found — removing shims/venvs manually."
-    rm -rf "$HOME/.local/share/uv/tools/venya-cli" "$HOME/.local/bin/venya"
-    rm -rf "$HOME/.local/share/uv/tools/venya-mcp" "$HOME/.local/bin/venya-mcp"
+    UV_TOOLS_DIR=""
 fi
+
+# #390: uv's env + shim removal is receipt-driven (uv-receipt.toml). On a
+# de-registered or de-contented tool env `uv tool uninstall` reports "is not
+# installed" and removes NOTHING, leaving the ~/.local/bin shims resolving to
+# a broken launcher. Always clear the installer's writer sites ourselves; the
+# verify below still fails loud (exit 1) if anything resolves afterwards.
+: "${UV_TOOLS_DIR:=$HOME/.local/share/uv/tools}"
+rm -rf "${UV_TOOLS_DIR:?}/venya-cli" "${UV_TOOLS_DIR:?}/venya-mcp"
+rm -f "$HOME/.local/bin/venya" "$HOME/.local/bin/venya-mcp"
 
 if [ "$PURGE" = "yes" ]; then
     # Platform matrix must match the installer (install-venya-cli.sh Darwin/
