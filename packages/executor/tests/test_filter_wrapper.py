@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 try:
-    from venya_filter import compute_detection_hashes as _compute_detection_hashes  # type: ignore
+    import venya_filter  # type: ignore  # noqa: F401
 except ImportError:
     pytest.skip("venya_filter Rust extension not available", allow_module_level=True)
 
@@ -23,9 +23,8 @@ from executor.filter import build_filter_entries, filter_and_redact, filter_outp
 
 
 def _make_entries(secret_id: str, value: bytes) -> list[dict[str, Any]]:
-    """Helper to create filter entries using the Rust extension."""
-    hashes = _compute_detection_hashes(value)
-    return [{"secret_id": secret_id, "hashes": hashes, "secret_value": value}]
+    """Helper to create filter entries in the Rust extension wire shape."""
+    return [{"secret_id": secret_id, "secret_value": value}]
 
 
 # ---------------------------------------------------------------------------
@@ -36,24 +35,21 @@ def _make_entries(secret_id: str, value: bytes) -> list[dict[str, Any]]:
 class TestBuildFilterEntries:
     """Tests for build_filter_entries()."""
 
-    def test_build_entries_auto_computes_hashes(self):
-        """Entries without pre-computed hashes get hashes from Rust extension."""
+    def test_build_entries_send_no_hashes(self):
+        """Entries carry only secret_id + secret_value — no precomputed hashes."""
         secrets = [{"secret_id": "s1", "value": b"test-secret-value"}]
         entries = build_filter_entries(secrets)
 
         assert len(entries) == 1
-        assert entries[0]["secret_id"] == "s1"
-        assert "hashes" in entries[0]
-        assert len(entries[0]["hashes"]) == 3  # raw, b64, hex (no whitespace)
-        assert entries[0]["secret_value"] == b"test-secret-value"
+        assert entries[0] == {"secret_id": "s1", "secret_value": b"test-secret-value"}
+        assert "hashes" not in entries[0]
 
-    def test_build_entries_uses_pre_computed_hashes(self):
-        """Entries with pre-computed hashes use them directly."""
-        hashes = ["abc123", "def456", "ghi789"]
-        secrets = [{"secret_id": "s1", "value": b"data", "hashes": hashes}]
+    def test_build_entries_ignore_legacy_hashes_key(self):
+        """A legacy 'hashes' key on the input dict is dropped, not forwarded."""
+        secrets = [{"secret_id": "s1", "value": b"data", "hashes": ["abc123", "def456"]}]
         entries = build_filter_entries(secrets)
 
-        assert entries[0]["hashes"] == hashes
+        assert entries[0] == {"secret_id": "s1", "secret_value": b"data"}
 
     def test_build_entries_multiple_secrets(self):
         """Handles multiple secrets correctly."""
@@ -74,12 +70,29 @@ class TestBuildFilterEntries:
         entries = build_filter_entries([])
         assert entries == []
 
-    def test_build_entries_with_whitespace_value(self):
-        """Values with whitespace get 4 hashes (trimmed variant included)."""
-        secrets = [{"secret_id": "s1", "value": b"  padded  "}]
+    def test_build_entries_accepts_64_byte_id(self):
+        """A secret_id of exactly 64 bytes is accepted (slot boundary)."""
+        secrets = [{"secret_id": "x" * 64, "value": b"v"}]
         entries = build_filter_entries(secrets)
+        assert entries[0]["secret_id"] == "x" * 64
 
-        assert len(entries[0]["hashes"]) == 4
+    def test_build_entries_rejects_overlong_id(self):
+        """A secret_id longer than 64 bytes raises a named ValueError."""
+        secrets = [{"secret_id": "x" * 65, "value": b"v"}]
+        with pytest.raises(ValueError, match="secret_id must be at most 64 bytes"):
+            build_filter_entries(secrets)
+
+    def test_build_entries_rejects_non_str_id(self):
+        """An int secret_id raises a named TypeError (302ab25-class diagnosis)."""
+        secrets = [{"secret_id": 1234, "value": b"v"}]
+        with pytest.raises(TypeError, match="secret_id must be str"):
+            build_filter_entries(secrets)
+
+    def test_build_entries_rejects_non_bytes_value(self):
+        """A str value raises a named TypeError naming the entry."""
+        secrets = [{"secret_id": "s1", "value": "not-bytes"}]
+        with pytest.raises(TypeError, match="value must be bytes"):
+            build_filter_entries(secrets)
 
     def test_build_entries_preserves_order(self):
         """Entry order matches input order."""
@@ -235,11 +248,10 @@ class TestFilterAndRedact:
         assert "shared" in stdout_ids
         assert "shared" in stderr_ids
 
-    def test_pre_computed_hashes_used(self):
-        """Uses pre-computed hashes from secret dicts."""
+    def test_legacy_hashes_key_tolerated_end_to_end(self):
+        """Secrets carrying a legacy 'hashes' key still filter from the raw value."""
         secret = b"precomputed-test"
-        hashes = _compute_detection_hashes(secret)
-        secrets = [{"secret_id": "s1", "value": secret, "hashes": hashes}]
+        secrets = [{"secret_id": "s1", "value": secret, "hashes": ["stale"]}]
 
         masked_stdout, _, stdout_ids, _ = filter_and_redact(
             b"output " + secret,
@@ -249,3 +261,28 @@ class TestFilterAndRedact:
 
         assert secret not in masked_stdout
         assert "s1" in stdout_ids
+
+    def test_long_secret_id_returned_in_full(self):
+        """Masked ids are NOT truncated to 8 chars (#20 finding 2)."""
+        secret = b"long-id-secret-value"
+        long_id = "unrelated-secret-identifier"
+        secrets = [{"secret_id": long_id, "value": secret}]
+
+        masked_stdout, _, stdout_ids, _ = filter_and_redact(
+            b"output " + secret,
+            b"clean stderr",
+            secrets,
+        )
+
+        assert secret not in masked_stdout
+        assert stdout_ids == [long_id]
+        assert f"[REDACTED:{long_id}]".encode() in masked_stdout
+        # Negative half: a distinct long id must not alias with another.
+        other_id = "unrelated-other-identifier"
+        masked_stdout2, _, stdout_ids2, _ = filter_and_redact(
+            b"value " + secret + b" and other ",
+            b"",
+            secrets + [{"secret_id": other_id, "value": b"other-value"}],
+        )
+        assert other_id not in stdout_ids2  # other-value not in output
+        assert stdout_ids2 == [long_id]

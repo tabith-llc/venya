@@ -10,11 +10,9 @@ use base64::Engine;
 
 use crate::hashes::{sha256_digest, fnv1a_hash};
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SecretEntry {
     pub secret_id: String,
-    pub hashes: Vec<String>,
     pub secret_value: Vec<u8>,
 }
 
@@ -123,7 +121,8 @@ impl FilterState {
     fn add_entry(&mut self, entry: &SecretEntry) {
         let sid_bytes = entry.secret_id.as_bytes();
         let mut sid = [0u8; 64];
-        sid[..sid_bytes.len()].copy_from_slice(sid_bytes);
+        let n = sid_bytes.len().min(64);
+        sid[..n].copy_from_slice(&sid_bytes[..n]);
 
         self.add_variant(&entry.secret_value, &sid);
 
@@ -175,8 +174,7 @@ impl FilterState {
 }
 
 pub fn redact(result: &mut Vec<u8>, sid: &[u8; 64], max: usize) {
-    let truncated = &sid[..8];
-    let trimmed = truncated.split(|&b| b == 0).next().unwrap_or(truncated);
+    let trimmed = sid.split(|&b| b == 0).next().unwrap_or(sid);
     let marker = format!("[REDACTED:{}]", String::from_utf8_lossy(trimmed));
     let marker_len = marker.len();
 
@@ -324,7 +322,6 @@ mod tests {
     fn test_filter_state_add_entry() {
         let entries = vec![SecretEntry {
             secret_id: "test".to_string(),
-            hashes: vec![],
             secret_value: b"hello".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -351,13 +348,13 @@ mod tests {
     }
 
     #[test]
-    fn test_redact_truncates_sid_to_8_chars() {
+    fn test_redact_keeps_full_sid() {
         let mut result = Vec::new();
         let mut sid = [0u8; 64];
         sid[..24].copy_from_slice(b"this-is-a-long-secret-id");
         redact(&mut result, &sid, 0);
         let output = String::from_utf8_lossy(&result);
-        assert_eq!(output, "[REDACTED:this-is-]");
+        assert_eq!(output, "[REDACTED:this-is-a-long-secret-id]");
     }
 
     #[test]
@@ -432,7 +429,6 @@ mod tests {
     fn test_filter_output_stub_with_redaction() {
         let entries = vec![SecretEntry {
             secret_id: "test-secret".to_string(),
-            hashes: vec![],
             secret_value: b"secret-value".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -454,7 +450,6 @@ mod tests {
     fn test_bug1_prefix_loss_processing_secret() {
         let entries = vec![SecretEntry {
             secret_id: "beta".to_string(),
-            hashes: vec![],
             secret_value: b"secret-beta".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -475,12 +470,10 @@ mod tests {
         let entries = vec![
             SecretEntry {
                 secret_id: "a".to_string(),
-                hashes: vec![],
                 secret_value: b"hello".to_vec(),
             },
             SecretEntry {
                 secret_id: "b".to_string(),
-                hashes: vec![],
                 secret_value: b"world".to_vec(),
             },
         ];
@@ -501,7 +494,6 @@ mod tests {
     fn test_bug1_prefix_loss_secret_at_zero() {
         let entries = vec![SecretEntry {
             secret_id: "x".to_string(),
-            hashes: vec![],
             secret_value: b"start".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -514,7 +506,6 @@ mod tests {
     fn test_bug1_prefix_loss_secret_at_end() {
         let entries = vec![SecretEntry {
             secret_id: "y".to_string(),
-            hashes: vec![],
             secret_value: b"end-here".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -527,7 +518,6 @@ mod tests {
     fn test_full_length_match_secret_longer_than_window() {
         let entries = vec![SecretEntry {
             secret_id: "long".to_string(),
-            hashes: vec![],
             secret_value: b"this-is-a-very-long-secret-value".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -544,7 +534,6 @@ mod tests {
     fn test_full_length_match_secret_at_start_longer_than_window() {
         let entries = vec![SecretEntry {
             secret_id: "s".to_string(),
-            hashes: vec![],
             secret_value: b"this-is-a-very-long-secret-value".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -557,7 +546,6 @@ mod tests {
     fn test_full_length_match_secret_at_end_longer_than_window() {
         let entries = vec![SecretEntry {
             secret_id: "e".to_string(),
-            hashes: vec![],
             secret_value: b"this-is-a-very-long-secret-value".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -570,7 +558,6 @@ mod tests {
     fn test_repeated_secrets_all_redacted() {
         let entries = vec![SecretEntry {
             secret_id: "dup".to_string(),
-            hashes: vec![],
             secret_value: b"dup".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -589,12 +576,10 @@ mod tests {
         let entries = vec![
             SecretEntry {
                 secret_id: "aaa".to_string(),
-                hashes: vec![],
                 secret_value: b"secret-alpha".to_vec(),
             },
             SecretEntry {
                 secret_id: "bbb".to_string(),
-                hashes: vec![],
                 secret_value: b"secret-beta".to_vec(),
             },
         ];
@@ -611,7 +596,6 @@ mod tests {
     fn test_full_length_match_prefix_preserved_exact_boundary() {
         let entries = vec![SecretEntry {
             secret_id: "b".to_string(),
-            hashes: vec![],
             secret_value: b"this-is-a-very-long-secret-value".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -627,7 +611,6 @@ mod tests {
     fn test_full_length_match_prefix_preserved_with_text_before() {
         let entries = vec![SecretEntry {
             secret_id: "c".to_string(),
-            hashes: vec![],
             secret_value: b"this-is-a-very-long-secret-value".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -643,7 +626,6 @@ mod tests {
     fn test_full_length_match_no_prefix_needed() {
         let entries = vec![SecretEntry {
             secret_id: "d".to_string(),
-            hashes: vec![],
             secret_value: b"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -660,12 +642,10 @@ mod tests {
         let entries = vec![
             SecretEntry {
                 secret_id: "short".to_string(),
-                hashes: vec![],
                 secret_value: b"SHORT".to_vec(),
             },
             SecretEntry {
                 secret_id: "long".to_string(),
-                hashes: vec![],
                 secret_value: b"THIS-IS-A-LONG-SECRET-VALUE-THAT-EXCEEDS-TEN".to_vec(),
             },
         ];
@@ -689,9 +669,9 @@ mod tests {
     #[test]
     fn test_bug3_same_prefix_three_secrets() {
         let entries = vec![
-            SecretEntry { secret_id: "alpha".to_string(), hashes: vec![], secret_value: b"x-secret-alpha-x-1234567890".to_vec() },
-            SecretEntry { secret_id: "beta".to_string(), hashes: vec![], secret_value: b"x-secret-beta-x-abcdefghij".to_vec() },
-            SecretEntry { secret_id: "gamma".to_string(), hashes: vec![], secret_value: b"x-secret-gamma-x-0987654321".to_vec() },
+            SecretEntry { secret_id: "alpha".to_string(), secret_value: b"x-secret-alpha-x-1234567890".to_vec() },
+            SecretEntry { secret_id: "beta".to_string(), secret_value: b"x-secret-beta-x-abcdefghij".to_vec() },
+            SecretEntry { secret_id: "gamma".to_string(), secret_value: b"x-secret-gamma-x-0987654321".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let input = b"x-secret-alpha-x-1234567890 x-secret-beta-x-abcdefghij x-secret-gamma-x-0987654321";
@@ -709,9 +689,9 @@ mod tests {
     #[test]
     fn test_bug3_same_prefix_shared_prefix_numbers() {
         let entries = vec![
-            SecretEntry { secret_id: "s1".to_string(), hashes: vec![], secret_value: b"SHARED_PREFIX_001".to_vec() },
-            SecretEntry { secret_id: "s2".to_string(), hashes: vec![], secret_value: b"SHARED_PREFIX_002".to_vec() },
-            SecretEntry { secret_id: "s3".to_string(), hashes: vec![], secret_value: b"SHARED_PREFIX_003".to_vec() },
+            SecretEntry { secret_id: "s1".to_string(), secret_value: b"SHARED_PREFIX_001".to_vec() },
+            SecretEntry { secret_id: "s2".to_string(), secret_value: b"SHARED_PREFIX_002".to_vec() },
+            SecretEntry { secret_id: "s3".to_string(), secret_value: b"SHARED_PREFIX_003".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let input = b"SHARED_PREFIX_001 SHARED_PREFIX_002 SHARED_PREFIX_003";
@@ -726,8 +706,8 @@ mod tests {
     #[test]
     fn test_bug3_identical_values_different_ids() {
         let entries = vec![
-            SecretEntry { secret_id: "id1".to_string(), hashes: vec![], secret_value: b"same-value".to_vec() },
-            SecretEntry { secret_id: "id2".to_string(), hashes: vec![], secret_value: b"same-value".to_vec() },
+            SecretEntry { secret_id: "id1".to_string(), secret_value: b"same-value".to_vec() },
+            SecretEntry { secret_id: "id2".to_string(), secret_value: b"same-value".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let input = b"same-value and same-value";
@@ -740,9 +720,9 @@ mod tests {
     #[test]
     fn test_bug3_same_length_same_prefix_all_masked() {
         let entries = vec![
-            SecretEntry { secret_id: "aaa".to_string(), hashes: vec![], secret_value: b"SHARED_PREFIX_AAA".to_vec() },
-            SecretEntry { secret_id: "bbb".to_string(), hashes: vec![], secret_value: b"SHARED_PREFIX_BBB".to_vec() },
-            SecretEntry { secret_id: "ccc".to_string(), hashes: vec![], secret_value: b"SHARED_PREFIX_CCC".to_vec() },
+            SecretEntry { secret_id: "aaa".to_string(), secret_value: b"SHARED_PREFIX_AAA".to_vec() },
+            SecretEntry { secret_id: "bbb".to_string(), secret_value: b"SHARED_PREFIX_BBB".to_vec() },
+            SecretEntry { secret_id: "ccc".to_string(), secret_value: b"SHARED_PREFIX_CCC".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let sha_a = sha256_digest(b"SHARED_PREFIX_AAA");
@@ -767,8 +747,8 @@ mod tests {
         let data_a = b"AAAAAAAABBBBCCCC";
         let data_b = b"1111111122223333";
         let entries = vec![
-            SecretEntry { secret_id: "collision_a".to_string(), hashes: vec![], secret_value: data_a.to_vec() },
-            SecretEntry { secret_id: "collision_b".to_string(), hashes: vec![], secret_value: data_b.to_vec() },
+            SecretEntry { secret_id: "collision_a".to_string(), secret_value: data_a.to_vec() },
+            SecretEntry { secret_id: "collision_b".to_string(), secret_value: data_b.to_vec() },
         ];
         let state = FilterState::new(&entries);
         assert_ne!(data_a, data_b);
@@ -783,8 +763,10 @@ mod tests {
         let output = String::from_utf8_lossy(&result);
         assert!(!output.contains("AAAAAAAABBBBCCCC"), "collision_a must be redacted");
         assert!(!output.contains("1111111122223333"), "collision_b must be redacted");
-        let redact_count = output.matches("[REDACTED:collisio]").count();
-        assert_eq!(redact_count, 2, "both secrets should be redacted");
+        let redact_count_a = output.matches("[REDACTED:collision_a]").count();
+        let redact_count_b = output.matches("[REDACTED:collision_b]").count();
+        assert_eq!(redact_count_a, 1, "collision_a should be redacted");
+        assert_eq!(redact_count_b, 1, "collision_b should be redacted");
     }
 
     #[test]
@@ -794,7 +776,7 @@ mod tests {
         for i in 0..20 {
             let id = format!("sec{:02}", i);
             let value = format!("common-prefix-unique-identifier-{:04}", i);
-            entries.push(SecretEntry { secret_id: id.clone(), hashes: vec![], secret_value: value.as_bytes().to_vec() });
+            entries.push(SecretEntry { secret_id: id.clone(), secret_value: value.as_bytes().to_vec() });
             input_parts.push(value);
         }
         let state = FilterState::new(&entries);
@@ -812,11 +794,11 @@ mod tests {
     #[test]
     fn test_bug3_prefix_variants_all_detected() {
         let entries = vec![
-            SecretEntry { secret_id: "v1".to_string(), hashes: vec![], secret_value: b"prefix-ApI-key-0001".to_vec() },
-            SecretEntry { secret_id: "v2".to_string(), hashes: vec![], secret_value: b"prefix-ApI-key-0002".to_vec() },
-            SecretEntry { secret_id: "v3".to_string(), hashes: vec![], secret_value: b"prefix-ApI-key-0003".to_vec() },
-            SecretEntry { secret_id: "v4".to_string(), hashes: vec![], secret_value: b"prefix-ApI-key-0004".to_vec() },
-            SecretEntry { secret_id: "v5".to_string(), hashes: vec![], secret_value: b"prefix-ApI-key-0005".to_vec() },
+            SecretEntry { secret_id: "v1".to_string(), secret_value: b"prefix-ApI-key-0001".to_vec() },
+            SecretEntry { secret_id: "v2".to_string(), secret_value: b"prefix-ApI-key-0002".to_vec() },
+            SecretEntry { secret_id: "v3".to_string(), secret_value: b"prefix-ApI-key-0003".to_vec() },
+            SecretEntry { secret_id: "v4".to_string(), secret_value: b"prefix-ApI-key-0004".to_vec() },
+            SecretEntry { secret_id: "v5".to_string(), secret_value: b"prefix-ApI-key-0005".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let input = b"prefix-ApI-key-0001 text prefix-ApI-key-0002 text prefix-ApI-key-0003 text prefix-ApI-key-0004 text prefix-ApI-key-0005 text";
@@ -833,8 +815,8 @@ mod tests {
     #[test]
     fn test_bug3_consecutive_same_prefix() {
         let entries = vec![
-            SecretEntry { secret_id: "x1".to_string(), hashes: vec![], secret_value: b"common-AAAA".to_vec() },
-            SecretEntry { secret_id: "x2".to_string(), hashes: vec![], secret_value: b"common-BBBB".to_vec() },
+            SecretEntry { secret_id: "x1".to_string(), secret_value: b"common-AAAA".to_vec() },
+            SecretEntry { secret_id: "x2".to_string(), secret_value: b"common-BBBB".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let input = b"common-AAAAcommon-BBBB";
@@ -848,8 +830,8 @@ mod tests {
     #[test]
     fn test_bug3_nested_prefix_substring() {
         let entries = vec![
-            SecretEntry { secret_id: "short".to_string(), hashes: vec![], secret_value: b"token-ABC".to_vec() },
-            SecretEntry { secret_id: "long".to_string(), hashes: vec![], secret_value: b"token-ABCDEF".to_vec() },
+            SecretEntry { secret_id: "short".to_string(), secret_value: b"token-ABC".to_vec() },
+            SecretEntry { secret_id: "long".to_string(), secret_value: b"token-ABCDEF".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let input = b"token-ABCDEF and token-ABC";
@@ -892,9 +874,9 @@ mod tests {
     #[test]
     fn test_bug3_hash_map_different_sha256_for_different_values() {
         let entries = vec![
-            SecretEntry { secret_id: "h1".to_string(), hashes: vec![], secret_value: b"prefix-unique-A".to_vec() },
-            SecretEntry { secret_id: "h2".to_string(), hashes: vec![], secret_value: b"prefix-unique-B".to_vec() },
-            SecretEntry { secret_id: "h3".to_string(), hashes: vec![], secret_value: b"prefix-unique-C".to_vec() },
+            SecretEntry { secret_id: "h1".to_string(), secret_value: b"prefix-unique-A".to_vec() },
+            SecretEntry { secret_id: "h2".to_string(), secret_value: b"prefix-unique-B".to_vec() },
+            SecretEntry { secret_id: "h3".to_string(), secret_value: b"prefix-unique-C".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let sha_a = sha256_digest(b"prefix-unique-A");
@@ -911,9 +893,9 @@ mod tests {
     #[test]
     fn test_bug3_mixed_prefix_and_non_prefix_secrets() {
         let entries = vec![
-            SecretEntry { secret_id: "p1".to_string(), hashes: vec![], secret_value: b"shared-prefix-AAAA".to_vec() },
-            SecretEntry { secret_id: "p2".to_string(), hashes: vec![], secret_value: b"shared-prefix-BBBB".to_vec() },
-            SecretEntry { secret_id: "unrelated".to_string(), hashes: vec![], secret_value: b"completely-different-secret".to_vec() },
+            SecretEntry { secret_id: "p1".to_string(), secret_value: b"shared-prefix-AAAA".to_vec() },
+            SecretEntry { secret_id: "p2".to_string(), secret_value: b"shared-prefix-BBBB".to_vec() },
+            SecretEntry { secret_id: "unrelated".to_string(), secret_value: b"completely-different-secret".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let input = b"shared-prefix-AAAA and shared-prefix-BBBB and completely-different-secret";
@@ -922,15 +904,15 @@ mod tests {
         assert!(!output.contains("shared-prefix-AAAA"));
         assert!(!output.contains("shared-prefix-BBBB"));
         assert!(!output.contains("completely-different-secret"));
-        let expected = vec!["p1".to_string(), "p2".to_string(), "unrelate".to_string()];
+        let expected = vec!["p1".to_string(), "p2".to_string(), "unrelated".to_string()];
         assert_eq!(sorted_ids(&ids), expected);
     }
 
     #[test]
     fn test_bug3_same_prefix_with_base64_variants() {
         let entries = vec![
-            SecretEntry { secret_id: "b64a".to_string(), hashes: vec![], secret_value: b"api-key-0001".to_vec() },
-            SecretEntry { secret_id: "b64b".to_string(), hashes: vec![], secret_value: b"api-key-0002".to_vec() },
+            SecretEntry { secret_id: "b64a".to_string(), secret_value: b"api-key-0001".to_vec() },
+            SecretEntry { secret_id: "b64b".to_string(), secret_value: b"api-key-0002".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let b64_a = base64::engine::general_purpose::STANDARD.encode(b"api-key-0001");
@@ -999,9 +981,9 @@ mod tests {
     #[test]
     fn test_filter_output_multiple_different_secrets() {
         let entries = vec![
-            SecretEntry { secret_id: "a".to_string(), hashes: vec![], secret_value: b"SECRET_A".to_vec() },
-            SecretEntry { secret_id: "b".to_string(), hashes: vec![], secret_value: b"SECRET_B".to_vec() },
-            SecretEntry { secret_id: "c".to_string(), hashes: vec![], secret_value: b"SECRET_C".to_vec() },
+            SecretEntry { secret_id: "a".to_string(), secret_value: b"SECRET_A".to_vec() },
+            SecretEntry { secret_id: "b".to_string(), secret_value: b"SECRET_B".to_vec() },
+            SecretEntry { secret_id: "c".to_string(), secret_value: b"SECRET_C".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let input = b"before SECRET_A middle SECRET_B after SECRET_C end";
@@ -1016,8 +998,8 @@ mod tests {
     #[test]
     fn test_filter_output_secret_at_start_and_end() {
         let entries = vec![
-            SecretEntry { secret_id: "first".to_string(), hashes: vec![], secret_value: b"START".to_vec() },
-            SecretEntry { secret_id: "last".to_string(), hashes: vec![], secret_value: b"END".to_vec() },
+            SecretEntry { secret_id: "first".to_string(), secret_value: b"START".to_vec() },
+            SecretEntry { secret_id: "last".to_string(), secret_value: b"END".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let input = b"START middle END";
@@ -1029,8 +1011,8 @@ mod tests {
     #[test]
     fn test_filter_output_overlapping_secrets_longer_first() {
         let entries = vec![
-            SecretEntry { secret_id: "long".to_string(), hashes: vec![], secret_value: b"ABCDEFGHIJ".to_vec() },
-            SecretEntry { secret_id: "short".to_string(), hashes: vec![], secret_value: b"CDEF".to_vec() },
+            SecretEntry { secret_id: "long".to_string(), secret_value: b"ABCDEFGHIJ".to_vec() },
+            SecretEntry { secret_id: "short".to_string(), secret_value: b"CDEF".to_vec() },
         ];
         let state = FilterState::new(&entries);
         let input = b"ABCDEFGHIJ";
@@ -1045,7 +1027,6 @@ mod tests {
     fn test_filter_output_binary_data() {
         let entries = vec![SecretEntry {
             secret_id: "bin".to_string(),
-            hashes: vec![],
             secret_value: b"\x80\x81\x82\x83".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -1060,7 +1041,6 @@ mod tests {
     fn test_filter_output_whitespace_in_secret() {
         let entries = vec![SecretEntry {
             secret_id: "ws".to_string(),
-            hashes: vec![],
             secret_value: b"hello world".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -1076,7 +1056,6 @@ mod tests {
     fn test_filter_output_repeated_same_secret() {
         let entries = vec![SecretEntry {
             secret_id: "dup".to_string(),
-            hashes: vec![],
             secret_value: b"AAAAAA".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -1093,7 +1072,6 @@ mod tests {
     fn test_filter_output_no_match() {
         let entries = vec![SecretEntry {
             secret_id: "x".to_string(),
-            hashes: vec![],
             secret_value: b"notpresent".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -1107,7 +1085,6 @@ mod tests {
     fn test_filter_output_empty_secret_value() {
         let entries = vec![SecretEntry {
             secret_id: "empty".to_string(),
-            hashes: vec![],
             secret_value: b"".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -1122,7 +1099,6 @@ mod tests {
         let secret = b"this-is-a-very-long-secret-that-exceeds-twenty-bytes";
         let entries = vec![SecretEntry {
             secret_id: "long".to_string(),
-            hashes: vec![],
             secret_value: secret.to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -1169,7 +1145,6 @@ mod tests {
     fn test_filter_output_truncated_output() {
         let entries = vec![SecretEntry {
             secret_id: "x".to_string(),
-            hashes: vec![],
             secret_value: b"x".to_vec(),
         }];
         let state = FilterState::new(&entries);
@@ -1188,7 +1163,6 @@ mod tests {
         let entries: Vec<SecretEntry> = (0..n)
             .map(|i| SecretEntry {
                 secret_id: format!("s-{:05}", i),
-                hashes: vec![],
                 secret_value: format!("multi-secret-value-{:04}-xyz", i).into_bytes(),
             })
             .collect();
@@ -1291,7 +1265,6 @@ mod tests {
         let entries: Vec<SecretEntry> = secrets.iter().map(|(val, id)| {
             SecretEntry {
                 secret_id: id.to_string(),
-                hashes: vec![],
                 secret_value: val.clone(),
             }
         }).collect();

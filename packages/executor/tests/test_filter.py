@@ -96,8 +96,7 @@ class TestFilterOutput:
     """Tests for filter_output with the C extension."""
 
     def _make_entries(self, secret_id: str, value: bytes) -> list[dict]:
-        hashes = _compute_detection_hashes(value)
-        return [{"secret_id": secret_id, "hashes": hashes, "secret_value": value}]
+        return [{"secret_id": secret_id, "secret_value": value}]
 
     def test_exact_secret_in_output(self):
         """Secret value found and replaced with [REDACTED:id]."""
@@ -106,8 +105,8 @@ class TestFilterOutput:
         output = b"Connecting with password: leaked-password-ABC123 done"
         masked, masked_ids = _filter_output(output, entries)
         assert secret not in masked
-        assert b"[REDACTED:db-passw" in masked
-        assert "db-passw" in masked_ids
+        assert b"[REDACTED:db-password]" in masked
+        assert "db-password" in masked_ids
 
     def test_secret_at_start(self):
         """Secret at the beginning of output."""
@@ -240,8 +239,7 @@ class TestFalsePositives:
     """
 
     def _make_entries(self, secret_id: str, value: bytes) -> list[dict]:
-        hashes = _compute_detection_hashes(value)
-        return [{"secret_id": secret_id, "hashes": hashes, "secret_value": value}]
+        return [{"secret_id": secret_id, "secret_value": value}]
 
     def test_common_words_not_matched(self):
         """Common English words should not trigger false positives."""
@@ -399,8 +397,7 @@ class TestPerformance:
     """
 
     def _make_entries(self, secret_id: str, value: bytes) -> list[dict]:
-        hashes = _compute_detection_hashes(value)
-        return [{"secret_id": secret_id, "hashes": hashes, "secret_value": value}]
+        return [{"secret_id": secret_id, "secret_value": value}]
 
     def test_256kb_with_secret(self):
         """256KB output with embedded secret — latency target < 10ms/MB."""
