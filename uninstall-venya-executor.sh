@@ -83,6 +83,32 @@ rm -rf /opt/venya /etc/venya /var/lib/venya /var/log/venya
 info "Removing venya service account (Rust, uv, sbx state)..."
 userdel -r venya 2> /dev/null || true
 
+# #396: never claim success before the removals are proven — same contract as
+# the cli-uninstaller-incomplete-rc0 verify block. Every survivor prints its
+# own [ERROR] and fails the run; the warns above stay as guidance.
+VERIFY_FAILED=0
+for path_item in /etc/systemd/system/venya-executor.service \
+                 /etc/systemd/system/tmp-venya_secrets.mount \
+                 /etc/systemd/system/venya-executor.seccomp \
+                 /etc/systemd/system/venya-sandboxd.service \
+                 /etc/systemd/system/venya-executor.service.d \
+                 /opt/venya /etc/venya /var/lib/venya /var/log/venya \
+                 /usr/local/share/ca-certificates/venya-local-ca.crt \
+                 /usr/local/share/ca-certificates/venya-root-ca.crt; do
+    if [ -e "$path_item" ]; then
+        error "$(basename "$path_item") still present at $path_item — inspect manually."
+        VERIFY_FAILED=1
+    fi
+done
+if id -u venya > /dev/null 2>&1; then
+    error "venya user still present — inspect manually."
+    VERIFY_FAILED=1
+fi
+if [ "$VERIFY_FAILED" -ne 0 ]; then
+    error "Venya Executor uninstall incomplete — see [ERROR] lines above."
+    exit 1
+fi
+
 info "Venya Executor uninstalled."
 echo "Kept: sbx/docker packages, /etc/hosts (provisioning-owned)."
 echo "Remember: revoke this executor's cert on the core if it stays online:"

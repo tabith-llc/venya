@@ -90,7 +90,9 @@ info "Removed /var/backups/venya (pre-upgrade database backups)."
 rm -f /var/www/.well-known/venya-ca.crt
 
 info "Dropping PostgreSQL database and role..."
+PG_WAS_ACTIVE=0
 if systemctl is-active --quiet postgresql; then
+    PG_WAS_ACTIVE=1
     sudo -u postgres psql -c "DROP DATABASE IF EXISTS venya;" > /dev/null 2>&1 || warn "DROP DATABASE failed — check manually."
     sudo -u postgres psql -c "DROP ROLE IF EXISTS venya;" > /dev/null 2>&1 || warn "DROP ROLE failed (open connections?) — check manually."
     sudo -u postgres psql -c "DROP ROLE IF EXISTS venya_audit;" > /dev/null 2>&1 || warn "DROP ROLE venya_audit failed (open connections?) — check manually."
@@ -100,13 +102,55 @@ if systemctl is-active --quiet postgresql; then
         sudo -u postgres sed -i "/^venya_map venya venya_audit$/d" "$d/pg_ident.conf" 2>/dev/null || warn "pg_ident.conf cleanup failed in $d — check manually."
         sudo -u postgres sed -i "/venya_audit.*peer map=venya_map/d" "$d/pg_hba.conf" 2>/dev/null || warn "pg_hba.conf cleanup failed in $d — check manually."
     done
-    sudo -u postgres psql -c "SELECT pg_reload_conf();" > /dev/null 2>&1
+    # #396: reload is advisory — warn, never silently abort the rest of the run.
+    sudo -u postgres psql -c "SELECT pg_reload_conf();" > /dev/null 2>&1 || warn "pg_reload_conf failed — marker lines apply on the next PostgreSQL restart."
 else
     warn "PostgreSQL not running — skipped DB/role drop."
 fi
 
 info "Removing venya service account..."
 userdel -r venya 2> /dev/null || true
+
+# #396: never claim success before the removals are proven — same contract as
+# the cli-uninstaller-incomplete-rc0 verify block. Every survivor prints its
+# own [ERROR] and fails the run; the warns above stay as guidance.
+VERIFY_FAILED=0
+for path_item in /etc/systemd/system/venya-core.service \
+                 /opt/venya /etc/venya /var/lib/venya /var/log/venya /var/backups/venya \
+                 /var/www/.well-known/venya-ca.crt \
+                 /usr/local/share/ca-certificates/venya-root-ca.crt \
+                 /usr/local/share/ca-certificates/venya-local-ca.crt; do
+    if [ -e "$path_item" ]; then
+        error "$(basename "$path_item") still present at $path_item — inspect manually."
+        VERIFY_FAILED=1
+    fi
+done
+if id -u venya > /dev/null 2>&1; then
+    error "venya user still present — inspect manually."
+    VERIFY_FAILED=1
+fi
+if [ "$PG_WAS_ACTIVE" = "1" ]; then
+    DB_PRESENT="$(sudo -u postgres psql -tAc "SELECT count(*) FROM pg_database WHERE datname='venya';" 2> /dev/null)" || DB_PRESENT="probe-failed"
+    if [ "$DB_PRESENT" = "probe-failed" ]; then
+        error "cannot verify 'venya' database removal — inspect manually."
+        VERIFY_FAILED=1
+    elif [ "$DB_PRESENT" != "0" ]; then
+        error "'venya' database still present — inspect manually."
+        VERIFY_FAILED=1
+    fi
+    ROLE_PRESENT="$(sudo -u postgres psql -tAc "SELECT count(*) FROM pg_roles WHERE rolname IN ('venya','venya_audit');" 2> /dev/null)" || ROLE_PRESENT="probe-failed"
+    if [ "$ROLE_PRESENT" = "probe-failed" ]; then
+        error "cannot verify 'venya'/'venya_audit' role removal — inspect manually."
+        VERIFY_FAILED=1
+    elif [ "$ROLE_PRESENT" != "0" ]; then
+        error "'venya' or 'venya_audit' role still present — inspect manually."
+        VERIFY_FAILED=1
+    fi
+fi
+if [ "$VERIFY_FAILED" -ne 0 ]; then
+    error "Venya Core uninstall incomplete — see [ERROR] lines above."
+    exit 1
+fi
 
 info "Venya Core uninstalled."
 echo "Kept (shared infrastructure): nginx + postgresql packages."
