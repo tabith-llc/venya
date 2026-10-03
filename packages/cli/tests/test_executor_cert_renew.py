@@ -551,6 +551,20 @@ class TestRenewSecretFileModes:
         # temp's 0600 wins over the target's old 0644 — os.replace semantics
         assert key_path.stat().st_mode & 0o777 == 0o600
 
+    def test_renew_certs_published_0644_key_stays_0600(self, tmp_path):
+        """#388: the public-material posture pinned at register (#376) must
+        hold at the renew writer too — crt/ca published 0644 through
+        pre-publish fchmod, key still 0600 (paired halves)."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        old = os.umask(0o022)
+        try:
+            assert self._renew(cert_path, key_path) == 0
+        finally:
+            os.umask(old)
+        assert cert_path.stat().st_mode & 0o777 == 0o644
+        assert (tmp_path / "ca.crt").stat().st_mode & 0o777 == 0o644
+        assert key_path.stat().st_mode & 0o777 == 0o600
+
     def test_planted_legacy_key_tmp_collision_fails_safe(self, tmp_path):
         """Old mechanism used the deterministic name <key>.key.tmp — the new
         random-named temp must neither write nor follow a planted file there."""
