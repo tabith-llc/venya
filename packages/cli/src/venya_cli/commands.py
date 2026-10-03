@@ -2642,11 +2642,13 @@ def executor_cert_renew(args: Any) -> int:
                 print(f"WARNING: cannot hand {output_dir} to {EXECUTOR_SERVICE_USER}: {e}", file=sys.stderr)
                 service_ids = None
 
+        # #388: crt/ca are public material — pinned 0644 at this writer too,
+        # matching the #376 register posture (keys stay 0600).
         with tempfile.NamedTemporaryFile(dir=output_dir, prefix=".venya-cert-", suffix=".pem", delete=False) as fd:
             cert_tmp_name = fd.name
             fd.write(cert_pem.encode() if isinstance(cert_pem, str) else cert_pem)
             fd.flush()
-            os.fchmod(fd.fileno(), 0o600)
+            os.fchmod(fd.fileno(), 0o644)
             _chown_secret_temp(fd.fileno(), service_ids)
 
         key_pem = new_private_key.private_bytes(
@@ -2670,7 +2672,7 @@ def executor_cert_renew(args: Any) -> int:
                 ca_tmp_name = fd.name
                 fd.write(ca_cert_pem.encode() if isinstance(ca_cert_pem, str) else ca_cert_pem)
                 fd.flush()
-                os.fchmod(fd.fileno(), 0o600)
+                os.fchmod(fd.fileno(), 0o644)
                 _chown_secret_temp(fd.fileno(), service_ids)
             os.replace(ca_tmp_name, str(ca_cert_path))
             ca_tmp_name = None
