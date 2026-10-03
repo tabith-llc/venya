@@ -280,14 +280,28 @@ Possible MITM or corrupted download. Aborting.
         $mcpPython = Join-Path $ToolDir 'venya-mcp\Scripts\python.exe'
         if (Test-Path $mcpPython) {
             Invoke-Native -Exe $mcpPython -Arguments @('-c', 'import venya_mcp.server') -What 'venya-mcp server module import'
+            # #396 contract: claims gate on verification — the installed claim
+            # prints only after the import check actually ran (and passed;
+            # Invoke-Native fails loud otherwise).
+            Info "venya-mcp installed: $mcpExe"
         } else {
-            Warn "Could not locate the venya-mcp venv interpreter at $mcpPython; skipped the import check."
+            # Absent interpreter = NOT installed: disclose degraded, no claim.
+            Warn "venya-mcp import check SKIPPED - interpreter missing at $mcpPython; venya-mcp install is UNVERIFIED."
         }
-        Info "venya-mcp installed: $mcpExe"
     }
 } finally {
     Remove-Item Env:\UV_PYTHON_INSTALL_DIR, Env:\UV_TOOL_DIR, Env:\UV_TOOL_BIN_DIR, Env:\UV_CACHE_DIR -ErrorAction SilentlyContinue
-    if (Test-Path $workDir) { Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue }
+    if (Test-Path $workDir) {
+        # #401: the sweep discloses its result instead of silently leaving
+        # venya-cli-install-<guid> scratch dirs behind.
+        $sweepErr = @()
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable sweepErr
+        if (@($sweepErr).Count -gt 0) {
+            Warn "Could not fully remove scratch dir $workDir ($(@($sweepErr).Count) error(s)) - safe to delete manually."
+        } else {
+            Info "Removed scratch dir $workDir."
+        }
+    }
 }
 
 # --- FIDO2 access check ---
