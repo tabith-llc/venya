@@ -48,3 +48,20 @@ class TestDaemonVersionFlag:
                 main()
         assert exc.value.code == 0
         assert EXECUTOR_VERSION in capsys.readouterr().out
+
+
+class TestDaemonDeadFlagsRemoved:
+    """The inert --allow-host/--no-network daemon flags were dropped (bug/
+    executor-dead-flags-386); the parser now rejects them."""
+
+    @pytest.mark.parametrize(
+        "argv", [["--allow-host", "example:443"], ["--no-network"]], ids=["allow-host", "no-network"]
+    )
+    def test_removed_flag_is_rejected(self, argv, capsys):
+        from executor.daemon import main
+
+        with patch("sys.argv", ["venya-executor", *argv]), patch("executor.daemon.ExecutorDaemon"):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+        assert "unrecognized" in capsys.readouterr().err
