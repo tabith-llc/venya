@@ -28,6 +28,7 @@ from .api_client import (
     APIClient,
     APIClientAuthenticationError,
     APIClientError,
+    _build_ssl_context,
     cli_version,
     execution_timeout,
     version_tuple,
@@ -2137,6 +2138,47 @@ def _chown_secret_temp(fileno: int, service_ids: tuple[int, int] | None) -> None
         print(f"WARNING: cannot hand a staged temp file to {EXECUTOR_SERVICE_USER}: {e}", file=sys.stderr)
 
 
+def _resolve_register_verify_cafile(client: APIClient, ca_bundle: str | None) -> str:
+    """Trust source for the post-register verify call (#395, lead ruling).
+
+    Build order: config-dir CA (what the plain ``client`` already trusts) if
+    present, ELSE the explicit ``--ca-bundle`` (already resolved from the
+    flag / executor.toml by the caller), ELSE fail loud. There is deliberately
+    no system-store or no-verify fallback: an unverifiable verification is an
+    error, never a silent pass (production mandate: propagate trust, never
+    weaken validation).
+    """
+    config_ca = client.config.ca_path
+    if config_ca.exists():
+        return str(config_ca)
+    if ca_bundle:
+        return str(ca_bundle)
+    raise APIClientError(
+        "Cannot verify the registration: no TLS trust material found — no config-dir CA "
+        f"({config_ca}) and no --ca-bundle. Re-run with --ca-bundle <venya-ca.crt> "
+        "(the register response also saved the CA beside the certificate)."
+    )
+
+
+def _verify_register_auth(client: APIClient, server_url: str, ca_bundle: str | None) -> None:
+    """Verify executor auth against the resolved core URL (#387) with the
+    register-path TLS trust (#395) — the plain ``client`` trust store is
+    config-dir-only, so on a config-less host the verify call could never
+    succeed while the CSR POST (which honors --ca-bundle) had just worked."""
+    cafile = _resolve_register_verify_cafile(client, ca_bundle)
+    headers = {"Accept": "application/json"}
+    if client.config.access_token:
+        headers["Authorization"] = f"Bearer {client.config.access_token}"
+    try:
+        with httpx2.Client(verify=_build_ssl_context(cafile=cafile, certfile=None, keyfile=None), timeout=30.0) as http:
+            response = http.get(f"{server_url}/api/v1/executors/certs/revocation-list", headers=headers)
+            response.raise_for_status()
+    except httpx2.HTTPStatusError as e:
+        raise APIClientError(f"Server returned {e.response.status_code}") from e
+    except httpx2.ConnectError as e:
+        raise APIClientError(f"Connection failed: {e}") from e
+
+
 def executor_register(client: APIClient, args: Any) -> int:
     """Register this machine as an executor with the core.
 
@@ -2362,14 +2404,21 @@ def executor_register(client: APIClient, args: Any) -> int:
         print(f"Failed to save certificate: {e}", file=sys.stderr)
         return 1
 
-    # Step 5: Verify auth with revocation list
+    # Step 5: Verify auth with revocation list (#395: the verify client carries
+    # the register-path trust — config-dir CA, else --ca-bundle, else loud).
     try:
         print("Verifying authentication...")
-        client.get("/api/v1/executors/certs/revocation-list")
+        _verify_register_auth(client, server_url, ca_bundle)
         print("Authentication verified.")
     except APIClientError as e:
-        print(f"Warning: authentication verification failed: {e}", file=sys.stderr)
-        print("Certificate was saved, but auth verification failed.", file=sys.stderr)
+        print(f"Error: authentication verification failed: {e}", file=sys.stderr)
+        # Ruling (ii): fail loud — rc!=0, cert/key/CA kept on disk, wording
+        # unambiguous for scripts. An unverified registration is not a success.
+        print(
+            f"Executor '{executor_id}' registered, auth NOT verified — " f"certificate kept at {cert_path}.",
+            file=sys.stderr,
+        )
+        return 1
 
     # Step 6: Print success
     print(f"\nExecutor '{executor_id}' registered successfully.")
