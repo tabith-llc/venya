@@ -71,11 +71,18 @@ class CliInteraction(UserInteraction):
     # time; consumed on first use, never persisted anywhere.
     preset_pin: str | None = None
 
+    # A single CTAP operation can emit several keepalive events while the
+    # key waits for a touch; prompt_up() fires on each one. This flag keeps
+    # the touch cue to one print per operation and is reset at every new
+    # operation boundary (request_pin, including PIN retries).
+    _prompt_up_shown: bool = False
+
     def request_pin(self, permissions: ClientPin.PERMISSION, rp_id: str | None) -> str | None:
         """Prompt for PIN via getpass (no echo, stderr only).
 
         Returns None if stdin is not a TTY (headless / piped).
         """
+        self._prompt_up_shown = False
         if self.preset_pin is not None:
             pin = self.preset_pin
             self.preset_pin = None
@@ -89,7 +96,13 @@ class CliInteraction(UserInteraction):
     def prompt_up(self) -> None:
         """Called when the authenticator awaits a user-presence touch.
         The key is flashing — this is the cue to touch it.
+
+        Repeated keepalive events within one operation print once; the flag
+        resets at the next request_pin() so every PIN retry shows the cue.
         """
+        if self._prompt_up_shown:
+            return
+        self._prompt_up_shown = True
         print(">>> Key is flashing — touch it to continue <<<", file=sys.stderr)
 
     def request_uv(self, permissions: ClientPin.PERMISSION, rp_id: str | None) -> bool:

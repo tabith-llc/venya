@@ -1318,6 +1318,50 @@ class TestPinSetupNewKey:
         assert interaction.preset_pin is None
 
 
+class TestKeepalivePromptDedup:
+    """#10 (cli-login-duplicate-flash-message): one CTAP operation can fire
+    on_keepalive several times while the key waits for a touch; each event
+    invoked prompt_up() and the "Key is flashing" cue printed twice per
+    authentication. CliInteraction now latches the print per operation and
+    resets the latch at request_pin() — the PIN-retry boundary."""
+
+    FLASH = "Key is flashing"
+
+    @patch("sys.stdin.isatty")
+    @patch("venya_cli.fido2_client.getpass")
+    def test_prompt_up_prints_once_per_operation(self, mock_getpass, mock_isatty, capsys):
+        mock_isatty.return_value = True
+        mock_getpass.getpass.return_value = "typed"
+
+        interaction = CliInteraction()
+        interaction.request_pin(None, "venya-core-1")
+        # several keepalive events with status 0x01 inside one assertion:
+        interaction.prompt_up()
+        interaction.prompt_up()
+        interaction.prompt_up()
+
+        assert capsys.readouterr().err.count(self.FLASH) == 1
+
+    @patch("sys.stdin.isatty")
+    @patch("venya_cli.fido2_client.getpass")
+    def test_prompt_up_prints_again_after_pin_retry(self, mock_getpass, mock_isatty, capsys):
+        """Paired negative: the dedup must not swallow the cue on the NEXT
+        operation — a wrong PIN retry calls request_pin() again, and the
+        touch cue has to be shown for the new attempt."""
+        mock_isatty.return_value = True
+        mock_getpass.getpass.return_value = "typed"
+
+        interaction = CliInteraction()
+        interaction.request_pin(None, "venya-core-1")
+        interaction.prompt_up()
+        interaction.prompt_up()  # duplicate within attempt 1 — suppressed
+        interaction.request_pin(None, "venya-core-1")  # PIN retry boundary
+        interaction.prompt_up()
+        interaction.prompt_up()  # duplicate within attempt 2 — suppressed
+
+        assert capsys.readouterr().err.count(self.FLASH) == 2
+
+
 class TestPinOnlyCtap2FieldTyping:
     """#294 (cli-add-credential-ctap-unexpected-type): the raw pin-only path
     fed CTAP2 make_credential via public_key Mapping reads, and python-fido2's
