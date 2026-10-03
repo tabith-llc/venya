@@ -317,9 +317,11 @@ async def main() -> None:
 def run() -> None:
     """Sync console-script entry point — async main() must be awaited.
 
-    Startup-precondition failures (missing or malformed config) exit 1 with the
-    actionable message on stderr instead of a raw traceback
-    (ticket mcp-missing-config-traceback-ux).
+    Startup-precondition failures (missing or malformed config, missing CA
+    trust anchor) exit 1 with the actionable message on stderr instead of a
+    raw traceback (tickets mcp-missing-config-traceback-ux,
+    mcp-ca-missing-traceback-ux #41). The TLS refusal itself is unchanged —
+    this only renders the message cleanly.
     """
     try:
         asyncio.run(main())
@@ -328,6 +330,9 @@ def run() -> None:
         sys.exit(1)
     except json.JSONDecodeError as e:
         print(f"Venya config is not valid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
         sys.exit(1)
 
 
