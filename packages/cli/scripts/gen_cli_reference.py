@@ -166,6 +166,12 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
             "revoke an executor certificate; the server then refuses to relay to it",
         ),
     ],
+    ("admin", "remove-executor"): [
+        (
+            ["admin", "remove-executor", "venya-exec-1"],
+            "remove an executor row (revokes its current certificate; refused while execution sessions are retained)",
+        ),
+    ],
     ("admin", "executor-enroll"): [
         (["admin", "executor-enroll", "venya-exec-1"], "print a bootstrap enrollment token for an executor"),
         (

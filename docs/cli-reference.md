@@ -45,6 +45,7 @@ and exits `1`.
     - [`venya admin key-version rollback`](#venya-admin-key-version-rollback)
   - [`venya admin rotate-key`](#venya-admin-rotate-key)
   - [`venya admin revoke-executor`](#venya-admin-revoke-executor)
+  - [`venya admin remove-executor`](#venya-admin-remove-executor)
   - [`venya admin executor-enroll`](#venya-admin-executor-enroll)
   - [`venya admin list-tokens`](#venya-admin-list-tokens)
   - [`venya admin issue-token`](#venya-admin-issue-token)
@@ -276,6 +277,7 @@ Subcommands:
 - [`venya admin key-version`](#venya-admin-key-version) — Key version management
 - [`venya admin rotate-key`](#venya-admin-rotate-key) — Rotate the key encryption key
 - [`venya admin revoke-executor`](#venya-admin-revoke-executor) — Revoke an executor certificate
+- [`venya admin remove-executor`](#venya-admin-remove-executor) — Remove an executor row (revokes its current certificate; refused while execution sessions are retained)
 - [`venya admin executor-enroll`](#venya-admin-executor-enroll) — Generate an enrollment token for an executor
 - [`venya admin list-tokens`](#venya-admin-list-tokens) — List all enrollment tokens for a user
 - [`venya admin issue-token`](#venya-admin-issue-token) — Revoke old tokens and issue a new enrollment token
@@ -581,6 +583,24 @@ venya admin revoke-executor <EXECUTOR_ID> [OPTIONS]
 
 ```bash
 venya admin revoke-executor venya-exec-1  # revoke an executor certificate; the server then refuses to relay to it
+```
+
+### `venya admin remove-executor`
+
+Remove an executor row (revokes its current certificate; refused while execution sessions are retained)
+
+```
+venya admin remove-executor <EXECUTOR_ID>
+```
+
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `EXECUTOR_ID` (positional) | **yes** | string | — | Executor ID to remove |
+
+**Examples**
+
+```bash
+venya admin remove-executor venya-exec-1  # remove an executor row (revokes its current certificate; refused while execution sessions are retained)
 ```
 
 ### `venya admin executor-enroll`

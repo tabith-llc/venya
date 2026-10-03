@@ -664,6 +664,8 @@ def cmd_admin(client: APIClient, args: Any) -> int:
         return cmd_admin_rotate_key(client, args)
     elif admin_command == "revoke-executor":
         return cmd_admin_revoke_executor(client, args)
+    elif admin_command == "remove-executor":
+        return cmd_admin_remove_executor(client, args)
     elif admin_command == "executor-enroll":
         return cmd_admin_executor_enroll(client, args)
     elif admin_command == "list-tokens":
@@ -957,6 +959,26 @@ def cmd_admin_revoke_executor(client: APIClient, args: Any) -> int:
         serial = getattr(args, "serial", None)
 
     return executor_cert_revoke(_RevokeArgs(), client=client)
+
+
+def cmd_admin_remove_executor(client: APIClient, args: Any) -> int:
+    """Remove an executor row (admin action, ticket #391 arm (b)).
+
+    Removal implies revocation: the server revokes the current certificate
+    serial, deletes the cert and executor rows, and refuses (409) while
+    execution-session history is retained. 404/409 details surface on
+    stderr with a nonzero exit (user-remove precedent).
+    """
+    try:
+        client.delete(f"/api/v1/admin/executors/{quote(args.executor_id, safe='')}")
+        print(f"Executor '{args.executor_id}' removed (current certificate revoked).")
+        return 0
+    except APIClientError as e:
+        print(f"Remove failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Remove failed: {e}", file=sys.stderr)
+        return 1
 
 
 # CA source paths for the executor-enroll --output-dir bundle. Module-level

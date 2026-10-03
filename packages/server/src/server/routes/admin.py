@@ -279,6 +279,12 @@ class AdminRevokeExecutorResponse(BaseModel):
     serial_number: str | None = None
 
 
+class AdminRemoveExecutorResponse(BaseModel):
+    removed: bool
+    executor_id: str
+    revoked_serial: str | None = None
+
+
 class AdminEnrollExecutorResponse(BaseModel):
     executor_id: str
     enrollment_token: str
@@ -1274,6 +1280,33 @@ async def admin_list_executors(
     return AdminExecutorListResponse(executors=result)
 
 
+def _revoke_record_serial(db: Session, executor_id: str, serial_number: str, revoked_at: datetime, reason: str) -> bool:
+    """Add an ExecutorCertRevocation row for a record serial unless one exists.
+
+    Shared by identity-form admin revoke and admin executor removal (ticket
+    admin-executor-row-removal-missing #391, arm (b) remove-implies-revoke —
+    one serial-revocation implementation so the two paths cannot drift).
+    Adds to `db` without committing (rides the caller's transaction).
+
+    Returns True when a new revocation row was added, False when one was
+    already present (idempotent).
+    """
+    from core.iam.models import ExecutorCertRevocation
+
+    existing = db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == serial_number).first()
+    if existing is not None:
+        return False
+    db.add(
+        ExecutorCertRevocation(
+            serial_number=serial_number,
+            executor_id=executor_id,
+            revoked_at=revoked_at,
+            reason=reason,
+        )
+    )
+    return True
+
+
 @router.post(
     "/admin/executors/{executor_id}/revoke",
     response_model=AdminRevokeExecutorResponse,
@@ -1364,18 +1397,7 @@ async def admin_revoke_executor(
     if not already and executor_row is not None:
         executor_row.revoked_at = now
 
-    existing_revocation = (
-        db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == cert.serial_number).first()
-    )
-    if existing_revocation is None:
-        db.add(
-            ExecutorCertRevocation(
-                serial_number=cert.serial_number,
-                executor_id=executor_id,
-                revoked_at=now,
-                reason="Admin revocation",
-            )
-        )
+    serial_revocation_present = not _revoke_record_serial(db, executor_id, cert.serial_number, now, "Admin revocation")
     # Q3 (#301): record the attempt — an identity-form duplicate emits with
     # already_revoked visible in fields.
     audit_lifecycle(
@@ -1385,12 +1407,12 @@ async def admin_revoke_executor(
         {
             "executor_id": executor_id,
             "form": "identity",
-            "already_revoked": already and existing_revocation is not None,
+            "already_revoked": already and serial_revocation_present,
         },
     )
     db.commit()
 
-    if already and existing_revocation is not None:
+    if already and serial_revocation_present:
         return AdminRevokeExecutorResponse(revoked=False, executor_id=executor_id, serial_number=cert.serial_number)
 
     metrics.TOKEN_REVOKED.labels(reason=EXECUTOR_REVOKED).inc()  # same label string; single-writer pin (#301)
@@ -1400,6 +1422,89 @@ async def admin_revoke_executor(
         cert.serial_number,
     )
     return AdminRevokeExecutorResponse(revoked=True, executor_id=executor_id, serial_number=cert.serial_number)
+
+
+@router.delete(
+    "/admin/executors/{executor_id}",
+    response_model=AdminRemoveExecutorResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def admin_remove_executor(
+    executor_id: str,
+    admin: dict = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> AdminRemoveExecutorResponse:
+    """Remove an executor row (admin only) — remove-implies-revoke (#391 arm (b)).
+
+    Ruled design (ticket admin-executor-row-removal-missing #391, owner ruling
+    2026-10-03): one transaction, all guards BEFORE any write —
+
+    - unknown id → 404 (row-keyed, mirroring the revoke route's detail shape);
+    - executor WITH execution-session history → 409 refused loud: sessions are
+      append-only audit evidence, never deleted or cascaded (the
+      fk_execution_sessions_executor_id FK is NO ACTION, so the raw delete
+      would fail at the DB anyway — the route answers before the driver does);
+    - otherwise: revoke the current record serial through the shared helper
+      (same machinery as identity-form admin revoke, reason "Removed by
+      admin"), explicitly delete the executor_certs rows (they FK
+      users.user_id — they ride no cascade from the executors row), delete
+      the executors row, and emit the lifecycle audit row riding the same
+      commit.
+
+    Revocation rows and enrollment-token rows (plain string ids) survive as
+    trail. Re-registration of the same id after removal is intended
+    lifecycle — the row-based terminal identity check dies with the row
+    (server/revocation.py lifecycle note).
+    """
+    from core.iam.models import ExecutionSession, Executor, ExecutorCert
+
+    now = datetime.now(UTC)
+
+    executor_row = db.query(Executor).filter(Executor.id == executor_id).first()
+    if executor_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Executor not found: {executor_id}",
+        )
+
+    sessions_retained = db.query(ExecutionSession).filter(ExecutionSession.executor_id == executor_id).count()
+    if sessions_retained > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Executor '{executor_id}' has {sessions_retained} execution session(s) "
+                "retained as audit evidence; removal refused"
+            ),
+        )
+
+    already_revoked = executor_row.revoked_at is not None
+    cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
+    revoked_serial = cert.serial_number if cert is not None else None
+    if cert is not None:
+        _revoke_record_serial(db, executor_id, cert.serial_number, now, "Removed by admin")
+
+    certs_removed = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).delete()
+    db.delete(executor_row)
+
+    audit_lifecycle(
+        db,
+        EXECUTOR_REVOKED,
+        admin.get("user_id"),
+        {
+            "executor_id": executor_id,
+            "form": "remove",
+            "already_revoked": already_revoked,
+        },
+    )
+    db.commit()
+
+    logger.info(
+        "Removed executor row (remove-implies-revoke): executor_id=%s, revoked_serial=%s, certs_removed=%s",
+        executor_id,
+        revoked_serial,
+        certs_removed,
+    )
+    return AdminRemoveExecutorResponse(removed=True, executor_id=executor_id, revoked_serial=revoked_serial)
 
 
 @router.post(
