@@ -271,8 +271,7 @@ if ! command -v sbx &>/dev/null; then
     fi
     rm -f "$SBX_SCRIPT" "$SBX_LOG"
     venya_apt install -y -qq docker-sbx
-    usermod -aG kvm venya 2>/dev/null || true
-    info "sbx CLI installed. venya user added to kvm group."
+    info "sbx CLI installed. kvm group is re-asserted on every install (see #384 block below)."
 else
     info "sbx CLI already installed: $(sbx --version 2>/dev/null || echo 'unknown')"
 fi
@@ -590,6 +589,18 @@ chmod 700 /etc/venya/executor
 find /etc/venya/executor -name '*.key' -exec   chmod 600 {} \; 2>/dev/null || true
 find /etc/venya/executor -name '*.crt' -exec   chmod 644 {} \; 2>/dev/null || true
 info "Executor credentials hardened (venya:venya, dir 700, key 600, cert 644)"
+
+# --- #384: UNCONDITIONAL kvm group re-assert for the daemon user ----------------
+# The kvm group add was born inside the fresh-sbx-install guard above, so a
+# re-install (sbx CLI persists, guard short-circuits) never re-asserted it:
+# hosts that rebuild or lose the venya user's supplemental groups silently
+# lose sandbox capability while the daemon stays active + heartbeats
+# (live: exec-1 'id venya' missing 993, 2026-10-03; exec-3 keeps its copy).
+# Idempotent re-assert on EVERY install path, after venya_create_user (:135)
+# and before the optional Docker chain, so a Docker-gate abort still lands
+# the capability (#370 lesson). The getent guard skips hosts without a kvm
+# group; usermod -aG is a no-op when the group is already set.
+getent group kvm >/dev/null && usermod -aG kvm venya 2>/dev/null || true
 
 # --- Docker auth (sbx template pulls) + sandboxd daemon ---
 # sbx runs microVMs via KVM but pulls its agent template from Docker and
