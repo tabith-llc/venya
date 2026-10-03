@@ -34,6 +34,7 @@ Paired negative on core: postgres-not-active skips the DB verify entirely
 """
 
 import os
+import pty
 import subprocess
 import tempfile
 from pathlib import Path
@@ -109,6 +110,40 @@ _STUB_OK = "#!/bin/bash\nexit 0\n"
 _PREFIXES = ("/etc/", "/opt/", "/var/", "/usr/local/")
 
 
+def _run_with_optional_tty(argv: list, env: dict, answer: str | None, timeout: int) -> subprocess.CompletedProcess:
+    """Run argv with stdin = DEVNULL (non-TTY) when answer is None, or on a
+    real pty slave with answer fed to the prompt (#399 gate cells). Feeding
+    then closing the master is what makes the pty case deterministic: an
+    unfed read blocks to timeout, a closed master mid-read aborts under
+    set -e (both verified on this idiom)."""
+    if answer is None:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        os.close(slave)
+        os.write(master, (answer + "\n").encode())
+        out = proc.communicate(timeout=timeout)[0]
+    finally:
+        os.close(master)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, "")
+
+
 class _RootHarness:
     """Runs a real root-scoped uninstaller against a fake-root tmpdir tree."""
 
@@ -174,24 +209,16 @@ class _RootHarness:
         self.rc.joinpath("db-count").write_text("1", encoding="utf-8")
         self.rc.joinpath("role-count").write_text("1", encoding="utf-8")
 
-    def run(self, rm_skip: str = "") -> subprocess.CompletedProcess:
+    def run(self, rm_skip: str = "", skip: str = "yes", answer: str | None = None) -> subprocess.CompletedProcess:
         env = {
             "HOME": str(self.tmp),
             "PATH": f"{self.stub}:{os.defpath}:/usr/bin:/bin",
             "RC_DIR": str(self.rc),
             "STUB_LOG": str(self.log),
             "RM_SKIP_SUB": rm_skip,
-            "VENYA_SKIP_PROMPT": "yes",
+            "VENYA_SKIP_PROMPT": skip,
         }
-        return subprocess.run(
-            ["/bin/bash", str(self.script)],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            check=False,
-        )
+        return _run_with_optional_tty(["/bin/bash", str(self.script)], env, answer, timeout=60)
 
     def calls(self) -> str:
         return self.log.read_text(encoding="utf-8")
@@ -317,3 +344,132 @@ def test_executor_userdel_failure_survivor_errors_nonzero() -> None:
         assert r.returncode != 0
         assert "venya user still present" in r.stdout, r.stdout
         assert "Venya Executor uninstalled." not in r.stdout
+
+
+# --- #399: non-TTY confirm gate — silent EOF-abort replaced by loud exit ---
+
+_CLI_UV_STUB = """#!/bin/bash
+if [ "$1 $2" = "tool dir" ]; then echo "$TOOLS_DIR"; exit 0; fi
+if [ "$1 $2" = "tool uninstall" ]; then
+    rm -rf "$TOOLS_DIR/$3"
+    if [ "$3" = "venya-cli" ]; then rm -f "$HOME/.local/bin/venya"; fi
+    if [ "$3" = "venya-mcp" ]; then rm -f "$HOME/.local/bin/venya-mcp"; fi
+fi
+exit 0
+"""
+
+
+class _CliHarness:
+    """Minimal HOME+stub harness for uninstall-venya-cli.sh (idiom per
+    test_installer_cli_uninstall_complete_390.py; the gate fires before any
+    uv call, so the stub only needs `tool dir`)."""
+
+    def __init__(self, tmp: str) -> None:
+        self.tmp = Path(tmp)
+        self.home = self.tmp / "home"
+        self.bindir = self.home / ".local" / "bin"
+        self.tools = self.home / ".local" / "share" / "uv" / "tools"
+        self.stub = self.tmp / "stubbin"
+        for d in (self.bindir, self.tools, self.stub):
+            d.mkdir(parents=True)
+        p = self.stub / "uv"
+        p.write_text(_CLI_UV_STUB, encoding="utf-8")
+        p.chmod(0o755)
+
+    def install_tree(self) -> None:
+        (self.bindir / "venya").write_text("#!/bin/sh\necho venya\n", encoding="utf-8")
+        (self.bindir / "venya-mcp").write_text("#!/bin/sh\necho mcp\n", encoding="utf-8")
+        for tool in ("venya-cli", "venya-mcp"):
+            env = self.tools / tool
+            env.mkdir(parents=True, exist_ok=True)
+            (env / "bin").mkdir(parents=True, exist_ok=True)
+            (env / "uv-receipt.toml").write_text("[tool]\n", encoding="utf-8")
+
+    def run(self, skip: str = "yes", answer: str | None = None) -> subprocess.CompletedProcess:
+        env = {
+            "HOME": str(self.home),
+            "PATH": f"{self.stub}:{os.defpath}:/usr/bin:/bin",
+            "TOOLS_DIR": str(self.tools),
+            "VENYA_SKIP_PROMPT": skip,
+            "VENYA_PURGE_CONFIG": "no",
+        }
+        return _run_with_optional_tty(
+            ["/bin/bash", str(REPO_ROOT / "uninstall-venya-cli.sh")],
+            env,
+            answer,
+            timeout=30,
+        )
+
+
+def test_core_non_tty_no_flag_aborts_loud_with_zero_writes() -> None:
+    """AC negative: non-TTY stdin + no flag -> rc 1, [ERROR] naming the
+    flag, and NOTHING removed (no stub calls, seeded tree intact)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _core(tmp)
+        r = h.run(skip="", answer=None)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "[ERROR]" in r.stdout and "non-interactive session" in r.stdout, r.stdout
+        assert "VENYA_SKIP_PROMPT=yes" in r.stdout, r.stdout
+        assert h.calls() == "", "abort must precede every removal call"
+        assert (h.root / "opt/venya/payload").exists()
+        assert (h.rc / "user-present").exists()
+
+
+def test_core_non_tty_flag_runs_normal_flow() -> None:
+    """AC positive: flag present -> gate not reached, full uninstall lands."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _core(tmp)
+        r = h.run(answer=None)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "Venya Core uninstalled." in r.stdout
+
+
+def test_core_tty_no_flag_prompt_still_works() -> None:
+    """Paired regression: TTY stdin + no flag -> gate stays out of the way,
+    the prompt reads the answer; "n" -> graceful Aborted, rc 0, no writes."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _core(tmp)
+        r = h.run(skip="", answer="n")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "non-interactive session" not in r.stdout
+        assert h.calls() == ""
+
+
+def test_executor_non_tty_no_flag_aborts_loud_with_zero_writes() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _exec_h(tmp)
+        r = h.run(skip="", answer=None)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "[ERROR]" in r.stdout and "non-interactive session" in r.stdout, r.stdout
+        assert h.calls() == ""
+        assert (h.root / "opt/venya/payload").exists()
+
+
+def test_executor_non_tty_flag_runs_normal_flow() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _exec_h(tmp)
+        r = h.run(answer=None)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "Venya Executor uninstalled." in r.stdout
+
+
+def test_cli_non_tty_no_flag_aborts_loud_with_zero_writes() -> None:
+    """cli uninstaller, same contract (harness per
+    test_installer_cli_uninstall_complete_390.py)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _CliHarness(tmp)
+        h.install_tree()
+        r = h.run(skip="", answer=None)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "[ERROR]" in r.stdout and "non-interactive session" in r.stdout, r.stdout
+        assert (h.bindir / "venya").exists(), "no removal before the gate"
+        assert (h.tools / "venya-cli").exists()
+
+
+def test_cli_non_tty_flag_runs_normal_flow() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        h = _CliHarness(tmp)
+        h.install_tree()
+        r = h.run(answer=None)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert not (h.bindir / "venya").exists()
