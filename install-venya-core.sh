@@ -408,6 +408,8 @@ from server.ca import AdminCAManager
 from server.config import CASecurityConfig
 cm = AdminCAManager(Path(\"$1\"), CASecurityConfig(key_passphrase_env=\"VENYA_ADMIN_CA_KEY_PASSPHRASE\"))
 cert, key_pem, cert_pem = cm.sign_admin_cert(sys.argv[1])
+Path(\"$2/admin.crt\").unlink(missing_ok=True)
+Path(\"$2/admin.key\").unlink(missing_ok=True)
 Path(\"$2/admin.crt\").write_bytes(cert_pem)
 Path(\"$2/admin.key\").write_bytes(key_pem)
 Path(\"$2/admin.crt\").chmod(0o644)
@@ -548,6 +550,9 @@ if [ -f "$STORED_ENV_FILE" ]; then
         /^VENYA_/ && !($1 in skip)
     ' "$STORED_ENV_FILE")
 fi
+# #381: delete-then-create — a truncating > over an incumbent .env keeps its
+# stale mode; the chmod 600 below remains the final-state pin.
+rm -f "$INSTALL_DIR/.env"
 {
     printf 'VENYA_HOST=127.0.0.1\n'
     printf 'VENYA_DB_URL=postgresql://venya:%s@localhost/venya\n' "$VENYA_DB_PASSWORD"  # pragma: allowlist secret
@@ -591,6 +596,8 @@ fi
 # newline/CR split that made this a systemd Environment= injection sink
 # is rejected at finalization above (Layer 1; fail-closed cannot brick:
 # a newline-bearing passphrase could never round-trip this file anyway).
+# #381: fresh inode (chmod 0640 below stays the final-state pin)
+rm -f /etc/venya/venya-core.env
 printf 'VENYA_CA_KEY_PASSPHRASE=%s\n' "$CA_KEY_PASSPHRASE" > /etc/venya/venya-core.env
 if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     printf 'VENYA_ADMIN_CA_KEY_PASSPHRASE=%s\n' "$ADMIN_CA_PASSPHRASE" >> /etc/venya/venya-core.env
@@ -863,6 +870,9 @@ else
 fi
 chmod 644 /etc/nginx/ssl/client-ca-bundle.crt
 
+# #381: fresh inode — cat > over an incumbent vhost preserved its old mode
+# (K30: re-install re-filled an incumbent 0644 inode under umask 077)
+rm -f /etc/nginx/sites-available/venya
 cat > /etc/nginx/sites-available/venya << EOF
 server {
     listen 443 ssl;
@@ -923,6 +933,8 @@ server {
     }
 }
 EOF
+# #381: explicit mode pin (K30 posture 0600 root:root; was umask-side-effect only)
+chmod 600 /etc/nginx/sites-available/venya
 
 # Enable site, disable default
 ln -sf /etc/nginx/sites-available/venya /etc/nginx/sites-enabled/venya
@@ -1034,11 +1046,15 @@ info "Database migrations complete"
 # --- Install systemd service (core-specific) ---
 info "Installing systemd service..."
 SYSTEMD_DIR="/etc/systemd/system"
+# #381: delete-then-create + explicit pin (K31 0600 root:root; sed > over an
+# incumbent unit file kept its stale mode)
+rm -f "$SYSTEMD_DIR/venya-core.service"
 sed "s|VENYA_ENV_DIR=/opt/venya|VENYA_ENV_DIR=$INSTALL_DIR|" "$INSTALL_DIR/systemd/venya-core.service" > "$SYSTEMD_DIR/venya-core.service"
+chmod 600 "$SYSTEMD_DIR/venya-core.service"
 
 # NOTE: no passphrase is injected into the unit here. The unit template carries
 # EnvironmentFile=-/etc/venya/venya-core.env (0640 root:venya, written above),
-# so the secret never lands in this 0644 root:root unit. The leading '-' makes
+# so the secret never lands in this 0600 root:root unit (#381 comment fix). The leading '-' makes
 # it optional: admin-mTLS-disabled installs (no env file) still start cleanly.
 
 systemctl daemon-reload

@@ -561,6 +561,8 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ] && [ "$CA_INSTALLED" != true ];
     # born inside this guard, so the immediate-register path skipped it); the
     # token file lands 0600: the old world-traversable dir plus the
     # :600->602 chmod window made a persisted token locally readable.
+    # #381: fresh inode (chmod 600 below stays the final-state pin)
+    rm -f /var/lib/venya/executor/bootstrap-token
     printf '%s\n' "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" > /var/lib/venya/executor/bootstrap-token
     chown venya:venya /var/lib/venya/executor/bootstrap-token
     chmod 600 /var/lib/venya/executor/bootstrap-token
@@ -628,6 +630,8 @@ else
 fi
 
 # --- sandboxd daemon (system-managed, persists across reboots) ---
+# #381: fresh inode (cat > over an incumbent unit kept its stale mode)
+rm -f /etc/systemd/system/venya-sandboxd.service
 cat > /etc/systemd/system/venya-sandboxd.service <<'SANDBOXD_UNIT'
 [Unit]
 Description=Venya sbx sandboxd (Docker Sandboxes daemon, user venya)
@@ -646,13 +650,18 @@ TimeoutStartSec=60
 [Install]
 WantedBy=multi-user.target
 SANDBOXD_UNIT
+chmod 600 /etc/systemd/system/venya-sandboxd.service
 # Executor ordering drop-in (does not touch the vendored unit template)
 mkdir -p /etc/systemd/system/venya-executor.service.d
+# #381: fresh inode; the .d dir itself is installer-created 0700 under the
+# entry umask and self-consistent across re-runs (no incumbent-widening path)
+rm -f /etc/systemd/system/venya-executor.service.d/10-sandboxd.conf
 cat > /etc/systemd/system/venya-executor.service.d/10-sandboxd.conf <<'DROPIN'
 [Unit]
 Wants=venya-sandboxd.service
 After=venya-sandboxd.service
 DROPIN
+chmod 600 /etc/systemd/system/venya-executor.service.d/10-sandboxd.conf
 systemctl daemon-reload
 systemctl enable venya-sandboxd.service > /dev/null 2>&1
 systemctl restart venya-sandboxd.service
@@ -711,9 +720,11 @@ fi
 # --- Install systemd service and mount unit (executor-specific) ---
 info "Installing systemd service..."
 SYSTEMD_DIR="/etc/systemd/system"
-cp "$INSTALL_DIR/systemd/venya-executor.service" "$SYSTEMD_DIR/"
-cp "$INSTALL_DIR/systemd/tmp-venya_secrets.mount" "$SYSTEMD_DIR/"
-cp "$INSTALL_DIR/systemd/venya-executor.seccomp" "$SYSTEMD_DIR/"
+# #381: install (unlink+create, mode pinned) instead of cp — cp over an
+# incumbent unit/mount/seccomp file preserved its stale mode (X13/X14/X15)
+install -m 0600 "$INSTALL_DIR/systemd/venya-executor.service" "$SYSTEMD_DIR/"
+install -m 0600 "$INSTALL_DIR/systemd/tmp-venya_secrets.mount" "$SYSTEMD_DIR/"
+install -m 0600 "$INSTALL_DIR/systemd/venya-executor.seccomp" "$SYSTEMD_DIR/"
 systemctl daemon-reload
 systemctl enable venya-executor.service tmp-venya_secrets.mount
 

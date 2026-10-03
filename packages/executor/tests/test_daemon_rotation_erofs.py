@@ -103,4 +103,6 @@ class TestUnitFileInterlock:
     def test_installer_deploys_the_repo_unit(self):
         """Assert the installer-generated unit == repo template (it copies it)."""
         installer = (REPO_ROOT / "install-venya-executor.sh").read_text()
-        assert 'cp "$INSTALL_DIR/systemd/venya-executor.service" "$SYSTEMD_DIR/"' in installer
+        # #381: deploy line is now install -m 0600 (unlink+create, mode pinned) — same
+        # intent (repo template lands unmutated), strengthened posture at the deploy site.
+        assert 'install -m 0600 "$INSTALL_DIR/systemd/venya-executor.service" "$SYSTEMD_DIR/"' in installer
