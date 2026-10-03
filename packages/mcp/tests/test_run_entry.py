@@ -34,3 +34,29 @@ def test_malformed_config_exits_clean(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "not valid JSON" in err
     assert "Traceback" not in err
+
+
+def test_missing_ca_exits_clean(tmp_path, monkeypatch, capsys):
+    """#41: valid config, no CA -> actionable stderr, exit 1, zero traceback."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{}")
+    monkeypatch.setenv("VENYA_CONFIG", str(cfg))
+    monkeypatch.delenv("VENYA_CA_CERT", raising=False)
+    monkeypatch.delenv("VENYA_TLS_VERIFY", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        run()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "Venya CA certificate not found" in err
+    assert "Traceback" not in err
+
+
+def test_missing_ca_refusal_semantics_untouched(monkeypatch):
+    """#41 paired negative: the refusal itself still raises — never a
+    fallback to unverified TLS (the fix catches at the entry point only)."""
+    from venya_mcp.client import _bootstrap_tls_verify
+
+    monkeypatch.delenv("VENYA_CA_CERT", raising=False)
+    monkeypatch.delenv("VENYA_TLS_VERIFY", raising=False)
+    with pytest.raises(RuntimeError, match="cannot be silently disabled"):
+        _bootstrap_tls_verify()
