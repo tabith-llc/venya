@@ -145,11 +145,19 @@ if [ "$INSTALL_MCP" != "no" ]; then
     fi
     # No --help probe: venya-mcp is a stdio server (would block). Import check instead.
     MCP_PY="$(uv tool dir)/venya-mcp/bin/python"
-    if [ -x "$MCP_PY" ] && ! "$MCP_PY" -c "import venya_mcp.server" 2> /dev/null; then
-        error "venya-mcp installed but its server module fails to import."
-        exit 1
+    if [ -x "$MCP_PY" ]; then
+        if ! "$MCP_PY" -c "import venya_mcp.server" 2> /dev/null; then
+            error "venya-mcp installed but its server module fails to import."
+            exit 1
+        fi
+        # #396 contract: claims gate on verification — the installed claim
+        # prints only after the import check actually ran (and passed; the
+        # error + exit path above fails loud otherwise).
+        info "venya-mcp installed: $(command -v venya-mcp)"
+    else
+        # Absent interpreter = NOT verified: disclose degraded, no claim.
+        warn "venya-mcp import check SKIPPED - interpreter missing at $MCP_PY; venya-mcp install is UNVERIFIED."
     fi
-    info "venya-mcp installed: $(command -v venya-mcp)"
 fi
 
 # --- FIDO2 access check (Linux: /dev/hidraw perms; macOS: IOKit HID, no setup) ---
