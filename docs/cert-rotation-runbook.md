@@ -12,17 +12,19 @@
 
 | Material | Location | Validity / rotation | Notes |
 |---|---|---|---|
-| Root CA keypair | core: `/var/lib/venya/ca/ca.key` (0600), `ca.crt` | manual break-glass only (§5) | key is PLAINTEXT at rest — ⚠ ticket `root-ca-key-plaintext-at-rest`; encryption deferred |
+| Root CA keypair | core: `/var/lib/venya/ca/ca.key` (0600), `ca.crt` | manual break-glass only (§5) | key ENCRYPTED at rest since fix `4218ec1` (ticket `root-ca-key-plaintext-at-rest`, CLOSED 2026-09-20); passphrase `VENYA_CA_KEY_PASSPHRASE` in `/etc/venya/venya-core.env` (0640 root:venya), reused on re-run — an explicit wrong value fails loudly at decrypt |
 | Admin CA keypair | core: `/var/lib/venya/ca/admin-ca/` | manual (§7) | key ENCRYPTED; passphrase in `/etc/venya/venya-core.env` (0640 root:venya) |
-| Server TLS leaf | core: `/etc/venya/tls/server.crt|.key` | 365 days; re-signed on every installer run (`install-venya-core.sh:335-349`) | CN + SAN DNS = `CORE_HOSTNAME` |
-| Relay client cert | core: `/etc/venya/relay/relay-client.crt|.key` | regenerated on installer run (`:355-400`) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids` |
+| Server TLS leaf | core: `/etc/venya/tls/server.crt|.key` | 365 days; re-signed on every installer run (`install-venya-core.sh`, the `Server TLS certificate signed with Venya CA` block) | CN + SAN DNS = `CORE_HOSTNAME` |
+| Relay client cert | core: `/etc/venya/relay/relay-client.crt|.key` | regenerated on installer run (the `Relay client certificate signed and verified` block) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids` |
 | Executor client cert | executor: `/etc/venya/executor/executor.crt|.key` (ca.crt alongside) | 30 days (`EXECUTOR_VALIDITY_DAYS = 30`, server `ca.py`); auto-rotation attempted 3 days before expiry (`rotate_before_days`, executor `config.py`) | Auto-rotation persistence FIXED 2026-09-19 (ticket `executor-cert-rotation-erofs`, §1); pre-fix hosts need the unit refresh; manual path: §2 |
 | Admin client certs | workstations / core: `/etc/venya/admin/admin.crt|.key` | manual (§7) | re-issued on every core installer run |
 | Secret-encryption KEK + key versions | core: database + server config | `venya admin rotate-key` (§6) | independent of the TLS CA hierarchy |
 
-nginx terminates TLS on :443 and proxies to the plain-HTTP backend on 127.0.0.1:8080
-(`install-venya-core.sh:458-480`). Nothing listens on `https://…:8080`; all verification
-curls below go through `https://<core-host>/…`.
+nginx terminates TLS on :443 and proxies to the backend over the inner-mTLS
+channel: uvicorn serves TLS on the loopback bind only and nginx presents the
+relay client certificate (`install-venya-core.sh`, the nginx site config block
+with `proxy_pass https://127.0.0.1:8080`). The port is unreachable from other
+hosts; all verification curls below go through `https://<core-host>/…`.
 
 ## 1. Executor certificate auto-rotation (design + deployment caveat)
 
@@ -150,8 +152,9 @@ curl -fsSL <origin>/install-venya-executor.sh | sudo \
 ```
 
 The installer fetches the current CA from `/.well-known/venya-ca.crt`, updates system
-trust (`install-venya-executor.sh:361-376`), writes `/etc/venya/executor/`, and
-registers at install time (`:416-474`). The SSH user on provisioned hosts is `bot`
+trust (the `Venya CA installed to system trust store` block of
+`install-venya-executor.sh`), writes `/etc/venya/executor/`, and
+registers at install time (the `Register mTLS certificate (if enrollment token provided)` block). The SSH user on provisioned hosts is `bot`
 (there are no `venya-executor`/`venya-core` user accounts; the service account is
 `venya`, nologin).
 
@@ -355,5 +358,5 @@ preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scop
 - `shamir-combine-no-threshold-verification` — FIXED 2026-09-19 (V2 shares carry K + checksum; below-threshold/corrupt/mixed sets fail loudly; pre-V2 files restore unverified with a CLI warning — still run the §5 pairing check)
 - `export-ca-key-echoed-passphrase` — FIXED 2026-09-19 (all secret prompts now getpass; pre-fix CLIs echoed)
 - `executor-dead-rotation-config` — FIXED 2026-09-19 (dead fields removed; legacy executor.toml keys still load, ignored)
-- `root-ca-key-plaintext-at-rest` — root CA key unencrypted at rest (§0)
+- `root-ca-key-plaintext-at-rest` — FIXED (close confirmed against the shipped installer): root CA key is encrypted at rest (`4218ec1`; see §0)
 - `executor-ero-fs-crash-loop-on-empty-token` (H) — never deploy an executor without an install-time token (§3)

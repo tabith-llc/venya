@@ -127,7 +127,7 @@ you install from a local package cache.
 | Executor (sandbox) | Target | 22 | SSH | via sbx egress allowlist, **not** host firewall |
 | Executor | Docker Hub | 443 | HTTPS | agent-template pull (cold start) |
 | Core / Executor / WS | GitHub Releases | 443 | HTTPS | install-time artifact fetch |
-| (local) | Core backend | 8080 | HTTP | loopback only — never expose |
+| (local) | Core backend | 8080 | HTTPS (inner-mTLS, loopback only — nginx presents the relay client cert) | loopback only — never expose |
 | (local) | Core PostgreSQL | 5432 | TCP | loopback only — never expose |
 
 **Default-deny summary:** core inbound = 443 only; executor inbound = 8443 (from core) only;
