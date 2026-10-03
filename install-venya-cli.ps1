@@ -241,15 +241,31 @@ Possible MITM or corrupted download. Aborting.
     # Cheap enough to always run, and it is the only thing standing between a
     # silent revert to hardlink mode and an install standard users cannot read.
     Info 'Verifying no file was left with a protected DACL...'
+    # Coverage tracking (#400): a SilentlyContinue-blinded count must never print
+    # a bare PASS. Count what was actually enumerated and ACL-read; anything that
+    # errored is disclosed as NOT checked.
     $protected = 0
-    Get-ChildItem $Base -Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
-        $a = Get-Acl -LiteralPath $_.FullName -ErrorAction SilentlyContinue
-        if ($a -and $a.AreAccessRulesProtected) { $protected++ }
+    $verified = 0
+    $notChecked = 0
+    $enumErr = @()
+    Get-ChildItem $Base -Recurse -Force -File -ErrorAction SilentlyContinue -ErrorVariable enumErr | ForEach-Object {
+        try {
+            $a = Get-Acl -LiteralPath $_.FullName -ErrorAction Stop
+            if ($a.AreAccessRulesProtected) { $protected++ }
+            $verified++
+        } catch {
+            $notChecked++
+        }
     }
+    $notChecked += @($enumErr).Count
     if ($protected -gt 0) {
         Fail "$protected file(s) under $Base carry a protected DACL and would be unreadable by standard users. Likely cause: --link-mode copy was dropped. Refusing to leave a broken install."
     }
-    Info 'ACL check passed: 0 protected DACLs.'
+    if ($notChecked -gt 0) {
+        Warn "ACL check INCOMPLETE: $notChecked item(s) could not be enumerated or read and were NOT checked; $verified file(s) verified with 0 protected DACLs."
+    } else {
+        Info "ACL check passed: $verified file(s) enumerated and ACL-read, 0 protected DACLs."
+    }
 
     # --- Machine PATH (idempotent; never clobbers the existing value) ---
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
