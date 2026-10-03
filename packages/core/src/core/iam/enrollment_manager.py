@@ -246,22 +246,6 @@ class EnrollmentManager:
         self.db.flush()
         return count
 
-    def get_user_tokens(self, user_id: str) -> list[EnrollmentToken]:
-        """Get all enrollment tokens for a user.
-
-        Args:
-            user_id: The user_id of the user.
-
-        Returns:
-            List of EnrollmentToken records.
-        """
-        return (
-            self.db.query(EnrollmentToken)
-            .filter(EnrollmentToken.user_id == user_id)
-            .order_by(EnrollmentToken.created_at.desc())
-            .all()
-        )
-
     def cleanup_expired(self) -> int:
         """Remove expired and revoked enrollment tokens.
 
