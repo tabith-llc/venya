@@ -2415,7 +2415,7 @@ def executor_register(client: APIClient, args: Any) -> int:
         # Ruling (ii): fail loud — rc!=0, cert/key/CA kept on disk, wording
         # unambiguous for scripts. An unverified registration is not a success.
         print(
-            f"Executor '{executor_id}' registered, auth NOT verified — " f"certificate kept at {cert_path}.",
+            f"Executor '{executor_id}' registered, auth NOT verified — certificate kept at {cert_path}.",
             file=sys.stderr,
         )
         return 1
