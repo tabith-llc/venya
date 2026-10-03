@@ -536,6 +536,17 @@ else
     warn "Re-run the installer with VENYA_EXECUTOR_ENROLLMENT_TOKEN set (admin mints one: venya admin executor-enroll <executor-id>)."
 fi
 
+# --- #380 (option a): UNCONDITIONAL daemon ReadWritePath pin -----------
+# The 0750 dir pin was born inside the deferred-token guard below, so the
+# immediate-register path (CA_INSTALLED=true) skipped it and a pre-existing
+# world-writable /var/lib/venya/executor survived a fully green install
+# (physical: flash4 LEG-3 sweep X7, venya-exec-2, 2026-10-02; re-confirmed
+# clean re-run + lead live stat). Readers: the daemon (User=venya = owner)
+# and root only. Runs EVERY install; `install -d` resets mode AND owner on
+# existing dirs. Placed after the common venya_create_directories chown-R
+# (:247 -> venya-common.sh:514, owner-only) so this pin is the final word.
+install -d -m 0750 -o venya -g venya /var/lib/venya/executor
+
 # --- Deferred daemon-side registration: persist the token where the daemon
 # can CLEAR it (ticket daemon-bootstrap-token-clear-erofs). /etc/venya is
 # ReadOnlyPaths for the daemon; /var/lib/venya/executor is in its
@@ -546,10 +557,10 @@ fi
 # crash-loop the boot. The daemon still honors a hand-placed legacy section
 # (loud non-fatal clear failure) until old installs are cut over.
 if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ] && [ "$CA_INSTALLED" != true ]; then
-    # #317: 0750 not 0755 — readers are the daemon (User=venya = owner) and
-    # root only; the token file lands 0600, but the old world-traversable dir
-    # plus the :600->602 chmod window made that token locally readable.
-    install -d -m 0750 -o venya -g venya /var/lib/venya/executor
+    # #317: the dir is pinned 0750 unconditionally above (#380 — the pin was
+    # born inside this guard, so the immediate-register path skipped it); the
+    # token file lands 0600: the old world-traversable dir plus the
+    # :600->602 chmod window made a persisted token locally readable.
     printf '%s\n' "$VENYA_EXECUTOR_ENROLLMENT_TOKEN" > /var/lib/venya/executor/bootstrap-token
     chown venya:venya /var/lib/venya/executor/bootstrap-token
     chmod 600 /var/lib/venya/executor/bootstrap-token

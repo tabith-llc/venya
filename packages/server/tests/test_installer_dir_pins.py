@@ -50,3 +50,14 @@ class TestInstallerDirPins:
         assert "mkdir -p /home/venya/.local/share/sandboxes" not in executor
         assert "install -d -m 0750 -g venya /home/venya/.local /home/venya/.local/share" in executor
         assert "install -d -m 0770 -o venya -g venya /home/venya/.local/share/sandboxes" in executor
+
+    def test_executor_daemon_dir_pin_unconditional(self):
+        """#380: the /var/lib/venya/executor pin lives OUTSIDE the CA/token guard."""
+        src = _script("install-venya-executor.sh")
+        pin = "install -d -m 0750 -o venya -g venya /var/lib/venya/executor"
+        guard = 'if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ] && [ "$CA_INSTALLED" != true ]; then'
+        assert src.count(pin) == 1  # single source of truth
+        guard_at = src.index(guard)
+        guard_end = guard_at + src[guard_at:].index("\nfi")
+        assert pin not in src[guard_at:guard_end]  # negative half: not re-nestable
+        assert src.index(pin) < guard_at  # positive: unconditional, precedes guard
