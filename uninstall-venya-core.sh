@@ -116,7 +116,7 @@ userdel -r venya 2> /dev/null || true
 # own [ERROR] and fails the run; the warns above stay as guidance.
 VERIFY_FAILED=0
 for path_item in /etc/systemd/system/venya-core.service \
-                 /opt/venya /etc/venya /var/lib/venya /var/log/venya \
+                 /opt/venya /etc/venya /var/lib/venya /var/log/venya /var/backups/venya \
                  /var/www/.well-known/venya-ca.crt \
                  /usr/local/share/ca-certificates/venya-root-ca.crt \
                  /usr/local/share/ca-certificates/venya-local-ca.crt; do
