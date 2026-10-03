@@ -4,6 +4,14 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+- **CLI: `exec register` verification carries the register-path trust (#395).**
+  The post-register verify call now builds its TLS trust in the ruled order —
+  config-dir CA if present, else the resolved `--ca-bundle`, else a loud
+  error — so a config-less host that registered with `--ca-bundle` can verify
+  instead of always hitting a certificate error. Verification failure now
+  exits non-zero with the certificate kept and the wording
+  `registered, auth NOT verified`; a verified registration still exits 0 with
+  `registered successfully` as before. refs #395
 - **End-to-end mTLS: client identity is crypto-verified at the app.** Admin
   and executor mTLS now read identity from the client certificate the app
   verifies itself (forwarded by nginx over the new inner nginx→uvicorn mTLS

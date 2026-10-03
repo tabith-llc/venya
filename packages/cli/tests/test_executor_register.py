@@ -411,7 +411,10 @@ class TestExecutorRegister:
             },
         )
 
-        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
+        with (
+            patch("venya_cli.api_client.httpx2.Client") as MockClient,
+            patch("venya_cli.commands._verify_register_auth"),
+        ):
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
@@ -529,7 +532,10 @@ class TestExecutorRegister:
             },
         )
 
-        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
+        with (
+            patch("venya_cli.api_client.httpx2.Client") as MockClient,
+            patch("venya_cli.commands._verify_register_auth"),
+        ):
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
@@ -571,7 +577,10 @@ class TestExecutorRegister:
             },
         )
 
-        with patch("venya_cli.api_client.httpx2.Client") as MockClient:
+        with (
+            patch("venya_cli.api_client.httpx2.Client") as MockClient,
+            patch("venya_cli.commands._verify_register_auth"),
+        ):
             MockClient.return_value.__enter__.return_value = MockClient.return_value
             MockClient.return_value.post.return_value = mock_response
 
@@ -643,7 +652,10 @@ class TestExecutorIdResolution:
         client = _mock_register_client()
         args = _register_args(tmp_path, executor_id="flag-exec")
 
-        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)):
+        with (
+            patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)),
+            patch("venya_cli.commands._verify_register_auth"),
+        ):
             assert executor_register(client, args) == 0
         kwargs = client.register_executor.call_args.kwargs
         assert kwargs["executor_id"] == "flag-exec"
@@ -659,7 +671,10 @@ class TestExecutorIdResolution:
         client = _mock_register_client()
         args = _register_args(tmp_path)
 
-        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)):
+        with (
+            patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)),
+            patch("venya_cli.commands._verify_register_auth"),
+        ):
             assert executor_register(client, args) == 0
         kwargs = client.register_executor.call_args.kwargs
         assert kwargs["executor_id"] == "venya-exec-1"
@@ -725,7 +740,10 @@ class TestExecutorIdResolution:
         client = _mock_register_client()
         args = _register_args(tmp_path, executor_id="flag-exec", ca_bundle="/flag/ca.crt")
 
-        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)):
+        with (
+            patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)),
+            patch("venya_cli.commands._verify_register_auth"),
+        ):
             assert executor_register(client, args) == 0
         assert client.register_executor.call_args.kwargs["ca_bundle"] == "/flag/ca.crt"
 
@@ -738,7 +756,10 @@ class TestExecutorIdResolution:
         client = _mock_register_client()
         args = _register_args(tmp_path)
 
-        with patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)):
+        with (
+            patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(toml)),
+            patch("venya_cli.commands._verify_register_auth"),
+        ):
             assert executor_register(client, args) == 0
         assert client.register_executor.call_args.kwargs["ca_bundle"] == "/toml/ca.crt"
 
@@ -757,6 +778,7 @@ class TestEnrollmentTokenEnv:
         with (
             patch("venya_cli.commands.EXECUTOR_TOML_PATH", str(tmp_path / "absent.toml")),
             patch.dict(os.environ, environ),
+            patch("venya_cli.commands._verify_register_auth"),
         ):
             assert executor_register(client, args) == 0
         return client.register_executor.call_args.kwargs["enrollment_token"]
@@ -1040,7 +1062,10 @@ class TestExecutorRegisterFileModes:
             },
         )
         try:
-            with patch("venya_cli.api_client.httpx2.Client") as MockClient:
+            with (
+                patch("venya_cli.api_client.httpx2.Client") as MockClient,
+                patch("venya_cli.commands._verify_register_auth"),
+            ):
                 MockClient.return_value.__enter__.return_value = MockClient.return_value
                 MockClient.return_value.post.return_value = mock_response
                 return executor_register(client, args)
@@ -1143,7 +1168,10 @@ class TestRegisterDirHardening373:
             },
         )
         try:
-            with patch("venya_cli.api_client.httpx2.Client") as MockClient:
+            with (
+                patch("venya_cli.api_client.httpx2.Client") as MockClient,
+                patch("venya_cli.commands._verify_register_auth"),
+            ):
                 MockClient.return_value.__enter__.return_value = MockClient.return_value
                 MockClient.return_value.post.return_value = mock_response
                 result = executor_register(client, args)
@@ -1162,12 +1190,12 @@ class TestRegisterDirHardening373:
         def spy_fchown(fd, uid, gid):
             fchown_calls.append((uid, gid))
 
-        with patch("venya_cli.commands.os.geteuid", return_value=0), patch(
-            "venya_cli.commands.os.chown", side_effect=spy_chown
-        ), patch("venya_cli.commands.os.fchown", side_effect=spy_fchown), patch(
-            "pwd.getpwnam", return_value=SimpleNamespace(pw_uid=4444)
-        ), patch(
-            "grp.getgrnam", return_value=SimpleNamespace(gr_gid=5555)
+        with (
+            patch("venya_cli.commands.os.geteuid", return_value=0),
+            patch("venya_cli.commands.os.chown", side_effect=spy_chown),
+            patch("venya_cli.commands.os.fchown", side_effect=spy_fchown),
+            patch("pwd.getpwnam", return_value=SimpleNamespace(pw_uid=4444)),
+            patch("grp.getgrnam", return_value=SimpleNamespace(gr_gid=5555)),
         ):
             assert self._register(tmp_path) == 0
 
@@ -1187,9 +1215,11 @@ class TestRegisterDirHardening373:
         def spy_fchown(fd, uid, gid):
             fchown_calls.append((uid, gid))
 
-        with patch("venya_cli.commands.os.geteuid", return_value=1000), patch(
-            "venya_cli.commands.os.chown", side_effect=spy_chown
-        ), patch("venya_cli.commands.os.fchown", side_effect=spy_fchown):
+        with (
+            patch("venya_cli.commands.os.geteuid", return_value=1000),
+            patch("venya_cli.commands.os.chown", side_effect=spy_chown),
+            patch("venya_cli.commands.os.fchown", side_effect=spy_fchown),
+        ):
             assert self._register(tmp_path) == 0
 
         assert chown_calls == []
@@ -1206,10 +1236,11 @@ class TestRegisterDirHardening373:
         def spy_fchown(fd, uid, gid):
             fchown_calls.append((uid, gid))
 
-        with patch("venya_cli.commands.os.geteuid", return_value=0), patch(
-            "venya_cli.commands.os.chown", side_effect=spy_chown
-        ), patch("venya_cli.commands.os.fchown", side_effect=spy_fchown), patch(
-            "pwd.getpwnam", side_effect=KeyError("venya")
+        with (
+            patch("venya_cli.commands.os.geteuid", return_value=0),
+            patch("venya_cli.commands.os.chown", side_effect=spy_chown),
+            patch("venya_cli.commands.os.fchown", side_effect=spy_fchown),
+            patch("pwd.getpwnam", side_effect=KeyError("venya")),
         ):
             assert self._register(tmp_path) == 0
 
@@ -1226,12 +1257,12 @@ class TestRegisterDirHardening373:
         def spy_fchown(fd, uid, gid):
             fchown_calls.append((uid, gid))
 
-        with patch("venya_cli.commands.os.geteuid", return_value=0), patch(
-            "venya_cli.commands.os.chown", side_effect=PermissionError(13, "Permission denied")
-        ), patch("venya_cli.commands.os.fchown", side_effect=spy_fchown), patch(
-            "pwd.getpwnam", return_value=SimpleNamespace(pw_uid=4444)
-        ), patch(
-            "grp.getgrnam", return_value=SimpleNamespace(gr_gid=5555)
+        with (
+            patch("venya_cli.commands.os.geteuid", return_value=0),
+            patch("venya_cli.commands.os.chown", side_effect=PermissionError(13, "Permission denied")),
+            patch("venya_cli.commands.os.fchown", side_effect=spy_fchown),
+            patch("pwd.getpwnam", return_value=SimpleNamespace(pw_uid=4444)),
+            patch("grp.getgrnam", return_value=SimpleNamespace(gr_gid=5555)),
         ):
             assert self._register(tmp_path) == 0
 
