@@ -142,7 +142,16 @@ def run_command(args: Any) -> int:
     # config.json (APIClient fallback). Empty env falls through (ticket
     # cli-server-url-env-ignored: headless guidance drove the CLI by env only,
     # which silently hit the localhost:8000 default -> Errno 111).
-    server_url = getattr(args, "server_url", None) or os.environ.get("VENYA_SERVER_URL") or None
+    # #387: the exec-family alias is dest=core_url (--core-url / --server-url)
+    # — it never reached this chokepoint, so `exec register` posted the CSR to
+    # the flag URL while the client's post-register verify call silently hit
+    # the config/env default (Errno 111 on config-less hosts).
+    server_url = (
+        getattr(args, "server_url", None)
+        or getattr(args, "core_url", None)
+        or os.environ.get("VENYA_SERVER_URL")
+        or None
+    )
     client = APIClient(server_url=server_url)
 
     # Authenticate if no token is available (init, setup, enroll, login,
