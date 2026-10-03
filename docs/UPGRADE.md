@@ -20,6 +20,9 @@ Guaranteed by a version-changing re-run:
 - **Stored-reuse, fail-loud.** The stored DB password, server passphrase, and
   recovery pepper are reused from `/opt/venya/.env`; an explicitly-passed
   value that does not match the stored one aborts the run before any change.
+  A re-run whose stored file is gone is still fail-loud: the installer
+  authenticates the existing PostgreSQL role before its first DB write and
+  aborts with the remedy printed, rather than rotating the password silently.
 - **A pre-upgrade backup before migrations.** Any version-changing re-run
   (up or down) takes a compressed `pg_dump` to `/var/backups/venya/` before
   migrations run. Same-version re-runs and fresh installs take none.
@@ -109,6 +112,13 @@ re-probe (Troubleshooting below).
   with `VENYA_DB_PASSWORD does not match the password stored in /opt/venya/.env
   (VENYA_DB_URL).` … `Aborting — no changes made.` and exit 1. Drill-verified
   state-intact: health and backup inventory unchanged after the abort.
+- **Stored `.env` gone (for example, after a partial wipe).** The installer
+  proves that any existing database role authenticates with the supplied
+  password BEFORE the first DB write; a stale role aborts with
+  `The PostgreSQL role 'venya' exists but does not authenticate with the
+  password this install will use.` … `Aborting — no changes made.` Re-run with
+  the role's actual password, or rotate deliberately with `ALTER USER` and
+  re-run carrying the new one — rotation is always a manual, deliberate act.
 - The server passphrase and recovery pepper follow the same
   reuse-or-must-match rule (their own messages).
 

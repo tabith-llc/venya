@@ -92,9 +92,11 @@ curl -sk https://<core-host>/api/v1/health
 
 **Re-runs are the idempotency contract.** Re-running an installer on a live
 host reuses stored secrets (`.env` stays byte-identical; an explicitly passed
-passphrase must MATCH the stored one or the install aborts), redeploys the
-packages, and **restarts the running service when the process predates the
-new bytes** — a loud NOTICE names both timestamps and a PROOF-OF-FRESH-BYTES
+passphrase must MATCH the stored one or the install aborts — and if the stored
+file itself is gone, the installer still authenticates the existing database
+role before any write, aborting rather than rotating its password silently),
+redeploys the packages, and **restarts the running service when the process
+predates the new bytes** — a loud NOTICE names both timestamps and a PROOF-OF-FRESH-BYTES
 line attests the verification probed the new process (ticket
 `installer-rerun-no-service-restart`). No manual `systemctl restart` is
 needed after a re-run; check for the PROOF line in the transcript before

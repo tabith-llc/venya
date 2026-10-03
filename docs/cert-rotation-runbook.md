@@ -269,16 +269,19 @@ Fresh installs seed one active `v1` key version (migration
 
 There is NO in-place CA-rotation command. The supported mechanism is the installer's
 create-if-absent behavior: the CA is generated only when `/var/lib/venya/ca/ca.key` is
-absent (`install-venya-core.sh:289-331`), while the server TLS cert, relay cert, system
+absent (`install-venya-core.sh`, the `if not ca_key_path.exists()` branch through the
+`CA already exists - preserved` print), while the server TLS cert, relay cert, system
 trust, well-known copy, and nginx client-CA bundle are rebuilt on EVERY run
-(`:335-457`). Rotating the root CA therefore means: remove it, re-run the installer,
+(the server-TLS, relay/inner, trust-store, well-known, and bundle blocks that follow).
+Rotating the root CA therefore means: remove it, re-run the installer,
 then re-enroll every executor.
 
 **Impact:** ALL executor client certs signed by the old CA become unverifiable — every
 executor must re-register (§3). The admin CA under `/var/lib/venya/ca/admin-ca/` can be
-PRESERVED (installer re-creates it only if absent, `:166-168`) — preserving it keeps
+PRESERVED (installer re-creates it only if absent — the `if not cm.has_ca` /
+`Admin CA already exists - preserved` branch) — preserving it keeps
 existing admin client certs valid for mTLS, but note the installer still RE-ISSUES the
-`/etc/venya/admin/admin.crt|.key` pair each run (`:172-192`), so workstation copies
+`/etc/venya/admin/admin.crt|.key` pair each run (the `Admin cert generated` block), so workstation copies
 should be refreshed from the core afterwards. The database (users, secrets, KEK,
 sessions) is untouched — secret encryption does not depend on the TLS CA.
 

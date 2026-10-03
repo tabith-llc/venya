@@ -136,7 +136,13 @@ admin) and the executor re-registers. Target hosts hold nothing — no backup ne
 ## Restore (core server)
 
 1. Reinstall the core (`install-venya-core.sh`) on the host, **or** restore onto a host that
-   already has PostgreSQL + nginx. Let the installer create an empty `venya` DB. Note the
+   already has PostgreSQL + nginx. Let the installer create an empty `venya` DB. If you are
+   clearing an old host first, go in order: release the grants the database role owns
+   INSIDE the old database, then drop the database, then drop the cluster-wide login role —
+   dropping only the database leaves the role alive on its previous password, and the
+   installer's pre-write authentication probe stops the install (with the remedy printed)
+   until the supplied password matches the role or the password is rotated deliberately.
+   Note the
    installer's CA behavior (drill-confirmed): it **preserves an existing on-disk CA** — if
    `/var/lib/venya/ca/ca.key` is present it prints "CA already exists - preserved" and
    mints nothing; it only generates a fresh CA when the key is absent. Either way, the
