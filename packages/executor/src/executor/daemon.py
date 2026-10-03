@@ -25,6 +25,7 @@ import signal
 import ssl
 import sys
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -175,6 +176,57 @@ def _token_required_error(exc: httpx2.HTTPStatusError, *, rotation: bool = False
 
 _TLS_ERROR_KEYWORDS = ("ssl", "certificate", "tls", "verif")
 
+# #24 (executor-register-retry-storm-ratelimit-lockout): in-process retry
+# budget for TRANSIENT registration failures (429/5xx/network). Permanent
+# rejects (401/403/404) never enter this path — they stop loud. The unit
+# (RestartSec/StartLimit) paces anything beyond this budget.
+# ponytail: fixed constants; promote to config knobs only when an operator needs tuning.
+_REGISTER_RETRY_ATTEMPTS = 4
+_REGISTER_RETRY_BASE_SECONDS = 5.0
+_REGISTER_RETRY_CAP_SECONDS = 60.0
+_PERMANENT_REGISTER_STATUSES = (401, 403, 404)
+
+
+def _register_retry_delay(exc: httpx2.HTTPStatusError, attempt: int) -> float:
+    """Backoff for a transient register reject: a server Retry-After (every 429
+    this endpoint emits carries one — rate_limit contract, ticket
+    delta-b-run-low-bundle O2) wins when parseable, else exponential
+    5/10/20s capped. The daemon must never wait LESS than the limiter window."""
+    raw: object = None
+    try:
+        raw = exc.response.headers.get("Retry-After")
+    except AttributeError:
+        raw = None
+    if raw is not None:
+        try:
+            return max(1.0, min(float(int(str(raw).strip())), 900.0))
+        except (TypeError, ValueError):
+            pass
+    return min(_REGISTER_RETRY_BASE_SECONDS * (2**attempt), _REGISTER_RETRY_CAP_SECONDS)
+
+
+def _permanent_rejection_error(exc: httpx2.HTTPStatusError) -> RuntimeError:
+    """#24: a permanent register rejection retried at systemd's 100 ms default
+    burns the register rate limiter within seconds and the resulting 429 masks
+    the root cause in the journal. Name the status + the server's reason ONCE,
+    loudly; the boot stops — re-enrollment is the operator's decision, same
+    posture as the token-required and ghost-identity classes."""
+    resp = exc.response
+    code = getattr(resp, "status_code", "unknown")
+    try:
+        detail = str(resp.json().get("detail", "")) or str(getattr(resp, "text", ""))
+    except Exception:
+        detail = ""
+    msg = (
+        f"Registration permanently rejected by the core (HTTP {code}): {detail} — "
+        "retrying cannot change this outcome (identity revoked, bad or expired "
+        "enrollment token, or executor not enrollable). Mint a fresh token "
+        "(`venya admin executor-enroll <executor-id>`), fix the cause, then "
+        "`systemctl restart venya-executor`. Exiting; no retry storm."
+    )
+    logger.error("%s", msg)
+    return RuntimeError(msg)
+
 
 def _is_tls_handshake_failure(exc: BaseException) -> bool:
     """True when a transport error is a TLS-level rejection, not plain connectivity.
@@ -314,34 +366,72 @@ class CertificateManager:
         else:
             verify_param = False
 
-        try:
-            with httpx2.Client(verify=verify_param, timeout=self.config.network.registration_timeout_seconds) as client:
-                response = client.post(url, json=payload)
-            response.raise_for_status()
-        except httpx2.HTTPStatusError as e:
-            # Token-required 400 becomes an actionable named error; the boot
-            # path lets it propagate → exit 1 (ero-fs fail-fast semantics).
-            actionable = _token_required_error(e)
-            if actionable is not None:
-                raise actionable from e
-            raise
-        except httpx2.ConnectError as e:
-            # Log full traceback in debug mode for deep diagnostics
-            if os.environ.get("VENYA_DEBUG"):
-                import traceback
+        response: httpx2.Response | None = None
+        for attempt in range(_REGISTER_RETRY_ATTEMPTS):
+            try:
+                with httpx2.Client(
+                    verify=verify_param, timeout=self.config.network.registration_timeout_seconds
+                ) as client:
+                    response = client.post(url, json=payload)
+                response.raise_for_status()
+                break
+            except httpx2.HTTPStatusError as e:
+                # Token-required 400 becomes an actionable named error; the boot
+                # path lets it propagate → exit 1 (ero-fs fail-fast semantics).
+                actionable = _token_required_error(e)
+                if actionable is not None:
+                    raise actionable from e
+                code = getattr(e.response, "status_code", None)
+                if code in _PERMANENT_REGISTER_STATUSES:
+                    # #24: revoked/bad-token/un-enrollable — stop loud, single
+                    # log naming the root cause; a systemd-paced restart is the
+                    # operator's path, never an in-process or 100 ms loop.
+                    raise _permanent_rejection_error(e) from e
+                transient = isinstance(code, int) and (code == 429 or code >= 500)
+                if not transient or attempt == _REGISTER_RETRY_ATTEMPTS - 1:
+                    raise
+                delay = _register_retry_delay(e, attempt)
+                logger.warning(
+                    "Registration transiently rejected (HTTP %s) — retrying in %.0fs (%d/%d attempts)",
+                    code,
+                    delay,
+                    attempt + 2,
+                    _REGISTER_RETRY_ATTEMPTS,
+                )
+                time.sleep(delay)
+            except httpx2.ConnectError as e:
+                # Log full traceback in debug mode for deep diagnostics
+                if os.environ.get("VENYA_DEBUG"):
+                    import traceback
 
-                logger.error("Full exception chain:\n%s", traceback.format_exc())
+                    logger.error("Full exception chain:\n%s", traceback.format_exc())
 
-            # Determine if this is a TLS failure by inspecting the exception chain
-            # httpx2 wraps ssl.SSLError as ConnectError — check the message for TLS keywords
-            if any(t in str(e).lower() for t in _TLS_ERROR_KEYWORDS):
-                raise RuntimeError(
-                    f"Registration failed: TLS verification error — {e}. " "Verify server CA is trusted."
-                ) from e
-            raise RuntimeError(
-                f"Registration failed: cannot reach server — {e}. "
-                "Check: DNS resolution, network connectivity, and core service status."
-            ) from e
+                # Determine if this is a TLS failure by inspecting the exception chain
+                # httpx2 wraps ssl.SSLError as ConnectError — check the message for TLS keywords
+                if any(t in str(e).lower() for t in _TLS_ERROR_KEYWORDS):
+                    raise RuntimeError(
+                        f"Registration failed: TLS verification error — {e}. " "Verify server CA is trusted."
+                    ) from e
+                # #24: plain reachability blips retry in-process with backoff;
+                # TLS/CA faults above stay single-shot (they are configuration
+                # problems, and re-POSTing them cannot help).
+                if attempt == _REGISTER_RETRY_ATTEMPTS - 1:
+                    raise RuntimeError(
+                        f"Registration failed: cannot reach server — {e}. "
+                        "Check: DNS resolution, network connectivity, and core service status."
+                    ) from e
+                delay = min(_REGISTER_RETRY_BASE_SECONDS * (2**attempt), _REGISTER_RETRY_CAP_SECONDS)
+                logger.warning(
+                    "Registration unreachable (%s) — retrying in %.0fs (%d/%d attempts)",
+                    e,
+                    delay,
+                    attempt + 2,
+                    _REGISTER_RETRY_ATTEMPTS,
+                )
+                time.sleep(delay)
+
+        if response is None:  # pragma: no cover — the loop always breaks or raises
+            raise RuntimeError("Registration failed: no response from server")
 
         data = response.json()
 

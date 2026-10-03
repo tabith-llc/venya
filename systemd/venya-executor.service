@@ -2,6 +2,11 @@
 Description=Venya Executor Daemon
 After=network.target tmp-venya_secrets.mount
 Requires=tmp-venya_secrets.mount
+# #24: a permanent register rejection (revoked identity, bad token) must park
+# the unit in failed state instead of hot-looping the core's register rate
+# limiter — five restarts in 3 s turned a loud 400 into a masking 429.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -9,6 +14,7 @@ User=venya
 Group=venya
 ExecStart=/opt/venya/.venv/bin/venya-executor --config /etc/venya/executor.toml
 Restart=always
+RestartSec=5s
 
 # Executor must NOT have CAP_IPC_LOCK — jump host is untrusted
 # All capabilities dropped by default (NoNewPrivileges=true)
