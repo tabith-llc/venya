@@ -251,35 +251,6 @@ class CommandValidator:
         remote_part = " ".join(tokens[dest_idx + 1 :])
         return local_part, remote_part
 
-    def _parse_allow_hosts(self, command: str) -> list[dict[str, Any]]:
-        """Parse --allow-host flags from the command string.
-
-        Args:
-            command: The command string (may contain --allow-host flags).
-
-        Returns:
-            List of {host, port} dicts parsed from --allow-host flags.
-        """
-        import re
-
-        allowed_hosts: list[dict[str, Any]] = []
-        pattern = r"--allow-host\s+(\S+)"
-
-        for match in re.finditer(pattern, command):
-            host_port = match.group(1)
-            if ":" in host_port:
-                host, port_str = host_port.rsplit(":", 1)
-                try:
-                    port = int(port_str)
-                    allowed_hosts.append({"host": host, "port": port})
-                except ValueError:
-                    pass  # Invalid port, skip
-            else:
-                # No port specified, default to all ports
-                allowed_hosts.append({"host": host_port, "port": 0})
-
-        return allowed_hosts
-
     def _matches_dangerous_pattern(self, command: str) -> tuple[bool, str]:
         """Check if command matches any dangerous pattern.
 
