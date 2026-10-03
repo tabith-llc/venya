@@ -61,3 +61,15 @@ class TestInstallerDirPins:
         guard_end = guard_at + src[guard_at:].index("\nfi")
         assert pin not in src[guard_at:guard_end]  # negative half: not re-nestable
         assert src.index(pin) < guard_at  # positive: unconditional, precedes guard
+
+    def test_executor_kvm_group_assert_unconditional(self):
+        """#384: the kvm group re-assert is idempotent and OUTSIDE the fresh-sbx guard."""
+        src = _script("install-venya-executor.sh")
+        pin = "usermod -aG kvm venya"
+        guard = "if ! command -v sbx &>/dev/null; then"
+        assert src.count(pin) == 1  # single source of truth
+        assert src.count("getent group kvm >/dev/null && usermod -aG kvm venya 2>/dev/null || true") == 1
+        guard_at = src.index(guard)
+        guard_end = guard_at + src[guard_at:].index("\nfi")
+        assert pin not in src[guard_at:guard_end]  # negative half: not re-nestable
+        assert src.index(pin) > src.index("venya_create_user")  # positive: runs after the user exists
