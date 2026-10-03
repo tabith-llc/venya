@@ -296,6 +296,13 @@ def create_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # admin remove-executor
+    remove_executor_parser = admin_sub.add_parser(
+        "remove-executor",
+        help="Remove an executor row (revokes its current certificate; refused while execution sessions are retained)",
+    )
+    remove_executor_parser.add_argument("executor_id", help="Executor ID to remove")
+
     # admin executor-enroll
     enroll_executor_parser = admin_sub.add_parser(
         "executor-enroll", help="Generate an enrollment token for an executor"
