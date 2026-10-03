@@ -284,6 +284,12 @@ Notable changes to Venya will be documented in this file.
   docstring's stale "server→executor propagation is not wired" claim was
   corrected — propagation is wired (861a682) and the row enforces fleet-wide
   via heartbeat.
+- **Installer: fresh executor installs fail fast without an enrollment token
+  (#28).** A missing or empty `VENYA_EXECUTOR_ENROLLMENT_TOKEN` on an install
+  with no incumbent `/etc/venya/executor/executor.crt` now exits 1 with
+  minting guidance (`venya admin executor-enroll <id>`, single-use, ~30-min
+  TTL) before any system write, mirroring the `VENYA_SERVER_URL` Require
+  block; re-runs over an existing certificate proceed tokenless as before.
 
 ## [0.1.0alpha16] - 2026-09-27
 
