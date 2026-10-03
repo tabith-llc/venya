@@ -241,6 +241,37 @@ manually; the enrollment token is already consumed server-side` and continues
 from `/etc/venya/executor.toml`. The residue is a spent single-use token only,
 but remove it as hygiene.
 
+**CA trust chain — how the executor gets its trust anchor (two paths).**
+The executor installer acquires the core's CA certificate in one of two ways,
+and the two paths have different trust properties (documented per ticket
+`executor-installer-ca-fetch-insecure-tofu` #23 — this is a documentation of
+the bootstrap design, not a change to it):
+
+1. **Pre-copied CA file (recommended for security-sensitive deployments).**
+   Set `VENYA_VENYA_CA_FILE=/path/to/ca.crt` (the `venya admin executor-enroll
+   --output-dir <dir>` bundle writes `core-server-ca.crt` beside the token and
+   prints a `SHA256` bundle fingerprint — verify that fingerprint against the
+   core before copying: `sha256sum /var/lib/venya/ca/ca.crt` on the core).
+   The installer installs the file you verified — no network fetch of the
+   trust anchor is involved.
+2. **Online fetch fallback (convenience TOFU).** With no pre-copied file, the
+   installer fetches `/.well-known/venya-ca.crt` from the core over an
+   **unverified** TLS connection (`curl --insecure`) and installs it as the
+   trust anchor. This is trust-on-first-use: it works on a fresh LAN install,
+   but an attacker positioned between the executor host and the core **during
+   this one fetch** could substitute their own CA, and every later "verified"
+   chain would descend from the substituted anchor. The post-install
+   connections themselves are fully verified against whatever anchor was
+   installed — the exposure is the install moment only.
+
+   If this fallback cannot reach the core, the CA is not installed and
+   registration defers to daemon start (above); the installer warns and prints
+   the pre-copy remedy. Use path 1 wherever the network between executor and
+   core is not fully trusted (cross-tenant networks, the internet, or any
+   segment you would not run a plain-HTTP mirror on). A hardening option
+   (fingerprint-pin env with fail-closed comparison) is tracked as a separate
+   ruling on ticket #23 and is **not** current installer behavior.
+
 **Docker account credentials are required.** The sbx sandbox runtime pulls
 its agent template from Docker: the installer prompts for a Docker username
 and API key/access token (interactive runs), or takes
