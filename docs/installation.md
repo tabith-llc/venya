@@ -293,8 +293,10 @@ is non-fatal — loud warning, and the first command falls back to the cold
 pull path.
 
 The sandbox DNS resolver is explicit config — `VENYA_DNS_RESOLVER` (required,
-no default; strict IPv4, validated before any write). It is the resolver IP
-sandboxed commands may use, always allowed for egress. Re-runs reuse the value
+no default; strict IPv4, validated before any write). It is always allowed
+for sandbox egress; hostname targets resolve only when the hostname itself is
+listed in the egress allowlist (the sandbox DNS proxy authorizes per domain).
+Re-runs reuse the value
 already stored in `/etc/venya/executor.toml` (the toml write overwrites on every
 run, so the installer preserves the stored value rather than re-guessing). Find
 yours with `resolvectl status` or `grep nameserver /etc/resolv.conf`. An

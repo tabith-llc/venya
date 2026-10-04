@@ -680,7 +680,7 @@ venya_resolve_dns_resolver() {
         fi
     fi
     if [ -z "$DNS_RESOLVER" ]; then
-        error "VENYA_DNS_RESOLVER is required — the IP of the DNS resolver sandboxed commands may use."
+        error "VENYA_DNS_RESOLVER is required — the IP always allowed for sandbox egress (hostname targets resolve only when the hostname itself is in the egress allowlist)."
         error "Find yours with: resolvectl status   (or: grep nameserver /etc/resolv.conf)"
         error "Example: VENYA_DNS_RESOLVER=198.51.100.53"
         exit 1

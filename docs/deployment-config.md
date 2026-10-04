@@ -55,11 +55,11 @@ Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart
 
 **Requirement:** MUST be set to a valid IPv4 address. With no value the executor daemon **refuses to start** — the check runs in `ExecutorDaemon.start()` before registration, so the one-shot enrollment token is never consumed on a doomed boot. This is a named, loud failure by design (owner ruling D1 option (a): "Venya never guesses your network"); there is no built-in default.
 
-**Purpose:** The DNS resolver IP that sandboxed commands may use; it is always admitted to the sandbox egress policy. Without it, hostname-based egress entries can never resolve inside the sandbox, so the egress policy cannot be built.
+**Purpose:** The DNS resolver IP that is always allowed for sandbox egress. Hostname targets resolve only when the hostname itself is listed in the egress allowlist — the sandbox DNS proxy authorizes per domain. Without the resolver the egress policy cannot be built, so the executor refuses to start.
 
 **Error on missing (named ERROR log then `exit 1`; verbatim from `daemon.py` `start()`):**
 ```
-dns_resolver is not configured — refusing to start: the sandbox egress policy cannot be built and hostname targets could never resolve. Set `dns_resolver` in /etc/venya/executor.toml or VENYA_EXECUTOR_DNS_RESOLVER in the service environment (find your resolver: resolvectl status or grep nameserver /etc/resolv.conf).
+dns_resolver is not configured — refusing to start: the sandbox egress policy cannot be built without it. The resolver IP is always allowed for sandbox egress; hostname targets resolve only when the hostname itself is in the egress allowlist. Set `dns_resolver` in /etc/venya/executor.toml or VENYA_EXECUTOR_DNS_RESOLVER in the service environment (find your resolver: resolvectl status or grep nameserver /etc/resolv.conf).
 ```
 
 **How to find the value:** `resolvectl status` or `grep nameserver /etc/resolv.conf`.
