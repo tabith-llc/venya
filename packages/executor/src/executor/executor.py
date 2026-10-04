@@ -790,8 +790,14 @@ class Executor:
             logger.exception("Sandbox execution failed")
             raise
         finally:
-            # Always remove the sandbox
-            strategy.remove_sandbox()
+            # Always remove the sandbox. A teardown raise (subprocess-level:
+            # timeout, missing sbx binary) must never REPLACE the in-flight
+            # origin exception (ticket sandbox-teardown-finally-raise-masks-
+            # origin-error #417): swallow it and log, naming the sandbox.
+            try:
+                strategy.remove_sandbox()
+            except Exception:
+                logger.warning("Sandbox teardown failed for %s; origin outcome preserved", sandbox_name, exc_info=True)
 
     # ================================================================
     # SHARED FILTERING (used by both execution paths)
