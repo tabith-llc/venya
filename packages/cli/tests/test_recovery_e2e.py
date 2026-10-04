@@ -331,6 +331,14 @@ def test_recovery_e2e_full_loop(tmp_path):
     finally:
         db.close()
 
+    # Seed the in-memory Fido2Store the way the production handlers do after
+    # their DB write succeeds (enroll.py / init.py / credentials.py, ticket
+    # webauthn-credential-id-crosscheck #416: finish_registration no longer
+    # stores — a direct-DB fixture must carry the store seed too, or the
+    # assertion path (store-only lookup, manager.py finish_authentication)
+    # answers "Credential not found").
+    app.state.fido2_manager.store.store_credential(cred_b)
+
     resp = client.post("/api/v1/auth/login/start", json={"user_id": "newadmin"})
     assert resp.status_code == 200, resp.text
     login = resp.json()
