@@ -416,6 +416,15 @@ mkdir -p /var/log/venya
     printf 'ca_cert = "/etc/venya/executor/ca.crt"\n'
     printf 'cert = "/etc/venya/executor/executor.crt"\n'
     printf 'key = "/etc/venya/executor/executor.key"\n'
+    case "$SERVER_URL" in
+      https://*)
+        if [ "$CA_INSTALLED" = true ]; then
+          printf '\n'
+          printf '[audit]\n'
+          printf 'remote_url = "%s"\n' "${SERVER_URL%/}/api/v1/audit/ingest"
+          printf 'ca_cert_path = "%s"\n' "$CA_BUNDLE_PATH"
+        fi ;;
+    esac
 } > /etc/venya/executor.toml
 
 info "Executor config written to /etc/venya/executor.toml"
