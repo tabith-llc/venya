@@ -20,6 +20,7 @@ import contextlib
 import json
 import logging
 import os
+import ssl
 import tempfile
 import threading
 import time
@@ -243,6 +244,29 @@ class AuditLogger:
                 time.sleep(backoff)
                 backoff = min(backoff * 2, self._config.retry_max_delay)
 
+    def _build_forward_ssl_context(self) -> ssl.SSLContext:
+        """One TLS context carrying both directions for the forward client (#432).
+
+        Port of the cli-admin-mtls-verify-cert-conflict precedent
+        (venya_cli.api_client._build_ssl_context): httpx2 >= 2.12 rejects a
+        string ``verify=`` combined with ``cert=``, so the CA anchors and the
+        executor mTLS client cert chain live in a single SSLContext.
+
+        Fail-closed postures preserved: a missing/empty ca_cert_path falls
+        back to the system trust store (``load_default_certs()``), never
+        False; a CA or cert-FILE load failure raises into the per-cycle
+        handler in ``_forward_once`` (spool lines kept, loud log, no crash
+        loop — same semantics as the old constructor TypeError, now fixed).
+        """
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if self._config.ca_cert_path:
+            ctx.load_verify_locations(cafile=self._config.ca_cert_path)
+        else:
+            ctx.load_default_certs()
+        if self._client_cert:
+            ctx.load_cert_chain(certfile=self._client_cert[0], keyfile=self._client_cert[1])
+        return ctx
+
     def _forward_once(self) -> bool:
         """Drain up to min(max_buffer_size, max_batch_lines) spool lines to the remote.
 
@@ -284,11 +308,7 @@ class AuditLogger:
                 return True
 
             client = httpx2.Client(
-                # Fail closed: config validation guarantees ca_cert_path when
-                # remote_url is set; if validation is bypassed (direct
-                # mutation), fall back to the system trust store — never False.
-                verify=self._config.ca_cert_path if self._config.ca_cert_path else True,
-                cert=self._client_cert,
+                verify=self._build_forward_ssl_context(),
                 timeout=self._config.request_timeout_seconds,
             )
             batch = lines
