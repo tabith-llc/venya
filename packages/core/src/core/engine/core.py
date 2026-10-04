@@ -14,6 +14,7 @@ from sqlalchemy import or_
 
 from ..iam.models import Role, Secret, SecretRole, SessionSecret
 from .backend import Backend, ensure_kek_sentinel
+from .encryption import DecryptionError
 from .encryption import decrypt_secret as _decrypt_secret_impl
 from .rate_limiter import RateLimiter
 
@@ -118,10 +119,19 @@ class Core:
 
         session = self.backend.get_session()
         try:
-            secret = self._resolve_secret_in(session, secret_key, user_id, role_names)
-            if secret is None:
-                raise CoreAccessError(f"Secret not found: {secret_key}")
-            return secret.id, self.decrypt_secret(secret), dict(secret.meta or {})
+            try:
+                secret = self._resolve_secret_in(session, secret_key, user_id, role_names)
+                if secret is None:
+                    raise CoreAccessError(f"Secret not found: {secret_key}")
+                result = (secret.id, self.decrypt_secret(secret), dict(secret.meta or {}))
+            except (CoreAccessError, DecryptionError):
+                # Ticket ratelimiter-lockout-inert (refs #385): retrieval
+                # failures count; the Nth raises RateLimitExceededError —
+                # that IS the lockout arming, and it propagates.
+                self.rate_limiter.record_failure(user_id)
+                raise
+            self.rate_limiter.record_success(user_id)
+            return result
         finally:
             session.close()
 
@@ -157,26 +167,32 @@ class Core:
 
         session = self.backend.get_session()
         try:
-            # Visibility: role-scoped match OR creator (single enforcement
-            # point — _resolve_secret_in). Scoped-out and nonexistent keys are
-            # indistinguishable.
-            secret = self._resolve_secret_in(session, secret_key, user_id, role_names)
+            try:
+                # Visibility: role-scoped match OR creator (single enforcement
+                # point — _resolve_secret_in). Scoped-out and nonexistent keys
+                # are indistinguishable.
+                secret = self._resolve_secret_in(session, secret_key, user_id, role_names)
 
-            if secret is None:
-                raise CoreAccessError(f"Secret not found: {secret_key}")
+                if secret is None:
+                    raise CoreAccessError(f"Secret not found: {secret_key}")
 
-            # For executor: always plaintext
-            if caller == Caller.EXECUTOR:
-                plaintext = self.decrypt_secret(secret)
-                return plaintext
-
-            # For human: masked by default
-            if not unmask:
-                return "\u2022" * 8  # ••••••••
-
-            # Human with unmask: requires re-auth (enforced at server level)
-            plaintext = self.decrypt_secret(secret)
-            return plaintext
+                # For executor: always plaintext
+                if caller == Caller.EXECUTOR:
+                    result = self.decrypt_secret(secret)
+                elif not unmask:
+                    # For human: masked by default
+                    result = "\u2022" * 8  # ••••••••
+                else:
+                    # Human with unmask: requires re-auth (enforced at server level)
+                    result = self.decrypt_secret(secret)
+            except (CoreAccessError, DecryptionError):
+                # Ticket ratelimiter-lockout-inert (refs #385): retrieval
+                # failures count; the Nth raises RateLimitExceededError —
+                # that IS the lockout arming, and it propagates.
+                self.rate_limiter.record_failure(user_id)
+                raise
+            self.rate_limiter.record_success(user_id)
+            return result
         finally:
             session.close()
 
