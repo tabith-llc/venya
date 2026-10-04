@@ -8,12 +8,15 @@
 
 import base64
 import fcntl
+import logging
 import os
 import re
 import stat
 import tempfile
+import time
 from pathlib import Path
 
+from executor import injector
 from executor.injector import (
     SentinelRegistry,
     inject_via_fifo,
@@ -582,6 +585,26 @@ class TestInjectViaMemfd:
 class TestInjectViaFifo:
     """Tests for FIFO injection."""
 
+    LOUD_MARKER = "no reader ever opened"
+
+    @staticmethod
+    def _drain_fifo_writer(fifo_path: str, expected: bytes, timeout: float = 5.0) -> None:
+        """#420 leak cleanup: give the FIFO its reader inside the cell so the
+        background writer thread completes and exits — no zombie sleeper past
+        cell end."""
+        fd = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            data = b""
+            deadline = time.monotonic() + timeout
+            while len(data) < len(expected) and time.monotonic() < deadline:
+                try:
+                    data += os.read(fd, 4096)
+                except BlockingIOError:
+                    time.sleep(0.01)
+            assert data == expected
+        finally:
+            os.close(fd)
+
     def test_fifo_created(self, tmp_path: Path):
         fifo_path = str(tmp_path / "test.fifo")
 
@@ -589,6 +612,7 @@ class TestInjectViaFifo:
 
         assert os.path.exists(fifo_path)
         assert stat.S_ISFIFO(os.stat(fifo_path).st_mode)
+        self._drain_fifo_writer(fifo_path, b"secret-data")
 
     def test_fifo_permissions(self, tmp_path: Path):
         fifo_path = str(tmp_path / "test.fifo")
@@ -597,6 +621,7 @@ class TestInjectViaFifo:
 
         mode = stat.S_IMODE(os.stat(fifo_path).st_mode)
         assert mode == 0o600
+        self._drain_fifo_writer(fifo_path, b"data")
 
     def test_fifo_content_readable(self, tmp_path: Path):
         fifo_path = str(tmp_path / "test.fifo")
@@ -605,8 +630,6 @@ class TestInjectViaFifo:
         inject_via_fifo(fifo_path, secret)
 
         # Give the background thread a moment to write
-        import time
-
         time.sleep(0.2)
 
         with open(fifo_path, "rb") as f:
@@ -623,6 +646,7 @@ class TestInjectViaFifo:
         inject_via_fifo(fifo_path, b"new-secret")
 
         assert stat.S_ISFIFO(os.stat(fifo_path).st_mode)
+        self._drain_fifo_writer(fifo_path, b"new-secret")
 
     def test_fifo_injection_path(self, tmp_path: Path):
         fifo_path = str(tmp_path / "test.fifo")
@@ -630,6 +654,67 @@ class TestInjectViaFifo:
         injection = inject_via_fifo(fifo_path, b"data")
 
         assert injection.injection_path == fifo_path
+        self._drain_fifo_writer(fifo_path, b"data")
+
+    def test_fifo_no_reader_gives_up_loudly(self, tmp_path: Path, monkeypatch, caplog):
+        """Dead-listener truth-table half: at the cap the give-up is LOUD —
+        an error naming the FIFO path — and the writer thread exits bounded."""
+        fifo_path = str(tmp_path / "dead.fifo")
+
+        class _InjectorClock:
+            """time stand-in swapped into executor.injector ONLY: every
+            sleep() advances the clock 1 s so the writer hits its 30 s
+            deadline in ~31 non-blocking attempts instead of real time."""
+
+            def __init__(self) -> None:
+                self._t = time.time()
+
+            def time(self) -> float:
+                return self._t
+
+            def sleep(self, seconds: float) -> None:
+                self._t += 1.0
+
+        monkeypatch.setattr(injector, "time", _InjectorClock())
+
+        with caplog.at_level(logging.WARNING, logger="venya.executor.injector"):
+            inject_via_fifo(fifo_path, b"undelivered")
+            # The loud line and the trailing logger.exception are the LAST
+            # statements the writer thread runs — seeing both bounds its exit.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if any(self.LOUD_MARKER in r.getMessage() for r in caplog.records):
+                    break
+                time.sleep(0.01)
+
+        loud = [r for r in caplog.records if self.LOUD_MARKER in r.getMessage()]
+        assert loud, "bounded give-up must announce itself (refs #420)"
+        assert loud[0].levelno >= logging.ERROR
+        assert fifo_path in loud[0].getMessage()
+
+    def test_fifo_slow_listener_still_succeeds(self, tmp_path: Path, caplog):
+        """Paired negative: a reader that opens after a bounded delay well
+        under the cap still gets the secret, with no give-up signal."""
+        fifo_path = str(tmp_path / "slow.fifo")
+        secret = b"late-reader-secret"
+
+        with caplog.at_level(logging.WARNING, logger="venya.executor.injector"):
+            inject_via_fifo(fifo_path, secret)
+            time.sleep(0.3)  # well under the 30 s cap
+            data = b""
+            fd = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                deadline = time.monotonic() + 5.0
+                while len(data) < len(secret) and time.monotonic() < deadline:
+                    try:
+                        data += os.read(fd, 4096)
+                    except BlockingIOError:
+                        time.sleep(0.01)
+            finally:
+                os.close(fd)
+
+        assert data == secret
+        assert not any(self.LOUD_MARKER in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
