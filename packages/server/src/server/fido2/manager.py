@@ -139,10 +139,14 @@ class Fido2Manager:
         rp_name: str = "Venya",
         origins: list[str] | None = None,
         backend: Any = None,
+        user_verification: str = "discouraged",
     ) -> None:
         self.rp_id = rp_id
         self.rp_name = rp_name
         self.origins = origins or ["https://localhost"]
+        # Server-side UV policy for auth ceremonies (#413): recorded on each
+        # challenge and enforced by the assertion-side UV branch.
+        self.user_verification = user_verification
         self.store = Fido2Store()
         self.backend = backend
         if backend is not None:
@@ -388,9 +392,11 @@ class Fido2Manager:
             {
                 "target_user_id": user_id,
                 "raw_challenge": raw_challenge,
-                # Server hint is "discouraged"; CLI client enforces REQUIRED itself.
-                # Intentionally decoupled — do not "fix" one to match the other.
-                "user_verification": "discouraged",
+                # Recorded from the server config knob (fido2.user_verification,
+                # #413); the assertion-side branch enforces it when "required".
+                # The CLI client additionally enforces REQUIRED locally —
+                # intentionally decoupled, do not "fix" one to match the other.
+                "user_verification": self.user_verification,
             },
         )
 
@@ -398,7 +404,7 @@ class Fido2Manager:
             "challenge": base64.b64encode(raw_challenge).decode("ascii"),
             "rpId": self.rp_id,
             "timeout": CHALLENGE_TIMEOUT_MS,
-            "userVerification": "discouraged",
+            "userVerification": self.user_verification,
         }
 
         if allow_credentials:

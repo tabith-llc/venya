@@ -108,6 +108,17 @@ class Fido2Config(BaseModel):
         default=15,
         description="Enrollment token lifetime in minutes",
     )
+    user_verification: str = Field(
+        default="discouraged",
+        description="Server-side WebAuthn user-verification for auth ceremonies: discouraged|preferred|required (#413)",
+    )
+
+    @field_validator("user_verification")
+    @classmethod
+    def _validate_user_verification(cls, v: str) -> str:
+        if v not in ("discouraged", "preferred", "required"):
+            raise ValueError("fido2.user_verification must be one of: discouraged, preferred, required")
+        return v
 
 
 class CRLConfig(BaseModel):
