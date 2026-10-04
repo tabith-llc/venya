@@ -148,8 +148,9 @@ async def list_tools() -> list[Tool]:
                 "Query the Venya audit log. Shows what commands have been executed, "
                 "by whom, when, and what secrets were used. Use this to review "
                 "recent activity or investigate a specific event. Callers with "
-                "admin or an auditor-tier role see the full log; all others see "
-                "only their own events."
+                "admin or an auditor-tier role see the full log; other "
+                "read-write callers see only their own events; plain-read "
+                "callers are denied (403)."
             ),
             inputSchema={
                 "type": "object",
