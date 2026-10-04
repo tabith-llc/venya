@@ -764,12 +764,17 @@ class TestRevokeSessionSecrets:
     """Tests for session secret revocation endpoint."""
 
     def test_revoke_executor_success(self):
-        """POST /sessions/{id}/secrets/revoke should work for executor."""
+        """POST /sessions/{id}/secrets/revoke works for executor and reports the
+        rows actually removed (#411: count is the DELETE rowcount, not len(ids))."""
         core = _make_mock_core()
         backend = MagicMock()
         session = MagicMock()
-        backend.get_session.return_value = session
+        # #411: the endpoint now deletes the session's execution_session_secrets
+        # rows; the bulk-delete chain returns the honest rowcount. Set AFTER
+        # _create_test_app — it replaces get_session.return_value unconditionally.
         app = _create_test_app(core=core, backend=backend)
+        session.query.return_value.filter.return_value.delete.return_value = 2
+        backend.get_session.return_value = session
 
         # Mock AuditEvent import (import is local to the endpoint function)
         mock_audit_event = MagicMock()
@@ -788,7 +793,7 @@ class TestRevokeSessionSecrets:
 
             resp = client.post(
                 "/api/v1/sessions/sess-123/secrets/revoke",
-                json={"secret_ids": ["sec-1", "sec-2"]},
+                json={"secret_ids": ["1", "2"]},
             )
             assert resp.status_code == 200
             data = resp.json()

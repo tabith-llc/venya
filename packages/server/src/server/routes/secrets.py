@@ -790,7 +790,23 @@ async def revoke_session_secrets(
     request: Request,
     db: Session = Depends(get_db),
 ) -> RevokeSecretsResponse:
-    """Revoke scoped credentials for secrets injected during this session.
+    """Revoke the session's wrapped secrets NOW (ticket #411, ruled shape (b)).
+
+    Deletes the session's ``execution_session_secrets`` rows for the requested
+    secret ids, so the wrapped values stop resolving at call time: the execute
+    relay (routes/executors.py, ``SessionSecret.session_id == session.id``) and
+    the stage-2 filter reader (routes/filter.py, same predicate) both see zero
+    bindings after a revoke — revoked-then-fetched fails closed. DELETE (not a
+    zeroing UPDATE): ``wrapped_value`` is NOT NULL, so a blank row would still
+    resolve to an empty-but-present value on every fetch path; row removal is
+    exactly the semantics the readers already honor for the maintenance TTL
+    purge (maintenance.py deletes the same rows), so this endpoint simply makes
+    the purge happen on the revoke call instead of at ``expires_at``.
+
+    The maintenance TTL purge stays as the backstop: a second revoke, or a
+    revoke after the purge already ran, deletes zero rows and answers honestly
+    (``count=0``). Rows of OTHER sessions are untouched — the predicate is
+    scoped to this ``session_id`` AND the requested secret ids.
 
     Called automatically by the executor after command execution completes.
     Uses mTLS auth (executor identity), not bearer token auth.
@@ -801,11 +817,9 @@ async def revoke_session_secrets(
         request: The FastAPI request (mTLS cert info).
 
     Returns:
-        Confirmation of revocation with count.
+        Confirmation of revocation with the count of rows actually removed.
     """
-    from datetime import datetime
-
-    from core.iam.models import AuditEvent
+    from core.iam.models import AuditEvent, SessionSecret
 
     # Verify caller is executor (mTLS)
     caller = getattr(request.state, "auth_user", {})
@@ -813,6 +827,25 @@ async def revoke_session_secrets(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Executor mTLS authentication required",
+        )
+
+    # Normalize ids for the DB predicate: SessionSecret.secret_id is Integer,
+    # the wire carries strings (executor str()-casts; the daemon orphan reaper
+    # sends dir filenames). Non-numeric ids cannot match a row — skip them for
+    # the DELETE but they stay in the audit trail (audit writes unchanged).
+    numeric_ids = []
+    for secret_id in req.secret_ids:
+        try:
+            numeric_ids.append(int(secret_id))
+        except ValueError:
+            continue
+
+    rows_revoked = 0
+    if numeric_ids:
+        rows_revoked = (
+            db.query(SessionSecret)
+            .filter(SessionSecret.session_id == session_id, SessionSecret.secret_id.in_(numeric_ids))
+            .delete(synchronize_session=False)
         )
 
     # Log audit event for each revoked secret
@@ -830,14 +863,15 @@ async def revoke_session_secrets(
 
     db.commit()
     logger.info(
-        "Revoked %d secret credentials for session %s",
-        len(req.secret_ids),
+        "Revoked %d secret credentials for session %s (%d requested)",
+        rows_revoked,
         session_id,
+        len(req.secret_ids),
     )
 
     return RevokeSecretsResponse(
         revoked=True,
-        count=len(req.secret_ids),
+        count=rows_revoked,
         session_id=session_id,
     )
 
