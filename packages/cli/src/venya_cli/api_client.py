@@ -165,6 +165,7 @@ class Config:
                 config_file = Path(env)
         self.config_file = config_file or DEFAULT_CONFIG_FILE
         self._data: dict[str, Any] = {}
+        self._transient_server_url: str | None = None
         self._load()
 
     def _load(self) -> None:
@@ -203,16 +204,22 @@ class Config:
 
     @property
     def server_url(self) -> str:
+        if self._transient_server_url is not None:
+            return self._transient_server_url
         return self._data.get("server_url", "http://localhost:8000")
 
     @server_url.setter
     def server_url(self, value: str) -> None:
+        self._transient_server_url = None
         self._data["server_url"] = value.rstrip("/")
         self.save()
 
     def set_server_url_transient(self, value: str) -> None:
-        """One-shot server URL for this process only — no config.json write (#398)."""
-        self._data["server_url"] = value.rstrip("/")
+        """One-shot server URL for this process only — no config.json write (#398).
+
+        Stored outside _data (#423) so no later save() can persist it.
+        """
+        self._transient_server_url = value.rstrip("/")
 
     @property
     def access_token(self) -> str | None:

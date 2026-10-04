@@ -74,3 +74,36 @@ class TestExecRegisterNoConfigWrite:
             assert data["server_url"] == "https://core.example.com"
         finally:
             client.close()
+
+
+class TestOneshotUrlNoLeakOnLaterSave423:
+    """#423: a one-shot URL must never enter Config._data — a later
+    save()-triggering flow (login/token save) must not persist it."""
+
+    def test_transient_url_not_persisted_by_later_save(self, tmp_path):
+        """NEW (RED before fix: server_url leaks): one-shot URL on the
+        client, then a login-shaped token save — config.json gets the token
+        but NO server_url, and the transient URL still resolves in-process."""
+        config_file = tmp_path / "config.json"
+        client = APIClient(server_url="https://oneshot.example.com", config_file=config_file)
+        try:
+            client.config.access_token = "tok-123"
+            data = json.loads(config_file.read_text())
+            assert data["access_token"] == "tok-123"
+            assert "server_url" not in data
+            assert client.config.server_url == "https://oneshot.example.com"
+        finally:
+            client.close()
+
+    def test_intentional_set_wins_over_live_transient(self, tmp_path):
+        """Precedence: an intentional set in the same process as a live
+        transient wins for later reads AND persists."""
+        config_file = tmp_path / "config.json"
+        client = APIClient(server_url="https://oneshot.example.com", config_file=config_file)
+        try:
+            client.config.server_url = "https://intentional.example.com"
+            assert client.config.server_url == "https://intentional.example.com"
+            data = json.loads(config_file.read_text())
+            assert data["server_url"] == "https://intentional.example.com"
+        finally:
+            client.close()
