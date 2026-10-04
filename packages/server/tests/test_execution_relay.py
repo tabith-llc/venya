@@ -1724,3 +1724,51 @@ class TestPolicyRejectionRelay410:
         resp = self._harness_with_response(httpx2.Response(422, text="gate blew up", request=request))
         assert resp.status_code == 422
         assert resp.json()["detail"] == "Executor returned an error"
+
+
+class TestSessionLockout429:
+    """#421: get_for_injection raising the account lockout maps to 429 +
+    Retry-After on session creation; the paired negative proves a decrypt
+    failure still 503s (no bleed)."""
+
+    def _executor_db(self, backend):
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "192.0.2.14"
+        mock_executor.revoked_at = None
+        mock_executor.serial_number = None
+        mock_db = _mock_db_for_session(mock_executor, [MagicMock()])
+        backend.get_session.return_value = mock_db
+
+    def test_session_get_for_injection_lockout_429(self):
+        from core.engine.rate_limiter import RateLimitExceededError
+
+        app, backend = _create_test_app()
+        self._executor_db(backend)
+        app.state.core.get_for_injection.side_effect = RateLimitExceededError(
+            "locked out", retry_after_seconds=600
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/executors/sessions",
+            json={"executor_id": "exec-1", "secret_keys": ["db-password"]},
+        )
+
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "600"
+
+    def test_session_decrypt_failure_still_503(self):
+        """Paired NEGATIVE: a non-rate injection failure keeps its 503."""
+        app, backend = _create_test_app()
+        self._executor_db(backend)
+        app.state.core.get_for_injection.side_effect = RuntimeError("decrypt blew up")
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/v1/executors/sessions",
+            json={"executor_id": "exec-1", "secret_keys": ["db-password"]},
+        )
+
+        assert resp.status_code == 503
+        assert "Retry-After" not in resp.headers

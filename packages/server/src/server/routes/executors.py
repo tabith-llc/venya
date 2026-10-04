@@ -1240,6 +1240,8 @@ async def create_execution_session(
     # scoped-out key 404s indistinguishably from a nonexistent one (no
     # cross-role key-name enumeration). No admin bypass.
     from core.engine.core import CoreAccessError
+    from core.engine.rate_limiter import RateLimitExceededError
+    from server.rate_limit import lockout_http_exception
     from core.iam.role_manager import RoleManager
 
     rm = RoleManager(db)
@@ -1251,6 +1253,9 @@ async def create_execution_session(
             secret_id, plaintext, meta = core.get_for_injection(key, auth_user["user_id"], caller_roles)
         except CoreAccessError:
             raise HTTPException(status_code=404, detail=f"Secret '{key}' not found")
+        except RateLimitExceededError as e:
+            # #421: locked-out account surfaces 429 + Retry-After, not 503
+            raise lockout_http_exception(e)
         except Exception:
             logger.exception("Failed to decrypt secret '%s' for session %s", key, session.id)
             raise HTTPException(

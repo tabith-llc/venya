@@ -1928,3 +1928,81 @@ class TestSecretsGetRoleNames:
         assert resp.status_code == 404
         assert self._token_used(engine) is False
         engine.dispose()
+
+
+class TestLockoutMapsTo429:
+    """#421: core account lockout surfaces as HTTP 429 + Retry-After, never
+    a 500. Each arm is exercised on the get/elevation/metadata paths; the
+    paired negatives prove non-rate failures keep their prior status."""
+
+    def test_get_lockout_returns_429_with_retry_after(self):
+        """Positive: core.get raises the armed-limiter error mid-window."""
+        from core.engine.rate_limiter import RateLimitExceededError
+
+        core = _make_mock_core()
+        core.get.side_effect = RateLimitExceededError("locked out", retry_after_seconds=840)
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password")
+
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "840"
+
+    def test_get_lockout_no_retry_after_value_defaults_1(self):
+        """NEGATIVE: an unlock error with no retry_after_seconds still gets a
+        numeric Retry-After (>=1), never a missing header / 500."""
+        from core.engine.rate_limiter import RateLimitExceededError
+
+        core = _make_mock_core()
+        core.get.side_effect = RateLimitExceededError("locked out")  # no value
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password")
+
+        assert resp.status_code == 429
+        assert int(resp.headers["Retry-After"]) >= 1
+
+    def test_get_non_rate_500_unchanged(self):
+        """Paired NEGATIVE: a generic retrieval failure is NOT remapped to 429
+        — it keeps the pre-#421 shape (masked GET swallows to 404)."""
+        core = _make_mock_core()
+        core.get.side_effect = RuntimeError("boom")
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password")
+
+        assert resp.status_code == 404  # generic except, unchanged by #421
+        assert "Retry-After" not in resp.headers
+
+    def test_get_success_path_unchanged(self):
+        """Paired NEGATIVE: a normal retrieval still 200s, no 429 leakage."""
+        core = _make_mock_core()
+        core.get.return_value = "\u2022" * 8
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/v1/secrets/db-password")
+
+        assert resp.status_code == 200
+        assert "Retry-After" not in resp.headers
+
+    def test_metadata_patch_lockout_returns_429(self):
+        """Positive: the metadata PATCH (which calls core.get first) surfaces
+        lockout as 429 + Retry-After, not the generic 500."""
+        from core.engine.rate_limiter import RateLimitExceededError
+
+        core = _make_mock_core()
+        core.get.side_effect = RateLimitExceededError("locked out", retry_after_seconds=300)
+        app = _create_test_app(core=core)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.patch(
+            "/api/v1/secrets/db-password/metadata",
+            json={"metadata": {"username": "bot"}},
+        )
+
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "300"

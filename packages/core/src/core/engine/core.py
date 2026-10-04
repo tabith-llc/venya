@@ -112,10 +112,14 @@ class Core:
         Returns (secret_id, plaintext, meta). Raises CoreAccessError when the
         secret is not visible to the caller (role-scoped out and not the
         creator) — routes map that to 404 "Secret not found", indistinguishable
-        from a nonexistent key.
+        from a nonexistent key. Raises RateLimitExceededError when the user is
+        locked out (ticket #421: this entrance gates on check() like get();
+        routes map that to 429 + Retry-After).
         """
         if user_id is None:
             raise CoreAccessError("user_id is required for secret injection")
+
+        self.rate_limiter.check(user_id)
 
         session = self.backend.get_session()
         try:
@@ -180,8 +184,10 @@ class Core:
                 if caller == Caller.EXECUTOR:
                     result = self.decrypt_secret(secret)
                 elif not unmask:
-                    # For human: masked by default
-                    result = "\u2022" * 8  # ••••••••
+                    # For human: masked by default. A masked read is
+                    # counter-NEUTRAL (ticket #421): neither clears nor
+                    # records — it returns before the bookkeeping below.
+                    return "\u2022" * 8  # ••••••••
                 else:
                     # Human with unmask: requires re-auth (enforced at server level)
                     result = self.decrypt_secret(secret)

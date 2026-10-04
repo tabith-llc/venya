@@ -13,6 +13,7 @@ rate limits using atomic multi-key sliding window check-and-consume.
 import logging
 from datetime import UTC, datetime
 
+from core.engine.rate_limiter import RateLimitExceededError
 from fastapi import HTTPException, Request, status
 
 from .utils.rate_limiter import SlidingWindowRateLimiter
@@ -197,3 +198,19 @@ async def rate_limit_registration(request: Request) -> None:
             detail="Too many registration attempts",
             headers={"Retry-After": str(retry_after)},
         )
+
+
+def lockout_http_exception(exc: RateLimitExceededError) -> HTTPException:
+    """HTTP 429 + Retry-After for a core account lockout (ticket #421).
+
+    Mirrors this module's existing 429 shape (str Retry-After header);
+    the value is the limiter's own seconds-until-unlock carried on the
+    error. A raise without a value falls back to 1 second — the client
+    re-derives the real window on its next attempt via check().
+    """
+    retry_after = max(1, int(exc.retry_after_seconds)) if exc.retry_after_seconds else 1
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail=str(exc),
+        headers={"Retry-After": str(retry_after)},
+    )
