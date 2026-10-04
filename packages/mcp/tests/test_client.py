@@ -307,12 +307,27 @@ async def test_run_command_metachar_stays_element_data(mock_config: MCPConfig) -
 async def test_run_command_unterminated_quote_raises_clean_valueerror(mock_config: MCPConfig) -> None:
     """Negative: an unbalanced quote is a clean ValueError with an actionable
     message (server.py maps handler exceptions to isError=True) — never a
-    raw shlex traceback, never a POSTed half-parse."""
+    raw shlex traceback, never a POSTed half-parse. Since #415 the argv
+    parse precedes the session POST, so NOTHING is requested: a malformed
+    command must not churn a secret-bound session row awaiting TTL reap."""
     client, mock_http = _argv_harness(mock_config)
     with pytest.raises(ValueError, match="Command could not be parsed as a shell line"):
         await client.run_command("exec-1", 'echo "unclosed', [])
-    # only the session leg ran; nothing half-parsed reached the execute wire
-    assert mock_http.request.await_count == 1
+    # zero legs: parse failed locally, no session POST, nothing on the wire
+    assert mock_http.request.await_count == 0
+
+
+async def test_run_command_valid_path_session_then_execute(mock_config: MCPConfig) -> None:
+    """Paired negative for #415: a parseable command keeps the original
+    order — session POST first, execute POST second, argv on the wire."""
+    client, mock_http = _argv_harness(mock_config)
+    result = await client.run_command("exec-1", "echo hi", ["k1"])
+    assert result["exit_code"] == 0
+    assert mock_http.request.call_args_list[0][0][1].endswith("/api/v1/executors/sessions")
+    session_body = mock_http.request.call_args_list[0][1]["json"]
+    assert session_body == {"executor_id": "exec-1", "secret_keys": ["k1"]}
+    assert mock_http.request.call_args_list[1][0][1].endswith("/execute")
+    assert mock_http.request.call_args_list[1][1]["json"]["command"] == ["echo", "hi"]
 
 
 async def test_run_command_empty_string_posts_empty_argv(mock_config: MCPConfig) -> None:
