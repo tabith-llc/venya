@@ -155,3 +155,65 @@ class TestRateLimiterWireInjectionTwin:
         """The wiring ships on the ruled 5/300s/15min defaults."""
         limiter = RateLimiter()
         assert (limiter.max_attempts, limiter.window_seconds) == (5, 300)
+
+
+class TestLockoutGateAndNeutrality:
+    """#421: entrance-B check() gate, counter-neutral masked reads, Retry-After."""
+
+    def test_injection_gated_by_check_before_resolve(self) -> None:
+        """B: locked-out user's get_for_injection raises via check() BEFORE
+        resolve. RED-before: it resolved."""
+        core = _core(None)
+        _fail_gets(core, MAX_ATTEMPTS - 1)
+        with pytest.raises(RateLimitExceededError):
+            core.get("missing", user_id="u1")  # arms at the Nth
+        core._resolve_secret_in.reset_mock()
+        with pytest.raises(RateLimitExceededError):
+            core.get_for_injection("present", user_id="u1")
+        assert not core._resolve_secret_in.called
+
+    def test_fresh_user_injection_not_gated(self) -> None:
+        """B paired negative: a fresh user's injection retrieval proceeds."""
+        good = _core(_secret())
+        secret_id, plaintext, _meta = good.get_for_injection("present", user_id="fresh")
+        assert (secret_id, plaintext) == (7, "hunter2")
+
+    def test_masked_read_is_counter_neutral(self) -> None:
+        """C: 4 strikes, then a masked read — counter UNCHANGED at 4.
+        RED-before: the masked read cleared it to 5. (The positive half —
+        a real successful retrieval still clears — is pinned by
+        test_success_clears_the_failure_counter above.)"""
+        core = _core(None)
+        _fail_gets(core, MAX_ATTEMPTS - 1)
+        assert core.rate_limiter.get_remaining_attempts("u1") == 1
+        core._resolve_secret_in.return_value = _secret()  # now visible
+        assert core.get("present", user_id="u1") == "\u2022" * 8
+        assert core.rate_limiter.get_remaining_attempts("u1") == 1
+
+    def test_retry_after_full_window_at_arming(self) -> None:
+        """A: the arming raise carries the FULL lockout window."""
+        limiter = RateLimiter()
+        for _ in range(MAX_ATTEMPTS - 1):
+            limiter.record_failure("u1")
+        with pytest.raises(RateLimitExceededError) as arm:
+            limiter.record_failure("u1")
+        assert arm.value.retry_after_seconds == 15 * 60
+
+    def test_retry_after_shrinks_monotonically_while_locked(self) -> None:
+        """A: check()-time Retry-After = locked_at + window - now — bounded by
+        the window and shrinking as time passes (no fake-clock idiom in this
+        file — grepped first — so wall-clock bounds + rewind, per spec §4)."""
+        limiter = RateLimiter()
+        for _ in range(MAX_ATTEMPTS - 1):
+            limiter.record_failure("u1")
+        with pytest.raises(RateLimitExceededError):
+            limiter.record_failure("u1")
+        with pytest.raises(RateLimitExceededError) as blocked:
+            limiter.check("u1")
+        first = blocked.value.retry_after_seconds
+        assert 0 < first <= 15 * 60
+        limiter._failures["u1"].locked_at -= 120
+        with pytest.raises(RateLimitExceededError) as later:
+            limiter.check("u1")
+        assert later.value.retry_after_seconds < first
+        assert later.value.retry_after_seconds >= 15 * 60 - 120 - 1

@@ -18,7 +18,9 @@ from fastapi import Path as ApiPath
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from core.engine.rate_limiter import RateLimitExceededError
 from server.dependencies import get_db, require_role
+from server.rate_limit import lockout_http_exception
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -543,6 +545,8 @@ async def secrets_get(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=str(e),
                 )
+            except RateLimitExceededError as e:
+                raise lockout_http_exception(e)
             except Exception:
                 logger.exception("Secret retrieval failed (elevated)")
                 raise HTTPException(
@@ -552,6 +556,8 @@ async def secrets_get(
 
         except HTTPException:
             raise
+        except RateLimitExceededError as e:
+            raise lockout_http_exception(e)
         except Exception:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -571,6 +577,8 @@ async def secrets_get(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e),
         )
+    except RateLimitExceededError as e:
+        raise lockout_http_exception(e)
     except Exception:
         logger.exception("Secret retrieval failed")
         raise HTTPException(
@@ -752,6 +760,8 @@ async def update_secret_metadata(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Secret not found",
             ) from None
+        except RateLimitExceededError as e:
+            raise lockout_http_exception(e)
 
         secret = db.query(Secret).filter(Secret.key == key).first()
         if secret is None:

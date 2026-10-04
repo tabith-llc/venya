@@ -25,7 +25,16 @@ class FailureRecord:
 
 
 class RateLimitExceededError(Exception):
-    """Rate limit exceeded — account locked."""
+    """Rate limit exceeded — account locked.
+
+    Carries ``retry_after_seconds`` — seconds until unlock (ticket #421) —
+    so the server can emit an HTTP Retry-After header without re-deriving
+    the limiter's state.
+    """
+
+    def __init__(self, message: str, retry_after_seconds: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class RateLimiter:
@@ -84,7 +93,8 @@ class RateLimiter:
             record.locked_at = now
             raise RateLimitExceededError(
                 f"User {user_id} has exceeded {self.max_attempts} failed attempts "
-                f"within {self.window_seconds} seconds. Locked out for {self.lockout_reinstate_minutes} minutes."
+                f"within {self.window_seconds} seconds. Locked out for {self.lockout_reinstate_minutes} minutes.",
+                retry_after_seconds=self.lockout_reinstate_minutes * 60,
             )
 
     def check(self, user_id: str) -> None:
@@ -122,12 +132,16 @@ class RateLimiter:
             else:
                 # Still locked out
                 remaining = int(lockout_seconds - (now - record.locked_at))
-                raise RateLimitExceededError(f"User {user_id} is locked out. Unlock in {remaining} seconds.")
+                raise RateLimitExceededError(
+                    f"User {user_id} is locked out. Unlock in {remaining} seconds.",
+                    retry_after_seconds=remaining,
+                )
 
         if record.failed_attempts >= self.max_attempts:
             raise RateLimitExceededError(
                 f"User {user_id} has exceeded {self.max_attempts} failed attempts "
-                f"within {self.window_seconds} seconds."
+                f"within {self.window_seconds} seconds.",
+                retry_after_seconds=self.lockout_reinstate_minutes * 60,
             )
 
     def record_success(self, user_id: str) -> None:
