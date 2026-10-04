@@ -650,9 +650,9 @@ class TestResolveEnvVars:
 
     def test_literal_passes_verbatim(self):
         env = _resolve_env_vars(
-            [{"var_name": "GIT_ASKPASS", "literal_value": "/run/secrets/venya/.venya-askpass"}], [], None
+            [{"var_name": "GIT_ASKPASS", "literal_value": "/usr/local/bin/venya-askpass"}], [], None
         )
-        assert env == {"GIT_ASKPASS": "/run/secrets/venya/.venya-askpass"}
+        assert env == {"GIT_ASKPASS": "/usr/local/bin/venya-askpass"}
 
     def test_legacy_override_merges_underneath(self):
         env = _resolve_env_vars([{"var_name": "A", "literal_value": "new"}], [], {"A": "old", "B": "keep"})

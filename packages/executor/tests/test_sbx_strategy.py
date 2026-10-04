@@ -815,33 +815,67 @@ class TestAskpassHelper:
         s._sandbox_name = "venya-test123"
         return s
 
-    def test_helper_written_555_at_contract_path(self):
+    def test_helper_copied_555_to_exec_capable_path(self):
+        """RED1 (ticket askpass-helper-noexec-mount-conflict): the static helper
+        is staged 0555 on the host and `sbx cp`-copied to the contract path,
+        which is now the exec-capable /usr/local/bin — NOT the noexec
+        /run/secrets mount that made git/ssh exec die rc=128."""
+        s = self._strategy()
+        captured: dict = {}
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["sbx", "cp"]:
+                host_temp = cmd[2]
+                captured["dest"] = cmd[3]
+                captured["mode"] = os.stat(host_temp).st_mode & 0o777
+                with open(host_temp, "rb") as fh:
+                    captured["content"] = fh.read()
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            s.write_askpass_helper()
+
+        assert captured["dest"] == f"venya-test123:{ASKPASS_HELPER_PATH}"
+        assert not ASKPASS_HELPER_PATH.startswith("/run/secrets")
+        assert ASKPASS_HELPER_PATH == "/usr/local/bin/venya-askpass"
+        assert captured["mode"] == 0o555
+        assert captured["content"] == ASKPASS_HELPER_CONTENT.encode("utf-8")
+
+    def test_guest_secrets_dir_mkdir_runs_before_cp(self):
+        """§12.2 ordering: the guest secrets-dir mkdir (for the
+        VENYA_ASKPASS_SECRET file) still runs before the helper copy."""
         s = self._strategy()
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             s.write_askpass_helper()
         calls = [c[0][0] for c in mock_run.call_args_list]
         assert calls[0][:4] == ["sbx", "exec", "venya-test123", "mkdir"]
-        tee = calls[1]
-        assert tee[:3] == ["sbx", "exec", "-i"]
-        assert tee[-2:] == ["tee", ASKPASS_HELPER_PATH]
-        chmod = calls[2]
-        assert chmod[-3:] == ["chmod", "555", ASKPASS_HELPER_PATH]
-        stdin = mock_run.call_args_list[1][1]["input"].decode()
-        assert stdin.startswith("#!/bin/sh")
-        assert 'cat "$VENYA_ASKPASS_SECRET"' in stdin
-        assert "VENYA_ASKPASS_USER" in stdin
+        assert calls[1][:2] == ["sbx", "cp"]
 
-    def test_helper_write_failure_removes_partial_and_raises(self):
+    def test_helper_cp_failure_raises_fail_closed_no_guest_rm(self):
+        """Fail-closed on cp failure, and NO in-guest rollback rm: a uid-1000
+        `sbx exec rm` cannot unlink from the root-owned dir (§12.3) — the static
+        helper is cleaned up by per-run sandbox destruction instead."""
         s = self._strategy()
         with patch("subprocess.run") as mock_run:
             ok = MagicMock(returncode=0, stdout="", stderr="")
-            fail = MagicMock(returncode=1, stdout="", stderr=b"tee: error")
-            mock_run.side_effect = [ok, fail, ok]  # mkdir OK, tee FAIL, rm cleanup
+            fail = MagicMock(returncode=1, stdout="", stderr="cp: error")
+            mock_run.side_effect = [ok, fail]  # mkdir OK, cp FAIL
             with pytest.raises(RuntimeError, match="askpass helper"):
                 s.write_askpass_helper()
-        rm_call = mock_run.call_args_list[2][0][0]
-        assert rm_call[-3:] == ["rm", "-f", ASKPASS_HELPER_PATH]
+        calls = [c[0][0] for c in mock_run.call_args_list]
+        assert len(calls) == 2
+        assert not any("rm" in c for c in calls)
+
+    def test_helper_content_is_static_and_secret_free(self):
+        """Truth-table negative (§7): the static helper carries NO secret value
+        and no secrets-dir path — the credential arrives only at run time via
+        the VENYA_ASKPASS_SECRET file."""
+        assert ASKPASS_HELPER_CONTENT.startswith("#!/bin/sh")
+        assert 'cat "$VENYA_ASKPASS_SECRET"' in ASKPASS_HELPER_CONTENT
+        assert "/run/secrets" not in ASKPASS_HELPER_CONTENT
+        for token in ("hunter2", "s3cr3t", "tok-value"):
+            assert token not in ASKPASS_HELPER_CONTENT
 
     def test_no_sandbox_raises(self):
         with pytest.raises(RuntimeError, match="Sandbox not created yet"):
