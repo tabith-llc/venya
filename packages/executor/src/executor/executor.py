@@ -63,6 +63,16 @@ class CommandResult:
 MAX_OUTPUT_BYTES = 262144  # 256 KB per stream
 TRUNCATION_MARKER = "... [OUTPUT TRUNCATED: {n} bytes discarded]\n"
 
+
+class CommandRejected(ValueError):
+    """Pre-run rejection raised by the two gates in ``execute()`` (structural
+    + policy) — ticket policy-reject-flat-503 #410. Subclasses ``ValueError``
+    so every pre-#410 catcher keeps working; the relay listener maps ONLY
+    this class to a 4xx-with-reason lane. Every other engine exception stays
+    the flat transport 503: the reason string describes the caller's own
+    command, never secret material (both gates run BEFORE injection)."""
+
+
 # How long to wait for sandbox commands
 SBX_TIMEOUT = 3600  # 1 hour max
 
@@ -348,7 +358,7 @@ class Executor:
         except ValueError as exc:
             if self.audit_logger:
                 self.audit_logger.emit("command_rejected", command=shlex.join(command), reason=str(exc))
-            raise ValueError(f"Command rejected: {exc}") from None
+            raise CommandRejected(f"Command rejected: {exc}") from None
 
         # EXECUTION POSTURE (ticket #322 ruling Q3=C3, owner 2026-10-02; fleet
         # C5 probe grounded): the common case runs the VALIDATED ARGV LIST
@@ -372,7 +382,7 @@ class Executor:
         if not is_valid:
             if self.audit_logger:
                 self.audit_logger.emit("command_rejected", command=command_str, reason=reason)
-            raise ValueError(f"Command rejected: {reason}")
+            raise CommandRejected(f"Command rejected: {reason}")
 
         logger.info("Executing command: %s", command_str)
         start_time = time.time()

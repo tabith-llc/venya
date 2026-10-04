@@ -31,6 +31,8 @@ from typing import Any
 from pydantic import ValidationError
 from venya_contract import RelayRequest, RelayResponse
 
+from .executor import CommandRejected
+
 logger = logging.getLogger("venya.executor.relay")
 
 RELAY_PORT = 8443
@@ -143,7 +145,9 @@ class ExecuteHandler(BaseHTTPRequestHandler):
         # ExecutorDaemon.create_executor in production; tests inject a stub.
         # Per the plan's failure-mode table, any execution failure is a flat 503
         # (no retry), which also covers sandbox/subprocess timeouts surfacing as
-        # exceptions from the engine.
+        # exceptions from the engine. ONE carve-out (ticket policy-reject-flat-503
+        # #410): a CommandRejected from the pre-run gates is not an execution
+        # failure — nothing ran — and takes a 422-with-reason lane.
         # env/askpass specs (ticket secret-shape-env-injection) pass through
         # as plain dicts; secret_id -> plaintext resolution happens inside
         # execute() where the unwrapped bundles live — the listener never
@@ -153,6 +157,16 @@ class ExecuteHandler(BaseHTTPRequestHandler):
             result = self.server.executor_factory(session_id).execute(  # type: ignore[attr-defined]
                 command, secrets, env_vars=env_vars, askpass_helper=req.askpass_helper
             )
+        except CommandRejected as exc:
+            # The reason describes the CALLER's own command (both gates run
+            # before injection, so secret material is structurally absent) —
+            # safe to surface. 422 is the deliberately-distinct code: the
+            # listener's 400 lane echoes request-body fragments in its
+            # details, so the server forwards ONLY this status's detail
+            # onward (routes/executors.py, #410 hop).
+            logger.warning("Relay /execute policy rejection for session %s: %s", session_id, exc)
+            self._reply(422, {"detail": str(exc)})
+            return
         except Exception:
             logger.exception("Relay /execute failed for session %s", session_id)
             self._reply(503, {"detail": "execution failed"})

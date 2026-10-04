@@ -19,6 +19,7 @@ Failure-mode matrix (the plan's "immediate 503 on any failure"):
   - client cert wrong CA      -> TLS handshake fails (no HTTP)
   - known CA, unknown CN      -> 403 (B0.3)
   - allowed CN, bad payload   -> 400
+  - allowed CN, policy rejection (CommandRejected) -> 422 with reason (#410)
   - allowed CN, engine error  -> 503
   - empty relay_client_ids    -> listener never binds (fail-closed)
 """
@@ -38,7 +39,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from executor.config import ExecutorConfig, MtlsConfig
-from executor.executor import CommandResult
+from executor.executor import CommandRejected, CommandResult
 from executor.relay_listener import (
     MAX_RELAY_BODY_BYTES,
     RELAY_READ_TIMEOUT_SECONDS,
@@ -357,6 +358,37 @@ class TestRelayListener:
         finally:
             listener.stop()
         assert resp.status_code == 503
+
+    def test_policy_rejection_returns_422_with_reason(self, pk):
+        """#410 positive half: a pre-run policy rejection (CommandRejected)
+        is deterministic, caller-owned input advice — it must reach the
+        caller as a 4xx carrying its reason, not the flat transport 503."""
+        fake = _FakeExec(exc=CommandRejected("Command rejected: Dangerous pattern detected"))
+        sessions: list = []
+        listener = _start(pk.config, _factory(fake, sessions), [ALLOWED])
+        try:
+            with _client(pk.ca_a, pk.c_ok) as client:
+                resp = client.post(_url(listener), json={"session_id": "x", "command": ["sudo", "rm"]})
+        finally:
+            listener.stop()
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "Command rejected: Dangerous pattern detected"
+
+    def test_non_rejection_value_error_still_503_no_reason(self, pk):
+        """#410 paired negative half: a generic ValueError raised deeper in
+        the engine (NOT the dedicated rejection class) keeps the flat 503
+        with the generic detail — no reason text (and anything it might
+        carry) leaks to the relay peer."""
+        fake = _FakeExec(exc=ValueError("unwrap failed near s3cret-material"))
+        sessions: list = []
+        listener = _start(pk.config, _factory(fake, sessions), [ALLOWED])
+        try:
+            with _client(pk.ca_a, pk.c_ok) as client:
+                resp = client.post(_url(listener), json={"session_id": "x", "command": ["sleep", "300"]})
+        finally:
+            listener.stop()
+        assert resp.status_code == 503
+        assert resp.json() == {"detail": "execution failed"}
 
     def test_wrong_path_returns_404(self, started):
         listener, pk, _fake, _sessions = started

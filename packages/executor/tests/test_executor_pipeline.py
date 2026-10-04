@@ -111,9 +111,9 @@ def test_mock_sbx_run_signature_is_call_compatible():
     real_params = inspect.signature(Executor._run_command_sbx).parameters
     mock_params = inspect.signature(mock_sbx_run).parameters
     missing = [name for name in real_params if name not in mock_params]
-    assert not missing, (
-        f"mock_sbx_run misses real-parameter(s) {missing} — pipeline call sites TypeError on sbx-present runs"
-    )
+    assert (
+        not missing
+    ), f"mock_sbx_run misses real-parameter(s) {missing} — pipeline call sites TypeError on sbx-present runs"
 
 
 class TestExecute:
@@ -743,6 +743,27 @@ class TestStructuralGate:
         with pytest.raises(ValueError, match="Command rejected: Shell metacharacters"):
             ex.execute(["/usr/bin/echo", "hi;", "rm", "x"], [])
         strategy.execute_command.assert_not_called()
+
+    def test_structural_rejection_is_command_rejected_class(self):
+        """#410: the structural gate raises the dedicated CommandRejected
+        class — the single marker the relay listener uses for its 4xx lane.
+        ValueError subclass, so pre-#410 ValueError catchers (and the
+        match="Command rejected" cells above) stay green unchanged."""
+        from executor.executor import CommandRejected
+
+        ex, _strategy = self._executor()
+        with pytest.raises(CommandRejected, match="Command rejected: Shell metacharacters"):
+            ex.execute(["/usr/bin/echo", "hi;", "tail"], [])
+
+    def test_policy_rejection_is_command_rejected_class(self):
+        """#410 paired positive: the policy gate's Dangerous-pattern veto
+        carries the SAME class — both pre-run gates share the 4xx lane,
+        nothing else does."""
+        from executor.executor import CommandRejected
+
+        ex, _strategy = self._executor()
+        with pytest.raises(CommandRejected, match="Command rejected: Dangerous pattern"):
+            ex.execute(["/usr/bin/sudo", "ls"], [])
 
     def test_structural_rejection_emits_command_rejected_audit(self):
         """Ruling condition 2: explicit audit assertion, not an assumption —

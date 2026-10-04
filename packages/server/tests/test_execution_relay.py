@@ -1462,3 +1462,104 @@ class TestExecuteRequestStrictUtf8:
             json={"session_id": "sess-1", "command": ["ls"]},
         )
         assert resp.status_code == 404
+
+
+class TestPolicyRejectionRelay410:
+    """#410 server half: the executor's CommandRejected 422 lane must carry
+    its reason through the relay->server hop to the client; every other
+    relay error status keeps the generic detail (the listener's 400 lane
+    echoes request fragments and must not be relayed onward verbatim)."""
+
+    def _harness_with_response(self, response: httpx2.Response):
+        """App + mocks identical to TestMalformedExecutorResponse._setup_db,
+        but the relay call yields `response` (a real httpx2 Response, so
+        raise_for_status/json behave exactly like production)."""
+        app, backend = _create_test_app()
+        mock_db = MagicMock()
+
+        mock_exec_session = MagicMock()
+        mock_exec_session.id = "sess-1"
+        mock_exec_session.user_id = "test-user"
+        mock_exec_session.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        mock_exec_session.executor_id = "exec-1"
+
+        mock_session_query = MagicMock()
+        mock_session_query.filter.return_value.first.return_value = mock_exec_session
+
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "192.0.2.14"
+        mock_executor.revoked_at = None
+        mock_executor.serial_number = None
+        mock_executor.version = "0.1.0a14"
+
+        mock_executor_query = MagicMock()
+        mock_executor_query.filter.return_value.first.return_value = mock_executor
+
+        mock_secrets_query = MagicMock()
+        mock_secrets_query.all.return_value = []
+
+        def query_side_effect(model):
+            if model.__name__ == "ExecutionSession":
+                return mock_session_query
+            elif model.__name__ == "Executor":
+                return mock_executor_query
+            elif model.__name__ == "SessionSecret":
+                return mock_secrets_query
+            none_q = MagicMock()
+            none_q.filter.return_value.first.return_value = None
+            return none_q
+
+        mock_db.query.side_effect = query_side_effect
+        backend.get_session.return_value = mock_db
+
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=response)
+
+        with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
+            with patch("server.routes.executors.ssl.create_default_context", return_value=MagicMock()):
+                tc = TestClient(app, raise_server_exceptions=False)
+                resp = tc.post(
+                    "/api/v1/executors/exec-1/execute",
+                    json={"session_id": "sess-1", "command": ["sudo", "rm", "-rf", "/"]},
+                )
+        return resp
+
+    @staticmethod
+    def _relay(status: int, body: dict) -> httpx2.Response:
+        request = httpx2.Request("POST", "https://192.0.2.14:8443/execute")
+        return httpx2.Response(status, json=body, request=request)
+
+    def test_rejection_reason_survives_the_hop(self):
+        """Positive: relay 422 CommandRejected detail reaches the client."""
+        reason = "Command rejected: Dangerous pattern matched: rm -rf"
+        resp = self._harness_with_response(self._relay(422, {"detail": reason}))
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == reason
+
+    def test_relay_503_detail_stays_generic(self):
+        """Paired negative (truth table): transport 503 keeps status but the
+        generic detail — no relay body is echoed on this lane."""
+        resp = self._harness_with_response(self._relay(503, {"detail": "execution failed"}))
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Executor returned an error"
+
+    def test_non_rejection_422_detail_stays_generic(self):
+        """Paired negative (allow-list discipline): a 422 whose detail does
+        not carry the CommandRejected prefix is NOT forwarded — the prefix
+        is the contract, not the status alone."""
+        resp = self._harness_with_response(
+            self._relay(422, {"detail": "malformed request: WrappedSecret(wrapped_value='...')"})
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "Executor returned an error"
+
+    def test_422_non_json_body_stays_generic(self):
+        """Paired negative (robustness): non-JSON relay body on the 422 lane
+        degrades to the generic detail, never a 500."""
+        request = httpx2.Request("POST", "https://192.0.2.14:8443/execute")
+        resp = self._harness_with_response(httpx2.Response(422, text="gate blew up", request=request))
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "Executor returned an error"

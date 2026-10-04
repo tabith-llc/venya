@@ -1452,7 +1452,22 @@ async def execute_command_on_executor(
         raise HTTPException(status_code=503, detail="Executor unreachable (connection lost mid-response)")
     except httpx2.HTTPStatusError as e:
         logger.warning("Executor returned HTTP %d for session %s: %s", e.response.status_code, session.id, e)
-        raise HTTPException(status_code=e.response.status_code, detail="Executor returned an error")
+        detail = "Executor returned an error"
+        if e.response.status_code == 422:
+            # Ticket policy-reject-flat-503 #410: the executor's 422 lane is
+            # the CommandRejected reply — a pre-run policy/structural rejection
+            # whose detail describes the CALLER's own command (the gates run
+            # before injection; no secret material). Forward the reason so the
+            # client can tell "policy said no" from a transport failure. All
+            # other statuses keep the generic detail: the listener's 400 lane
+            # echoes request fragments and must not be relayed onward verbatim.
+            try:
+                relay_detail = e.response.json().get("detail")
+            except (ValueError, AttributeError, RuntimeError):
+                relay_detail = None
+            if isinstance(relay_detail, str) and relay_detail.startswith("Command rejected:"):
+                detail = relay_detail
+        raise HTTPException(status_code=e.response.status_code, detail=detail)
 
     # Validate executor response shape before any field access
     try:
