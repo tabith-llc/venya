@@ -11,7 +11,7 @@ justification. Rows are keyed on file + line content (line numbers drift and are
 deliberately not recorded). Scope = `packages/*/src` — the same tree the pre-commit
 bandit hook scans (tests dirs are hook-excluded).
 
-**61 suppression lines across 20 files.**
+**62 suppression lines across 20 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -42,6 +42,7 @@ bandit hook scans (tests dirs are hook-excluded).
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec` | <!-- pragma: allowlist secret -->
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `WORKSPACE_BASE = str(Path.home() / ".venya-workspaces")  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `CONTAINER_SECRET_DIR = "/run/secrets/venya"  # nosec` | <!-- pragma: allowlist secret -->
+| `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `subprocess.run(  # nosec` |

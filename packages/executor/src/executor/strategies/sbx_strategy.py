@@ -66,6 +66,48 @@ SBX_TIMEOUT = 3600  # 1 hour
 # template at enrollment) is tracked in `venya-dev/tickets/sbx-cold-start-prepull.md`.
 SBX_CREATE_TIMEOUT = 240
 
+SBX_MIN_VERSION = (0, 39, 0)  # refs ticket sbx-exec-env-file-noop
+
+
+class SbxVersionError(RuntimeError):
+    pass
+
+
+def _parse_sbx_version(raw: str) -> tuple[int, int, int]:
+    m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", raw)
+    if not m:
+        raise SbxVersionError(f"cannot read sbx version from output: {raw.strip()!r}")
+    return (int(m[1]), int(m[2]), int(m[3]))
+
+
+def require_supported_sbx(timeout: float = 10.0) -> str:
+    """Refuse boot on sbx < SBX_MIN_VERSION (silent env-file no-op class)."""
+    try:
+        # check=False: nonzero exit is still parsed below — unparseable output is a refusal.
+        result = subprocess.run(  # nosec
+            ["sbx", "version"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SbxVersionError(
+            "sbx CLI not runnable — install/upgrade the vendor package docker-sbx; "
+            "the executor starts once sbx version >= 0.39.0 is available."
+        ) from exc
+    version = _parse_sbx_version(result.stdout + result.stderr)
+    if version < SBX_MIN_VERSION:
+        too_old = "v" + ".".join(map(str, version))
+        raise SbxVersionError(
+            f"sbx CLI {too_old} is below the required 0.39.0 — secret injection would be "
+            "silently ignored. The site administrator should upgrade the vendor package "
+            "docker-sbx (Venya does not manage vendor packages); the executor starts "
+            "once the CLI is >= 0.39.0. (refs ticket sbx-exec-env-file-noop)"
+        )
+    return (result.stdout + result.stderr).strip()
+
+
 # Server-issued secret ids land in path joins (host tmpfs file name and the
 # sandbox container_path), so each id must be ONE safe path segment. Server
 # truth: core Secret.id / SessionSecret.secret_id are Integer PKs and the
