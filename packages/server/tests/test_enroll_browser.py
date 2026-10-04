@@ -39,17 +39,20 @@ def _create_test_app(fido2_manager=None, backend=None, config=None):
     return app
 
 
-def _run_enroll_complete(session):
+def _run_enroll_complete(session, token_state="in_progress", real_completer=False):
     """Drive POST /enroll/browser/complete to the session-creation step with a
     fully mocked fido2/enrollment/db stack. ``session`` is the session config
     namespace (session_timeout/access_token_ttl/max_session_duration). Returns
-    (response, the patched SessionManager class-mock) so callers can assert how
-    the session was built."""
+    (response, the patched SessionManager class-mock, the fido2 mock, the db
+    mock) so callers can assert how the session was built and whether the
+    ceremony ran. With ``real_completer=True`` the real
+    ``EnrollmentManager.complete_enrollment`` executes (state-checked against
+    the mock token) instead of the no-op stub."""
     from core.iam.enrollment_manager import EnrollmentManager
 
     mock_token = SimpleNamespace(
         user_id=1,
-        state="in_progress",
+        state=token_state,
         token_hash="test-token-hash-00000000000000000000000000000000000000000000000000000000",
         binding_hash="test-binding-hash-000000000000000000000000000000000000000000000000000000000000000000000000000",
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
@@ -97,10 +100,11 @@ def _run_enroll_complete(session):
     )
     app = _create_test_app(fido2_manager=fido2, backend=backend, config=config)
 
+    completer = EnrollmentManager.complete_enrollment if real_completer else mock_em.complete_enrollment
     with patch("server.routes.enroll.verify_binding_hash", return_value=True):
         with patch.object(EnrollmentManager, "__init__", lambda self, db, config=None: None):
             with patch.object(EnrollmentManager, "get_token_by_plaintext", mock_em.get_token_by_plaintext):
-                with patch.object(EnrollmentManager, "complete_enrollment", mock_em.complete_enrollment):
+                with patch.object(EnrollmentManager, "complete_enrollment", completer):
                     with patch("core.iam.session_manager.SessionManager", return_value=mock_sm) as sm_cls:
                         client = TestClient(app, raise_server_exceptions=False)
                         resp = client.post(
@@ -112,7 +116,7 @@ def _run_enroll_complete(session):
                                 "label": "Primary key",
                             },
                         )
-    return resp, sm_cls
+    return resp, sm_cls, fido2, db
 
 
 class TestBrowserEnrollStart:
@@ -236,7 +240,7 @@ class TestBrowserEnrollComplete:
 
     def test_enroll_complete_success(self):
         """Should store credential, activate user, create session."""
-        resp, _sm = _run_enroll_complete(
+        resp, _sm, _fido2, _db = _run_enroll_complete(
             SimpleNamespace(
                 session_timeout=900,
                 access_token_ttl=300,
@@ -255,7 +259,7 @@ class TestBrowserEnrollComplete:
         be built from the operator's configured session settings
         (request.app.state.config.session), not the core defaults. The
         SessionManager is handed a config carrying the configured expiry."""
-        resp, sm_cls = _run_enroll_complete(
+        resp, sm_cls, _fido2, _db = _run_enroll_complete(
             SimpleNamespace(
                 session_timeout=600,
                 access_token_ttl=240,
@@ -274,7 +278,7 @@ class TestBrowserEnrollComplete:
         handed to SessionManager equals the core defaults (900 s / 300 s / 4 h)."""
         from core.iam.session_manager import SessionConfig as CoreSessionConfig
 
-        resp, sm_cls = _run_enroll_complete(
+        resp, sm_cls, _fido2, _db = _run_enroll_complete(
             SimpleNamespace(
                 session_timeout=900,
                 access_token_ttl=300,
@@ -429,3 +433,41 @@ class TestBrowserEnrollComplete:
                         },
                     )
                     assert resp.status_code == 503
+
+    def test_enroll_complete_created_state_token_400_before_side_effects(self):
+        """#412: complete over a token still in 'created' state must 400 before
+        the ceremony. The route accepted ("in_progress", "created") while
+        complete_enrollment enforces "in_progress" only, so a direct POST ran
+        finish_registration + db.add and died in the completer (500 +
+        store/DB divergence)."""
+        resp, _sm, fido2, db = _run_enroll_complete(
+            SimpleNamespace(
+                session_timeout=900,
+                access_token_ttl=300,
+                max_session_duration=14400,
+            ),
+            token_state="created",
+            real_completer=True,
+        )
+        assert resp.status_code == 400
+        assert "not in progress" in resp.json()["detail"]
+        fido2.finish_registration.assert_not_called()
+        fido2.store.store_credential.assert_not_called()
+        db.add.assert_not_called()
+
+    def test_enroll_complete_completed_state_token_400(self):
+        """Truth table: an already-'completed' token is rejected 400 too —
+        pins the route check to exactly the completer's accepted state."""
+        resp, _sm, fido2, db = _run_enroll_complete(
+            SimpleNamespace(
+                session_timeout=900,
+                access_token_ttl=300,
+                max_session_duration=14400,
+            ),
+            token_state="completed",
+            real_completer=True,
+        )
+        assert resp.status_code == 400
+        fido2.finish_registration.assert_not_called()
+        fido2.store.store_credential.assert_not_called()
+        db.add.assert_not_called()

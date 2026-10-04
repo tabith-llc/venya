@@ -202,7 +202,7 @@ async def browser_enroll_complete(
         # Validate token is in in_progress state
         try:
             token = em.get_token_by_plaintext(req.enrollment_token)
-            if token is None or token.state not in ("in_progress", "created"):
+            if token is None or token.state != "in_progress":
                 raise EnrollmentError("Invalid enrollment token or not in progress")
             server_config = getattr(request.app.state, "config", None)
             tolerance = (
