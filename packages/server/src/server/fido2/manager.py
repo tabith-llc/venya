@@ -25,6 +25,12 @@ from .browser_adapter import base64url_encode
 
 logger = logging.getLogger(__name__)
 
+# Ceremony timeout (ms) actually sent to the authenticator in both option
+# builders below. Stored challenges are swept with a x5 grace factor,
+# mirroring the #345 elevation precedent (ELEVATION_TOKEN_TTL_SECONDS * 5).
+CHALLENGE_TIMEOUT_MS = 60_000
+CHALLENGE_TTL_SECONDS = CHALLENGE_TIMEOUT_MS // 1000 * 5
+
 
 class WebAuthnError(ValueError):
     """User-facing WebAuthn validation failure.
@@ -79,6 +85,7 @@ class Fido2Store:
         self._credentials: dict[bytes, StoredCredential] = {}
 
     def store_challenge(self, challenge_id: str, user_id: str, data: dict) -> None:
+        self._sweep_stale_challenges()
         self._challenges[challenge_id] = StoredChallenge(
             user_id=user_id,
             data=data,
@@ -86,7 +93,22 @@ class Fido2Store:
         )
 
     def get_challenge(self, challenge_id: str) -> StoredChallenge | None:
+        # Aged entries are dropped before the pop, so a timed-out challenge
+        # returns None even when touched and "Challenge not found or expired"
+        # becomes honest.
+        self._sweep_stale_challenges()
         return self._challenges.pop(challenge_id, None)
+
+    def _sweep_stale_challenges(self) -> None:
+        """Prune challenges older than CHALLENGE_TTL_SECONDS (#408).
+
+        Abandoned ceremonies are pruned on the next store/get touch instead
+        of lingering until restart — same shape as the #345 elevation sweep.
+        """
+        now = time.time()
+        stale = [cid for cid, ch in self._challenges.items() if now - ch.created_at > CHALLENGE_TTL_SECONDS]
+        for cid in stale:
+            self._challenges.pop(cid, None)
 
     def store_credential(self, cred: StoredCredential) -> None:
         self._credentials[cred.credential_id] = cred
@@ -194,7 +216,7 @@ class Fido2Manager:
                 {"type": "public-key", "alg": -7},  # RS256
                 {"type": "public-key", "alg": -257},  # ES256
             ],
-            "timeout": 60000,
+            "timeout": CHALLENGE_TIMEOUT_MS,
             "excludeCredentials": [
                 {"type": "public-key", "id": base64.b64encode(cid).decode("ascii")}
                 for cid in (existing_credential_ids or [])
@@ -360,7 +382,7 @@ class Fido2Manager:
         options: dict[str, Any] = {
             "challenge": base64.b64encode(raw_challenge).decode("ascii"),
             "rpId": self.rp_id,
-            "timeout": 60000,
+            "timeout": CHALLENGE_TIMEOUT_MS,
             "userVerification": "discouraged",
         }
 
