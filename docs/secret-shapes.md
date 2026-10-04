@@ -51,7 +51,7 @@ The blessed taxonomy is `BUILTIN_SHAPES` in
 | `http-netrc` | curl/netrc credential file | `curl -n --netrc-file {secret_path} https://api.example.com/data` |
 | `http-header-file` | header lives INSIDE the file; curl reads the config | `curl -K {secret_path} https://api.example.com/data` — the file carries the `header = …` line |
 | `mysql-defaults` | client option file | `mysql --defaults-file={secret_path} -e "status"` |
-| `ipmi-passfile` | password from file | `ipmitool -H 10.0.0.5 -U admin -f {secret_path} chassis power status` |
+| `ipmi-passfile` | password from file | `ipmitool -H 192.0.2.10 -U admin -f {secret_path} chassis power status` |
 | `askpass` | sudo/git/ssh passphrase prompts answered via the static helper | stored value = the passphrase; at execute time the relay wires `GIT_ASKPASS`/`SSH_ASKPASS` to the helper (`routes/executors.py` askpass branch, `venya_contract.relay.ASKPASS_HELPER_PATH`). The command itself needs no shape-specific syntax. |
 | `sudo-stdin` | sudo's `-S` reads the password from stdin; the session-bound `<` redirect pair is the ruled delivery | `sudo -S < {secret_path} systemctl restart httpd` (the `<` must be its own argument followed exactly by the bound secret path — `executor.py:_redirect_pair`; do NOT add `-p ''` to remote ssh commands, see architecture.md) |
 | `env:NAME` | value is written into the sandbox env file as `NAME=<value>` before the run (`routes/executors.py` env-shape branch; `RelayEnvVar` contract) | store the key as `env:KUBECONFIG`; then plain `kubectl get pods` works — see the `$` constraint in §5 |
