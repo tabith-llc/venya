@@ -507,7 +507,20 @@ async def admin_remove(
 ) -> AdminRemoveResponse:
     """Remove a user (admin only)."""
     try:
-        from core.iam.models import RoleMember, Session, User
+        from core.iam.models import (
+            ElevationToken,
+            EnrollmentToken,
+            ExecutionSession,
+            ExecutorCert,
+            RoleMember,
+            Secret,
+            SecretRole,
+            Session,
+            SessionSecret,
+            User,
+            WebAuthnCredential,
+        )
+        from sqlalchemy import select
 
         user = db.query(User).filter(User.user_id == user_id).first()
         if user is None:
@@ -516,14 +529,33 @@ async def admin_remove(
                 detail=f"User not found: {user_id}",
             )
 
+        # Remove every dependent BEFORE the ORM delete, in FK-dependency
+        # order (join rows first). The user-delete flush null-outs the FKs
+        # of any relationship the ORM knows about; those columns are NOT
+        # NULL (some are primary keys), so an untouched dependent crashes
+        # the cascade (#425 DEFECT B — the credential case).
+        secret_ids = select(Secret.id).where(Secret.created_by == user.user_id)
+        exec_session_ids = select(ExecutionSession.id).where(ExecutionSession.user_id == user.user_id)
         # Remove role memberships
         memberships_removed = db.query(RoleMember).filter(RoleMember.user_id == user_id).delete()
         # Remove sessions
         sessions_revoked = db.query(Session).filter(Session.user_id == user_id).delete()
         # Remove enrollment tokens (user_id is String FK to users.user_id)
-        from core.iam.models import EnrollmentToken
-
         tokens_revoked = db.query(EnrollmentToken).filter(EnrollmentToken.user_id == user.user_id).delete()
+        # Remove WebAuthn credentials, elevation tokens, executor certs
+        credentials_removed = db.query(WebAuthnCredential).filter(WebAuthnCredential.user_id == user.user_id).delete()
+        elevations_removed = db.query(ElevationToken).filter(ElevationToken.user_id == user.user_id).delete()
+        executor_certs_removed = db.query(ExecutorCert).filter(ExecutorCert.executor_id == user.user_id).delete()
+        # Secret/execution history: the join tables have no DB-level
+        # cascade, so they go before their parents.
+        session_secrets_removed = (
+            db.query(SessionSecret)
+            .filter(SessionSecret.secret_id.in_(secret_ids) | SessionSecret.session_id.in_(exec_session_ids))
+            .delete()
+        )
+        secret_scopes_removed = db.query(SecretRole).filter(SecretRole.secret_id.in_(secret_ids)).delete()
+        secrets_removed = db.query(Secret).filter(Secret.created_by == user.user_id).delete()
+        exec_sessions_removed = db.query(ExecutionSession).filter(ExecutionSession.user_id == user.user_id).delete()
         # Remove the user
         db.delete(user)
         audit_lifecycle(
@@ -535,6 +567,13 @@ async def admin_remove(
                 "memberships_removed": memberships_removed,
                 "sessions_revoked": sessions_revoked,
                 "tokens_revoked": tokens_revoked,
+                "credentials_removed": credentials_removed,
+                "elevations_removed": elevations_removed,
+                "executor_certs_removed": executor_certs_removed,
+                "secrets_removed": secrets_removed,
+                "secret_scopes_removed": secret_scopes_removed,
+                "session_secrets_removed": session_secrets_removed,
+                "exec_sessions_removed": exec_sessions_removed,
             },
         )
         db.commit()

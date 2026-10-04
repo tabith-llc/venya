@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from .models import Role, RoleMember, User
+from .models import Role, RoleMember, SecretRole, User
 
 
 class RoleManagerError(Exception):
@@ -179,14 +179,29 @@ class RoleManager:
         return self.db.query(Role).order_by(Role.name).all()
 
     def delete_role(self, role_id: int) -> bool:
-        """Delete a role and its RoleMember memberships (cascades).
+        """Delete an EMPTY role.
+
+        A role that still has members or secret scopes is refused with a
+        dependency message: the ORM delete-dependency machinery cannot
+        blank-out the RoleMember/SecretRole primary-key columns, and today
+        raises an internal AssertionError instead (#425 DEFECT A).
 
         Returns:
             True if deleted, False if not found.
+
+        Raises:
+            RoleManagerError: if the role still has members or secret scopes.
         """
         role = self.get_role(role_id)
         if role is None:
             return False
+
+        member_count = self.db.query(RoleMember).filter(RoleMember.role_id == role_id).count()
+        if member_count:
+            raise RoleManagerError(f"Role '{role.name}' still has {member_count} member(s); remove members first")
+        scope_count = self.db.query(SecretRole).filter(SecretRole.role_id == role_id).count()
+        if scope_count:
+            raise RoleManagerError(f"Role '{role.name}' still scopes {scope_count} secret(s); unscope secrets first")
 
         self.db.delete(role)
         self.db.flush()
