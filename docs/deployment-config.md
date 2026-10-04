@@ -87,6 +87,7 @@ Unknown `VENYA_*` names are silently ignored (`extra="ignore"`) — a misspelled
 | `db.database_url` | `VENYA_DB__DATABASE_URL` |
 | `session.session_timeout` | `VENYA_SESSION__SESSION_TIMEOUT` |
 | `fido2.enrollment_token_ttl` (minutes) | `VENYA_FIDO2__ENROLLMENT_TOKEN_TTL` |
+| `fido2.user_verification` (discouraged\|preferred\|required) | `VENYA_FIDO2__USER_VERIFICATION` |
 | `executor_enrollment.token_ttl_seconds` | `VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS` |
 | `executor_enrollment.require_token` | `VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN` |
 

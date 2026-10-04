@@ -371,6 +371,7 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         rp_id=config.fido2.rp_id,
         rp_name=config.fido2.rp_name,
         origins=config.fido2.origins,
+        user_verification=config.fido2.user_verification,
         backend=backend,
     )
 
