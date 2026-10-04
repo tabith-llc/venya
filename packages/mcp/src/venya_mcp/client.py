@@ -251,6 +251,22 @@ class VenyaClient:
 
         If secret_keys is empty, step 1 creates a session with no secrets.
         """
+        # Parse argv BEFORE the session POST (ticket mcp-session-created-before-
+        # argv-parse #415): an unparseable command must not churn a secret-bound
+        # session row that then waits on TTL reap. The shlex split needs no
+        # session — it leads.
+        # M1 boundary split (ticket execution-command-wire-unstructured-string
+        # #322, owner ruling): the MCP TOOL surface stays a shell string, but
+        # ExecuteRequest.command is a list[str] since #322 — argv is split
+        # HERE so the wire carries structured tokens. An unparseable string
+        # (unbalanced quote) becomes a ValueError, which rides the EXISTING
+        # tool-error path (server.py: handler exceptions become isError=True
+        # results carrying this message; no traceback reaches the agent).
+        try:
+            argv = shlex.split(command)
+        except ValueError as exc:
+            raise ValueError(f"Command could not be parsed as a shell line: {exc}") from None
+
         # Step 1: Create session (with optional secret keys)
         session_body: dict = {"executor_id": executor_id}
         if secret_keys:
@@ -265,17 +281,6 @@ class VenyaClient:
 
         # Step 2: Execute command — long-running: last-fuse timeout (ticket
         # cli-execution-timeout-cold-start-default).
-        # M1 boundary split (ticket execution-command-wire-unstructured-string
-        # #322, owner ruling): the MCP TOOL surface stays a shell string, but
-        # ExecuteRequest.command is a list[str] since #322 — argv is split
-        # HERE so the wire carries structured tokens. An unparseable string
-        # (unbalanced quote) becomes a ValueError, which rides the EXISTING
-        # tool-error path (server.py: handler exceptions become isError=True
-        # results carrying this message; no traceback reaches the agent).
-        try:
-            argv = shlex.split(command)
-        except ValueError as exc:
-            raise ValueError(f"Command could not be parsed as a shell line: {exc}") from None
         result = await self._request(
             "POST",
             f"/api/v1/executors/{executor_id}/execute",
