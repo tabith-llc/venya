@@ -723,27 +723,31 @@ class Executor:
         session_uuid = uuid.uuid4().hex[:12]
         sandbox_name = f"venya-{self.session_id}-{session_uuid}"
 
-        # Create the sandbox. When cwd is None the strategy creates a
-        # per-run disk-backed workspace (a missing path makes sbx create
-        # prompt and fail with "user cancelled operation" in a non-TTY
-        # subprocess).
-        logger.info("Creating Docker Sandbox: %s", sandbox_name)
-        strategy.create_sandbox(sandbox_name, cwd)
-
-        # Copy secrets into sandbox
-        if self._injection_result:
-            strategy.copy_secrets_into_sandbox(self._injection_result.secret_mounts)
-
-        # Askpass helper (ticket secret-shape-askpass-helpers): static 0555
-        # script git/ssh invoke; it reads the credential file at run time.
-        # Written AFTER the secrets (it references their in-sandbox paths).
-        if askpass_helper:
-            strategy.write_askpass_helper()
-
-        # Apply network policy from allowlist file
-        strategy.apply_network_policy(sandbox_name)
-
+        # Ticket executor-sandbox-setup-orphans-live-vm (#406): the guarded
+        # region starts BEFORE create so any setup raise (create/copy-secrets/
+        # askpass/egress-policy) still routes through the remove_sandbox
+        # finally — no secrets-bearing orphan VM survives a setup failure.
         try:
+            # Create the sandbox. When cwd is None the strategy creates a
+            # per-run disk-backed workspace (a missing path makes sbx create
+            # prompt and fail with "user cancelled operation" in a non-TTY
+            # subprocess).
+            logger.info("Creating Docker Sandbox: %s", sandbox_name)
+            strategy.create_sandbox(sandbox_name, cwd)
+
+            # Copy secrets into sandbox
+            if self._injection_result:
+                strategy.copy_secrets_into_sandbox(self._injection_result.secret_mounts)
+
+            # Askpass helper (ticket secret-shape-askpass-helpers): static 0555
+            # script git/ssh invoke; it reads the credential file at run time.
+            # Written AFTER the secrets (it references their in-sandbox paths).
+            if askpass_helper:
+                strategy.write_askpass_helper()
+
+            # Apply network policy from allowlist file
+            strategy.apply_network_policy(sandbox_name)
+
             # Execute command inside sandbox
             logger.info("Executing in sandbox: %s", command)
             result = strategy.execute_command(command, env_override=env_override, cwd=cwd, argv=argv)

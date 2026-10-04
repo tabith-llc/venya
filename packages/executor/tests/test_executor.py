@@ -660,3 +660,87 @@ class TestSendToStage2FailClosed:
         executor.http_client = mock_http_client
         with pytest.raises(RuntimeError, match="Stage-2 filter returned 500"):
             executor._send_to_stage2(b"out", b"err")
+
+
+class TestSbxSetupOrphanCleanup:
+    """Ticket executor-sandbox-setup-orphans-live-vm (#406): every setup call
+    (create / copy-secrets / askpass / egress-policy) must live INSIDE the
+    guarded region so the remove_sandbox finally runs on any setup raise.
+    Pre-fix, a raise in the setup region escaped the try and orphaned a live
+    microVM with secrets copied in — the daemon reaper sweeps tmpfs/host dirs
+    only, there is no VM GC. Paired negatives: happy path and timeout path
+    keep a SINGLE removal (no double-remove)."""
+
+    def _executor_with_mock_sbx(self, injection_result=None):
+        from executor.strategies.sbx_strategy import SbxStrategy
+
+        strategy = MagicMock(spec=SbxStrategy)
+        strategy.execute_command.return_value = MagicMock(returncode=0, stdout=b"ok", stderr=b"")
+        ex = Executor(command_validator=MagicMock(), session_id="s-orphan", injection_strategy=strategy)
+        ex.http_client = None
+        ex._injection_result = injection_result
+        return ex, strategy
+
+    def _run(self, ex, **kw):
+        with patch("executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])):
+            return ex._run_command_sbx("cmd", [], None, None, **kw)
+
+    def test_copy_secrets_raise_removes_sandbox(self):
+        boom = RuntimeError("copy failed")
+        ex, strategy = self._executor_with_mock_sbx(injection_result=MagicMock())
+        strategy.copy_secrets_into_sandbox.side_effect = boom
+        with pytest.raises(RuntimeError) as ei:
+            self._run(ex)
+        assert ei.value is boom
+        assert strategy.remove_sandbox.call_count == 1
+
+    def test_askpass_helper_raise_removes_sandbox(self):
+        boom = RuntimeError("askpass failed")
+        ex, strategy = self._executor_with_mock_sbx()
+        strategy.write_askpass_helper.side_effect = boom
+        with pytest.raises(RuntimeError) as ei:
+            self._run(ex, askpass_helper=True)
+        assert ei.value is boom
+        assert strategy.remove_sandbox.call_count == 1
+
+    def test_network_policy_raise_removes_sandbox(self):
+        boom = RuntimeError("policy failed")
+        ex, strategy = self._executor_with_mock_sbx()
+        strategy.apply_network_policy.side_effect = boom
+        with pytest.raises(RuntimeError) as ei:
+            self._run(ex)
+        assert ei.value is boom
+        assert strategy.remove_sandbox.call_count == 1
+
+    def test_create_raise_still_calls_remove_once(self):
+        """Pre-fix, a create raise escaped the try (no finally at all).
+        Post-fix the finally fires: with the real SbxStrategy this is a SAFE
+        NO-OP — _sandbox_name is set only after create returns rc 0, so
+        remove_sandbox short-circuits to the workspace-only branch."""
+        boom = RuntimeError("create failed")
+        ex, strategy = self._executor_with_mock_sbx()
+        strategy.create_sandbox.side_effect = boom
+        with pytest.raises(RuntimeError) as ei:
+            self._run(ex)
+        assert ei.value is boom
+        assert strategy.remove_sandbox.call_count == 1
+        strategy.execute_command.assert_not_called()
+
+    def test_happy_path_single_removal(self):
+        """Paired negative: normal run unchanged — result delivered and
+        remove_sandbox called EXACTLY once (no double-removal)."""
+        ex, strategy = self._executor_with_mock_sbx()
+        result = self._run(ex)
+        assert result.stdout == b"ok"
+        assert strategy.remove_sandbox.call_count == 1
+
+    def test_timeout_path_single_removal(self):
+        """Paired negative: execute-path TimeoutExpired keeps the exit_code -1
+        CommandResult AND exactly one removal."""
+        import subprocess
+
+        ex, strategy = self._executor_with_mock_sbx()
+        strategy.execute_command.side_effect = subprocess.TimeoutExpired("sbx", 30)
+        result = self._run(ex)
+        assert result.exit_code == -1
+        assert strategy.remove_sandbox.call_count == 1
