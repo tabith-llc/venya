@@ -318,6 +318,10 @@ async def browser_enroll_complete(
         )
         db.commit()
 
+        # Persist in-memory entry only after the DB write succeeded
+        # (#416 fix-shape (b)): a failed flush/commit leaves no store entry.
+        fido2_manager.store.store_credential(cred)
+
         # Set session cookie
         response = JSONResponse(
             content=BrowserEnrollCompleteResponse(

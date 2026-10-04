@@ -429,6 +429,10 @@ async def init_complete(
         )
         db.commit()
 
+        # Persist in-memory entry only after the DB write succeeded
+        # (#416 fix-shape (b)): a failed flush/commit leaves no store entry.
+        fido2_manager.store.store_credential(cred)
+
         logger.info(
             "Init step 2: admin %s enrolled via FIDO2, recovery code issued",
             req.user_id,

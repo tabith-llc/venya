@@ -57,6 +57,11 @@ def _make_membership(user_id="alice", role_id=1):
 class MockFido2Manager:
     def __init__(self):
         self._challenges = {}
+        # #416: finish_registration no longer stores in-memory; the handler
+        # persists via store.store_credential after its DB write succeeds.
+        from server.fido2.manager import Fido2Store
+
+        self.store = Fido2Store()
 
     def start_registration(self, user_id, username, existing_credential_ids=None):
         challenge_id = "test-challenge-id"
