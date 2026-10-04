@@ -242,6 +242,11 @@ class Fido2Manager:
 
         Raises:
             ValueError: If registration fails.
+
+        The returned credential is NOT placed in the in-memory store here —
+        the consuming handler persists it via ``store.store_credential`` only
+        after its DB write succeeds (ticket webauthn-credential-id-crosscheck
+        #416, fix-shape (b): a failed DB write must leave no store entry).
         """
         stored = self.store.get_challenge(challenge_id)
         if stored is None:
@@ -280,6 +285,17 @@ class Fido2Manager:
         auth_data = ao.auth_data
         if auth_data.credential_data is None:
             raise WebAuthnError("No attested credential data in attestation")
+
+        # WebAuthn §7.1 step 21 crosscheck (ticket webauthn-credential-id-
+        # crosscheck #416): the client-response id must equal the ATTESTED
+        # credential id. Pre-fix the key came from response["id"]
+        # (attacker-chosen) while the persisted key material came from the
+        # attested object — one registration could poison another user's
+        # in-memory store entry. Reject BEFORE any store/DB write, and key
+        # everything off the attested id.
+        attested_credential_id = auth_data.credential_data.credential_id
+        if credential_id != attested_credential_id:
+            raise WebAuthnError("Credential ID mismatch: response id is not the attested credential id")
 
         # --- Ceremony verification (WebAuthn spec steps 5-7; ticket
         # sec-auth-elevation-authz-hardening #4). Pre-fix, finish_registration
@@ -332,12 +348,11 @@ class Fido2Manager:
 
         cred = StoredCredential(
             user_id=stored.data["user_id"],
-            credential_id=credential_id,
+            credential_id=attested_credential_id,
             public_key=public_key_bytes,
             sign_count=sign_count,
         )
 
-        self.store.store_credential(cred)
         return cred
 
     def start_authentication(
