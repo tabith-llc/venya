@@ -1772,3 +1772,160 @@ class TestSessionLockout429:
 
         assert resp.status_code == 503
         assert "Retry-After" not in resp.headers
+
+
+class TestRelayRejectionAudit424:
+    """#424: every pre-sandbox rejection relayed back as the 422 CommandRejected
+    lane must land a command_rejected row on the CORE audit trail. Today the
+    lane forwards the reason to the client and records nothing — the executor
+    spool leg is green (gates emit), but the fleet forwarder is inert unless
+    [audit] remote_url is configured, so the rejection is silent on core.
+    Truth table: rejection 422 -> one row (positive); non-rejection 422,
+    transport 503, and the success path -> no row (paired negatives); audit
+    commit failure still returns the 422 with its reason (best-effort half)."""
+
+    @staticmethod
+    def _harness(commit_side_effect=None):
+        """Relay-response harness (same DB mocks as TestPolicyRejectionRelay410);
+        `commit_side_effect` drives the best-effort cell on the shared mock_db."""
+        app, backend = _create_test_app()
+        mock_db = MagicMock()
+        if commit_side_effect is not None:
+            mock_db.commit.side_effect = commit_side_effect
+
+        mock_exec_session = MagicMock()
+        mock_exec_session.id = "sess-1"
+        mock_exec_session.user_id = "test-user"
+        mock_exec_session.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        mock_exec_session.executor_id = "exec-1"
+
+        mock_session_query = MagicMock()
+        mock_session_query.filter.return_value.first.return_value = mock_exec_session
+
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "192.0.2.14"
+        mock_executor.revoked_at = None
+        mock_executor.serial_number = None
+        mock_executor.version = "0.1.0a14"
+
+        mock_executor_query = MagicMock()
+        mock_executor_query.filter.return_value.first.return_value = mock_executor
+
+        mock_secrets_query = MagicMock()
+        mock_secrets_query.all.return_value = []
+
+        def query_side_effect(model):
+            if model.__name__ == "ExecutionSession":
+                return mock_session_query
+            elif model.__name__ == "Executor":
+                return mock_executor_query
+            elif model.__name__ == "SessionSecret":
+                return mock_secrets_query
+            none_q = MagicMock()
+            none_q.filter.return_value.first.return_value = None
+            return none_q
+
+        mock_db.query.side_effect = query_side_effect
+        backend.get_session.return_value = mock_db
+        return app, mock_db
+
+    @staticmethod
+    def _post(app, response: httpx2.Response):
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=response)
+        with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
+            with patch("server.routes.executors.ssl.create_default_context", return_value=MagicMock()):
+                client = TestClient(app, raise_server_exceptions=False)
+                return client.post(
+                    "/api/v1/executors/exec-1/execute",
+                    json={"session_id": "sess-1", "command": ["/usr/bin/sort", "<", "/etc/passwd"]},
+                )
+
+    @staticmethod
+    def _relay(status: int, body: dict) -> httpx2.Response:
+        request = httpx2.Request("POST", "https://192.0.2.14:8443/execute")
+        return httpx2.Response(status, json=body, request=request)
+
+    @staticmethod
+    def _rejected_rows(mock_db):
+        return [
+            call[0][0]
+            for call in mock_db.add.call_args_list
+            if call[0] and getattr(call[0][0], "event_type", None) == "command_rejected"
+        ]
+
+    _REASON = (
+        "Command rejected: Redirect '<' is only permitted when immediately followed by a "
+        "SESSION-BOUND secret path (/run/secrets/venya/<id> for a secret injected in this "
+        "session). Any other redirect target is rejected."
+    )
+
+    def test_relay_rejection_writes_command_rejected_row(self):
+        """Positive: relay 422 CommandRejected lane -> exactly one command_rejected row
+        carrying session_id, executor_id, display command, and the verbatim reason."""
+        app, mock_db = self._harness()
+        resp = self._post(app, self._relay(422, {"detail": self._REASON}))
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == self._REASON
+
+        rows = self._rejected_rows(mock_db)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.user_id == "test-user"
+        fields = json.loads(row.fields) if isinstance(row.fields, str) else row.fields
+        assert fields["session_id"] == "sess-1"
+        assert fields["executor_id"] == "exec-1"
+        assert fields["command"] == "/usr/bin/sort '<' /etc/passwd"
+        assert fields["reason"] == self._REASON
+
+    def test_rejection_row_carries_no_secret_material(self):
+        """Hygiene paired negative (#424 AC2): the row fields are path+reason only —
+        the fixed key set, and no secret-value surface (the relay body never carries
+        values; nothing else may ride into the ledger)."""
+        app, mock_db = self._harness()
+        self._post(app, self._relay(422, {"detail": self._REASON}))
+        fields = self._rejected_rows(mock_db)[0].fields
+        fields = json.loads(fields) if isinstance(fields, str) else fields
+        assert set(fields) == {"session_id", "executor_id", "command", "reason"}
+
+    def test_non_rejection_422_writes_no_row(self):
+        """Paired negative: a 422 without the CommandRejected prefix (the #410
+        allow-list lane) keeps the generic detail and records NO rejection row."""
+        app, mock_db = self._harness()
+        resp = self._post(
+            app, self._relay(422, {"detail": "malformed request: WrappedSecret(wrapped_value='...')"})
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "Executor returned an error"
+        assert self._rejected_rows(mock_db) == []
+
+    def test_transport_503_writes_no_row(self):
+        """Paired negative: a relay transport 503 is not a rejection — no row."""
+        app, mock_db = self._harness()
+        resp = self._post(app, self._relay(503, {"detail": "execution failed"}))
+        assert resp.status_code == 503
+        assert self._rejected_rows(mock_db) == []
+
+    def test_success_path_writes_no_rejection_row(self):
+        """Paired negative: the happy path stays byte-unchanged — command_executed
+        only, zero command_rejected rows."""
+        app, mock_db = self._harness()
+        response = self._relay(200, {"exit_code": 0, "stdout": "ok\n", "stderr": "", "masked_count": 0})
+        response.raise_for_status = MagicMock()
+        resp = self._post(app, response)
+        assert resp.status_code == 200
+        assert self._rejected_rows(mock_db) == []
+
+    def test_audit_commit_failure_still_returns_422_reason(self, caplog):
+        """Best-effort half: the audit commit raising must not mask the 422 or its
+        forwarded reason (record_login_failure posture, same as the #407 helper)."""
+        app, mock_db = self._harness(commit_side_effect=RuntimeError("db down"))
+        with caplog.at_level(logging.ERROR, logger="venya.server"):
+            resp = self._post(app, self._relay(422, {"detail": self._REASON}))
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == self._REASON
+        assert any("Rejection audit write failed" in r.getMessage() for r in caplog.records)

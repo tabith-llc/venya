@@ -480,6 +480,54 @@ def _record_relay_timeout_audit(
         db.close()
 
 
+def _record_rejection_audit(
+    request: Request,
+    session_id: str,
+    executor_id: str,
+    display_command: str,
+    user_id: str | None,
+    reason: str,
+) -> None:
+    """Best-effort command_rejected row when the relay returns the executor's 422
+    CommandRejected lane (ticket injection-rejected-audit #424).
+
+    Every pre-sandbox rejection (structure gate, policy gate) converges on this
+    server lane, and nothing else records it on the core ledger: the executor
+    emits the event to its local spool, but the forwarder is inert unless
+    ``[audit] remote_url`` is configured, so without this row a relayed
+    rejection is silent in the audit trail. Same standalone-transaction
+    posture as ``_record_relay_timeout_audit`` (#407): the request's get_db
+    session rolls back when the 422 unwinds, so the write uses its own session
+    and any failure is swallowed + logged — it must never mask the 422 or its
+    forwarded reason. Value-free by construction: session/executor ids, the
+    display command, and the reason only (both gates run before injection).
+    """
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        return
+    db = backend.get_session()
+    try:
+        db.add(
+            AuditEvent(
+                event_type="command_rejected",
+                user_id=user_id,
+                fields={
+                    "session_id": session_id,
+                    "executor_id": executor_id,
+                    "command": display_command,
+                    "reason": reason,
+                },
+                timestamp=datetime.now(UTC),
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Rejection audit write failed for session %s on executor %s", session_id, executor_id)
+    finally:
+        db.close()
+
+
 # --- Endpoints ---
 
 
@@ -1522,6 +1570,13 @@ async def execute_command_on_executor(
                 relay_detail = None
             if isinstance(relay_detail, str) and relay_detail.startswith("Command rejected:"):
                 detail = relay_detail
+                # #424: the relayed pre-sandbox rejection must land on the core
+                # ledger here — the only convergence point for both executor
+                # gates (the spool copy only reaches core if the forwarder is
+                # configured; see _record_rejection_audit).
+                _record_rejection_audit(
+                    request, session.id, id, display_command, auth_user["user_id"], relay_detail
+                )
         raise HTTPException(status_code=e.response.status_code, detail=detail)
 
     # Validate executor response shape before any field access
