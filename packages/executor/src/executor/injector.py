@@ -282,7 +282,14 @@ def inject_via_fifo(path: str, secret_value: bytes) -> SecretInjection:
                 try:
                     fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
                 except OSError as e:
-                    if e.errno != errno.ENXIO or time.time() >= deadline:
+                    if e.errno != errno.ENXIO:
+                        raise
+                    if time.time() >= deadline:
+                        logger.error(
+                            "FIFO write gave up after %.0fs: no reader ever opened %s" " — secret not delivered",
+                            FIFO_WRITE_TIMEOUT,
+                            path,
+                        )
                         raise
                     time.sleep(0.1)
                     continue
