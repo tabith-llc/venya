@@ -210,6 +210,10 @@ class Config:
         self._data["server_url"] = value.rstrip("/")
         self.save()
 
+    def set_server_url_transient(self, value: str) -> None:
+        """One-shot server URL for this process only — no config.json write (#398)."""
+        self._data["server_url"] = value.rstrip("/")
+
     @property
     def access_token(self) -> str | None:
         return self._data.get("access_token")
@@ -240,7 +244,8 @@ class APIClient:
     - Automatic token refresh within active sessions
     - FIDO2 re-authentication on token expiry
     - Error handling with meaningful messages
-    - Config file persistence (server_url, access_token)
+    - Config file persistence (access_token; server_url only via the
+      explicit setter — a constructor server_url is one-shot, in-memory)
 
     Usage:
         # Create client (reads config from ~/.config/venya/config.json)
@@ -267,7 +272,10 @@ class APIClient:
     ) -> None:
         self.config = Config(config_file=config_file)
         if server_url:
-            self.config.server_url = server_url
+            # #398: the constructor URL is the one-shot flag/env override —
+            # in-memory for this process only; persistence belongs to the
+            # explicit setter (setup / config set server_url).
+            self.config.set_server_url_transient(server_url)
         if access_token:
             self.config.access_token = access_token
 
