@@ -9,6 +9,8 @@
 Covers session creation, command relay, audit events, and session validation.
 """
 
+import json
+import logging
 import socket
 import ssl
 from datetime import UTC, datetime, timedelta
@@ -1462,3 +1464,162 @@ class TestExecuteRequestStrictUtf8:
             json={"session_id": "sess-1", "command": ["ls"]},
         )
         assert resp.status_code == 404
+
+
+class TestRelayTimeoutAudit407:
+    """#407 fail-honest audit: a relay-timeout raise writes ONE command_executed row
+    (outcome "relay_timeout", NULL exit_code) BEFORE the 503 — today the raise precedes
+    the success-path audit write and the get_db rollback erases the run's record entirely.
+    Truth table: timeout->row exists with honest tag (positive); non-timeout 503 writes
+    no row (paired negative); audit failure never masks the 503 (best-effort half);
+    success path unchanged, no duplicate tagged row (paired negative)."""
+
+    @staticmethod
+    def _relay_harness(commit_side_effect=None):
+        """Dial-stage harness: valid session/executor, empty secrets, and the request
+        session AND the best-effort audit session are the SAME mock_db (mirrors
+        backend.get_session.return_value in _create_test_app)."""
+        app, backend = _create_test_app()
+        mock_db = MagicMock()
+        if commit_side_effect is not None:
+            mock_db.commit.side_effect = commit_side_effect
+
+        mock_exec_session = MagicMock()
+        mock_exec_session.id = "sess-1"
+        mock_exec_session.user_id = "test-user"
+        mock_exec_session.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        mock_exec_session.executor_id = "exec-1"
+
+        mock_session_query = MagicMock()
+        mock_session_filtered = MagicMock()
+        mock_session_filtered.first.return_value = mock_exec_session
+        mock_session_query.filter.return_value = mock_session_filtered
+
+        mock_executor = MagicMock()
+        mock_executor.id = "exec-1"
+        mock_executor.hostname = "192.0.2.14"
+        mock_executor.revoked_at = None
+        mock_executor.serial_number = None
+
+        mock_executor_query = MagicMock()
+        mock_executor_filtered = MagicMock()
+        mock_executor_filtered.first.return_value = mock_executor
+        mock_executor_query.filter.return_value = mock_executor_filtered
+
+        mock_secrets_query = MagicMock()
+        mock_secrets_query.all.return_value = []
+
+        def query_side_effect(model):
+            if model.__name__ == "ExecutionSession":
+                return mock_session_query
+            elif model.__name__ == "Executor":
+                return mock_executor_query
+            elif model.__name__ == "SessionSecret":
+                return mock_secrets_query
+            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+                none_q = MagicMock()
+                none_q.filter.return_value.first.return_value = None
+                return none_q
+            return mock_session_query
+
+        mock_db.query.side_effect = query_side_effect
+        backend.get_session.return_value = mock_db
+        return app, mock_db
+
+    @staticmethod
+    def _command_executed_rows(mock_db):
+        rows = []
+        for call in mock_db.add.call_args_list:
+            event = call[0][0] if call[0] else None
+            if event is not None and getattr(event, "event_type", None) == "command_executed":
+                rows.append(event)
+        return rows
+
+    def _post_execute(self, app, side_effect):
+        mock_ssl_ctx = MagicMock()
+        with patch("server.routes.executors.httpx2.AsyncClient", side_effect=side_effect):
+            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+                client = TestClient(app, raise_server_exceptions=False)
+                return client.post(
+                    "/api/v1/executors/exec-1/execute",
+                    json={"session_id": "sess-1", "command": ["sleep", "9999"]},
+                )
+
+    def test_relay_timeout_writes_honest_command_executed_row(self):
+        """Positive half: ReadTimeout (the real scalar-timeout class, a TimeoutException
+        subclass) -> 503 AND one command_executed row tagged outcome="relay_timeout"
+        with NULL exit_code/masked_count (response-body-only values do not exist here)."""
+        app, mock_db = self._relay_harness()
+        resp = self._post_execute(app, httpx2.ReadTimeout("read timed out"))
+
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Executor timed out"
+
+        rows = self._command_executed_rows(mock_db)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.user_id == "test-user"
+        fields = json.loads(row.fields) if isinstance(row.fields, str) else row.fields
+        assert fields["session_id"] == "sess-1"
+        assert fields["executor_id"] == "exec-1"
+        assert fields["command"] == "sleep 9999"
+        assert fields["outcome"] == "relay_timeout"
+        assert fields["exit_code"] is None
+        assert fields["masked_count"] is None
+        # best-effort half of the shape: the row rides its OWN standalone commit
+        mock_db.commit.assert_called()
+
+    def test_relay_timeout_commit_failure_still_returns_503(self, caplog):
+        """Best-effort half: the audit commit raising must not mask the 503 — the
+        exception is rolled back, logged, and swallowed (record_login_failure posture)."""
+        app, mock_db = self._relay_harness(commit_side_effect=RuntimeError("db down"))
+        with caplog.at_level(logging.ERROR, logger="server.routes.executors"):
+            resp = self._post_execute(app, httpx2.ReadTimeout("read timed out"))
+
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Executor timed out"
+        mock_db.rollback.assert_called()
+        assert any("Relay-timeout audit write failed" in r.getMessage() for r in caplog.records)
+
+    def test_non_timeout_transport_error_writes_no_row(self):
+        """Paired negative: the OTHER 503 transports (RemoteProtocolError here,
+        sibling of the timeout guard) stay byte-unchanged — no audit row is written."""
+        app, mock_db = self._relay_harness()
+        err = httpx2.RemoteProtocolError("peer closed without complete message")
+        resp = self._post_execute(app, err)
+
+        assert resp.status_code == 503
+        assert "connection lost" in resp.json()["detail"]
+        assert self._command_executed_rows(mock_db) == []
+
+    def test_success_path_writes_one_untagged_row(self):
+        """Paired negative: success keeps the EXISTING row shape — exactly one
+        command_executed, real exit_code/masked_count, NO outcome tag key (no
+        duplicate fail-honest row on the happy path)."""
+        app, mock_db = self._relay_harness()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"exit_code": 0, "stdout": "ok\n", "stderr": "", "masked_count": 0}
+        mock_response.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(return_value=mock_response)
+
+        mock_ssl_ctx = MagicMock()
+        with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
+            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+                client = TestClient(app, raise_server_exceptions=False)
+                resp = client.post(
+                    "/api/v1/executors/exec-1/execute",
+                    json={"session_id": "sess-1", "command": ["sleep", "9999"]},
+                )
+
+        assert resp.status_code == 200
+        rows = self._command_executed_rows(mock_db)
+        assert len(rows) == 1
+        fields = json.loads(rows[0].fields) if isinstance(rows[0].fields, str) else rows[0].fields
+        assert "outcome" not in fields
+        assert fields["exit_code"] == 0
+        assert fields["masked_count"] == 0

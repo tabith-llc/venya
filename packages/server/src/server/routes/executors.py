@@ -431,6 +431,55 @@ def _mark_execution_session_completed(
         )
 
 
+def _record_relay_timeout_audit(
+    request: Request,
+    session_id: str,
+    executor_id: str,
+    display_command: str,
+    user_id: str | None,
+) -> None:
+    """Best-effort fail-honest command_executed row when the relay TIMED OUT (ticket #407).
+
+    A 300 s relay raise abandons a request the executor may still be running toward its
+    own 3600 s ceiling, and the success-path audit write lives AFTER the response — so
+    without this row the run lands with ZERO audit records. The outcome is UNKNOWN here
+    (the executor may complete, fail, or still be running), so exit_code/masked_count —
+    response-body-only values — are NULL and fields carry the honest tag
+    ``outcome: "relay_timeout"``.
+
+    Own standalone best-effort transaction (the record_login_failure idiom — commit in
+    its own session, swallow+log any failure): the request's get_db session ROLLS BACK
+    when the 503 unwinds, so an add on that session would be erased, and an audit-write
+    failure must never mask the 503 the operator sees.
+    """
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        return
+    db = backend.get_session()
+    try:
+        db.add(
+            AuditEvent(
+                event_type="command_executed",
+                user_id=user_id,
+                fields={
+                    "session_id": session_id,
+                    "executor_id": executor_id,
+                    "command": display_command,
+                    "outcome": "relay_timeout",
+                    "exit_code": None,
+                    "masked_count": None,
+                },
+                timestamp=datetime.now(UTC),
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Relay-timeout audit write failed for session %s on executor %s", session_id, executor_id)
+    finally:
+        db.close()
+
+
 # --- Endpoints ---
 
 
@@ -1443,6 +1492,7 @@ async def execute_command_on_executor(
             )
         raise HTTPException(status_code=503, detail="Executor unreachable (connection refused)")
     except httpx2.TimeoutException:
+        _record_relay_timeout_audit(request, session.id, id, display_command, auth_user["user_id"])
         raise HTTPException(status_code=503, detail="Executor timed out")
     except httpx2.RemoteProtocolError as e:
         # Executor died mid-response (e.g. daemon SEGV): peer closed without a
