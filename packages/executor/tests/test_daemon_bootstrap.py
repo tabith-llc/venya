@@ -178,6 +178,7 @@ enrollment_token = "enrl_exec_toml_legacy"
         try:
             with (
                 patch("executor.daemon.sweep_workspace_base", return_value=0),
+                patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
                 caplog.at_level(logging.ERROR),
             ):
                 daemon.start()  # must complete — no crash, loop entered

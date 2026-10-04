@@ -1417,8 +1417,9 @@ class TestDeafBootRefusal:
         d = self._daemon(cfg)
         sentinel = RuntimeError("past-the-guard")
         d.cert_manager.register.side_effect = sentinel
-        with pytest.raises(RuntimeError) as exc:
-            d.start()
+        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+            with pytest.raises(RuntimeError) as exc:
+                d.start()
         assert exc.value is sentinel  # reached registration ⇒ guard passed
 
     def test_bind_failure_also_refuses(self, config):
@@ -1428,8 +1429,9 @@ class TestDeafBootRefusal:
         d._create_mtls_client = MagicMock(return_value=MagicMock())
         d.relay = MagicMock()
         d.relay.active = False
-        with pytest.raises(SystemExit) as exc:
-            d.start()
+        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+            with pytest.raises(SystemExit) as exc:
+                d.start()
         assert exc.value.code == 1
         assert d.state.running is False
 
@@ -1443,7 +1445,8 @@ class TestDeafBootRefusal:
         d._main_loop = MagicMock()
         d.stop = MagicMock()
         d._write_pidfile = MagicMock()
-        d.start()
+        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+            d.start()
         assert d.state.running is True
         d._main_loop.assert_called_once()
 
@@ -1487,8 +1490,9 @@ class TestResolverBootRefusal:
         d = self._daemon(cfg)
         sentinel = RuntimeError("past-the-resolver-gate")
         d.cert_manager.register.side_effect = sentinel
-        with pytest.raises(RuntimeError) as exc:
-            d.start()
+        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+            with pytest.raises(RuntimeError) as exc:
+                d.start()
         assert exc.value is sentinel  # reached registration ⇒ resolver gate passed
 
 
@@ -1522,8 +1526,9 @@ class TestMtlsMaterialNamedError:
         d.cert_manager = MagicMock()
         d.reaper = MagicMock()
         d._create_mtls_client = MagicMock(side_effect=RuntimeError("mTLS material unusable: boom"))
-        with pytest.raises(SystemExit) as exc:
-            d.start()
+        with patch("executor.daemon.require_supported_sbx", return_value="0.46.0"):
+            with pytest.raises(SystemExit) as exc:
+                d.start()
         assert exc.value.code == 1
         assert d.state.running is False
 

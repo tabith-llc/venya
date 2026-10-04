@@ -52,7 +52,13 @@ from .command_validator import (
 from .config import ExecutorConfig
 from .executor import Executor
 from .relay_listener import RelayListener
-from .strategies.sbx_strategy import SECRET_TMPFS_BASE, SbxStrategy, sweep_workspace_base
+from .strategies.sbx_strategy import (
+    SECRET_TMPFS_BASE,
+    SbxStrategy,
+    SbxVersionError,
+    require_supported_sbx,
+    sweep_workspace_base,
+)
 
 logger = logging.getLogger("venya.executor.daemon")
 
@@ -1284,6 +1290,16 @@ class ExecutorDaemon:
                 "(find your resolver: resolvectl status or grep nameserver /etc/resolv.conf)."
             )
             raise SystemExit(1)
+        # refs ticket sbx-exec-env-file-noop: refuse boot on an sbx CLI below
+        # the version floor — below 0.39.0 `sbx exec --env-file` is a silent
+        # no-op, so secrets would never land. Checked BEFORE registration so
+        # the one-shot enrollment token is never consumed on a doomed boot.
+        try:
+            sbx_ver = require_supported_sbx()
+            logger.info("sbx CLI supported: %s", sbx_ver)
+        except SbxVersionError as exc:
+            logger.error("%s", exc)
+            raise
         logger.info("Starting executor daemon: %s", self.config.executor_id)
 
         # /dev/shm survives daemon kills and reboots but sandboxes never do:

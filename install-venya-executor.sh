@@ -289,7 +289,27 @@ if ! command -v sbx &>/dev/null; then
     venya_apt install -y -qq docker-sbx
     info "sbx CLI installed. kvm group is re-asserted on every install (see #384 block below)."
 else
-    info "sbx CLI already installed: $(sbx --version 2>/dev/null || echo 'unknown')"
+    # refs ticket sbx-exec-env-file-noop (fix B'): DETECT AND TELL ONLY.
+    # An old sbx makes `sbx exec --env-file` a silent no-op, so the executor
+    # would refuse to start; the admin upgrades the vendor package on their
+    # own policy. This path NEVER runs apt — Venya does not manage vendor
+    # packages on customer machines.
+    SBX_MIN_VERSION="0.39.0"
+    # `|| true` inside the substitution: grep-no-match would fail the
+    # pipeline at the assignment under set -o pipefail (same guard class as
+    # the build-id block above).
+    SBX_FOUND=$(sbx version 2>/dev/null | grep -oE "v?[0-9]+\.[0-9]+\.[0-9]+" | head -n1 || true)
+    if [ -z "$SBX_FOUND" ]; then
+        error "sbx found on PATH but 'sbx version' gave no version — repair the vendor package yourself, then re-run this installer. Venya does not manage vendor packages."
+        exit 1
+    fi
+    SBX_FOUND="${SBX_FOUND#v}"
+    if [ "$(printf '%s\n%s\n' "$SBX_MIN_VERSION" "$SBX_FOUND" | sort -V | head -n1)" = "$SBX_MIN_VERSION" ]; then
+        info "sbx CLI $SBX_FOUND meets the requirement (>= $SBX_MIN_VERSION) — no change made."
+    else
+        error "Docker Sandboxes CLI $SBX_FOUND is older than the required $SBX_MIN_VERSION. Older versions silently ignore the secret-injection file Venya depends on, so the executor would refuse to start. Venya will not upgrade your Docker installation — versions of vendor packages on your machines are yours to choose. Upgrade the docker-sbx package yourself (for example: sudo apt-get install docker-sbx), then re-run this installer."
+        exit 1
+    fi
 fi
 
 # Ensure sbx state directory exists with correct ownership (runs every install;
