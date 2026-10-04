@@ -673,9 +673,11 @@ venya_write_egress_allowlist() {
 # chicken-and-egg (sandbox DNS is what this value serves).
 venya_resolve_dns_resolver() {
     DNS_RESOLVER="${VENYA_DNS_RESOLVER:-}"
+    DNS_RESOLVER_REUSED=0
     if [ -z "$DNS_RESOLVER" ] && [ -f /etc/venya/executor.toml ]; then
         DNS_RESOLVER="$(sed -n 's/^dns_resolver = "\(.*\)"$/\1/p' /etc/venya/executor.toml | head -1)"
         if [ -n "$DNS_RESOLVER" ]; then
+            DNS_RESOLVER_REUSED=1
             info "Reusing dns_resolver from existing /etc/venya/executor.toml"
         fi
     fi
@@ -688,6 +690,21 @@ venya_resolve_dns_resolver() {
     if ! _venya_valid_ipv4 "$DNS_RESOLVER"; then
         error "VENYA_DNS_RESOLVER='$DNS_RESOLVER' is not a valid IPv4 address (hostnames are not accepted — the resolver must be reachable by IP)."
         exit 1
+    fi
+    # #428 (shape (c), owner ruling 2026-10-04): a carried-forward value is the
+    # only one the operator never re-asserted this run — probe it. HARD
+    # placement pin: runs ONLY after _venya_valid_ipv4, so nothing but a
+    # validated IPv4 ever reaches the bash -c interpolation. The explicit
+    # VENYA_DNS_RESOLVER path stays unprobed (operator intent; the documented
+    # bypass when this abort fires). timeout 3 caps the probe; TCP/53 needs no
+    # internet — same LAN/offline constraint as everything else here.
+    if [ "${DNS_RESOLVER_REUSED}" -eq 1 ]; then
+        if ! timeout 3 bash -c "exec 3<>/dev/tcp/${DNS_RESOLVER}/53" 2>/dev/null; then
+            error "Stored dns_resolver=${DNS_RESOLVER} in /etc/venya/executor.toml is unreachable (TCP/53 probe failed within 3s)."
+            error "Fix the stored value, or re-run with an explicit resolver: VENYA_DNS_RESOLVER=<ip> (find yours: resolvectl status; or: grep nameserver /etc/resolv.conf)"
+            exit 1
+        fi
+        info "Stored dns_resolver=${DNS_RESOLVER} reachable (TCP/53 probe OK)"
     fi
 }
 
