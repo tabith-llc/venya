@@ -46,7 +46,11 @@ WORKSPACE_BASE = str(Path.home() / ".venya-workspaces")  # nosec
 
 # Where secrets appear inside the sandbox. The shell agent runs as non-root
 # (uid 1000) and /run is root-owned, so the dir must live under the image's
-# 1777 /run/secrets.
+# 1777 /run/secrets. NOTE: the sbx runtime mounts /run/secrets rw,noexec,nosuid
+# (its own injected-mount default — we pass no mount flag), so only the
+# NON-EXECUTED secret files live here; the exec'd askpass helper is placed at
+# ASKPASS_HELPER_PATH under /usr/local/bin instead (ticket
+# askpass-helper-noexec-mount-conflict).
 CONTAINER_SECRET_DIR = "/run/secrets/venya"  # nosec
 
 # How long to wait for sandbox commands
@@ -114,8 +118,11 @@ def sweep_workspace_base(base: str = WORKSPACE_BASE) -> int:
 # unguarded `cat "$VAR"` with VAR unset becomes `cat` on stdin, which would
 # HANG until SBX_TIMEOUT (1h) instead of failing loudly (ticket acceptance:
 # "never empty-string success" — and never a silent hang either).
-# STATIC content — carries no secret; written 0555 into the protected secrets
-# dir at runtime.
+# STATIC content — carries no secret. Staged 0555 on the host and copied to
+# ASKPASS_HELPER_PATH (/usr/local/bin — an exec-capable, root-owned dir the
+# uid-1000 sandbox user cannot write) via `sbx cp`. NOT tee'd into /run/secrets,
+# which the sbx runtime mounts noexec and where git/ssh could not exec it (ticket
+# askpass-helper-noexec-mount-conflict).
 ASKPASS_HELPER_CONTENT = """#!/bin/sh
 if [ -z "${VENYA_ASKPASS_SECRET:-}" ] || [ ! -r "${VENYA_ASKPASS_SECRET:-}" ]; then
     echo "venya-askpass: VENYA_ASKPASS_SECRET is unset or unreadable" >&2
@@ -424,18 +431,37 @@ class SbxStrategy(InjectionStrategy):
             logger.debug("Copied secret %s into sandbox: %s", mount.secret_id, container_path)
 
     def write_askpass_helper(self) -> None:
-        """Write the askpass helper script into the sandbox secrets dir (0555).
+        """Stage the static askpass helper on the host and copy it to an
+        exec-capable path in the sandbox (0555).
 
-        Fail-closed like copy_secrets_into_sandbox: any failed step removes the
-        partial file and raises — a missing helper would surface later as a
-        confusing git/ssh prompt failure. The script is STATIC (no secret
-        content); at invocation time it prints the credential file named by
-        VENYA_ASKPASS_SECRET and answers username prompts from
+        The sbx runtime mounts /run/secrets rw,noexec,nosuid, so a helper
+        tee'd into the secrets dir could be read but not exec'd and the
+        git/ssh clone shape died at rc=128 (ticket
+        askpass-helper-noexec-mount-conflict). The static script is therefore
+        staged on the host (mkstemp -> write -> fchmod 0555) and copied to
+        ASKPASS_HELPER_PATH (a root-owned, exec-capable system dir the
+        sandbox uid-1000 user cannot write or replace) with `sbx cp` — the
+        same mechanism _copy_sshpass uses for a system path. There is NO
+        tee-to-/tmp fallback: /tmp is agent-writable and would silently drop
+        the unwritable property. cp failure is fail-closed (no in-guest
+        rollback rm is attempted — a uid-1000 `sbx exec rm` cannot unlink
+        from the root-owned dir, and the static, secret-free helper is
+        cleaned up when the per-run sandbox is destroyed).
+
+        The guest secrets dir is still created: the helper references the
+        credential file at VENYA_ASKPASS_SECRET inside it regardless of where
+        the helper itself lives. The script carries NO secret; at invocation
+        it prints that file and answers username prompts from
         VENYA_ASKPASS_USER (ticket secret-shape-askpass-helpers).
         """
         if not self._sandbox_name:
             raise RuntimeError("Sandbox not created yet")
 
+        # Ordering verified in executor.py: copy_secrets_into_sandbox runs
+        # BEFORE write_askpass_helper and creates this dir; the mkdir -p here
+        # is the idempotent guard for the askpass-only path (an askpass secret
+        # always rides a copied secret file, but keep it so the helper never
+        # points at a missing dir).
         mkdir_result = subprocess.run(  # nosec
             ["sbx", "exec", self._sandbox_name, "mkdir", "-p", CONTAINER_SECRET_DIR],
             capture_output=True,
@@ -447,45 +473,33 @@ class SbxStrategy(InjectionStrategy):
             logger.error("mkdir %s for askpass helper failed: %s", CONTAINER_SECRET_DIR, mkdir_result.stderr)
             raise RuntimeError(f"Failed to create secrets directory {CONTAINER_SECRET_DIR} for askpass helper")
 
-        result = subprocess.run(  # nosec
-            ["sbx", "exec", "-i", self._sandbox_name, "tee", ASKPASS_HELPER_PATH],
-            input=ASKPASS_HELPER_CONTENT.encode("utf-8"),
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-        if result.returncode != 0:
-            logger.error(
-                "askpass helper write failed: %s",
-                (result.stderr or b"").decode(errors="replace"),
-            )
-            subprocess.run(  # nosec
-                ["sbx", "exec", self._sandbox_name, "rm", "-f", ASKPASS_HELPER_PATH],
+        fd, host_temp = tempfile.mkstemp(prefix="venya-askpass-")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(ASKPASS_HELPER_CONTENT.encode("utf-8"))
+                fh.flush()
+                os.fchmod(fh.fileno(), 0o555)  # nosec B103 — read+exec for the
+                # git/ssh-invoking agent, NO write bit: this is the tamper
+                # property. The staged file is the static, secret-free helper.
+            cp_result = subprocess.run(  # nosec
+                ["sbx", "cp", host_temp, f"{self._sandbox_name}:{ASKPASS_HELPER_PATH}"],
                 capture_output=True,
                 text=True,
                 timeout=10,
                 check=False,
             )
-            raise RuntimeError("Failed to write askpass helper into sandbox")
+            if cp_result.returncode != 0:
+                logger.error("askpass helper sbx cp failed: %s", cp_result.stderr)
+                raise RuntimeError("Failed to copy askpass helper into sandbox")
+        finally:
+            # Best-effort host cleanup: the helper is static and secret-free,
+            # so a failed unlink is logged, not raised.
+            try:
+                os.unlink(host_temp)
+            except OSError:
+                logger.warning("Failed to unlink host askpass helper temp: %s", host_temp)
 
-        chmod_result = subprocess.run(  # nosec
-            ["sbx", "exec", self._sandbox_name, "chmod", "555", ASKPASS_HELPER_PATH],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if chmod_result.returncode != 0:
-            logger.error("askpass helper chmod failed: %s", chmod_result.stderr)
-            subprocess.run(  # nosec
-                ["sbx", "exec", self._sandbox_name, "rm", "-f", ASKPASS_HELPER_PATH],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            raise RuntimeError("Failed to set askpass helper permissions")
-        logger.debug("Askpass helper written to %s (mode 555)", ASKPASS_HELPER_PATH)
+        logger.debug("Askpass helper copied to %s (mode 555)", ASKPASS_HELPER_PATH)
 
     # --- env-file injection (ticket secret-shape-env-injection, option ii) ---
 

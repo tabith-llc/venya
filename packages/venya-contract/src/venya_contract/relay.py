@@ -14,10 +14,20 @@ makes any one-sided field change a loud ``ValidationError`` instead of a silent 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Sandbox path of the askpass helper script (ticket secret-shape-askpass-helpers).
-# The executor writes it when ``askpass_helper`` is set; the server references it
-# in literal env entries (GIT_ASKPASS/SSH_ASKPASS). Shared constant so both ends
-# of the wire agree on the path without a stringly-typed duplicate.
-ASKPASS_HELPER_PATH = "/run/secrets/venya/.venya-askpass"
+# The executor stages it on the host at 0555 and copies it in with ``sbx cp``
+# when ``askpass_helper`` is set; the server references it in literal env
+# entries (GIT_ASKPASS/SSH_ASKPASS). Shared constant so both ends of the wire
+# agree on the path without a stringly-typed duplicate.
+#
+# It lives under /usr/local/bin, NOT /run/secrets: the sbx runtime mounts
+# /run/secrets rw,noexec,nosuid (the runtime's own injected-mount default — the
+# executor never passes a mount flag), so a helper there could be read but not
+# exec'd and the git/ssh clone shape died rc=128 (ticket
+# askpass-helper-noexec-mount-conflict). /usr/local/bin is exec-capable and
+# root-owned, so the uid-1000 sandbox agent cannot write or replace the file;
+# the secret VALUE stays in /run/secrets and the helper reads it at exec time
+# via VENYA_ASKPASS_SECRET.
+ASKPASS_HELPER_PATH = "/usr/local/bin/venya-askpass"
 
 
 class RelayEnvVar(BaseModel):

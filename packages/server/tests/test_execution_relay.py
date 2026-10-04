@@ -25,6 +25,7 @@ from server.routes import executors as executors_routes
 from server.routes.executors import _ENV_SHAPE_MIN_VERSION, _version_tuple
 from server.routes.secrets import wrap_with_sentinel
 from starlette.testclient import TestClient
+from venya_contract import ASKPASS_HELPER_PATH
 
 TEST_USER = {"user_id": "test-user", "roles": ["devops"], "caller": "human"}
 
@@ -1308,8 +1309,14 @@ class TestEnvShapeDerivation:
         payload = _sent_payload(mc)
         assert payload["askpass_helper"] is True
         env = {e["var_name"]: e for e in payload["env"]}
-        assert env["GIT_ASKPASS"]["literal_value"] == "/run/secrets/venya/.venya-askpass"
-        assert env["SSH_ASKPASS"]["literal_value"] == "/run/secrets/venya/.venya-askpass"
+        # single-source wiring (§7 GREEN-preserved): the server names the SAME
+        # shared constant the executor copies to — now the exec-capable
+        # /usr/local/bin, NOT the noexec /run/secrets mount (ticket
+        # askpass-helper-noexec-mount-conflict). The secret FILE path
+        # (VENYA_ASKPASS_SECRET) still lives under /run/secrets.
+        assert env["GIT_ASKPASS"]["literal_value"] == ASKPASS_HELPER_PATH
+        assert env["SSH_ASKPASS"]["literal_value"] == ASKPASS_HELPER_PATH
+        assert not ASKPASS_HELPER_PATH.startswith("/run/secrets")
         assert env["VENYA_ASKPASS_SECRET"]["literal_value"] == "/run/secrets/venya/1"
         assert env["VENYA_ASKPASS_USER"]["literal_value"] == "gituser"
 
@@ -1745,9 +1752,7 @@ class TestSessionLockout429:
 
         app, backend = _create_test_app()
         self._executor_db(backend)
-        app.state.core.get_for_injection.side_effect = RateLimitExceededError(
-            "locked out", retry_after_seconds=600
-        )
+        app.state.core.get_for_injection.side_effect = RateLimitExceededError("locked out", retry_after_seconds=600)
         client = TestClient(app, raise_server_exceptions=False)
 
         resp = client.post(
