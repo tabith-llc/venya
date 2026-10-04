@@ -148,6 +148,28 @@ convenience costs no man-in-the-middle signal. Operator behavior is the primary 
 post-beta hardening may additionally scrub the command string against known
 secret values (ticket sec-secret-redaction-log-leaks #14).
 
+**File-arg tool blessings (same rule, other tools).** A tool that natively
+reads a credential from a file-path argument needs no code — the injected
+`{secret_path}` file IS the mechanism:
+
+- `mysql-defaults` — `mysql --defaults-extra-file={secret_path} …` with an
+  INI body `[client]` / `password=…`. Inline `--password=X` is FORBIDDEN
+  (command text persists unmasked in audit sinks, same as the `sshpass -p`
+  case above). Physical verification is PARKED pending a MariaDB venue
+  (ticket secret-shape-file-arg-tools #57; the 0400-acceptance and
+  tmpfs-sweep pins land with that unpark).
+- `ipmi-passfile` — `ipmitool … -f {secret_path}`. UNVERIFIED-PHYSICAL:
+  no BMC exists in the test fleet; docs+taxonomy only (same recording
+  discipline as the EROFS dormant-guard precedent).
+- psql does NOT need a file-arg shape: `PGPASSFILE` points psql at the
+  injected file via the env-shape family (`usage` metadata `env:PGPASSFILE`)
+  — cross-reference secret-shape-env-injection, not a new blessing.
+
+Pattern rule: any tool that natively reads a credential from a file-path
+argument is a bless-only shape — a row in this list plus its verification
+cells, NOT a code ticket. Tool availability inside the sandbox template is
+a deployment property; document it per shape.
+
 ## Sandbox and egress
 
 Commands run in sbx (Docker Sandboxes) microVMs. Networking is
