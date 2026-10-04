@@ -551,6 +551,59 @@ class TestSbxTruncationAccounting:
         assert result.original_stdout_size == 100
         assert result.original_stderr_size == 50
 
+    def test_under_limit_not_truncated_true_sizes_no_marker(self):
+        """#409 paired negative half: under-cap sbx output is byte-identical
+        to the produced payload — no truncation marker is added."""
+        payload = b"x" * 1000
+        result = self._run_sbx(self._executor_with_output(payload, b"y" * 50))
+
+        assert result.stdout == payload
+        assert b"OUTPUT TRUNCATED" not in result.stdout
+        assert b"OUTPUT TRUNCATED" not in result.stderr
+
+    def test_oversized_stdout_carries_truncation_marker(self):
+        """#409 positive half: over-cap sbx stdout must end with the same
+        TRUNCATION_MARKER the direct path applies — byte-accurate discard
+        count, payload exactly at the cap (marker carved out of it)."""
+        from executor.executor import MAX_OUTPUT_BYTES, TRUNCATION_MARKER
+
+        true_size = MAX_OUTPUT_BYTES + 4096
+        result = self._run_sbx(self._executor_with_output(b"x" * true_size))
+
+        assert result.stdout.decode().endswith(TRUNCATION_MARKER.format(n=4096))
+        assert len(result.stdout) == MAX_OUTPUT_BYTES
+
+    def test_oversized_stderr_carries_truncation_marker(self):
+        """#409 positive half, stderr stream: same marker idiom."""
+        from executor.executor import MAX_OUTPUT_BYTES, TRUNCATION_MARKER
+
+        true_size = MAX_OUTPUT_BYTES + 1
+        result = self._run_sbx(self._executor_with_output(b"out", b"e" * true_size))
+
+        assert result.stderr.decode().endswith(TRUNCATION_MARKER.format(n=1))
+        assert len(result.stderr) == MAX_OUTPUT_BYTES
+
+    def test_marker_survives_secret_masking(self):
+        """#409 (ticket re-derive demand): the marker is applied BEFORE the
+        Stage-1/2 masking path, and masking replaces secret-value occurrences
+        only — the marker tail must survive next to the masked head. The stub
+        uses an EQUAL-LENGTH replacement so the cap invariant is asserted on
+        the executor's own trim, not a masking-length artifact."""
+        from executor.executor import MAX_OUTPUT_BYTES, TRUNCATION_MARKER
+
+        true_size = MAX_OUTPUT_BYTES + 10
+        payload = b"sekret" + b"x" * (true_size - 6)
+        ex = self._executor_with_output(payload)
+        with patch(
+            "executor.executor.filter_and_redact",
+            side_effect=lambda o, e, s: (o.replace(b"sekret", b"XXXXXX"), e, ["s1"], []),
+        ):
+            result = ex._run_command_sbx("cmd", [], None, None)
+
+        assert result.stdout.startswith(b"XXXXXX")
+        assert result.stdout.decode().endswith(TRUNCATION_MARKER.format(n=10))
+        assert len(result.stdout) == MAX_OUTPUT_BYTES
+
     def test_direct_path_threads_capture_totals(self):
         """_run_command_direct wiring: the true totals from _capture_output
         reach CommandResult, not the post-slice payload lengths."""

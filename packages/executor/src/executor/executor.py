@@ -63,6 +63,22 @@ class CommandResult:
 MAX_OUTPUT_BYTES = 262144  # 256 KB per stream
 TRUNCATION_MARKER = "... [OUTPUT TRUNCATED: {n} bytes discarded]\n"
 
+
+def _cap_with_truncation_marker(data: bytes, total_size: int) -> bytes:
+    """Single cap+marker idiom for BOTH execution paths (ticket
+    sbx-output-silent-truncation #409). When the true produced size exceeds
+    the cap, carve the marker out of MAX_OUTPUT_BYTES so a truncated payload
+    lands at exactly the cap (the invariant established by ticket
+    executor-sbx-truncation-accounting-wrong). Under-cap data is returned
+    unchanged — no marker. The direct path applied this inside _capture_output
+    only; the sbx path sliced raw, so its clients saw a silent cut."""
+    if not data or total_size <= MAX_OUTPUT_BYTES:
+        return data
+    discarded = max(0, total_size - MAX_OUTPUT_BYTES)
+    marker = TRUNCATION_MARKER.format(n=discarded).encode()
+    return data[: MAX_OUTPUT_BYTES - len(marker)] + marker
+
+
 # How long to wait for sandbox commands
 SBX_TIMEOUT = 3600  # 1 hour max
 
@@ -663,14 +679,12 @@ class Executor:
         # the cap, so a truncated payload is exactly MAX_OUTPUT_BYTES long —
         # the invariant "truncated ⇒ len == cap" is stable for downstream
         # checks (ticket executor-sbx-truncation-accounting-wrong, issue 3).
+        # Shared idiom with the sbx path via _cap_with_truncation_marker
+        # (ticket sbx-output-silent-truncation #409).
         if stdout_truncated and stdout:
-            discarded = max(0, stdout_total - MAX_OUTPUT_BYTES)
-            marker = TRUNCATION_MARKER.format(n=discarded).encode()
-            stdout = stdout[: MAX_OUTPUT_BYTES - len(marker)] + marker
+            stdout = _cap_with_truncation_marker(stdout, stdout_total)
         if stderr_truncated and stderr:
-            discarded = max(0, stderr_total - MAX_OUTPUT_BYTES)
-            marker = TRUNCATION_MARKER.format(n=discarded).encode()
-            stderr = stderr[: MAX_OUTPUT_BYTES - len(marker)] + marker
+            stderr = _cap_with_truncation_marker(stderr, stderr_total)
 
         return stdout, stderr, stdout_total, stderr_total
 
@@ -754,11 +768,14 @@ class Executor:
 
             # Record true pre-slice sizes BEFORE capping — truncation
             # metadata must describe the real output, not the sliced copy
-            # (ticket executor-sbx-truncation-accounting-wrong).
+            # (ticket executor-sbx-truncation-accounting-wrong). The cap is
+            # applied with the same in-band TRUNCATION_MARKER idiom the direct
+            # path uses, so a cut is visible to server and client alike
+            # (ticket sbx-output-silent-truncation #409).
             original_stdout_size = len(result.stdout)
             original_stderr_size = len(result.stderr)
-            stdout = result.stdout[:MAX_OUTPUT_BYTES]
-            stderr = result.stderr[:MAX_OUTPUT_BYTES]
+            stdout = _cap_with_truncation_marker(result.stdout, original_stdout_size)
+            stderr = _cap_with_truncation_marker(result.stderr, original_stderr_size)
 
             logger.info(
                 "Sandbox command exited: code=%d, stdout=%d bytes, stderr=%d bytes",
