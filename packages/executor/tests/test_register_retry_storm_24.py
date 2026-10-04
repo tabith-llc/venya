@@ -12,6 +12,7 @@ Paired negatives: plain 400 still propagates raw (no over-conversion), TLS-keywo
 ConnectError stays single-shot, and the vendored unit declares restart pacing.
 """
 
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -54,6 +55,23 @@ def _status_error(status_code: int, detail: str, headers: dict | None = None) ->
     return exc
 
 
+class _MainClock:
+    """time.sleep stand-in recording MAIN-THREAD calls only. patch() on
+    ``executor.daemon.time.sleep`` rewrites the GLOBAL time module attribute,
+    so leaked background sleepers (e.g. the injector FIFO writer thread) land
+    in plain mock sleeps under full-suite load — the #419 rotating-cell flake.
+    daemon.register runs on the main thread, so main-thread-only recording
+    keeps the retry-clock assertions exact."""
+
+    def __init__(self) -> None:
+        self._main = threading.main_thread()
+        self.calls: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        if threading.current_thread() is self._main:
+            self.calls.append(seconds)
+
+
 def _patched_register(mock_client_cls, config: ExecutorConfig):
     """Register under patched keypair/CSR — existing test_daemon.py mock idiom:
     the context-managed client IS mock_client_cls.return_value."""
@@ -76,15 +94,16 @@ def test_register_permanent_rejection_stops_loud_single_attempt(config, status_c
     message), ONE POST attempt, zero sleeps; message names the status AND the
     server's reason (the 429-mask fix)."""
     err = _status_error(status_code, "Executor revoked")
+    clock = _MainClock()
     with (
         patch("executor.daemon.httpx2.Client") as MockClient,
-        patch("executor.daemon.time.sleep") as mock_sleep,
+        patch("executor.daemon.time.sleep", clock),
     ):
         _enter(MockClient).post.return_value.raise_for_status.side_effect = err
         with pytest.raises(RuntimeError, match="permanently rejected") as ei:
             _patched_register(MockClient, config)
     assert MockClient.return_value.post.call_count == 1
-    mock_sleep.assert_not_called()
+    assert clock.calls == []
     msg = str(ei.value)
     assert f"HTTP {status_code}" in msg
     assert "Executor revoked" in msg
@@ -94,58 +113,62 @@ def test_register_429_retries_honoring_retry_after(config):
     """#24 positive: 429 with Retry-After -> transient path; waits the server's
     window (never shorter than the limiter), up to the attempt budget, final raise raw."""
     err = _status_error(429, "Too Many Requests", headers={"Retry-After": "2"})
+    clock = _MainClock()
     with (
         patch("executor.daemon.httpx2.Client") as MockClient,
-        patch("executor.daemon.time.sleep") as mock_sleep,
+        patch("executor.daemon.time.sleep", clock),
     ):
         _enter(MockClient).post.return_value.raise_for_status.side_effect = err
         with pytest.raises(httpx2.HTTPStatusError):
             _patched_register(MockClient, config)
     assert MockClient.return_value.post.call_count == 4
-    assert [c.args[0] for c in mock_sleep.call_args_list] == [2.0, 2.0, 2.0]
+    assert clock.calls == [2.0, 2.0, 2.0]
 
 
 def test_register_503_backoff_exponential(config):
     """#24 positive: 5xx without Retry-After -> 5/10/20s exponential, final raise raw."""
     err = _status_error(503, "nginx is down")
+    clock = _MainClock()
     with (
         patch("executor.daemon.httpx2.Client") as MockClient,
-        patch("executor.daemon.time.sleep") as mock_sleep,
+        patch("executor.daemon.time.sleep", clock),
     ):
         _enter(MockClient).post.return_value.raise_for_status.side_effect = err
         with pytest.raises(httpx2.HTTPStatusError):
             _patched_register(MockClient, config)
     assert MockClient.return_value.post.call_count == 4
-    assert [c.args[0] for c in mock_sleep.call_args_list] == [5.0, 10.0, 20.0]
+    assert clock.calls == [5.0, 10.0, 20.0]
 
 
 def test_register_plain_400_still_raw_paired_negative(config):
     """Paired negative: a non-token 400 is NOT reclassified — it propagates raw
     exactly once (#369-pinned behavior; no over-conversion)."""
     err = _status_error(400, "Invalid payload")
+    clock = _MainClock()
     with (
         patch("executor.daemon.httpx2.Client") as MockClient,
-        patch("executor.daemon.time.sleep") as mock_sleep,
+        patch("executor.daemon.time.sleep", clock),
     ):
         _enter(MockClient).post.return_value.raise_for_status.side_effect = err
         with pytest.raises(httpx2.HTTPStatusError):
             _patched_register(MockClient, config)
     assert MockClient.return_value.post.call_count == 1
-    mock_sleep.assert_not_called()
+    assert clock.calls == []
 
 
 def test_register_tls_connect_error_single_shot_paired_negative(config):
     """Paired negative: TLS-keyword ConnectError stays single-shot RuntimeError
     (configuration fault — retrying cannot change the outcome)."""
+    clock = _MainClock()
     with (
         patch("executor.daemon.httpx2.Client") as MockClient,
-        patch("executor.daemon.time.sleep") as mock_sleep,
+        patch("executor.daemon.time.sleep", clock),
     ):
         _enter(MockClient).post.side_effect = httpx2.ConnectError("SSL: CERTIFICATE_VERIFY_FAILED")
         with pytest.raises(RuntimeError, match="TLS verification error"):
             _patched_register(MockClient, config)
     assert MockClient.return_value.post.call_count == 1
-    mock_sleep.assert_not_called()
+    assert clock.calls == []
 
 
 def test_executor_unit_declares_restart_pacing():
