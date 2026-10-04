@@ -1451,8 +1451,10 @@ class TestDeafBootRefusal:
 class TestResolverBootRefusal:
     """Ticket private-infra-product-defaults-and-fixtures (stage 2, ruling D1
     option (a)): an executor without a configured dns_resolver refuses to
-    boot — the sandbox egress policy cannot be built and hostname targets
-    could never resolve. Mirrors TestDeafBootRefusal: checked at start(),
+    boot — the egress policy cannot be built without this required input
+    (the resolver IP is always allowed for sandbox egress; hostname targets
+    resolve only when the hostname itself is in the egress allowlist).
+    Mirrors TestDeafBootRefusal: checked at start(),
     BEFORE registration, so the one-shot enrollment token is never consumed
     on a doomed boot."""
 

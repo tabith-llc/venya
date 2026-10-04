@@ -1268,13 +1268,18 @@ class ExecutorDaemon:
         # Refuse to boot without a configured DNS resolver (ruling D1 option (a):
         # Venya never guesses your network). Same shape/position as the deaf-relay
         # guard above — checked BEFORE registration so the one-shot enrollment
-        # token is never consumed on a doomed boot. Without a resolver the sandbox
-        # egress policy cannot be built and hostname targets could never resolve.
+        # token is never consumed on a doomed boot: the egress policy cannot be
+        # built without this required input. The resolver IP is always allowed
+        # for sandbox egress; hostname targets resolve only when the hostname
+        # itself is in the egress allowlist (the sandbox DNS proxy authorizes
+        # per domain).
         if not self.config.dns_resolver:
             logger.error(
                 "dns_resolver is not configured — refusing to start: the sandbox "
-                "egress policy cannot be built and hostname targets could never "
-                "resolve. Set `dns_resolver` in /etc/venya/executor.toml or "
+                "egress policy cannot be built without it. The resolver IP is always "
+                "allowed for sandbox egress; hostname targets resolve only when the "
+                "hostname itself is in the egress allowlist. Set `dns_resolver` in "
+                "/etc/venya/executor.toml or "
                 "VENYA_EXECUTOR_DNS_RESOLVER in the service environment "
                 "(find your resolver: resolvectl status or grep nameserver /etc/resolv.conf)."
             )
