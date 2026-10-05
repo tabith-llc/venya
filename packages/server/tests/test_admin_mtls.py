@@ -451,24 +451,34 @@ class TestExtractIdentity:
 
 
 def _sqlite_revocation_backend(revocation_rows: list[tuple[str, str]] | None = None):
-    """Real in-memory SQLite backend holding the AdminCertRevocation table.
+    """Real SQLite backend holding the AdminCertRevocation table.
 
-    StaticPool pins ONE connection: a bare "sqlite://" memory database is
-    per-connection — without it the seeding session drops the tables when it
-    closes and the middleware's lookup sees "no such table" (caught by the
-    first run of the revocation cells). check_same_thread=False lets the
-    concurrency test's worker threads share the pinned connection.
+    File-backed with the normal connection pool (ticket
+    admin-mtls-concurrency-flake #437). The earlier fixture pinned ONE
+    connection (StaticPool + check_same_thread=False) — fine for the
+    single-request revocation cells, but the concurrency test's 10 threads
+    then shared a single sqlite3 connection; interleaved cursor/transaction
+    use intermittently raised
+    sqlite3.InterfaceError("bad parameter or other API misuse") at the
+    auth.py ``.first()`` call site, and the middleware's fail-closed
+    ``except`` turned it into a 403 (harness race, not a product race —
+    production is PostgreSQL with one pooled connection per request).
+    A temp-file database gives every thread its own checked-out
+    connection — the production pooling shape — while the table stays
+    REAL SQLite, because the middleware's revocation lookup uses
+    func.upper() SQL, which mocks cannot evaluate (ticket
+    sec-admin-mtls-allowlist-revocation; house precedent: real-SQLite
+    cells in test_session_manager_gate.py).
     """
+    import tempfile
+
     from core.iam.models import AdminCertRevocation, Base
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
-    from sqlalchemy.pool import StaticPool
 
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    workdir = tempfile.TemporaryDirectory(prefix="venya-revocation-backend-")
+    db_path = Path(workdir.name) / "revocation.db"
+    engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine)
     seed = session_factory()
@@ -478,6 +488,10 @@ def _sqlite_revocation_backend(revocation_rows: list[tuple[str, str]] | None = N
     seed.close()
 
     class _Backend:
+        # Keep the temp directory alive for the backend's lifetime —
+        # garbage collection would otherwise delete the file DB underneath it.
+        _workdir = workdir
+
         def get_session(self):
             return session_factory()
 
