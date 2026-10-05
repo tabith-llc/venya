@@ -550,8 +550,12 @@ class SbxStrategy(InjectionStrategy):
     def _write_env_file(self, env: dict[str, str]) -> str:
         """Write KEY=VALUE lines to a 0600 file in the session tmpfs dir.
 
-        Consumed via `sbx exec --env-file` (native flag, spike-verified on
-        exec-1 2026-09-21) — values never ride host argv, unlike the former
+        Consumed via `sbx exec --env-file` — native flag on sbx >= 0.39.0.
+        The 2026-09-21 exec-1 spike predated the correction: on the 0.38.0
+        build of that day the flag is accepted and ignored (silent no-op,
+        refs ticket sbx-exec-env-file-noop), which is why the boot floor in
+        require_supported_sbx now refuses sbx < 0.39.0. Values never ride
+        host argv, unlike the former
         `-e K=V` form which exposed them in `/proc/<pid>/cmdline` for the
         command's duration. The format is line-based: CR/LF/NUL in a value is
         rejected here as the last line of defense against forging extra
@@ -678,11 +682,15 @@ class SbxStrategy(InjectionStrategy):
         env_override rides as a 0600 `--env-file` on the host session tmpfs
         (NEVER `-e K=V` argv — that exposed values in host /proc for the
         command's duration; ticket secret-shape-env-injection option (ii),
-        spike-ruled: `--env-file` is native to `sbx exec`). The file is zeroed
-        and deleted in a `finally` the moment the exec returns. cwd still
-        rides as `-w DIR` (docker-exec semantics; non-secret). Physically
-        probed on the deployed sbx (2026-09-18, exec-1): values stay DATA —
-        never shell-parsed; `-w` overrides the workspace-mount default pwd
+        spike-ruled: `--env-file` is native to `sbx exec` >= 0.39.0). The file
+        is zeroed and deleted in a `finally` the moment the exec returns.
+        cwd still rides as `-w DIR` (docker-exec semantics; non-secret).
+        The 2026-09-18 exec-1 probe ("values stay DATA — never shell-parsed")
+        ran on sbx
+        0.38.0, where the flag injects nothing — a silent-no-op misread, since
+        corrected (refs ticket sbx-exec-env-file-noop; functional proof of
+        injection on 0.46.0 in the ticket's note 3951754721).
+        `-w` overrides the workspace-mount default pwd
         per command without conflicting with the mount.
 
         Args:
