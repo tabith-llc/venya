@@ -2127,8 +2127,15 @@ def _executor_service_ids(output_path: Path) -> tuple[int, int] | None:
       re-register via sudo, and the installer block owns ownership there);
     - no ``venya`` account exists (workstation/CI hosts have no daemon —
       warn LOUD with the exact chown remedy instead of failing a registration
-      that already succeeded).
+      that already succeeded);
+    - the platform is not POSIX (no POSIX accounts, no ``User=`` service,
+      no root — the self-harden path is a no-op; writes stay as they are).
     """
+    if os.name != "posix":
+        # No POSIX accounts, no systemd `User=` service, no root to be: the
+        # self-harden path is a no-op on Windows. Returning None is the
+        # documented "writes stay as they are, zero behavior change" branch.
+        return None
     if os.geteuid() != 0:
         return None
     import grp

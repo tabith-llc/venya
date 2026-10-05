@@ -214,11 +214,20 @@ def ensure_secret_dir(dir_path: Path) -> None:
     - looser but not owner-owned: warn LOUD, attempt no chmod — a
       service-account-owned dir must not turn every CLI command into a
       traceback.
+
+    The ladder is a POSIX-only concept: on non-POSIX platforms the function
+    is a no-op (no mode bits, no ownership semantics, no os.geteuid()).
     """
     try:
         st = os.stat(str(dir_path))
     except OSError:
         return  # raced away / unstatable: the mkdir call site reports it
+    if os.name != "posix":
+        # Windows has no POSIX mode bits, no ownership semantics, and no
+        # os.geteuid(): the tightening ladder below is a POSIX-only concept.
+        # Skip silently — a per-command warning would be noise, and NTFS ACLs
+        # are the real control on that platform.
+        return
     mode = st.st_mode & 0o777
     if not (mode & ~0o700):
         return  # already 0700-or-stricter

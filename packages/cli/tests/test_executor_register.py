@@ -1271,3 +1271,32 @@ class TestRegisterDirHardening373:
         # dir hand-over failed -> the key temp is left alone (no half-hardened state)
         assert fchown_calls == []
         assert (tmp_path / "certs" / "executor.key").exists()
+
+
+class TestExecutorServiceIDsPlatform438:
+    """#438: _executor_service_ids() is POSIX-only logic (accounts, root,
+    service hand-over). On a non-POSIX platform it must return None quietly
+    instead of reaching os.geteuid(); on POSIX the non-root branch stays as
+    documented (paired control)."""
+
+    def test_executor_service_ids_non_posix_returns_none(self, monkeypatch, capsys):
+        from venya_cli.commands import _executor_service_ids
+
+        monkeypatch.setattr("os.name", "nt")
+        monkeypatch.setattr(
+            "os.geteuid",
+            lambda *a: (_ for _ in ()).throw(AttributeError("module 'os' has no attribute 'geteuid'")),
+        )
+        # The guard returns before the function-local pwd/grp imports are
+        # reached, so the non-POSIX path never consults POSIX accounts —
+        # asserted via the return value + silent stderr (house style here).
+        assert _executor_service_ids(Path("/tmp/venya-438-unused")) is None
+        assert capsys.readouterr().err == ""
+
+    def test_executor_service_ids_non_root_still_returns_none(self, monkeypatch, capsys):
+        from venya_cli.commands import _executor_service_ids
+
+        monkeypatch.setattr("os.name", "posix")
+        monkeypatch.setattr("venya_cli.commands.os.geteuid", lambda: 1000)
+        assert _executor_service_ids(Path("/tmp/venya-438-unused")) is None
+        assert capsys.readouterr().err == ""
