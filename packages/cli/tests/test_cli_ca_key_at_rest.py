@@ -452,6 +452,35 @@ class TestEnsureSecretDir:
         assert f.read_bytes() == b"tok"  # content flow unchanged (paired positive)
         assert capsys.readouterr().err == ""  # silent one-time tightening, no per-run spam
 
+    def test_ensure_secret_dir_posix_ladder_unchanged(self, tmp_path, monkeypatch, capsys):
+        """#438 paired positive: with os.name pinned to "posix", the ladder
+        behaves exactly as before the Windows guard — a loose owned dir
+        tightens to 0700, silently."""
+        monkeypatch.setattr("os.name", "posix")
+        d = tmp_path / "conf"
+        d.mkdir()
+        d.chmod(0o755)
+        ensure_secret_dir(d)
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700
+        assert capsys.readouterr().err == ""
+
+    def test_ensure_secret_dir_non_posix_is_noop(self, tmp_path, monkeypatch, capsys):
+        """#438 AC2 negative half: a non-POSIX platform (os.name == "nt")
+        must not raise — os.geteuid does not exist there — and must not
+        chmod. The geteuid stub raises the exact Windows AttributeError, so
+        this cell fails at HEAD and passes only with the guard."""
+        monkeypatch.setattr("os.name", "nt")
+        monkeypatch.setattr(
+            "os.geteuid",
+            lambda *a: (_ for _ in ()).throw(AttributeError("module 'os' has no attribute 'geteuid'")),
+        )
+        d = tmp_path / "conf"
+        d.mkdir()
+        d.chmod(0o755)
+        ensure_secret_dir(d)  # returns without raising
+        assert stat.S_IMODE(d.stat().st_mode) == 0o755  # mode unchanged: no chmod attempted
+        assert capsys.readouterr().err == ""  # silent no-op, no per-command spam
+
     def test_already_0700_untouched_no_warning(self, tmp_path, capsys):
         d = tmp_path / "ok"
         d.mkdir(mode=0o700)
