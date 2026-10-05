@@ -70,6 +70,12 @@ logger = logging.getLogger("venya.executor.daemon")
 # LEGACY location honored until old installs are cut over.
 BOOTSTRAP_TOKEN_PATH = Path("/var/lib/venya/executor/bootstrap-token")
 
+# refs ticket audit-spool-forwarder-session-lifetime (#436): tag for the boot-time
+# AuditLogger. session_id is read ONLY by the emit() write path (audit.py); this
+# instance never emits — the forwarder drains spool lines that already carry their
+# real session ids — so a fixed boot tag states what it is, not a fake session.
+BOOT_FORWARDER_SESSION_ID = "boot-forwarder"
+
 
 def _atomic_write(path: str | Path, payload: bytes, mode: int) -> None:
     """Write ``payload`` to ``path`` atomically with the FINAL mode at CREATE.
@@ -1114,6 +1120,10 @@ class ExecutorDaemon:
         # HTTP client — initialized in start() after registration
         self.client: httpx2.Client | None = None
 
+        # Boot-time audit spool forwarder — constructed in start(), drained and
+        # joined in stop() (refs ticket audit-spool-forwarder-session-lifetime #436).
+        self.audit_boot_forwarder: AuditLogger | None = None
+
     def _create_mtls_client(self) -> httpx2.Client:
         """Create HTTP client with mTLS after certificate registration.
 
@@ -1358,6 +1368,25 @@ class ExecutorDaemon:
             logger.error("Relay listener failed to bind — refusing to run deaf")
             raise SystemExit(1)
 
+        # Boot-time audit spool forwarder (refs ticket
+        # audit-spool-forwarder-session-lifetime #436): the forwarder thread is
+        # owned by AuditLogger, historically constructed ONLY per command
+        # session — an idle executor never drained its backlog. Sibling of the
+        # reaper/relay starts above; the per-session logger in create_executor
+        # is unchanged. Guarded by the sink being configured: with remote_url
+        # unset _forward_once returns True without any POST, so the thread
+        # would poll for nothing (and the constructor touches the default
+        # spool path). client_cert derived exactly as the session path does
+        # (#307 D1 fail-closed mTLS sink).
+        if self.config.audit.remote_url:
+            mtls = self.config.mtls
+            self.audit_boot_forwarder = AuditLogger(
+                self.config.audit,
+                BOOT_FORWARDER_SESSION_ID,
+                client_cert=(mtls.cert, mtls.key) if mtls.cert and mtls.key else None,
+            )
+            logger.info("Audit spool forwarder booted (session-less drain armed)")
+
         # Mark as running
         self.state.running = True
         self.state.cert_serial = self.cert_manager.serial
@@ -1596,6 +1625,7 @@ class ExecutorDaemon:
             self._stop_http_pool,
             self.reaper.stop,
             self.relay.stop,
+            self._stop_audit_forwarder,
             self._remove_pidfile,
             self._close_client,
         ):
@@ -1609,6 +1639,12 @@ class ExecutorDaemon:
     def _stop_http_pool(self) -> None:
         """Stop the HTTP thread pool."""
         self._http_executor.shutdown(wait=True)
+
+    def _stop_audit_forwarder(self) -> None:
+        """Drain and join the boot-time spool forwarder (#436). No-op if skipped."""
+        if self.audit_boot_forwarder is not None:
+            self.audit_boot_forwarder.shutdown()
+            logger.info("Audit spool forwarder stopped")
 
     def _close_client(self) -> None:
         """Close the HTTP client if it exists."""
