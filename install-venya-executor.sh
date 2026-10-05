@@ -286,6 +286,11 @@ if ! command -v sbx &>/dev/null; then
         exit 1
     fi
     rm -f "$SBX_SCRIPT" "$SBX_LOG"
+    # refs ticket apt-repo-file-mode-unreadable-sbx-upgrade (#434): apt's _apt
+    # downloader cannot read a 600 sources file, and the get.docker.com helper
+    # leaves the mode to the invoking umask (entry umask 077) — deliberate
+    # world-readables carry an explicit chmod line (#317 convention).
+    chmod 644 /etc/apt/sources.list.d/docker.list
     venya_apt install -y -qq docker-sbx
     info "sbx CLI installed. kvm group is re-asserted on every install (see #384 block below)."
 else
