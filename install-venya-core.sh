@@ -645,13 +645,26 @@ os.chmod(str(ca_dir), 0o700)
 ca_key_path = ca_dir / 'ca.key'
 ca_cert_path = ca_dir / 'ca.crt'
 
-if not ca_key_path.exists():
+# #505: CA existence is BOTH files, not the key file alone. A re-install on a
+# host whose CA directory lost ca.crt but kept ca.key used to print 'preserved'
+# and then abort at the relay-cert guard with no way to self-heal. If the key
+# survives, re-issue the certificate FROM THE INCUMBENT KEY — never regenerate
+# the key, because that invalidates every certificate the fleet already holds.
+key_exists = ca_key_path.exists()
+cert_exists = ca_cert_path.exists()
+
+if key_exists and cert_exists:
+    print('CA already exists - preserved')
+else:
     passphrase = sys.stdin.readline().rstrip(chr(10)).encode()
     if not passphrase:
         raise SystemExit('VENYA_CA_KEY_PASSPHRASE empty - refusing to write a plaintext CA key')
-    ca_key = ec.generate_private_key(ec.SECP256R1())
-    ca_key_path.write_bytes(ca_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.BestAvailableEncryption(passphrase)))
-    ca_key_path.chmod(0o600)
+    if key_exists:
+        ca_key = serialization.load_pem_private_key(ca_key_path.read_bytes(), password=passphrase)
+    else:
+        ca_key = ec.generate_private_key(ec.SECP256R1())
+        ca_key_path.write_bytes(ca_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.BestAvailableEncryption(passphrase)))
+        ca_key_path.chmod(0o600)
     now = datetime.now(UTC)
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, 'Venya'),
@@ -671,11 +684,12 @@ if not ca_key_path.exists():
         .add_extension(ski, critical=False)
         .add_extension(aki, critical=False))
     ca_cert = builder.sign(ca_key, hashes.SHA256())
+    # #381 idiom: unlink before the write so a truncating write never inherits
+    # an incumbent inode's mode (no-op when the file is absent)
+    ca_cert_path.unlink(missing_ok=True)
     ca_cert_path.write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
     ca_cert_path.chmod(0o644)
-    print('CA generated (key encrypted)')
-else:
-    print('CA already exists - preserved')
+    print('CA certificate re-issued from existing key' if key_exists else 'CA generated (key encrypted)')
 " <<<"$CA_KEY_PASSPHRASE"
 
 # Sign server cert with openssl CLI (cryptography 50.0.1 Rust backend bug:
