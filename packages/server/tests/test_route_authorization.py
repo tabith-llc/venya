@@ -45,7 +45,9 @@ NO_ROLE_ROUTES = frozenset(
         "/api/v1/enroll/browser/start",  # self-registration via issuance token
         "/api/v1/enroll/browser/complete",
         "/api/v1/init",  # bootstrap (gated by FIDO2 / enrolled_count==0)
-        "/api/v1/init/reset",
+        # /api/v1/init/reset: removed from this allowlist (#450) — the route
+        # now carries require_admin_when_initialized (_venya_guard = "admin"),
+        # so the net above covers it.
         "/api/v1/init/complete",
         # --- break-glass: recovery code + FIDO2 assertion + 5/hr per-IP limit ---
         "/api/v1/recovery",

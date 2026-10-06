@@ -232,7 +232,10 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/api/v1/auth/refresh/browser",
             "/api/v1/init",
             "/api/v1/init/complete",
-            "/api/v1/init/reset",
+            # #450: "/api/v1/init/reset" left this set. It deletes every user,
+            # credential, role and membership on the core, so it is no longer
+            # reachable anonymously — see BOOTSTRAP_PATHS below for how the
+            # pre-initialization bootstrap caller still reaches the handler.
             "/api/v1/recovery",
             "/api/v1/executors/register",
             "/api/v1/executors/certs/revocation-list",
@@ -246,6 +249,16 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/enroll-admin",  # admin enrollment page (public)
         }
     )
+
+    # Bootstrap-plane paths (#450). Authentication is OPPORTUNISTIC here: an
+    # identity is attached when the caller presents one (crypto-verified admin
+    # mTLS certificate, or a valid bearer/cookie session), but nothing is
+    # DENIED at this layer. The handler owns the decision, because on a core
+    # that has never been initialized no identity can exist yet — the CLI's
+    # `venya init --installation-reset` bootstrap call posts here before any
+    # admin account exists (see cli/commands.py cmd_init). The route's own
+    # "is the deployment initialized?" predicate is the gate.
+    BOOTSTRAP_PATHS = frozenset({"/api/v1/init/reset"})
 
     # Prefixes that don't require authentication
     PUBLIC_PREFIXES = ("/static/",)  # static assets (CSS, JS, images)
@@ -296,7 +309,12 @@ class SessionMiddleware(BaseHTTPMiddleware):
         """
         return path.startswith("/api/v1/admin/")
 
-    async def _validate_admin_mtls(self, request: Request) -> JSONResponse | None:
+    async def _validate_admin_mtls(
+        self,
+        request: Request,
+        *,
+        deny_on_missing_cert: bool = True,
+    ) -> JSONResponse | None:
         """Validate the crypto-forwarded client certificate for admin routes.
 
         When admin_mtls is enabled and the path is an admin route, this
@@ -321,21 +339,37 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         Args:
             request: The FastAPI request.
+            deny_on_missing_cert: True (admin routes) -> a request with no
+                client certificate is denied 403, exactly as before.
+                False (BOOTSTRAP_PATHS, #450) -> "no certificate presented" is
+                simply "no identity": the request continues unauthenticated and
+                the handler decides. A certificate that IS presented still runs
+                the whole chain/allowlist/revocation check below and denies 403
+                on any failure — nothing about a verified-credential comparison
+                is relaxed.
 
         Returns:
-            JSONResponse with 403 if validation fails, None if all checks pass.
+            JSONResponse with 403 if validation fails, None if all checks pass
+            (or, with deny_on_missing_cert=False, if nothing was presented).
         """
         config = getattr(request.app.state, "config", None)
         if not config or not config.admin_mtls.enabled:
             return None
 
         path = request.url.path.rstrip("/") if request.url.path != "/" else request.url.path
-        if not self._is_admin_route(path):
+        if not (self._is_admin_route(path) or path in self.BOOTSTRAP_PATHS):
             return None
 
         # Step 1: crypto-verified client cert against the ADMIN-plane anchors
         cert = _forwarded_client_cert(request)
         admin_cas = _admin_ca_certs(request) if cert is not None else None
+        if cert is None and not deny_on_missing_cert:
+            # Bootstrap plane (#450): absence of a certificate is not a denial —
+            # the pre-initialization bootstrap caller has no certificate to
+            # offer. Anything that IS offered falls through to the full
+            # verification below and fails closed.
+            logger.debug("Bootstrap path %s: no client certificate presented", path)
+            return None
         if cert is None or admin_cas is None or not _verify_forwarded_cert(request, cert, admin_cas):
             logger.warning(
                 "Admin route %s: no crypto-verified client certificate — failing closed. "
@@ -505,6 +539,32 @@ class SessionMiddleware(BaseHTTPMiddleware):
             executor_result = await self._validate_executor_mtls(request, reject_revoked=False)
             if executor_result is not None:
                 return executor_result
+            return await call_next(request)
+
+        # Bootstrap plane (#450): POST /api/v1/init/reset left PUBLIC_PATHS, so
+        # an anonymous caller is no longer waved through. Identity is attached
+        # when one is offered — admin mTLS certificate first (the headless-core
+        # CLI form), otherwise a bearer/cookie session — and the request then
+        # reaches the handler either way. The handler refuses anything that did
+        # not authenticate as an admin once the deployment is initialized; a
+        # core with nothing to protect yet (fresh install, abandoned ceremony)
+        # has no identity to require and keeps its bootstrap path.
+        if path in self.BOOTSTRAP_PATHS:
+            config = getattr(request.app.state, "config", None)
+            if config and config.admin_mtls.enabled:
+                mtls_result = await self._validate_admin_mtls(request, deny_on_missing_cert=False)
+                if mtls_result is not None:
+                    return mtls_result
+            if getattr(request.state, "auth_user", None) is None:
+                token = self._extract_session_token(request)
+                if token:
+                    session_user = await self._validate_token(request, token)
+                    if session_user is None:
+                        return JSONResponse(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            content={"detail": "Invalid or expired token"},
+                        )
+                    request.state.auth_user = session_user
             return await call_next(request)
 
         # Admin mTLS validation (before bearer token auth)
