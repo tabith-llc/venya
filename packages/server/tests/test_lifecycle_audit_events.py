@@ -674,6 +674,12 @@ class TestUserLifecycle:
             def first(self):
                 return user
 
+            def all(self):
+                # The #443 lockout guard reads the admin roster before the
+                # delete; an empty roster means carol holds no admin
+                # membership, so the guard stays out of this cell's way.
+                return []
+
             def delete(self):
                 return 2
 

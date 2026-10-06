@@ -505,7 +505,15 @@ async def admin_remove(
     auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminRemoveResponse:
-    """Remove a user (admin only)."""
+    """Remove a user (admin only).
+
+    #443 lockout guards, both answered BEFORE anything is deleted: a caller
+    cannot delete their own account, and nobody can delete the only user
+    holding the ``admin`` role — either action leaves the deployment with no
+    way to administer it. Both refusals answer 409 (the same-file precedent of
+    admin_remove_executor's refused-while-history-retained 409) and land an
+    admin_lockout_denied audit row; neither discloses who the admins are.
+    """
     try:
         from core.iam.models import (
             ElevationToken,
@@ -520,13 +528,31 @@ async def admin_remove(
             User,
             WebAuthnCredential,
         )
+        from core.iam.role_manager import AdminLockoutError, RoleManager
         from sqlalchemy import select
+
+        from .roles import _audit_lockout_denied
 
         user = db.query(User).filter(User.user_id == user_id).first()
         if user is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"User not found: {user_id}",
+            )
+
+        # One enforcement point for both destructive routes (#443 acceptance
+        # criterion 3): the shared core guard, not a copy of its rules here.
+        # role_id omitted = the whole user is going, every membership with it.
+        try:
+            RoleManager(db).assert_removal_keeps_admin(
+                user_id,
+                caller_user_id=auth_user.get("user_id"),
+            )
+        except AdminLockoutError as e:
+            _audit_lockout_denied(db, auth_user, action="remove_user", error=e)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(e),
             )
 
         # Remove every dependent BEFORE the ORM delete, in FK-dependency

@@ -10,7 +10,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Literal
 
-from core.iam.role_manager import RoleManagerError, SeparationOfDutiesError
+from core.iam.role_manager import AdminLockoutError, RoleManagerError, SeparationOfDutiesError
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -58,6 +58,42 @@ def _audit_sod_denied(db: Session, actor: dict, action: str, error: SeparationOf
         db.commit()
     except Exception:
         logger.exception("Audit write failed on auditor SoD deny (still denying)")
+
+
+def _audit_lockout_denied(db: Session, actor: dict, action: str, error: AdminLockoutError) -> None:
+    """Write the admin_lockout_denied compliance event on a #443 refusal.
+
+    Denial-side shape copied from _audit_sod_denied above (and the
+    recovery_code_reissue_denied / auditor_secret_read_denied sites): COMMIT
+    BEFORE the raise, because get_db rolls back any exception escaping the
+    route and an add-then-raise without commit would evaporate the event. The
+    row is a DENIAL, not a lifecycle event, so audit_lifecycle's approved
+    single-writer vocabulary is untouched — but this IS a new event name
+    (``admin_lockout_denied``), reported as such. Fail-closed: an audit-write
+    failure never upgrades the refusal. Value-free fields: ids and the
+    machine-readable reason — never the roster, so the audit surface adds no
+    enumeration oracle.
+    """
+    from core.iam.models import AuditEvent
+
+    try:
+        db.add(
+            AuditEvent(
+                event_type="admin_lockout_denied",
+                user_id=(actor or {}).get("user_id"),
+                fields={
+                    "outcome": "denied",
+                    "reason": error.reason,
+                    "action": action,
+                    "target_user_id": error.user_id,
+                    "role_id": error.role_id,
+                },
+                timestamp=datetime.now(UTC),
+            )
+        )
+        db.commit()
+    except Exception:
+        logger.exception("Audit write failed on admin lockout deny (still denying)")
 
 
 # --- Request/Response models ---
@@ -495,9 +531,16 @@ async def role_member_remove(
 
     role_manager = RoleManager(db)
     try:
+        # #443: refuse a removal that would leave no administrator. The rule
+        # itself lives in core RoleManager (assert_removal_keeps_admin, which
+        # remove_member calls before any delete) — the route only supplies the
+        # caller identity. caller_user_id is the session user_id, or the mTLS
+        # admin cert identity: a string matching no user row simply disables
+        # the self-removal half, never the last-admin half.
         removed = role_manager.remove_member(
             user_id=user_id,
             role_id=role_id,
+            caller_user_id=auth_user.get("user_id"),
         )
         if not removed:
             raise HTTPException(
@@ -514,6 +557,12 @@ async def role_member_remove(
         return RoleMemberRemoveResponse(removed=True, user_id=user_id)
     except HTTPException:
         raise
+    except AdminLockoutError as e:
+        _audit_lockout_denied(db, auth_user, action="remove_member", error=e)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(e),
+        )
     except RoleManagerError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
