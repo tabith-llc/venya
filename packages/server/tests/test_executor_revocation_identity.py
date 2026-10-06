@@ -293,6 +293,104 @@ class TestHelperSemantics:
         assert executor_revocation_state(SessionLocal(), "exec-a").revoked is False
 
 
+class TestSerialFormLeadingZeroSerial:
+    """Truth table for ticket cert-serial-canonicalization-mismatch (#481) on
+    the EXECUTOR side: the serial-form revocation stored zero-padded while the
+    middleware presented unpadded, so ~1/16 of certificates got a revocation
+    that recorded green and never refused anything. Serial under test:
+    0x0a1b2c3d4e5f6071 — padded "0a1b2c3d4e5f6071", unpadded "a1b2c3d4e5f6071".
+    """
+
+    PADDED = "0a1b2c3d4e5f6071"
+    UNPADDED = "a1b2c3d4e5f6071"
+
+    def test_serial_form_revocation_of_leading_zero_serial_refuses(self, env):
+        """(e) the defect: revoke the padded record serial of a leading-zero
+        certificate, then present it the way the middleware does (canonical) and
+        the way a legacy presentation did (unpadded) — BOTH refuse."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial=self.PADDED)
+        resp = client.post("/api/v1/admin/executors/exec-a/revoke", json={"serial": self.PADDED})
+        assert resp.status_code == 200 and resp.json()["revoked"] is True
+        s = SessionLocal()
+        try:
+            state = executor_revocation_state(s, "exec-a", presented_serial=self.PADDED)
+            assert state.revoked and state.reason == "serial"
+            # The unpadded presentation the middleware used before #481 — this is
+            # the shape that silently never matched.
+            state = executor_revocation_state(s, "exec-a", presented_serial=self.UNPADDED)
+            assert state.revoked and state.reason == "serial"
+        finally:
+            s.close()
+
+    def test_operator_unpadded_revoke_stores_canonical_and_refuses(self, env):
+        """(e') the operator half: typing the serial WITHOUT padding revokes the
+        same certificate, and the row lands in the one canonical form."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial=self.PADDED)
+        resp = client.post("/api/v1/admin/executors/exec-a/revoke", json={"serial": self.UNPADDED.upper()})
+        assert resp.status_code == 200 and resp.json()["revoked"] is True
+        s = SessionLocal()
+        try:
+            row = s.query(ExecutorCertRevocation).filter_by(executor_id="exec-a").first()
+            assert row is not None and row.serial_number == self.PADDED
+            state = executor_revocation_state(s, "exec-a", presented_serial=self.PADDED)
+            assert state.revoked and state.reason == "serial"
+        finally:
+            s.close()
+
+    def test_legacy_unpadded_row_still_refuses_after_the_change(self, env):
+        """(e'') tolerance half: a row ALREADY stored unpadded (no migration
+        rewrites it) still refuses the certificate it names."""
+        _, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial=self.PADDED)
+        _seed_revocation(SessionLocal, self.UNPADDED)
+        s = SessionLocal()
+        try:
+            state = executor_revocation_state(s, "exec-a", presented_serial=self.PADDED)
+            assert state.revoked and state.reason == "serial"
+        finally:
+            s.close()
+
+    def test_unrevoked_leading_zero_serial_is_admitted(self, env):
+        """(e-b) the admitted half: the SAME leading-zero serial with no
+        revocation row is not revoked (a gate that only rejects proves nothing).
+        A row for a DIFFERENT leading-zero serial must not refuse it either."""
+        _, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial=self.PADDED)
+        s = SessionLocal()
+        try:
+            assert executor_revocation_state(s, "exec-a", presented_serial=self.PADDED).revoked is False
+        finally:
+            s.close()
+        _seed_revocation(SessionLocal, "0999999999999999", executor_id="exec-a")
+        s = SessionLocal()
+        try:
+            assert executor_revocation_state(s, "exec-a", presented_serial=self.PADDED).revoked is False
+        finally:
+            s.close()
+
+    def test_identity_form_path_is_unchanged(self, env):
+        """(e-b') the ticket's BOUNDED half: identity-form revocation is
+        representation-free and is still checked FIRST — this fix must not
+        reorder or touch it."""
+        client, SessionLocal = env
+        _seed_executor(SessionLocal)
+        _seed_cert(SessionLocal, serial=self.PADDED)
+        resp = client.post("/api/v1/admin/executors/exec-a/revoke")
+        assert resp.status_code == 200 and resp.json()["revoked"] is True
+        s = SessionLocal()
+        try:
+            state = executor_revocation_state(s, "exec-a", presented_serial=self.UNPADDED)
+            assert state.revoked and state.reason == "identity"
+        finally:
+            s.close()
+
+
 # --- Admin revoke route: identity + serial forms ---
 
 

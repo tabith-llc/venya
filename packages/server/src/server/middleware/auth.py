@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from core.utils.cert_serial import canonical_serial, serial_match_clause
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
@@ -391,9 +392,13 @@ class SessionMiddleware(BaseHTTPMiddleware):
         # longer be "absent" (it comes from the certificate object, not a
         # header) — the former missing-header fail-closed branch is retired by
         # construction; backend-absence and lookup-error still fail closed.
-        # Serial match is case-insensitive: legacy rows store the serial
-        # as-provided; new writes normalize at the storage boundary (admin.py).
-        presented_serial = format(cert.serial_number, "x")
+        # Serial match is case- AND padding-insensitive (ticket
+        # cert-serial-canonicalization-mismatch #481): the serial is written in
+        # the ONE canonical form, and the lookup compares match keys so legacy
+        # rows stored unpadded/upper/lower still refuse the certificate they
+        # name. (Before this, a 1/16-of-serials slice got a revocation that
+        # recorded green and never took effect.)
+        presented_serial = canonical_serial(cert.serial_number)
 
         backend = getattr(request.app.state, "backend", None)
         if backend is None:
@@ -406,13 +411,23 @@ class SessionMiddleware(BaseHTTPMiddleware):
         db = backend.get_session()
         try:
             from core.iam.models import AdminCertRevocation
-            from sqlalchemy import func
 
             revoked = (
                 db.query(AdminCertRevocation)
-                .filter(func.upper(AdminCertRevocation.serial_number) == presented_serial.upper())
+                .filter(serial_match_clause(AdminCertRevocation.serial_number, presented_serial))
                 .first()
             )
+            if revoked is None:
+                # One line at the enforcement point, naming WHICH no-match this
+                # is: an empty table is a fresh install, a non-empty table that
+                # missed is where a failed revocation would hide (#481).
+                rows_exist = db.query(AdminCertRevocation.serial_number).first() is not None
+                logger.info(
+                    "Admin route %s: serial %s admitted — %s",
+                    path,
+                    presented_serial,
+                    "no revocation row matched the rows on file" if rows_exist else "no revocation rows exist",
+                )
         except Exception:
             logger.exception("Admin route %s: revocation lookup failed — failing closed", path)
             return JSONResponse(
@@ -639,7 +654,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
                     content={"detail": detail},
                 )
 
-            presented_serial = format(cert.serial_number, "x")
+            presented_serial = canonical_serial(cert.serial_number)
             rev = executor_revocation_state(db, executor_id, presented_serial=presented_serial, executor_row=row)
             if rev.revoked:
                 if reject_revoked:

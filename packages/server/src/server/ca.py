@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from core.utils.cert_serial import canonical_serial
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -382,13 +383,18 @@ class CAManager:
     def compute_serial_hex(serial: int) -> str:
         """Convert a serial number to a hex string.
 
+        The ONE serial representation is `core.utils.cert_serial.canonical_serial`
+        (ticket cert-serial-canonicalization-mismatch #481); this is the padded
+        precedent that shape was named after, kept as the server-side writer so
+        call sites and this method's mocks keep working unchanged.
+
         Args:
             serial: The serial number integer.
 
         Returns:
-            Hex-encoded serial string.
+            Lowercase hex, zero-padded to a minimum of 16 digits.
         """
-        return format(serial, "016x")
+        return canonical_serial(serial)
 
     def get_ca_key_pem(self) -> bytes:
         """Get the CA private key in PEM format.

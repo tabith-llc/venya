@@ -3791,7 +3791,12 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         cert_path.write_bytes(cert_pem)
         cert_path.chmod(0o644)
 
-        # Print details
+        # Print details. The serial renders in the ONE canonical form (lowercase
+        # hex, zero-padded to 16) that server/core utils `canonical_serial` defines
+        # — the value an operator pastes into `revoke-admin-cert`. This package is
+        # barred from importing core (tests/test_capability_isolation.py keeps
+        # venya-cli standalone), so the format literal is repeated HERE on purpose;
+        # keep it byte-identical to core.utils.cert_serial.canonical_serial.
         serial_hex = format(cert.serial_number, "016x")
         not_after = cert.not_valid_after_utc
 

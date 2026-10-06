@@ -37,6 +37,7 @@ import httpx2
 # Failing fast at import time is correct — a security-critical dependency
 # must not be silently unavailable at runtime.
 import tomli_w  # type: ignore[import-not-found]
+from core.utils.cert_serial import canonical_serial, serial_match_key
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -718,8 +719,15 @@ class CertificateManager:
                     self.config.executor_id,
                 )
                 return True
-            revoked_serials = set(data.get("revoked_serials", []))
-            is_revoked = self.serial in revoked_serials
+            revoked_serials = data.get("revoked_serials", [])
+            # Case/padding-insensitive membership (ticket
+            # cert-serial-canonicalization-mismatch #481): the list carries the
+            # STORED spelling, and rows written before the single canonical form
+            # exist unpadded/upper as well as padded. Keying the list once keeps
+            # this a set lookup instead of a scan per poll. Identity-level
+            # revocation (checked above) matches ANY serial regardless.
+            revoked_keys = {serial_match_key(s) for s in revoked_serials}
+            is_revoked = serial_match_key(self.serial) in revoked_keys
 
             if is_revoked:
                 logger.warning("Executor certificate REVOKED (serial=%s)", self.serial)
@@ -739,7 +747,7 @@ class CertificateManager:
         try:
             cert = x509.load_pem_x509_certificate(Path(self.cert_path).read_bytes())
             self._not_after = cert.not_valid_after_utc
-            self.serial = format(cert.serial_number, "016x")
+            self.serial = canonical_serial(cert.serial_number)
         except Exception:
             # Corrupted or invalid cert — metadata unavailable but cert
             # still exists, so registration is still skipped.

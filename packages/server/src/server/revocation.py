@@ -71,17 +71,26 @@ def executor_revocation_state(
         RevocationState — see module docstring for the ruled order.
     """
     from core.iam.models import Executor, ExecutorCert, ExecutorCertRevocation
+    from core.utils.cert_serial import canonical_serial, serial_match_clause
 
     row = executor_row if executor_row is not None else db.query(Executor).filter(Executor.id == executor_id).first()
     if row is not None and getattr(row, "revoked_at", None) is not None:
         return RevocationState(True, "identity", row.revoked_at)
 
-    serial = presented_serial.casefold() if presented_serial else None
+    # Serial history, matched in the ONE canonical representation and compared
+    # case/padding-insensitively (ticket cert-serial-canonicalization-mismatch
+    # #481): legacy rows are stored padded, unpadded, upper and lower, and no
+    # migration rewrites them.
+    serial = canonical_serial(presented_serial) if presented_serial else None
     if serial is None:
         cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
-        serial = cert.serial_number.casefold() if cert is not None and cert.serial_number else None
+        serial = canonical_serial(cert.serial_number) if cert is not None and cert.serial_number else None
     if serial is not None:
-        hit = db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == serial).first()
+        hit = (
+            db.query(ExecutorCertRevocation)
+            .filter(serial_match_clause(ExecutorCertRevocation.serial_number, serial))
+            .first()
+        )
         if hit is not None:
             return RevocationState(True, "serial", hit.revoked_at)
 
