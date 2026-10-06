@@ -1512,6 +1512,11 @@ def cmd_setup(client: APIClient, args: Any) -> int:
     Fido2Auth then verify core TLS against it automatically — no
     SSL_CERT_FILE incantation needed for any later command.
 
+    An explicit http:// URL is REFUSED before anything is written (#497): the
+    fetched bytes become the trust anchor every later call verifies against, so
+    a plaintext answer from an on-path adversary would be installed as the CA.
+    A bare hostname still normalizes to https://.
+
     The fetch is a scoped, unverified GET (trust-on-first-use): the cert it
     returns becomes the verification anchor, and its subject + SHA-256
     fingerprint are printed so the operator can confirm them out-of-band.
@@ -1520,6 +1525,20 @@ def cmd_setup(client: APIClient, args: Any) -> int:
     core = args.corename
     if not core.startswith(("http://", "https://")):
         core = "https://" + core
+    # Plaintext http:// is REJECTED, not downgraded — the same ruling the
+    # heartbeat path carries (ticket sec-sweep-low-informational #17, user
+    # ruling 2026-09-21) and the one this bootstrap site was missing
+    # (ticket cli-setup-ca-fetch-plaintext-http #497). The sanctioned
+    # VENYA_TLS_VERIFY=false knob covers a DISTRUSTED CERT over https; it never
+    # means "no TLS", and it is not consulted here.
+    if not core.startswith("https://"):
+        print(
+            f"Error: server URL must be https:// — got '{core}'. Plaintext http is "
+            "not supported for setup: the fetched certificate is installed as this "
+            "workstation's trust anchor (ticket cli-setup-ca-fetch-plaintext-http #497).",
+            file=sys.stderr,
+        )
+        return 1
     client.config.server_url = core
 
     url = f"{core}/.well-known/venya-ca.crt"
