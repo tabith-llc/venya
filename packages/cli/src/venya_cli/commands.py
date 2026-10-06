@@ -1503,6 +1503,35 @@ def cmd_run(client: APIClient, args: Any) -> int:
         return 1
 
 
+def _require_https_server_url(server_url: str, *, site: str, ticket: str, detail: str = "") -> bool:
+    """One shared https:// scheme guard for every place the CLI dials a core URL.
+
+    Plaintext http is REJECTED — never downgraded, never warned-and-continued. That
+    is the owner ruling on ``sec-sweep-low-informational`` #17 (2026-09-21), which
+    the executor heartbeat has carried since; the renew / register / setup /
+    config-write sites are being brought onto the same rule rather than inventing
+    one (#497 #506 #508 #509).
+
+    The sanctioned ``VENYA_TLS_VERIFY=false`` knob is NOT consulted here: it means
+    "distrust this certificate over https", never "no TLS", so it cannot re-open
+    plaintext. The check runs on the RESOLVED URL, so no source of that URL
+    (flag, env, config.json, executor.toml) escapes it.
+
+    Returns True when the URL is usable. On failure prints the refusal (the exact
+    wording class the heartbeat site pinned) and returns False, so the caller only
+    has to ``return 1``.
+    """
+    if server_url.startswith("https://"):
+        return True
+    suffix = f" — {detail}" if detail else ""
+    print(
+        f"Error: server URL must be https:// — got '{server_url}'. Plaintext http is "
+        f"not supported for {site}{suffix} (ticket {ticket}).",
+        file=sys.stderr,
+    )
+    return False
+
+
 def cmd_setup(client: APIClient, args: Any) -> int:
     """Save the server URL and install the core's CA certificate.
 
@@ -1525,19 +1554,15 @@ def cmd_setup(client: APIClient, args: Any) -> int:
     core = args.corename
     if not core.startswith(("http://", "https://")):
         core = "https://" + core
-    # Plaintext http:// is REJECTED, not downgraded — the same ruling the
-    # heartbeat path carries (ticket sec-sweep-low-informational #17, user
-    # ruling 2026-09-21) and the one this bootstrap site was missing
-    # (ticket cli-setup-ca-fetch-plaintext-http #497). The sanctioned
-    # VENYA_TLS_VERIFY=false knob covers a DISTRUSTED CERT over https; it never
-    # means "no TLS", and it is not consulted here.
-    if not core.startswith("https://"):
-        print(
-            f"Error: server URL must be https:// — got '{core}'. Plaintext http is "
-            "not supported for setup: the fetched certificate is installed as this "
-            "workstation's trust anchor (ticket cli-setup-ca-fetch-plaintext-http #497).",
-            file=sys.stderr,
-        )
+    # #497, now on the shared guard: the fetched bytes become this workstation's
+    # trust anchor, so a plaintext answer from an on-path adversary would be
+    # installed as the CA. Bare hostnames still normalize to https:// above.
+    if not _require_https_server_url(
+        core,
+        site="venya setup",
+        ticket="cli-setup-ca-fetch-plaintext-http",
+        detail="the fetched certificate is installed as this workstation's trust anchor",
+    ):
         return 1
     client.config.server_url = core
 
@@ -2666,6 +2691,18 @@ def executor_cert_renew(args: Any) -> int:
             "Error: server URL not configured. Pass --server-url (alias: --core-url) or set VENYA_SERVER_URL.",
             file=sys.stderr,
         )
+        return 1
+
+    # #506: this POST carries the executor's existing client certificate AND a
+    # fresh CSR, so a plaintext scheme would put both on the wire. Refused before
+    # any transport object exists (shared guard; the TLS-verify knob below is
+    # never a way back into http).
+    if not _require_https_server_url(
+        server_url,
+        site="the executor certificate renewal",
+        ticket="executor-renew-no-scheme-check",
+        detail="this request carries your client certificate and a new CSR",
+    ):
         return 1
 
     try:
