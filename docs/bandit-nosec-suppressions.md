@@ -1,17 +1,22 @@
 # Bandit `# nosec` Suppressions
 
 <!-- GENERATED FILE — DO NOT HAND-EDIT.
-     Source of truth: every `nosec` marker under packages/*/src.
+     Source of truth: every `nosec` marker in the files the pre-commit
+     bandit hook scans — all of packages/ minus the hook's own -x exclusions,
+     parsed from .pre-commit-config.yaml; git-tracked files only.
      Regenerate: uv run -p 3.14 --directory packages/core python scripts/gen_bandit_suppressions.py
      Enforced by packages/core/tests/test_bandit_suppressions_doc.py (drift = RED). -->
 
 Every suppression in the scanned source, verbatim. All entries are intentional —
 false positives or deliberate design decisions; the comment on each line carries its
 justification. Rows are keyed on file + line content (line numbers drift and are
-deliberately not recorded). Scope = `packages/*/src` — the same tree the pre-commit
-bandit hook scans (tests dirs are hook-excluded).
+deliberately not recorded). Scope = the bandit hook's own file set: `packages/` minus
+the hook's `-x` exclusions, parsed from `.pre-commit-config.yaml` — one definition,
+so the register and the hook cannot drift apart. If a marker is ever legitimately
+needed in a non-src file (e.g. an alembic version or a script), it must land with
+this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**64 suppression lines across 20 files.**
+**66 suppression lines across 21 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -23,6 +28,8 @@ bandit hook scans (tests dirs are hook-excluded).
 | `packages/cli/src/venya_cli/commands.py` | `except Exception:  # nosec B110  # noqa: S110` |
 | `packages/cli/src/venya_cli/fido2_client.py` | `except Exception:  # noqa: S110  # nosec B110 — deliberate: parse failure keeps raw status text` |
 | `packages/cli/src/venya_cli/webauthn.py` | `except Exception:  # nosec B110  # noqa: S110` |
+| `packages/core/scripts/gen_bandit_suppressions.py` | `import subprocess  # nosec B404 — git ls-files provides the tracked set; fixed argv, no shell` |
+| `packages/core/scripts/gen_bandit_suppressions.py` | `raw = subprocess.run(  # nosec B603 B607 — git ls-files with fixed argv list, no shell, no external input` |
 | `packages/core/src/core/engine/encryption.py` | `from Crypto.Cipher import AES as PyCryptoAES  # nosec B413 — AES-KW per RFC 5649 requires pycryptodome` |
 | `packages/core/src/core/engine/encryption.py` | `cipher = PyCryptoAES.new(kek, PyCryptoAES.MODE_ECB)  # nosec B305 — AES-KW per RFC 5649 requires ECB` |
 | `packages/core/src/core/engine/encryption.py` | `cipher = PyCryptoAES.new(kek, PyCryptoAES.MODE_ECB)  # nosec B305 — AES-KW per RFC 5649 requires ECB` |
