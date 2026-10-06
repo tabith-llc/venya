@@ -153,26 +153,51 @@ class Fido2Manager:
             self._load_credentials_from_db()
 
     def _load_credentials_from_db(self) -> None:
-        """Load WebAuthn credentials from the database into the in-memory store."""
+        """Load active WebAuthn credentials from the database into the in-memory store.
+
+        #441, recovery shape (a) — fail startup loudly: a load fault is
+        logged with full exception context and re-raised. The only
+        production caller is the server lifespan (app.py constructs
+        ``Fido2Manager(... backend=backend)`` inside ``lifespan``), whose
+        startup contract already aborts on propagated exceptions — the same
+        pattern as ``_init_core`` and ``_verify_kek_sentinel``, which log
+        operator-actionable errors and re-raise so uvicorn exits non-zero.
+        The process must never serve with a silently-empty credential
+        store; the swallow is narrowed to the session close, which cannot
+        change the load verdict (a close fault warns, credentials stand).
+        """
         from core.iam.models import WebAuthnCredential
 
+        loaded = 0
+        db = None
         try:
             db = self.backend.get_session()
-            try:
-                creds = db.query(WebAuthnCredential).filter(WebAuthnCredential.is_active.is_(True)).all()
-                for db_cred in creds:
-                    stored = StoredCredential(
-                        user_id=db_cred.user_id,
-                        credential_id=db_cred.credential_id,
-                        public_key=db_cred.public_key,
-                        sign_count=db_cred.sign_count,
-                        label=db_cred.label,
-                    )
-                    self.store.store_credential(stored)
-            finally:
-                db.close()
-        except Exception:  # nosec B110 — db cleanup in finally block, outer scope handles error  # noqa: S110
-            pass
+            creds = db.query(WebAuthnCredential).filter(WebAuthnCredential.is_active.is_(True)).all()
+            for db_cred in creds:
+                stored = StoredCredential(
+                    user_id=db_cred.user_id,
+                    credential_id=db_cred.credential_id,
+                    public_key=db_cred.public_key,
+                    sign_count=db_cred.sign_count,
+                    label=db_cred.label,
+                )
+                self.store.store_credential(stored)
+                loaded += 1
+            logger.info("Loaded %d active WebAuthn credential(s) into the in-memory store", loaded)
+        except Exception:
+            logger.exception(
+                "FIDO2 credential load FAILED after %d credential(s) loaded; "
+                "credentials not loaded; login/enrollment assertions will fail — "
+                "aborting startup",
+                loaded,
+            )
+            raise
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    logger.warning("Failed to close DB session after credential load", exc_info=True)
 
     def start_registration(
         self,

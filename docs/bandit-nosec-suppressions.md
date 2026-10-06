@@ -11,7 +11,7 @@ justification. Rows are keyed on file + line content (line numbers drift and are
 deliberately not recorded). Scope = `packages/*/src` — the same tree the pre-commit
 bandit hook scans (tests dirs are hook-excluded).
 
-**64 suppression lines across 20 files.**
+**63 suppression lines across 19 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -67,7 +67,6 @@ bandit hook scans (tests dirs are hook-excluded).
 | `packages/server/src/server/audit_lifecycle.py` | `EXECUTOR_ENROLLMENT_TOKEN_CREATED = "executor_enrollment_token_created"  # nosec B105 — audit event name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/ca.py` | `self._key_passphrase_env = "VENYA_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/ca.py` | `self._key_passphrase_env = "VENYA_ADMIN_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
-| `packages/server/src/server/fido2/manager.py` | `except Exception:  # nosec B110 — db cleanup in finally block, outer scope handles error  # noqa: S110` |
 | `packages/server/src/server/middleware/auth.py` | `ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort JSON parse, None falls through  # noqa: S110` |
 | `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort DB query, None falls through  # noqa: S110` |
