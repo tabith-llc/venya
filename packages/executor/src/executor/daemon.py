@@ -293,6 +293,23 @@ class CertificateManager:
         """Certificate expiry time."""
         return self._not_after
 
+    def _server_ssl_context(self) -> ssl.SSLContext:
+        """Client TLS context for the core, pinned to the configured Venya anchors (#502).
+
+        One construction shared by register() and the boot identity probe so the
+        two paths cannot drift apart again: the system store stays loaded (a core
+        whose certificate a host already trusts keeps verifying) and every local
+        anchor that exists is added — ``ca_bundle`` from the config and the CA
+        file written at registration/rotation (``mtls.ca_cert``). Without the
+        local anchors a probe verifies only against the host store, which is the
+        defect this closes.
+        """
+        ssl_ctx = ssl.create_default_context()
+        for candidate in (self.config.ca_bundle, self.ca_cert_path):
+            if candidate and Path(candidate).exists():
+                ssl_ctx.load_verify_locations(candidate)
+        return ssl_ctx
+
     def register(self, executor_id: str, enrollment_token: str | None = None) -> None:
         """Register executor with server, obtain signed certificate.
 
@@ -369,15 +386,8 @@ class CertificateManager:
         else:
             raise RuntimeError(f"Invalid VENYA_TLS_VERIFY value: '{tls_verify_env}'. " "Must be 'true' or 'false'.")
 
-        # Build SSL context for TLS verification
-        if tls_verify:
-            ssl_ctx = ssl.create_default_context()
-            ca_bundle = self.config.ca_bundle
-            if ca_bundle and Path(ca_bundle).exists():
-                ssl_ctx.load_verify_locations(ca_bundle)
-            verify_param: object = ssl_ctx
-        else:
-            verify_param = False
+        # Build SSL context for TLS verification (shared with the identity probe)
+        verify_param: object = self._server_ssl_context() if tls_verify else False
 
         response: httpx2.Response | None = None
         for attempt in range(_REGISTER_RETRY_ATTEMPTS):
@@ -509,15 +519,20 @@ class CertificateManager:
         daemon's own heartbeat loop keeps checking, and a core outage must
         not strand a legitimately enrolled executor). Other status classes
         propagate loud via raise_for_status. Full TLS verification per house
-        policy (same VENYA_TLS_VERIFY knob register honors; dev-fleet only).
+        policy against the configured Venya anchors, same context register()
+        builds (#502); the dev-fleet ``VENYA_TLS_VERIFY=false`` knob still turns
+        it off at this site.
         """
         url = f"{self.config.server_url}/api/v1/heartbeat"
         tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
-        verify: bool | str = tls_verify_env.lower() != "false"
+        verify: bool = tls_verify_env.lower() != "false"
         if not verify:
             logger.warning("VENYA_TLS_VERIFY=false — identity probe skips TLS verification (dev only)")
+        # Same anchor-pinned context register() uses; `verify=True` here would mean
+        # "host trust store only" and ignore the Venya CA (#502).
+        probe_verify: object = self._server_ssl_context() if verify else False
         try:
-            with httpx2.Client(cert=(self.cert_path, self.key_path), verify=verify, timeout=10.0) as client:
+            with httpx2.Client(cert=(self.cert_path, self.key_path), verify=probe_verify, timeout=10.0) as client:
                 response = client.post(url, json={"executor_id": executor_id})
         except httpx2.TransportError as exc:
             if _is_tls_handshake_failure(exc):
