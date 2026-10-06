@@ -95,7 +95,7 @@ def create_parser() -> argparse.ArgumentParser:
     store_parser.add_argument(
         "--shape",
         default=None,
-        help="How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name)",
+        help="How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, sudo-stdin, env:NAME, or a custom name)",
     )
     store_parser.add_argument(
         "--usage",
@@ -158,7 +158,7 @@ def create_parser() -> argparse.ArgumentParser:
     update_meta_parser.add_argument(
         "--shape",
         default=None,
-        help="How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name)",
+        help="How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, sudo-stdin, env:NAME, or a custom name)",
     )
     update_meta_parser.add_argument(
         "--usage",

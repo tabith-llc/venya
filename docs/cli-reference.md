@@ -132,7 +132,7 @@ venya store <KEY> [VALUE] --roles ROLES [OPTIONS]
 | `--roles` | **yes** | repeatable/space-separated list | — | Role(s) to scope the secret to (comma- and/or space-separated) |
 | `--key-version` | no | string | — | Key version ID to encrypt with (default: server's active key version) |
 | `--metadata`, `-m` | no | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |
-| `--shape` | no | string | — | How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name) |
+| `--shape` | no | string | — | How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, sudo-stdin, env:NAME, or a custom name) |
 | `--usage` | no | string | — | Command template for humans/agents; reference the secret only via {secret_path} (e.g. 'sshpass -f {secret_path} ssh user@host cmd') |
 
 **Examples**
@@ -219,7 +219,7 @@ venya update-metadata <KEY> [OPTIONS]
 |----------|----------|----------------|---------|-------------|
 | `KEY` (positional) | **yes** | string | — | Secret key to update |
 | `--metadata`, `-m` | no | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |
-| `--shape` | no | string | — | How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, env:NAME, or a custom name) |
+| `--shape` | no | string | — | How this secret is consumed (ssh-password, ssh-key, http-netrc, http-header-file, mysql-defaults, ipmi-passfile, askpass, sudo-stdin, env:NAME, or a custom name) |
 | `--usage` | no | string | — | Command template for humans/agents; reference the secret only via {secret_path} (e.g. 'sshpass -f {secret_path} ssh user@host cmd') |
 
 **Examples**
