@@ -170,7 +170,15 @@ class CAManager:
 
         # Store private key (encrypted if passphrase provided)
         key_pem = _serialize_key_encrypted(private_key, passphrase, self._key_passphrase_env)
-        self.ca_key_path.write_bytes(key_pem)
+        # #499: create-time mode via os.open(..., 0o600) — the house idiom of
+        # sbx_strategy.py's env-file write. write_bytes() creates the inode at
+        # 0666 & ~umask and the chmod below lands only after the full key body
+        # is on disk; under a permissive umask the bytes are observable at a
+        # wider mode in that window. The chmod stays as the exact final-state
+        # pin (unchanged outcome: 0600).
+        key_fd = os.open(str(self.ca_key_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(key_fd, "wb") as key_handle:
+            key_handle.write(key_pem)
         os.chmod(str(self.ca_key_path), 0o600)
 
         # Create self-signed CA certificate
@@ -554,7 +562,12 @@ class AdminCAManager:
 
         # Store private key (encrypted if passphrase provided)
         key_pem = _serialize_key_encrypted(private_key, passphrase, self._key_passphrase_env)
-        self.ca_key_path.write_bytes(key_pem)
+        # #499: create-time mode via os.open(..., 0o600) — see CAManager.initialize;
+        # write_bytes() + chmod leaves the key body at 0666 & ~umask until the
+        # chmod lands. The chmod stays as the exact final-state pin.
+        key_fd = os.open(str(self.ca_key_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(key_fd, "wb") as key_handle:
+            key_handle.write(key_pem)
         os.chmod(str(self.ca_key_path), 0o600)
 
         # Create self-signed admin CA certificate
