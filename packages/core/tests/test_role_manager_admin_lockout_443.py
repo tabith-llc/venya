@@ -4,18 +4,26 @@
 # Change Date listed there, the work will be available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Truth-table tests for the #443 admin-lockout guard (RoleManager).
+"""Truth-table tests for the admin-lockout guard (RoleManager) — #443 removals,
+#486 deactivations.
 
-The guard is the ONE enforcement point behind both destructive routes
+The guard is the ONE enforcement point behind the destructive routes
 (``DELETE /admin/users/{user_id}`` and ``DELETE /roles/{role_id}/members/
 {user_id}``): a removal that would leave the ``admin`` role with zero members,
 or that would let a caller strip their own admin access, is refused BEFORE any
 delete. #443 shipped because neither route had either check, so a deployment
 could lock itself out of enrollment, key rotation and policy work.
 
+#486 adds the other half of the same rule: ``PUT /admin/users/{user_id}`` can
+write ``users.status``, which leaves the roster intact but takes the account
+out of the login path — a disabled account cannot authenticate
+(``session_manager.is_user_active``), and recovery-code reissue needs an
+account that can still sign in. So the count these cells check is the set of
+USABLE admins: active status AND an ``admin`` membership.
+
 Bound to a REAL SQLite session (house pattern from
-test_role_manager_delete_dependency_425.py) — the guard reads the roster, and a
-mock can answer a roster question with anything.
+test_role_manager_delete_dependency_425.py) — the guard reads the roster and
+the account statuses, and a mock can answer either question with anything.
 
 Every cell is paired with the half that must STILL WORK: a guard that refuses
 everything is not a pass.
@@ -261,3 +269,182 @@ class TestNoEnumerationOracle:
         assert error.reason == AdminLockoutError.LAST_ADMIN
         assert error.user_id == "admin1"
         assert isinstance(error.role_id, int)
+
+
+def _set_status(session, user_id, status_value):
+    session.query(User).filter(User.user_id == user_id).update({"status": status_value})
+    session.commit()
+
+
+class TestUsableAdminSet:
+    """#486 AC3: the definition of "usable admin" — active status AND an
+    ``admin`` membership. Both absence classes count as zero."""
+
+    def test_active_admin_counts(self, session):
+        _join(session, "admin1", "admin")
+        assert RoleManager(session).usable_admin_ids() == {"admin1"}
+
+    def test_disabled_admin_does_not_count(self, session):
+        _join(session, "admin1", "admin")
+        _set_status(session, "admin1", "disabled")
+
+        assert RoleManager(session).usable_admin_ids() == set()
+
+    def test_active_user_without_admin_membership_does_not_count(self, session):
+        _join(session, "admin1", "operator")
+
+        assert RoleManager(session).usable_admin_ids() == set()
+
+    def test_pending_enrollment_admin_does_not_count(self, session):
+        """A freshly created account that has not enrolled yet is not usable
+        either — ``is_user_active`` is the login gate, not a string check on
+        "disabled" only."""
+        _join(session, "admin1", "admin")
+        _set_status(session, "admin1", "pending_enrollment")
+
+        assert RoleManager(session).usable_admin_ids() == set()
+
+    def test_no_admin_role_seeded_yet_counts_zero(self, session):
+        session.query(RoleMember).delete()
+        session.query(Role).filter(Role.name == "admin").delete()
+        session.commit()
+
+        assert RoleManager(session).usable_admin_ids() == set()
+
+
+class TestStatusChangeKeepsAdmin:
+    """#486: the deactivation half of the lockout rule, same enforcement point
+    as the removal guards — asserted at the core, where the count lives."""
+
+    def test_disabling_the_only_active_admin_refused(self, session):
+        """The headline: one active admin, no other usable admin -> refuse."""
+        _join(session, "admin1", "admin")
+
+        with pytest.raises(AdminLockoutError) as excinfo:
+            RoleManager(session).assert_status_change_keeps_admin("admin1", "disabled")
+
+        assert excinfo.value.reason == AdminLockoutError.LAST_USABLE_ADMIN_DEACTIVATED
+        assert excinfo.value.user_id == "admin1"
+        session.rollback()
+        assert _user_status(session, "admin1") == "active"
+
+    def test_disabling_an_admin_while_another_active_admin_stands_allowed(self, session):
+        """Paired negative (AC1): the refusal is only for ZERO usable admins."""
+        _join(session, "admin1", "admin")
+        _join(session, OTHER_ADMIN, "admin")
+
+        RoleManager(session).assert_status_change_keeps_admin(OTHER_ADMIN, "disabled")
+
+    def test_disabling_a_non_admin_user_allowed_and_guard_silent(self, session):
+        """Negative: the ordinary administrative write on a plain account is
+        untouched — no raise, no reason, nothing to answer."""
+        _join(session, "admin1", "admin")
+        _join(session, "plainjane", "operator")
+
+        RoleManager(session).assert_status_change_keeps_admin("plainjane", "disabled")
+
+    def test_activation_of_the_last_admin_allowed(self, session):
+        """Pinning the scope: ONLY deactivation is guarded. Re-activating the
+        last admin must stay possible — that is the recovery path."""
+        _join(session, "admin1", "admin")
+        _set_status(session, "admin1", "disabled")
+
+        RoleManager(session).assert_status_change_keeps_admin("admin1", "active")
+
+    def test_pending_enrollment_write_on_the_last_admin_refused(self, session):
+        """A ruled-scope cell the spec matrix asks about: ``pending_enrollment``
+        is not an activation — ``is_user_active`` refuses login for it exactly
+        as it does for ``disabled`` — so the design rule (refuse when the write
+        leaves ZERO usable admins) covers it. Reported as a spec-vs-design
+        discrepancy for the lead; this cell states which way the code went."""
+        _join(session, "admin1", "admin")
+
+        with pytest.raises(AdminLockoutError) as excinfo:
+            RoleManager(session).assert_status_change_keeps_admin("admin1", "pending_enrollment")
+
+        assert excinfo.value.reason == AdminLockoutError.LAST_USABLE_ADMIN_DEACTIVATED
+
+    def test_pending_enrollment_write_allowed_when_another_active_admin_stands(self, session):
+        """Paired negative of the cell above: the rule counts usable admins, it
+        does not blacklist a status value."""
+        _join(session, "admin1", "admin")
+        _join(session, OTHER_ADMIN, "admin")
+
+        RoleManager(session).assert_status_change_keeps_admin(OTHER_ADMIN, "pending_enrollment")
+
+    def test_one_active_one_disabled_roster_refuses_deactivating_the_active_one(self, session):
+        """The roster has two admins on paper, ONE usable: the removal guards
+        see a healthy roster and stay silent, which is exactly the #486
+        outage — the status write must be the one that answers."""
+        _join(session, "admin1", "admin")
+        _join(session, OTHER_ADMIN, "admin")
+        _set_status(session, OTHER_ADMIN, "disabled")
+
+        with pytest.raises(AdminLockoutError) as excinfo:
+            RoleManager(session).assert_status_change_keeps_admin("admin1", "disabled")
+
+        assert excinfo.value.reason == AdminLockoutError.LAST_USABLE_ADMIN_DEACTIVATED
+
+    def test_disabling_an_already_disabled_admin_allowed(self, session):
+        """Negative: a no-op disable on the last admin changes nothing, so it
+        changes nothing to refuse — the usable count is already zero and this
+        write does not lower it."""
+        _join(session, "admin1", "admin")
+        _set_status(session, "admin1", "disabled")
+
+        RoleManager(session).assert_status_change_keeps_admin("admin1", "disabled")
+
+    def test_unseeded_admin_role_passes_through(self, session):
+        """Pre-init posture, matching the removal half: no admin role means no
+        roster to strand."""
+        session.query(RoleMember).delete()
+        session.query(Role).filter(Role.name == "admin").delete()
+        session.commit()
+
+        RoleManager(session).assert_status_change_keeps_admin("admin1", "disabled")
+
+    def test_guard_answers_before_any_status_write(self, session):
+        """The refusal stages nothing: the route's commit has no pending UPDATE
+        to land, so the account keeps signing in."""
+        _join(session, "admin1", "admin")
+        target = session.query(User).filter(User.user_id == "admin1").one()
+
+        rm = RoleManager(session)
+        with pytest.raises(AdminLockoutError):
+            rm.assert_status_change_keeps_admin("admin1", "disabled")
+
+        assert len(session.deleted) == 0
+        assert len(session.new) == 0
+        assert not session.is_modified(target), "the guard must not stage a status UPDATE"
+        assert target.status == "active"
+        session.expire_all()
+        assert _user_status(session, "admin1") == "active"
+
+    def test_unknown_status_value_is_treated_as_deactivating(self, session):
+        """Fail-closed posture: the guard guards on "not active", so an
+        unrecognised status value cannot slip past it as if it were an
+        activation."""
+        _join(session, "admin1", "admin")
+
+        with pytest.raises(AdminLockoutError) as excinfo:
+            RoleManager(session).assert_status_change_keeps_admin("admin1", "suspended")
+
+        assert excinfo.value.reason == AdminLockoutError.LAST_USABLE_ADMIN_DEACTIVATED
+
+    def test_refusal_message_states_the_usable_admin_definition(self, session):
+        """AC3: the operator reading the 409 learns WHAT counts as usable, not
+        just that something is wrong — and the message names no other member."""
+        _join(session, "admin1", "admin")
+        _join(session, OTHER_ADMIN, "operator")
+
+        with pytest.raises(AdminLockoutError) as excinfo:
+            RoleManager(session).assert_status_change_keeps_admin("admin1", "disabled")
+
+        message = str(excinfo.value)
+        assert "active" in message and "admin role" in message
+        assert OTHER_ADMIN not in message
+        assert "plainjane" not in message
+
+
+def _user_status(session, user_id):
+    return session.query(User).filter(User.user_id == user_id).one().status

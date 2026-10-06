@@ -339,3 +339,169 @@ class TestRefusalAuditAndDisclosurePosture:
 
         assert client.delete(f"/api/v1/admin/users/{SECOND_ADMIN}").status_code == 200
         assert _denials(session) == []
+
+
+class TestConfigureUserStatusGuard:
+    """PUT /admin/users/{user_id} — the #486 deactivation half of the same
+    rule. ``status`` is a different field from the roster, so the removal
+    guards stay silent while the login path dies: is_user_active refuses every
+    session for a disabled account, and recovery-code reissue needs an account
+    that can still sign in."""
+
+    def _configure(self, client, user_id, payload):
+        return client.put(f"/api/v1/admin/users/{user_id}", json=payload)
+
+    def test_disabling_the_only_active_admin_is_refused(self, session):
+        """The headline: one active admin, zero others usable -> 409 and the
+        account is STILL active in the database."""
+        _join(session, "admin1")
+        client = _client(session, caller_id=SECOND_ADMIN)
+
+        resp = self._configure(client, "admin1", {"status": "disabled"})
+
+        assert resp.status_code == 409, resp.text
+        assert "usable admin" in resp.json()["detail"]
+        assert _status(session, "admin1") == "active", "a refusal must not write the status"
+        assert not _success_rows(session, "user_updated")
+
+    def test_disabling_an_admin_while_another_active_admin_stands_is_allowed(self, session):
+        """(b) shape, status route: the refusal is only for a zero-usable
+        after-state, so the ordinary disable of a co-admin still works."""
+        _join(session, "admin1")
+        _join(session, SECOND_ADMIN)
+        client = _client(session, caller_id="admin1")
+
+        resp = self._configure(client, SECOND_ADMIN, {"status": "disabled"})
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["configured"] is True
+        assert _status(session, SECOND_ADMIN) == "disabled"
+        assert _status(session, "admin1") == "active"
+
+    def test_disabling_a_non_admin_user_is_allowed_and_guard_silent(self, session):
+        """Negative: the guard is admin-role scoped — a plain account is
+        disabled exactly as before, with no denial row."""
+        _join(session, "admin1")
+        _join(session, "plainjane", role_name="operator")
+        client = _client(session, caller_id="admin1")
+
+        resp = self._configure(client, "plainjane", {"status": "disabled"})
+
+        assert resp.status_code == 200, resp.text
+        assert _status(session, "plainjane") == "disabled"
+        assert _denials(session) == []
+
+    def test_activating_the_last_admin_is_allowed(self, session):
+        """Recovery path: the guarded direction is deactivation only, so
+        re-activating the only admin is never refused."""
+        _join(session, "admin1")
+        _set_status(session, "admin1", "disabled")
+        client = _client(session, caller_id="cert-only-admin")
+
+        resp = self._configure(client, "admin1", {"status": "active"})
+
+        assert resp.status_code == 200, resp.text
+        assert _status(session, "admin1") == "active"
+
+    def test_non_status_fields_on_the_last_admin_are_allowed(self, session):
+        """Regression: the guard answers the status write only — display name,
+        auth mode and session timeout on the last admin stay the ordinary
+        operation (no req.status, no guard call)."""
+        _join(session, "admin1")
+        client = _client(session, caller_id="admin1")
+
+        resp = self._configure(client, "admin1", {"display_name": "Ops", "session_timeout": 1800})
+
+        assert resp.status_code == 200, resp.text
+        assert _status(session, "admin1") == "active"
+
+    def test_one_active_one_disabled_roster_refuses_deactivating_the_active_one(self, session):
+        """The #486 outage exactly: TWO admin rows on the roster, ONE usable.
+        A roster-only check would wave this through."""
+        _join(session, "admin1")
+        _join(session, SECOND_ADMIN)
+        _set_status(session, SECOND_ADMIN, "disabled")
+        client = _client(session, caller_id="admin1")
+
+        resp = self._configure(client, "admin1", {"status": "disabled"})
+
+        assert resp.status_code == 409, resp.text
+        assert _status(session, "admin1") == "active"
+
+    def test_pending_enrollment_write_on_the_last_admin_is_refused(self, session):
+        """Scope pinned: is_user_active gates on "active", so
+        pending_enrollment takes the login away too — guarding only the
+        "disabled" literal would reopen the outage through the other value."""
+        _join(session, "admin1")
+        client = _client(session, caller_id=SECOND_ADMIN)
+
+        resp = self._configure(client, "admin1", {"status": "pending_enrollment"})
+
+        assert resp.status_code == 409, resp.text
+        assert _status(session, "admin1") == "active"
+
+    def test_refusal_lands_one_denial_row_naming_the_configure_action(self, session):
+        """AC1: the SAME event and shape as the removal refusals — no new
+        audit vocabulary, one row, commit-before-raise."""
+        _join(session, "admin1")
+        _join(session, "plainjane", role_name="operator")
+        client = _client(session, caller_id=SECOND_ADMIN)
+
+        resp = self._configure(client, "admin1", {"status": "disabled"})
+
+        assert resp.status_code == 409, resp.text
+        rows = _denials(session)
+        assert len(rows) == 1, "a refusal must be recorded, and recorded once"
+        assert rows[0].user_id == SECOND_ADMIN  # the actor, migration-022 convention
+        fields = _fields(rows[0])
+        assert fields["outcome"] == "denied"
+        assert fields["reason"] == "last_usable_admin_deactivated"
+        assert fields["action"] == "configure_user"
+        assert fields["target_user_id"] == "admin1"
+
+    def test_refusal_discloses_no_other_user(self, session):
+        """(e) enumeration posture on the new route: neither the 409 body nor
+        the audit row may name anyone besides the id the caller typed."""
+        _join(session, "admin1")
+        for name in ("dave", "eve"):
+            session.add(User(user_id=name, status="active"))
+        session.commit()
+        client = _client(session, caller_id="dave")
+
+        resp = self._configure(client, "admin1", {"status": "disabled"})
+
+        assert resp.status_code == 409, resp.text
+        body = resp.json()["detail"]
+        for name in ("dave", "eve"):
+            assert name not in body, body
+        for row in _denials(session):
+            blob = str(_fields(row))
+            assert "eve" not in blob
+
+    def test_successful_configure_writes_no_denial_row(self, session):
+        """Negative half of the audit surface: a permitted status write is not
+        recorded as a refusal, and still writes its user_updated row."""
+        _join(session, "admin1")
+        _join(session, SECOND_ADMIN)
+        client = _client(session, caller_id="admin1")
+
+        assert self._configure(client, SECOND_ADMIN, {"status": "disabled"}).status_code == 200
+        assert _denials(session) == []
+        assert len(_success_rows(session, "user_updated")) == 1
+
+    def test_unknown_user_still_404s(self, session):
+        """Regression: the guard answers after the 404, not instead of it."""
+        _join(session, "admin1")
+        client = _client(session, caller_id="admin1")
+
+        assert self._configure(client, "ghost", {"status": "disabled"}).status_code == 404
+
+
+def _status(session, user_id):
+    session.expire_all()
+    return session.query(User).filter(User.user_id == user_id).one().status
+
+
+def _set_status(session, user_id, value):
+    session.query(User).filter(User.user_id == user_id).update({"status": value})
+    session.commit()

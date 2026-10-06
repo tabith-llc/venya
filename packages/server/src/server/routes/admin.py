@@ -653,16 +653,41 @@ async def admin_configure_user(
     auth_user: dict = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> AdminConfigureUserResponse:
-    """Configure user settings (admin only)."""
-    try:
-        from core.iam.models import User
+    """Configure user settings (admin only).
 
+    #486: a ``status`` write is answered by the SAME lockout rule the removal
+    routes use, before anything is written. Disabling the only usable admin
+    keeps the ``admin`` roster intact, so the removal guards stay silent while
+    the login path dies — ``is_user_active`` refuses every session for that
+    account and recovery-code reissue needs an account that can still sign in.
+    The refusal answers 409 and lands an ``admin_lockout_denied`` row exactly
+    like the removal refusals, and discloses no other user id.
+    """
+    from core.iam.models import User
+    from core.iam.role_manager import AdminLockoutError, RoleManager
+
+    from .roles import _audit_lockout_denied
+
+    try:
         user = db.query(User).filter(User.user_id == user_id).first()
         if user is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"User not found: {user_id}",
             )
+
+        if req.status is not None:
+            # Guard BEFORE any attribute write, and inside the route's existing
+            # failure posture (the shape admin_remove uses): an unexpected
+            # internal fault stays a loud 400, never a bare 500.
+            try:
+                RoleManager(db).assert_status_change_keeps_admin(user_id, req.status)
+            except AdminLockoutError as e:
+                _audit_lockout_denied(db, auth_user, action="configure_user", error=e)
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=str(e),
+                )
 
         changed_fields: list[str] = []
         if req.display_name is not None:

@@ -12,6 +12,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .models import Role, RoleMember, SecretRole, User
+from .session_manager import is_user_active
 
 
 class RoleManagerError(Exception):
@@ -37,12 +38,14 @@ class SeparationOfDutiesError(RoleManagerError):
 
 
 class AdminLockoutError(RoleManagerError):
-    """Admin-lockout refusal (#443).
+    """Admin-lockout refusal (#443, #486).
 
-    Raised before any write by the shared destructive-removal guard
-    :meth:`RoleManager.assert_removal_keeps_admin`: the operation would leave
-    the ``admin`` role with nobody in it, or it would let a caller strip their
-    own access. A deployment with zero administrators cannot enroll, rotate
+    Raised before any write by the two halves of the shared lockout rule —
+    :meth:`RoleManager.assert_removal_keeps_admin` (destructive removals) and
+    :meth:`RoleManager.assert_status_change_keeps_admin` (account
+    deactivation): the operation would leave the ``admin`` role with nobody in
+    it who can actually sign in, or it would let a caller strip their own
+    access. A deployment with zero usable administrators cannot enroll, rotate
     keys or change policy, so the refusal is the safe outcome.
 
     Subclasses RoleManagerError so every existing catch keeps working; carries
@@ -54,6 +57,10 @@ class AdminLockoutError(RoleManagerError):
 
     LAST_ADMIN = "last_admin"
     SELF_REMOVAL = "self_removal"
+    #: #486: the account-status write would take the last usable admin's login
+    #: out of service. The roster still shows an admin, so the removal guard
+    #: stays silent — the outage arrives through ``users.status`` instead.
+    LAST_USABLE_ADMIN_DEACTIVATED = "last_usable_admin_deactivated"
 
     def __init__(
         self,
@@ -97,6 +104,13 @@ class RoleManager:
     #: literal is the one require_admin resolves too (server/dependencies.py) —
     #: a named constant, not a second source of the admin role id.
     ADMIN_ROLE_NAME = "admin"
+
+    #: The one account status that keeps a login usable. Compared only through
+    #: :func:`core.iam.session_manager.is_user_active` — this constant names
+    #: the value, the predicate owns the semantics (#486: a second
+    #: status-literal comparison would be the divergence bug that file warns
+    #: about).
+    USER_STATUS_ACTIVE = "active"
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -375,9 +389,10 @@ class RoleManager:
             safe: they name no member other than the caller's own target.
         """
         # Same lookup require_admin uses (server/dependencies.py) — never a
-        # re-derived id or a name guess.
-        admin_role = self.get_role_by_name(self.ADMIN_ROLE_NAME)
-        if admin_role is None:
+        # re-derived id or a name guess. The roster read is shared with the
+        # deactivation half of the rule (#486) through one helper.
+        roles = self._admin_role_and_members()
+        if roles is None:
             # No admin role seeded yet (a pre-init core): there is no roster to
             # empty, so only the self-removal half of the rule can apply.
             if role_id is None and caller_user_id is not None and target_user_id == caller_user_id:
@@ -387,10 +402,9 @@ class RoleManager:
                     user_id=target_user_id,
                 )
             return
+        admin_role, members = roles
         if role_id is not None and role_id != admin_role.id:
             return
-
-        members = self.get_role_members(admin_role.id)
         target_holds_admin = any(member.user_id == target_user_id for member in members)
 
         if target_holds_admin and len(members) <= 1:
@@ -413,6 +427,107 @@ class RoleManager:
             reason=AdminLockoutError.SELF_REMOVAL,
             user_id=target_user_id,
             role_id=None if role_id is None else admin_role.id,
+        )
+
+    def _admin_role_and_members(self) -> tuple[Role, list[RoleMember]] | None:
+        """The ``admin`` role row and its roster, or None when no admin role is
+        seeded yet.
+
+        Shared by the removal half (:meth:`assert_removal_keeps_admin`) and the
+        deactivation half (#486) of the lockout rule so neither re-copies the
+        role lookup — the same ``get_role_by_name`` require_admin resolves, and
+        the same ``get_role_members`` enumeration, never a re-derived id.
+        """
+        admin_role = self.get_role_by_name(self.ADMIN_ROLE_NAME)
+        if admin_role is None:
+            return None
+        return admin_role, self.get_role_members(admin_role.id)
+
+    def usable_admin_ids(self) -> set[str]:
+        """User ids that count as usable administrators right now (#486).
+
+        "Usable admin" = ``is_user_active(user)`` (the single login-status
+        gate, the same predicate ``create_session`` and the auth middleware
+        use) AND an ``admin``-role membership. An account that is disabled, or
+        one that is active but no longer holds the membership, counts as
+        absent: the roster alone is not the boundary — the roster of
+        SIGNABLE-IN members is.
+        """
+        roles = self._admin_role_and_members()
+        if roles is None:
+            return set()
+        return {
+            member.user_id
+            for member in roles[1]
+            if is_user_active(self.db.query(User).filter(User.user_id == member.user_id).first())
+        }
+
+    def assert_status_change_keeps_admin(self, target_user_id: str, new_status: str | None) -> None:
+        """Refuse an account-status write that would strand the last usable admin (#486).
+
+        The deactivation half of the ONE lockout rule. The removal guards
+        (:meth:`assert_removal_keeps_admin`) answer whether an ``admin``
+        membership survives; this answers whether a surviving membership is
+        still SIGNABLE-IN, because a disabled account keeps its roster row
+        while :func:`is_user_active` refuses every login for it — and
+        recovery-code reissue is conditioned on an account that can still sign
+        in. Two different fields, one outage class.
+
+        The count is the CURRENT usable-admin set, so the rule reads the way
+        an operator would: after this write, can anyone still administer this
+        core? A write is refused when it would take the set to zero AND the
+        target is in it today (causation — a status write on an account that
+        already cannot sign in strands nobody new).
+
+        Args:
+            target_user_id: Account whose status is being written.
+            new_status: The status value the write would store. Only
+                ``USER_STATUS_ACTIVE`` preserves login, so every other value —
+                ``disabled``, ``pending_enrollment``, or an unexpected one —
+                counts as taking that account out of the usable set
+                (fail-closed, and the same test ``is_user_active`` applies at
+                login: ``pending_enrollment`` cannot sign in either, so
+                treating it as safe would reopen the outage through the other
+                literal).
+
+        Raises:
+            AdminLockoutError: ``reason=LAST_USABLE_ADMIN_DEACTIVATED`` when
+                the write would leave the ``admin`` role with zero usable
+                admins. Enumeration-safe: the message names no member other
+                than the target the caller already typed.
+        """
+        if new_status == self.USER_STATUS_ACTIVE:
+            # An activation cannot strand anybody — only deactivation is guarded.
+            return
+
+        roles = self._admin_role_and_members()
+        if roles is None:
+            # No admin role seeded yet (a pre-init core): no roster to strand.
+            return
+        admin_role, members = roles
+        if not any(member.user_id == target_user_id for member in members):
+            # A status write on a NON-admin account cannot shrink the
+            # usable-admin set, so it stays the ordinary operation.
+            return
+
+        # The target is under the CANDIDATE status now, which is not
+        # USER_STATUS_ACTIVE (handled above), so it is not usable in the
+        # after-state. A target that is NOT usable today cannot be made less
+        # usable by this write, so the count only drops when the target is in
+        # the set right now (causation, not merely a post-state of zero).
+        usable = self.usable_admin_ids()
+        if target_user_id not in usable:
+            return
+        if usable - {target_user_id}:
+            return
+
+        raise AdminLockoutError(
+            "Cannot deactivate the only usable admin — a usable admin is an active "
+            "account that also holds the admin role, and this write would leave "
+            "zero. Seed or activate another admin first.",
+            reason=AdminLockoutError.LAST_USABLE_ADMIN_DEACTIVATED,
+            user_id=target_user_id,
+            role_id=admin_role.id,
         )
 
     def get_role_members(self, role_id: int) -> list[RoleMember]:
