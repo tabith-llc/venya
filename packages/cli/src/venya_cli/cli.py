@@ -759,7 +759,10 @@ def create_parser() -> argparse.ArgumentParser:
 
     # setup
     setup_parser = subparsers.add_parser("setup", help="Save the server URL and install the core's CA certificate")
-    setup_parser.add_argument("corename", help="Core server hostname or full URL (e.g. venya-core-1)")
+    setup_parser.add_argument(
+        "corename",
+        help="Core server hostname (https assumed) or full https:// URL (e.g. venya-core-1); plaintext http is refused",
+    )
     setup_parser.add_argument(
         "--ca-sha256",
         default=None,

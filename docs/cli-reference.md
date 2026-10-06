@@ -1429,7 +1429,7 @@ venya setup <CORENAME> [OPTIONS]
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
-| `CORENAME` (positional) | **yes** | string | — | Core server hostname or full URL (e.g. venya-core-1) |
+| `CORENAME` (positional) | **yes** | string | — | Core server hostname (https assumed) or full https:// URL (e.g. venya-core-1); plaintext http is refused |
 | `--ca-sha256` | no | string | — | Pin the expected CA SHA-256 fingerprint (hex; colons, spaces, and case are ignored) |
 
 **Examples**

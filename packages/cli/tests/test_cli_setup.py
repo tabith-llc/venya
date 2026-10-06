@@ -149,6 +149,84 @@ class TestSetupCommand:
         assert client.config.ca_path.exists()
 
 
+class TestSetupHttpsRequired:
+    """#497 pin (ticket cli-setup-ca-fetch-plaintext-http): `venya setup` is the one
+    remaining place a plaintext transport could install a trust anchor. The fetched
+    bytes become the anchor every later call verifies against, so an on-path
+    adversary that answers the GET picks the CA. Plaintext is REFUSED, not
+    downgraded — same ruling class as sec-sweep-low-informational #17 at the
+    heartbeat site (user ruling 2026-09-21). VENYA_TLS_VERIFY=false is not in play
+    here: it means "distrust this certificate over https", never "no TLS"."""
+
+    def test_http_scheme_refused_before_any_fetch_or_write(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture,
+        ca_pem: bytes,
+    ):
+        """RED at HEAD: an explicit http:// corename -> rc=1, no GET, no server_url
+        write, no ca.crt."""
+        client = APIClient(config_file=tmp_path / "config.json")
+        with patch("venya_cli.commands.httpx2.get", return_value=_resp(200, ca_pem)) as mock_get:
+            rc = commands_mod.cmd_setup(client, _args("http://venya-core-1"))
+        assert rc == 1
+        mock_get.assert_not_called()
+        assert not client.config.ca_path.exists()
+        assert not (tmp_path / "config.json").exists()
+        assert client.config.server_url == "http://localhost:8000"  # untouched default
+        err = capsys.readouterr().err
+        assert "https://" in err
+        assert "cli-setup-ca-fetch-plaintext-http" in err
+
+    def test_http_scheme_refused_even_with_correct_pin(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture,
+        ca_pem: bytes,
+    ):
+        """NEGATIVE pairing: a --ca-sha256 pin that WOULD match does not unlock
+        plaintext — the scheme check runs first, before any fetch."""
+        client = APIClient(config_file=tmp_path / "config.json")
+        with patch("venya_cli.commands.httpx2.get", return_value=_resp(200, ca_pem)) as mock_get:
+            rc = commands_mod.cmd_setup(client, _args("http://venya-core-1", pin=_fingerprint(ca_pem)))
+        assert rc == 1
+        mock_get.assert_not_called()
+        assert not client.config.ca_path.exists()
+        assert not (tmp_path / "config.json").exists()
+        assert "https://" in capsys.readouterr().err
+
+    def test_bare_hostname_still_normalizes_to_https(self, tmp_path: Path, ca_pem: bytes):
+        """Paired positive: the refusal is scheme-specific, not a lockdown — the
+        documented bare-hostname form keeps working exactly as before."""
+        client = APIClient(config_file=tmp_path / "config.json")
+        with patch("venya_cli.commands.httpx2.get", return_value=_resp(200, ca_pem)) as mock_get:
+            rc = commands_mod.cmd_setup(client, _args("venya-core-1"))
+        assert rc == 0
+        assert mock_get.call_args.args[0] == "https://venya-core-1/.well-known/venya-ca.crt"
+        assert client.config.server_url == "https://venya-core-1"
+        assert client.config.ca_path.read_bytes() == ca_pem
+
+    def test_https_scheme_still_fetches(self, tmp_path: Path, ca_pem: bytes):
+        """Paired positive: explicit https:// proceeds to the fetch unchanged."""
+        client = APIClient(config_file=tmp_path / "config.json")
+        with patch("venya_cli.commands.httpx2.get", return_value=_resp(200, ca_pem)) as mock_get:
+            rc = commands_mod.cmd_setup(client, _args("https://core.example.com"))
+        assert rc == 0
+        mock_get.assert_called_once()
+        assert client.config.ca_path.read_bytes() == ca_pem
+
+    def test_pin_mismatch_writes_nothing(self, tmp_path: Path, capsys: pytest.CaptureFixture, ca_pem: bytes):
+        """Criterion 3 unchanged: an https fetch whose pin mismatches writes nothing
+        (the optional-pin path the refusal must not disturb)."""
+        client = APIClient(config_file=tmp_path / "config.json")
+        with patch("venya_cli.commands.httpx2.get", return_value=_resp(200, ca_pem)):
+            rc = commands_mod.cmd_setup(client, _args("https://core.example.com", pin="1" * 64))
+        assert rc == 1
+        assert not client.config.ca_path.exists()
+        assert client.config.server_url == "https://core.example.com"
+        assert "mismatch" in capsys.readouterr().err
+
+
 class TestCaVerifyPrecedence:
     """APIClient.__init__: SSL_CERT_FILE env > setup ca.crt > system trust.
 
