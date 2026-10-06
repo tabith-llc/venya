@@ -326,7 +326,12 @@ async def secrets_create(
     try:
         # Caller's ACTUAL role names, fresh from the DB (NOT user_info["roles"]
         # — that carries role IDs; same wiring as the injection path in
-        # executors.py). Visibility context for the upsert resolve.
+        # executors.py). Two jobs: visibility context for the upsert resolve, and
+        # the identity core.put authorizes the REQUESTED scope against — a
+        # read-write holder may not store into a group they do not belong to
+        # (ticket secret-write-namespace-scoping #451). The refusal comes back as
+        # CoreAccessError → 400 below, naming the offending role(s); nothing is
+        # written and the requested scope is never quietly narrowed here.
         from core.engine.core import CoreAccessError
         from core.iam.role_manager import RoleManager
 

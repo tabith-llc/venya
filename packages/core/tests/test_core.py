@@ -501,7 +501,12 @@ class TestSecretUpsertSqlite:
         core, engine, SessionLocal = self._make_env(tmp_path)
         try:
             r1 = core.put("k1", b"first", "alice", ["admin"], "v1", meta={"purpose": "a"}, caller_roles=["admin"])
-            r2 = core.put("k1", b"second", "alice", ["user"], "v2", meta={"purpose": "b"}, caller_roles=["admin"])
+            # alice holds BOTH groups here: writing a scope the caller does not hold
+            # is refused at this door since #451, and this cell is about replace
+            # semantics, not namespace authorization.
+            r2 = core.put(
+                "k1", b"second", "alice", ["user"], "v2", meta={"purpose": "b"}, caller_roles=["admin", "user"]
+            )
             assert r2.replaced is True
             assert r2.id == r1.id, "row id must be stable (injection path /run/secrets/venya/<pk>)"
             assert r2.created_by == "alice"
@@ -517,7 +522,9 @@ class TestSecretUpsertSqlite:
     def test_reput_by_in_scope_member_replaces_creator_immutable(self, tmp_path):
         core, engine, _ = self._make_env(tmp_path)
         try:
-            r1 = core.put("shared", b"aaa", "alice", ["user"], "v1", caller_roles=["admin"])
+            # alice holds both groups (see the #451 note on the write door): the
+            # point of this cell is that an in-scope NON-creator replaces the row.
+            r1 = core.put("shared", b"aaa", "alice", ["user"], "v1", caller_roles=["admin", "user"])
             r2 = core.put("shared", b"bbb", "bob", ["user"], "v1", caller_roles=["user"])
             assert r2.replaced is True
             assert r2.id == r1.id
@@ -560,13 +567,36 @@ class TestSecretUpsertSqlite:
         finally:
             engine.dispose()
 
+    def test_put_scope_outside_the_callers_roles_is_refused_and_writes_nothing(self, tmp_path):
+        """Paired negative at the enforcement point (ticket secret-write-namespace-
+        scoping #451): a caller holding only 'admin' may NOT plant a secret in the
+        'user' namespace. The refusal is loud (every offending name is named) and
+        lands BEFORE any encryption or session work, so nothing is written — no
+        Secret row, no SecretRole link — for the rejected request.
+        """
+        from core.iam.models import Secret, SecretRole
+
+        core, engine, SessionLocal = self._make_env(tmp_path)
+        try:
+            with pytest.raises(CoreAccessError, match="Role not held by caller: user"):
+                core.put("planted", b"nope", "alice", ["user"], "v1", caller_roles=["admin"])
+            with SessionLocal() as s:
+                assert s.query(Secret).filter(Secret.key == "planted").count() == 0
+                assert s.query(SecretRole).count() == 0, "a refused write leaves no link residue"
+            # the caller's OWN namespace still writes on the same connection — the
+            # refusal is scoped to the offending name, not a blanket break
+            rec = core.put("own", b"yes", "alice", ["admin"], "v1", caller_roles=["admin"])
+            assert rec.key == "own" and rec.replaced is False
+        finally:
+            engine.dispose()
+
     def test_reput_replaces_role_links_without_residue(self, tmp_path):
         from core.iam.models import Role, SecretRole
 
         core, engine, SessionLocal = self._make_env(tmp_path)
         try:
             core.put("k", b"1", "alice", ["admin"], "v1", caller_roles=["admin"])
-            core.put("k", b"2", "alice", ["user"], "v1", caller_roles=["admin"])
+            core.put("k", b"2", "alice", ["user"], "v1", caller_roles=["admin", "user"])
             with SessionLocal() as s:
                 from core.iam.models import Secret
 

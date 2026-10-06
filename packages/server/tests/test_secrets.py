@@ -1376,6 +1376,149 @@ class TestSecretUpsertRoute:
             assert decrypt_secret(kek, rows[0].wrapped_dek, rows[0].nonce, rows[0].encrypted_value) == b"owner-value"
 
 
+class TestSecretWriteNamespaceScoping:
+    """Write-side namespace door (ticket secret-write-namespace-scoping #451).
+
+    The read side of the namespace model has one enforcement point
+    (_resolve_secret_in) and it holds; the write side never consulted it, so a
+    caller holding the read-write tier in ANY group could store a key into a
+    group they do not belong to — require_role("read-write") is a global tier
+    test and never asks WHICH group. These cells ride the real route: Backend
+    over SQLite, real secrets router, real require_role chain, and the caller's
+    roles read fresh from the DB by the route itself (no mock in the path).
+    """
+
+    def _build_app(self, tmp_path, member_roles: list[str]):
+        from core.engine.backend import Backend, BackendConfig
+        from core.engine.encryption import KEK_SIZE
+        from core.iam.models import Base, Role, RoleMember, User
+        from fastapi import FastAPI
+        from server.dependencies import get_current_user
+        from server.routes import secrets as secrets_routes
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from starlette.testclient import TestClient
+
+        db_path = tmp_path / "write_scope.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Base.metadata.create_all(engine)
+        SessionLocal = sessionmaker(bind=engine)
+
+        kek = b"k" * KEK_SIZE
+        s = SessionLocal()
+        web = Role(name="web-ops", permissions="read-write")
+        dev = Role(name="dev-ops", permissions="read-write")
+        s.add_all([User(user_id="test-user"), web, dev])
+        s.flush()
+        for name in member_roles:
+            role = web if name == "web-ops" else dev
+            s.add(RoleMember(user_id="test-user", role_id=role.id))
+        s.commit()
+        s.close()
+
+        backend = Backend(BackendConfig(database_url=f"sqlite:///{db_path}", kek=kek))
+        backend._engine = engine
+        backend._session_factory = SessionLocal
+
+        app = FastAPI()
+        app.state.backend = backend
+        app.state.core = backend.get_core()
+        app.include_router(secrets_routes.router, prefix="/api/v1")
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": "test-user"}
+        return TestClient(app, raise_server_exceptions=False), SessionLocal, engine
+
+    def _payload(self, roles: list[str], **over):
+        body = {"key": "ssh-target", "value": "s3cret", "roles": roles, "key_version_id": "v1"}
+        body.update(over)
+        return body
+
+    def _stored_rows(self, SessionLocal, key: str):
+        """(created_by, sorted scope names) for every row holding `key`."""
+        from core.iam.models import Role, Secret, SecretRole
+
+        with SessionLocal() as s:
+            out = []
+            for row in s.query(Secret).filter(Secret.key == key).all():
+                names = [
+                    r.name
+                    for r in s.query(Role)
+                    .join(SecretRole, SecretRole.role_id == Role.id)
+                    .filter(SecretRole.secret_id == row.id)
+                    .all()
+                ]
+                out.append((row.created_by, sorted(names)))
+            return out
+
+    def test_store_into_a_group_the_caller_is_not_in_is_refused_and_writes_nothing(self, tmp_path):
+        """The required negative half (AC-4): a web-ops-only member attempting
+        roles=[web-ops, dev-ops] gets a 400 that NAMES dev-ops, and NOTHING is
+        written — not the foreign row, and not the allowed one either (a refused
+        request never partially commits)."""
+        client, SessionLocal, engine = self._build_app(tmp_path, ["web-ops"])
+        try:
+            resp = client.post("/api/v1/secrets", json=self._payload(["web-ops", "dev-ops"]))
+            assert resp.status_code == 400, resp.text
+            detail = resp.json()["detail"]
+            assert "dev-ops" in detail, f"refusal must name the offending group: {detail}"
+            assert "web-ops" not in detail, "the caller's own group must not be named"
+            assert self._stored_rows(SessionLocal, "ssh-target") == [], "refused write must leave no row"
+        finally:
+            engine.dispose()
+
+    def test_store_into_only_a_foreign_group_is_refused(self, tmp_path):
+        """Same door, the wholly-foreign shape: one requested name, none held."""
+        client, SessionLocal, engine = self._build_app(tmp_path, ["web-ops"])
+        try:
+            resp = client.post("/api/v1/secrets", json=self._payload(["dev-ops"]))
+            assert resp.status_code == 400, resp.text
+            assert "dev-ops" in resp.json()["detail"]
+            assert self._stored_rows(SessionLocal, "ssh-target") == []
+        finally:
+            engine.dispose()
+
+    def test_store_into_two_groups_the_caller_holds_succeeds(self, tmp_path):
+        """Positive half (AC-4): the same request from a member of BOTH groups
+        stores, with both namespace links present."""
+        client, SessionLocal, engine = self._build_app(tmp_path, ["web-ops", "dev-ops"])
+        try:
+            resp = client.post("/api/v1/secrets", json=self._payload(["web-ops", "dev-ops"]))
+            assert resp.status_code == 201, resp.text
+            assert resp.json()["replaced"] is False
+            assert self._stored_rows(SessionLocal, "ssh-target") == [("test-user", ["dev-ops", "web-ops"])]
+        finally:
+            engine.dispose()
+
+    def test_single_role_store_within_membership_still_succeeds(self, tmp_path):
+        """No-regression half (AC-4): the ordinary one-group store — the shape
+        every existing cell in this file rides — keeps working unchanged."""
+        client, SessionLocal, engine = self._build_app(tmp_path, ["web-ops"])
+        try:
+            resp = client.post("/api/v1/secrets", json=self._payload(["web-ops"]))
+            assert resp.status_code == 201, resp.text
+            assert self._stored_rows(SessionLocal, "ssh-target") == [("test-user", ["web-ops"])]
+        finally:
+            engine.dispose()
+
+    def test_metadata_patch_path_is_unchanged_by_the_door(self, tmp_path):
+        """Unchanged-behaviour half (AC-4): the PATCH/metadata route — which
+        already derived caller_roles from the DB and fed the visibility
+        primitive — still merges metadata for the owner after the door lands."""
+        client, SessionLocal, engine = self._build_app(tmp_path, ["web-ops"])
+        try:
+            store = client.post(
+                "/api/v1/secrets",
+                json=self._payload(["web-ops"], metadata={"purpose": "ssh_login"}),
+            )
+            assert store.status_code == 201, store.text
+            resp = client.patch("/api/v1/secrets/ssh-target/metadata", json={"metadata": {"username": "bot"}})
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["metadata"] == {"purpose": "ssh_login", "username": "bot"}
+            # the merge landed on the caller's own row, in its own namespace
+            assert self._stored_rows(SessionLocal, "ssh-target") == [("test-user", ["web-ops"])]
+        finally:
+            engine.dispose()
+
+
 class TestShapeMetadata:
     """shape/usage metadata convention (ticket secret-shape-metadata).
 
