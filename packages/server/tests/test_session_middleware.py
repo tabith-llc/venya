@@ -553,7 +553,7 @@ class TestExecutorSessionPathAuth:
         assert resp.json()["user"] == {
             "caller": "executor",
             "executor_id": "venya-exec-1",
-            "presented_serial": "1",
+            "presented_serial": "0000000000000001",
             "revoked": False,
         }
 
@@ -641,7 +641,7 @@ class TestExecutorSessionPathAuth:
         assert resp.json()["user"] == {
             "caller": "executor",
             "executor_id": "venya-exec-1",
-            "presented_serial": "1",
+            "presented_serial": "0000000000000001",
             "revoked": False,
         }
 
@@ -665,7 +665,7 @@ class TestExecutorSessionPathAuth:
         # audit-ingest-revoked-serial-flag-divergence: the admission verdict
         # + its input ride on auth_user for the route to share by construction.
         assert resp.json()["user"]["revoked"] is True
-        assert resp.json()["user"]["presented_serial"] == "1"
+        assert resp.json()["user"]["presented_serial"] == "0000000000000001"
 
     # --- Audit-forwarder ingest gating (ticket audit-forwarder-server-sink #307) ---
 
@@ -693,7 +693,7 @@ class TestExecutorSessionPathAuth:
         assert resp.json()["user"] == {
             "caller": "executor",
             "executor_id": "venya-exec-1",
-            "presented_serial": "1",
+            "presented_serial": "0000000000000001",
             "revoked": False,
         }
 
@@ -711,7 +711,7 @@ class TestExecutorSessionPathAuth:
         assert resp.status_code == 200
         assert resp.json()["user"]["caller"] == "executor"
         assert resp.json()["user"]["revoked"] is True
-        assert resp.json()["user"]["presented_serial"] == "1"
+        assert resp.json()["user"]["presented_serial"] == "0000000000000001"
 
 
 class TestBareHealthAlias:

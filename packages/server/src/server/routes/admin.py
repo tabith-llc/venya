@@ -13,6 +13,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
+from core.utils.cert_serial import canonical_serial, serial_match_clause
 from core.utils.entropy import get_secure_token
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Request, status
 from pydantic import BaseModel, Field
@@ -1327,17 +1328,27 @@ def _revoke_record_serial(db: Session, executor_id: str, serial_number: str, rev
     one serial-revocation implementation so the two paths cannot drift).
     Adds to `db` without committing (rides the caller's transaction).
 
+    The row is written in the ONE canonical serial form, and "already exists"
+    is decided case/padding-insensitively (ticket
+    cert-serial-canonicalization-mismatch #481) so a legacy spelling of the same
+    serial is recognized instead of inserting a second row the lookups ignore.
+
     Returns True when a new revocation row was added, False when one was
     already present (idempotent).
     """
     from core.iam.models import ExecutorCertRevocation
 
-    existing = db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == serial_number).first()
+    serial = canonical_serial(serial_number)
+    existing = (
+        db.query(ExecutorCertRevocation)
+        .filter(serial_match_clause(ExecutorCertRevocation.serial_number, serial))
+        .first()
+    )
     if existing is not None:
         return False
     db.add(
         ExecutorCertRevocation(
-            serial_number=serial_number,
+            serial_number=serial,
             executor_id=executor_id,
             revoked_at=revoked_at,
             reason=reason,
@@ -1387,8 +1398,15 @@ async def admin_revoke_executor(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="serial must be hex, 1-16 chars",
             )
-        serial_arg = serial_arg.casefold()
-        existing = db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == serial_arg).first()
+        # ONE canonical serial form (ticket cert-serial-canonicalization-mismatch
+        # #481); the duplicate check below reads case/padding-insensitively, so a
+        # legacy spelling of the same serial is an idempotent no-op, not a second row.
+        serial_arg = canonical_serial(serial_arg)
+        existing = (
+            db.query(ExecutorCertRevocation)
+            .filter(serial_match_clause(ExecutorCertRevocation.serial_number, serial_arg))
+            .first()
+        )
         if existing is not None:
             # Q3 (#301): the ATTEMPT is the record — the duplicate still
             # emits, with the no-op visible in fields.
@@ -1970,26 +1988,33 @@ async def admin_revoke_admin_cert(
 
     Admin only. Idempotent — revoking the same serial twice returns success.
     """
-    # Normalize at the STORAGE BOUNDARY (user ruling 2026-09-20, ticket
-    # sec-admin-mtls-allowlist-revocation): nginx $ssl_client_serial is
-    # UPPERCASE; storing the serial as-provided forced every reader to
-    # compensate case-insensitively forever. Legacy mixed-case rows stay
-    # matched via the middleware's func.upper() read.
-    serial = req.serial.strip().upper()
+    # Validate the OPERATOR STRING first — the 400 contract is unchanged: non-empty
+    # hex, up to 16 digits. Then normalize at the STORAGE BOUNDARY in the ONE
+    # canonical serial form (ticket cert-serial-canonicalization-mismatch #481,
+    # superseding the 2026-09-20 uppercase ruling B — whose stated reason was that
+    # nginx $ssl_client_serial is uppercase, and the middleware has since moved to
+    # the crypto-forwarded certificate, so it never compares a header value again).
+    # Legacy uppercase/unpadded rows keep matching: every reader compares the
+    # case/padding-insensitive match key.
+    provided = req.serial.strip()
     try:
-        int(serial, 16)
-        if len(serial) > 16:
-            raise ValueError("too long")
+        int(provided, 16)
+        if not provided or len(provided) > 16:
+            raise ValueError("bad length")
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid serial format — must be hex string (up to 16 chars)",
         )
+    serial = canonical_serial(provided)
 
-    # Check if already revoked (idempotent)
+    # Check if already revoked (idempotent) — same insensitive match as the
+    # enforcement lookup, so the answer cannot disagree with what refuses.
     from core.iam.models import AdminCertRevocation
 
-    existing = db.query(AdminCertRevocation).filter(AdminCertRevocation.serial_number == serial).first()
+    existing = (
+        db.query(AdminCertRevocation).filter(serial_match_clause(AdminCertRevocation.serial_number, serial)).first()
+    )
 
     if existing:
         # Q3 (#301): duplicate attempt still recorded, no-op visible.

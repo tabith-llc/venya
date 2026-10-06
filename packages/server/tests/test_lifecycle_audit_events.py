@@ -1352,7 +1352,13 @@ class TestRevocationLifecycle:
         assert resp.status_code == 200
         rows = _by_type(_lifecycle_events(db), "executor_cert_revoked")
         assert len(rows) == 1
-        assert _f(rows[0]) == {"executor_id": "exec-1", "serial_number": "ab12", "already_revoked": False}
+        # Serial rides the ONE canonical form (#481): padded lowercase, whatever
+        # padding/case the operator typed.
+        assert _f(rows[0]) == {
+            "executor_id": "exec-1",
+            "serial_number": "000000000000ab12",
+            "already_revoked": False,
+        }
 
     def test_executor_serial_duplicate_emits_noop_row(self):
         from core.iam.models import ExecutorCertRevocation
@@ -1364,7 +1370,11 @@ class TestRevocationLifecycle:
         assert resp.json()["revoked"] is False
         rows = _by_type(_lifecycle_events(db), "executor_cert_revoked")
         assert len(rows) == 1
-        assert _f(rows[0]) == {"executor_id": "exec-1", "serial_number": "ab12", "already_revoked": True}
+        assert _f(rows[0]) == {
+            "executor_id": "exec-1",
+            "serial_number": "000000000000ab12",
+            "already_revoked": True,
+        }
         db.commit.assert_called_once()  # no-op row still gets its commit
 
     def test_admin_cert_revoke_row_and_duplicate(self):
@@ -1377,7 +1387,11 @@ class TestRevocationLifecycle:
         assert resp.status_code == 200
         rows = _by_type(_lifecycle_events(db), "admin_cert_revoked")
         assert len(rows) == 1
-        assert _f(rows[0]) == {"serial_number": "AB12", "reason": "compromised", "already_revoked": False}
+        assert _f(rows[0]) == {
+            "serial_number": "000000000000ab12",
+            "reason": "compromised",
+            "already_revoked": False,
+        }
 
         db2 = _keyed_db(MagicMock(), {AdminCertRevocation: existing})
         client2 = TestClient(_admin_app(db2), raise_server_exceptions=False)
@@ -1386,7 +1400,11 @@ class TestRevocationLifecycle:
         assert resp2.json()["already_revoked"] is True
         rows2 = _by_type(_lifecycle_events(db2), "admin_cert_revoked")
         assert len(rows2) == 1
-        assert _f(rows2[0]) == {"serial_number": "AB12", "reason": "leaked", "already_revoked": True}
+        assert _f(rows2[0]) == {
+            "serial_number": "000000000000ab12",
+            "reason": "leaked",
+            "already_revoked": True,
+        }
 
     def test_revocation_negatives_write_no_rows(self):  # Q7
         from core.iam.models import Executor, ExecutorCert, ExecutorCertRevocation

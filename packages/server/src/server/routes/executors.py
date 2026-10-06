@@ -25,6 +25,7 @@ from uuid import uuid4
 
 import httpx2
 from core.iam.models import AuditEvent, CommandPolicy, Executor, ExecutorCert, ExecutorEnrollmentToken, User
+from core.utils.cert_serial import canonical_serial, serial_match_clause, serial_match_key, serials_equal
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -570,7 +571,7 @@ def _verified_incumbent_serial(request: Request, executor_id: str) -> str | None
             return None
     except ValueError:
         return None
-    return format(cert.serial_number, "016x")
+    return canonical_serial(cert.serial_number)
 
 
 def _incumbent_exemption_applies(db: Session, executor_id: str, presented_serial: str) -> bool:
@@ -578,11 +579,15 @@ def _incumbent_exemption_applies(db: Session, executor_id: str, presented_serial
     presented == current record serial. executor_revocation_state is the ONE
     revocation source (revocation.py contract names this consumer); a second
     implementation here would be a rotation/revocation split-brain.
+
+    The record-serial equality is case/padding-insensitive (ticket
+    cert-serial-canonicalization-mismatch #481) so a legacy record row spelled
+    without padding is still recognized as the same credential.
     """
     if executor_revocation_state(db, executor_id, presented_serial=presented_serial).revoked:
         return False
     cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
-    return cert is not None and (cert.serial_number or "").casefold() == presented_serial
+    return cert is not None and serials_equal(cert.serial_number, presented_serial)
 
 
 @router.post(
@@ -847,15 +852,23 @@ async def register_executor(
         # replaced predecessor serial is CRLed IN THE SAME TRANSACTION — normal
         # operation must not mint off-record chain-valid orphans, and a diverged
         # daemon still running the predecessor dies within one poll (fail-closed).
-        old_serial = (existing_cert.serial_number or "").casefold()
-        if old_serial and old_serial != serial_hex.casefold():
+        # Replaced-vs-new is decided on the case/padding-insensitive match key
+        # (ticket cert-serial-canonicalization-mismatch #481), so a legacy
+        # unpadded record row is not mistaken for a different credential and
+        # auto-revoked out from under the executor.
+        old_key = serial_match_key(existing_cert.serial_number) if existing_cert.serial_number else None
+        if old_key and old_key != serial_match_key(serial_hex):
             from core.iam.models import ExecutorCertRevocation
 
-            prior = db.query(ExecutorCertRevocation).filter(ExecutorCertRevocation.serial_number == old_serial).first()
+            prior = (
+                db.query(ExecutorCertRevocation)
+                .filter(serial_match_clause(ExecutorCertRevocation.serial_number, existing_cert.serial_number))
+                .first()
+            )
             if prior is None:
                 db.add(
                     ExecutorCertRevocation(
-                        serial_number=old_serial,
+                        serial_number=canonical_serial(existing_cert.serial_number),
                         executor_id=resolved_executor_id,
                         revoked_at=datetime.now(UTC),
                         reason="Replaced by re-registration/rotation",
@@ -1289,8 +1302,9 @@ async def create_execution_session(
     # cross-role key-name enumeration). No admin bypass.
     from core.engine.core import CoreAccessError
     from core.engine.rate_limiter import RateLimitExceededError
-    from server.rate_limit import lockout_http_exception
     from core.iam.role_manager import RoleManager
+
+    from server.rate_limit import lockout_http_exception
 
     rm = RoleManager(db)
     caller_roles = [m.role.name for m in rm.get_user_roles(auth_user["user_id"])]
@@ -1574,9 +1588,7 @@ async def execute_command_on_executor(
                 # ledger here — the only convergence point for both executor
                 # gates (the spool copy only reaches core if the forwarder is
                 # configured; see _record_rejection_audit).
-                _record_rejection_audit(
-                    request, session.id, id, display_command, auth_user["user_id"], relay_detail
-                )
+                _record_rejection_audit(request, session.id, id, display_command, auth_user["user_id"], relay_detail)
         raise HTTPException(status_code=e.response.status_code, detail=detail)
 
     # Validate executor response shape before any field access

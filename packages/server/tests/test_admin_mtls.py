@@ -1152,10 +1152,12 @@ class TestRevokeAdminCertEndpoint:
     """Tests for POST /api/v1/admin/certs/revoke."""
 
     def test_revoke_admin_cert_endpoint(self):
-        """Valid revocation request should return 200, serial normalized to
-        UPPERCASE at the storage boundary (user ruling B, ticket
-        sec-admin-mtls-allowlist-revocation — nginx $ssl_client_serial is
-        uppercase; mixed-case input is the legacy trap)."""
+        """Valid revocation request should return 200, serial normalized to the
+        ONE canonical form (ticket cert-serial-canonicalization-mismatch #481,
+        superseding the 2026-09-20 uppercase ruling B — the middleware reads the
+        crypto-forwarded certificate now, never nginx's uppercase
+        $ssl_client_serial). Legacy mixed-case/unpadded rows keep matching via
+        the case- and padding-insensitive lookup."""
         serial_input = "ab12ab12ab12ab12"
 
         app, _backend, revocations = _create_revoke_test_app()
@@ -1167,11 +1169,11 @@ class TestRevokeAdminCertEndpoint:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["serial"] == "AB12AB12AB12AB12"
+        assert data["serial"] == "ab12ab12ab12ab12"
         assert data["revoked"] is True
         assert data["reason"] == "test revocation"
         assert len(revocations) == 1
-        assert revocations[0].serial_number == "AB12AB12AB12AB12"
+        assert revocations[0].serial_number == "ab12ab12ab12ab12"
 
     def test_revoke_admin_cert_already_revoked(self):
         """Revoking the same serial twice should return 200 (idempotent)."""
@@ -1245,6 +1247,50 @@ class TestRevokeAdminCertEndpoint:
             json={"serial": "ab12ab12ab12ab12", "reason": "r" * 65},
         )
         assert resp.status_code == 422
+        assert revocations == []
+
+    def test_revoke_pads_a_leading_zero_serial(self):
+        """#481: an operator pasting the UNPADDED spelling gets a row in the ONE
+        canonical form, so the middleware's lookup finds it (this is the row
+        shape that used to be written and then never matched)."""
+        app, _backend, revocations = _create_revoke_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post(
+            "/api/v1/admin/certs/revoke",
+            json={"serial": "a1b2c3d4e5f6071", "reason": "padded-write"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["serial"] == "0a1b2c3d4e5f6071"
+        assert len(revocations) == 1
+        assert revocations[0].serial_number == "0a1b2c3d4e5f6071"
+
+    def test_revoke_idempotent_across_spellings(self):
+        """#481: padded then unpadded for the SAME serial is one record and the
+        second call says already_revoked — the duplicate check uses the same
+        insensitive match as the enforcement lookup, so the two cannot disagree.
+        (This tracker's mock returns the stored row whatever the clause, so the
+        clause itself is proven on real SQLite in
+        TestAdminMtlsLeadingZeroSerial and the core helper cells.)"""
+        app, _backend, revocations = _create_revoke_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        first = client.post("/api/v1/admin/certs/revoke", json={"serial": "0A1B2C3D4E5F6071"})
+        assert first.status_code == 200 and first.json()["revoked"] is True
+        second = client.post("/api/v1/admin/certs/revoke", json={"serial": "a1b2c3d4e5f6071"})
+        assert second.status_code == 200
+        assert second.json()["already_revoked"] is True
+        assert len(revocations) == 1
+
+    def test_revoke_empty_serial_400(self):
+        """#481 negative half: the 400 validation contract is unchanged — an
+        empty serial still dies at the boundary instead of storing serial 0."""
+        app, _backend, revocations = _create_revoke_test_app()
+
+        client = TestClient(app, raise_server_exceptions=False)
+        for bad in ("", "   ", "zzzz", "0123456789abcdef0"):
+            resp = client.post("/api/v1/admin/certs/revoke", json={"serial": bad})
+            assert resp.status_code == 400, bad
         assert revocations == []
 
 
@@ -1448,7 +1494,8 @@ class TestAdminMtlsSerialRevocation:
 
     def test_legacy_lowercase_row_matches_cert_serial(self, admin_ca_dir, admin_ca_security, tmp_path):
         """#16 format-trap pin (ruling B): a legacy as-provided (lowercase)
-        row still matches the cert-serial presentation via func.upper()."""
+        row still matches the cert-serial presentation via the case- and
+        padding-insensitive match key (#481)."""
         prefix = make_cert_prefix(tmp_path)
         cert = self._leaf(admin_ca_dir, admin_ca_security, serial_hex=FOREIGN_SERIAL_HEX)
         app = _create_admin_mtls_app(
@@ -1493,3 +1540,135 @@ class TestAdminMtlsSerialRevocation:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
         assert resp.status_code == 403
+
+
+class TestAdminMtlsLeadingZeroSerial:
+    """Truth table for ticket cert-serial-canonicalization-mismatch (#481).
+
+    A 64-bit random serial has a zero leading nibble in 1/16 of cases, and the
+    serial was WRITTEN zero-padded while the middleware PRESENTED it unpadded —
+    exact string equality then missed, so a revoked admin certificate kept
+    passing admin mTLS while the revoke call reported success. These cells drive
+    a real leading-zero serial through the middleware over REAL SQLite (the
+    match key is a SQL expression; mocks cannot evaluate it).
+
+    Serial under test: 0x0a1b2c3d4e5f6071
+      canonical/padded   "0a1b2c3d4e5f6071"  (16 chars)
+      legacy unpadded    "a1b2c3d4e5f6071"   (15 chars)
+    """
+
+    PADDED = "0a1b2c3d4e5f6071"
+    UNPADDED = "a1b2c3d4e5f6071"
+    MIXED_CASE = "0A1b2C3d4E5f6071"
+    # A DIFFERENT leading-zero serial, for the admitted-half pins.
+    OTHER_PADDED = "0999999999999999"
+
+    def _leaf(self, admin_ca_dir, admin_ca_security, serial_hex=PADDED):
+        return _admin_leaf(admin_ca_dir, admin_ca_security, serial=int(serial_hex, 16))
+
+    def test_padded_row_revokes_leading_zero_serial(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """(a) the defect itself: row stored PADDED refuses the certificate."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            revocation_rows=[(self.PADDED, "compromised")],
+            cert_prefix=prefix,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Admin certificate revoked"
+
+    def test_unpadded_legacy_row_revokes_leading_zero_serial(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """(c) a legacy UNPADDED row (the old middleware spelling) still matches."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            revocation_rows=[(self.UNPADDED, "legacy-unpadded")],
+            cert_prefix=prefix,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Admin certificate revoked"
+
+    def test_mixed_case_row_revokes_leading_zero_serial(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """(d) a MIXED-CASE row (as-provided, pre-storage-boundary) still matches."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            revocation_rows=[(self.MIXED_CASE, "legacy-mixed-case")],
+            cert_prefix=prefix,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Admin certificate revoked"
+
+    def test_upper_padded_row_revokes_leading_zero_serial(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """(d') the uppercase half: legacy rows stored by the old
+        uppercase-at-storage-boundary convention still refuse the certificate."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            revocation_rows=[(self.PADDED.upper(), "legacy-uppercase")],
+            cert_prefix=prefix,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Admin certificate revoked"
+
+    def test_leading_zero_serial_not_revoked_is_admitted(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """(b) the admitted half — a gate that only rejects proves nothing: the
+        SAME leading-zero certificate with no row on file still passes (200)."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(admin_ca_dir, cert_prefix=prefix)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
+        assert resp.status_code == 200
+        assert resp.json()["user"]["caller"] == "admin"
+
+    def test_other_leading_zero_row_does_not_revoke_this_serial(self, admin_ca_dir, admin_ca_security, tmp_path):
+        """(b') second admitted half: a row for a DIFFERENT leading-zero serial
+        must not refuse this certificate (the match key is not a prefix match)."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
+        app = _create_admin_mtls_app(
+            admin_ca_dir,
+            revocation_rows=[(self.OTHER_PADDED, "other-certificate")],
+            cert_prefix=prefix,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/test", headers=forwarded_headers(prefix, cert))
+        assert resp.status_code == 200
+        assert resp.json()["user"]["caller"] == "admin"
+
+    def test_no_match_log_distinguishes_empty_table_from_miss(self, admin_ca_dir, admin_ca_security, tmp_path, caplog):
+        """#481 acceptance 5: the enforcement point logs WHICH no-match it got —
+        silent misses are what made a failed revocation look like a success."""
+        prefix = make_cert_prefix(tmp_path)
+        cert = self._leaf(admin_ca_dir, admin_ca_security)
+
+        with caplog.at_level("INFO", logger="venya.server"):
+            app = _create_admin_mtls_app(admin_ca_dir, cert_prefix=prefix)
+            TestClient(app, raise_server_exceptions=False).get(
+                "/api/v1/admin/test", headers=forwarded_headers(prefix, cert)
+            )
+        assert any("no revocation rows exist" in r.getMessage() for r in caplog.records)
+
+        with caplog.at_level("INFO", logger="venya.server"):
+            app = _create_admin_mtls_app(
+                admin_ca_dir,
+                revocation_rows=[(self.OTHER_PADDED, "other-certificate")],
+                cert_prefix=prefix,
+            )
+            TestClient(app, raise_server_exceptions=False).get(
+                "/api/v1/admin/test", headers=forwarded_headers(prefix, cert)
+            )
+        assert any("no revocation row matched the rows on file" in r.getMessage() for r in caplog.records)
