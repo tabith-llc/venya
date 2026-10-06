@@ -222,9 +222,12 @@ class Core:
             key_version_id: Key version to use for encryption.
             meta: Structured metadata for discovery (executor, purpose, etc.).
             caller_roles: The caller's ACTUAL role names (fresh from the DB —
-                NOT user_info["roles"], which carries role IDs). Used solely
-                to resolve an existing row for replacement; omit for
-                creator-only upsert semantics.
+                NOT user_info["roles"], which carries role IDs). Two jobs:
+                resolve an existing row for replacement, AND authorize the
+                requested scope — every name in role_names must be one the
+                caller holds (ticket secret-write-namespace-scoping #451, the
+                write-side mirror of _resolve_secret_in). Omit only where no
+                human caller identity exists (see the note in the body).
 
         Upsert semantics (ticket cli-store-force-field-ignored option-2
         ruling): if the key resolves for this caller under the SAME
@@ -249,6 +252,28 @@ class Core:
 
         if not role_names:
             raise CoreAccessError("Secret must be scoped to at least one role")
+
+        # Write-side namespace authorization (ticket secret-write-namespace-scoping
+        # #451). Reads have one door — _resolve_secret_in — and it is sound; the
+        # write side had none, so holding the read-write tier in ANY group let a
+        # caller store a secret into a namespace they do not belong to
+        # (require_role("read-write") is a global tier test: it never asks WHICH
+        # group). A caller may scope a secret only into groups they actually hold.
+        # Refusal is loud — every offending name is reported and the request is
+        # never silently narrowed to the caller's own subset — and it lands here,
+        # before any encryption or session work, so a refused write cannot leave a
+        # row, a link, or a partial commit behind. Runs ahead of the
+        # "Role not found" existence check on purpose: an out-of-caller name is
+        # refused whether or not it exists, so the answer leaks no group inventory.
+        # caller_roles=None means "no human caller identity was supplied" — the
+        # trusted/internal plane. The only production caller of put() is
+        # server/routes/secrets.py::secrets_create, which always derives the real
+        # roles from the DB (refs 451).
+        if caller_roles is not None:
+            held = set(caller_roles)
+            offending = [name for name in dict.fromkeys(role_names) if name not in held]
+            if offending:
+                raise CoreAccessError("Role not held by caller: " + ", ".join(offending))
 
         if self.kek is None:
             raise CoreError("KEK not configured")
