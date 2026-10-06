@@ -6,6 +6,7 @@
 
 """Tests for Executor.revoke_tokens(), _send_to_stage2(), and create_executor()."""
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -438,6 +439,83 @@ class TestRunCommandStage2:
         # Should use Stage 1 results directly
         assert result.stdout == stage1_stdout
         assert result.masked_secret_ids == ["a1a1a1a1"]
+
+
+class TestFdScanIndeterminate:
+    """#453: an unreadable /proc (scan_open_fds -> None) must be distinguishable
+    from a clean scan. The caller must not report clean when it could not look.
+
+    Constructed with a mock injection_strategy (not the sbx-requiring `executor`
+    fixture) so the call-site logic actually executes on hosts without the sbx CLI."""
+
+    def _executor(self) -> Executor:
+        from executor.strategies.sbx_strategy import SbxStrategy
+
+        strategy = MagicMock(spec=SbxStrategy)
+        ex = Executor(
+            command_validator=MagicMock(),
+            session_id="s-fd453",
+            injection_strategy=strategy,
+        )
+        ex.http_client = None
+        ex._injection_result = None
+        return ex
+
+    def _mock_process(self) -> MagicMock:
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stderr = MagicMock()
+        proc.stdin.fileno.return_value = 3
+        proc.stdout.fileno.return_value = 4
+        proc.stderr.fileno.return_value = 5
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            stream.__enter__ = MagicMock(return_value=stream)
+            stream.__exit__ = MagicMock(return_value=False)
+        return proc
+
+    def _run(self, scan_return):
+        """Drive _run_command_direct with scan_open_fds pinned to scan_return;
+        return (set_cloexec mock, verify_fd_whitelist mock) for assertions."""
+        ex = self._executor()
+        with patch("executor.executor.subprocess.Popen", return_value=self._mock_process()):
+            with patch("executor.executor.filter_and_redact", return_value=(b"", b"", [], [])):
+                with patch("executor.executor.scan_open_fds", return_value=scan_return):
+                    with patch("executor.executor.set_cloexec") as cloexec_mock:
+                        with patch("executor.executor.verify_fd_whitelist", return_value=[]) as verify_mock:
+                            ex._run_command_direct(["echo", "test"], [], None, None)
+        return cloexec_mock, verify_mock
+
+    def test_none_scan_skips_cloexec_loop(self):
+        """(d) scan -> None: the set_cloexec loop runs zero times (nothing to
+        mark), not a silent empty-skip that pretends it looked."""
+        cloexec_mock, _verify = self._run(None)
+        cloexec_mock.assert_not_called()
+
+    def test_none_scan_whitelist_skipped_not_clean(self, caplog):
+        """(c) scan -> None: the whitelist check is SKIPPED (verify not run)
+        and an indeterminate warning is logged — nothing claims a clean result."""
+        caplog.set_level(logging.WARNING, logger="venya.executor")
+        _cloexec, verify_mock = self._run(None)
+        verify_mock.assert_not_called()
+        assert "SKIPPED" in caplog.text
+
+    def test_real_set_still_marks_unexpected_fd(self):
+        """(d) paired negative: a real set containing an unexpected fd still
+        marks it (the unchanged half of the behavior stays pinned). allowed is
+        {0,1,2} | {3,4,5}; fd 99 is unexpected -> set_cloexec(99) exactly once."""
+        cloexec_mock, verify_mock = self._run({0, 1, 2, 3, 4, 5, 99})
+        cloexec_mock.assert_called_once_with(99)
+        verify_mock.assert_called_once()
+
+    def test_real_empty_set_behaves_as_before(self, caplog):
+        """(c) paired negative: a real (empty) set still runs the whitelist
+        check and logs no indeterminate/SKIPPED warning — exactly as before."""
+        caplog.set_level(logging.WARNING, logger="venya.executor")
+        cloexec_mock, verify_mock = self._run(set())
+        verify_mock.assert_called_once()
+        cloexec_mock.assert_not_called()
+        assert "SKIPPED" not in caplog.text
 
 
 class TestEnvCwdThreadThrough:

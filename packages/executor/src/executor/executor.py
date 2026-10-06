@@ -570,15 +570,26 @@ class Executor:
         }
         proc_fds.discard(-1)
         allowed = {0, 1, 2} | proc_fds
-        for fd_num in scan_open_fds():
-            if fd_num not in allowed:
-                set_cloexec(fd_num)
+        scanned_fds = scan_open_fds()
+        if scanned_fds is None:
+            logger.warning(
+                "FD scan unavailable (unreadable /proc); set_cloexec pass skipped",
+            )
+        else:
+            for fd_num in scanned_fds:
+                if fd_num not in allowed:
+                    set_cloexec(fd_num)
 
         # Verify FD whitelist
         open_fds = scan_open_fds()
-        unexpected = verify_fd_whitelist(open_fds, self.allowed_fds)
-        if unexpected:
-            logger.warning("Unexpected open FDs before exec: %s", unexpected)
+        if open_fds is None:
+            logger.warning(
+                "FD whitelist verification SKIPPED (indeterminate: unreadable /proc); " "cannot confirm clean",
+            )
+        else:
+            unexpected = verify_fd_whitelist(open_fds, self.allowed_fds)
+            if unexpected:
+                logger.warning("Unexpected open FDs before exec: %s", unexpected)
 
         # Capture output with size limit
         stdout, stderr, stdout_total, stderr_total = self._capture_output(process)

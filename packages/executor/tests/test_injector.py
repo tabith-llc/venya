@@ -15,6 +15,7 @@ import stat
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from executor import injector
 from executor.injector import (
@@ -787,9 +788,30 @@ class TestScanOpenFds:
         assert all(isinstance(fd, int) for fd in fds)
 
     def test_nonexistent_pid(self):
-        """Non-existent PID returns empty set."""
+        """Unreadable /proc/<pid>/fd returns None (not an empty set).
+
+        Contract change (#453): "could not look" is now distinguished from
+        "looked and found nothing". A missing/unreadable fd dir yields None.
+        """
         fds = scan_open_fds(pid=999999)
-        assert fds == set()
+        assert fds is None
+
+    def test_unreadable_fd_dir_permission_error_returns_none(self):
+        """(a) os.listdir raising PermissionError -> None, not an empty set."""
+        with patch.object(injector.os, "listdir", side_effect=PermissionError):
+            assert scan_open_fds() is None
+
+    def test_unreadable_fd_dir_file_not_found_returns_none(self):
+        """(a) os.listdir raising FileNotFoundError -> None, not an empty set."""
+        with patch.object(injector.os, "listdir", side_effect=FileNotFoundError):
+            assert scan_open_fds() is None
+
+    def test_normal_scan_returns_real_set(self):
+        """(b) Paired negative: a normal self-scan returns the same set as
+        today (contains 0/1/2), i.e. not None and not collapsed to empty."""
+        fds = scan_open_fds()
+        assert fds is not None
+        assert {0, 1, 2} <= set(fds)
 
     def test_specific_pid(self, tmp_path: Path):
         """Can scan a specific PID."""
