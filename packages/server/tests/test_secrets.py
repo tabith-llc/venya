@@ -6,6 +6,7 @@
 
 """Tests for secrets CRUD endpoints."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -765,7 +766,12 @@ class TestRevokeSessionSecrets:
 
     def test_revoke_executor_success(self):
         """POST /sessions/{id}/secrets/revoke works for executor and reports the
-        rows actually removed (#411: count is the DELETE rowcount, not len(ids))."""
+        rows actually removed (#411: count is the DELETE rowcount, not len(ids)).
+
+        The session row is part of the shape now (#440 gate 2): the endpoint reads
+        execution_sessions to confirm the session is bound to the calling executor
+        before it deletes, so the stub hands back a session owned by "exec1" — the
+        same identity the auth middleware attaches."""
         core = _make_mock_core()
         backend = MagicMock()
         session = MagicMock()
@@ -774,6 +780,10 @@ class TestRevokeSessionSecrets:
         # _create_test_app — it replaces get_session.return_value unconditionally.
         app = _create_test_app(core=core, backend=backend)
         session.query.return_value.filter.return_value.delete.return_value = 2
+        session.query.return_value.filter.return_value.first.return_value = SimpleNamespace(
+            id="sess-123",
+            executor_id="exec1",
+        )
         backend.get_session.return_value = session
 
         # Mock AuditEvent import (import is local to the endpoint function)

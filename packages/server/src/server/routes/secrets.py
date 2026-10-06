@@ -13,12 +13,12 @@ import re
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
+from core.engine.rate_limiter import RateLimitExceededError
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi import Path as ApiPath
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from core.engine.rate_limiter import RateLimitExceededError
 from server.dependencies import get_db, require_role
 from server.rate_limit import lockout_http_exception
 
@@ -763,7 +763,19 @@ async def update_secret_metadata(
         except RateLimitExceededError as e:
             raise lockout_http_exception(e)
 
-        secret = db.query(Secret).filter(Secret.key == key).first()
+        # Caller-scoping on the WRITER as well (secret-session-authorization-scoping
+        # #440, gate 1): `key` alone is not an owner-unique name —
+        # uq_secrets_key_created_by lets two users hold the SAME key in different
+        # rows — so a bare key lookup here can resolve a DIFFERENT owner's row than
+        # the visibility check above just validated, and the merge below would
+        # overwrite that row's metadata. Pin the write to the caller's own row: a
+        # key the caller does not own stays 404-indistinguishable from a
+        # nonexistent one, the same no-existence-leak convention the visibility
+        # check uses. This is a tightening: a role-scoped non-creator can still
+        # READ a secret in its scope, but metadata edits stay with the owner, which
+        # is what the delete path in this file already does (core.delete is
+        # ownership-gated).
+        secret = db.query(Secret).filter(Secret.key == key, Secret.created_by == user_info["user_id"]).first()
         if secret is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Secret not found")
 
@@ -816,7 +828,9 @@ async def revoke_session_secrets(
     The maintenance TTL purge stays as the backstop: a second revoke, or a
     revoke after the purge already ran, deletes zero rows and answers honestly
     (``count=0``). Rows of OTHER sessions are untouched — the predicate is
-    scoped to this ``session_id`` AND the requested secret ids.
+    scoped to this ``session_id`` AND the requested secret ids, and the session
+    itself must be bound to the calling executor (#440: a revoke for another
+    executor's session is a 403, not a delete).
 
     Called automatically by the executor after command execution completes.
     Uses mTLS auth (executor identity), not bearer token auth.
@@ -829,7 +843,7 @@ async def revoke_session_secrets(
     Returns:
         Confirmation of revocation with the count of rows actually removed.
     """
-    from core.iam.models import AuditEvent, SessionSecret
+    from core.iam.models import AuditEvent, ExecutionSession, SessionSecret
 
     # Verify caller is executor (mTLS)
     caller = getattr(request.state, "auth_user", {})
@@ -837,6 +851,33 @@ async def revoke_session_secrets(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Executor mTLS authentication required",
+        )
+
+    # Caller-BINDING check before the DELETE (secret-session-authorization-scoping
+    # #440, gate 2): the caller CLASS check above says "an executor" — it does not
+    # say WHICH executor. execution_sessions.executor_id names the executor the
+    # session was routed to, so a revoke for someone else's session was accepted
+    # and its bound secrets deleted. Mismatch -> 403, no rows touched, no audit
+    # rows written for a request that was never authorized to make them.
+    #
+    # A MISSING session row is not a mismatch: the TTL purge deletes the parent row
+    # and its bindings together (maintenance.cleanup_expired_execution_sessions),
+    # and execution_session_secrets.session_id carries a FK to that parent, so a
+    # row with no parent has nothing left to revoke. That case keeps the honest
+    # 200 / count=0 answer pinned by the #411 idempotency + post-purge cells (the
+    # daemon's orphan-dir reaper calls this endpoint for vanished sessions too).
+    exec_session = db.query(ExecutionSession).filter(ExecutionSession.id == session_id).first()
+    caller_executor_id = caller.get("executor_id")
+    if exec_session is not None and exec_session.executor_id != caller_executor_id:
+        logger.warning(
+            "Revoke called by executor %s for session %s bound to executor %s — refusing",
+            caller_executor_id,
+            session_id,
+            exec_session.executor_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session belongs to another executor",
         )
 
     # Normalize ids for the DB predicate: SessionSecret.secret_id is Integer,
