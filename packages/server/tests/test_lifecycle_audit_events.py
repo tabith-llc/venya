@@ -677,6 +677,13 @@ class TestUserLifecycle:
             def filter(self, *a, **k):
                 return self
 
+            def with_for_update(self, **k):
+                # #487: the lockout guard now reads the roster under a row
+                # lock; this stub answers the extra chain hop with the SAME
+                # empty-roster posture its all() already gives — every
+                # original assertion below is kept.
+                return self
+
             def first(self):
                 return user
 

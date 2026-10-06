@@ -4,6 +4,9 @@
 # Change Date listed there, the work will be available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
+import os
+import threading
+
 """Truth-table tests for the admin-lockout guard (RoleManager) — #443 removals,
 #486 deactivations.
 
@@ -32,7 +35,8 @@ everything is not a pass.
 import pytest
 from core.iam.models import Base, Role, RoleMember, User
 from core.iam.role_manager import AdminLockoutError, RoleManager
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -448,3 +452,244 @@ class TestStatusChangeKeepsAdmin:
 
 def _user_status(session, user_id):
     return session.query(User).filter(User.user_id == user_id).one().status
+
+
+# ---------------------------------------------------------------------------
+# #487 — the roster COUNT must be taken under a row lock (option (i): atomic)
+# ---------------------------------------------------------------------------
+
+
+def _role_member_reads_locked(session, run):
+    """Run ``run()`` and record, for every ORM SELECT issued against
+    ``role_members``, whether the statement REQUESTS a row lock.
+
+    The lock check renders the captured statement through the PRODUCTION
+    dialect (PostgreSQL), because SQLite — the test-harness backend —
+    silently drops ``FOR UPDATE`` (verified: the locked read executes and
+    the clause is omitted). A ``True`` entry therefore means "this read asks
+    PostgreSQL to lock the roster rows it returns", which is the idiom
+    :func:`credentials.py`' last-active-credential guard and
+    ``EnrollmentToken`` minting already use (``with_for_update()``).
+
+    What this DOES prove: the guard's roster read requests the lock, in
+    statement order. What this does NOT prove: the wait/serialization
+    semantics of that lock — no PostgreSQL runs on this venue; that half is
+    the gated ``TestConcurrentRemovalsPostgresql`` cell below, which skipped
+    here and must be run against a scratch PostgreSQL before anyone claims
+    the race is physically closed.
+    """
+    outcomes = []
+
+    def hook(state):
+        if not state.is_select:
+            return
+        statement = state.statement
+        if "role_members" not in str(statement):
+            return
+        pg_text = " ".join(str(statement.compile(dialect=postgresql.dialect())).split()).upper()
+        outcomes.append("FOR UPDATE" in pg_text)
+
+    event.listen(session, "do_orm_execute", hook)
+    try:
+        run()
+    finally:
+        event.remove(session, "do_orm_execute", hook)
+    return outcomes
+
+
+class TestGuardLocksTheRosterRead487:
+    """AC1/AC2 (atomic option): both enforcement points — the removal guard
+    (#443) and the status guard (#486) — count the admin roster under
+    ``FOR UPDATE``, so two concurrent removals of the last two admins cannot
+    both read a roster of two. Same posture on both surfaces, AC2."""
+
+    def test_removal_guard_roster_read_is_locked(self, session):
+        """RED at HEAD: the guard counts the roster with no lock."""
+        _join(session, "admin1", "admin")
+        _join(session, OTHER_ADMIN, "admin")
+
+        outcomes = _role_member_reads_locked(
+            session,
+            lambda: RoleManager(session).assert_removal_keeps_admin(
+                OTHER_ADMIN, role_id=_admin_id(session), caller_user_id="admin1"
+            ),
+        )
+
+        assert outcomes, "the guard must read the roster at all"
+        assert outcomes[0] is True, f"first roster read must FOR UPDATE, saw {outcomes}"
+
+    def test_status_guard_roster_read_is_locked(self, session):
+        """The #486 half answers with the SAME posture (AC2: the surfaces
+        must not diverge)."""
+        _join(session, "admin1", "admin")
+        _join(session, OTHER_ADMIN, "admin")
+
+        outcomes = _role_member_reads_locked(
+            session,
+            lambda: RoleManager(session).assert_status_change_keeps_admin(OTHER_ADMIN, "disabled"),
+        )
+
+        assert outcomes, "the guard must read the roster at all"
+        assert outcomes[0] is True, f"first roster read must FOR UPDATE, saw {outcomes}"
+
+    def test_removal_lock_precedes_the_membership_delete_read(self, session):
+        """Ordering: in ``remove_member`` the LOCKED guard read runs before
+        the (unlocked, same-transaction) lookup the delete uses — the lock is
+        taken before anything the rule protects is touched."""
+        _join(session, "admin1", "admin")
+        _join(session, OTHER_ADMIN, "admin")
+
+        outcomes = _role_member_reads_locked(
+            session,
+            lambda: RoleManager(session).remove_member(OTHER_ADMIN, _admin_id(session), caller_user_id="admin1"),
+        )
+
+        assert outcomes[0] is True, f"guard read must come first and be locked, saw {outcomes}"
+        session.commit()
+
+    def test_non_admin_role_removal_still_succeeds_under_the_locked_guard_read(self, session):
+        """Paired negative on posture: removing a membership of a role other
+        than 'admin' still answers through the guard's locked roster read
+        (the guard cannot know which role is at stake until it looks), and
+        the operation stays ALLOWED — the lock must not refuse what the rule
+        permits."""
+        _join(session, "admin1", "admin")
+        _join(session, "admin1", "operator")
+
+        outcomes = _role_member_reads_locked(
+            session,
+            lambda: RoleManager(session).remove_member(
+                "admin1", _role_id(session, "operator"), caller_user_id="admin1"
+            ),
+        )
+
+        assert outcomes[0] is True, f"roster read under lock, then fall-through, saw {outcomes}"
+        session.commit()
+        assert _holds(session, "admin1", "admin")
+        assert not _holds(session, "admin1", "operator")
+
+
+class TestRemovalsSucceedWhileThirdAdminStands:
+    """AC2's paired negative, behavioral half: with THREE admins on the
+    roster, two removals (the race's two threads, run sequentially here)
+    both succeed and one admin survives. The lock must not over-refuse — a
+    race test that only proves refusal is untested.
+
+    Plain sequential, so this cell does not pretend to be the concurrent
+    case; the concurrent negative lives in the PostgreSQL-gated class."""
+
+    def test_two_removals_pass_when_a_third_admin_stands(self, session):
+        session.add(User(user_id="admin3", status="active"))
+        session.commit()
+        _join(session, "admin1", "admin")
+        _join(session, OTHER_ADMIN, "admin")
+        _join(session, "admin3", "admin")
+
+        assert RoleManager(session).remove_member(OTHER_ADMIN, _admin_id(session), caller_user_id="admin1") is True
+        session.commit()
+        assert RoleManager(session).remove_member("admin3", _admin_id(session), caller_user_id="admin1") is True
+        session.commit()
+
+        assert _holds(session, "admin1", "admin")
+        assert RoleManager(session).usable_admin_ids() == {"admin1"}
+
+
+_PG_URL_ENV = "VENYA_TEST_PG_URL"
+
+
+@pytest.mark.skipif(
+    not os.environ.get(_PG_URL_ENV),
+    reason=f"real-concurrency cell needs a scratch PostgreSQL in {_PG_URL_ENV} (not available on this venue)",
+)
+class TestConcurrentRemovalsPostgresql:
+    """The #487 race, physically: two threads each remove a DIFFERENT one of
+    the last two admins, released together by a barrier so both guard reads
+    aim at the same roster. Under the row lock, exactly one succeeds and one
+    answers ``AdminLockoutError(LAST_ADMIN)`` — the second guard waits on the
+    locked read, re-scans after the first commits (READ COMMITTED re-evaluates
+    the locking scan), and sees the survivor already gone.
+
+    DESIGN NOTE FROM THIS LEG: this class is the ticket's physical cell
+    rendered as code. It has NOT RUN on the #487 leg — no PostgreSQL exists
+    at that venue (spec: no fleet/VM) — so it skipped. Point
+    ``VENYA_TEST_PG_URL`` at a SCRATCH database (it drops and recreates the
+    IAM tables) before trusting it; do not run it against anything live.
+
+    "Exactly one succeeds" is deterministic AFTER the lock lands; before the
+    fix the outcome is timing-dependent (that is the race itself), so this
+    cell is the concurrency proof for the fix, not a repro for the bug.
+    """
+
+    def _engine_and_factory(self):
+        engine = create_engine(os.environ[_PG_URL_ENV])
+        Base.metadata.drop_all(engine)
+        Base.metadata.create_all(engine)
+        return engine, sessionmaker(bind=engine)
+
+    def _seed(self, factory, admin_ids):
+        s = factory()
+        try:
+            for uid in admin_ids:
+                s.add(User(user_id=uid, status="active"))
+            s.add(Role(name="admin", permissions="read-write"))
+            s.commit()
+            admin_role = s.query(Role).filter(Role.name == "admin").one()
+            for uid in admin_ids:
+                s.add(RoleMember(user_id=uid, role_id=admin_role.id))
+            s.commit()
+            return admin_role.id
+        finally:
+            s.close()
+
+    def _race(self, admin_ids, targets):
+        engine, factory = self._engine_and_factory()
+        try:
+            admin_role_id = self._seed(factory, admin_ids)
+            results = []
+            barrier = threading.Barrier(len(targets))
+
+            def worker(target):
+                s = factory()
+                try:
+                    # Start the transaction BEFORE the release, so both
+                    # threads' guard reads race for the same roster snapshot.
+                    s.query(User).filter(User.user_id == target).first()
+                    barrier.wait()
+                    try:
+                        removed = RoleManager(s).remove_member(target, admin_role_id, caller_user_id="cert-only")
+                        s.commit()
+                        results.append((target, "removed" if removed else "not-found"))
+                    except AdminLockoutError as exc:
+                        s.rollback()
+                        results.append((target, f"refused:{exc.reason}"))
+                finally:
+                    s.close()
+
+            threads = [threading.Thread(target=worker, args=(t,)) for t in targets]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+            survivors = self._roster(factory)
+            return sorted(results), survivors
+        finally:
+            Base.metadata.drop_all(engine)
+            engine.dispose()
+
+    def _roster(self, factory):
+        s = factory()
+        try:
+            return RoleManager(s).usable_admin_ids()
+        finally:
+            s.close()
+
+    def test_last_two_admins_two_threads_exactly_one_passes(self):
+        outcomes, survivors = self._race(["admin1", "admin2"], ["admin1", "admin2"])
+        statuses = [status for _, status in outcomes]
+        assert sorted(statuses) == ["refused:last_admin", "removed"], outcomes
+        assert len(survivors) == 1, survivors
+
+    def test_two_threads_with_third_admin_both_pass(self):
+        outcomes, survivors = self._race(["admin1", "admin2", "admin3"], ["admin1", "admin2"])
+        assert sorted(status for _, status in outcomes) == ["removed", "removed"], outcomes
+        assert survivors == {"admin3"}, survivors

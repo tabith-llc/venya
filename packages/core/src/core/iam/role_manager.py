@@ -374,6 +374,11 @@ class RoleManager:
         2. self-removal — the caller is the target: the "are you sure" a
            remote call cannot answer.
 
+        Concurrency posture (#487): the count is taken under a row lock
+        (:meth:`_locked_admin_roster`), held until the caller's transaction
+        ends, so this guard plus the delete it answers for is one atomic
+        step — concurrent removals of the last two admins cannot both pass.
+
         Args:
             target_user_id: User whose membership (or whole account) is being
                 removed.
@@ -389,9 +394,13 @@ class RoleManager:
             safe: they name no member other than the caller's own target.
         """
         # Same lookup require_admin uses (server/dependencies.py) — never a
-        # re-derived id or a name guess. The roster read is shared with the
-        # deactivation half of the rule (#486) through one helper.
-        roles = self._admin_role_and_members()
+        # re-derived id or a name guess. The read is the LOCKED variant (#487):
+        # the roster rows are FOR UPDATE until this transaction ends, so the
+        # count-and-write below is atomic — two concurrent removals of the
+        # last two admins cannot both read a roster of two. The idiom is the
+        # existing one in this tree: credentials.py's last-active-credential
+        # guard and enrollment_manager.py's token cap do the same thing.
+        roles = self._locked_admin_roster()
         if roles is None:
             # No admin role seeded yet (a pre-init core): there is no roster to
             # empty, so only the self-removal half of the rule can apply.
@@ -433,15 +442,39 @@ class RoleManager:
         """The ``admin`` role row and its roster, or None when no admin role is
         seeded yet.
 
-        Shared by the removal half (:meth:`assert_removal_keeps_admin`) and the
-        deactivation half (#486) of the lockout rule so neither re-copies the
-        role lookup — the same ``get_role_by_name`` require_admin resolves, and
-        the same ``get_role_members`` enumeration, never a re-derived id.
+        The unlocked read — correct for enumeration callers such as
+        :meth:`usable_admin_ids` re-reads inside an already-locked
+        transaction. The lockout GUARDS use :meth:`_locked_admin_roster`,
+        which shares this helper's role lookup and adds the row lock (#487).
         """
         admin_role = self.get_role_by_name(self.ADMIN_ROLE_NAME)
         if admin_role is None:
             return None
         return admin_role, self.get_role_members(admin_role.id)
+
+    def _locked_admin_roster(self) -> tuple[Role, list[RoleMember]] | None:
+        """The ``admin`` role row and its roster read ``FOR UPDATE`` (#487).
+
+        Same role lookup as :meth:`_admin_role_and_members` (one
+        ``get_role_by_name``, the same require_admin resolves), but the
+        member rows carry a row lock held until the caller's transaction
+        commits or rolls back. That makes "count the roster, then act" a
+        single atomic step against a concurrent removal or status write
+        racing for the same roster: the second transaction blocks on this
+        read, re-evaluates after the first commits (READ COMMITTED), and
+        sees the roster the first transaction left behind — so exactly one
+        of two concurrent removals of the last two admins can pass.
+        PostgreSQL locks; SQLite, the test backend, ignores the clause —
+        the same posture the credential-deactivation guard (#credentials.py
+        ``with_for_update``) and the enrollment token cap (#enrollment_manager.py)
+        already ship. Raises nothing; mirrors the unlocked helper's
+        ``None`` answer when no admin role is seeded.
+        """
+        admin_role = self.get_role_by_name(self.ADMIN_ROLE_NAME)
+        if admin_role is None:
+            return None
+        members = self.db.query(RoleMember).filter(RoleMember.role_id == admin_role.id).with_for_update().all()
+        return admin_role, members
 
     def usable_admin_ids(self) -> set[str]:
         """User ids that count as usable administrators right now (#486).
@@ -477,7 +510,10 @@ class RoleManager:
         an operator would: after this write, can anyone still administer this
         core? A write is refused when it would take the set to zero AND the
         target is in it today (causation — a status write on an account that
-        already cannot sign in strands nobody new).
+        already cannot sign in strands nobody new). The roster read below is
+        the LOCKED variant (#487), the same posture as the removal guard, so
+        the two surfaces do not diverge and a concurrent deactivation of the
+        other last admin cannot slip both writes through.
 
         Args:
             target_user_id: Account whose status is being written.
@@ -500,7 +536,7 @@ class RoleManager:
             # An activation cannot strand anybody — only deactivation is guarded.
             return
 
-        roles = self._admin_role_and_members()
+        roles = self._locked_admin_roster()
         if roles is None:
             # No admin role seeded yet (a pre-init core): no roster to strand.
             return
