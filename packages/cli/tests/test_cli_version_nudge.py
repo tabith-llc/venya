@@ -67,6 +67,18 @@ class TestVersionTuple:
         assert version_tuple("0.1.0beta1") == version_tuple("0.1.0b1")
         assert version_tuple("0.1.0alpha2") < version_tuple("0.1.0a13")
 
+    def test_beta_sorts_between_alpha_and_final(self):
+        """0.1.0beta1 is a prerelease: above the shipped alphas, below 0.1.0.
+
+        A wrong-side sort here would nudge users the wrong way (stale-vs-
+        future verdicts in the advisory truth table). The garbage-returns-
+        None negative half is already pinned by
+        test_unparseable_fails_closed at this tip.
+        """
+        assert version_tuple("0.1.0beta1") is not None
+        assert version_tuple("0.1.0beta1") > version_tuple("0.1.0alpha16")
+        assert version_tuple("0.1.0beta1") < version_tuple("0.1.0")
+
     def test_unparseable_fails_closed(self):
         for bad in (None, "", "garbage", "unknown", "0.1.0a13+local"):
             assert version_tuple(bad) is None, bad
