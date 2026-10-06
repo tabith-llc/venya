@@ -239,6 +239,121 @@ class TestRenewSuccess:
 
 
 # ---------------------------------------------------------------------------
+# Plaintext scheme refusal — #506
+# ---------------------------------------------------------------------------
+
+
+class TestRenewHttpsRequired:
+    """#506 pin (ticket executor-renew-no-scheme-check): the renewal POST carries the
+    executor's existing client certificate AND a fresh CSR, so an http:// server URL
+    puts both in the clear. Plaintext is REJECTED, not downgraded — the same ruling
+    the heartbeat path already carries (sec-sweep-low-informational #17, user ruling
+    2026-09-21). The refusal must land BEFORE any transport is constructed, and the
+    sanctioned VENYA_TLS_VERIFY=false knob must not re-open it (that knob means
+    "distrust this certificate over https", never "no TLS")."""
+
+    def _args(self, tmp_path, core_url):
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = core_url
+        return cert_path, args
+
+    def test_http_env_url_refused_no_client_constructed(self, tmp_path, capsys):
+        """RED at HEAD: VENYA_SERVER_URL=http://... -> rc=1 and NO httpx2.Client at
+        all (AC1 — nothing dialled, so the cert and the CSR never leave the box)."""
+        _cert_path, args = self._args(tmp_path, None)
+
+        mock_client = _make_mock_httpx_client()
+        with (
+            patch.dict(os.environ, {"VENYA_SERVER_URL": "http://venya-core-1"}),
+            patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as mock_ctor,
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            result = executor_cert_renew(args)
+
+        assert result == 1
+        mock_ctor.assert_not_called()
+        mock_client.post.assert_not_called()
+        err = capsys.readouterr().err
+        assert "https://" in err
+        assert "executor-renew-no-scheme-check" in err
+
+    def test_http_flag_url_refused_no_client_constructed(self, tmp_path, capsys):
+        """The flag source is refused too — the guard sees the RESOLVED URL, so no
+        source of it (--core-url / env / config / executor.toml) escapes."""
+        _cert_path, args = self._args(tmp_path, "http://venya-core-1")
+
+        mock_client = _make_mock_httpx_client()
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as mock_ctor:
+            from venya_cli.commands import executor_cert_renew
+
+            result = executor_cert_renew(args)
+
+        assert result == 1
+        mock_ctor.assert_not_called()
+        assert "https://" in capsys.readouterr().err
+
+    def test_tls_verify_false_does_not_reopen_plaintext(self, tmp_path, capsys):
+        """AC3: the scheme check runs FIRST and is independent of the knob —
+        VENYA_TLS_VERIFY=false + http:// still refuses, still builds no client."""
+        _cert_path, args = self._args(tmp_path, None)
+
+        mock_client = _make_mock_httpx_client()
+        with (
+            patch.dict(
+                os.environ,
+                {"VENYA_SERVER_URL": "http://venya-core-1", "VENYA_TLS_VERIFY": "false"},
+            ),
+            patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as mock_ctor,
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            result = executor_cert_renew(args)
+
+        assert result == 1
+        mock_ctor.assert_not_called()
+        # the knob warning never even gets printed: the URL died at the scheme gate
+        err = capsys.readouterr().err
+        assert "TLS verification disabled" not in err
+        assert "https://" in err
+
+    def test_https_url_still_proceeds(self, tmp_path, capsys):
+        """AC2 paired negative: the refusal is scheme-specific, not a lockdown —
+        https:// renews exactly as before, against the resolved URL."""
+        _cert_path, args = self._args(tmp_path, "https://venya-core")
+
+        mock_client = _make_mock_httpx_client()
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_cert_renew
+
+            result = executor_cert_renew(args)
+
+        assert result == 0
+        assert mock_client.post.call_args[0][0] == "https://venya-core/api/v1/executors/register"
+
+    def test_tls_verify_false_still_allows_https(self, tmp_path, capsys):
+        """Paired control for AC3: the sanctioned knob keeps its ruled meaning on
+        the https path (unverified TLS over https), untouched by this guard."""
+        _cert_path, args = self._args(tmp_path, "https://venya-core")
+
+        mock_client = _make_mock_httpx_client()
+        with (
+            patch.dict(os.environ, {"VENYA_TLS_VERIFY": "false"}),
+            patch("venya_cli.commands.httpx2.Client", return_value=mock_client) as mock_ctor,
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            result = executor_cert_renew(args)
+
+        assert result == 0
+        assert mock_ctor.call_args.kwargs["verify"] is False
+        assert "TLS verification disabled" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # Error cases
 # ---------------------------------------------------------------------------
 
@@ -682,14 +797,13 @@ class TestRenewHardening373:
             fchown_calls.append((uid, gid))
 
         mock_client = _make_mock_httpx_client()
-        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client), patch(
-            "venya_cli.commands.os.geteuid", return_value=0
-        ), patch("venya_cli.commands.os.chown", side_effect=spy_chown), patch(
-            "venya_cli.commands.os.fchown", side_effect=spy_fchown
-        ), patch(
-            "pwd.getpwnam", return_value=SimpleNamespace(pw_uid=4444)
-        ), patch(
-            "grp.getgrnam", return_value=SimpleNamespace(gr_gid=5555)
+        with (
+            patch("venya_cli.commands.httpx2.Client", return_value=mock_client),
+            patch("venya_cli.commands.os.geteuid", return_value=0),
+            patch("venya_cli.commands.os.chown", side_effect=spy_chown),
+            patch("venya_cli.commands.os.fchown", side_effect=spy_fchown),
+            patch("pwd.getpwnam", return_value=SimpleNamespace(pw_uid=4444)),
+            patch("grp.getgrnam", return_value=SimpleNamespace(gr_gid=5555)),
         ):
             from venya_cli.commands import executor_cert_renew
 
@@ -711,10 +825,11 @@ class TestRenewHardening373:
             fchown_calls.append((uid, gid))
 
         mock_client = _make_mock_httpx_client()
-        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client), patch(
-            "venya_cli.commands.os.geteuid", return_value=1000
-        ), patch("venya_cli.commands.os.chown", side_effect=spy_chown), patch(
-            "venya_cli.commands.os.fchown", side_effect=spy_fchown
+        with (
+            patch("venya_cli.commands.httpx2.Client", return_value=mock_client),
+            patch("venya_cli.commands.os.geteuid", return_value=1000),
+            patch("venya_cli.commands.os.chown", side_effect=spy_chown),
+            patch("venya_cli.commands.os.fchown", side_effect=spy_fchown),
         ):
             from venya_cli.commands import executor_cert_renew
 
