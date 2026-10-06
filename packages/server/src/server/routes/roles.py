@@ -363,11 +363,56 @@ async def roles_delete(
 )
 async def role_members_list(
     role_id: int,
-    _: dict = Depends(require_role("read")),
+    user_info: dict = Depends(require_role("read")),
     db: Session = Depends(get_db),
 ) -> RoleMemberListResponse:
-    """List all members of a role."""
+    """List all members of a role.
+
+    Roster scoping (role-read-surface-enumeration-oracle #448): the roster names
+    every human identity inside a group, which is identity STRUCTURE, not a group
+    name — so it is answered only about groups the caller actually holds, or for
+    callers in an OVERSIGHT tier (``auditor`` / ``read-write``), the same tier set
+    the audit GET surface was deliberately raised to. Everyone else gets a 404 in
+    the exact shape ``roles_get`` above uses for an unknown role id: a 403 would
+    confirm "that group exists and you are outside it", which is half the
+    exposure being closed.
+
+    ``GET /roles`` and ``GET /roles/{role_id}`` are deliberately UNCHANGED — group
+    names, tiers and member COUNTS stay visible to every tier (RULING 4).
+
+    No new query and no parallel role lookup: the caller's own ``role_id -> tier``
+    map rides the ``require_role("read")`` gate's per-request fetch — ``_checker``
+    attaches it as ``user_info["_role_permissions"]`` (``dependencies.py``), the
+    same reuse pattern ``routes/audit.py`` and ``secrets_get`` already use. Both
+    halves of this decision read that one request-scoped map.
+
+    Fail-closed note: the executor early-return in ``_checker`` attaches no role
+    map, so a caller arriving without one is denied. Executor mTLS identity is
+    only granted on ``/api/v1/sessions/...`` paths, so no live caller is
+    affected — and a missing map must never widen a gate.
+    """
     from core.iam.role_manager import RoleManager
+
+    # Both halves read the map the gate already fetched (role_id -> tier).
+    caller_permissions: dict = user_info.get("_role_permissions") or {}
+    member_of_this_role = role_id in caller_permissions
+    oversight_tier = any(tier in ("auditor", "read-write") for tier in caller_permissions.values())
+
+    if not (member_of_this_role or oversight_tier):
+        # DENIED BEFORE ANY ROLE/MEMBERSHIP READ: this branch touches no table, so
+        # a group the caller is outside of and an id that does not exist produce
+        # the same status and the same detail template — indistinguishable, and
+        # with no existence signal to extract. Same wording as ``roles_get``'s
+        # unknown-role 404; deliberately no distinguishing detail, no extra body.
+        logger.warning(
+            "Role roster refused: caller %s holds no tier over role %s",
+            user_info.get("user_id"),
+            role_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Role {role_id} not found",
+        )
 
     role_manager = RoleManager(db)
     members = role_manager.get_role_members(role_id)

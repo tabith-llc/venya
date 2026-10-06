@@ -240,6 +240,21 @@ def require_role(permission: str):
             permissions = rm.get_user_permissions(user_info["user_id"])
 
             if permission == "read":
+                # MEMBERSHIP test, not a tier comparison (documentation-only note
+                # from the role-read-surface-enumeration-oracle #448 ruling 5):
+                # this branch passes on ANY non-empty role map. That is equivalent
+                # to "tier >= read" ONLY because "read" is the FLOOR of the closed
+                # tier vocabulary — read / auditor / read-write, validated in both
+                # layers (core/iam/role_manager.py create + update, and the
+                # Literal[...] extra="forbid" request models). The day a tier BELOW
+                # "read" is introduced (a pending-approval group, say), every
+                # require_role("read") gate opens to it silently — 7 live gate
+                # sites, verified by grep at this tip: routes/roles.py x3 (list,
+                # get, members), routes/secrets.py x3 (get, list, key-versions)
+                # and routes/executors.py x1 (list).
+                # A tier requirement that a route needs belongs in THAT route (see
+                # role_members_list's membership/oversight scoping), not in a
+                # tree-wide widening of this shared gate.
                 if not permissions:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,

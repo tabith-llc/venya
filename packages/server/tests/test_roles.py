@@ -77,9 +77,14 @@ def _make_mock_role_manager(role=None, roles=None, members=None, error=None, use
     rm.add_member.return_value = SimpleNamespace(user_id="user1", role_id=1)
     rm.remove_member.return_value = True
 
-    # Default: user has read permission (makes require_role("read") pass)
-    if user_permissions is None:
-        rm.get_user_permissions.return_value = {"dev": "read"}
+    # Default: user holds role id 1 at tier "read" — makes require_role("read")
+    # pass. NOTE the shape: get_user_permissions returns {role_id: tier}
+    # (core/iam/role_manager.py:316-322), so an int id is the key. The previous
+    # default was name-keyed ({"dev": "read"}) — fiction that survived only
+    # because nothing read the map's KEYS until #448 put a key check in
+    # role_members_list. The `user_permissions` argument also used to be ACCEPTED
+    # AND IGNORED unless it was None; both are fixed here.
+    rm.get_user_permissions.return_value = {1: "read"} if user_permissions is None else user_permissions
 
     # For require_admin: admin role exists and user has write permission
     admin_role = make_role(999, "admin", "read-write")
@@ -417,8 +422,13 @@ class TestRoleMembersList:
     """Tests for role members listing endpoint."""
 
     def test_list_members_success(self):
-        """GET /roles/{id}/members should return list of members."""
-        rm = _make_mock_role_manager()
+        """GET /roles/{id}/members should return list of members.
+
+        The caller's role map is `{1: "read"}` — the shape `get_user_permissions`
+        actually documents (role_id -> tier). A roster is answered only about a
+        group the caller holds (#448), so the fixture has to say so honestly.
+        """
+        rm = _make_mock_role_manager(user_permissions={1: "read"})
         member1 = MagicMock(user_id="user1", role_id=1)
         member2 = MagicMock(user_id="user2", role_id=1)
         rm.get_role_members.return_value = [member1, member2]
@@ -439,8 +449,13 @@ class TestRoleMembersList:
             assert data["members"][1]["user_id"] == "user2"
 
     def test_list_members_empty(self):
-        """GET /roles/{id}/members should return empty list when no members."""
-        rm = _make_mock_role_manager()
+        """GET /roles/{id}/members should return empty list when no members.
+
+        The caller holds the group it asks about, so this stays the legitimate
+        "group has no members" answer — the scoped-out half is
+        TestRoleMembersRosterScoping448.
+        """
+        rm = _make_mock_role_manager(user_permissions={1: "read"})
         rm.get_role_members.return_value = []
         backend = MagicMock()
         session = MagicMock()
@@ -454,6 +469,164 @@ class TestRoleMembersList:
             resp = client.get("/api/v1/roles/1/members")
             assert resp.status_code == 200
             assert resp.json()["members"] == []
+
+
+class TestRoleMembersRosterScoping448:
+    """role-read-surface-enumeration-oracle (#448) — the roster of a group the
+    caller does not belong to is refused, and the refusal is INDISTINGUISHABLE
+    from asking about a group that does not exist.
+
+    The ruling (owner 2026-10-06): "the single intern should absolutely _not have
+    this power" — and the deny must not become a second oracle, so 404 (never 403)
+    with a body that does not vary by whether the group is real. Oversight tiers
+    (auditor, read-write) keep the full view; `roles_list` / `roles_get` keep
+    names, tiers and member COUNTS for every tier — the deliberate no-change half.
+    """
+
+    @staticmethod
+    def _client(user_permissions, members_for_one=(), role_members_side_effect=None):
+        rm = _make_mock_role_manager(user_permissions=user_permissions)
+        if role_members_side_effect is not None:
+            rm.get_role_members.side_effect = role_members_side_effect
+        else:
+            rm.get_role_members.return_value = list(members_for_one)
+        backend = MagicMock()
+        backend.get_session.return_value = MagicMock()
+        app = _create_test_app(backend=backend)
+        return TestClient(app, raise_server_exceptions=False), rm
+
+    def test_non_member_deny_is_byte_identical_to_unknown_group(self):
+        """REQUIRED NEGATIVE HALF.
+
+        A caller holding group 1 only asks for group 7, in two worlds: one where
+        group 7 is a REAL group with members, one where group 7 does not exist at
+        all. Before the fix the first world served the roster — that is the
+        defect. After it both answers are byte-identical, so no existence signal
+        survives the deny.
+        """
+        real_group = [MagicMock(user_id="alice", role_id=7), MagicMock(user_id="bob", role_id=7)]
+        client_real, rm_real = self._client(
+            user_permissions={1: "read"},
+            role_members_side_effect=lambda role_id: real_group if role_id == 7 else [],
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm_real), patch(
+            "server.dependencies.RoleManager", return_value=rm_real
+        ):
+            resp_exists = client_real.get("/api/v1/roles/7/members")
+        # The deny reads nothing: no membership query, so no row count, timing
+        # difference, or body to observe.
+        rm_real.get_role_members.assert_not_called()
+
+        client_absent, rm_absent = self._client(
+            user_permissions={1: "read"},
+            role_members_side_effect=lambda role_id: [],
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm_absent), patch(
+            "server.dependencies.RoleManager", return_value=rm_absent
+        ):
+            resp_missing = client_absent.get("/api/v1/roles/7/members")
+        rm_absent.get_role_members.assert_not_called()
+
+        assert resp_exists.status_code == 404, resp_exists.text
+        assert resp_missing.status_code == 404, resp_missing.text
+        assert resp_exists.content == resp_missing.content
+        assert resp_exists.json() == {"detail": "Role 7 not found"}
+        # A 403 would name the caller's position relative to the group; AC-2
+        # refuses that whatever this file's other denials do.
+        assert "forbidden" not in resp_exists.text.lower()
+        assert "another" not in resp_exists.text.lower()
+        assert "insufficient" not in resp_exists.text.lower()
+        # "alice" is the roster that was refused: she must not appear anywhere.
+        assert "alice" not in resp_exists.text
+
+    def test_member_still_gets_own_group_roster(self):
+        """POSITIVE (member half): holding the group is sufficient — the 200 shape
+        and field names are exactly what they were before the fix."""
+        members = [MagicMock(user_id="alice", role_id=1), MagicMock(user_id="carol", role_id=1)]
+        client, rm = self._client(user_permissions={1: "read"}, members_for_one=members)
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            resp = client.get("/api/v1/roles/1/members")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "members": [
+                {"user_id": "alice", "role_id": 1},
+                {"user_id": "carol", "role_id": 1},
+            ]
+        }
+
+    def test_auditor_tier_reads_a_foreign_group_roster(self):
+        """POSITIVE (oversight half, tier `auditor`): the audit-surface precedent —
+        an auditor sees who is in which group."""
+        client, rm = self._client(
+            user_permissions={4: "auditor"}, members_for_one=[MagicMock(user_id="dave", role_id=1)]
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            resp = client.get("/api/v1/roles/1/members")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"members": [{"user_id": "dave", "role_id": 1}]}
+
+    def test_readwrite_tier_reads_a_foreign_group_roster(self):
+        """POSITIVE (oversight half, tier `read-write`): admin keeps the full view."""
+        client, rm = self._client(
+            user_permissions={9: "read-write"}, members_for_one=[MagicMock(user_id="dave", role_id=1)]
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            resp = client.get("/api/v1/roles/1/members")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"members": [{"user_id": "dave", "role_id": 1}]}
+
+    def test_lowest_tier_still_sees_roles_list(self):
+        """NO-REGRESSION half of the ruling: `GET /roles` stays open to a
+        lowest-tier caller — names, tiers and member counts are not the exposure."""
+        client, rm = self._client(user_permissions={1: "read"})
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            resp = client.get("/api/v1/roles")
+        assert resp.status_code == 200, resp.text
+        roles = resp.json()["roles"]
+        assert roles and roles[0]["name"] == "dev"
+        assert "member_count" in roles[0]
+
+    def test_lowest_tier_still_sees_role_get(self):
+        """NO-REGRESSION half: `GET /roles/{id}` unchanged for the same caller."""
+        client, rm = self._client(user_permissions={1: "read"})
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            resp = client.get("/api/v1/roles/1")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["name"] == "dev"
+
+    def test_holding_two_groups_opens_exactly_those_two_rosters(self):
+        """Truth table on the member half: groups 1 and 2 answer, group 3 stays
+        404 for the SAME caller — the scoping is per-group, not per-caller."""
+        rosters = {
+            1: [MagicMock(user_id="alice", role_id=1)],
+            2: [MagicMock(user_id="bob", role_id=2)],
+            3: [MagicMock(user_id="carol", role_id=3)],
+        }
+        client, rm = self._client(
+            user_permissions={1: "read", 2: "read"},
+            role_members_side_effect=lambda role_id: rosters.get(role_id, []),
+        )
+        with patch("core.iam.role_manager.RoleManager", return_value=rm), patch(
+            "server.dependencies.RoleManager", return_value=rm
+        ):
+            for role_id, expected_user in ((1, "alice"), (2, "bob")):
+                resp = client.get(f"/api/v1/roles/{role_id}/members")
+                assert resp.status_code == 200, resp.text
+                assert [m["user_id"] for m in resp.json()["members"]] == [expected_user]
+            denied = client.get("/api/v1/roles/3/members")
+        assert denied.status_code == 404
+        assert denied.json() == {"detail": "Role 3 not found"}
+        assert "carol" not in denied.text
 
 
 class TestRoleMemberAdd:
