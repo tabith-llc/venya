@@ -22,13 +22,37 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("venya.mcp")
 
-DEFAULT_CONFIG_PATH = Path.home() / ".config" / "venya" / "config.json"
+
+def default_config_dir() -> Path:
+    """Platform-appropriate config directory.
+
+    macOS convention: ~/Library/Application Support/venya.
+    Windows convention: %APPDATA%/venya.
+    POSIX (Linux, etc.): ~/.config/venya.
+
+    This resolver deliberately mirrors venya_cli.api_client.default_config_dir().
+    The mcp package does not depend on venya-cli (see packages/mcp/pyproject.toml:
+    mcp, httpx2, pydantic), so product code must not import the CLI helper; the
+    two copies are pinned together by tests/test_config_path.py, which compares
+    both resolvers under each platform branch.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "venya"
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        return Path(appdata or Path.home() / "AppData" / "Roaming") / "venya"
+    return Path.home() / ".config" / "venya"
+
+
+DEFAULT_CONFIG_DIR = default_config_dir()
+DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.json"
 
 
 class MCPConfig:
@@ -44,7 +68,7 @@ class MCPConfig:
         env = os.environ.get("VENYA_CONFIG")
         if env:
             return Path(env)
-        return DEFAULT_CONFIG_PATH
+        return default_config_dir() / "config.json"
 
     def _load(self) -> None:
         if not self.path.exists():
