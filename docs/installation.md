@@ -349,9 +349,15 @@ your user, the installer prints the exact udev/plugdev commands to fix it.
 **Windows:** use `install-venya-cli.ps1` from the same release (run as
 Administrator — machine-wide install to `C:\Program Files\Venya`; per-user
 state under `%APPDATA%\venya\`). Uninstall: `uninstall-venya-cli.ps1`.
+Elevated **install**, unelevated **use**: the Administrator terminal is for the
+install (and uninstall) only — run every `venya` command, FIDO2 ceremonies
+included, from a standard (non-elevated) terminal.
 FIDO2 ceremonies on Windows go through the platform API and require an
-interactive desktop session; standard (non-admin) users are supported for
-ceremonies. macOS is handled by the same `.sh` installer (IOKit HID — no
+interactive desktop session — a remote session (SSH, WinRM, or Run-as over
+SSH) is not one, because the platform API needs a foreground window, so
+ceremonies are typed at the machine's own console. Standard (non-admin)
+users are supported for ceremonies. macOS is handled by the same `.sh`
+installer (IOKit HID — no
 udev rules needed).
 
 **macOS workstation + core in a lima VM:** the server certificate is issued

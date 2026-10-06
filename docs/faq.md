@@ -84,8 +84,10 @@ always means a human touching a physical key.
 **What platforms are supported?**
 Ubuntu 24.04 LTS is the tested server/executor target. Workstation CLI:
 Linux and macOS (install-venya-cli.sh), and Windows 10 1903+/11
-(install-venya-cli.ps1, machine-wide, admin-run; FIDO2 ceremonies go
-through the Windows platform API and need an interactive desktop session).
+(install-venya-cli.ps1, machine-wide, admin-run for the install only — daily
+use is unelevated; FIDO2 ceremonies go through the Windows platform API and
+need an interactive desktop session — a remote SSH/WinRM session is not one,
+so ceremonies are typed at the machine's own console).
 Python 3.14 is pinned and provisioned automatically — you do not install it.
 
 **Can Venya run air-gapped?**

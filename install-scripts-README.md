@@ -117,7 +117,10 @@ Windows equivalent of `install-venya-cli.sh`, for PowerShell 5.1 and later.
 Installs the same bundle **machine-wide — run from an Administrator terminal**
 (a standard user cannot create the install root or the uv Python junction;
 ticket `windows-uv-junction-standard-user`). Standard users need no rights to
-USE the CLI afterward.
+USE the CLI afterward. The two elevation classes are deliberate and separate:
+**elevated to install, unelevated to use** — run `venya` from a standard
+(non-elevated) terminal; an elevated CLI session is not needed for any command,
+ceremonies included.
 
 - **uv** (pinned, sha256-verified) + a uv-managed CPython 3.14, under the install root (default `C:\Program Files\Venya`; override with `VENYA_INSTALL_DIR`)
 - `venya-cli` and `venya-mcp` as isolated `uv tool` venvs under the install root, with `venya` / `venya-mcp` shims on the machine `PATH`

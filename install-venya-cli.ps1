@@ -341,6 +341,7 @@ Write-Host "  $Base"
 Write-Host '============================================'
 Write-Host ''
 Write-Host 'For EACH operator (standard user, no admin needed to run these):'
+Write-Host '  Run venya from a STANDARD (non-elevated) terminal - the elevated terminal is for the install above only.'
 Write-Host '  open a NEW terminal so the machine PATH refreshes, then:'
 Write-Host '  venya setup <core-host>    # save the server URL + install the core CA cert (fingerprint printed for verification)'
 Write-Host '  venya init <user-id>       # create the first admin account (FIDO2 key required)'
