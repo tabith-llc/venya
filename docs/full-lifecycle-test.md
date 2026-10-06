@@ -561,9 +561,12 @@ found`), just **re-run `init`** — the server supersedes abandoned PENDING
 (unenrolled) rows automatically and returns 201 with a fresh challenge (fix
 `init-pin-invalid-after-installation-reset`, dev since fc94308). A **409** now
 means a COMPLETED admin enrollment exists — protection, not residue: use a
-different user id, or only deliberately reset (allowed only while no user is
-fully enrolled; pre-fix/legacy servers still 409 on pending rows, and the CLI
-prints the reset hint there):
+different user id, or only deliberately reset (on a core that is already
+initialized — any user with `enrolled_at` set, or any credential row — the
+reset needs an authenticated admin and answers 401/403 to anyone else; an
+uninitialized core, including one holding only PENDING rows, stays resettable
+without a session so the bootstrap can run; pre-fix/legacy servers still 409 on
+pending rows, and the CLI prints the reset hint there):
 
 ```bash
 VENYA_CONFIG=$ADMIN_WS/config.json SSL_CERT_FILE=/tmp/venya-ca.crt \
@@ -988,7 +991,7 @@ injected secret file**, uses it, and the returned output has the value
 
 | Symptom | Cause | Recovery |
 |---------|-------|----------|
-| `venya init`/`enroll` 409 | a COMPLETED admin enrollment exists (abandoned PENDING rows are auto-superseded since `init-pin-invalid-after-installation-reset`, dev fc94308) | use a different user id; `--installation-reset` only deliberately (allowed only while no user is fully enrolled). Pre-fix/legacy servers still 409 on pending rows → CLI prints the reset hint there (C.3) |
+| `venya init`/`enroll` 409 | a COMPLETED admin enrollment exists (abandoned PENDING rows are auto-superseded since `init-pin-invalid-after-installation-reset`, dev fc94308) | use a different user id; `--installation-reset` only deliberately (unauthenticated only while the core is uninitialized — an initialized core requires an authenticated admin, #450). Pre-fix/legacy servers still 409 on pending rows → CLI prints the reset hint there (C.3) |
 | Pasted block did nothing after the ssh banner | paste race: lines typed while ssh connects are consumed by the local terminal buffer (observed twice, 2026-09-17) | verify remote state before rerunning (`ls /tmp/...`, `ls /opt/venya`); use single-line commands or paste only after the remote prompt |
 | `ClientError code=3 CONFIGURATION_UNSUPPORTED` on init/enroll/login | key has NO PIN (UV impossible). Keys WITH a PIN but no built-in UV (clientPin-only, TrustKey class) are supported since fc94308 — raw clientPin registration path | set the PIN (C.2), re-run — on current servers the retry needs no `--installation-reset` (pending rows auto-superseded) |
 | CLI 409 message unclear | stale CLI predating detail-carrying fix | update the workstation venv/install (B.3); state also visible via `journalctl -u venya-core` or the `users` table |

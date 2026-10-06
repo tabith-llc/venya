@@ -9,12 +9,19 @@
 import logging
 from datetime import UTC
 
+from core.engine.backend import Backend
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..audit_lifecycle import ADMIN_INITIALIZED, FIRST_ADMIN_ENROLLED, audit_lifecycle
-from ..dependencies import get_db
+from ..audit_lifecycle import (
+    ADMIN_INITIALIZED,
+    FIRST_ADMIN_ENROLLED,
+    ROLE_DELETED,
+    USER_DELETED,
+    audit_lifecycle,
+)
+from ..dependencies import get_backend, get_db, require_admin
 from ..fido2.browser_adapter import challenge_to_browser_options
 from ..fido2.manager import WebAuthnError
 from ..recovery_codes import generate_recovery_code as _generate_recovery_code
@@ -64,6 +71,76 @@ class ResetResponse(BaseModel):
 # --- Endpoints ---
 
 
+# --- Endpoints ---
+
+
+def deployment_is_initialized(db: Session) -> bool:
+    """True once this core holds identity that a reset would destroy (#450).
+
+    The guard this replaces counted users that ALSO had a credential row — an
+    INNER JOIN between users and webauthn_credentials — so a user with
+    ``enrolled_at`` set and no credential row contributed nothing to the count
+    and the wipe went ahead. That is exactly the shape the break-glass flow
+    commits: ``routes/recovery.py`` creates the replacement admin with
+    ``enrolled_at=datetime.now(UTC)`` and NO credential row (the credential
+    arrives in a later ceremony), and ``routes/admin.py`` ``admin_remove``
+    hard-deletes credential rows for a user who stays enrolled.
+
+    "Initialized" therefore asks about the two sets independently and refuses
+    on either:
+
+    * any user with ``enrolled_at`` set (enrolled, or break-glass created), and
+    * any WebAuthn credential row at all — active or retired
+      (``routes/credentials.py`` retires with ``is_active=False`` and keeps the row).
+
+    A core with neither answers False, which is the state the fresh-install
+    bootstrap reset needs to keep working: there is no identity to protect yet.
+    """
+    from core.iam.models import User, WebAuthnCredential
+
+    if db.query(User.user_id).filter(User.enrolled_at.isnot(None)).first() is not None:
+        return True
+    return db.query(WebAuthnCredential.id).first() is not None
+
+
+def require_admin_when_initialized(
+    request: Request,
+    backend: Backend = Depends(get_backend),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Gate for POST /api/v1/init/reset: only an admin may reset everything.
+
+    Initialized core → the caller must hold admin authority. No identity at all
+    is a 401; an authenticated non-admin gets the 403 ``require_admin`` returns
+    (executors presenting mTLS are denied there too — this surface is
+    human-only).
+
+    Uninitialized core → an unauthenticated caller may pass, because in that
+    window the ONLY caller is the bootstrap itself: ``venya init
+    --installation-reset`` posts this route from ``cli/commands.py`` ``cmd_init``,
+    and ``"init"`` sits in that module's authenticate-first exemption list, so
+    no session exists to present. Gating the pre-init window would brick fresh
+    installs and abandoned-ceremony recovery, so it stays reachable and is
+    covered by the guard above rather than by an identity check. A token- or
+    certificate-gated bootstrap is the follow-on proposed on the ticket; it
+    needs installer/CLI work, which is deliberately NOT implemented here.
+    """
+    if not deployment_is_initialized(db):
+        return {"caller": "bootstrap", "user_id": None}
+
+    auth_user = getattr(request.state, "auth_user", None)
+    if auth_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to reset an initialized core",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return require_admin(user_info=auth_user, backend=backend)
+
+
+require_admin_when_initialized._venya_guard = "admin"  # type: ignore[attr-defined]
+
+
 @router.post(
     "/init/reset",
     response_model=ResetResponse,
@@ -71,16 +148,18 @@ class ResetResponse(BaseModel):
 )
 async def init_reset(
     db: Session = Depends(get_db),
+    auth_user: dict = Depends(require_admin_when_initialized),
 ) -> ResetResponse:
     """Reset the core to pre-initialization state.
 
-    Permitted when no enrolled user has a valid WebAuthn credential.
-    Covers both fresh installs (no users) and failed enrollment
-    attempts (user record exists but no usable credential).
+    Destructive: every credential, enrollment token, role membership, user
+    (except ``system``) and the admin/user roles are deleted in one commit.
 
-    Refuses to reset when at least one enrolled user has a stored
-    WebAuthn credential — the system is fully initialized and a
-    reset would destroy valid authentication data.
+    Authority (#450): on a core that is already initialized this is an
+    ADMIN-ONLY operation — the gate is ``require_admin_when_initialized``.
+    On a core with no enrolled user and no credential row the bootstrap caller
+    (``venya init --installation-reset``) is still permitted, because no
+    identity exists yet to require and there is no identity to destroy.
     """
     from core.iam.models import (
         EnrollmentToken,
@@ -89,38 +168,69 @@ async def init_reset(
         User,
         WebAuthnCredential,
     )
+    from core.iam.models import (
+        Session as SessionModel,
+    )
 
     try:
-        # A user is "fully enrolled" only if they have enrolled_at
-        # set AND a stored WebAuthn credential. A failed enrollment
-        # may leave enrolled_at set without a usable credential —
-        # that broken state must be resettable.
-        fully_enrolled_count = (
-            db.query(User)
-            .join(
-                WebAuthnCredential,
-                User.user_id == WebAuthnCredential.user_id,
-            )
-            .filter(User.enrolled_at.isnot(None))
-            .count()
-        )
+        # Snapshot what the wipe is about to remove, both so the audit rows can
+        # name the counts (AC: the destructive path is auditable) and because
+        # a bulk delete leaves nothing to read afterwards.
+        wiped_users = db.query(User).filter(User.user_id != "system").all()
+        wiped_roles = db.query(Role).filter(Role.name.in_(["admin", "user"])).all()
+        user_snapshot = [
+            {
+                "target_user_id": user.user_id,
+                "operation": "core_reset",
+                "memberships_removed": db.query(RoleMember).filter(RoleMember.user_id == user.user_id).count(),
+                "credentials_removed": db.query(WebAuthnCredential)
+                .filter(WebAuthnCredential.user_id == user.user_id)
+                .count(),
+                "tokens_revoked": db.query(EnrollmentToken).filter(EnrollmentToken.user_id == user.user_id).count(),
+                "sessions_revoked": db.query(SessionModel).filter(SessionModel.user_id == user.user_id).count(),
+            }
+            for user in wiped_users
+        ]
+        role_snapshot = [
+            {
+                "role_id": role.id,
+                "role_name": role.name,
+                "members_affected": db.query(RoleMember).filter(RoleMember.role_id == role.id).count(),
+                "operation": "core_reset",
+            }
+            for role in wiped_roles
+        ]
 
-        if fully_enrolled_count > 0:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Core already initialized with valid credentials. Cannot reset.",
-            )
-
-        # Safe to reset: no enrolled user has a working credential.
-        # Delete in FK-safe order (children before parents).
+        # Safe to reset: delete in FK-safe order (children before parents).
+        # Sessions go explicitly rather than by FK cascade: a live token for a
+        # user this wipe removes is a credential outliving its principal, and
+        # the reset should not depend on cascade configuration to revoke it
+        # (same posture as admin.py's user removal).
         db.query(WebAuthnCredential).delete()
         db.query(EnrollmentToken).delete()
         db.query(RoleMember).delete()
+        db.query(SessionModel).delete()
         db.query(User).filter(User.user_id != "system").delete()
         db.query(Role).filter(Role.name.in_(["admin", "user"])).delete()
+
+        # Same-transaction lifecycle audit (audit_lifecycle is the single
+        # writer; the rows ride the reset's own commit, so a wipe and its
+        # record are complete-or-nothing). One user_deleted per removed
+        # account and one role_deleted per removed role — the existing
+        # vocabulary, actor named, counts in the field table.
+        actor_user_id = auth_user.get("user_id")
+        for fields in user_snapshot:
+            audit_lifecycle(db, USER_DELETED, actor_user_id, fields)
+        for fields in role_snapshot:
+            audit_lifecycle(db, ROLE_DELETED, actor_user_id, fields)
         db.commit()
 
-        logger.info("Core reset to pre-initialization state")
+        logger.info(
+            "Core reset to pre-initialization state by %s (users=%d, roles=%d)",
+            actor_user_id,
+            len(user_snapshot),
+            len(role_snapshot),
+        )
 
         return ResetResponse(
             success=True,
