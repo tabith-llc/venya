@@ -104,6 +104,9 @@ class AdminCreateUserResponse(BaseModel):
 
 class AdminReEnrollResponse(BaseModel):
     user_id: str
+    # #482 option (a): the route mutates the user to pending_enrollment and
+    # reports it, so the CLI's Status line is server truth, not a phantom key.
+    status: str
     enrollment_token: str
     expires_in_seconds: int = 900
     credentials_deactivated: int = 0
@@ -1829,6 +1832,7 @@ async def admin_re_enroll(
 
         return AdminReEnrollResponse(
             user_id=user_id,
+            status=user.status,
             enrollment_token=plaintext,
             expires_in_seconds=int(em.config.token_expiry.total_seconds()),
             credentials_deactivated=deactivated,

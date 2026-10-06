@@ -228,13 +228,13 @@ class TestCredentialAdd:
         )
         start_resp.raise_for_status.return_value = None
 
-        # Credential add complete response
+        # Credential add complete response — CredentialAddCompleteResponse
+        # shape (#482 AC3): status + credential_label, no phantom id/label.
         complete_resp = _make_mock_response(
             status_code=200,
             json_data={
-                "id": "cred_new_789",
-                "label": "YubiKey 2",
                 "status": "ok",
+                "credential_label": "YubiKey 2",
             },
         )
         complete_resp.raise_for_status.return_value = None
@@ -395,9 +395,8 @@ class TestCredentialAdd:
         complete_resp = _make_mock_response(
             status_code=200,
             json_data={
-                "id": "cred_new_789",
-                "label": "YubiKey 2",
                 "status": "ok",
+                "credential_label": "YubiKey 2",
             },
         )
         complete_resp.raise_for_status.return_value = None
@@ -436,11 +435,92 @@ class TestCredentialAdd:
                     # Extract JSON from output (elevation messages come before JSON)
                     json_start = output.find("{")
                     assert json_start >= 0
-                    parsed = json.loads(output[json_start:])
-                    assert parsed["id"] == "cred_new_789"
-                    assert parsed["label"] == "YubiKey 2"
+                    # --json is a byte-exact passthrough of the response (#482 AC5):
+                    # the envelope carries the real model keys, unreshaped.
+                    assert json.loads(output[json_start:]) == {
+                        "status": "ok",
+                        "credential_label": "YubiKey 2",
+                    }
         client.close()
         config_file.unlink()
+
+    def _drive_add(self, client, complete_json, label, json_mode=False):
+        """Run cmd_credential_add through the mocked ceremony with a given
+        complete-response body; returns (rc, stdout)."""
+        import io
+        from contextlib import redirect_stdout
+
+        mock_http = MagicMock()
+        start_resp = _make_mock_response(
+            status_code=200,
+            json_data={
+                "challenge_id": "cred_chal_456",
+                "options": {
+                    "challenge": "dGVzdC1jaGFsbGVuZ2U=",
+                    "rp": {"name": "Venya"},
+                    "user": {"id": "dXNlcjEyMw==", "name": "jsmith", "displayName": "jsmith"},
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                    "timeout": 60000,
+                },
+            },
+        )
+        start_resp.raise_for_status.return_value = None
+        complete_resp = _make_mock_response(status_code=200, json_data=complete_json)
+        complete_resp.raise_for_status.return_value = None
+        mock_http.request.side_effect = [start_resp, complete_resp]
+        client._http = mock_http
+
+        mock_credential = self._make_mock_credential()
+
+        with patch("venya_cli.commands._elevate", return_value="elev_token_xyz"):
+            with patch("venya_cli.fido2_client.list_devices", return_value=["fake_device"]):
+                with patch("venya_cli.fido2_client.Fido2Client") as mock_fido2, patch(
+                    "venya_cli.fido2_client.Ctap2"
+                ) as mock_ctap2:
+                    mock_ctap2.return_value.info.options = {"uv": True}
+                    mock_instance = MagicMock()
+                    mock_fido2.return_value = mock_instance
+                    mock_instance.make_credential.return_value = mock_credential
+                    args = MagicMock()
+                    args.label = label
+                    args.json = json_mode
+
+                    f = io.StringIO()
+                    with redirect_stdout(f):
+                        rc = cmd_credential_add(client, args)
+        return rc, f.getvalue()
+
+    def test_add_credential_displays_server_echoed_label(self):
+        """#482 site 2: the operator must see the SERVER's stored label
+        (``credential_label`` from CredentialAddCompleteResponse), not the
+        CLI's own local variable — a server-side normalization/truncation
+        (bounded 1..64) has to be visible."""
+        client, config_file = _make_client()
+        try:
+            rc, out = self._drive_add(
+                client,
+                {"status": "ok", "credential_label": "Stored: YubiKey 2"},
+                label="YubiKey 2",
+            )
+            assert rc == 0
+            assert "Stored: YubiKey 2" in out
+            assert "Label: YubiKey 2\n" not in out
+        finally:
+            client.close()
+            config_file.unlink()
+
+    def test_add_credential_falls_back_to_local_label_when_omitted(self):
+        """#482 paired negative (AC2): a complete response that omits
+        ``credential_label`` still prints the local label — the documented
+        fallback, never a blank line."""
+        client, config_file = _make_client()
+        try:
+            rc, out = self._drive_add(client, {"status": "ok"}, label="YubiKey 2")
+            assert rc == 0
+            assert "Label: YubiKey 2" in out
+        finally:
+            client.close()
+            config_file.unlink()
 
     def test_add_credential_no_fido2_device(self):
         """Add credential with no FIDO2 device returns error."""
@@ -510,7 +590,7 @@ class TestCredentialAdd:
             },
         )
         complete_resp = _make_mock_response(
-            status_code=200, json_data={"id": "cred_new_789", "label": "YubiKey 2", "status": "ok"}
+            status_code=200, json_data={"status": "ok", "credential_label": "YubiKey 2"}
         )
         mock_http.request.side_effect = [start_resp, complete_resp]
         client._http = mock_http

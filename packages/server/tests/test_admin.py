@@ -873,6 +873,9 @@ class TestAdminReEnroll:
             assert resp.status_code == 200
             data = resp.json()
             assert data["user_id"] == "user1"
+            # #482 option (a): the model carries the post-mutation status so
+            # the operator sees what the server actually did.
+            assert data["status"] == "pending_enrollment"
             assert data["enrollment_token"] == "new-token-xyz"
             assert data["expires_in_seconds"] == 900
             assert data["credentials_deactivated"] == 0

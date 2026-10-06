@@ -50,7 +50,13 @@ class TestAdminReEnroll:
     """Tests for venya admin re-enroll command."""
 
     def test_re_enroll_success(self):
-        """Re-enroll succeeds and prints user_id, status, token, credentials_deactivated, tokens_revoked."""
+        """Re-enroll succeeds and prints user_id, status, token, credentials_deactivated, tokens_revoked.
+
+        Fixture keys mirror AdminReEnrollResponse exactly (#482 AC3): the
+        model carries status (option (a)) and types credentials_deactivated
+        as int — a mock supplying a key or type the model rejects is the
+        bug's hiding place, not a test.
+        """
         client, config_file = _make_client()
         mock_http = MagicMock()
         mock_response = _make_mock_response(
@@ -59,7 +65,7 @@ class TestAdminReEnroll:
                 "user_id": "jsmith",
                 "status": "pending_enrollment",
                 "enrollment_token": "tok_reenroll_xyz",
-                "credentials_deactivated": True,
+                "credentials_deactivated": 3,
                 "tokens_revoked": 2,
                 "expires_in_seconds": 900,
             },
@@ -72,8 +78,18 @@ class TestAdminReEnroll:
         args.user_id = "jsmith"
         args.json = False
 
-        result = cmd_admin_re_enroll(client, args)
+        import io
+        from contextlib import redirect_stdout
+
+        f = io.StringIO()
+        with redirect_stdout(f):
+            result = cmd_admin_re_enroll(client, args)
         assert result == 0
+        out = f.getvalue()
+        # Status now arrives on the wire — the line renders the server value.
+        assert "Status:" in out and "pending_enrollment" in out
+        # int rendering, not a bool echo.
+        assert "Credentials deactivated: 3" in out
 
         call_args = mock_http.request.call_args
         assert call_args[0][0] == "POST"
@@ -91,7 +107,7 @@ class TestAdminReEnroll:
                 "user_id": "jsmith",
                 "status": "pending_enrollment",
                 "enrollment_token": "tok_reenroll_json",
-                "credentials_deactivated": True,
+                "credentials_deactivated": 1,
                 "tokens_revoked": 1,
                 "expires_in_seconds": 900,
             },
@@ -116,7 +132,7 @@ class TestAdminReEnroll:
         parsed = json.loads(output.strip())
         assert parsed["user_id"] == "jsmith"
         assert parsed["status"] == "pending_enrollment"
-        assert parsed["credentials_deactivated"] is True
+        assert parsed["credentials_deactivated"] == 1
         assert parsed["tokens_revoked"] == 1
         client.close()
         config_file.unlink()

@@ -1195,7 +1195,7 @@ def cmd_admin_re_enroll(client: APIClient, args: Any) -> int:
         if token:
             print(f"  Enrollment Token: {token}")
             print("    WARNING: Token is printed once and never stored.")
-        print(f"  Credentials deactivated: {result.get('credentials_deactivated', False)}")
+        print(f"  Credentials deactivated: {result.get('credentials_deactivated', 0)}")
         print(f"  Tokens revoked: {result.get('tokens_revoked', 0)}")
         print(f"  Expires in: {result.get('expires_in_seconds', 900)} seconds")
         return 0
@@ -1902,7 +1902,10 @@ def cmd_credential_add(client: APIClient, args: Any) -> int:
             return 0
 
         print("Credential added successfully.")
-        print(f"  Label: {result.get('label', label)}")
+        # Server-truth label (CredentialAddCompleteResponse.credential_label);
+        # the local variable is only the documented fallback for a response
+        # that omits the field (#482 AC2).
+        print(f"  Label: {result.get('credential_label', label)}")
         print("  Status: ok")
         return 0
     except APIClientError as e:
