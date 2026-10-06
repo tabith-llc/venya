@@ -155,6 +155,26 @@ def _executor_ca_certs(request: Request) -> list[x509.Certificate] | None:
         return None
 
 
+def _cert_signature_verifies(cert: x509.Certificate, issuer: x509.Certificate) -> bool:
+    """Check whether a leaf's signature cryptographically verifies against a CA anchor."""
+    try:
+        public_key = issuer.public_key()
+        if isinstance(public_key, ec.EllipticCurvePublicKey):
+            public_key.verify(cert.signature, cert.tbs_certificate_bytes, ec.ECDSA(cert.signature_hash_algorithm))
+            return True
+        if isinstance(public_key, rsa.RSAPublicKey):
+            public_key.verify(
+                cert.signature,
+                cert.tbs_certificate_bytes,
+                PKCS1v15(),
+                cert.signature_hash_algorithm,
+            )
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def _verify_forwarded_cert(request: Request, cert: x509.Certificate, ca_certs: list[x509.Certificate]) -> bool:
     """Crypto-verify a forwarded leaf against its PLANE's CA set (per-plane binding, ruled Q4).
 
@@ -170,7 +190,9 @@ def _verify_forwarded_cert(request: Request, cert: x509.Certificate, ca_certs: l
     against the installed version), so the leaf→single-anchor check is
     explicit. Every CA we issue (root, admin, executor leaves) is one
     signature link under a CA-flagged anchor; multi-hop chains are not an
-    issued shape in this product.
+    issued shape in this product. When a transition bundle contains multiple
+    anchors with the same subject name (e.g. during CA rotation), every
+    candidate anchor is evaluated until one verifies or all fail closed.
     """
     config = getattr(request.app.state, "config", None)
     tolerance = getattr(getattr(config, "clock_skew", None), "cert_tolerance_seconds", 0) or 0
@@ -179,30 +201,17 @@ def _verify_forwarded_cert(request: Request, cert: x509.Certificate, ca_certs: l
         return False
     if now > cert.not_valid_after_utc + timedelta(seconds=tolerance):
         return False
-    issuer = next((ca for ca in ca_certs if ca.subject == cert.issuer), None)
-    if issuer is None:
-        return False
-    try:
-        if not issuer.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
-            return False
-    except x509.ExtensionNotFound:
-        return False
-    public_key = issuer.public_key()
-    try:
-        if isinstance(public_key, ec.EllipticCurvePublicKey):
-            public_key.verify(cert.signature, cert.tbs_certificate_bytes, ec.ECDSA(cert.signature_hash_algorithm))
-        elif isinstance(public_key, rsa.RSAPublicKey):
-            public_key.verify(
-                cert.signature,
-                cert.tbs_certificate_bytes,
-                PKCS1v15(),
-                cert.signature_hash_algorithm,
-            )
-        else:
-            return False
-    except Exception:
-        return False
-    return True
+    for issuer in ca_certs:
+        if issuer.subject != cert.issuer:
+            continue
+        try:
+            if not issuer.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+                continue
+        except x509.ExtensionNotFound:
+            continue
+        if _cert_signature_verifies(cert, issuer):
+            return True
+    return False
 
 
 class SessionMiddleware(BaseHTTPMiddleware):
