@@ -580,6 +580,9 @@ class AdminCAManager:
             ]
         )
 
+        # #504: SKI + self-AKI, matching the installer's root-CA block
+        # (install-venya-core.sh) — every CA in this product carries them.
+        admin_ca_ski = x509.SubjectKeyIdentifier.from_public_key(private_key.public_key())
         builder = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -605,6 +608,11 @@ class AdminCAManager:
                     decipher_only=False,
                 ),
                 critical=True,
+            )
+            .add_extension(admin_ca_ski, critical=False)
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(admin_ca_ski),
+                critical=False,
             )
         )
 
@@ -678,6 +686,17 @@ class AdminCAManager:
             .serial_number(serial)
             .not_valid_before(now)
             .not_valid_after(now + timedelta(days=ADMIN_CERT_VALIDITY_DAYS))
+            # #504: SKI + AKI referencing the admin CA — same placement and
+            # from_issuer_public_key idiom as CAManager.sign_csr (executor
+            # leaves), so admin leaves match the rest of the product's PKI.
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(admin_key.public_key()),
+                critical=False,
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_cert.public_key()),
+                critical=False,
+            )
             .add_extension(
                 x509.BasicConstraints(ca=False, path_length=None),
                 critical=True,
