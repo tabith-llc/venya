@@ -332,14 +332,16 @@ def verify_fd_whitelist(open_fds: set[int], allowed_fds: set[int] | None = None)
     return sorted(unexpected)
 
 
-def scan_open_fds(pid: int | None = None) -> set[int]:
+def scan_open_fds(pid: int | None = None) -> set[int] | None:
     """Scan open file descriptors for a process.
 
     Args:
         pid: Process ID to scan. Defaults to current process.
 
     Returns:
-        Set of open FD numbers.
+        Set of open FD numbers, or None when /proc/<pid>/fd could not be read.
+        Returning None (rather than an empty set) keeps "could not look"
+        distinguishable from "looked and found nothing" (#453).
     """
     if pid is None:
         pid = os.getpid()
@@ -348,7 +350,7 @@ def scan_open_fds(pid: int | None = None) -> set[int]:
     try:
         return {int(fd) for fd in os.listdir(fd_dir)}
     except (FileNotFoundError, PermissionError):
-        return set()
+        return None
 
 
 def set_cloexec(fd: int) -> None:
