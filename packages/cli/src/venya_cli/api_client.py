@@ -138,7 +138,19 @@ def _build_ssl_context(cafile: str | None, certfile: str | None, keyfile: str | 
     """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     if cafile:
-        ctx.load_verify_locations(cafile=cafile)
+        try:
+            ctx.load_verify_locations(cafile=cafile)
+        except (ssl.SSLError, OSError) as e:
+            # Ticket 439: the refusal is correct behaviour, but the raw OpenSSL
+            # text named neither the file we tried to load nor the repair.
+            # Wrap — never silence — and append the original text after the
+            # guidance (production mandate: loud failure, full context).
+            raise APIClientError(
+                f"TLS trust file {cafile!r} is present but could not be loaded as a "
+                "certificate (corrupt, empty, or not PEM). Repair: run "
+                "`venya setup <core>` to reinstall the core CA, or set SSL_CERT_FILE "
+                f"to a valid bundle. Underlying OpenSSL error: {e}"
+            ) from e
     else:
         ctx.load_default_certs()
     if certfile and keyfile:

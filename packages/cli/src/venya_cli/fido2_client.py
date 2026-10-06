@@ -21,6 +21,7 @@ import getpass
 import json
 import logging
 import os
+import ssl
 import sys
 from pathlib import Path
 from typing import Any
@@ -216,8 +217,34 @@ class Fido2Auth:
         # Same server-TLS precedence as APIClient: SSL_CERT_FILE env wins,
         # then the CA installed by `venya setup`, then system trust.
         self._verify: str | bool = True
+        self._ca_path = ca_path
         if ca_path is not None and ca_path.exists() and not os.environ.get("SSL_CERT_FILE"):
             self._verify = str(ca_path)
+
+    def _tls_absent_hint(self, exc: BaseException) -> str:
+        """Diagnostic for a TLS verification failure when the config-dir CA is
+        absent (ticket 439): name the expected file, say it is absent, name the
+        repair. The system-trust fallback itself is unchanged — only the
+        failure TEXT gains the parity the registration path already had. The
+        hint is suppressed when SSL_CERT_FILE was set (an operator choice) or
+        when the failure has no certificate-verification cause."""
+        if self._verify is not True or os.environ.get("SSL_CERT_FILE"):
+            return ""
+        cause: BaseException | None = exc
+        while cause is not None:
+            if isinstance(cause, ssl.SSLCertVerificationError):
+                break
+            cause = cause.__cause__ or cause.__context__
+        else:
+            return ""
+        expected = str(self._ca_path) if self._ca_path is not None else "<config-dir>/ca.crt"
+        state = "is absent" if self._ca_path is not None and not self._ca_path.exists() else "is not trusted"
+        return (
+            f" — TLS trust check: the server certificate did not verify against the system "
+            f"store, and the config-dir CA file {expected} {state}. Run "
+            f"`venya setup <core>` for this server ({self.server_url}) to install the core "
+            f"CA, or set SSL_CERT_FILE to a valid trust bundle."
+        )
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Simple GET request."""
@@ -236,7 +263,7 @@ class Fido2Auth:
                 pass
             raise Fido2ClientError(error_msg)
         except httpx2.ConnectError as e:
-            raise Fido2ClientError(f"Connection failed: {e}")
+            raise Fido2ClientError(f"Connection failed: {e}{self._tls_absent_hint(e)}")
 
     def _post(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
         """Simple POST request."""
@@ -274,7 +301,7 @@ class Fido2Auth:
                 pass
             raise Fido2ClientError(error_msg)
         except httpx2.ConnectError as e:
-            raise Fido2ClientError(f"Connection failed: {e}")
+            raise Fido2ClientError(f"Connection failed: {e}{self._tls_absent_hint(e)}")
 
     def authenticate(self, user_id: str | None = None, timeout: float = 60.0) -> dict[str, Any]:
         """Perform WebAuthn authentication.
