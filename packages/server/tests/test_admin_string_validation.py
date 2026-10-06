@@ -43,10 +43,14 @@ def _build_app(tmp_path):
     SessionLocal = sessionmaker(bind=engine)
     s = SessionLocal()
     s.add(User(user_id="alice", status="active", auth_mode="security-key", display_name="Alice"))
+    # #486: a SECOND usable admin so status writes on alice stay ordinary
+    # operations — disabling the last usable admin is now a 409 by rule.
+    s.add(User(user_id="bob", status="active", auth_mode="security-key", display_name="Bob"))
     role = Role(name="admin", permissions="read-write")
     s.add(role)
     s.flush()
     s.add(RoleMember(user_id="alice", role_id=role.id))
+    s.add(RoleMember(user_id="bob", role_id=role.id))
     s.commit()
     s.close()
 

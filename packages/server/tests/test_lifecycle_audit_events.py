@@ -656,7 +656,13 @@ class TestUserLifecycle:
         db.query.return_value.filter.return_value.first.return_value = user
         app = _admin_app(db)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.put("/api/v1/admin/users/carol", json={"status": "disabled"})
+        # #486: the status guard reads the admin roster, which a MagicMock
+        # session cannot answer honestly. Stub the roster lookup to "no admin
+        # role seeded" so the guard stays out of this cell's way (same stub
+        # precedent as RoleManager.add_member above); every original assertion
+        # below is kept.
+        with patch("core.iam.role_manager.RoleManager.get_role_by_name", return_value=None):
+            resp = client.put("/api/v1/admin/users/carol", json={"status": "disabled"})
         assert resp.status_code == 200
         rows = _by_type(_lifecycle_events(db), "user_updated")
         assert len(rows) == 1
@@ -928,7 +934,11 @@ class TestSameTxnPosture:
         db.commit.side_effect = RuntimeError("audit flush blew up")
         app = _admin_app(db)
         client = TestClient(app, raise_server_exceptions=False)
-        resp = client.put("/api/v1/admin/users/carol", json={"status": "disabled"})
+        # #486: same roster-stub as TestUserLifecycle — keep the guard out of
+        # the way so the 400 below can only come from the commit failure this
+        # cell claims to test.
+        with patch("core.iam.role_manager.RoleManager.get_role_by_name", return_value=None):
+            resp = client.put("/api/v1/admin/users/carol", json={"status": "disabled"})
         assert resp.status_code == 400  # action FAILED — never a success with no row
         assert resp.json() == {"detail": "User configuration failed"}
 
