@@ -36,6 +36,39 @@ class SeparationOfDutiesError(RoleManagerError):
         self.tiers = sorted(tiers)
 
 
+class AdminLockoutError(RoleManagerError):
+    """Admin-lockout refusal (#443).
+
+    Raised before any write by the shared destructive-removal guard
+    :meth:`RoleManager.assert_removal_keeps_admin`: the operation would leave
+    the ``admin`` role with nobody in it, or it would let a caller strip their
+    own access. A deployment with zero administrators cannot enroll, rotate
+    keys or change policy, so the refusal is the safe outcome.
+
+    Subclasses RoleManagerError so every existing catch keeps working; carries
+    the structured refusal context (target user, role, machine-readable
+    reason) so the server layer writes the admin_lockout_denied audit event
+    without re-querying or string-matching the message. Messages are
+    enumeration-safe by construction: they name no other member.
+    """
+
+    LAST_ADMIN = "last_admin"
+    SELF_REMOVAL = "self_removal"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        user_id: str,
+        role_id: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.user_id = user_id
+        self.role_id = role_id
+
+
 def _mixed_auditor_tiers(tiers: set[str]) -> bool:
     """True iff 'auditor' coexists with ANY non-auditor tier (ruling 2').
 
@@ -59,6 +92,11 @@ class RoleInfo:
 
 class RoleManager:
     """Manages roles, memberships, and permissions."""
+
+    #: The role whose non-empty roster is the lockout boundary (#443). The
+    #: literal is the one require_admin resolves too (server/dependencies.py) —
+    #: a named constant, not a second source of the admin role id.
+    ADMIN_ROLE_NAME = "admin"
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -255,12 +293,32 @@ class RoleManager:
         self.db.flush()
         return membership
 
-    def remove_member(self, user_id: str, role_id: int) -> bool:
+    def remove_member(self, user_id: str, role_id: int, *, caller_user_id: str | None = None) -> bool:
         """Remove a user from a role.
+
+        Args:
+            user_id: User to remove.
+            role_id: Role to remove the membership from.
+            caller_user_id: Authenticated caller's user id, when it has one.
+                It carries the #443 self-removal half of the guard; pass None
+                only where no user principal exists (a certificate-only
+                caller), which disables that half and NOT the last-admin half.
 
         Returns:
             True if removed, False if not found.
+
+        Raises:
+            AdminLockoutError: Refused before any write because the removal
+                would leave the admin roster empty, or would strip the caller's
+                own admin membership (#443).
         """
+        # ONE enforcement point: the rule runs here, so no caller can reach the
+        # delete without having answered it.
+        self.assert_removal_keeps_admin(
+            user_id,
+            role_id=role_id,
+            caller_user_id=caller_user_id,
+        )
         membership = (
             self.db.query(RoleMember).filter(RoleMember.user_id == user_id, RoleMember.role_id == role_id).first()
         )
@@ -270,6 +328,92 @@ class RoleManager:
         self.db.delete(membership)
         self.db.flush()
         return True
+
+    def assert_removal_keeps_admin(
+        self,
+        target_user_id: str,
+        *,
+        role_id: int | None = None,
+        caller_user_id: str | None = None,
+    ) -> None:
+        """Refuse a destructive removal that would leave this core without an admin.
+
+        ONE enforcement point for both destructive surfaces (#443 acceptance
+        criterion 3), so a future route cannot ship without it — each caller
+        invokes it BEFORE any write:
+
+        - ``role_id=None`` — the whole user is going away, and with it every
+          membership it holds (``DELETE /admin/users/{user_id}``). Removing
+          one's own account over the API is refused outright.
+        - ``role_id`` set — only that one membership is at stake
+          (``DELETE /roles/{role_id}/members/{user_id}``); a role other than
+          the admin role cannot empty the admin roster, and a target that
+          holds no admin membership keeps its existing 404 — so both fall
+          through untouched.
+
+        Refusals, in this order (the last-admin fact outranks the self-removal
+        fact when both apply, because it is the one telling the operator to
+        seed a second admin first):
+
+        1. last admin — the target holds the only admin membership, so the
+           removal would leave the roster empty.
+        2. self-removal — the caller is the target: the "are you sure" a
+           remote call cannot answer.
+
+        Args:
+            target_user_id: User whose membership (or whole account) is being
+                removed.
+            role_id: Role of the single membership being removed, or None when
+                the entire user is being removed.
+            caller_user_id: Authenticated caller's user id, when it has one.
+                ``None`` (a certificate-only caller with no user row) simply
+                disables the self-removal half; the last-admin half still
+                applies.
+
+        Raises:
+            AdminLockoutError: On either refusal. Messages are enumeration-
+            safe: they name no member other than the caller's own target.
+        """
+        # Same lookup require_admin uses (server/dependencies.py) — never a
+        # re-derived id or a name guess.
+        admin_role = self.get_role_by_name(self.ADMIN_ROLE_NAME)
+        if admin_role is None:
+            # No admin role seeded yet (a pre-init core): there is no roster to
+            # empty, so only the self-removal half of the rule can apply.
+            if role_id is None and caller_user_id is not None and target_user_id == caller_user_id:
+                raise AdminLockoutError(
+                    "Cannot remove your own user account",
+                    reason=AdminLockoutError.SELF_REMOVAL,
+                    user_id=target_user_id,
+                )
+            return
+        if role_id is not None and role_id != admin_role.id:
+            return
+
+        members = self.get_role_members(admin_role.id)
+        target_holds_admin = any(member.user_id == target_user_id for member in members)
+
+        if target_holds_admin and len(members) <= 1:
+            raise AdminLockoutError(
+                "Cannot remove the last admin",
+                reason=AdminLockoutError.LAST_ADMIN,
+                user_id=target_user_id,
+                role_id=admin_role.id,
+            )
+
+        if caller_user_id is None or target_user_id != caller_user_id:
+            return
+        if role_id is not None and not target_holds_admin:
+            # Membership-scoped route, caller is the target, but the target
+            # holds no admin membership: nothing is taken away here, so the
+            # route's existing 404 stays the answer.
+            return
+        raise AdminLockoutError(
+            "Cannot remove your own user account" if role_id is None else "Cannot remove your own admin membership",
+            reason=AdminLockoutError.SELF_REMOVAL,
+            user_id=target_user_id,
+            role_id=None if role_id is None else admin_role.id,
+        )
 
     def get_role_members(self, role_id: int) -> list[RoleMember]:
         """Get all members of a role."""

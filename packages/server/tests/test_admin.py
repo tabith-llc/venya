@@ -110,7 +110,13 @@ class TestAdminRemove:
     """Tests for admin user removal endpoint."""
 
     def test_remove_success(self):
-        """DELETE /admin/users/{id} should remove user with row lock."""
+        """DELETE /admin/users/{id} should remove user with row lock.
+
+        The route now reads the admin roster first (#443 lockout guard), so the
+        fake answers `.all()` with an EMPTY roster: user1 holds no admin
+        membership, the guard stays out of the way, and the delete path under
+        test is the one that has always run.
+        """
         user = SimpleNamespace(user_id="user1", id=1)
 
         class MockQuery:
@@ -122,6 +128,9 @@ class TestAdminRemove:
 
             def first(self):
                 return user
+
+            def all(self):
+                return []
 
             def delete(self):
                 return 0
@@ -165,7 +174,12 @@ class TestAdminRemove:
         assert resp.status_code == 404
 
     def test_remove_integrity_error(self):
-        """DELETE /admin/users/{id} should return 400 on FK violation."""
+        """DELETE /admin/users/{id} should return 400 on FK violation.
+
+        `.all()` answers empty for the same #443 reason as test_remove_success:
+        the guard reads the roster before the cascade, and this cell is about
+        the IntegrityError behind it.
+        """
         from sqlalchemy import exc as sqlalchemy_exc
 
         user = SimpleNamespace(user_id="user1", id=1)
@@ -179,6 +193,9 @@ class TestAdminRemove:
 
             def first(self):
                 return user
+
+            def all(self):
+                return []
 
             def delete(self):
                 return 0
