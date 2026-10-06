@@ -156,7 +156,7 @@ async def filter_session_output(
     Definitive masking endpoint. Called by executor after Stage 1 local filtering.
 
     Args:
-        session_id: The executor session ID.
+        session_id: The executor session ID — an ``execution_sessions`` row id.
         req: Base64-encoded stdout/stderr to filter.
         request: The FastAPI request (mTLS caller state).
 
@@ -164,7 +164,6 @@ async def filter_session_output(
         Sanitized output with masked secrets.
     """
     from core.iam.models import Secret
-    from core.iam.models import Session as SessionModel
 
     # Verify caller is executor (mTLS) — mirrors routes/secrets.py revoke.
     # The middleware is the choke point that VERIFIES the identity
@@ -177,30 +176,86 @@ async def filter_session_output(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Executor mTLS authentication required",
         )
+    caller_executor_id = caller.get("executor_id")
 
-    # Look up session to find injected secrets
-    try:
-        session_id_int = int(session_id)
-    except (ValueError, TypeError):
-        session_id_int = None
+    # RESOLVE EXECUTION SESSIONS ONLY (secret-session-authorization-scoping #440,
+    # gate 4). The former shape integer-parsed session_id and, on a hit, queried
+    # the AUTH session table (core.iam.models.Session) and then decrypted EVERY
+    # secret that session's user owns. ExecutionSession.id is a String UUID while
+    # the auth Session.id is an Integer, so an integer that reached this route (the
+    # reaper/dir-filename path) resolved the WRONG session kind and masked against
+    # an unrelated — and much larger — secret set, handing plaintext-equivalent
+    # knowledge to a caller never bound to those secrets. Execution-session ids
+    # never collide with auth-session ids, so the auth table is not consulted here
+    # at all: an id that is not an execution-session id resolves nothing.
+    from core.engine.encryption import DecryptionError
+    from core.engine.encryption import decrypt_secret as _decrypt_secret_impl
+    from core.iam.models import ExecutionSession, SessionSecret
 
-    session = None
-    if session_id_int is not None:
-        session = db.query(SessionModel).filter(SessionModel.id == session_id_int).first()
+    # FAIL CLOSED on unknown sessions (ticket
+    # stage2-filter-unknown-session-unmasked-passthrough): this route is the
+    # DEFINITIVE masker and the executor adopts its answer over its own
+    # Stage-1 masking — an empty-knowledge 200 therefore ships RAW output to
+    # the caller. Vanished sessions are a PROVEN real occurrence (the 10-min
+    # TTL reaper deletes rows mid-run — execute-stale-session-update-500), so
+    # unknown → 404 → the executor's existing "Stage 2 filter failed — using
+    # Stage 1 results" fallback keeps masking at one stage, never zero. A
+    # session that EXISTS with zero bindings still returns 200 (legitimately
+    # nothing to mask). The same 404 shape covers the integer-id case above:
+    # an id with no execution_sessions row is unknown here, fail-closed.
+    exec_session = db.query(ExecutionSession).filter(ExecutionSession.id == session_id).first()
+    if exec_session is None:
+        logger.warning(
+            "Filter called for unknown session %s — refusing empty-knowledge passthrough",
+            session_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+
+    # CALLER-BINDING CHECK (#440 gate 3): class alone was not enough — any
+    # authenticated executor could ask this route whether a secret it is not
+    # bound to appears in ANOTHER executor's session output, and the
+    # masked_count/masked_hashes answer is the oracle. The session row names
+    # its executor (execution_sessions.executor_id); a mismatch is a flat 403
+    # BEFORE any decryption or hash comparison, so a foreign session yields no
+    # knowledge at all (routes/secrets.py revoke carries the same binding check).
+    if exec_session.executor_id != caller_executor_id:
+        logger.warning(
+            "Filter called by executor %s for session %s bound to executor %s — refusing",
+            caller_executor_id,
+            session_id,
+            exec_session.executor_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Session belongs to another executor",
+        )
 
     session_secrets: dict[str, bytes] = {}
-    if session is not None:
-        from core.engine.encryption import DecryptionError
-        from core.engine.encryption import decrypt_secret as _decrypt_secret_impl
+    bindings = db.query(SessionSecret).filter(SessionSecret.session_id == session_id).all()
 
-        kek = backend.config.kek
-        # Get secrets associated with this session's user
-        secrets = db.query(Secret).filter(Secret.created_by == session.user_id).all()
-        for secret in secrets:
+    if not bindings:
+        logger.warning(
+            "Session %s has no secret bindings — masking will be a no-op",
+            session_id,
+        )
+    else:
+        for binding in bindings:
+            secret = db.query(Secret).filter(Secret.id == binding.secret_id).first()
+            if secret is None:
+                logger.warning(
+                    "Secret %s bound to session %s not found in DB — skipping",
+                    binding.secret_id,
+                    session_id,
+                )
+                continue
+            kek = backend.config.kek
             if kek is None:
                 logger.warning(
                     "No KEK configured, cannot decrypt secret %s for session %s",
-                    secret.id,
+                    binding.secret_id,
                     session_id,
                 )
                 continue
@@ -209,77 +264,12 @@ async def filter_session_output(
             except DecryptionError:
                 logger.warning(
                     "Failed to decrypt secret %s for session %s",
-                    secret.id,
+                    binding.secret_id,
                     session_id,
                 )
                 continue
             hash_hex = hashlib.sha256(plaintext).hexdigest()
             session_secrets[hash_hex] = plaintext
-    else:
-        # Non-auth-session path: session_id is not an integer auth-session ID.
-        # This catches UUID execution sessions AND integer IDs that failed lookup.
-        # We look up bound secrets through the SessionSecret join table.
-        from core.engine.encryption import DecryptionError
-        from core.engine.encryption import decrypt_secret as _decrypt_secret_impl
-        from core.iam.models import ExecutionSession, SessionSecret
-
-        # FAIL CLOSED on unknown sessions (ticket
-        # stage2-filter-unknown-session-unmasked-passthrough): this route is the
-        # DEFINITIVE masker and the executor adopts its answer over its own
-        # Stage-1 masking — an empty-knowledge 200 therefore ships RAW output to
-        # the caller. Vanished sessions are a PROVEN real occurrence (the 10-min
-        # TTL reaper deletes rows mid-run — execute-stale-session-update-500), so
-        # unknown → 404 → the executor's existing "Stage 2 filter failed — using
-        # Stage 1 results" fallback keeps masking at one stage, never zero. A
-        # session that EXISTS with zero bindings still returns 200 (legitimately
-        # nothing to mask).
-        exec_session = db.query(ExecutionSession).filter(ExecutionSession.id == session_id).first()
-        if exec_session is None:
-            logger.warning(
-                "Filter called for unknown session %s — refusing empty-knowledge passthrough",
-                session_id,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Session not found",
-            )
-
-        bindings = db.query(SessionSecret).filter(SessionSecret.session_id == session_id).all()
-
-        if not bindings:
-            logger.warning(
-                "Session %s has no secret bindings — masking will be a no-op",
-                session_id,
-            )
-        else:
-            for binding in bindings:
-                secret = db.query(Secret).filter(Secret.id == binding.secret_id).first()
-                if secret is None:
-                    logger.warning(
-                        "Secret %s bound to session %s not found in DB — skipping",
-                        binding.secret_id,
-                        session_id,
-                    )
-                    continue
-                kek = backend.config.kek
-                if kek is None:
-                    logger.warning(
-                        "No KEK configured, cannot decrypt secret %s for session %s",
-                        binding.secret_id,
-                        session_id,
-                    )
-                    continue
-                try:
-                    plaintext = _decrypt_secret_impl(kek, secret.wrapped_dek, secret.nonce, secret.encrypted_value)
-                except DecryptionError:
-                    logger.warning(
-                        "Failed to decrypt secret %s for session %s",
-                        binding.secret_id,
-                        session_id,
-                    )
-                    continue
-                hash_hex = hashlib.sha256(plaintext).hexdigest()
-                session_secrets[hash_hex] = plaintext
 
     # Decode base64 input
     try:

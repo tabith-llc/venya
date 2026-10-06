@@ -14,7 +14,7 @@ from server.routes import filter as filter_routes
 from starlette.testclient import TestClient
 
 
-def _create_test_app(backend=None):
+def _create_test_app(backend=None, executor_id="venya-exec-1"):
     """Create a minimal test app with filter route."""
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
@@ -29,11 +29,77 @@ def _create_test_app(backend=None):
             # The real SessionMiddleware grants this only after verifying the
             # executor mTLS identity (sec-executor-session-path-no-auth); the
             # route-level caller check below is defense-in-depth.
-            request.state.auth_user = {"caller": "executor", "executor_id": "venya-exec-1"}
+            request.state.auth_user = {"caller": "executor", "executor_id": executor_id}
             return await call_next(request)
 
     app.add_middleware(AuthMiddleware)
     return app
+
+
+def _exec_session(session_id="exec-session-uuid", executor_id="venya-exec-1"):
+    """A stand-in execution_sessions row: the route reads id + executor_id."""
+    return SimpleNamespace(id=session_id, executor_id=executor_id)
+
+
+def _db_stub(*, exec_session=None, bindings=(), secrets=()):
+    """Query stub over the THREE reads the stage-2 route makes.
+
+    routes/filter.py resolves one ExecutionSession, then the SessionSecret
+    bindings for that session, then one Secret per binding id. Keying on the
+    model name keeps the stub honest about WHICH table the route touches: the
+    auth-session table (core Session) is not read at all since
+    secret-session-authorization-scoping #440 gate 4.
+    """
+    secret_by_id = {s.id: s for s in secrets}
+
+    class _Q:
+        def __init__(self, kind):
+            self._kind = kind
+            self._wanted = None
+
+        def filter(self, *args, **kwargs):
+            # The per-binding read is `Secret.id == binding.secret_id`; take the
+            # id off the criterion so one stub answers for several secrets.
+            if self._kind == "secret" and args:
+                try:
+                    self._wanted = args[0].right.value
+                except AttributeError:
+                    pass
+            return self
+
+        def first(self):
+            if self._kind == "exec":
+                return exec_session
+            if self._kind == "secret":
+                return secret_by_id.get(self._wanted)
+            return None
+
+        def all(self):
+            if self._kind == "bindings":
+                return list(bindings)
+            return []
+
+    def query_side_effect(model):
+        name = model.__name__
+        if name == "ExecutionSession":
+            return _Q("exec")
+        if name == "SessionSecret":
+            return _Q("bindings")
+        return _Q("secret")
+
+    db = MagicMock()
+    db.query.side_effect = query_side_effect
+    return db
+
+
+def _secret_row(secret_id=1, key="mysecret"):
+    return SimpleNamespace(
+        id=secret_id,
+        key=key,
+        encrypted_value=b"encrypted_data",
+        nonce=b"nonce12345678901",
+        wrapped_dek=b"wrapped_dk12345678",
+    )
 
 
 class TestFilterSessionOutput:
@@ -41,44 +107,20 @@ class TestFilterSessionOutput:
 
     def test_filter_no_secrets(self):
         """POST /sessions/{id}/filter should return output unmodified when no secrets."""
-        session = SimpleNamespace(id=123, user_id="user1")
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def first(self):
-                return session
-
-        class EmptyMockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def all(self):
-                return []
-
-        db = MagicMock()
-
-        def query_side_effect(model):
-            if model.__name__ == "Secret":
-                return EmptyMockQuery()
-            return MockQuery()
-
-        db.query.side_effect = query_side_effect
-
         backend = MagicMock()
-        backend.get_session.return_value = db
+        backend.get_session.return_value = _db_stub(exec_session=_exec_session("sess-clean"))
         app = _create_test_app(backend=backend)
 
         client = TestClient(app, raise_server_exceptions=False)
         import base64
 
-        # Use an integer session_id so the auth-session path is taken
-        # (the test mocks SessionModel lookup; Secret query returns empty)
+        # An execution session that EXISTS with zero bound secrets: the
+        # legitimate nothing-to-mask 200 (routes/filter.py stays fail-closed
+        # only for UNKNOWN sessions — stage2-filter-unknown-session-unmasked-passthrough).
         stdout = base64.b64encode(b"hello world").decode()
         stderr = base64.b64encode(b"error msg").decode()
         resp = client.post(
-            "/api/v1/sessions/123/filter",
+            "/api/v1/sessions/sess-clean/filter",
             json={"stdout": stdout, "stderr": stderr},
         )
         assert resp.status_code == 200
@@ -93,33 +135,8 @@ class TestFilterSessionOutput:
         FilterRequest never declared it (pydantic drops extra keys), so a
         legacy payload must return 200 with a response IDENTICAL to the
         new shape. Old daemons talking to new cores must not break."""
-        session = SimpleNamespace(id=123, user_id="user1")
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def first(self):
-                return session
-
-        class EmptyMockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def all(self):
-                return []
-
-        db = MagicMock()
-
-        def query_side_effect(model):
-            if model.__name__ == "Secret":
-                return EmptyMockQuery()
-            return MockQuery()
-
-        db.query.side_effect = query_side_effect
-
         backend = MagicMock()
-        backend.get_session.return_value = db
+        backend.get_session.return_value = _db_stub(exec_session=_exec_session("sess-legacy"))
         app = _create_test_app(backend=backend)
         client = TestClient(app, raise_server_exceptions=False)
 
@@ -129,7 +146,7 @@ class TestFilterSessionOutput:
         stderr = base64.b64encode(b"error msg").decode()
 
         legacy = client.post(
-            "/api/v1/sessions/123/filter",
+            "/api/v1/sessions/sess-legacy/filter",
             json={
                 "stdout": stdout,
                 "stderr": stderr,
@@ -137,7 +154,7 @@ class TestFilterSessionOutput:
             },
         )
         current = client.post(
-            "/api/v1/sessions/123/filter",
+            "/api/v1/sessions/sess-legacy/filter",
             json={"stdout": stdout, "stderr": stderr},
         )
         assert legacy.status_code == 200
@@ -158,23 +175,8 @@ class TestFilterSessionOutput:
 
     def test_filter_invalid_b64(self):
         """POST /sessions/{id}/filter should handle invalid base64 gracefully."""
-        session = SimpleNamespace(id=123, user_id="user1")
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def first(self):
-                return session
-
-            def all(self):
-                return []
-
-        db = MagicMock()
-        db.query.return_value = MockQuery()
-
         backend = MagicMock()
-        backend.get_session.return_value = db
+        backend.get_session.return_value = _db_stub(exec_session=_exec_session("sess-123"))
         app = _create_test_app(backend=backend)
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -190,23 +192,8 @@ class TestFilterSessionOutput:
 
     def test_filter_with_session_no_secrets(self):
         """POST /sessions/{id}/filter should handle session with no secrets."""
-        session = SimpleNamespace(id=123, user_id="user1")
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def first(self):
-                return session
-
-            def all(self):
-                return []
-
-        db = MagicMock()
-        db.query.return_value = MockQuery()
-
         backend = MagicMock()
-        backend.get_session.return_value = db
+        backend.get_session.return_value = _db_stub(exec_session=_exec_session("sess-123"))
         app = _create_test_app(backend=backend)
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -228,37 +215,17 @@ class TestFilterSessionOutput:
         import base64
         from unittest.mock import patch
 
-        session = SimpleNamespace(id=123, user_id="user1")
-
         # The actual secret value that should be redacted
         secret_value = b"AKIAIOSFODNN7EXAMPLE"
-        secret_key_name = "aws_api_key"
 
-        # Mock secret with encrypted fields
-        secret = SimpleNamespace(
-            id=1,
-            key=secret_key_name,
-            created_by="user1",
-            encrypted_value=b"encrypted_data",
-            nonce=b"nonce12345678901",
-            wrapped_dek=b"wrapped_dk12345678",
-        )
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def first(self):
-                return session
-
-            def all(self):
-                return [secret]
-
-        db = MagicMock()
-        db.query.return_value = MockQuery()
-
+        # Bound-secret shape: the stage-2 route masks EXACTLY the secrets this
+        # session has rows for (#440 gate 4 — nothing else is in scope).
         backend = MagicMock()
-        backend.get_session.return_value = db
+        backend.get_session.return_value = _db_stub(
+            exec_session=_exec_session("sess-mask"),
+            bindings=[SimpleNamespace(secret_id=1)],
+            secrets=[_secret_row(1, "aws_api_key")],
+        )
         backend.config.kek = b"A" * 32  # 32-byte KEK
         app = _create_test_app(backend=backend)
 
@@ -271,9 +238,8 @@ class TestFilterSessionOutput:
         with patch("core.engine.encryption.decrypt_secret") as mock_decrypt:
             mock_decrypt.return_value = secret_value
 
-            # Use integer session ID so session lookup executes
             resp = client.post(
-                "/api/v1/sessions/123/filter",
+                "/api/v1/sessions/sess-mask/filter",
                 json={"stdout": stdout_with_secret, "stderr": stderr},
             )
 
@@ -291,32 +257,12 @@ class TestFilterSessionOutput:
         import base64
         from unittest.mock import patch
 
-        session = SimpleNamespace(id=123, user_id="user1")
-
-        secret = SimpleNamespace(
-            id=1,
-            key="mysecret",
-            created_by="user1",
-            encrypted_value=b"encrypted_data",
-            nonce=b"nonce12345678901",
-            wrapped_dek=b"wrapped_dk12345678",
-        )
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def first(self):
-                return session
-
-            def all(self):
-                return [secret]
-
-        db = MagicMock()
-        db.query.return_value = MockQuery()
-
         backend = MagicMock()
-        backend.get_session.return_value = db
+        backend.get_session.return_value = _db_stub(
+            exec_session=_exec_session("sess-undec"),
+            bindings=[SimpleNamespace(secret_id=1)],
+            secrets=[_secret_row(1, "mysecret")],
+        )
         backend.config.kek = b"A" * 32
         app = _create_test_app(backend=backend)
 
@@ -331,7 +277,7 @@ class TestFilterSessionOutput:
             mock_decrypt.side_effect = DecryptionError("invalid tag")
 
             resp = client.post(
-                "/api/v1/sessions/123/filter",
+                "/api/v1/sessions/sess-undec/filter",
                 json={"stdout": stdout, "stderr": stderr},
             )
 
@@ -345,32 +291,12 @@ class TestFilterSessionOutput:
         """POST /sessions/{id}/filter should skip secrets when KEK is None."""
         import base64
 
-        session = SimpleNamespace(id=123, user_id="user1")
-
-        secret = SimpleNamespace(
-            id=1,
-            key="mysecret",
-            created_by="user1",
-            encrypted_value=b"encrypted_data",
-            nonce=b"nonce12345678901",
-            wrapped_dek=b"wrapped_dk12345678",
-        )
-
-        class MockQuery:
-            def filter(self, *args, **kwargs):
-                return self
-
-            def first(self):
-                return session
-
-            def all(self):
-                return [secret]
-
-        db = MagicMock()
-        db.query.return_value = MockQuery()
-
         backend = MagicMock()
-        backend.get_session.return_value = db
+        backend.get_session.return_value = _db_stub(
+            exec_session=_exec_session("sess-nokek"),
+            bindings=[SimpleNamespace(secret_id=1)],
+            secrets=[_secret_row(1, "mysecret")],
+        )
         backend.config.kek = None
         app = _create_test_app(backend=backend)
 
@@ -380,7 +306,7 @@ class TestFilterSessionOutput:
         stderr = base64.b64encode(b"clean").decode()
 
         resp = client.post(
-            "/api/v1/sessions/123/filter",
+            "/api/v1/sessions/sess-nokek/filter",
             json={"stdout": stdout, "stderr": stderr},
         )
 
@@ -412,9 +338,9 @@ class TestFilterSessionOutput:
                 return [binding]
 
             def first(self):
-                # ExecutionSession existence check (stage2 fail-closed fix):
-                # this test's session EXISTS with bindings.
-                return SimpleNamespace(id="exec-session-uuid")
+                # ExecutionSession existence + caller-binding check (#440 gate 3):
+                # this test's session EXISTS and is bound to the calling executor.
+                return _exec_session("exec-session-uuid", "venya-exec-1")
 
         class SecretMockQuery:
             def filter(self, *args, **kwargs):
@@ -471,10 +397,10 @@ class TestFilterSessionOutput:
                 return []
 
             def first(self):
-                # ExecutionSession existence check (stage2 fail-closed fix):
-                # the session EXISTS; it simply has zero secret bindings —
-                # the legitimate 200 no-op case.
-                return SimpleNamespace(id="550e8400-e29b-41d4-a716-446655440000")
+                # ExecutionSession existence + caller-binding check (#440 gate 3):
+                # the session EXISTS, is bound to the caller, and simply has zero
+                # secret bindings — the legitimate 200 no-op case.
+                return _exec_session("550e8400-e29b-41d4-a716-446655440000", "venya-exec-1")
 
         db = MagicMock()
         db.query.return_value = MockQuery()
@@ -606,7 +532,7 @@ class TestFilterUnknownSessionFailClosed:
         def qse(model):
             q = MagicMock()
             if model.__name__ == "ExecutionSession":
-                q.filter.return_value.first.return_value = SimpleNamespace(id="known-1")
+                q.filter.return_value.first.return_value = _exec_session("known-1", "venya-exec-1")
             else:
                 q.filter.return_value.first.return_value = None
                 q.filter.return_value.all.return_value = []
