@@ -7,16 +7,83 @@
 """Tests for disk encryption check utility."""
 
 import logging
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from server.utils.disk_encryption import (
+    _find_crypt_backing_device,
     _find_mount_point,
     _get_fstype_via_lsblk,
     _get_pg_data_directory,
     _has_crypt_target,
     check_disk_encryption,
 )
+
+# /proc/self/mountinfo fixtures. Format:
+# <id> <parent> <maj:min> <root> <mount> <opts> [optional -] - <fstype> <source> <super>
+MOUNTINFO_PLAIN_PGDATA_OTHER_CRYPT = (
+    "21 0 8:1 / / ext4 rw,relatime - ext4 /dev/sda1 rw\n"
+    "36 21 253:0 / /backup4 ext4 rw,relatime - ext4 /dev/mapper/backup4_crypt rw\n"
+    "42 21 253:1 / /var/lib/postgresql ext4 rw,relatime - ext4 /dev/mapper/pgdata rw\n"
+)
+MOUNTINFO_CRYPT_PGDATA = (
+    "21 0 8:1 / / ext4 rw,relatime - ext4 /dev/sda1 rw\n"
+    "42 21 253:1 / /var/lib/postgresql ext4 rw,relatime - ext4 /dev/mapper/pgdata_crypt rw\n"
+)
+MOUNTINFO_LVM_OVER_CRYPT = (
+    "21 0 8:1 / / ext4 rw,relatime - ext4 /dev/sda1 rw\n"
+    "42 21 253:3 / /var/lib/postgresql ext4 rw,relatime - "
+    "ext4 /dev/mapper/vg--pgdata-lv--main rw\n"
+)
+MOUNTINFO_TMPFS_MOUNT = (
+    "21 0 8:1 / / ext4 rw,relatime - ext4 /dev/sda1 rw\n" "36 21 0:41 / /var/lib/postgresql rw - tmpfs tmpfs rw\n"
+)
+
+TABLE_PLAIN_PGDATA = "pgdata: 0 20971520 linear 8:16 2048\n"
+TABLE_CRYPT = (
+    "pgdata_crypt: 0 4194304000 crypt aes-xts-plain64 0123456789abcdef 0 8 4096 " "1024 0 2 sha256 2 : LUKS_2\n"
+)
+TABLE_LV = "vg--pgdata-lv--main: 0 20971520 linear 253:1 2048\n"
+TABLE_VG = "vg--pgdata: 0 41943040 striped 2 32 253:0 0 8:32 4096\n"
+
+
+def _write_mountinfo(tmp_path: Path, content: str) -> str:
+    path = tmp_path / "mountinfo"
+    path.write_text(content, encoding="utf-8")
+    return str(path)
+
+
+def _dmsetup_fixture(info=None, table=None, deps=None):
+    """Build a subprocess.run side_effect for the scoped dmsetup calls.
+
+    Each mapping keys the device argument (last token of the command) to
+    stdout for returncode 0. Any unmapped call gets returncode 1 with empty
+    stdout — the real dmsetup answer for a plain (non-dm) partition, and a
+    tripwire if the code ever queries a device outside the mount's lineage.
+    """
+    info = info or {}
+    table = table or {}
+    deps = deps or {}
+
+    def _run(cmd, *args, **kwargs):
+        sub = cmd[1]
+        # Unscoped whole-system query (exactly the #444 bug shape): every
+        # device's line is present, so a substring match over this output
+        # cannot pass the negative cells.
+        if len(cmd) == 2 and sub in ("info", "table", "deps"):
+            whole = "".join(mapping_all[sub])
+            return MagicMock(returncode=0, stdout=whole, stderr="")
+        device = cmd[-1]
+        mapping = {"info": info, "table": table, "deps": deps}[sub]
+        if device not in mapping:
+            return MagicMock(returncode=1, stdout="", stderr=f"no fixture for {' '.join(cmd)}")
+        return MagicMock(returncode=0, stdout=mapping[device], stderr="")
+
+    mapping_all = {"info": [], "table": [], "deps": []}
+    for mapping, key in ((info, "info"), (table, "table"), (deps, "deps")):
+        mapping_all[key] = list(mapping.values())
+    return _run
 
 
 class TestGetPgDataDirectory:
@@ -90,35 +157,188 @@ class TestGetFstypeViaLsblk:
 
 
 class TestHasCryptTarget:
-    """Tests for dmsetup crypt target detection."""
+    """Tests for crypt-target detection, scoped to the mount's OWN device
+    lineage (ticket disk-encryption-mount-check-ignores-argument #444).
+    Every test fakes subprocess.run and a mountinfo file — never real
+    dmsetup, never /proc of the test host."""
 
-    def test_returns_true_for_crypt_target(self):
-        """Returns True when dmsetup shows a crypt target."""
-        dmsetup_output = "sda1_crypt: 0 10485760 crypt aes-xts-plain64 ..."
-        mock_result = MagicMock(returncode=0, stdout=dmsetup_output, stderr="")
+    # ---- (a) the bug case, and (e) its regression-lock twin ----
 
-        with patch("server.utils.disk_encryption.subprocess.run", return_value=mock_result):
-            assert _has_crypt_target("/var/lib/postgresql") is True
+    def test_unrelated_crypt_line_does_not_satisfy_check(self, tmp_path):
+        """#444 the bug case: dmsetup output contains a crypt target for a
+        DIFFERENT device while our mount sits on a plain linear target →
+        must be False. RED on the old whole-table substring match."""
+        mi = _write_mountinfo(tmp_path, MOUNTINFO_PLAIN_PGDATA_OTHER_CRYPT)
+        side = _dmsetup_fixture(
+            info={
+                "/dev/mapper/pgdata": "pgdata\n",
+                "/dev/mapper/backup4_crypt": "backup4_crypt\n",
+            },
+            table={
+                "pgdata": TABLE_PLAIN_PGDATA,
+                # The unrelated device's crypt line EXISTS, exactly as it
+                # would in a real whole-system `dmsetup table`. Our code
+                # must never consult it — querying backup4_crypt's table
+                # would return rc 1 (unmapped tripwire) and prove drift.
+                "backup4_crypt": TABLE_CRYPT.replace("pgdata_crypt", "backup4_crypt"),
+            },
+            deps={"pgdata": "pgdata: 1 dependencies: (8,16) [ sda2 ]\n"},
+        )
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch("server.utils.disk_encryption.subprocess.run", side_effect=side):
+                assert _has_crypt_target("/var/lib/postgresql") is False
 
-    def test_returns_false_without_crypt(self):
-        """Returns False when no crypt target found."""
-        dmsetup_output = "sda1: 0 10485760 linear /dev/sda1 4096"
-        mock_result = MagicMock(returncode=0, stdout=dmsetup_output, stderr="")
+    def test_same_host_two_mounts_give_different_answers(self, tmp_path):
+        """(e) Regression lock against "matches any line": on ONE host with
+        root plain, backup4 encrypted, PGDATA plain — the crypt-backed
+        mount verifies True and the plain mount verifies False from the
+        SAME dmsetup fixtures. The old code returned True for both."""
+        mi = _write_mountinfo(tmp_path, MOUNTINFO_PLAIN_PGDATA_OTHER_CRYPT)
+        side = _dmsetup_fixture(
+            info={
+                "/dev/mapper/pgdata": "pgdata\n",
+                "/dev/mapper/backup4_crypt": "backup4_crypt\n",
+            },
+            table={
+                "pgdata": TABLE_PLAIN_PGDATA,
+                "backup4_crypt": TABLE_CRYPT.replace("pgdata_crypt", "backup4_crypt"),
+            },
+            deps={
+                "pgdata": "pgdata: 1 dependencies: (8,16) [ sda2 ]\n",
+                "backup4_crypt": "backup4_crypt: 1 dependencies: (8,32) [ sdb1 ]\n",
+            },
+        )
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch("server.utils.disk_encryption.subprocess.run", side_effect=side):
+                assert _has_crypt_target("/backup4") is True
+                assert _has_crypt_target("/var/lib/postgresql") is False
 
-        with patch("server.utils.disk_encryption.subprocess.run", return_value=mock_result):
-            assert _has_crypt_target("/var/lib/postgresql") is False
+    # ---- (b) the mount's own device IS crypt-backed ----
 
-    def test_returns_false_on_dmsetup_failure(self):
-        """Returns False when dmsetup fails."""
-        mock_result = MagicMock(returncode=1, stdout="", stderr="error")
+    def test_direct_crypt_mapping_returns_true(self, tmp_path):
+        """Our mount's own device is a crypt mapping → True."""
+        mi = _write_mountinfo(tmp_path, MOUNTINFO_CRYPT_PGDATA)
+        side = _dmsetup_fixture(
+            info={"/dev/mapper/pgdata_crypt": "pgdata_crypt\n"},
+            table={"pgdata_crypt": TABLE_CRYPT},
+            deps={"pgdata_crypt": "pgdata_crypt: 1 dependencies: (8,16) [ sda2 ]\n"},
+        )
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch("server.utils.disk_encryption.subprocess.run", side_effect=side):
+                assert _has_crypt_target("/var/lib/postgresql") is True
 
-        with patch("server.utils.disk_encryption.subprocess.run", return_value=mock_result):
-            assert _has_crypt_target("/var/lib/postgresql") is False
+    def test_parent_crypt_under_lvm_stack_returns_true(self, tmp_path):
+        """crypt lives on a PARENT device (LV → VG → crypt → partition):
+        the lineage walk must find it and report True."""
+        mi = _write_mountinfo(tmp_path, MOUNTINFO_LVM_OVER_CRYPT)
+        side = _dmsetup_fixture(
+            info={
+                "/dev/mapper/vg--pgdata-lv--main": "vg--pgdata-lv--main\n",
+                "vg--pgdata": "vg--pgdata\n",
+                "pgdata_crypt": "pgdata_crypt\n",
+            },
+            table={
+                "vg--pgdata-lv--main": TABLE_LV,
+                "vg--pgdata": TABLE_VG,
+                "pgdata_crypt": TABLE_CRYPT,
+            },
+            deps={
+                "vg--pgdata-lv--main": "vg--pgdata-lv--main: 1 dependencies: (253,1) [ vg--pgdata ]\n",
+                "vg--pgdata": "vg--pgdata: 2 dependencies: (253,0) [ pgdata_crypt ] (8,32) [ sdb1 ]\n",
+                "pgdata_crypt": "pgdata_crypt: 1 dependencies: (8,16) [ sda2 ]\n",
+            },
+        )
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch("server.utils.disk_encryption.subprocess.run", side_effect=side):
+                assert _has_crypt_target("/var/lib/postgresql") is True
 
-    def test_returns_false_when_dmsetup_not_installed(self):
-        """Returns False when dmsetup command not found."""
-        with patch("server.utils.disk_encryption.subprocess.run", side_effect=FileNotFoundError):
-            assert _has_crypt_target("/var/lib/postgresql") is False
+    # ---- (c) fail-closed: dmsetup missing / failing / timing out ----
+
+    def test_returns_false_when_dmsetup_not_installed(self, tmp_path):
+        """Missing dmsetup → False (not verified), never a silent pass."""
+        mi = _write_mountinfo(tmp_path, MOUNTINFO_CRYPT_PGDATA)
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch(
+                "server.utils.disk_encryption.subprocess.run",
+                side_effect=FileNotFoundError,
+            ):
+                assert _has_crypt_target("/var/lib/postgresql") is False
+
+    def test_returns_false_on_dmsetup_failure(self, tmp_path):
+        """Non-zero rc from dmsetup info → False."""
+        mi = _write_mountinfo(tmp_path, MOUNTINFO_CRYPT_PGDATA)
+        failing = MagicMock(returncode=1, stdout="", stderr="error")
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch("server.utils.disk_encryption.subprocess.run", return_value=failing):
+                assert _has_crypt_target("/var/lib/postgresql") is False
+
+    def test_returns_false_on_dmsetup_timeout(self, tmp_path):
+        """Timeout from dmsetup → False (fail-closed, same polarity as the
+        original except-pass)."""
+        mi = _write_mountinfo(tmp_path, MOUNTINFO_CRYPT_PGDATA)
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch(
+                "server.utils.disk_encryption.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd="dmsetup", timeout=5),
+            ):
+                assert _has_crypt_target("/var/lib/postgresql") is False
+
+    # ---- (d) unresolvable mount point ----
+
+    def test_returns_false_for_unresolvable_mount(self, tmp_path):
+        """No mountinfo entry with a block-device source for the path →
+        False."""
+        mi = _write_mountinfo(tmp_path, "")
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch("server.utils.disk_encryption.subprocess.run") as run:
+                assert _has_crypt_target("/var/lib/postgresql") is False
+                run.assert_not_called()
+
+    def test_returns_false_when_mountinfo_unreadable(self, tmp_path):
+        """/proc/self/mountinfo not readable (non-Linux, sandbox) → False
+        (fail-closed), never True."""
+        missing = str(tmp_path / "no-such-mountinfo")
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", missing):
+            with patch("server.utils.disk_encryption.subprocess.run") as run:
+                assert _has_crypt_target("/var/lib/postgresql") is False
+                run.assert_not_called()
+
+    def test_pseudo_filesystem_mount_is_not_crypt_backed(self, tmp_path):
+        """A tmpfs-backed mount has no dm device → False."""
+        mi = _write_mountinfo(tmp_path, MOUNTINFO_TMPFS_MOUNT)
+        side = _dmsetup_fixture()  # every dmsetup call answers rc=1
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch("server.utils.disk_encryption.subprocess.run", side_effect=side):
+                assert _has_crypt_target("/var/lib/postgresql") is False
+
+    # ---- device-name keying, not substring ----
+
+    def test_crypt_word_in_params_column_does_not_count(self, tmp_path):
+        """Our device's table line has a NON-crypt target type but carries
+        crypt-ish text in the parameter columns → False. The old code's
+        whole-line substring match said True."""
+        mi = _write_mountinfo(tmp_path, MOUNTINFO_CRYPT_PGDATA)
+        tricky = "pgdata_crypt: 0 20971520 linear 8:16 4096 # encrypted-at-rest-elsewhere\n"
+        side = _dmsetup_fixture(
+            info={"/dev/mapper/pgdata_crypt": "pgdata_crypt\n"},
+            table={"pgdata_crypt": tricky},
+            deps={"pgdata_crypt": "pgdata_crypt: 1 dependencies: (8,16) [ sda2 ]\n"},
+        )
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch("server.utils.disk_encryption.subprocess.run", side_effect=side):
+                assert _has_crypt_target("/var/lib/postgresql") is False
+
+    def test_find_crypt_backing_device_returns_verified_device_name(self, tmp_path):
+        """_find_crypt_backing_device names the crypt device it verified, so
+        the caller's log line is falsifiable."""
+        mi = _write_mountinfo(tmp_path, MOUNTINFO_CRYPT_PGDATA)
+        side = _dmsetup_fixture(
+            info={"/dev/mapper/pgdata_crypt": "pgdata_crypt\n"},
+            table={"pgdata_crypt": TABLE_CRYPT},
+        )
+        with patch("server.utils.disk_encryption._MOUNTINFO_PATH", mi):
+            with patch("server.utils.disk_encryption.subprocess.run", side_effect=side):
+                assert _find_crypt_backing_device("/var/lib/postgresql") == "pgdata_crypt"
 
 
 class TestCheckDiskEncryption:
@@ -144,21 +364,48 @@ class TestCheckDiskEncryption:
 
         with patch("server.utils.disk_encryption._get_pg_data_directory", return_value=Path("/var/lib/postgresql")):
             with patch("server.utils.disk_encryption._find_mount_point", return_value="/var/lib/postgresql"):
-                with patch("server.utils.disk_encryption.subprocess.run", return_value=mock_result):
-                    check_disk_encryption("postgresql://user@localhost/venya")
+                with patch("server.utils.disk_encryption._find_crypt_backing_device", return_value=None):
+                    with patch("server.utils.disk_encryption.subprocess.run", return_value=mock_result):
+                        check_disk_encryption("postgresql://user@localhost/venya")
 
         assert any("No disk encryption detected" in record.message for record in caplog.records)
 
     def test_logs_info_when_dmsetup_crypt_detected(self, caplog):
-        """Logs INFO when dmsetup shows crypt target."""
+        """Logs INFO when the mount's own dm lineage shows a crypt target."""
         caplog.set_level(logging.INFO)
         with patch("server.utils.disk_encryption._get_pg_data_directory", return_value=Path("/var/lib/postgresql")):
             with patch("server.utils.disk_encryption._find_mount_point", return_value="/var/lib/postgresql"):
                 with patch("server.utils.disk_encryption._get_fstype_via_lsblk", return_value=None):
-                    with patch("server.utils.disk_encryption._has_crypt_target", return_value=True):
+                    with patch("server.utils.disk_encryption._find_crypt_backing_device", return_value="pgdata_crypt"):
                         check_disk_encryption("postgresql://user@localhost/venya")
 
         assert any("Disk encryption verified" in record.message for record in caplog.records)
+
+    def test_dmsetup_success_message_names_verified_device(self, caplog):
+        """The success line states WHICH device was verified, so a reader of
+        the health output can falsify it (fix-leg spec step 2.4)."""
+        caplog.set_level(logging.INFO)
+        with patch("server.utils.disk_encryption._get_pg_data_directory", return_value=Path("/var/lib/postgresql")):
+            with patch("server.utils.disk_encryption._find_mount_point", return_value="/var/lib/postgresql"):
+                with patch("server.utils.disk_encryption._get_fstype_via_lsblk", return_value=None):
+                    with patch("server.utils.disk_encryption._find_crypt_backing_device", return_value="pgdata_crypt"):
+                        check_disk_encryption("postgresql://user@localhost/venya")
+
+        verified = [r.message for r in caplog.records if "Disk encryption verified" in r.message]
+        assert verified and "pgdata_crypt" in verified[0]
+
+    def test_logs_warning_when_only_unrelated_device_is_crypt(self, caplog):
+        """#444 end-to-end polarity: mount's lineage NOT crypt-backed
+        (unrelated volume is) → WARNING, never the verified claim."""
+        caplog.set_level(logging.INFO)
+        with patch("server.utils.disk_encryption._get_pg_data_directory", return_value=Path("/var/lib/postgresql")):
+            with patch("server.utils.disk_encryption._find_mount_point", return_value="/var/lib/postgresql"):
+                with patch("server.utils.disk_encryption._get_fstype_via_lsblk", return_value=None):
+                    with patch("server.utils.disk_encryption._find_crypt_backing_device", return_value=None):
+                        check_disk_encryption("postgresql://user@localhost/venya")
+
+        assert any("No disk encryption detected" in record.message for record in caplog.records)
+        assert not any("Disk encryption verified" in record.message for record in caplog.records)
 
     def test_logs_warning_when_no_data_dir(self, caplog):
         """Logs WARNING when data directory can't be determined."""
