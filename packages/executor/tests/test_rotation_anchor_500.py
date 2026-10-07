@@ -432,10 +432,17 @@ class TestWriteOrdering:
         assert _snapshot(manager) == before
 
     def test_sequence_on_the_accepted_path(self, manager):
-        """Success path: the writes land in the order cert -> key -> ca, so the
-        trust anchor is written LAST — nothing already trusted a
-        partially-installed identity, and the anchor only moves once the leaf
-        and key it will be used with are durable."""
+        """Success path: the writes land in the order key -> cert -> ca.
+
+        Two ruled invariants compose here:
+        - #500: the trust anchor (ca.crt) is written LAST — nothing ever
+          trusts a partially-installed identity, and the anchor only moves
+          once the leaf and key it will be used with are durable;
+        - #480 (interrupted-rotation-leaves-mismatched-cert-key-pair): the
+          KEY precedes the CERT, so the new cert never sits on disk ahead of
+          the private key it pairs with — the cert replace is the commit
+          point of the pair, and a kill between replaces is what the
+          register() boot-time pair check detects and re-enrolls."""
         incumbent_key, incumbent = _ca("Venya Root CA")
         _incumbent(manager, incumbent_key, incumbent)
         new_leaf = _executor_leaf(incumbent_key, incumbent)
@@ -452,7 +459,7 @@ class TestWriteOrdering:
         with patch.object(daemon_mod, "_atomic_write", side_effect=spy):
             _rotate(manager, _response(new_leaf, incumbent))
 
-        assert events == ["executor.crt", "executor.key", "ca.crt"]
+        assert events == ["executor.key", "executor.crt", "ca.crt"]
 
     def test_leaf_signed_by_the_foreign_ca_never_reaches_validation(self, manager):
         """The substitution is caught at the ANCHOR step, not by the leaf
