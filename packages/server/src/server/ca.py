@@ -191,6 +191,11 @@ class CAManager:
             ]
         )
 
+        # #522: SKI + self-AKI, matching the installer's root-CA block
+        # (install-venya-core.sh) and the admin CA fix (#504) — every CA in
+        # this product carries them, so a root minted by the server stays
+        # acceptable to strict verifiers (openssl -x509_strict, error 86).
+        root_ca_ski = x509.SubjectKeyIdentifier.from_public_key(private_key.public_key())
         builder = (
             x509.CertificateBuilder()
             .subject_name(subject)
@@ -216,6 +221,11 @@ class CAManager:
                     decipher_only=False,
                 ),
                 critical=True,
+            )
+            .add_extension(root_ca_ski, critical=False)
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(root_ca_ski),
+                critical=False,
             )
         )
 
