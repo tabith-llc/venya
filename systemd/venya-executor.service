@@ -16,6 +16,15 @@ ExecStart=/opt/venya/.venv/bin/venya-executor --config /etc/venya/executor.toml
 Restart=always
 RestartSec=5s
 
+# #477 (relay-stop-unbounded-skips-cleanup-under-systemd): the relay drain
+# waits up to RELAY_STOP_DEADLINE_SECONDS (30 s) for an in-flight command to
+# finish and run its teardown; this unit grants 45 s before SIGKILL — drain
+# bound plus margin for the remaining cleanup steps — so the cooperative
+# stop always lands inside the systemd deadline. A static interlock test
+# (executor/tests/test_relay_stop_477.py) pins this value against the code
+# constant; edit both together or the test gate fails.
+TimeoutStopSec=45s
+
 # Executor must NOT have CAP_IPC_LOCK — jump host is untrusted
 # All capabilities dropped by default (NoNewPrivileges=true)
 
