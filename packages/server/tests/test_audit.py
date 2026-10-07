@@ -7,7 +7,7 @@
 """Tests for audit log endpoints."""
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -1424,13 +1424,24 @@ def _ndjson_zstd(lines: list[str]) -> bytes:
     return zstd.compress(("\n".join(lines) + "\n").encode(), level=3)
 
 
+def _in_window_ts(offset_hours: float = -2.0) -> datetime:
+    """A client timestamp INSIDE the #461 skew band, derived from the server
+    clock at run time (not a pinned calendar date, which ages out of the
+    band and silently turns a positive fixture into a clamped one).
+    Offset off "now" so a wall-clock fallback can never match by accident.
+    """
+    from datetime import timedelta
+
+    return datetime.now(UTC) + timedelta(hours=offset_hours)
+
+
 def _rejection_line(**over) -> str:
     import json
 
     payload = {
         "event_type": "command_rejected",
         "session_id": "sess-9",
-        "timestamp": "2026-10-01T10:00:00+00:00",
+        "timestamp": _in_window_ts().isoformat(),
         "command": "scp secrets.txt host2:/tmp/",
         "reason": "blocked pattern: scp",
     }
@@ -1469,17 +1480,18 @@ class TestAuditIngest:
         ->> operator; physical halves are cells F1/F3)."""
         backend, sm, _engine = _sqlite_ingest_backend()
         app = _ingest_app(_executor_auth(), backend)
+        sent_ts = _in_window_ts()
         line2 = json.dumps(
             {
                 "event_type": "command_executed",
                 "session_id": "sess-9",
-                "timestamp": "2026-10-01T10:00:05+00:00",
+                "timestamp": (sent_ts + timedelta(seconds=5)).isoformat(),
                 "command": "ls -la",
                 "exit_code": 0,
                 "duration_ms": 3.2,
             }
         )
-        resp = _post_ingest(app, _ndjson_zstd([_rejection_line(), line2]))
+        resp = _post_ingest(app, _ndjson_zstd([_rejection_line(timestamp=sent_ts.isoformat()), line2]))
         assert resp.status_code == 200
         assert resp.json() == {"accepted": 2}
 
@@ -1494,9 +1506,11 @@ class TestAuditIngest:
         assert fields["forwarded"] is True
         assert fields["command"] == "scp secrets.txt host2:/tmp/"  # UNMASKED by design
         assert fields["reason"] == "blocked pattern: scp"
-        # spool timestamp preserved (SQLite drops the offset on read —
-        # compare wall value; a wall-clock fallback would not match)
-        assert rej.timestamp.replace(tzinfo=UTC) == datetime(2026, 10, 1, 10, 0, 0, tzinfo=UTC)
+        # spool timestamp preserved EXACTLY as supplied — in-window stamps are
+        # never rewritten (SQLite drops the offset on read: compare wall
+        # value; a wall-clock fallback would not match)
+        assert rej.timestamp.replace(tzinfo=UTC) == sent_ts.replace(tzinfo=UTC)
+        assert json.loads(rej.fields)["timestamp_skewed"] is False
         # executor_id readable via the JSON operator (GET filter's key)
         from sqlalchemy import text
 
@@ -1525,7 +1539,7 @@ class TestAuditIngest:
         backend, sm, _engine = _sqlite_ingest_backend()
         app = _ingest_app(_executor_auth(), backend)
         line = json.dumps(
-            {"event_type": "future_executor_event", "session_id": "s1", "timestamp": "2026-10-01T10:00:00+00:00"}
+            {"event_type": "future_executor_event", "session_id": "s1", "timestamp": _in_window_ts().isoformat()}
         )
         resp = _post_ingest(app, _ndjson_zstd([line]))
         assert resp.status_code == 200
@@ -1699,3 +1713,212 @@ class TestAuditIngest:
         s = sm()
         assert s.query(audit_models.AuditEvent).count() == 0
         s.close()
+
+
+# ---------------------------------------------------------------------------
+# POST /audit/ingest — client-timestamp bound (#461)
+# ---------------------------------------------------------------------------
+
+
+class TestAuditIngestTimestampBound461:
+    """Ticket audit-ingest-accepts-unbound-client-timestamps #461.
+
+    _spool_timestamp trusted ANY tz-aware executor-supplied stamp, while the
+    GET windows (days=/hours=) cut on the SERVER clock: a skewed executor
+    stamped its rows outside the window and they vanished from the auditor's
+    view without a single row being deleted.
+
+    Chosen shape: CLAMP to the edge of the band + structured FLAG. The bound
+    is audit_routes.INGEST_MAX_TIMESTAMP_SKEW (24 hours, server clock, both
+    directions). Reject was rejected (it drops the batch and hands the
+    executor a permanent stall); flag-only was rejected (the row stays
+    invisible, which is the very evasion being fixed). An honest in-window
+    executor sees ZERO change — the paired positive cells below pin that.
+    """
+
+    def _ingest_one(self, timestamp):
+        """Ingest a single line carrying ``timestamp``; return the landed row."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        resp = _post_ingest(app, _ndjson_zstd([_rejection_line(timestamp=timestamp)]))
+        assert resp.status_code == 200, resp.text
+        s = sm()
+        row = s.query(audit_models.AuditEvent).one()
+        result = (row, s)
+        return result
+
+    # ---- paired positive: the honest executor is untouched ----
+
+    def test_P1_in_window_stamp_stored_exactly(self):
+        """P (AC-2): a stamp inside the band is stored EXACTLY as supplied —
+        no clamp, no flag, no extra keys in the row."""
+        supplied = datetime.now(UTC) - timedelta(hours=6)
+        row, s = self._ingest_one(supplied.isoformat())
+        assert row.timestamp.replace(tzinfo=UTC) == supplied
+        fields = json.loads(row.fields)
+        assert fields["timestamp_skewed"] is False
+        # the repair fields are ABSENT for an honest row — nothing invented
+        assert "client_timestamp" not in fields
+        assert "client_skew_seconds" not in fields
+        s.close()
+
+    def test_P2_stamp_near_the_band_edge_stored_exactly(self):
+        """P (boundary, honest half): just INSIDE the edge is stored exactly.
+        (A literal at-the-edge stamp is a race — the server clock moves
+        between the test and the ingest — so the cell sits 5 minutes inside.)"""
+        supplied = datetime.now(UTC) - audit_routes.INGEST_MAX_TIMESTAMP_SKEW + timedelta(minutes=5)
+        row, s = self._ingest_one(supplied.isoformat())
+        assert row.timestamp.replace(tzinfo=UTC) == supplied
+        assert json.loads(row.fields)["timestamp_skewed"] is False
+        s.close()
+
+    # ---- paired negative: out-of-band stamps are repaired, never hidden ----
+
+    def test_N1_far_past_stamp_clamped_flagged_and_visible(self):
+        """N (AC-1/AC-3/AC-4): a stamp one year back — outside any days=/
+        hours= window an auditor can even ask for — is CLAMPED into the band,
+        flagged in the sender_revoked/forwarded field family, and is visible
+        to the windowed GET (the row the old code hid from the default view)."""
+        supplied = datetime.now(UTC) - timedelta(days=365)
+        row, s = self._ingest_one(supplied.isoformat())
+        limit = audit_routes.INGEST_MAX_TIMESTAMP_SKEW
+        age = datetime.now(UTC) - row.timestamp.replace(tzinfo=UTC)
+        assert age <= limit + timedelta(minutes=5), age
+        assert age >= limit - timedelta(minutes=5), age  # clamped to the EDGE, not to now
+
+        fields = json.loads(row.fields)
+        assert fields["timestamp_skewed"] is True
+        assert fields["client_timestamp"] == supplied.isoformat()  # claim preserved verbatim
+        assert fields["client_skew_seconds"] < 0
+        assert fields["forwarded"] is True and fields["sender_revoked"] is False  # same family
+
+        # visible to a windowed auditor view (the evasion this ticket is about)
+        get_backend = MagicMock()
+        get_backend.get_session.side_effect = lambda: s
+        client = TestClient(_create_test_app(backend=get_backend), raise_server_exceptions=False)
+        g = client.get("/api/v1/audit", params={"days": 2})
+        assert g.status_code == 200
+        assert g.json()["total"] == 1
+        s.close()
+
+    def test_N2_far_future_stamp_clamped_flagged(self):
+        """N: a stamp a year in the FUTURE (the out-of-order interleaving
+        half) is clamped to the upper edge and flagged."""
+        supplied = datetime.now(UTC) + timedelta(days=365)
+        row, s = self._ingest_one(supplied.isoformat())
+        limit = audit_routes.INGEST_MAX_TIMESTAMP_SKEW
+        lead = row.timestamp.replace(tzinfo=UTC) - datetime.now(UTC)
+        assert lead <= limit + timedelta(minutes=5), lead
+        assert lead >= limit - timedelta(minutes=5), lead
+        fields = json.loads(row.fields)
+        assert fields["timestamp_skewed"] is True
+        assert fields["client_timestamp"] == supplied.isoformat()
+        assert fields["client_skew_seconds"] > 0
+        s.close()
+
+    def test_N3_just_outside_band_is_repaired(self):
+        """N (boundary, dishonest half, twin of P2): five minutes past the
+        edge is enough — the bound is enforced, not advisory."""
+        supplied = datetime.now(UTC) - audit_routes.INGEST_MAX_TIMESTAMP_SKEW - timedelta(minutes=5)
+        row, s = self._ingest_one(supplied.isoformat())
+        assert json.loads(row.fields)["timestamp_skewed"] is True
+        assert row.timestamp.replace(tzinfo=UTC) != supplied
+        # and the repair is the EDGE of the band, not the server "now"
+        age = datetime.now(UTC) - row.timestamp.replace(tzinfo=UTC)
+        assert abs(age - audit_routes.INGEST_MAX_TIMESTAMP_SKEW) < timedelta(minutes=2), age
+        s.close()
+
+    def test_N4_mixed_batch_repairs_only_the_skewed_row(self):
+        """N+P in one transaction: an honest row and a skewed row in the same
+        batch — the honest one keeps its exact stamp and carries no flag;
+        only the skewed one is clamped. Per-row, not per-batch."""
+        honest = datetime.now(UTC) - timedelta(hours=1)
+        skewed = datetime.now(UTC) - timedelta(days=40)
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        resp = _post_ingest(
+            app,
+            _ndjson_zstd(
+                [
+                    _rejection_line(session_id="h", timestamp=honest.isoformat()),
+                    _rejection_line(session_id="k", timestamp=skewed.isoformat()),
+                ]
+            ),
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"accepted": 2}
+        s = sm()
+        rows = {json.loads(r.fields)["session_id"]: r for r in s.query(audit_models.AuditEvent).all()}
+        assert rows["h"].timestamp.replace(tzinfo=UTC) == honest
+        assert json.loads(rows["h"].fields)["timestamp_skewed"] is False
+        assert json.loads(rows["k"].fields)["timestamp_skewed"] is True
+        assert json.loads(rows["k"].fields)["client_timestamp"] == skewed.isoformat()
+        s.close()
+
+    # ---- the naive/garbage half keeps its old behavior (unchanged) ----
+
+    def test_P5_naive_stamp_still_falls_back_to_server_clock(self):
+        """P (unchanged behavior): a NAIVE stamp is still refused by the
+        parse rule and replaced with the server clock — no flag (the fallback
+        cannot be skewed), and the row lands at 'now', inside every window."""
+        naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=200)
+        row, s = self._ingest_one(naive.isoformat())
+        age = datetime.now(UTC) - row.timestamp.replace(tzinfo=UTC)
+        assert age < timedelta(minutes=5), age
+        fields = json.loads(row.fields)
+        assert fields["timestamp_skewed"] is False
+        assert "client_timestamp" not in fields
+        s.close()
+
+    def test_P6_garbage_stamp_still_falls_back_to_server_clock(self):
+        """P (unchanged behavior): a non-ISO value degrades to now(UTC),
+        unflagged — exactly as before the fix."""
+        row, s = self._ingest_one("not-a-timestamp")
+        age = datetime.now(UTC) - row.timestamp.replace(tzinfo=UTC)
+        assert age < timedelta(minutes=5), age
+        assert json.loads(row.fields)["timestamp_skewed"] is False
+        s.close()
+
+    def test_P7_missing_stamp_falls_back_unflagged(self):
+        """P: a line with no timestamp at all → server clock, unflagged."""
+        backend, sm, _engine = _sqlite_ingest_backend()
+        app = _ingest_app(_executor_auth(), backend)
+        line = json.dumps({"event_type": "command_executed", "session_id": "s"})
+        resp = _post_ingest(app, _ndjson_zstd([line]))
+        assert resp.status_code == 200
+        s = sm()
+        row = s.query(audit_models.AuditEvent).one()
+        assert datetime.now(UTC) - row.timestamp.replace(tzinfo=UTC) < timedelta(minutes=5)
+        assert json.loads(row.fields)["timestamp_skewed"] is False
+        s.close()
+
+    # ---- the helper itself, without HTTP ----
+
+    def test_U_bound_helper_returns_value_and_fields(self):
+        """Unit: in-band → (same value, no fields); out-of-band → (edge,
+        flag fields). No schema column is involved — the flag lives in the
+        JSON ``fields`` family, which is what AC-4 asks for."""
+        now = datetime(2026, 10, 7, 12, 0, 0, tzinfo=UTC)
+        inside = now - timedelta(hours=1)
+        assert audit_routes.bound_to_server_clock(inside, now=now) == (inside, {})
+
+        past = now - timedelta(days=3)
+        clamped, fields = audit_routes.bound_to_server_clock(past, now=now)
+        assert clamped == now - audit_routes.INGEST_MAX_TIMESTAMP_SKEW
+        assert fields["timestamp_skewed"] is True
+        assert fields["client_timestamp"] == past.isoformat()
+        assert fields["client_skew_seconds"] == -3 * 86400
+
+        future = now + timedelta(days=3)
+        clamped_up, fields_up = audit_routes.bound_to_server_clock(future, now=now)
+        assert clamped_up == now + audit_routes.INGEST_MAX_TIMESTAMP_SKEW
+        assert fields_up["client_skew_seconds"] == 3 * 86400
+
+    def test_U_spool_timestamp_contract_unchanged_for_non_aware_values(self):
+        """Unit: the naive/garbage/missing branches still return a single
+        now(UTC) value with no fields — the old behavior, one extra tuple
+        slot."""
+        for raw in (None, "", 123, "2026-10-01T10:00:00", "garbage"):
+            ts, fields = audit_routes._spool_timestamp(raw)
+            assert abs((datetime.now(UTC) - ts).total_seconds()) < 60
+            assert fields == {}
