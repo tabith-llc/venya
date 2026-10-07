@@ -95,6 +95,74 @@ def _cap_with_truncation_marker(data: bytes, total_size: int) -> bytes:
 # How long to wait for sandbox commands
 SBX_TIMEOUT = 3600  # 1 hour max
 
+# Cap for the LEGACY direct (memfd) path — output capture AND the wait that
+# follows it. Ticket direct-path-capture-timeout-untimed-wait #470: the capture
+# loop below bounded itself with SBX_TIMEOUT, logged a timeout, and then called
+# ``process.wait()`` with NO bound at all, so a child that stopped writing but
+# never exited parked the worker forever — the timeout produced a log line,
+# not a stop. One constant now bounds both halves, read once per command so a
+# deployment (and a unit cell) can shorten it without touching the sandbox
+# budget. Override: ``VENYA_DIRECT_PATH_TIMEOUT`` (seconds).
+DIRECT_PATH_TIMEOUT_ENV = "VENYA_DIRECT_PATH_TIMEOUT"
+
+# Extra patience for the reaping of a child we terminated ourselves (#470).
+# Generous relative to a kill and small relative to the bound it follows.
+DIRECT_CHILD_REAP_SECONDS = 5.0
+
+
+def _close_child_stdin(process: subprocess.Popen) -> None:
+    """Close the child's stdin write end (ticket #470 AC2).
+
+    Best-effort by design: an FD that will not close is not worth replacing a
+    command outcome, and the bounded wait below is the backstop either way.
+    """
+    if process.stdin is None:
+        return
+    try:
+        process.stdin.close()
+    except OSError:
+        logger.exception("Direct path could not close the child stdin pipe")
+
+
+def _terminate_child_process(process: subprocess.Popen) -> None:
+    """Kill a direct-path child that outlived the bound (ticket #470 AC1).
+
+    The child is its own process group (``start_new_session=True``), so the
+    group is signalled first: a shell-out grandchild would otherwise keep the
+    pipes open and hold the reaping in ``communicate()`` past its own bound.
+    Falls back to the plain child kill when the group is already gone.
+    """
+    try:
+        os.killpg(os.getpgid(process.pid), 9)  # nosec B606 — no shell string; a pid we own
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            process.kill()
+        except OSError:
+            logger.exception("Direct path could not terminate child %d", process.pid)
+
+
+def _direct_path_timeout() -> float:
+    """Direct-path capture/wait bound (ticket #470 AC1).
+
+    Same env-override idiom as ``VENYA_SBX_CREATE_TIMEOUT`` in the sbx
+    strategy: read at call time so a unit cell can inject a short bound
+    instead of waiting out an hour.
+    """
+    raw = os.environ.get(DIRECT_PATH_TIMEOUT_ENV)
+    if raw is None or raw == "":
+        return float(SBX_TIMEOUT)
+    try:
+        return max(float(raw), 0.0)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a number — using the %d s default for the direct path",
+            DIRECT_PATH_TIMEOUT_ENV,
+            raw,
+            SBX_TIMEOUT,
+        )
+        return float(SBX_TIMEOUT)
+
+
 # Shell metacharacters that are not permitted in executor commands.
 # Enforced PER ELEMENT by `_validate_command_structure` at the top of
 # `execute()` — before policy validation and before any strategy dispatch.
@@ -595,11 +663,43 @@ class Executor:
             if unexpected:
                 logger.warning("Unexpected open FDs before exec: %s", unexpected)
 
-        # Capture output with size limit
-        stdout, stderr, stdout_total, stderr_total = self._capture_output(process)
+        # stdin is dropped HERE — after the FD bookkeeping above (its number is
+        # in the allow-set while it is still ours) and before anything waits on
+        # the child (ticket #470 AC2). Nothing on this path ever writes to it,
+        # so a parent still holding the write end means a child that reads stdin
+        # to EOF before exiting blocks forever on a pipe that will never
+        # deliver — the deadlock the row names. Closing it hands the child its
+        # EOF. The close is best-effort: an fd that will not close is not worth
+        # replacing a command outcome, and the bound below is the backstop.
+        _close_child_stdin(process)
 
-        # Wait for process to complete
-        exit_code = process.wait()
+        # Capture output with size limit, then wait for the process — BOTH
+        # inside ONE bound (ticket #470 AC1). Pre-fix the capture loop bounded
+        # itself, logged, broke, and the ``process.wait()`` that followed had no
+        # bound at all: the timeout produced a log line, not a stop.
+        bound = _direct_path_timeout()
+        capture_deadline = time.time() + bound
+        stdout, stderr, stdout_total, stderr_total = self._capture_output(process, deadline=capture_deadline)
+
+        try:
+            exit_code = process.wait(timeout=max(capture_deadline - time.time(), 0.0))
+        except subprocess.TimeoutExpired:
+            # The bound expired with the child still alive. Killing it is the
+            # whole point of the bound; ``communicate()`` then reaps it and
+            # drains the pipes (a bare wait() could sit in a zombie loop).
+            logger.error("Direct-path child %d did not exit within %s s — terminating it", process.pid, bound)
+            _terminate_child_process(process)
+            try:
+                process.communicate(timeout=DIRECT_CHILD_REAP_SECONDS)
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    "Direct-path child %d still unaccounted for after terminate — exit code reported as -1",
+                    process.pid,
+                )
+                exit_code = -1
+            else:
+                # ``poll()`` is non-blocking; the reaped child reports its code.
+                exit_code = process.returncode if process.returncode is not None else -1
 
         return self._filter_and_build_result(
             shlex.join(command),  # response-side display stays a string (#322)
@@ -611,11 +711,18 @@ class Executor:
             original_stderr_size=stderr_total,
         )
 
-    def _capture_output(self, process: subprocess.Popen) -> tuple[bytes, bytes, int, int]:
+    def _capture_output(
+        self, process: subprocess.Popen, deadline: float | None = None
+    ) -> tuple[bytes, bytes, int, int]:
         """Capture stdout/stderr with batch mode and size limit.
 
         Args:
             process: The subprocess to capture from.
+            deadline: Absolute ``time.time()`` bound for the capture loop
+                (ticket #470). None derives it from the module bound, so a
+                direct caller keeps today's behavior; the direct path passes
+                the SAME deadline its ``wait`` uses, so capture and wait cannot
+                each grant a fresh budget.
 
         Returns:
             Tuple of (stdout, stderr, stdout_total, stderr_total). The
@@ -627,12 +734,20 @@ class Executor:
         stderr_truncated = False
         stdout_total = 0
         stderr_total = 0
+        deadline = time.time() + _direct_path_timeout() if deadline is None else deadline
 
         stdout_fd = process.stdout  # type: ignore[union-attr]
         stderr_fd = process.stderr  # type: ignore[union-attr]
 
         if stdout_fd is None or stderr_fd is None:
-            process.wait()
+            # Bounded too (#470): an unwaited process here would park the caller
+            # exactly like the unbounded wait did. The caller's deadline is the
+            # right bound — capture never gets a fresh budget.
+            try:
+                process.wait(timeout=max(deadline - time.time(), 0.0))
+            except subprocess.TimeoutExpired:
+                logger.error("Direct-path child %d did not exit — terminating it", process.pid)
+                _terminate_child_process(process)
             return b"", b"", 0, 0
 
         fd_map = {stdout_fd.fileno(): "stdout", stderr_fd.fileno(): "stderr"}
@@ -642,11 +757,11 @@ class Executor:
         }
         fd_active: dict[int, bool] = {stdout_fd.fileno(): True, stderr_fd.fileno(): True}
 
-        deadline = time.time() + SBX_TIMEOUT
+        bound = max(deadline - time.time(), 0.0)
 
         while any(fd_active.values()):
             if time.time() > deadline:
-                logger.warning("Output capture timed out after %d seconds", SBX_TIMEOUT)
+                logger.warning("Output capture reached its %s second bound", bound)
                 break
 
             readable_fds = [fd for fd, active in fd_active.items() if active]

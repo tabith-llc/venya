@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**67 suppression lines across 20 files.**
+**68 suppression lines across 20 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -36,6 +36,7 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/core/src/core/engine/secure_memory.py` | `except Exception:  # nosec B110 — best-effort unlock in __del__, no stack to unwind  # noqa: S110` |
 | `packages/core/src/core/utils/sensitive_log.py` | `def token(value: Any, token_type: str = "UNKNOWN") -> Token:  # nosec B107 — not a password, just a type label` | <!-- pragma: allowlist secret -->
 | `packages/executor/src/executor/executor.py` | `import subprocess  # nosec B404 — executor requires subprocess to run commands` |
+| `packages/executor/src/executor/executor.py` | `os.killpg(os.getpgid(process.pid), 9)  # nosec B606 — no shell string; a pid we own` |
 | `packages/executor/src/executor/executor.py` | `shell=False,  # nosec B603 — shell explicitly disabled for security` |
 | `packages/executor/src/executor/injector.py` | `tmpfs_dir: str = "/tmp/venya_secrets",  # nosec B108 — tmpfs, not persistent disk` | <!-- pragma: allowlist secret -->
 | `packages/executor/src/executor/injector.py` | `secret_id="",  # nosec B106 — placeholder set by caller` | <!-- pragma: allowlist secret -->
