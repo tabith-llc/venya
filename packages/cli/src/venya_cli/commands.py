@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import shlex
-import ssl
 import sys
 import tempfile
 from datetime import UTC
@@ -2302,6 +2301,14 @@ def _executor_verify_cafile(args: Any, cert_path: str, *, purpose: str) -> str:
     keep working (the ticket's paired negative). What is dropped is the SILENT SKIP:
     if none of the three exists this raises instead of letting
     ``ssl.create_default_context()`` verify against the host store.
+
+    Callers feed the result to ``api_client._build_ssl_context(cafile=…)``, the house
+    builder, which never calls ``load_default_certs()`` — that is what makes this a
+    fix rather than a re-ordered guess. The incumbent code built
+    ``ssl.create_default_context()`` (host store ALREADY loaded) and then ADDED the
+    Venya CA when it happened to be found, so the anchor only ever made the trust set
+    BIGGER: a certificate signed by any public CA verified both on a miss and on a
+    hit. Renewing the guess in place would have left that half open.
     """
     from .api_client import Config as CLIConfig
 
@@ -2310,24 +2317,6 @@ def _executor_verify_cafile(args: Any, cert_path: str, *, purpose: str) -> str:
         _resolve_executor_ca_bundle(args),
         purpose=purpose,
         sibling_ca=Path(cert_path).parent / "ca.crt",
-    )
-
-
-def _executor_mtls_context(args: Any, cert_path: str, key_path: str, *, purpose: str) -> ssl.SSLContext:
-    """An mTLS context that trusts ONLY the Venya CA (#507), or raises
-    :class:`APIClientError` naming the trust source to provide.
-
-    ``_build_ssl_context(cafile=…)`` is the house builder and it deliberately never
-    calls ``load_default_certs()`` — that is what makes this a fix rather than a
-    re-ordered guess. The incumbent code built ``ssl.create_default_context()``
-    (host store LOADED, 152 anchors on this venue) and then ADDED the Venya CA when
-    it happened to be found, so a certificate signed by any public CA verified both
-    on a miss and on a hit: the Venya anchor only ever made the trust set BIGGER.
-    """
-    return _build_ssl_context(
-        cafile=_executor_verify_cafile(args, cert_path, purpose=purpose),
-        certfile=cert_path,
-        keyfile=key_path,
     )
 
 
