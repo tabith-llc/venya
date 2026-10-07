@@ -284,12 +284,24 @@ class SessionManager:
     def revoke_session(self, session_id: int) -> bool:
         """Revoke a session.
 
+        #527 (elevation-not-session-bound): also deletes UNCONSUMED
+        elevation tokens bound to this session — logout must end every
+        credential the session earned, and deleting the rows closes the
+        window instead of shrinking it (a consumer sees rowcount 0 and
+        refuses; there is no state check that could race a stale row).
+        Legacy NULL-session rows (pre-#527) are not bound to any session
+        and stay governed by their own user+expiry+used checks.
+
         Returns:
             True if revoked, False if not found.
         """
         session = self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
         if session is None:
             return False
+
+        from .models import ElevationToken
+
+        self.db.query(ElevationToken).filter(ElevationToken.session_id == session_id).delete(synchronize_session=False)
 
         self.db.delete(session)
         self.db.flush()

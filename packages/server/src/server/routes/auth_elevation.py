@@ -161,6 +161,20 @@ async def elevate_assert(
             detail="Elevation challenge user mismatch",
         )
 
+    # #527 elevation-not-session-bound: the challenge STORES the session that
+    # started it but this path only read user_id, so a second session of the
+    # same user could complete a ceremony earned elsewhere. Assert-side check
+    # mirrors the browser twin (auth_browser: "Elevation challenge session
+    # mismatch"). Pop-up-front keeps its meaning: the entry is consumed on
+    # EVERY path (this refusal included) — a denied ceremony never leaves a
+    # live slot (pattern ruled #345). mTLS/admin contexts carry session_id
+    # None on both sides, so the comparison stays inert for them.
+    if challenge_info.get("session_id") != user_info.get("session_id"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Elevation challenge session mismatch",
+        )
+
     # Verify the assertion
     fido2_response = browser_assertion_to_fido2(req.response)
 
@@ -231,6 +245,10 @@ async def elevate_assert(
     elevation_record = ElevationToken(
         token_hash=token_hash,
         user_id=user_info["user_id"],
+        # #527: bind the token to the session that earned it — revoke_session
+        # deletes bound rows, so a logged-out session's unconsumed elevation
+        # token is no longer consumable. None-tolerant (mTLS/admin contexts).
+        session_id=user_info.get("session_id"),
         expires_at=expires_at,
     )
     db.add(elevation_record)

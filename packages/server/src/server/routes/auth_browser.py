@@ -9,8 +9,9 @@
 Router MOUNTED (app.py: app.include_router(auth_browser.router,
 prefix="/api/v1")). The browser login entry points
 (/auth/login/browser/challenge and /assert) are SessionMiddleware
-PUBLIC_PATHS; every other route in this module —
-/auth/refresh/browser, /auth/logout/browser,
+PUBLIC_PATHS; /auth/refresh/browser is ALSO public by design (#341 —
+self-gated handler); every other route in this module —
+/auth/logout/browser,
 /auth/elevate/browser/challenge, /auth/elevate/browser/assert,
 /auth/me — is LIVE and gated by SessionMiddleware, satisfied by the
 HttpOnly session cookie or a Bearer token.
@@ -815,6 +816,9 @@ async def browser_elevate_assert(
         elevation_record = ElevationToken(
             token_hash=token_hash,
             user_id=session.user_id,
+            # #527: bind to the session that earned it (cookie plane) — the
+            # row's life is the session's life from revoke_session onward.
+            session_id=session.id,
             expires_at=expires_at,
         )
         db.add(elevation_record)
