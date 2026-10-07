@@ -107,16 +107,23 @@ class TestAdminCertSkiAki504:
         assert key_pem  # returned keypair still present
 
     def test_ac3_root_executor_plane_unchanged(self, tmp_path):
-        """AC3 paired negative: nothing about CAManager (root CA) or sign_csr
-        (executor leaves) changed. Root CA's extension SET at this tip is
-        BasicConstraints+KeyUsage (its SKI/AKI are minted by the installer's
-        own block — the ca.py gap is a separate finding reported to the lead,
-        pinned here exactly as found, NOT silently changed by this ticket)."""
+        """AC3 paired negative: nothing about CAManager.sign_csr (executor
+        leaves) changed. The root CA now also carries SKI + self-AKI — the
+        gap this test originally pinned as a separate finding landed as its
+        own fix (#522, bug/root-ca-initialize-missing-ski-aki), so the pin
+        was updated to the post-#522 set in the same changeset that fixed
+        it (leaf identifiers and construction remain the point of this
+        cell)."""
         root = CAManager(str(tmp_path / "ca"))
         root.initialize()
         root_cert = x509.load_pem_x509_certificate(root.ca_cert_path.read_bytes())
         root_oids = {e.oid for e in root_cert.extensions}
-        assert root_oids == {ExtensionOID.BASIC_CONSTRAINTS, ExtensionOID.KEY_USAGE}
+        assert root_oids == {
+            ExtensionOID.BASIC_CONSTRAINTS,
+            ExtensionOID.KEY_USAGE,
+            ExtensionOID.SUBJECT_KEY_IDENTIFIER,
+            ExtensionOID.AUTHORITY_KEY_IDENTIFIER,
+        }
 
         exec_key = ec.generate_private_key(ec.SECP256R1())
         csr = (
