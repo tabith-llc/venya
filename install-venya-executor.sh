@@ -157,7 +157,7 @@ venya_install_system_pkgs curl sudo build-essential sshpass
 SU_CARGO="/home/venya/.cargo/bin/cargo"
 if [ ! -f "$SU_CARGO" ]; then
     info "Installing Rust for venya user..."
-    sudo -u venya bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y" > /dev/null 2>&1
+    sudo -H -u venya bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y" > /dev/null 2>&1
 fi
 
 # --- Install uv for venya user ---
