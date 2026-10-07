@@ -29,11 +29,20 @@ from server.ca import AdminCAManager, CAManager
 _ADMIN_IDENTITY = "admin@venya-test-workstation"
 
 
+_ADMIN_PASSPHRASE = b"test_admin_passphrase_504"
+_ROOT_PASSPHRASE = b"test_passphrase_504"
+
+
 @pytest.fixture(autouse=True)
-def _clean_passphrase_envs(monkeypatch):
-    """Deterministic plaintext keys for these cells regardless of ambient env."""
-    monkeypatch.delenv("VENYA_CA_KEY_PASSPHRASE", raising=False)
-    monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
+def _passphrase_envs(monkeypatch):
+    """Deterministic encrypted keys for these cells regardless of ambient env.
+
+    Used to DELETE these vars so the cells minted plaintext keys; #537 made the
+    write path refuse that, so the fixture now sets test passphrases instead.
+    The cells are about certificate extensions — the key envelope is incidental.
+    """
+    monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", _ROOT_PASSPHRASE.decode())
+    monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", _ADMIN_PASSPHRASE.decode())
 
 
 @pytest.fixture
@@ -65,7 +74,9 @@ class TestAdminCertSkiAki504:
         key and its AKI references that same SKI (self-signed)."""
         ca_cert = x509.load_pem_x509_certificate(admin_manager.ca_cert_path.read_bytes())
         expected = x509.SubjectKeyIdentifier.from_public_key(
-            serialization.load_pem_private_key(admin_manager.ca_key_path.read_bytes(), password=None).public_key()
+            serialization.load_pem_private_key(
+                admin_manager.ca_key_path.read_bytes(), password=_ADMIN_PASSPHRASE
+            ).public_key()
         )
         assert _ski(ca_cert) == expected.digest, "admin CA missing SKI or wrong digest"
         assert _aki_keyid(ca_cert) == expected.digest, "admin CA missing self-AKI"
@@ -133,14 +144,23 @@ class TestAdminCertSkiAki504:
         )
         leaf = root.sign_csr(csr, "exec-1")
         assert _ski(leaf) == x509.SubjectKeyIdentifier.from_public_key(exec_key.public_key()).digest
-        ca_public = serialization.load_pem_private_key(root.ca_key_path.read_bytes(), password=None).public_key()
+        ca_public = serialization.load_pem_private_key(
+            root.ca_key_path.read_bytes(), password=_ROOT_PASSPHRASE
+        ).public_key()
         assert _aki_keyid(leaf) == x509.SubjectKeyIdentifier.from_public_key(ca_public).digest
 
-    def test_incumbent_admin_ca_without_ski_still_signs_valid_leaves(self, tmp_path):
+    def test_incumbent_admin_ca_without_ski_still_signs_valid_leaves(self, tmp_path, monkeypatch):
         """Deployment-continuity cell: sign_admin_cert uses
         from_issuer_public_key, which does NOT require the incumbent CA to
         carry an SKI. An admin CA minted BEFORE this change can still sign
         leaves that now carry SKI + a correct AKI digest."""
+        # Incumbent keys are plaintext (they predate #537), so this cell runs
+        # with the passphrase envs UNSET. A plaintext key at rest read while a
+        # passphrase is set is the #537 read-side finding: load_ca() logs
+        # "ignoring passphrase" and still hands it to the loader, which raises
+        # TypeError. That behaviour is deliberately unchanged here.
+        monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
+        monkeypatch.delenv("VENYA_CA_KEY_PASSPHRASE", raising=False)
         # Pre-#504 incumbent: mint a CA pair without the identifiers.
         key = ec.generate_private_key(ec.SECP256R1())
         subject = issuer = x509.Name(

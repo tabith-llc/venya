@@ -65,6 +65,12 @@ def clear_passphrase_env():
     old_admin = os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
     old_exec = os.environ.pop("VENYA_CA_KEY_PASSPHRASE", None)
     yield
+    # Restore EXACTLY the pre-test state. The old form only wrote the saved value
+    # back when there had been one, so a passphrase a test set survived teardown
+    # and leaked into every later file in the same process — order-dependent
+    # greens (#537 review finding: some CA cells passed only on that leak).
+    os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
+    os.environ.pop("VENYA_CA_KEY_PASSPHRASE", None)
     if old_admin is not None:
         os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = old_admin
     if old_exec is not None:
@@ -81,6 +87,9 @@ class TestAdminCAInitialize:
 
     def test_admin_ca_initialize(self, admin_ca_dir, admin_ca_security):
         """AdminCAManager.initialize() should create key/cert pair."""
+        # #537: the write path refuses to mint a key with no passphrase, so the
+        # happy-path cells set one (the valid configuration).
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         assert not manager.has_ca
 
@@ -92,6 +101,7 @@ class TestAdminCAInitialize:
 
     def test_admin_ca_initialize_fails_when_exists(self, admin_ca_dir, admin_ca_security):
         """AdminCAManager.initialize() should raise if CA already exists."""
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -109,6 +119,7 @@ class TestAdminCAInitialize:
 
     def test_admin_ca_key_permissions(self, admin_ca_dir, admin_ca_security):
         """Admin CA key should have 0600 permissions."""
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -117,6 +128,7 @@ class TestAdminCAInitialize:
 
     def test_admin_ca_cert_permissions(self, admin_ca_dir, admin_ca_security):
         """Admin CA cert should have 0644 permissions."""
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -125,6 +137,7 @@ class TestAdminCAInitialize:
 
     def test_admin_ca_directory_permissions(self, admin_ca_dir, admin_ca_security):
         """Admin CA directory should have 0700 permissions."""
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -314,6 +327,7 @@ class TestAdminSignCert:
 
     def test_admin_ca_cert_pem(self, admin_ca_dir, admin_ca_security):
         """get_admin_ca_cert_pem() should return valid PEM."""
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -327,6 +341,7 @@ class TestAdminSignCert:
 
     def test_admin_ca_subject(self, admin_ca_dir, admin_ca_security):
         """Admin CA cert should have correct subject."""
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
 
@@ -824,12 +839,19 @@ class TestStartupEnforcement:
             pytest.fail("Should not raise for loopback host")
 
     def test_passphrase_enforced_at_startup(self, admin_ca_dir, admin_ca_security):
-        """admin_mtls.enabled + passphrase env unset should raise RuntimeError."""
-        # Ensure passphrase is unset
-        os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
+        """admin_mtls.enabled + passphrase env unset should raise RuntimeError.
 
+        #537 note: the write path refuses first — initialize() raises the refusal
+        naming the admin var and creates nothing — so the CA is planted with the
+        passphrase set and the var is removed afterwards, which is the state a
+        running install reaches when the operator drops it from the env file.
+        """
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
         manager = AdminCAManager(Path(admin_ca_dir), admin_ca_security)
         manager.initialize()
+
+        # Ensure passphrase is unset for the startup check
+        os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
 
         config = ServerConfig(
             admin_mtls=AdminMTLSConfig(
@@ -969,7 +991,7 @@ class TestAdminCAWiring:
 
         This is the production condition: the installer delivers
         VENYA_ADMIN_CA_KEY_PASSPHRASE and never sets VENYA_CA_KEY_PASSPHRASE.
-        Pre-fix the manager read the executor var (unset) -> plaintext key.
+        Pre-#537 the manager was wired to the executor var (unset) -> plaintext key.
         """
         from pathlib import Path as PPath
 
@@ -992,22 +1014,23 @@ class TestAdminCAWiring:
         # Decrypts with the admin passphrase the manager read.
         assert manager._load_ca_key() is not None
 
-    def test_admin_ca_ignores_executor_var(self, admin_ca_dir, caplog):
-        """Negative (sharp regression): executor var set, admin var unset -> plaintext.
+    def test_admin_ca_ignores_executor_var(self, admin_ca_dir):
+        """Negative (sharp regression): executor var set, admin var unset -> refusal names the ADMIN var.
 
         Proves the admin manager reads the ADMIN var, not the executor var.
         Pre-fix (manager wired to config.ca_security = VENYA_CA_KEY_PASSPHRASE)
         this encrypted the key from the executor var and the test FAILS.
-        Post-fix the admin var is absent -> plaintext + warning naming it.
+        #537 changed the observable: the unset admin var no longer yields a
+        plaintext key plus a warning — the mint REFUSES, and the refusal text
+        names the admin var, which pins the same var-selection contract.
         """
-        import logging
         from pathlib import Path as PPath
 
         from server.app import _admin_ca_security
         from server.ca import AdminCAManager
 
         os.environ["VENYA_CA_KEY_PASSPHRASE"] = "executor_pp"
-        # admin var deliberately UNSET
+        # admin var deliberately UNSET (autouse fixture cleared it)
 
         config = ServerConfig(
             ca_dir=str(Path(admin_ca_dir)),
@@ -1015,19 +1038,25 @@ class TestAdminCAWiring:
             recovery_code_pepper="test-pepper",
         )
         manager = AdminCAManager(PPath(admin_ca_dir), _admin_ca_security(config))
-        with caplog.at_level(logging.WARNING, logger="venya.ca"):
+        with pytest.raises(RuntimeError) as excinfo:
             manager.initialize()
 
-        key_data = PPath(admin_ca_dir, "admin-ca.key").read_bytes()
-        assert b"ENCRYPTED" not in key_data, "admin CA must NOT key off the executor var"
-        assert any(
-            "VENYA_ADMIN_CA_KEY_PASSPHRASE" in r.getMessage() and "UNENCRYPTED" in r.getMessage()
-            for r in caplog.records
-        ), "warning must name the admin var the manager actually reads"
+        message = str(excinfo.value)
+        assert "VENYA_ADMIN_CA_KEY_PASSPHRASE" in message, "refusal must name the admin var the manager actually reads"
+        # The split-brain half: it must NOT have keyed off the executor var.
+        assert "Set VENYA_CA_KEY_PASSPHRASE" not in message
+        assert not manager.ca_key_path.exists(), "nothing may be written on the refusal path"
+        assert not manager.ca_cert_path.exists(), "no admin CA cert on the refusal path"
+        # The admin_ca_dir fixture pre-creates the directory; it must stay empty.
+        assert not any(manager.ca_path.iterdir()), "refusal left artifacts in the CA directory"
 
-    def test_admin_ca_unencrypted_warning_names_admin_var(self, admin_ca_dir, caplog):
-        """Negative: no passphrase -> loud warning naming the ADMIN var, key still written."""
-        import logging
+    def test_admin_ca_unencrypted_refusal_names_admin_var(self, admin_ca_dir):
+        """Negative: no passphrase -> the mint REFUSES, naming the ADMIN var, and writes nothing.
+
+        This cell used to pin the warn-and-write-plaintext posture. #537 ruled
+        that posture out: with no passphrase there is no key and no directory,
+        so the same fixture now asserts the refusal (a strictly stronger check).
+        """
         from pathlib import Path as PPath
 
         from server.app import _admin_ca_security
@@ -1040,16 +1069,15 @@ class TestAdminCAWiring:
             recovery_code_pepper="test-pepper",
         )
         manager = AdminCAManager(PPath(admin_ca_dir), _admin_ca_security(config))
-        with caplog.at_level(logging.WARNING, logger="venya.ca"):
+        with pytest.raises(RuntimeError) as excinfo:
             manager.initialize()
 
-        key_data = PPath(admin_ca_dir, "admin-ca.key").read_bytes()
-        assert b"ENCRYPTED" not in key_data  # plaintext, but...
-        assert b"BEGIN PRIVATE KEY" in key_data  # ...still written: no silent failure
-        assert any(
-            "VENYA_ADMIN_CA_KEY_PASSPHRASE" in r.getMessage() and "UNENCRYPTED" in r.getMessage()
-            for r in caplog.records
-        ), "warning must name the admin var the manager actually reads"
+        message = str(excinfo.value)
+        assert message.startswith("REFUSED:")
+        assert "VENYA_ADMIN_CA_KEY_PASSPHRASE" in message
+        assert not manager.ca_key_path.exists(), "nothing may be written on the refusal path"
+        assert not manager.ca_cert_path.exists(), "no admin CA cert on the refusal path"
+        assert not any(manager.ca_path.iterdir()), "refusal left artifacts in the CA directory"
 
 
 # ---------------------------------------------------------------------------

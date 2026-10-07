@@ -94,22 +94,49 @@ def _load_passphrase(env_var: str) -> bytes | None:
     return None
 
 
+def _unencrypted_key_refusal(passphrase_env: str) -> str:
+    """Owner-approved refusal text for the write path (ticket #537).
+
+    The wording is final; only the env-var NAME interpolates, because the caller may read a
+    different variable (admin CA vs root/executor CA) and the repair step must name the real one.
+    """
+    return (
+        "REFUSED: the Venya root CA key must never be stored unencrypted. Nothing was written.\n"
+        "Why it matters: anyone who can read an unencrypted root CA key can mint certificates that\n"
+        "this entire deployment trusts.\n"
+        "To fix it:\n"
+        f"  1. Set {passphrase_env} for the venya-core service. On an installed system it lives\n"
+        "     in /etc/venya/venya-core.env.\n"
+        "  2. If this machine was set up with the Venya installer, the value is already there. Re-running\n"
+        "     the installer reuses it and PRESERVES your existing CA key - it is not replaced.\n"
+        "  3. Provide the passphrase through that file or the service environment, never as a command-line\n"
+        "     argument (command-line values are visible to other processes on the machine).\n"
+        "Your existing CA was not modified by this refusal.\n"
+        "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md (CA file locations and rotation)."
+    )
+
+
 def _serialize_key_encrypted(
     key: ec.EllipticCurvePrivateKey,
     passphrase: bytes | None,
     passphrase_env: str,
 ) -> bytes:
-    """Serialize a private key, optionally encrypting with a passphrase.
+    """Serialize a private key, encrypted with a passphrase.
 
     Args:
         key: The private key to serialize.
-        passphrase: Optional passphrase for encryption.
-        passphrase_env: Name of the env var that should carry the passphrase.
-            Used only to make the "unencrypted" warning actionable — it names
-            the var the caller actually reads (admin vs executor CA differ).
+        passphrase: Passphrase for encryption; None means no passphrase is configured.
+        passphrase_env: Name of the env var that should carry the passphrase, used in
+            the refusal text so it names the var the caller actually reads (admin vs
+            executor CA differ).
 
     Returns:
-        PEM-encoded key bytes (encrypted if passphrase provided).
+        PEM-encoded key bytes, always encrypted.
+
+    Raises:
+        RuntimeError: If no passphrase is available (#537) — an unencrypted CA key at
+            rest lets anyone who reads it mint certificates the whole deployment trusts,
+            so the plaintext branch is gone: nothing is written and the caller fails.
     """
     if passphrase:
         return key.private_bytes(
@@ -118,15 +145,7 @@ def _serialize_key_encrypted(
             encryption_algorithm=BestAvailableEncryption(passphrase),
         )
     else:
-        logger.warning(
-            "CA key will be stored UNENCRYPTED — set %s in production",
-            passphrase_env,
-        )
-        return key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
+        raise RuntimeError(_unencrypted_key_refusal(passphrase_env))
 
 
 def _deserialize_key(data: bytes, passphrase: bytes | None) -> ec.EllipticCurvePrivateKey:
@@ -184,14 +203,23 @@ class CAManager:
         """Generate a new CA keypair and self-signed certificate.
 
         Creates the CA directory (if needed), generates an ECDSA P-256
-        keypair, and creates a self-signed CA certificate. If a passphrase
-        is set via VENYA_CA_KEY_PASSPHRASE, the key will be encrypted on disk.
+        keypair, and creates a self-signed CA certificate. The key is always
+        stored encrypted: the passphrase comes from VENYA_CA_KEY_PASSPHRASE
+        (or the configured ``ca_security.key_passphrase_env``).
 
         Raises:
-            RuntimeError: If CA already exists.
+            RuntimeError: If no passphrase is set — nothing is created (#537).
+            CAExistsError: If CA already exists.
         """
         if self.has_ca:
             raise CAExistsError(f"CA already exists at {self.ca_dir}")
+
+        # #537: refuse before ANY filesystem work. The serializer below is the
+        # backstop for the bytes, but a key it never produced still leaves the
+        # 0700 CA directory behind, which would make "Nothing was written." untrue.
+        # An empty value counts as unset — _load_passphrase() already treats it so.
+        if not _load_passphrase(self._key_passphrase_env):
+            raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
 
         self.ca_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(str(self.ca_dir), 0o700)
@@ -202,7 +230,7 @@ class CAManager:
         # Load passphrase for encryption
         passphrase = _load_passphrase(self._key_passphrase_env)
 
-        # Store private key (encrypted if passphrase provided)
+        # Store private key (encrypted — see the guard above and #537)
         key_pem = _serialize_key_encrypted(private_key, passphrase, self._key_passphrase_env)
         # #499: create-time mode via os.open(..., 0o600) — the house idiom of
         # sbx_strategy.py's env-file write. write_bytes() creates the inode at
@@ -598,14 +626,20 @@ class AdminCAManager:
         """Generate a new admin CA keypair and self-signed certificate.
 
         Creates the admin CA directory (if needed), generates an ECDSA P-256
-        keypair, and creates a self-signed admin CA certificate. If a passphrase
-        is set via VENYA_ADMIN_CA_KEY_PASSPHRASE, the key will be encrypted on disk.
+        keypair, and creates a self-signed admin CA certificate. The key is
+        always stored encrypted: the passphrase comes from
+        VENYA_ADMIN_CA_KEY_PASSPHRASE (or the configured admin passphrase env).
 
         Raises:
-            RuntimeError: If admin CA already exists.
+            RuntimeError: If admin CA already exists, or if no passphrase is
+                set — nothing is created (#537).
         """
         if self.has_ca:
             raise RuntimeError(f"Admin CA already exists at {self.ca_path}")
+
+        # #537: refuse before ANY filesystem work — see CAManager.initialize.
+        if not _load_passphrase(self._key_passphrase_env):
+            raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
 
         self.ca_path.mkdir(parents=True, exist_ok=True)
         os.chmod(str(self.ca_path), 0o700)
@@ -616,7 +650,7 @@ class AdminCAManager:
         # Load passphrase for encryption
         passphrase = _load_passphrase(self._key_passphrase_env)
 
-        # Store private key (encrypted if passphrase provided)
+        # Store private key (encrypted — see the guard above and #537)
         key_pem = _serialize_key_encrypted(private_key, passphrase, self._key_passphrase_env)
         # #499: create-time mode via os.open(..., 0o600) — see CAManager.initialize;
         # write_bytes() + chmod leaves the key body at 0666 & ~umask until the

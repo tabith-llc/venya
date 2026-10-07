@@ -203,14 +203,18 @@ class _CliHttpShim:
         return resp.json()
 
 
-def test_recovery_e2e_full_loop(tmp_path):
+def test_recovery_e2e_full_loop(tmp_path, monkeypatch):
     """init → capture code → CLI recovery → burn → replay 401 → enroll+login.
 
     Single sequential narrative: every step consumes the state the previous
     step created, exactly like a real lockout recovery.
+
+    #537: the init route mints the root CA, and the write path now refuses to do
+    that without a passphrase, so the harness provides the valid configuration.
     """
     from core.iam.models import Role, RoleMember, User
 
+    monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "test-ca-passphrase-recovery-e2e")
     app, backend = _build_real_app(tmp_path)
     client = TestClient(app, raise_server_exceptions=False)
 
