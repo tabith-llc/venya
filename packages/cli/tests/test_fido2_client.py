@@ -9,12 +9,39 @@
 Verifies that Fido2Client is instantiated correctly with fido2 2.x API.
 """
 
+import datetime
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import httpx2
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.x509.oid import NameOID
 from venya_cli.fido2_client import CliInteraction, Fido2Auth, Fido2ClientError, Fido2NotFoundError
+
+
+def _ca_file(tmp_path):
+    """A real self-signed CA PEM: #533 makes the ceremony dial LOAD its anchor
+    (a placeholder no longer survives the context build)."""
+    key = ed25519.Ed25519PrivateKey.generate()
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "t533-ca")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, None)
+    )
+    ca = tmp_path / "ca.crt"
+    ca.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return ca
 
 
 class TestFido2ClientInstantiation:
@@ -579,46 +606,49 @@ class TestPostErrorDetailPropagation:
         request = httpx2.Request("POST", "https://venya-core-2/api/v1/init")
         return httpx2.Response(status, content=body, headers={"content-type": content_type}, request=request)
 
-    def _post_and_catch(self, resp):
+    def _post_and_catch(self, resp, tmp_path):
+        # #533: the ceremony dials ONLY against the configured anchor, so this
+        # transport-parse cell hands it one (a real CA PEM). The anchor law
+        # itself is test_cli_fido2_ceremony_anchor_533.py's job.
         with patch("httpx2.Client.post", return_value=resp):
-            auth = Fido2Auth(server_url="https://venya-core-2")
+            auth = Fido2Auth(server_url="https://venya-core-2", ca_path=_ca_file(tmp_path))
             with pytest.raises(Fido2ClientError) as ei:
                 auth._post("/api/v1/init", {})
         return str(ei.value)
 
-    def test_409_already_initialized_detail_reaches_message(self):
+    def test_409_already_initialized_detail_reaches_message(self, tmp_path):
         resp = self._response(
             409,
             b'{"detail":"Core already initialized with admin \'admin1\'. Cannot re-initialize."}',
             "application/json",
         )
-        msg = self._post_and_catch(resp)
+        msg = self._post_and_catch(resp, tmp_path)
         # cmd_init matcher contract (server wording: routes/init.py:171)
         assert "already initialized" in msg.lower()
         assert "developer.mozilla.org" not in msg
 
-    def test_409_pending_enrollment_detail_reaches_message(self):
+    def test_409_pending_enrollment_detail_reaches_message(self, tmp_path):
         resp = self._response(
             409,
             b'{"detail":"A pending enrollment exists for \'admin1\'. Reset required."}',
             "application/json",
         )
-        msg = self._post_and_catch(resp)
+        msg = self._post_and_catch(resp, tmp_path)
         # cmd_init matcher contract (server wording: routes/init.py:183)
         assert "pending enrollment" in msg.lower()
 
-    def test_non_json_error_body_falls_back_to_status_text(self):
+    def test_non_json_error_body_falls_back_to_status_text(self, tmp_path):
         resp = self._response(500, b"<html>Internal Server Error</html>", "text/html")
-        msg = self._post_and_catch(resp)
+        msg = self._post_and_catch(resp, tmp_path)
         assert "500" in msg  # httpx status text fallback, no crash
 
-    def test_non_string_detail_does_not_crash(self):
+    def test_non_string_detail_does_not_crash(self, tmp_path):
         resp = self._response(
             422,
             b'{"detail":[{"loc":["body","user_id"],"msg":"field required"}]}',
             "application/json",
         )
-        msg = self._post_and_catch(resp)
+        msg = self._post_and_catch(resp, tmp_path)
         assert msg  # non-empty, Fido2ClientError (not TypeError/AttributeError)
 
 

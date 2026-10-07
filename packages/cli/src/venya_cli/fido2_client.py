@@ -235,21 +235,66 @@ class Fido2Auth:
                 )
             )
         self.server_url = server_url.rstrip("/")
-        # Same server-TLS precedence as APIClient: SSL_CERT_FILE env wins,
-        # then the CA installed by `venya setup`, then system trust.
-        self._verify: str | bool = True
+        # Server-TLS verification precedence, now the SAME rule the bearer dial
+        # uses (#530, inherited by #533): SSL_CERT_FILE env wins (the operator
+        # NAMING a public-CA bundle), then the CA installed by `venya setup`.
+        # There is no third branch: with neither, `_anchor` is None and the DIAL
+        # refuses — the workstation OS trust store is never the fallback for a
+        # transport carrying the WebAuthn challenge and assertion. Resolution is
+        # cheap and non-raising at construction (`venya setup` — the repair this
+        # refusal names — constructs this object); the refusal lands at the dial.
         self._ca_path = ca_path
-        if ca_path is not None and ca_path.exists() and not os.environ.get("SSL_CERT_FILE"):
-            self._verify = str(ca_path)
+        self._anchor, self._anchor_searched = self._resolve_tls_anchor()
+
+    def _resolve_tls_anchor(self) -> tuple[str | None, str]:
+        """This ceremony transport's Venya trust anchor, or None + what was searched.
+
+        Mirrors ``APIClient._resolve_tls_anchor`` (#530). Nothing here consults
+        the host trust store, and nothing here raises.
+        """
+        env_ca = os.environ.get("SSL_CERT_FILE")
+        if env_ca:
+            return env_ca, f"SSL_CERT_FILE={env_ca!r}"
+        ca_path = self._ca_path
+        if ca_path is not None and ca_path.exists():
+            return str(ca_path), f"the config-dir CA at {ca_path}"
+        expected = str(ca_path) if ca_path is not None else "<config-dir>/ca.crt"
+        return None, f"no SSL_CERT_FILE set and no config-dir CA at {expected}"
+
+    def _dial_verify(self) -> ssl.SSLContext:
+        """The anchored TLS context for one dial — or the loud refusal, BEFORE
+        any ``httpx2.Client`` exists (AC1/AC3, #533).
+
+        Reuses the house builder ``_build_ssl_context`` (#530): a bare
+        ``PROTOCOL_TLS_CLIENT`` context loaded with ONLY the resolved anchor,
+        so ``CERT_REQUIRED`` and ``check_hostname`` stay on and the host store
+        is never consulted. A None anchor cannot reach the builder silently —
+        the ceremony raises its own error class so every caller's
+        ``except Fido2ClientError`` keeps working.
+        """
+        from .api_client import APIClientError, _anchor_refusal_text, _build_ssl_context
+
+        if self._anchor is None:
+            raise Fido2ClientError(_anchor_refusal_text(self._anchor_searched, transport="WebAuthn ceremony call"))
+        try:
+            return _build_ssl_context(cafile=self._anchor, certfile=None, keyfile=None)
+        except APIClientError as e:
+            # The corrupt/empty-anchor wrap (#439) reads right, but this transport's
+            # callers all catch Fido2ClientError — carry the same text in that class.
+            raise Fido2ClientError(str(e)) from e
 
     def _tls_absent_hint(self, exc: BaseException) -> str:
-        """Diagnostic for a TLS verification failure when the config-dir CA is
-        absent (ticket 439): name the expected file, say it is absent, name the
-        repair. The system-trust fallback itself is unchanged — only the
-        failure TEXT gains the parity the registration path already had. The
-        hint is suppressed when SSL_CERT_FILE was set (an operator choice) or
-        when the failure has no certificate-verification cause."""
-        if self._verify is not True or os.environ.get("SSL_CERT_FILE"):
+        """Diagnostic for a TLS verification failure on an ANCHORED dial (#439).
+
+        #533 removed the case this hint used to describe (no anchor at all —
+        that state is now refused before the dial). What remains is the real
+        one: an anchor WAS configured and the server did not verify against it
+        (a stale config-dir CA after a core reinstall is the ordinary shape).
+        Name the file that was trusted, and the repair. Suppressed when
+        SSL_CERT_FILE was set (an operator choice) or when the failure has no
+        certificate-verification cause.
+        """
+        if self._anchor is None or os.environ.get("SSL_CERT_FILE"):
             return ""
         cause: BaseException | None = exc
         while cause is not None:
@@ -258,20 +303,22 @@ class Fido2Auth:
             cause = cause.__cause__ or cause.__context__
         else:
             return ""
-        expected = str(self._ca_path) if self._ca_path is not None else "<config-dir>/ca.crt"
-        state = "is absent" if self._ca_path is not None and not self._ca_path.exists() else "is not trusted"
+        state = (
+            f"the config-dir CA file {self._anchor} is no longer present"
+            if self._ca_path is not None and not Path(self._anchor).exists()
+            else f"the server certificate did not verify against the Venya CA file {self._anchor}"
+        )
         return (
-            f" — TLS trust check: the server certificate did not verify against the system "
-            f"store, and the config-dir CA file {expected} {state}. Run "
-            f"`venya setup <core>` for this server ({self.server_url}) to install the core "
-            f"CA, or set SSL_CERT_FILE to a valid trust bundle."
+            f" — TLS trust check: {state}, the file this workstation is configured to "
+            f"trust. Run `venya setup <core>` for this server ({self.server_url}) to reinstall "
+            f"the core CA, or set SSL_CERT_FILE to a valid trust bundle."
         )
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Simple GET request."""
         url = self.server_url + path
         try:
-            with httpx2.Client(verify=self._verify) as client:
+            with httpx2.Client(verify=self._dial_verify()) as client:
                 resp = client.get(url, params=params, timeout=30.0)
                 resp.raise_for_status()
                 return resp.json() if resp.content else {}
@@ -290,7 +337,7 @@ class Fido2Auth:
         """Simple POST request."""
         url = self.server_url + path
         try:
-            with httpx2.Client(verify=self._verify) as client:
+            with httpx2.Client(verify=self._dial_verify()) as client:
                 resp = client.post(
                     url,
                     json=json_data,
