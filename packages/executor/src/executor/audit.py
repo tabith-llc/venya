@@ -252,17 +252,36 @@ class AuditLogger:
         string ``verify=`` combined with ``cert=``, so the CA anchors and the
         executor mTLS client cert chain live in a single SSLContext.
 
-        Fail-closed postures preserved: a missing/empty ca_cert_path falls
-        back to the system trust store (``load_default_certs()``), never
-        False; a CA or cert-FILE load failure raises into the per-cycle
-        handler in ``_forward_once`` (spool lines kept, loud log, no crash
-        loop — same semantics as the old constructor TypeError, now fixed).
+        Trust set (#531, owner ruling 2026-10-07): the configured
+        ``ca_cert_path`` is the ONLY anchor — this dial never loads the host
+        trust store. The retired ``else: ctx.load_default_certs()`` meant an
+        audit row could be posted to whatever a publicly-issued certificate
+        claimed was the core, so a forwarded line was not provably addressed
+        to our core. ``ssl.create_default_context()`` is deliberately NOT used
+        here either: it calls ``load_default_certs()`` and
+        ``load_verify_locations()`` only ADDS to that set. The repair for a
+        missing anchor is the CA the executor installer copies to this host
+        (workstations: ``venya setup <core>``) — never an implicit host store
+        (same ruling as #530/#501).
+
+        Fail-loud postures: an empty ``ca_cert_path`` and a CA or cert-FILE
+        load failure both raise into the per-cycle handler in
+        ``_forward_once`` (spool lines kept, loud log, no crash loop — same
+        semantics as the old constructor TypeError, now fixed). Nothing here
+        ever degrades to ``verify=False``.
         """
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        if self._config.ca_cert_path:
-            ctx.load_verify_locations(cafile=self._config.ca_cert_path)
-        else:
-            ctx.load_default_certs()
+        if not self._config.ca_cert_path:
+            # Defense in depth: AuditForwarderConfig._require_verified_https_remote
+            # already refuses remote_url-without-CA at config load, so reaching
+            # this line means the config was mutated past the validator.
+            raise RuntimeError(
+                "Audit forwarder has no trust anchor: audit.ca_cert_path is empty and the "
+                "host trust store is not consulted (#531) — events stay spooled. Repair: point "
+                "audit.ca_cert_path at the Venya CA this installer copies to the executor "
+                "(workstations: 'venya setup <core>')"
+            )
+        ctx.load_verify_locations(cafile=self._config.ca_cert_path)
         if self._client_cert:
             ctx.load_cert_chain(certfile=self._client_cert[0], keyfile=self._client_cert[1])
         return ctx

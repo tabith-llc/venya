@@ -371,7 +371,15 @@ class CertificateManager:
         file written at registration/rotation (``mtls.ca_cert``). Without the
         local anchors a probe verifies only against the host store, which is the
         defect this closes.
+
+        RULED POSTURE (#531, owner ruling 2026-10-07): keeping the system store
+        here is intentional and recorded, not an oversight — see the comment at
+        the construction site below. The other two #531 dials (the audit
+        forwarder and ``_create_mtls_client``) are tightened; this one stands.
         """
+        # RULED POSTURE (owner, 2026-10-07, refs #531): this context keeps the OS trust store loaded on
+        # purpose — it serves customer bring-your-own-certificate leaves. Do not "tighten" it without a
+        # written revision of that ruling. See features/bring-your-own-certificate.md.
         ssl_ctx = ssl.create_default_context()
         for candidate in (self.config.ca_bundle, self.ca_cert_path):
             if candidate and Path(candidate).exists():
@@ -1381,9 +1389,22 @@ class ExecutorDaemon:
         Missing/unusable material is a named single-line startup refusal, not
         a raw traceback (ticket refactor-1-config-consolidation residual —
         same fail-loud pattern as the deaf-boot guard).
+
+        Trust set (#531, owner ruling 2026-10-07): the configured Venya CA
+        (``mtls.ca_cert``) is the ONLY anchor. This used to start from
+        ``ssl.create_default_context()``, which loads the HOST trust store and
+        then only ADDS our anchor with ``load_verify_locations()`` — so the
+        executor's control-channel dial accepted any publicly-issued
+        certificate for the core hostname. A bare ``PROTOCOL_TLS_CLIENT``
+        context (already ``CERT_REQUIRED`` + ``check_hostname``) carries the
+        verification posture the default helper set, and the two flags
+        ``create_default_context()`` applied are set explicitly so the anchor
+        set is the only thing that changed (same house shape as #501's
+        ``_build_relay_ssl_context`` and #530's ``_build_ssl_context``).
         """
         try:
-            ssl_ctx = ssl.create_default_context()
+            ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_ctx.verify_flags |= ssl.VERIFY_X509_STRICT | ssl.VERIFY_X509_PARTIAL_CHAIN
             ssl_ctx.load_cert_chain(self.config.mtls.cert, self.config.mtls.key)
             ssl_ctx.load_verify_locations(self.config.mtls.ca_cert)
         except (OSError, ssl.SSLError) as exc:
