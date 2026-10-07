@@ -12,6 +12,7 @@ from datetime import UTC
 from core.engine.backend import Backend
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..audit_lifecycle import (
@@ -72,6 +73,84 @@ class ResetResponse(BaseModel):
 
 
 # --- Endpoints ---
+
+
+# --- First-admin bootstrap serialization (#510) ---
+
+#: One fixed advisory-lock key for the whole first-admin bootstrap. Step 1
+#: (count → create the pending admin) and step 2 (re-check → enroll) take the
+#: SAME key, so the two steps of two different callers cannot interleave. The
+#: lock is transaction-scoped, therefore held to the commit that writes the
+#: enrollment, and it is a database object: it serializes every process that
+#: shares the database, which is what two uvicorn workers do.
+INIT_BOOTSTRAP_LOCK_KEY = "venya:init:first-admin"
+
+
+def _lock_first_admin_bootstrap(db: Session) -> None:
+    """Serialize the first-admin bootstrap on PostgreSQL (#510).
+
+    The shape is the one already in this tree —
+    ``core/iam/enrollment_manager.create_enrollment_token`` (the #339 cap plus
+    the #366 dialect guard): ``FOR UPDATE`` locks only MATCHED rows, so it locks
+    nothing in the bootstrap case where no enrolled admin row exists yet to
+    lock, which is exactly the case that must serialize. An advisory lock keyed
+    on a constant is the shape that survives two processes racing on an empty
+    set. ``hashtext`` runs PostgreSQL-side and the key travels as a bind param,
+    never interpolated.
+
+    Dialect guard (#366): ``pg_advisory_xact_lock``/``hashtext`` are
+    PostgreSQL-only — issued against SQLite the same statement is a runtime
+    "no such function" error. The statement therefore goes out only on a
+    PostgreSQL bind; a session that cannot report its dialect is treated as
+    PostgreSQL so the statement contract stays pinned. SQLite fallback, stated
+    plainly: the advisory lock is SKIPPED — cross-process serialization is a
+    PostgreSQL-production property. What the SQLite cells in the test suite
+    prove is the in-transaction re-check in :func:`init_complete`, not this
+    lock; the lock itself is pinned by statement construction plus a
+    PostgreSQL-gated race cell that skips on a venue with no scratch database.
+    """
+    bind = db.get_bind() if hasattr(db, "get_bind") else None
+    if bind is None or bind.dialect.name == "postgresql":
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+            {"key": INIT_BOOTSTRAP_LOCK_KEY},
+        )
+
+
+def _enrolled_admin_present(db: Session, admin_role_id: int) -> bool:
+    """True when an ``admin``-role member is already enrolled — read FOR UPDATE.
+
+    The re-check inside the transaction that writes the enrollment (#510). Two
+    properties are deliberate:
+
+    * Admin-scoped, not :func:`deployment_is_initialized`. That helper answers
+      "a reset would destroy identity" and says True for ANY
+      ``WebAuthnCredential`` row; using it here would refuse a legitimate
+      bootstrap over orphan credential residue left by a partial wipe, and step
+      1 already refuses on the narrower admin-scoped predicate. Step 2 refuses
+      on exactly the predicate step 1 used, so the two steps agree.
+    * ``with_for_update`` on the membership/user join, which is the same
+      ``role_members`` rows :meth:`core.iam.role_manager.RoleManager._locked_admin_roster`
+      locks (#487). That is the belt for a concurrent roster or status write:
+      the advisory lock serializes bootstrap callers among themselves, the row
+      lock interlocks this read with the roster guards. PostgreSQL locks;
+      SQLite, the test backend, ignores the clause — the posture that helper's
+      own docstring records.
+
+    The count is deliberately not a ``count()`` with ``FOR UPDATE``:
+    PostgreSQL rejects ``FOR UPDATE`` on an aggregate, so this asks for one
+    matching id and stops there.
+    """
+    from core.iam.models import RoleMember, User
+
+    row = (
+        db.query(User.user_id)
+        .join(RoleMember, RoleMember.user_id == User.user_id)
+        .filter(RoleMember.role_id == admin_role_id, User.enrolled_at.isnot(None))
+        .with_for_update()
+        .first()
+    )
+    return row is not None
 
 
 def deployment_is_initialized(db: Session) -> bool:
@@ -274,6 +353,11 @@ async def init_core(
     from ..ca import CAExistsError, CAManager
 
     try:
+        # #510: take the bootstrap lock BEFORE the "already initialized" count
+        # below. Two concurrent step-1 calls used to read zero each and both
+        # commit a pending admin, which is what lets two step-2 calls enroll.
+        _lock_first_admin_bootstrap(db)
+
         admin_role = db.query(Role).filter(Role.name == "admin").first()
 
         if admin_role is not None:
@@ -317,6 +401,10 @@ async def init_core(
                 db.query(User).filter(User.user_id == stale.user_id).delete()
             if stale_pending:
                 db.commit()
+                # That commit ended the transaction, and with it the advisory
+                # lock (#510): re-take it so the create below stays inside the
+                # same serialization instead of falling outside it.
+                _lock_first_admin_bootstrap(db)
                 logger.info(
                     "Init step 1: superseded %d abandoned pending enrollment(s)",
                     len(stale_pending),
@@ -426,6 +514,10 @@ async def init_complete(
     Step 2 of two-step FIDO2 enrollment. Verifies the FIDO2 attestation,
     stores the WebAuthn credential, generates a recovery code (hashed),
     and marks the user as enrolled.
+
+    A core that already has an enrolled admin answers 409 here as well, not
+    only at step 1: two bootstrap flows may each hold a pending row, and only
+    one of them may enroll (#510).
     """
     from datetime import datetime
 
@@ -485,6 +577,12 @@ async def init_complete(
         # Find the pending user matching the submitted user_id
         from core.iam.models import Role, RoleMember
 
+        # #510: the lock goes out before the first read of this transaction, so
+        # the re-check below and the enrollment write are one serialized step
+        # against every other bootstrap caller — including a second uvicorn
+        # worker on the same database.
+        _lock_first_admin_bootstrap(db)
+
         admin_role = db.query(Role).filter(Role.name == "admin").first()
         if admin_role is None:
             raise HTTPException(
@@ -504,6 +602,39 @@ async def init_complete(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No pending enrollment found for this user",
+            )
+
+        # #510 AC3: re-check the initialized state HERE, inside the transaction
+        # that writes the enrollment. Step 1's 409 is not enough on its own —
+        # before this lock landed, two step-1 calls could both pass the
+        # unlocked count and each keep its own pending row, and this route then
+        # enrolled both, giving the core two first administrators. Order is
+        # deliberate: the pending-row 400 above answers first (that is the
+        # superseded-ceremony case the CLI already word-maps), and this refusal
+        # comes before ANY write, so the loser stores no credential, no
+        # recovery-code hash and no enrolled_at.
+        if _enrolled_admin_present(db, admin_role.id):
+            # Denial-side shape from audit_lifecycle's own docstring: this event
+            # has no action riding on it, so the audit row commits before the
+            # raise. Field table stays value-free and names no other principal —
+            # /init is reachable unauthenticated, so a name here is an oracle.
+            audit_lifecycle(
+                db,
+                FIRST_ADMIN_ENROLLED,
+                req.user_id,
+                {"outcome": "refused_already_initialized", "auth_mode": "webauthn", "recovery_code_issued": False},
+            )
+            db.commit()
+            logger.warning(
+                "Init step 2: refused enrollment for %s — this core already has an enrolled admin",
+                req.user_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Core already initialized with an enrolled admin; enrollment for "
+                    f"'{req.user_id}' was refused. Use --installation-reset to start over."
+                ),
             )
 
         # Store WebAuthn credential in database
