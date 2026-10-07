@@ -59,6 +59,19 @@ MAX_RELAY_BODY_BYTES = 16 * 1024 * 1024
 # AUTHENTICATED peer (mTLS + CN allowlist), not an adversarial one.
 RELAY_READ_TIMEOUT_SECONDS = 30.0
 
+# #477 (relay-stop-unbounded-skips-cleanup-under-systemd): the bound stop()
+# waits for the in-flight command to finish and its teardown to run. The
+# server is single-threaded and executes INLINE, so an unwaited shutdown was
+# unbounded (a command may run to SBX_TIMEOUT = 1h) — and systemd's default
+# stop deadline then SIGKILLed the process, skipping the sandbox-removal
+# finally and the temp cleanup. 30 s keeps a normal restart prompt; the unit
+# declares TimeoutStopSec=45s so systemd's kill lands only AFTER this bound +
+# margin for the remaining teardown steps (a static interlock guards the two
+# values — see tests/test_relay_stop_477.py). A command outliving the bound is
+# logged and left to the boot-reaper pairing row; overflow can never again be
+# a silent skip without a journal trace.
+RELAY_STOP_DEADLINE_SECONDS = 30.0
+
 
 class ExecuteHandler(BaseHTTPRequestHandler):
     """Handle ``POST /execute`` with mTLS mutual authentication.
@@ -93,6 +106,16 @@ class ExecuteHandler(BaseHTTPRequestHandler):
         if peer_cn is None or peer_cn not in self.server.allowed_client_ids:  # type: ignore[attr-defined]
             logger.warning("Relay /execute rejected: peer CN %r not allowed", peer_cn)
             self._reply(403, {"detail": "unknown client identity"})
+            return
+
+        # #477: no NEW commands once draining. The flag is set before the
+        # serve_forever shutdown is requested, so a peer racing the teardown
+        # gets the flat 503 lane (same no-retry treatment as an execution
+        # failure) instead of queueing behind a shutdown in progress.
+        draining = getattr(self.server, "draining", None)
+        if draining is not None and draining.is_set():
+            logger.warning("Relay /execute rejected: executor is draining (shutdown in progress)")
+            self._reply(503, {"detail": "executor is draining (shutdown in progress)"})
             return
 
         # Body-size guard BEFORE any read/allocation: reject absurd or
@@ -237,6 +260,10 @@ class RelayListener:
         self._port = port
         self._server: HTTPServer | None = None
         self._thread: threading.Thread | None = None
+        # #477: set by stop() BEFORE the shutdown is requested. While set, the
+        # handler refuses every NEW /execute with a flat 503 — the "no new
+        # commands" flag of cooperative drain.
+        self._draining = threading.Event()
 
     @property
     def active(self) -> bool:
@@ -280,6 +307,8 @@ class RelayListener:
 
         server.executor_factory = self._executor_factory  # type: ignore[attr-defined]
         server.allowed_client_ids = self.allowed_client_ids  # type: ignore[attr-defined]
+        # #477: the no-new-commands flag the handler consults before executing.
+        server.draining = self._draining  # type: ignore[attr-defined]
         server.socket = context.wrap_socket(server.socket, server_side=True)
 
         self._server = server
@@ -292,12 +321,46 @@ class RelayListener:
             len(self.allowed_client_ids),
         )
 
-    def stop(self) -> None:
+    def stop(self, deadline_seconds: float = RELAY_STOP_DEADLINE_SECONDS) -> None:
+        """Cooperative, BOUNDED shutdown (#477).
+
+        Order:
+        1. set the draining flag — the handler refuses every NEW /execute
+           with a flat 503 ("no new commands", acceptance 1);
+        2. request the ``serve_forever`` shutdown and wait for it BOUNDED. On
+           the single-threaded server the request completes only once the
+           in-flight command finishes and its ``finally`` (sandbox teardown,
+           executor.py) has run — the common case returns with the teardown
+           done, the first arm of acceptance 2;
+        3. if the in-flight command outlives the bound, return anyway with a
+           named ERROR line. The unit's TimeoutStopSec (45 s > this 30 s
+           bound) is what would otherwise follow with a SIGKILL — the exact
+           skip-the-teardown class this ticket kills. Overflow residue is
+           covered by the boot-reaper pairing row; the journal states
+           verbatim what could not be finished here.
+        """
+        self._draining.set()
+        overflow = False
         if self._server is not None:
-            self._server.shutdown()
+            waiter = threading.Thread(target=self._server.shutdown, name="venya-relay-shutdown", daemon=True)
+            waiter.start()
+            waiter.join(timeout=deadline_seconds)
+            overflow = waiter.is_alive()
+            if overflow:
+                logger.error(
+                    "Relay stop deadline (%.0fs) reached with a command still in flight — "
+                    "no longer waiting; that command's sandbox teardown will not complete "
+                    "in this process (boot reaper pairing ticket covers the residue)",
+                    deadline_seconds,
+                )
             self._server.server_close()
             self._server = None
         if self._thread is not None:
-            self._thread.join(timeout=5.0)
+            # On the overflow path the serve thread is the one still running
+            # the command — joining it here would spend a second deadline and
+            # make the "bounded" stop unbounded again. It is a daemon thread:
+            # the shutdown request is already set, so it exits on its own once
+            # the command returns; a non-overflow stop joins normally.
+            self._thread.join(timeout=0.0 if overflow else 5.0)
             self._thread = None
         logger.info("Executor relay listener stopped")
