@@ -23,9 +23,12 @@ import os
 import shutil
 import signal
 import ssl
+import stat
 import sys
+import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -82,13 +85,23 @@ def _atomic_write(path: str | Path, payload: bytes, mode: int) -> None:
     """Write ``payload`` to ``path`` atomically with the FINAL mode at CREATE.
 
     House pattern (audit.py #310 spool rewrite): temp file created in the
-    target's own directory, then ``os.replace``. os.open applies ``mode`` at
-    create (umask can only remove bits) and O_CREAT|O_EXCL fails loud if
-    anything — including attacker-planted garbage — already sits at the temp
-    name; the temp is unlinked on every failure path. Unlike write-then-chmod,
-    the target never exists at a mode other than ``mode``, so secret material
-    has no umask-born world-writable window (ticket
+    target's own directory, then ``os.replace``. The final mode is pinned with
+    ``fchmod`` while the file is still invisible under the temp name (umask can
+    only REMOVE bits at create; fchmod pins the exact mode), so unlike
+    write-then-chmod the target never exists at a mode other than ``mode`` and
+    secret material has no umask-born world-writable window (ticket
     executor-daemon-umask0-key-write-window).
+
+    #478: the temp name used to be DETERMINISTIC (``<path>.tmp`` with
+    O_CREAT|O_EXCL), so one write killed between create and replace — the
+    systemd stop-path SIGKILL, an OOM kill, a Restart=always bounce — left
+    ``<target>.tmp`` behind and wedged EVERY later write to that target with
+    FileExistsError forever. The temp is now mkstemp-unique, exactly the
+    proven audit.py spool shape: a stale file cannot block a new writer, and
+    the no-interleave property that O_EXCL was bought for is unchanged — the
+    only publish step is still a single ``os.replace`` from an exclusive
+    temp. Residue (including legacy deterministic names from older builds)
+    is reclaimed at boot by ``sweep_stale_tmp_files`` below.
     """
     path = str(path)
     # Refuse BEFORE creating a temp when the target itself is not writable
@@ -96,19 +109,73 @@ def _atomic_write(path: str | Path, payload: bytes, mode: int) -> None:
     # an atomic replace would otherwise silently succeed over an RO target.
     if os.path.exists(path) and not os.access(path, os.W_OK):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), path)
-    tmp_name = f"{path}.tmp"
-    fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    parent = os.path.dirname(path) or "."
+    fd, tmp_name = tempfile.mkstemp(
+        dir=parent,
+        prefix=os.path.basename(path) + ".",
+        suffix=".tmp",
+    )
     try:
-        # umask can only REMOVE bits at create; fchmod pins the exact final
-        # mode while the file is still invisible under the temp name.
         os.fchmod(fd, mode)
-        with os.fdopen(fd, "wb") as f:
+        with os.fdopen(fd, "wb") as f:  # mkstemp creates 0600; fchmod above pins the final mode
             f.write(payload)
         os.replace(tmp_name, path)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)
         raise
+
+
+# #478 AC2: bound for the stale-*.tmp reclaim. A healthy writer here lives for
+# microseconds (create -> write -> replace); anything older than this bound is
+# by construction debris of a killed writer. 3600 s is deliberately much larger
+# than that window (it matches SBX_TIMEOUT, the longest activity the executor
+# runs), so a FRESH temp of a live writer is never reclaimed while anything
+# stale cannot survive into the next boot.
+_STALE_TMP_MAX_AGE_SECONDS = 3600.0
+
+
+def sweep_stale_tmp_files(
+    directories: Iterable[str | Path],
+    max_age_seconds: float = _STALE_TMP_MAX_AGE_SECONDS,
+) -> int:
+    """Boot-time reclaim of stale ``*.tmp`` files (ticket #478 acceptance 2).
+
+    Scoped strictly to the executor's OWN directories — callers pass them
+    explicitly, this never walks a tree. Removes regular files whose name ends
+    in ``.tmp`` and whose mtime is older than ``max_age_seconds``; anything
+    younger, any directory, symlink, or unreadable entry is left alone (fail
+    quietly per entry: a boot must not die over debris it came to clean).
+    Returns the number of files removed.
+    """
+    now = time.time()
+    removed = 0
+    seen: set[str] = set()
+    for directory in directories:
+        d = str(directory)
+        if d in seen:
+            continue
+        seen.add(d)
+        try:
+            entries = os.listdir(d)
+        except OSError:
+            continue
+        for name in entries:
+            if not name.endswith(".tmp"):
+                continue
+            victim = os.path.join(d, name)
+            try:
+                st = os.lstat(victim)
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                if now - st.st_mtime <= max_age_seconds:
+                    continue
+                os.unlink(victim)
+            except OSError:
+                continue
+            removed += 1
+            logger.info("Reclaimed stale temp file: %s", victim)
+    return removed
 
 
 def _dist_version() -> str:
@@ -1420,6 +1487,27 @@ class ExecutorDaemon:
                     e,
                 )
 
+    def _reclaim_stale_tmp(self) -> int:
+        """Sweep stale ``*.tmp`` across every directory this daemon writes through.
+
+        Single source of the sweep SCOPE (#478 AC2): the mTLS material dirs,
+        the executor config dir, the bootstrap-token dir, and the audit-spool
+        dir when configured — the executor's own directories only, never a
+        global walk. Delegates the age/identity policy to
+        ``sweep_stale_tmp_files``.
+        """
+        dirs: set[str | Path] = {
+            Path(self.config.mtls.cert).parent,
+            Path(self.config.mtls.key).parent,
+            Path(self.config.mtls.ca_cert).parent,
+            self._config_path.parent,
+            self._bootstrap_token_path.parent,
+        }
+        spool = getattr(self.config.audit, "spool_path", None)
+        if spool:
+            dirs.add(Path(spool).parent)
+        return sweep_stale_tmp_files(dirs)
+
     def create_executor(self, session_id: str) -> Executor:
         """Create an Executor instance with mTLS client.
 
@@ -1500,6 +1588,15 @@ class ExecutorDaemon:
         # once, at process start, before any execution can create new ones.
         swept = sweep_workspace_base()
         logger.info("Swept %d orphaned workspace dir(s) from previous run(s)", swept)
+
+        # #478: reclaim stale *.tmp left behind by a killed writer. The legacy
+        # deterministic temp name (<target>.tmp) could wedge every later write
+        # to that target forever; sweep it (and any mkstemp-era residue older
+        # than the bound) BEFORE the writes that would once have been blocked
+        # by it. Scoped to this executor's own directories only.
+        reclaimed = self._reclaim_stale_tmp()
+        if reclaimed:
+            logger.info("Reclaimed %d stale temp file(s) from executor directories (#478)", reclaimed)
 
         # Register with server (creates cert/key if not present)
         # register() uses throwaway httpx2.Client instances internally —
