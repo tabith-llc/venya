@@ -46,6 +46,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+#: The membership-lock namespace this leg ships, spelled out rather than read
+#: back from the class: the cell pins the literal, so a renamed or emptied
+#: namespace trips here instead of silently following the source.
+EXPECTED_MEMBERSHIP_LOCK_NAMESPACE = "venya:membership:"
+
 # --------------------------------------------------------------------------------
 # statement-recording fake
 # --------------------------------------------------------------------------------
@@ -191,7 +196,7 @@ def test_advisory_lock_is_xact_scoped_keyed_on_the_target_and_bound():
     assert "pg_advisory_lock(" not in sql, "session-scoped locks outlive the grant"
     assert "hashtext" in sql, "the key text must be hashed database-side"
     assert ":user_id" in sql, "the user id must travel as a bind param"
-    assert params == {"user_id": RoleManager.MEMBERSHIP_LOCK_PREFIX + "alice"}, params
+    assert params == {"user_id": EXPECTED_MEMBERSHIP_LOCK_NAMESPACE + "alice"}, params
     assert "alice" not in sql, "no string-interpolated user id"
 
     other = _FakeDb()
@@ -263,7 +268,7 @@ def test_remove_member_takes_the_same_per_user_lock():
 
     locks = db.lock_statements()
     assert locks, "remove_member did not take the per-user advisory lock"
-    assert locks[0][2] == {"user_id": RoleManager.MEMBERSHIP_LOCK_PREFIX + "frank"}
+    assert locks[0][2] == {"user_id": EXPECTED_MEMBERSHIP_LOCK_NAMESPACE + "frank"}
 
 
 def test_leg_ships_no_schema_migration():
