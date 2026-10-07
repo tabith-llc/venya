@@ -488,44 +488,124 @@ venya_create_venv() {
 venya_apply_code_fixes() {
     info "Applying code fixes..."
 
-    # Fix 1: Update init_db to use db_config.database_url in dependencies.py
-    if grep -q 'database_url = os.environ.get("VENYA_DB_URL")' "$INSTALL_DIR/packages/server/src/server/dependencies.py" 2>/dev/null; then
-        sed -i 's|database_url = os.environ.get("VENYA_DB_URL")|database_url = db_config.database_url or os.environ.get("VENYA_DB_URL")|' \
-            "$INSTALL_DIR/packages/server/src/server/dependencies.py"
-        if ! head -10 "$INSTALL_DIR/packages/server/src/server/dependencies.py" | grep -q "^import os"; then
-            sed -i '/from __future__ import annotations/a\\nimport os' \
-                "$INSTALL_DIR/packages/server/src/server/dependencies.py"
+    # #519 installer-sed-fake-success: `sed` exits 0 whether it replaced
+    # 100 lines or zero, so the old unconditional info lines could claim a
+    # fix that did nothing. Each fix now verifies a PATCH-SITE post-condition
+    # (no file-wide pre-checks — an unrelated occurrence used to mask a
+    # needed fix) and reports exactly one outcome:
+    #   applied / already clean / FAILED-ANCHOR-MISSING (loud warn, never a
+    #   success line). Idempotent: a second run on a patched tree reports
+    #   "already clean". set -euo pipefail safe: every count capture ends in
+    #   `|| true` because grep exits 1 on zero matches.
+    local f n_applied=0 n_clean=0 n_failed=0
+
+    # --- Fix 1: dependencies.py — init_db reads db_config.database_url ---
+    f="$INSTALL_DIR/packages/server/src/server/dependencies.py"
+    if [ ! -f "$f" ]; then
+        warn "  Fix 1 (dependencies.py db_config): FAILED-ANCHOR-MISSING - file absent"
+        n_failed=$((n_failed + 1))
+    elif grep -qF 'database_url = db_config.database_url or os.environ.get("VENYA_DB_URL")' "$f"; then
+        info "  Fix 1 (dependencies.py db_config): already clean"
+        n_clean=$((n_clean + 1))
+    elif grep -qF 'database_url = os.environ.get("VENYA_DB_URL")' "$f"; then
+        sed -i 's|database_url = os.environ.get("VENYA_DB_URL")|database_url = db_config.database_url or os.environ.get("VENYA_DB_URL")|' "$f"
+        if ! head -10 "$f" | grep -q "^import os"; then
+            sed -i '/from __future__ import annotations/a\\nimport os' "$f"
         fi
-        info "  Fixed init_db to use db_config.database_url"
+        if grep -qF 'database_url = db_config.database_url or os.environ.get("VENYA_DB_URL")' "$f"; then
+            info "  Fix 1 (dependencies.py db_config): applied"
+            n_applied=$((n_applied + 1))
+        else
+            warn "  Fix 1 (dependencies.py db_config): FAILED-ANCHOR-MISSING - sed did not land the patch"
+            n_failed=$((n_failed + 1))
+        fi
+    else
+        warn "  Fix 1 (dependencies.py db_config): FAILED-ANCHOR-MISSING - anchor absent from installed source (upstream shape changed)"
+        n_failed=$((n_failed + 1))
     fi
 
-    # Fix 2: Fix init.py imports (from ..iam.models -> from core.iam.models)
-    for f in "$INSTALL_DIR/packages/server/src/server/routes/init.py"; do
-        if [ -f "$f" ]; then
-            sed -i 's/from \.\.iam\.models/from core.iam.models/g' "$f"
-            info "  Fixed init.py imports"
+    # --- Fix 2: init.py relative imports (from ..iam.models -> core) ---
+    f="$INSTALL_DIR/packages/server/src/server/routes/init.py"
+    if [ ! -f "$f" ]; then
+        warn "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - file absent"
+        n_failed=$((n_failed + 1))
+    elif grep -qF 'from ..iam.models' "$f"; then
+        sed -i 's/from \.\.iam\.models/from core.iam.models/g' "$f"
+        if grep -qF 'from ..iam.models' "$f"; then
+            warn "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - relative import survived the sed"
+            n_failed=$((n_failed + 1))
+        else
+            info "  Fix 2 (init.py imports): applied"
+            n_applied=$((n_applied + 1))
         fi
-    done
+    elif grep -qF 'from core.iam.models' "$f"; then
+        info "  Fix 2 (init.py imports): already clean"
+        n_clean=$((n_clean + 1))
+    else
+        warn "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - neither import form present (upstream shape changed)"
+        n_failed=$((n_failed + 1))
+    fi
 
-    # Fix 3: Ensure db.flush() after admin_role creation in init.py
-    for f in "$INSTALL_DIR/packages/server/src/server/routes/init.py"; do
-        if [ -f "$f" ]; then
-            if ! grep -q 'db\.flush()' "$f" 2>/dev/null; then
-                sed -i '/db\.add(admin_role)/a\        db.flush()' "$f"
-                info "  Added db.flush() after admin_role creation"
+    # --- Fix 3: init.py — db.flush() immediately after db.add(admin_role) ---
+    # Patch-site-specific anchor (#519 criterion 2): the old file-wide
+    # 'db.flush()' grep let any unrelated occurrence mask a missing site
+    # flush. Every db.add(admin_role) line must now be followed by the flush.
+    if [ ! -f "$f" ]; then
+        warn "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - file absent"
+        n_failed=$((n_failed + 1))
+    else
+        local n_anchor n_paired
+        n_anchor=$(grep -cF 'db.add(admin_role)' "$f" || true)
+        n_paired=$(grep -A1 -F 'db.add(admin_role)' "$f" | grep -cE '^[[:space:]]*db\.flush\(\)[[:space:]]*$' || true)
+        if [ "${n_anchor:-0}" -eq 0 ]; then
+            warn "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - db.add(admin_role) anchor absent (upstream shape changed)"
+            n_failed=$((n_failed + 1))
+        elif [ "$n_paired" -ge "$n_anchor" ]; then
+            info "  Fix 3 (init.py admin_role flush): already clean"
+            n_clean=$((n_clean + 1))
+        else
+            sed -i '/db\.add(admin_role)/a\        db.flush()' "$f"
+            n_paired=$(grep -A1 -F 'db.add(admin_role)' "$f" | grep -cE '^[[:space:]]*db\.flush\(\)[[:space:]]*$' || true)
+            if [ "$n_paired" -ge "$n_anchor" ]; then
+                info "  Fix 3 (init.py admin_role flush): applied"
+                n_applied=$((n_applied + 1))
+            else
+                warn "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - sed did not land the flush"
+                n_failed=$((n_failed + 1))
             fi
         fi
-    done
+    fi
 
-    # Fix 4: Ensure timezone-aware datetimes in executors.py heartbeat
-    for f in "$INSTALL_DIR/packages/server/src/server/routes/executors.py"; do
-        if [ -f "$f" ]; then
-            if ! grep -q 'not_after\.tzinfo' "$f" 2>/dev/null; then
-                sed -i '/not_after = current_cert\.not_after/a\                if not_after.tzinfo is None:\n                    not_after = not_after.replace(tzinfo=timezone.utc)' "$f"
-                info "  Fixed timezone-aware datetime in heartbeat"
-            fi
+    # --- Fix 4: executors.py — timezone check AT the not_after site ---
+    # Patch-site-specific anchor (#519 criterion 2): the old file-wide
+    # 'not_after.tzinfo' grep was satisfied by any occurrence, not the guard
+    # this patch appends. The check now looks within the anchor's own lines.
+    f="$INSTALL_DIR/packages/server/src/server/routes/executors.py"
+    if [ ! -f "$f" ]; then
+        warn "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - file absent"
+        n_failed=$((n_failed + 1))
+    elif ! grep -qF 'not_after = current_cert.not_after' "$f"; then
+        warn "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - not_after anchor absent (upstream shape changed)"
+        n_failed=$((n_failed + 1))
+    elif grep -A2 -F 'not_after = current_cert.not_after' "$f" | grep -qF 'not_after.tzinfo'; then
+        info "  Fix 4 (executors.py heartbeat tz guard): already clean"
+        n_clean=$((n_clean + 1))
+    else
+        sed -i '/not_after = current_cert\.not_after/a\                if not_after.tzinfo is None:\n                    not_after = not_after.replace(tzinfo=timezone.utc)' "$f"
+        if grep -A2 -F 'not_after = current_cert.not_after' "$f" | grep -qF 'not_after.tzinfo'; then
+            info "  Fix 4 (executors.py heartbeat tz guard): applied"
+            n_applied=$((n_applied + 1))
+        else
+            warn "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - sed did not land the guard"
+            n_failed=$((n_failed + 1))
         fi
-    done
+    fi
+
+    if [ "$n_failed" -gt 0 ]; then
+        warn "Code fixes summary: $n_applied applied, $n_clean already clean, $n_failed anchor-missing failures (see [WARN] lines above)"
+    else
+        info "Code fixes summary: $n_applied applied, $n_clean already clean, 0 failures"
+    fi
 }
 
 # --- 14. Create directories ---
