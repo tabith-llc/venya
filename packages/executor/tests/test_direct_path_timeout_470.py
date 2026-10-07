@@ -39,6 +39,13 @@ report, NOT fixed here — different ticket), and every existing unit of this pa
 in the repo already pins the scan (test_executor.py, test_executor_pipeline.py).
 Pinning it does not weaken an assertion of this row: none of these cells are
 about the FD scan.
+
+UPDATE (ticket open-fd-scan-set-cloexec-toctou-ebadf #535): that pre-existing
+escape is now closed — the per-fd act skips a descriptor that vanished in
+flight (EBADF) and still raises anything else. The pin here STAYS as written:
+these rows are about the bound, and leaving the scan unpinned would rewrite
+FD_CLOEXEC on this pytest process's own descriptors. The race itself is pinned
+by test_fd_scan_cloexec_toctou_535.py.
 """
 
 import contextlib
