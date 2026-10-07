@@ -6,6 +6,7 @@
 
 """Tests for session authentication middleware (dual cookie + bearer)."""
 
+import os
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -311,7 +312,11 @@ class TestExecutorSessionPathAuth:
 
             ca_dir = tmp_path / "ca"
             ca_dir.mkdir(exist_ok=True)
-            mgr = CAManager(str(ca_dir), CASecurityConfig(key_passphrase_env="ABSENT_TEST_VAR"))
+            # #537: the write path refuses to mint an unencrypted CA key, so this
+            # helper points the manager at a passphrase var that IS set (the var
+            # name is test-local; the plaintext config it used to rely on is gone).
+            os.environ.setdefault("TEST_CA_KEY_PASSPHRASE_314", "test_passphrase_314")
+            mgr = CAManager(str(ca_dir), CASecurityConfig(key_passphrase_env="TEST_CA_KEY_PASSPHRASE_314"))
             mgr.initialize()
             ca_cert, ca_key = mgr.load_ca()
             self._ca_cache[cache_key] = (mgr, ca_cert, ca_key)

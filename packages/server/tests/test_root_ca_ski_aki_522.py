@@ -36,11 +36,18 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID, NameOID
 from server.ca import CAExistsError, CAManager
 
+_PASSPHRASE = b"test_passphrase_522"
+
 
 @pytest.fixture(autouse=True)
-def _clean_passphrase_env(monkeypatch):
-    """Deterministic plaintext keys for these cells regardless of ambient env."""
-    monkeypatch.delenv("VENYA_CA_KEY_PASSPHRASE", raising=False)
+def _passphrase_env(monkeypatch):
+    """Deterministic encrypted keys for these cells regardless of ambient env.
+
+    Used to DELETE these vars so the cells minted plaintext keys; #537 made the
+    write path refuse that, so the fixture now sets a test passphrase instead.
+    The cells are about certificate extensions — the key envelope is incidental.
+    """
+    monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", _PASSPHRASE.decode())
 
 
 @pytest.fixture
@@ -77,7 +84,7 @@ class TestRootCaSkiAki522:
         """AC1 (RED at HEAD): SKI is the digest of the root's own public key
         and the AKI references that same SKI (self-signed root form)."""
         root_cert = _load_root_cert(root)
-        key = serialization.load_pem_private_key(root.ca_key_path.read_bytes(), password=None)
+        key = serialization.load_pem_private_key(root.ca_key_path.read_bytes(), password=_PASSPHRASE)
         expected = x509.SubjectKeyIdentifier.from_public_key(key.public_key())
         assert _ski(root_cert) == expected.digest, "minted root missing SKI or wrong digest"
         assert _aki_keyid(root_cert) == expected.digest, "minted root missing self-AKI"
@@ -96,14 +103,22 @@ class TestRootCaSkiAki522:
         # matching SKI (pre-fix: the AKI pointed at an identifier the root did
         # not publish).
         assert _aki_keyid(leaf) == _ski(root_cert)
-        ca_public = serialization.load_pem_private_key(root.ca_key_path.read_bytes(), password=None).public_key()
+        ca_public = serialization.load_pem_private_key(root.ca_key_path.read_bytes(), password=_PASSPHRASE).public_key()
         assert _aki_keyid(leaf) == x509.SubjectKeyIdentifier.from_public_key(ca_public).digest
 
-    def test_ac3_incumbent_ca_reused_byte_for_byte(self, tmp_path):
+    def test_ac3_incumbent_ca_reused_byte_for_byte(self, tmp_path, monkeypatch):
         """AC3 paired negative: an existing deployment's root is NOT rewritten
         by this change. With ca.key + ca.crt on disk, initialize raises
         CAExistsError and both files keep their exact bytes (the callers in
         app.py / routes/init.py guard on has_ca and skip the mint entirely)."""
+        # The incumbent key is plaintext (it predates #537), so this cell runs
+        # with the passphrase env UNSET — the combination the autouse fixture
+        # would otherwise create (plaintext key at rest + passphrase set) is the
+        # #537 read-side finding: load_ca() logs "ignoring passphrase" but still
+        # passes it to the loader, which raises TypeError. That behaviour is
+        # unchanged here on purpose; the incumbent half of this cell is the
+        # deployment-continuity case the ticket keeps working.
+        monkeypatch.delenv("VENYA_CA_KEY_PASSPHRASE", raising=False)
         ca_dir = tmp_path / "ca"
         ca_dir.mkdir()
         # Incumbent pre-#522 root: minted without the identifiers.

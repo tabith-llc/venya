@@ -42,8 +42,13 @@ def ca_dir(tmp_path):
 
 
 @pytest.fixture
-def ca_manager(ca_dir):
-    """Create and initialize a CAManager."""
+def ca_manager(ca_dir, monkeypatch):
+    """Create and initialize a CAManager.
+
+    #537: the write path refuses to mint a CA key with no passphrase set, so the
+    fixture provides one (the valid configuration). The var is test-local.
+    """
+    monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "test_passphrase_crl")
     manager = CAManager(ca_dir)
     manager.initialize()
     return manager

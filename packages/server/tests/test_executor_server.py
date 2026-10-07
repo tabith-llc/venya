@@ -36,8 +36,13 @@ def ca_dir(tmp_path):
 
 
 @pytest.fixture
-def ca_manager(ca_dir):
-    """Create and initialize a CAManager."""
+def ca_manager(ca_dir, monkeypatch):
+    """Create and initialize a CAManager.
+
+    #537: the write path refuses to mint a CA key with no passphrase set, so the
+    fixture provides one (the valid configuration).
+    """
+    monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "test_passphrase_executor_server")
     manager = CAManager(ca_dir)
     manager.initialize()
     return manager
@@ -133,7 +138,8 @@ class MockCommandPolicy:
 class TestCAManager:
     """Tests for CAManager."""
 
-    def test_initialize_creates_ca_files(self, ca_dir):
+    def test_initialize_creates_ca_files(self, ca_dir, monkeypatch):
+        monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "test_passphrase_executor_server")
         manager = CAManager(ca_dir)
         assert not manager.has_ca
         manager.initialize()

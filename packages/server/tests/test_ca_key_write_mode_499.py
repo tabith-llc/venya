@@ -40,10 +40,15 @@ def permissive_umask():
 
 
 @pytest.fixture
-def no_passphrases(monkeypatch):
-    """Worst case per the ticket body: unset passphrase envs -> unencrypted PEM."""
-    monkeypatch.delenv("VENYA_CA_KEY_PASSPHRASE", raising=False)
-    monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
+def passphrase_set(monkeypatch):
+    """Set both passphrase envs — the only CA configuration #537 allows.
+
+    This fixture used to delete them ("unset passphrase envs -> unencrypted PEM").
+    That premise is VOID: the write path now refuses to create any key without a
+    passphrase, so the mode cells below run on the encrypted path.
+    """
+    monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "test-ca-passphrase-499")
+    monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", "test-admin-passphrase-499")
 
 
 def _watch_open_modes(monkeypatch) -> dict:
@@ -70,7 +75,7 @@ def _mode(path):
 
 
 class TestCaKeyWriteModeWindow499:
-    def test_ac1_root_ca_key_never_created_wide(self, tmp_path, monkeypatch, permissive_umask, no_passphrases):
+    def test_ac1_root_ca_key_never_created_wide(self, tmp_path, monkeypatch, permissive_umask, passphrase_set):
         """AC1 (RED at HEAD): under umask 0o022 the root CA key's create-time mode
         is 0600 — no group/world-readable window between create and chmod."""
         seen = _watch_open_modes(monkeypatch)
@@ -80,7 +85,7 @@ class TestCaKeyWriteModeWindow499:
         assert seen[str(manager.ca_key_path)] == 0o600
         assert _mode(manager.ca_key_path) == 0o600
 
-    def test_ac2_admin_ca_key_never_created_wide(self, tmp_path, monkeypatch, permissive_umask, no_passphrases):
+    def test_ac2_admin_ca_key_never_created_wide(self, tmp_path, monkeypatch, permissive_umask, passphrase_set):
         """AC2 (RED at HEAD): same create-time guarantee for the admin CA key."""
         seen = _watch_open_modes(monkeypatch)
         manager = AdminCAManager(tmp_path / "admin-ca")
@@ -89,7 +94,7 @@ class TestCaKeyWriteModeWindow499:
         assert seen[str(manager.ca_key_path)] == 0o600
         assert _mode(manager.ca_key_path) == 0o600
 
-    def test_ac3_incumbent_key_not_widened_by_reinit(self, tmp_path, permissive_umask, no_passphrases):
+    def test_ac3_incumbent_key_not_widened_by_reinit(self, tmp_path, permissive_umask, passphrase_set):
         """AC3 paired negative: a re-initialize that lands on an existing key inode
         (cert removed) leaves the incumbent mode at 0600 and the dir pin at 0700.
         O_CREAT's mode argument applies only to NEW files; the 0600 chmod pin
@@ -104,7 +109,7 @@ class TestCaKeyWriteModeWindow499:
         assert _mode(retry.ca_key_path) == 0o600, "incumbent key was widened"
         assert _mode(retry.ca_dir) == 0o700, "CA directory pin changed"
 
-    def test_reinit_with_full_ca_raises_and_touches_nothing(self, tmp_path, permissive_umask, no_passphrases):
+    def test_reinit_with_full_ca_raises_and_touches_nothing(self, tmp_path, permissive_umask, passphrase_set):
         """Existence guard intact under both managers: a full re-run raises before
         any write; bytes and modes are untouched. (AdminCAManager raises
         RuntimeError; CAManager raises CAExistsError, a RuntimeError subclass.)"""
@@ -124,7 +129,7 @@ class TestCaKeyWriteModeWindow499:
             assert _mode(manager.ca_key_path) == snapshot["key_mode"]
             assert manager.ca_cert_path.read_bytes() == snapshot["cert_bytes"]
 
-    def test_final_states_pinned_under_permissive_umask(self, tmp_path, permissive_umask, no_passphrases):
+    def test_final_states_pinned_under_permissive_umask(self, tmp_path, permissive_umask, passphrase_set):
         """Final-state regression pin (also passes at HEAD — that is its point):
         key 0600, cert 0644, CA dir 0700, for BOTH managers."""
         root = CAManager(str(tmp_path / "ca"))

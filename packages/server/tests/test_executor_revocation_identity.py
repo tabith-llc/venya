@@ -107,7 +107,7 @@ def _make_mock_ca(real_manager=None):
 
 
 @pytest.fixture()
-def env(tmp_path):
+def env(tmp_path, monkeypatch):
     """Real-SQLite app environment: routes wired, auth overridden, roles seeded."""
     engine = create_engine(f"sqlite:///{tmp_path / 'rev.db'}")
     Base.metadata.create_all(engine)
@@ -127,7 +127,11 @@ def env(tmp_path):
 
     ca_dir = tmp_path / "ca"
     ca_dir.mkdir()
-    real_ca = CAManager(str(ca_dir), CASecurityConfig(key_passphrase_env="ABSENT_TEST_VAR"))
+    # #537: the write path refuses to mint an unencrypted CA key, so this CA is
+    # created with a passphrase var that IS set (test-local name; the plaintext
+    # configuration it used to rely on no longer exists).
+    monkeypatch.setenv("TEST_CA_KEY_PASSPHRASE_REVOC", "test_passphrase_revoc")
+    real_ca = CAManager(str(ca_dir), CASecurityConfig(key_passphrase_env="TEST_CA_KEY_PASSPHRASE_REVOC"))
     real_ca.initialize()
     cert_prefix = tmp_path / "certfiles"
     cert_prefix.mkdir()
