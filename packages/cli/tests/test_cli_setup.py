@@ -237,6 +237,12 @@ class TestCaVerifyPrecedence:
     refusal, and moved the context/transport build to the first DIAL — so
     these cells touch client._http to reach the seam. Context behavior itself
     is tested with real certs in test_api_client_mtls.py::TestBuildSslContext.
+
+    #521 (the dial seam) also refuses a non-https base_url at this seam, so the
+    two cells that reach the build name an https server_url — they are anchor
+    PRECEDENCE cells, not scheme cells. The no-anchor cell keeps the plaintext
+    default on purpose: the anchor refusal is checked FIRST and wins, which is
+    the ordering the #530 wording depends on.
     """
 
     def test_ca_used_when_present_no_env(self, tmp_path: Path):
@@ -248,7 +254,7 @@ class TestCaVerifyPrecedence:
             patch("venya_cli.api_client._build_ssl_context", return_value=sentinel) as spy,
             patch("venya_cli.api_client.httpx2.Client") as mock_client,
         ):
-            client = APIClient(config_file=tmp_path / "config.json")
+            client = APIClient(server_url="https://venya-core-1", config_file=tmp_path / "config.json")
             _ = client._http  # #530 dial seam — the transport is built here, not at construction
         assert spy.call_args.kwargs["cafile"] == str(ca)
         assert mock_client.call_args.kwargs.get("verify") is sentinel
@@ -264,7 +270,7 @@ class TestCaVerifyPrecedence:
             patch("venya_cli.api_client._build_ssl_context", return_value=sentinel) as spy,
             patch("venya_cli.api_client.httpx2.Client"),
         ):
-            client = APIClient(config_file=tmp_path / "config.json")
+            client = APIClient(server_url="https://venya-core-1", config_file=tmp_path / "config.json")
             _ = client._http  # #530 dial seam — the transport is built here, not at construction
         assert spy.call_args.kwargs["cafile"] == "/tmp/venya-ca.crt"
 

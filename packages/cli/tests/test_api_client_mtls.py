@@ -141,7 +141,10 @@ class TestRealConstructionNoMock:
         monkeypatch.setenv("VENYA_ADMIN_KEY", str(key))
         monkeypatch.delenv("SSL_CERT_FILE", raising=False)
 
-        client = APIClient(config_file=tmp_path / "config.json")
+        # #521: the dial seam refuses a non-https base_url, and the CLI's no-config
+        # default IS plaintext — an https URL is named so this cell keeps testing
+        # the mTLS context, not the scheme guard (which has its own suite).
+        client = APIClient(server_url="https://venya-core-1", config_file=tmp_path / "config.json")
         try:
             assert isinstance(client._http, httpx2.Client)
             assert client.has_admin_mtls is True
@@ -167,7 +170,7 @@ class TestRealConstructionNoMock:
             return real(cafile, certfile, keyfile)
 
         monkeypatch.setattr(mod, "_build_ssl_context", spy)
-        client = APIClient(config_file=tmp_path / "config.json")
+        client = APIClient(server_url="https://venya-core-1", config_file=tmp_path / "config.json")
         try:
             # #530: the transport (and so the context) is built on first DIAL,
             # not at construction — touching client._http is the dial seam.
@@ -194,7 +197,7 @@ class TestRealConstructionNoMock:
             return real(cafile, certfile, keyfile)
 
         monkeypatch.setattr(mod, "_build_ssl_context", spy)
-        client = APIClient(config_file=tmp_path / "config.json")
+        client = APIClient(server_url="https://venya-core-1", config_file=tmp_path / "config.json")
         try:
             _ = client._http  # #530 dial seam — the transport is built here, not at construction
             assert captured["cafile"] == str(tmp_path / "ca.crt")
@@ -219,7 +222,7 @@ class TestAdminMtlsClientCert:
         monkeypatch.setenv("VENYA_ADMIN_CERT", str(cert))
         monkeypatch.setenv("VENYA_ADMIN_KEY", str(key))
 
-        client = APIClient(config_file=tmp_path / "config.json")
+        client = APIClient(server_url="https://venya-core-1", config_file=tmp_path / "config.json")
         try:
             _ = client._http  # #530 dial seam — the transport is built here, not at construction
 
@@ -242,7 +245,7 @@ class TestAdminMtlsClientCert:
         ca, _ = _make_cert_key(tmp_path, "setup-ca")
         (tmp_path / "ca.crt").write_bytes(ca.read_bytes())
 
-        client = APIClient(config_file=tmp_path / "config.json")
+        client = APIClient(server_url="https://venya-core-1", config_file=tmp_path / "config.json")
         try:
             _ = client._http  # #530 dial seam — the transport is built here, not at construction
 

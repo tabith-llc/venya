@@ -416,10 +416,34 @@ class APIClient:
         Refuses with the loud anchor message BEFORE any HTTP client exists when
         this workstation has no Venya trust anchor — the token-bearing call is
         never made against the host system store.
+
+        #521 site 1 (option C, the dial seam): the SAME seam also refuses a
+        non-``https://`` core URL before any transport exists. The check lives
+        HERE rather than in ``__init__`` because ``run_command()`` constructs an
+        APIClient for every command before it dispatches: an eager raise at
+        construction would brick ``venya setup`` — the very repair the anchor
+        refusal names — on exactly the host that needs it, and would hide the
+        repair hint behind a construction error. Landing at the build branch (and
+        NOT in the setter) keeps the test seam that injects a stub usable.
         """
         if self.__http is None:
             if not self._anchor:
                 raise _anchor_refusal(self._anchor_searched)
+            base_url = self._http_kwargs.get("base_url", "")
+            if not (isinstance(base_url, str) and base_url.startswith("https://")):
+                # Deferred import: commands.py imports this module at its top,
+                # so a module-level back-import would be a cycle. Same shape the
+                # landed #521 site 3 uses in fido2_client.py (`_https_refusal`).
+                from .commands import _https_refusal
+
+                raise APIClientError(
+                    _https_refusal(
+                        str(base_url),
+                        site="the venya API request",
+                        ticket="cli-dial-sites-missing-https-guard",
+                        detail="this transport carries your bearer token, secrets and audit calls",
+                    )
+                )
             verify = _build_ssl_context(
                 cafile=self._anchor,
                 certfile=self._admin_certfile,
