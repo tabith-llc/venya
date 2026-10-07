@@ -126,21 +126,32 @@ class APIClientAuthenticationError(APIClientError):
     """Authentication failed — requires re-auth."""
 
 
-def _anchor_refusal(searched: str) -> APIClientError:
-    """The loud refusal for a dial with no Venya trust anchor (#530).
+def _anchor_refusal_text(searched: str, *, transport: str = "token-bearing call") -> str:
+    """The one refusal wording for a dial with no Venya trust anchor (#530).
 
-    One wording, shared by the house builder and the resolver, so every path
-    that cannot name an anchor reads the same: what was searched, why the host
-    store is not the answer, and the repair.
+    Kept as TEXT (not an exception) so the bearer dial and the FIDO2 ceremony
+    dial (#533) raise it in their OWN error classes — one wording, two seams.
+    Every path that cannot name an anchor reads the same: what was searched,
+    why the host store is not the answer, and the repair. ``transport`` names
+    the kind of call so the ceremony refusal says "WebAuthn ceremony".
     """
-    return APIClientError(
+    return (
         f"Cannot dial the core: no Venya TLS trust anchor is configured — {searched}. "
-        "Venya does not fall back to the host's system trust store on a token-bearing "
-        "call: a certificate for this hostname issued by any public CA is not proof "
+        f"Venya does not fall back to the host's system trust store on a {transport}: "
+        "a certificate for this hostname issued by any public CA is not proof "
         "you reached your core. Repair: run `venya setup <core>` on this workstation, "
         "or set SSL_CERT_FILE to a CA bundle you trust — a core served by a public "
         "certificate is the operator naming that bundle, never an implicit host store."
     )
+
+
+def _anchor_refusal(searched: str) -> APIClientError:
+    """The loud refusal for a bearer dial with no Venya trust anchor (#530).
+
+    One wording, shared by the house builder and the resolver — see
+    ``_anchor_refusal_text``.
+    """
+    return APIClientError(_anchor_refusal_text(searched))
 
 
 def _build_ssl_context(cafile: str | None, certfile: str | None, keyfile: str | None) -> ssl.SSLContext:

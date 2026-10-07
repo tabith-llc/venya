@@ -85,27 +85,34 @@ class TestLoginCaDiagnostics439:
         assert str(bad) in msg, f"resolved CA path missing from: {msg}"
         assert "venya setup" in msg, f"repair command missing from: {msg}"
 
-    def test_T2_absent_ca_names_path_and_differs_from_invalid(self, tmp_path: Path):
-        """T2: with NO config-dir ca.crt, a login whose TLS verification fails
-        must still name the expected path, state the file is absent, and be
-        distinguishable from the invalid-file message.
+    def test_T2_stale_ca_names_file_and_differs_from_invalid(self, tmp_path: Path, monkeypatch):
+        """T2: with a config-dir CA INSTALLED and the server failing to verify
+        against it (the ordinary shape after a core reinstall), the ceremony error
+        must name the trusted FILE and the REPAIR, and read differently from the
+        invalid-file message.
 
-        RED at tip: the ceremony error is 'Connection failed: <raw ssl text>' —
-        no path, no absent statement, no repair.
+        #533 changed what "no CA" means here: an ABSENT anchor is now a refusal
+        before the dial (test_cli_fido2_ceremony_anchor_533.py), so this cell
+        covers the case the hint still owns — an anchor that exists and did not
+        verify. RED at the pre-439 tip: the ceremony error was
+        'Connection failed: <raw ssl text>' — no path, no repair.
         """
-        ca = tmp_path / "ca.crt"  # deliberately NOT created
+        ca = _make_ca(tmp_path)
         url = "https://core.example.invalid/api/v1/auth/options"
+        monkeypatch.delenv("SSL_CERT_FILE", raising=False)
         auth = Fido2Auth("https://core.example.invalid", ca_path=ca)
-        assert auth._verify is True  # system-trust fallback (precedence pinned in TestFido2CaPrecedence)
+        assert auth._anchor == str(ca)  # anchored — the case the hint owns
 
         with patch("venya_cli.fido2_client.httpx2.Client") as client_cls:
             client_cls.return_value.__enter__.return_value.get.side_effect = _connect_error_with_ssl_cause(url)
             with pytest.raises(Fido2ClientError) as excinfo:
                 auth._get("/api/v1/auth/options")
         msg = str(excinfo.value)
-        assert str(ca) in msg, f"expected CA path missing from: {msg}"
-        assert "absent" in msg.lower(), f"absent-file statement missing from: {msg}"
+        assert str(ca) in msg, f"trusted CA path missing from: {msg}"
+        assert "did not verify" in msg.lower(), f"verification statement missing from: {msg}"
         assert "venya setup" in msg, f"repair command missing from: {msg}"
+        # #533: the wording no longer claims a system-store fallback happened.
+        assert "system trust store" not in msg and "system store" not in msg
 
         # The two failure classes must be distinguishable from each other.
         bad = tmp_path / "bad-ca" / "ca.crt"

@@ -300,14 +300,16 @@ class TestFido2CaPrecedence:
         ca.write_bytes(b"pem")
         with patch.dict(os.environ, {}, clear=True):
             auth = Fido2Auth("https://core", ca_path=ca)
-        assert auth._verify == str(ca)
+        assert auth._anchor == str(ca)
 
     def test_env_wins_over_ca(self, tmp_path: Path):
         ca = tmp_path / "ca.crt"
         ca.write_bytes(b"pem")
         with patch.dict(os.environ, {"SSL_CERT_FILE": "/tmp/venya-ca.crt"}, clear=True):
             auth = Fido2Auth("https://core", ca_path=ca)
-        assert auth._verify is True
+        # #533: the named bundle IS the anchor — the transport never falls back to
+        # `verify=True` (which is httpx asking the host store).
+        assert auth._anchor == "/tmp/venya-ca.crt"
 
 
 class TestSetupCaDirPermission376:
