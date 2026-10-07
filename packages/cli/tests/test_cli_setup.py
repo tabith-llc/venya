@@ -29,7 +29,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from venya_cli import commands as commands_mod
-from venya_cli.api_client import APIClient
+from venya_cli.api_client import APIClient, APIClientError
 from venya_cli.fido2_client import Fido2Auth
 
 
@@ -228,14 +228,15 @@ class TestSetupHttpsRequired:
 
 
 class TestCaVerifyPrecedence:
-    """APIClient.__init__: SSL_CERT_FILE env > setup ca.crt > system trust.
+    """APIClient anchor precedence: SSL_CERT_FILE env > setup ca.crt > REFUSAL.
 
     Since ticket cli-admin-mtls-verify-cert-conflict (option (a)) the chosen
     anchor is loaded into ONE ssl.SSLContext passed as verify= (string verify
     and the cert= kwarg are gone — httpx2 >= 2.12 rejects the combination).
-    The precedence itself is unchanged; observed via the cafile argument the
-    initializer hands _build_ssl_context. Context behavior itself is tested
-    with real certs in test_api_client_mtls.py::TestBuildSslContext.
+    #530 replaced the old third branch ("then system trust") with a loud
+    refusal, and moved the context/transport build to the first DIAL — so
+    these cells touch client._http to reach the seam. Context behavior itself
+    is tested with real certs in test_api_client_mtls.py::TestBuildSslContext.
     """
 
     def test_ca_used_when_present_no_env(self, tmp_path: Path):
@@ -247,7 +248,8 @@ class TestCaVerifyPrecedence:
             patch("venya_cli.api_client._build_ssl_context", return_value=sentinel) as spy,
             patch("venya_cli.api_client.httpx2.Client") as mock_client,
         ):
-            APIClient(config_file=tmp_path / "config.json")
+            client = APIClient(config_file=tmp_path / "config.json")
+            _ = client._http  # #530 dial seam — the transport is built here, not at construction
         assert spy.call_args.kwargs["cafile"] == str(ca)
         assert mock_client.call_args.kwargs.get("verify") is sentinel
         assert "cert" not in mock_client.call_args.kwargs
@@ -262,19 +264,32 @@ class TestCaVerifyPrecedence:
             patch("venya_cli.api_client._build_ssl_context", return_value=sentinel) as spy,
             patch("venya_cli.api_client.httpx2.Client"),
         ):
-            APIClient(config_file=tmp_path / "config.json")
+            client = APIClient(config_file=tmp_path / "config.json")
+            _ = client._http  # #530 dial seam — the transport is built here, not at construction
         assert spy.call_args.kwargs["cafile"] == "/tmp/venya-ca.crt"
 
-    def test_system_trust_when_neither(self, tmp_path: Path):
+    def test_no_anchor_refuses_never_system_trust(self, tmp_path: Path):
+        """#530: no SSL_CERT_FILE and no setup CA -> the dial REFUSES.
+
+        Paired negative for the branch that used to be 'then system trust'. The
+        builder is rigged to record any call: the refusal must land before it,
+        so a token-bearing request can never be satisfied by a publicly-issued
+        certificate for the hostname.
+        """
         sentinel = object()
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("venya_cli.api_client._build_ssl_context", return_value=sentinel) as spy,
             patch("venya_cli.api_client.httpx2.Client") as mock_client,
         ):
-            APIClient(config_file=tmp_path / "config.json")
-        assert spy.call_args.kwargs["cafile"] is None
-        assert mock_client.call_args.kwargs.get("verify") is sentinel
+            client = APIClient(config_file=tmp_path / "config.json")
+            with pytest.raises(APIClientError, match="no Venya TLS trust anchor"):
+                _ = client._http
+            # And the refusal is at the dial, not the request: no transport ever existed.
+            spy.assert_not_called()
+            mock_client.assert_not_called()
+        # Constructing the client with no anchor is still allowed — `venya setup`
+        # is the repair, and run_command() builds the client before it dispatches.
 
 
 class TestFido2CaPrecedence:
