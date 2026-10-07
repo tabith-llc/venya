@@ -1502,6 +1502,21 @@ def cmd_run(client: APIClient, args: Any) -> int:
         return 1
 
 
+def _https_refusal(server_url: str, *, site: str, ticket: str, detail: str = "") -> str:
+    """The ONE refusal wording for a non-https core URL, as a string.
+
+    Split out of ``_require_https_server_url`` (#521) so the sites that cannot
+    "print then ``return 1``" — the FIDO2 ceremony transport and the register
+    verify call, which raise into an existing handler instead — reuse the SAME
+    text instead of hand-copying it. One check, one wording, no variant.
+    """
+    suffix = f" — {detail}" if detail else ""
+    return (
+        f"Error: server URL must be https:// — got '{server_url}'. Plaintext http is "
+        f"not supported for {site}{suffix} (ticket {ticket})."
+    )
+
+
 def _require_https_server_url(server_url: str, *, site: str, ticket: str, detail: str = "") -> bool:
     """One shared https:// scheme guard for every place the CLI dials a core URL.
 
@@ -1522,12 +1537,7 @@ def _require_https_server_url(server_url: str, *, site: str, ticket: str, detail
     """
     if server_url.startswith("https://"):
         return True
-    suffix = f" — {detail}" if detail else ""
-    print(
-        f"Error: server URL must be https:// — got '{server_url}'. Plaintext http is "
-        f"not supported for {site}{suffix} (ticket {ticket}).",
-        file=sys.stderr,
-    )
+    print(_https_refusal(server_url, site=site, ticket=ticket, detail=detail), file=sys.stderr)
     return False
 
 
@@ -2324,7 +2334,22 @@ def _verify_register_auth(client: APIClient, server_url: str, ca_bundle: str | N
     """Verify executor auth against the resolved core URL (#387) with the
     register-path TLS trust (#395) — the plain ``client`` trust store is
     config-dir-only, so on a config-less host the verify call could never
-    succeed while the CSR POST (which honors --ca-bundle) had just worked."""
+    succeed while the CSR POST (which honors --ca-bundle) had just worked.
+
+    #521: this bearer-bearing revocation READ now carries the shared scheme
+    guard itself, not only the guard its one caller ran before the CSR POST.
+    The read sends ``Authorization: Bearer <token>``, so a plaintext config
+    would put the workstation's token on the wire whatever got the CSR.
+    """
+    if not server_url.startswith("https://"):
+        raise APIClientError(
+            _https_refusal(
+                server_url,
+                site="the post-register revocation-list read",
+                ticket="cli-dial-sites-missing-https-guard",
+                detail="this request carries your bearer token",
+            )
+        )
     cafile = _resolve_register_verify_cafile(client, ca_bundle)
     headers = {"Accept": "application/json"}
     if client.config.access_token:

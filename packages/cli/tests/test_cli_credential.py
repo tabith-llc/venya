@@ -30,9 +30,17 @@ def _make_mock_response(status_code=200, json_data=None):
 
 
 def _make_client(mock_http=None):
-    """Create an APIClient with a mocked HTTP client."""
+    """Create an APIClient with a mocked HTTP client.
+
+    The config carries an https server URL: #521 put the scheme guard on the
+    FIDO2 ceremony transport, and these cells reach it through ``_elevate``, so
+    the fixture has to look like a provisioned workstation (what ``venya setup``
+    writes) rather than the unconfigured localhost default — which is now a
+    refused shape by design, not something a credential-add test should depend
+    on.
+    """
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        f.write(b"{}")
+        f.write(b'{"server_url": "https://test.example.com"}')
         config_file = Path(f.name)
 
     client = APIClient(config_file=config_file)

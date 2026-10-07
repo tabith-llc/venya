@@ -213,6 +213,27 @@ class Fido2Auth:
     """
 
     def __init__(self, server_url: str = "http://localhost:8000", ca_path: Path | None = None) -> None:
+        # #521: the ceremony transport dials the core with the RP challenge and
+        # the assertion, and its URL comes straight from config — the same
+        # resolved value the bearer path uses. Plaintext is refused here, at the
+        # ONE seam every ceremony construction passes through (commands.py init /
+        # credential add / enroll / _elevate, and APIClient.authenticate), instead
+        # of being re-copied at each. Bare hostnames mean https exactly as
+        # `venya setup` and `exec register` already read them; an explicit scheme
+        # is NEVER rewritten — no upgrade, no downgrade.
+        if "://" not in server_url:
+            server_url = "https://" + server_url
+        if not server_url.startswith("https://"):
+            from .commands import _https_refusal
+
+            raise Fido2ClientError(
+                _https_refusal(
+                    server_url,
+                    site="the FIDO2 ceremony transport",
+                    ticket="cli-dial-sites-missing-https-guard",
+                    detail="this transport carries the WebAuthn challenge and assertion",
+                )
+            )
         self.server_url = server_url.rstrip("/")
         # Same server-TLS precedence as APIClient: SSL_CERT_FILE env wins,
         # then the CA installed by `venya setup`, then system trust.
