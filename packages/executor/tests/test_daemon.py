@@ -556,6 +556,10 @@ class TestRotate:
     def test_rotate_success(self, cert_manager: CertificateManager, tmp_ca_dir: Path):
         """Rotation generates new keypair, submits CSR, installs new cert."""
         ca_key, ca_cert = _make_ca_pair()
+        # #500: rotation is checked against the trust anchor already on disk
+        # (what registration wrote). Put THIS pair's CA there — the response and
+        # the incumbent must be the same root, which is the legitimate shape.
+        Path(cert_manager.ca_cert_path).write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
 
         # Create initial cert
         initial_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
