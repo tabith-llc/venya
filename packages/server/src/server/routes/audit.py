@@ -8,7 +8,7 @@
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -31,6 +31,20 @@ router = APIRouter()
 # middleware bounds the COMPRESSED body; zstd can expand thousands-fold).
 INGEST_MAX_LINES = 2000
 INGEST_MAX_DECOMPRESSED_BYTES = 8_000_000
+
+# Client-clock bound (ticket audit-ingest-accepts-unbound-client-timestamps
+# #461): a spool line's timestamp comes from the EXECUTOR clock, while the
+# read-side window filters (``days=``/``hours=``) cut on the SERVER clock.
+# An unbound client stamp is therefore an evasion vector: a skewed executor
+# stamps its rows outside the window the auditor queries and they disappear
+# without anything being deleted. Every stored row is kept inside
+# ``now +/- INGEST_MAX_TIMESTAMP_SKEW`` of the server clock; a stamp outside
+# the band is CLAMPED to the nearest edge (so it stays visible to a
+# same-day view) and the row carries the structured ``timestamp_skewed``
+# flag next to ``sender_revoked``/``forwarded``, with the client's claim
+# preserved verbatim in ``client_timestamp`` — evidence outranks silence,
+# the same doctrine as the D2 revoked-sender ruling.
+INGEST_MAX_TIMESTAMP_SKEW = timedelta(hours=24)
 
 
 # --- Request/Response models ---
@@ -143,7 +157,6 @@ async def audit_list(
     if hours is not None:
         cutoff = datetime.now(UTC) - timedelta(hours=hours)
         query = query.filter(AuditEvent.timestamp >= cutoff)
-
     if executor_id is not None:
         from sqlalchemy import JSON, cast
 
@@ -213,6 +226,11 @@ async def audit_ingest(
     is a producer bug; the forwarder keeps its lines and the server log names
     the failing line index). Unknown-but-valid event types LAND (String(64)
     no-CHECK forward compatibility is deliberate).
+
+    Client timestamps are bounded against the server clock (see
+    ``INGEST_MAX_TIMESTAMP_SKEW``): in-window values are stored EXACTLY as
+    supplied, out-of-band values are clamped to the edge of the band and
+    flagged ``timestamp_skewed`` with the original claim kept in the row.
     """
     caller = getattr(request.state, "auth_user", {})
     if caller.get("caller") != "executor":
@@ -267,7 +285,7 @@ async def audit_ingest(
         )
 
     # Whole-batch validation first (D4) — zero partial writes.
-    parsed: list[tuple[str, datetime, dict[str, Any]]] = []
+    parsed: list[tuple[str, datetime, dict[str, Any], dict[str, Any]]] = []
     for idx, line in enumerate(lines):
         try:
             obj = json.loads(line)
@@ -302,7 +320,8 @@ async def audit_ingest(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"line {idx}: fields must be JSON-serializable",
             )
-        parsed.append((event_type, _spool_timestamp(obj.get("timestamp")), obj))
+        ts, skew_fields = _spool_timestamp(obj.get("timestamp"))
+        parsed.append((event_type, ts, obj, skew_fields))
 
     # Flag and admission share one derivation by construction (audit-ingest-revoked-serial-flag-divergence):
     # read the middleware's stashed verdict; re-derive only if the key is
@@ -320,25 +339,57 @@ async def audit_ingest(
     return {"accepted": len(parsed)}
 
 
-def _spool_timestamp(raw: Any) -> datetime:
+def _spool_timestamp(raw: Any) -> tuple[datetime, dict[str, Any]]:
     """Spool-line timestamp when ISO-parseable AND tz-aware, else now(UTC)
     (naive wall-clock datetimes are banned tree-wide; a garbage timestamp
-    degrades to now, never to a naive value)."""
+    degrades to now, never to a naive value).
+
+    Returns ``(stored_timestamp, skew_fields)``. An honest in-window value is
+    stored EXACTLY as supplied and adds no keys; a value outside
+    ``INGEST_MAX_TIMESTAMP_SKEW`` of the server clock is clamped to the edge
+    of that band and adds the structured flag family (#461). A naive or
+    garbage value keeps its old behavior: fall back to now, no flag — the
+    fallback IS the server clock, so it cannot be skewed.
+    """
     if isinstance(raw, str):
         try:
             ts = datetime.fromisoformat(raw)
         except ValueError:
-            return datetime.now(UTC)
+            return datetime.now(UTC), {}
         if ts.tzinfo is not None:
-            return ts
-    return datetime.now(UTC)
+            return bound_to_server_clock(ts)
+    return datetime.now(UTC), {}
+
+
+def bound_to_server_clock(ts: datetime, now: datetime | None = None) -> tuple[datetime, dict[str, Any]]:
+    """Keep a tz-aware client timestamp within ``INGEST_MAX_TIMESTAMP_SKEW``
+    of the server clock, pairing the answer with the structured fields to
+    write (empty dict when the value needed no repair).
+
+    ``now`` is injectable for testability; production passes nothing.
+    """
+    if now is None:
+        now = datetime.now(UTC)
+    skew_seconds = (ts - now).total_seconds()
+    limit_seconds = INGEST_MAX_TIMESTAMP_SKEW.total_seconds()
+    if abs(skew_seconds) <= limit_seconds:
+        return ts, {}
+    if skew_seconds < 0:
+        clamped = now - INGEST_MAX_TIMESTAMP_SKEW
+    else:
+        clamped = now + INGEST_MAX_TIMESTAMP_SKEW
+    return clamped, {
+        "timestamp_skewed": True,
+        "client_timestamp": ts.isoformat(),
+        "client_skew_seconds": round(skew_seconds),
+    }
 
 
 def _write_forwarded_events(
     db: Session,
     executor_id: str,
     sender_revoked: bool,
-    parsed: list[tuple[str, datetime, dict[str, Any]]],
+    parsed: list[tuple[str, datetime, dict[str, Any], dict[str, Any]]],
 ) -> None:
     """Append the forwarded rows to the ledger (no commit — the route
     commits once: one batch, one transaction).
@@ -348,16 +399,25 @@ def _write_forwarded_events(
     executor-forwarder writer. Provenance per D2/Q4: user_id carries the
     sending executor's cert CN (migration-022 'principal verbatim incl.
     mTLS CNs'), fields carry the spool payload verbatim plus executor_id
-    (the GET executor_id filter's key), sender_revoked, and forwarded.
+    (the GET executor_id filter's key), sender_revoked, forwarded, and the
+    timestamp_skewed family (always present as a bool; the client's original
+    claim rides along only when a stamp was out of band).
     """
     from core.iam.models import AuditEvent
 
-    for event_type, ts, obj in parsed:
+    for event_type, ts, obj, skew_fields in parsed:
         db.add(
             AuditEvent(
                 event_type=event_type,
                 user_id=executor_id,
-                fields={**obj, "executor_id": executor_id, "sender_revoked": sender_revoked, "forwarded": True},
+                fields={
+                    **obj,
+                    "executor_id": executor_id,
+                    "sender_revoked": sender_revoked,
+                    "forwarded": True,
+                    "timestamp_skewed": bool(skew_fields),
+                    **skew_fields,
+                },
                 timestamp=ts,
             )
         )
