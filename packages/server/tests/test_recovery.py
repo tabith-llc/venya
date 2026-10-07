@@ -349,15 +349,21 @@ class TestRecoveryBurnRealDB:
 
     def test_wrong_code_rejected_and_code_survives(self, tmp_path):
         """Paired negative first: a wrong code burns nothing; the real code
-        still works afterwards."""
+        still works afterwards.
+
+        The IDs here are legal shapes: #517 put the admin-surface grammar on
+        ``new_user_id``, and this cell is about code semantics, so a shape the
+        request model would refuse (the single character it used to carry) now
+        answers 422 before the handler and never reaches the burn path.
+        """
         from core.iam.models import User
 
         client, SessionLocal, code = _build_real_app(tmp_path)
-        bad = client.post("/api/v1/recovery", json={"code": "WRONG-CODE", "new_user_id": "x"})
+        bad = client.post("/api/v1/recovery", json={"code": "WRONG-CODE", "new_user_id": "xy"})
         assert bad.status_code == 401
         with SessionLocal() as s:
             assert s.query(User).filter(User.user_id == "oldadmin").one().recovery_code_hash is not None
-        good = client.post("/api/v1/recovery", json={"code": code, "new_user_id": "x"})
+        good = client.post("/api/v1/recovery", json={"code": code, "new_user_id": "xy"})
         assert good.status_code == 200
 
 
