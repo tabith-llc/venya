@@ -6,7 +6,7 @@
 
 """Tests for server.maintenance — the extracted periodic DB cleanup passes."""
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +18,7 @@ from server.maintenance import (
     purge_admin_identity_metadata,
     run_maintenance,
 )
+from sqlalchemy.pool import StaticPool
 
 
 def _sql(db: MagicMock) -> str:
@@ -37,7 +38,101 @@ def test_cleanup_expired_sessions_runs_delete_and_commits():
     assert "DELETE FROM sessions" in _sql(db)
     assert _params(db)["limit"] == 1000  # M-27 cap
     assert isinstance(_params(db)["threshold"], datetime)
+    # #529: the hard-cap leg rides with the idle leg in the same statement.
+    assert "created_at" in _sql(db)
+    assert isinstance(_params(db)["cap_dead"], datetime)
     db.commit.assert_called_once()
+
+
+# --- #529 behavior: the sweep must catch past-cap sessions ------------------
+#
+# Real SQLite (house pattern: test_admin_delete_dependencies_425.py) — the
+# predicate IS the mechanism here, so which rows vanish is the assertion.
+# Defaults used by the sweep: timeout 900s, cap 14400s, tolerance 60s.
+
+
+@pytest.fixture()
+def session_db():
+    from core.iam.models import Base
+    from core.iam.models import Session as SessionModel
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    s = factory()
+    s._model = SessionModel  # handy for the cells
+    try:
+        yield s
+    finally:
+        s.close()
+        engine.dispose()
+
+
+def _mk(session, created_delta, expires_delta, token):
+    SessionModel = session._model
+    row = SessionModel(
+        user_id="u-" + token,
+        created_at=datetime.now(UTC) + timedelta(seconds=created_delta),
+        expires_at=datetime.now(UTC) + timedelta(seconds=expires_delta),
+        access_token=token,
+    )
+    session.add(row)
+    session.commit()
+
+
+def _surviving(session):
+    session.expire_all()
+    return {r.access_token for r in session.query(session._model).all()}
+
+
+class TestHardCapSweep529:
+    def test_extended_past_cap_is_swept(self, session_db):
+        """PAIRED (the #529 defect): a session refreshed into a future
+        expires_at but past created_at + max_session_duration never matched
+        the idle leg and lived forever. The cap leg takes it."""
+        _mk(session_db, created_delta=-5 * 3600, expires_delta=+600, token="past-cap")
+        assert cleanup_expired_sessions(session_db) == 1
+        assert _surviving(session_db) == set()
+
+    def test_active_within_cap_is_kept(self, session_db):
+        """Positive retained: a live, in-cap session is never touched."""
+        _mk(session_db, created_delta=-3 * 3600, expires_delta=+600, token="live")
+        assert cleanup_expired_sessions(session_db) == 0
+        assert _surviving(session_db) == {"live"}
+
+    def test_idle_dead_beyond_cap_still_swept(self, session_db):
+        """Original idle leg behavior preserved (this row matched the old
+        predicate too)."""
+        _mk(session_db, created_delta=-6 * 3600, expires_delta=-5 * 3600, token="idle-dead")
+        assert cleanup_expired_sessions(session_db) == 1
+        assert _surviving(session_db) == set()
+
+    def test_idle_expired_within_cap_survives(self, session_db):
+        """Option A invariant (#523/#526): idle-expired INSIDE the cap is
+        refresh-recoverable — the sweep must not eat it. Both legs keep:
+        idle threshold is cap-minus-a-window conservative, cap leg not
+        reached."""
+        _mk(session_db, created_delta=-2 * 3600, expires_delta=-3600, token="recoverable")
+        assert cleanup_expired_sessions(session_db) == 0
+        assert _surviving(session_db) == {"recoverable"}
+
+    def test_cap_boundary_keeps_live_side(self, session_db):
+        """Tolerance side pin: created exactly at the cap is still
+        refreshable (check_refresh_window: created + cap >= now), so the
+        sweep keeps it — fail toward keeping live sessions."""
+        _mk(session_db, created_delta=-14400, expires_delta=+600, token="at-cap")
+        assert cleanup_expired_sessions(session_db) == 0
+        assert _surviving(session_db) == {"at-cap"}
+
+    def test_sweep_bounded_by_limit(self, session_db):
+        """M-27 cap holds on the widened predicate: at most 1000 rows per
+        tick even when 1200 are past cap."""
+        for i in range(1200):
+            _mk(session_db, created_delta=-5 * 3600, expires_delta=+600, token=f"bulk-{i}")
+        assert cleanup_expired_sessions(session_db) == 1000
+        assert len(_surviving(session_db)) == 200
 
 
 def test_cleanup_expired_execution_sessions_deletes_fk_children_then_parents():

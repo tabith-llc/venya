@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from core.utils.entropy import get_secure_token
@@ -308,23 +309,44 @@ class SessionManager:
         return True
 
     def cleanup_expired(self) -> int:
-        """Remove expired sessions.
+        """Remove dead sessions — the same two legs as the live server sweep.
 
-        Deletes sessions where expires_at has passed (idle timeout expired).
-        This covers both idle-expired sessions and hard-cap expired sessions
-        in a single query.
+        NOTE (session-cleanup-skips-hard-cap-sessions #529): the sweep that
+        actually runs in production is ``server.maintenance.
+        cleanup_expired_sessions`` (called by ``run_maintenance`` from the
+        app's periodic loop); this core method currently has NO production
+        callers. It used to carry two bugs: the same missing hard-cap leg
+        (an actively-refreshed row past ``created_at +
+        max_session_duration`` was never seen), AND an idle leg that fired
+        at mere ``expires_at`` past — deleting idle-expired rows that are
+        still refreshable inside the cap, which the ruled refresh design
+        (mcp-refresh-path-unreachable Option A) treats as LIVE. Whichever
+        future caller wires this method up must not resurrect either bug.
+
+        Predicate (mirrors the maintenance sweep, tolerance on the
+        keep-live side):
+          idle leg  — expires_at older than the cap minus one idle window,
+                      i.e. idle-dead so long that the cap is certainly
+                      blown (conservative, as the original intent was);
+          cap leg   — created_at past max_session_duration + tolerance,
+                      mirroring check_refresh_window's refusal exactly.
 
         Returns:
             Number of sessions removed.
         """
         now = datetime.now(UTC)
-        cleanup_threshold = now - timedelta(seconds=self.config.clock_skew_tolerance_seconds)
+        tolerance = timedelta(seconds=self.config.clock_skew_tolerance_seconds)
+        idle_threshold = now - self.config.max_session_duration + self.config.session_timeout - tolerance
+        cap_dead = now - self.config.max_session_duration - tolerance
         expired = (
             self.db.query(SessionModel)
             .filter(
-                SessionModel.expires_at < cleanup_threshold,
+                or_(
+                    SessionModel.expires_at < idle_threshold,
+                    SessionModel.created_at < cap_dead,
+                ),
             )
-            .delete()
+            .delete(synchronize_session=False)
         )
         self.db.flush()
         return expired
