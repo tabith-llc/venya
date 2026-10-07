@@ -46,6 +46,11 @@ class TestRotateErofsGuard:
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import ec
 
+        # #500: the incumbent trust anchor (registration's CA file) must be the
+        # root the rotation response returns; these cells mint their own pair,
+        # so install it as the anchor before rotating.
+        Path(cert_manager.ca_cert_path).write_bytes(ca_cert.public_bytes(serialization.Encoding.PEM))
+
         initial_cert = _make_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
         Path(cert_manager.cert_path).write_bytes(initial_cert.public_bytes(serialization.Encoding.PEM))
         Path(cert_manager.key_path).write_bytes(

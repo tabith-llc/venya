@@ -637,8 +637,13 @@ class CertificateManager:
         cert_pem = data["cert_pem"].encode()
         ca_cert_pem = data["ca_cert_pem"].encode()
 
-        # Validate certificate
-        validate_executor_certificate(cert_pem, ca_cert_pem, executor_id)
+        # Trust-anchor continuity (#500): the anchor is resolved BEFORE any write
+        # and BEFORE the leaf is believed. A rotation response is never allowed
+        # to install its own trust root.
+        anchor_pem = self._resolve_rotation_anchor(ca_cert_pem)
+
+        # Validate the leaf against the resolved anchor (AC4)
+        validate_executor_certificate(cert_pem, anchor_pem, executor_id)
 
         # Replace on disk
         _atomic_write(self.cert_path, cert_pem, 0o644)
@@ -668,6 +673,66 @@ class CertificateManager:
             self.serial,
             self._not_after.isoformat(),
         )
+
+    def _resolve_rotation_anchor(self, ca_cert_pem: bytes) -> bytes:
+        """Check a rotation response's CA against the anchor already on disk (#500).
+
+        A rotation response carries both the new leaf and a CA. That CA is
+        adopted only when it is the anchor this executor ALREADY trusts, in one
+        of two shapes:
+
+        1. The same certificate (DER-equal) as the on-disk anchor — the ordinary
+           rotation, where the core hands back its own CA again. The leaf is
+           then validated against the bytes already on disk, so a response can
+           never validate itself.
+        2. A different CA that the on-disk anchor's key actually signed — a
+           cross-signed CA rollover, where the incumbent vouches for the new
+           root; only then is the arriving material the validation anchor.
+
+        Anything else — most notably a fresh self-signed root arriving in this
+        very response — is refused before any file is written. That is the
+        continuity gap: pre-fix, the response was its own authority.
+
+        Args:
+            ca_cert_pem: PEM-encoded CA presented by the rotation response.
+
+        Returns:
+            The PEM bytes the returned leaf must be validated against.
+
+        Raises:
+            CertificateValidationError: If the presented CA fails its CA-role
+                checks (``validate_ca_certificate``) or fails continuity against
+                the on-disk anchor.
+            RuntimeError: If no anchor is on disk to check continuity against
+                (rotation is not a bootstrap path — the message names the
+                re-enroll ceremony).
+        """
+        new_ca = validate_ca_certificate(ca_cert_pem)
+
+        anchor_path = Path(self.ca_cert_path)
+        if not anchor_path.exists():
+            raise RuntimeError(
+                f"Cannot rotate: no trust anchor on disk at {self.ca_cert_path} to check the "
+                "rotation response against. Rotation renews a certificate under an anchor this "
+                "executor already trusts; it never establishes one. Re-enroll by re-running the "
+                "executor installer with a fresh VENYA_EXECUTOR_ENROLLMENT_TOKEN (mint with: "
+                "venya admin executor-enroll <executor-id>)."
+            )
+        incumbent_pem = anchor_path.read_bytes()
+        incumbent = x509.load_pem_x509_certificate(incumbent_pem)
+
+        if incumbent.public_bytes(serialization.Encoding.DER) == new_ca.public_bytes(serialization.Encoding.DER):
+            # Same root: hand back what is already on disk — the leaf is
+            # validated against the incumbent, never against the response.
+            return incumbent_pem
+
+        # A different root is legitimate only if the incumbent signed it.
+        _verify_ca_signature(new_ca, incumbent)
+        logger.info(
+            "Rotation adopts a cross-signed CA (CN=%s) vouched for by the incumbent anchor",
+            _extract_common_name(new_ca),
+        )
+        return ca_cert_pem
 
     def get_fingerprint(self) -> str:
         """Compute the SHA-256 fingerprint of the current certificate.
@@ -846,6 +911,54 @@ def _verify_ca_signature(cert: x509.Certificate, ca_cert: x509.Certificate) -> N
         )
     except InvalidSignature:
         raise CertificateValidationError("Certificate not signed by trusted CA")
+
+
+def validate_ca_certificate(ca_cert_pem: bytes) -> x509.Certificate:
+    """Check that a certificate is fit to be held as a trust anchor (#500).
+
+    The anchor decides which leaves this daemon will believe from now on, so
+    arriving material is checked for CA SHAPE, not merely for parseability:
+    the validity window (same skew tolerance leaf validation uses),
+    ``BasicConstraints CA=TRUE`` and ``KeyUsage key_cert_sign``. Leaf-shaped
+    material — including a self-signed leaf carrying an ECDSA key, which
+    ``_verify_ca_signature`` alone would accept as an issuer — is refused.
+
+    Args:
+        ca_cert_pem: PEM-encoded certificate proposed as a trust anchor.
+
+    Returns:
+        The parsed certificate, so a caller does not re-parse it.
+
+    Raises:
+        CertificateValidationError: If the material is outside its validity
+            window, is not flagged as a CA, or cannot sign certificates.
+    """
+    ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
+    now = datetime.now(UTC)
+
+    # 1. Validity window
+    if now + CLOCK_SKEW_TOLERANCE < ca_cert.not_valid_before_utc:
+        raise CertificateValidationError("CA certificate not yet valid")
+    if now - CLOCK_SKEW_TOLERANCE > ca_cert.not_valid_after_utc:
+        raise CertificateValidationError("CA certificate expired")
+
+    # 2. BasicConstraints CA=TRUE
+    try:
+        bc = ca_cert.extensions.get_extension_for_class(x509.BasicConstraints)
+        if not bc.value.ca:
+            raise CertificateValidationError("CA certificate has BasicConstraints CA=False (must be a CA)")
+    except x509.ExtensionNotFound:
+        raise CertificateValidationError("CA certificate missing BasicConstraints extension")
+
+    # 3. KeyUsage key_cert_sign
+    try:
+        ku = ca_cert.extensions.get_extension_for_class(x509.KeyUsage)
+        if not ku.value.key_cert_sign:
+            raise CertificateValidationError("CA certificate KeyUsage missing keyCertSign")
+    except x509.ExtensionNotFound:
+        raise CertificateValidationError("CA certificate missing KeyUsage extension")
+
+    return ca_cert
 
 
 def validate_executor_certificate(
