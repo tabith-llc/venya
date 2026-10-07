@@ -7,8 +7,10 @@
 """CA (Certificate Authority) management for executor mTLS.
 
 Generates CA key/cert during initialization and signs executor CSRs.
-Uses ECDSA P-256 for all certificates. Supports passphrase-based
-encryption for CA private key storage.
+The CA keypair itself is ECDSA P-256; a submitted CSR may carry any public key
+on the accepted-curve list (``accepted_csr_curve_names()`` — P-256/P-384/P-521,
+refs #503 option A). Supports passphrase-based encryption for CA private key
+storage.
 """
 
 import hashlib
@@ -46,6 +48,38 @@ EXECUTOR_VALIDITY_DAYS = 30  # 30 days
 # (registration/heartbeat toward core) AND a TLS server (relay listener :8443).
 # This is the single source of truth — do not inline the OIDs elsewhere.
 EXECUTOR_LEAF_EKU = [ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]
+
+# Accepted CSR public-key curves. SINGLE SOURCE OF TRUTH (refs #503 option A):
+# both CAManager.sign_csr (the vault) and
+# routes/executors.validate_csr_key_strength (the promise the registration
+# endpoint makes in its 400 text) read accepted_csr_curve_names(), so the two
+# cannot drift apart. The mapping carries the human label used in the hint text.
+# Read at CALL time (not snapshot into a tuple at import) so the dict below is
+# the only place the list exists.
+ACCEPTED_CSR_CURVE_LABELS: dict[str, str] = {
+    "secp256r1": "P-256",
+    "secp384r1": "P-384",
+    "secp521r1": "P-521",
+}
+
+
+def accepted_csr_curve_names() -> tuple[str, ...]:
+    """Return the curve names a CSR public key may use."""
+    return tuple(ACCEPTED_CSR_CURVE_LABELS)
+
+
+def csr_curve_hint() -> str:
+    """Return the actionable text naming every curve the CA accepts.
+
+    Built from the same dict the signer checks, so the wording can never
+    advertise a list that differs from the one the vault enforces.
+    """
+    labels = [f"{ACCEPTED_CSR_CURVE_LABELS[name]} ({name})" for name in accepted_csr_curve_names()]
+    if len(labels) == 1:
+        joined = labels[0]
+    else:
+        joined = ", ".join(labels[:-1]) + ", or " + labels[-1]
+    return f"Use ECDSA {joined}."
 
 
 def _load_passphrase(env_var: str) -> bytes | None:
@@ -290,6 +324,13 @@ class CAManager:
 
         Returns:
             Signed X.509 certificate.
+
+        Raises:
+            ValueError: If the CSR self-signature does not verify, or its public
+                key is not an accepted ECDSA curve. Callers map ValueError to a
+                client error (400) — it is bad input, not a CA fault. A
+                RuntimeError from load_ca() means the CA material itself is
+                unusable and stays a service fault (503).
         """
         ca_cert, ca_key = self.load_ca()
         now = datetime.now(UTC)
@@ -301,9 +342,14 @@ class CAManager:
 
         pub_key = csr.public_key()
         if not isinstance(pub_key, ec.EllipticCurvePublicKey):
-            raise TypeError("CSR must use an ECDSA key")
-        if not isinstance(pub_key.curve, ec.SECP256R1):
-            raise TypeError("CSR must use P-256 curve")
+            # ValueError, not TypeError (#503): this is caller-supplied CSR material, and
+            # the registration route maps ValueError to a clean 400. A TypeError here was
+            # the defect — it escaped the route's `except RuntimeError` block as a 500.
+            raise ValueError(  # noqa: TRY004 — CA input validation; ValueError → 400 at caller
+                f"Unsupported CSR key type: {type(pub_key).__name__}. {csr_curve_hint()}"
+            )
+        if pub_key.curve.name not in accepted_csr_curve_names():
+            raise ValueError(f"Unsupported curve: {pub_key.curve.name}. {csr_curve_hint()}")
 
         # Extract subject from CSR, replacing CN with executor_id
         csr_name = csr.subject

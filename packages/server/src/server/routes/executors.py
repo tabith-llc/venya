@@ -37,7 +37,7 @@ from sqlalchemy.orm import Session
 from venya_contract import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, RelayResponse, RelaySecret
 
 from .. import metrics
-from ..ca import CAManager
+from ..ca import CAManager, accepted_csr_curve_names, csr_curve_hint
 from ..dependencies import get_db, require_role
 from ..middleware.auth import (
     _executor_ca_certs,
@@ -97,7 +97,9 @@ logger = logging.getLogger("venya.server")
 def validate_csr_key_strength(csr: x509.CertificateSigningRequest) -> None:
     """Validate that the CSR's public key meets minimum strength requirements.
 
-    Only ECDSA P-256, P-384, and P-521 are accepted.
+    The accepted curves come from ``server.ca.accepted_csr_curve_names`` — the
+    SAME list the signer enforces in ``CAManager.sign_csr`` (#503 option A), so
+    the promise this endpoint makes and the vault's behaviour cannot drift.
 
     Args:
         csr: The parsed Certificate Signing Request.
@@ -109,16 +111,12 @@ def validate_csr_key_strength(csr: x509.CertificateSigningRequest) -> None:
 
     if not isinstance(public_key, ec.EllipticCurvePublicKey):
         raise ValueError(  # noqa: TRY004 — API input validation; ValueError → 400 at caller
-            f"Unsupported key type: {type(public_key).__name__}. "
-            f"Use ECDSA P-256 (secp256r1), P-384 (secp384r1), or P-521 (secp521r1)."
+            f"Unsupported key type: {type(public_key).__name__}. {csr_curve_hint()}"
         )
 
     curve_name = public_key.curve.name
-    if curve_name not in ("secp256r1", "secp384r1", "secp521r1"):
-        raise ValueError(
-            f"Weak or unsupported curve: {curve_name}. "
-            f"Use ECDSA P-256 (secp256r1), P-384 (secp384r1), or P-521 (secp521r1)."
-        )
+    if curve_name not in accepted_csr_curve_names():
+        raise ValueError(f"Weak or unsupported curve: {curve_name}. {csr_curve_hint()}")
 
 
 router = APIRouter()
@@ -905,7 +903,21 @@ async def register_executor(
         crl_url = server_config.crl.crl_url if server_config and hasattr(server_config, "crl") else None
         cert = ca_manager.sign_csr(csr, resolved_executor_id, crl_url=crl_url)
         metrics.CA_SIGNED_TOTAL.labels(cert_type="executor").inc()
+    except ValueError as e:
+        # #503: the vault refusing a CSR (off-list curve, or a self-signature that
+        # does not verify) is bad client input, not a server fault — a clean 400.
+        # The key-strength validator above runs first and already turns off-list
+        # curves into 400s; this backstop is the half it cannot cover, because the
+        # CSR self-signature is only verified inside sign_csr().
+        metrics.EXECUTOR_REGISTERED.labels(result="invalid_csr").inc()
+        logger.warning("CSR refused by CA for %s: %s", resolved_executor_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
     except RuntimeError as e:
+        # CA material itself unusable (missing/undecryptable key or cert) — still
+        # 503, unchanged (#503 did not touch this path).
         metrics.EXECUTOR_REGISTERED.labels(result="ca_error").inc()
         logger.error("CA signing failed for %s: %s", resolved_executor_id, e)
         raise HTTPException(
