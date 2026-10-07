@@ -354,7 +354,7 @@ async def browser_refresh(
 
     db, session_model = session
 
-    from core.iam.session_manager import SessionConfig, SessionManager
+    from core.iam.session_manager import SessionConfig, SessionManager, UserNotActiveError
 
     sc = request.app.state.config.session
     session_config = SessionConfig(
@@ -365,7 +365,20 @@ async def browser_refresh(
     manager = SessionManager(db, session_config)
 
     current_token = request.cookies.get(COOKIE_NAME, "")
-    new_token = manager.refresh_token(current_token)
+    try:
+        new_token = manager.refresh_token(current_token)
+    except UserNotActiveError:
+        # #524 refresh status gate, cookie plane: the bearer twin's helper
+        # refuses a disabled / pending / missing user before minting or
+        # extending. Uniform 401 — the handler's existing expired shape, no
+        # account-state disclosure; denial-side audit row for the operator.
+        metrics.AUTH_REFRESH_TOTAL.labels(result="inactive").inc()
+        record_login_failure(request, "browser", "refresh_status_gate")
+        logger.warning("Browser refresh refused: session user is not active (session_id=%s)", session_model.id)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session",
+        ) from None
     if new_token is None:
         metrics.AUTH_REFRESH_TOTAL.labels(result="failed").inc()
         raise HTTPException(

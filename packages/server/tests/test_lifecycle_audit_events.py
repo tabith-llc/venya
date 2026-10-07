@@ -466,6 +466,59 @@ class TestRefreshZeroRows:
         assert resp.status_code == 200  # ruled OUT — must stay silent in the lifecycle audit
         assert not _lifecycle_events(db)
 
+    def test_refresh_status_gate_denial_writes_value_free_row(self):
+        """#524 AC5: a refresh refused by the status gate is recorded — a
+        LOGIN_FAILED-shaped denial row (reason refresh_status_gate) so an
+        operator sees a disabled account still trying. Value-free (Q6
+        variant B): no user id in the row, no USER_ID in the fields."""
+        from core.iam.session_manager import UserNotActiveError
+
+        db = MagicMock()
+        session_mock = SimpleNamespace(id=1, access_token="old", access_token_jti="jti")
+        db.query.return_value.filter.return_value.first.return_value = session_mock
+        backend = MagicMock(get_session=MagicMock(return_value=db))
+        app = _app(auth_routes.router, backend=backend, extra_state=_session_config())
+        with patch("core.iam.session_manager.SessionManager") as sm:
+            sm.return_value.check_refresh_window.return_value = True
+            sm.return_value.refresh_token.side_effect = UserNotActiveError(USER_ID, "disabled")
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/api/v1/auth/refresh", headers={"authorization": "Bearer old"})
+        assert resp.status_code == 401
+        rows = _by_type(_lifecycle_events(db), "login_failed")
+        assert len(rows) == 1
+        assert rows[0].user_id is None
+        fields = _f(rows[0])
+        assert fields["reason"] == "refresh_status_gate"
+        assert fields["mode"] == "cli"
+        blob = json.dumps(fields)
+        assert USER_ID not in blob
+
+    def test_browser_refresh_status_gate_denial_writes_value_free_row(self):
+        """#524 cookie-plane twin of the denial row — the gate lives in the
+        shared refresh_token helper, so the cookie route refuses the same
+        predicate; this cell pins its audit shape (mode=browser)."""
+        from core.iam.session_manager import UserNotActiveError
+        from server.dependencies import get_current_session
+
+        db = MagicMock()
+        backend = MagicMock(get_session=MagicMock(return_value=db))
+        app = _app(auth_browser_routes.router, backend=backend, extra_state=_session_config())
+        session_row = SimpleNamespace(id=9, user_id=USER_ID, access_token_jti="jti-br")
+        app.dependency_overrides[get_current_session] = lambda: (db, session_row)
+        client = TestClient(app, raise_server_exceptions=False)
+        client.cookies.set(auth_browser_routes.COOKIE_NAME, "old")
+        with patch("core.iam.session_manager.SessionManager") as sm:
+            sm.return_value.refresh_token.side_effect = UserNotActiveError(USER_ID, "pending_enrollment")
+            resp = client.post("/api/v1/auth/refresh/browser")
+        assert resp.status_code == 401
+        rows = _by_type(_lifecycle_events(db), "login_failed")
+        assert len(rows) == 1
+        assert rows[0].user_id is None
+        fields = _f(rows[0])
+        assert fields["reason"] == "refresh_status_gate"
+        assert fields["mode"] == "browser"
+        assert USER_ID not in json.dumps(fields)
+
 
 # ---------------------------------------------------------------------------
 # Logout

@@ -222,12 +222,29 @@ class SessionManager:
         former validate_session gate made every refresh of an idle-expired
         session fail: the mcp-refresh-path-unreachable dead-path root cause).
 
+        Status gate (auth-refresh-missing-active-user-gate #524): after the
+        hard-cap window and BEFORE any extension, the session's user must
+        satisfy ``is_user_active`` — the single semantic source, the same
+        predicate ``create_session`` applies at issuance and the bearer
+        middleware applies per request. A disabled / pending / missing user
+        gets NO new token and NO session extension: refresh raises
+        ``UserNotActiveError`` (a ``SessionError`` subclass — pre-existing
+        ``except SessionError`` callers still catch it). Placement here is
+        deliberate: BOTH refresh planes call this one helper — the bearer
+        route (server ``auth_refresh``) and the cookie-plane twin (server
+        ``browser_refresh``) — so one gate covers both, and any future
+        refresh caller inherits it instead of re-opening the hole.
+
         Args:
             access_token: The current access token string.
 
         Returns:
             New AccessToken if successful, None if unknown token or the
             session is past max_session_duration (re-auth required).
+
+        Raises:
+            UserNotActiveError: If the session's user is missing or its
+                status is not active (the refresh status gate).
         """
         # Find session by access token
         session = self.db.query(SessionModel).filter(SessionModel.access_token == access_token).first()
@@ -236,6 +253,15 @@ class SessionManager:
 
         if not self.check_refresh_window(session):
             return None
+
+        # #524 refresh status gate: hard-cap window alone must not let a
+        # disabled account keep minting tokens to the cap. Same predicate as
+        # create_session and the middleware — no second status literal.
+        if not is_user_active(session.user):
+            raise UserNotActiveError(
+                session.user_id,
+                None if session.user is None else session.user.status,
+            )
 
         # Extend session
         self.extend_session(session.id)
