@@ -57,7 +57,16 @@ def check_disk_encryption(db_url: str | None = None) -> None:
     # Check for LUKS via lsblk
     fstype = _get_fstype_via_lsblk(mount_point)
     if fstype == "crypto_LUKS":
-        logger.info("Disk encryption verified for PostgreSQL data directory (%s)", data_dir)
+        # Name the device this claim rests on so a reader of the log can
+        # falsify it (same law as the dmsetup branch below, #444 fix leg).
+        device = _get_lsblk_device_for_mount(mount_point)
+        logger.info(
+            "Disk encryption verified for PostgreSQL data directory (%s): "
+            "lsblk reports crypto_LUKS on device '%s' mounted at %s",
+            data_dir,
+            device if device is not None else "unknown",
+            mount_point,
+        )
         return
 
     # Check the mount's own device lineage for a crypt target via dmsetup
@@ -141,30 +150,75 @@ def _find_mount_point(path: str) -> str | None:
     return "/"
 
 
-def _get_fstype_via_lsblk(mount_point: str) -> str | None:
-    """Get the filesystem type for a mount point via lsblk.
+def _normalize_mount_point(mount_point: str) -> str:
+    """Canonical form for mount-point comparison: no trailing slash, root kept
+    as "/" (so "/var/lib/postgresql/" and "/var/lib/postgresql" are one path).
+    """
+    if mount_point == "/":
+        return "/"
+    return mount_point.rstrip("/") or "/"
 
-    Returns the FSTYPE if found, None otherwise.
+
+def _lsblk_mount_rows() -> list[tuple[str, str, str]]:
+    """Run lsblk and return (NAME, FSTYPE, MOUNTPOINT) rows for devices that
+    report all three columns.  Empty list on any failure (fail-closed).
     """
     try:
         result = subprocess.run(  # nosec
-            ["lsblk", "-d", "-b", "-o", "NAME,FSTYPE,MOUNTPOINT"],
+            ["lsblk", "-d", "-b", "-n", "-o", "NAME,FSTYPE,MOUNTPOINT"],
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
         )
         if result.returncode != 0:
-            return None
-
-        for line in result.stdout.strip().split("\n"):
-            parts = line.split()
-            if len(parts) >= 3 and mount_point in parts[-1]:
-                # FSTYPE is typically the second column
-                return parts[1] if len(parts) >= 2 else None
+            return []
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        return []
+
+    rows: list[tuple[str, str, str]] = []
+    for line in result.stdout.strip().splitlines():
+        parts = line.split()
+        # Three columns required: a row without a FSTYPE or without a
+        # MOUNTPOINT cannot answer a mount-point question.
+        if len(parts) >= 3:
+            rows.append((parts[0], parts[1], parts[-1]))
+    return rows
+
+
+def _matching_row(mount_point: str) -> tuple[str, str, str] | None:
+    """The lsblk row whose MOUNTPOINT column EQUALS ``mount_point`` — or None.
+
+    Exact equality is the whole fix (ticket lsblk-mountcheck-matches-any-mount
+    #488): the previous ``mount_point in parts[-1]`` containment test made
+    "/" match every mounted row (/boot, /boot/efi, a backup volume), so an
+    unrelated crypto_LUKS volume could certify a plain data directory.  This
+    mirrors the exact comparisons the sibling helpers already use
+    (``_resolve_backing_device`` mount equality, ``target == "crypt"``).
+    """
+    wanted = _normalize_mount_point(mount_point)
+    for row in _lsblk_mount_rows():
+        if _normalize_mount_point(row[2]) == wanted:
+            return row
     return None
+
+
+def _get_fstype_via_lsblk(mount_point: str) -> str | None:
+    """Get the filesystem type for a mount point via lsblk.
+
+    Returns the FSTYPE if found, None otherwise.  Only the row mounted
+    EXACTLY at ``mount_point`` answers — see ``_matching_row``.
+    """
+    row = _matching_row(mount_point)
+    return row[1] if row is not None else None
+
+
+def _get_lsblk_device_for_mount(mount_point: str) -> str | None:
+    """The NAME column of the lsblk row mounted exactly at ``mount_point``,
+    or None when no row matches (used to name the verified device in logs).
+    """
+    row = _matching_row(mount_point)
+    return row[0] if row is not None else None
 
 
 _MOUNTINFO_PATH = "/proc/self/mountinfo"
