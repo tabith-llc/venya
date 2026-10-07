@@ -498,16 +498,16 @@ class TestRefreshZeroRows:
         shared refresh_token helper, so the cookie route refuses the same
         predicate; this cell pins its audit shape (mode=browser)."""
         from core.iam.session_manager import UserNotActiveError
-        from server.dependencies import get_current_session
 
         db = MagicMock()
+        session_row = SimpleNamespace(id=9, user_id=USER_ID, access_token_jti="jti-br")
+        db.query.return_value.filter.return_value.first.return_value = session_row
         backend = MagicMock(get_session=MagicMock(return_value=db))
         app = _app(auth_browser_routes.router, backend=backend, extra_state=_session_config())
-        session_row = SimpleNamespace(id=9, user_id=USER_ID, access_token_jti="jti-br")
-        app.dependency_overrides[get_current_session] = lambda: (db, session_row)
         client = TestClient(app, raise_server_exceptions=False)
         client.cookies.set(auth_browser_routes.COOKIE_NAME, "old")
         with patch("core.iam.session_manager.SessionManager") as sm:
+            sm.return_value.check_refresh_window.return_value = True
             sm.return_value.refresh_token.side_effect = UserNotActiveError(USER_ID, "pending_enrollment")
             resp = client.post("/api/v1/auth/refresh/browser")
         assert resp.status_code == 401

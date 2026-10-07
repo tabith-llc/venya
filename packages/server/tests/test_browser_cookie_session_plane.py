@@ -127,5 +127,134 @@ def test_browser_refresh_is_public_and_bearer_refresh_unchanged():
 
 def test_browser_refresh_handler_self_gates_without_cookie():
     src = inspect.getsource(auth_browser.browser_refresh)
-    assert "session is None" in src
+    assert "session_model is None" in src
     assert "Invalid or expired session" in src
+    # #526: the self-gate is the HARD-CAP window (bearer-tier Option A), not
+    # the shared get_current_session idle check — the promise in the
+    # middleware's PUBLIC_PATHS note is now actually implemented here.
+    assert "check_refresh_window" in src
+    assert "Depends(get_current_session)" not in src
+
+
+# ---------------------------------------------------------------------------
+# #526 browser-refresh-unreachable-for-idle-expired-session — the cookie
+# refresh must revive idle-expired rows inside the hard cap (bearer-tier
+# Option A parity), and still 401 past the cap.
+
+
+def _idle_expired_row():
+    """created 1h ago (< 4h cap), idle-past the 900s session_timeout —
+    exactly the kind of row this endpoint exists to revive."""
+    now = datetime.now(UTC)
+    return SimpleNamespace(
+        id=21,
+        user_id="u1",
+        user=SimpleNamespace(user_id="u1", status="active"),
+        created_at=now - timedelta(hours=1),
+        expires_at=now - timedelta(minutes=10),
+        access_token="tok-idle",
+        access_token_jti="jti-idle",
+        access_token_expires_at=now - timedelta(minutes=10),
+    )
+
+
+def _refresh_app(row):
+    app = FastAPI()
+    app.state.config = SimpleNamespace(
+        session=SimpleNamespace(session_timeout=900, access_token_ttl=300, max_session_duration=14400),
+        admin_mtls=SimpleNamespace(enabled=False),
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = row
+    backend = MagicMock()
+    backend.get_session.return_value = db
+    app.state.backend = backend
+    app.include_router(auth_browser.router, prefix="/api/v1")
+    client = TestClient(app, raise_server_exceptions=False)
+    client.cookies.set(auth_browser.COOKIE_NAME, "tok-idle")
+    return app, client, db
+
+
+def test_idle_expired_cookie_refresh_revives_same_row():
+    """#526 AC1 PAIRED POSITIVE, RED at HEAD: inside the hard cap but past
+    the idle timeout, /auth/refresh/browser must 200 — new cookie written,
+    expires_at slid forward, and the SAME session row rotated in place (no
+    new Session row minted). At HEAD get_current_session's idle check
+    401'd exactly this shape."""
+    row = _idle_expired_row()
+    _, client, db = _refresh_app(row)
+    resp = client.post("/api/v1/auth/refresh/browser")
+    assert resp.status_code == 200, resp.text
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert auth_browser.COOKIE_NAME in set_cookie
+    assert row.access_token != "tok-idle"  # rotated
+    assert auth_browser.COOKIE_NAME + "=" + row.access_token in set_cookie  # cookie rides the NEW token
+    assert row.expires_at > datetime.now(UTC)  # slid forward
+    assert row.id == 21  # same row
+    # No new session minted: db.add is never handed a fresh Session row.
+    from core.iam.models import Session as SessionModel
+
+    added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], SessionModel)]
+    assert not added
+    db.commit.assert_called()
+
+
+def test_past_hard_cap_cookie_refresh_401_uniform():
+    """#526 AC2/AC5 PAIRED NEGATIVE: created beyond max_session_duration —
+    refresh dies, re-auth (FIDO2) required. 401 in the uniform expired
+    shape, NO cookie written, row untouched."""
+    now = datetime.now(UTC)
+    row = _idle_expired_row()
+    row.created_at = now - timedelta(hours=5)  # past the 4h cap
+    row.expires_at = now + timedelta(minutes=5)  # even a live idle clock must not save it
+    _, client, db = _refresh_app(row)
+    resp = client.post("/api/v1/auth/refresh/browser")
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Invalid or expired session"
+    assert "set-cookie" not in resp.headers
+    assert row.access_token == "tok-idle"  # not rotated
+    db.commit.assert_not_called()
+
+
+def test_garbage_cookie_refresh_401():
+    """Unknown token -> None row -> the uniform 401 (not a 500)."""
+    _, client, _ = _refresh_app(None)
+    resp = client.post("/api/v1/auth/refresh/browser")
+    assert resp.status_code == 401
+    assert resp.json()["detail"] == "Invalid or expired session"
+
+
+def test_no_cookie_refresh_401():
+    _, client, _ = _refresh_app(_idle_expired_row())
+    client.cookies.clear()
+    resp = client.post("/api/v1/auth/refresh/browser")
+    assert resp.status_code == 401
+
+
+def test_active_live_cookie_refresh_still_works():
+    """Positive retained: the ordinary (not idle-expired) cookie refresh keeps
+    working through the same dedicated path."""
+    row = _idle_expired_row()
+    row.expires_at = datetime.now(UTC) + timedelta(minutes=10)
+    _, client, _ = _refresh_app(row)
+    resp = client.post("/api/v1/auth/refresh/browser")
+    assert resp.status_code == 200
+    assert "set-cookie" in resp.headers
+
+
+def test_get_current_session_idle_check_untouched():
+    """#526 AC4 scope pin: the shared dependency keeps its strict idle
+    rejection (other handlers riding it must not widen). Verified against a
+    row that is idle-expired but inside the hard cap."""
+    from fastapi import FastAPI as _FastAPI
+    from server.dependencies import get_current_session
+
+    app = _FastAPI()
+    app.state.config = SimpleNamespace(
+        session=SimpleNamespace(session_timeout=900, access_token_ttl=300, max_session_duration=14400),
+        clock_skew=SimpleNamespace(token_tolerance_seconds=60),
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = _idle_expired_row()
+    request = SimpleNamespace(app=app, cookies={auth_browser.COOKIE_NAME: "tok-idle"})
+    assert get_current_session(request, db) is None
