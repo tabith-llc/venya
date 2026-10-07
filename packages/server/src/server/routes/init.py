@@ -28,6 +28,7 @@ from ..fido2.browser_adapter import challenge_to_browser_options
 from ..fido2.manager import WebAuthnError
 from ..recovery_codes import generate_recovery_code as _generate_recovery_code
 from ..recovery_codes import hash_recovery_code as _hash_recovery_code
+from ..utils.user_id import USER_ID_PATTERN
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -39,7 +40,10 @@ logger = logging.getLogger("venya.server")
 class InitRequest(BaseModel):
     model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
-    user_id: str = Field(..., description="User ID for first admin")
+    # #532: the bootstrap MINTS users.user_id, so it validates against the same
+    # grammar the surface that ADDRESSES it requires — the one definition in
+    # server/utils/user_id.py, imported, never copied (mirrors recovery #517).
+    user_id: str = Field(..., description="User ID for first admin", pattern=USER_ID_PATTERN)
 
 
 class InitResponse(BaseModel):
@@ -51,7 +55,10 @@ class InitResponse(BaseModel):
 class InitCompleteRequest(BaseModel):
     model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
-    user_id: str = Field(..., description="User ID for first admin")
+    # #532: step 2 names the SAME identity as step 1 and reaches the same row
+    # (enrolled_at, credential, recovery hash) — both models at the tip carry
+    # the unpatterned field, so both carry the pattern.
+    user_id: str = Field(..., description="User ID for first admin", pattern=USER_ID_PATTERN)
     challenge_id: str = Field(..., description="FIDO2 challenge ID")
     response: dict = Field(..., description="FIDO2 attestation response")
 
