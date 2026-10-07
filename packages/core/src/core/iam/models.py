@@ -495,6 +495,14 @@ class ElevationToken(Base):
         ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
+    # #527 elevation-not-session-bound: the session that EARNED this token.
+    # Nullable by ruling — pre-fix rows carry NULL and stay consumable under
+    # their own user+expiry checks; new mints always bind. No DB-level FK: a
+    # sessions.id reference would either block the bulk SQL sweeps (cleanup
+    # deletes bypass the ORM on SQLite, where FKs are off by default) or
+    # behave engine-differently — the lifecycle rule is enforced in code,
+    # SessionManager.revoke_session deletes bound rows with the session.
+    session_id = Column(Integer, nullable=True, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used = Column(Boolean, default=False, nullable=False)
 
