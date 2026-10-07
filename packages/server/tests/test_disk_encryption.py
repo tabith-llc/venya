@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from server.utils import disk_encryption as disk_encryption_module
 from server.utils.disk_encryption import (
     _find_crypt_backing_device,
     _find_mount_point,
@@ -154,6 +155,115 @@ class TestGetFstypeViaLsblk:
         with patch("server.utils.disk_encryption.subprocess.run", side_effect=FileNotFoundError):
             result = _get_fstype_via_lsblk("/var/lib/postgresql")
             assert result is None
+
+
+class TestGetFstypeViaLsblkMountMatch488:
+    """Ticket lsblk-mountcheck-matches-any-mount #488: the MOUNTPOINT column
+    is matched EXACTLY.  The old containment test (`mount_point in
+    parts[-1]`) let "/" answer for every mounted row, so one unrelated
+    crypto_LUKS volume falsely certified an unencrypted data directory."""
+
+    # Real-shaped `lsblk -d -b -n -o NAME,FSTYPE,MOUNTPOINT` body (three
+    # columns): the FIRST row is a crypto_LUKS volume mounted at /boot, the
+    # root filesystem is plain ext4.  Ordering matters — the old code returned
+    # the first row whose mountpoint merely CONTAINED the query, so "/" took
+    # the /boot row's answer and the check short-circuited on crypto_LUKS.
+    LUKS_AT_BOOT_ROOT_PLAIN = "sda2 crypto_LUKS /boot\n" "sda1 vfat /boot/efi\n" "sda3 ext4 /\n"
+
+    def _patch_lsblk(self, output: str):
+        return patch(
+            "server.utils.disk_encryption.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=output, stderr=""),
+        )
+
+    def test_root_query_does_not_answer_with_luks_from_another_mount(self):
+        """N (the bug case): "/" with a crypto_LUKS row at /boot → the answer
+        is the ROOT row's fstype (ext4), never crypto_LUKS. RED pre-fix."""
+        with self._patch_lsblk(self.LUKS_AT_BOOT_ROOT_PLAIN):
+            assert _get_fstype_via_lsblk("/") == "ext4"
+
+    def test_root_query_does_not_answer_at_all_when_root_row_is_absent(self):
+        """N: a /boot-only LUKS listing with NO root row answers None — the
+        containment test returned crypto_LUKS for this same output because
+        "/" is a substring of "/boot"."""
+        output = "sda2 crypto_LUKS /boot\n"
+        with self._patch_lsblk(output):
+            assert _get_fstype_via_lsblk("/") is None
+
+    def test_efi_mount_is_not_confused_with_boot(self):
+        """N: querying /boot must not take the /boot/efi row (the prefix
+        collision the containment test had in the other direction)."""
+        with self._patch_lsblk(self.LUKS_AT_BOOT_ROOT_PLAIN):
+            assert _get_fstype_via_lsblk("/boot") == "crypto_LUKS"
+            assert _get_fstype_via_lsblk("/boot/efi") == "vfat"
+
+    def test_exact_match_still_verifies_luks_on_the_mount_itself(self):
+        """P (AC-2): a crypto_LUKS row whose mountpoint EQUALS the requested
+        mount point still answers crypto_LUKS — the fix does not blind the
+        check to a genuinely encrypted mount."""
+        output = "sda3 crypto_LUKS /\n"
+        with self._patch_lsblk(output):
+            assert _get_fstype_via_lsblk("/") == "crypto_LUKS"
+
+    def test_trailing_slash_forms_same_mount(self):
+        """P: /var/lib/postgresql and /var/lib/postgresql/ are one mount —
+        normalization, not substring freedom."""
+        output = "dm-0 ext4 /var/lib/postgresql/\n"
+        with self._patch_lsblk(output):
+            assert _get_fstype_via_lsblk("/var/lib/postgresql") == "ext4"
+
+    def test_header_row_never_answers(self):
+        """N: the `lsblk` HEADING line (NAME FSTYPE MOUNTPOINT) is not a row;
+        with -n it is absent, and a listing that still carries it must not
+        answer for any mount."""
+        output = "NAME FSTYPE MOUNTPOINT\nsda3 ext4 /\n"
+        with self._patch_lsblk(output):
+            assert _get_fstype_via_lsblk("/var/lib/postgresql") is None
+            assert _get_fstype_via_lsblk("/") == "ext4"
+
+    def test_row_without_mountpoint_column_does_not_answer(self):
+        """N: a one-column row (device with no FSTYPE and no MOUNTPOINT) is
+        skipped — it cannot answer a mount-point question."""
+        output = "sr0\nsda3 ext4 /\n"
+        with self._patch_lsblk(output):
+            assert _get_fstype_via_lsblk("/") == "ext4"
+
+    def test_device_name_lookup_names_the_mounted_device(self):
+        """P: the log-side helper names the NAME column of the exact row."""
+        name_for_mount = disk_encryption_module._get_lsblk_device_for_mount
+        with self._patch_lsblk(self.LUKS_AT_BOOT_ROOT_PLAIN):
+            assert name_for_mount("/boot") == "sda2"
+            assert name_for_mount("/nope") is None
+
+    def test_check_warns_and_lineage_runs_when_luks_is_on_another_mount(self, caplog):
+        """N (AC-1, end to end): data dir on an unencrypted root with a LUKS
+        /boot → verify_disk-encryption check does NOT claim success, it
+        warns, and the dmsetup lineage path RUNS (pre-fix it short-circuited
+        before #444's lineage walk ever executed)."""
+        caplog.set_level(logging.INFO)
+        lineage = MagicMock(return_value=None)
+        with patch("server.utils.disk_encryption._get_pg_data_directory", return_value=Path("/var/lib/postgresql")):
+            with patch("server.utils.disk_encryption._find_mount_point", return_value="/"):
+                with patch("server.utils.disk_encryption._find_crypt_backing_device", lineage):
+                    with self._patch_lsblk(self.LUKS_AT_BOOT_ROOT_PLAIN):
+                        check_disk_encryption("postgresql://user@localhost/venya")
+
+        assert not any("Disk encryption verified" in r.message for r in caplog.records)
+        assert any("No disk encryption detected" in r.message for r in caplog.records)
+        lineage.assert_called_once_with("/")
+
+    def test_check_success_log_names_the_device_it_verified(self, caplog):
+        """P: when lsblk answers crypto_LUKS for the mount itself, the INFO
+        line names that device (falsifiable claim, same law as #444)."""
+        caplog.set_level(logging.INFO)
+        output = "sda3 crypto_LUKS /\n"
+        with patch("server.utils.disk_encryption._get_pg_data_directory", return_value=Path("/var/lib/postgresql")):
+            with patch("server.utils.disk_encryption._find_mount_point", return_value="/"):
+                with self._patch_lsblk(output):
+                    check_disk_encryption("postgresql://user@localhost/venya")
+
+        verified = [r.message for r in caplog.records if "Disk encryption verified" in r.message]
+        assert verified and "sda3" in verified[0]
 
 
 class TestHasCryptTarget:
