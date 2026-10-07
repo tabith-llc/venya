@@ -270,11 +270,11 @@ class TestSecureMemoryIsolation:
         mock_record.key = "test_secret"
         mock_backend.put.return_value = mock_record
         # Upsert resolve step must see "no existing row" (this test exercises
-        # the insert path): pin the _resolve_secret_in mock chain to None —
+        # the insert path): pin the _resolve_secret_in mock chain (through the #515 with_for_update read) to None —
         # MagicMock auto-chains are truthy and would take the replace branch.
-        mock_backend.get_session.return_value.query.return_value.filter.return_value.filter.return_value.order_by.return_value.first.return_value = (
-            None
-        )
+        (
+            mock_backend.get_session.return_value.query.return_value.filter.return_value.filter.return_value.order_by.return_value.with_for_update.return_value.first.return_value
+        ) = None
         core.backend = mock_backend
 
         # put() should not use mlock — it uses encryption, not SecureBuffer

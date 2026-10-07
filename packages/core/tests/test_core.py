@@ -116,11 +116,12 @@ class TestCorePut:
         session.flush = MagicMock()
         session.commit = MagicMock()
         # Upsert resolve step must see "no existing row" (insert path under
-        # test): pin the _resolve_secret_in chain (filter→filter→order_by→
-        # first) to None — MagicMock auto-chains are truthy otherwise.
-        session.query.return_value.filter.return_value.filter.return_value.order_by.return_value.first.return_value = (
-            None
-        )
+        # test): pin the _resolve_secret_in chain
+        # (filter→filter→order_by→with_for_update→first, the #515 locking read) to
+        # None — MagicMock auto-chains are truthy otherwise.
+        (
+            session.query.return_value.filter.return_value.filter.return_value.order_by.return_value.with_for_update.return_value.first.return_value
+        ) = None
         backend = MagicMock()
         backend.get_session.return_value = session
         core.backend = backend
@@ -155,9 +156,9 @@ class TestCorePut:
         session = MagicMock()
         session.flush = MagicMock(side_effect=Exception("UNIQUE constraint failed"))
         session.commit = MagicMock()
-        session.query.return_value.filter.return_value.filter.return_value.order_by.return_value.first.return_value = (
-            None
-        )
+        (
+            session.query.return_value.filter.return_value.filter.return_value.order_by.return_value.with_for_update.return_value.first.return_value
+        ) = None
         backend = MagicMock()
         backend.get_session.return_value = session
         core.backend = backend

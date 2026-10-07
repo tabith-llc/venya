@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 
 from ..iam.models import Role, Secret, SecretRole, SessionSecret
 from .backend import Backend, ensure_kek_sentinel
@@ -75,12 +75,18 @@ class Core:
         self.rate_limiter = rate_limiter or RateLimiter()
         self.kek = kek
 
+    #: Advisory-lock namespace for per-key secret upserts (#515). Combined with
+    #: the key under ``hashtext`` so this lock cannot collide with the #339
+    #: enrollment or #514 membership keys, which hash a bare user id.
+    ADVISORY_LOCK_NAMESPACE = "venya:secret-key:"
+
     def _resolve_secret_in(
         self,
         session,
         secret_key: str,
         user_id: str | None,
         role_names: list[str] | None = None,
+        for_update: bool = False,
     ) -> Secret | None:
         """Single enforcement point for secret visibility.
 
@@ -90,6 +96,20 @@ class Core:
         None when neither holds — callers MUST treat that as "not found" so
         scoped-out keys are indistinguishable from nonexistent ones (no
         cross-role key-name enumeration).
+
+        ``for_update`` is the write-side half of #514/#515 and is set ONLY by
+        :meth:`put`: it asks the database to lock the resolved row until the
+        caller's transaction ends, so "resolve the existing row, then replace
+        it" is one atomic step and a concurrent put or delete cannot land
+        between the read and the write. The read paths (``get``,
+        ``get_for_injection``, ``list``) leave it False — a locking read on a
+        hot read path would serialize every retrieval behind the row lock.
+        PostgreSQL locks; SQLite, the test backend, ignores the clause.
+
+        When duplicates exist (the shadow pair this ticket is about), the
+        answer is the LOWEST id — ``order_by(Secret.id).first()`` below — so
+        which value a session retrieves is decided by insertion order, which is
+        why an unrepaired race is order-dependent rather than merely untidy.
         """
         query = session.query(Secret).filter(Secret.key == secret_key)
         if role_names:
@@ -102,7 +122,10 @@ class Core:
         else:
             # No roles supplied: ownership only (legacy core.get semantics)
             query = query.filter(Secret.created_by == user_id)
-        return query.order_by(Secret.id).first()
+        query = query.order_by(Secret.id)
+        if for_update:
+            query = query.with_for_update()
+        return query.first()
 
     def get_for_injection(
         self, secret_key: str, user_id: str, role_names: list[str] | None = None
@@ -283,7 +306,35 @@ class Core:
 
         session = self.backend.get_session()
         try:
-            existing = self._resolve_secret_in(session, key, user_id, caller_roles)
+            # #515: the upsert's resolve-then-write is ONE serialized step. The
+            # advisory lock is keyed on the secret KEY (a database object, so
+            # it serializes every process sharing this database — separate
+            # uvicorn workers and the three core VMs pointing at one
+            # PostgreSQL), and it is transaction-scoped, so it releases on the
+            # commit below. The FOR UPDATE on the candidate row is the belt for
+            # the case where a row already exists to lock. Shape copied from
+            # the two precedents this tree already ships: #339
+            # ``enrollment_manager.create_enrollment_token`` and #510
+            # ``routes/init.py::_lock_first_admin_bootstrap`` — including the
+            # dialect guard, because pg_advisory_xact_lock/hashtext are
+            # PostgreSQL-only and against SQLite the statement is a runtime "no
+            # such function" error (#366). On SQLite the advisory lock is
+            # SKIPPED and the FOR UPDATE clause is ignored: cross-process
+            # serialization is a PostgreSQL-production property.
+            #
+            # What the lock does NOT change is intended multiplicity. Two
+            # callers putting the same key where neither can SEE the other's
+            # row (scoped out) still each resolve to None and each INSERT — the
+            # lock orders the two operations, it does not make one invisible to
+            # the other. Replacing is what visibility already authorizes
+            # ("you may replace exactly what you may see").
+            bind = session.get_bind()
+            if bind.dialect.name == "postgresql":
+                session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:secret_key))"),
+                    {"secret_key": f"{self.ADVISORY_LOCK_NAMESPACE}{key}"},
+                )
+            existing = self._resolve_secret_in(session, key, user_id, caller_roles, for_update=True)
 
             if existing is not None:
                 # Replace in place — id + created_by preserved (see docstring).
