@@ -8,7 +8,7 @@
 
 from dataclasses import dataclass
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from .models import Role, RoleMember, SecretRole, User
@@ -111,6 +111,60 @@ class RoleManager:
     #: status-literal comparison would be the divergence bug that file warns
     #: about).
     USER_STATUS_ACTIVE = "active"
+
+    #: Advisory-lock key namespace for per-user membership serialization
+    #: (#514). ``hashtext`` runs database-side and the user id travels as a
+    #: bind param, so this prefix is the only literal in the statement.
+    MEMBERSHIP_LOCK_PREFIX = "venya:membership:"
+
+    def _lock_user_memberships(self, user_id: str) -> list[RoleMember]:
+        """Read a user's memberships as ONE serialized step (#514).
+
+        Two concurrent ``add_member`` calls for the same user each computed the
+        separation-of-duties verdict off an unlocked read, so an auditor grant
+        and a non-auditor grant both saw a clean slate and both committed — the
+        mixed tier-set the ruling says is impossible, shipped. The fix is the
+        shape this tree already uses twice (#339
+        :meth:`core.iam.enrollment_manager.EnrollmentManager.create_enrollment_token`,
+        #510 ``server/routes/init.py::_lock_first_admin_bootstrap``) plus the
+        in-class precedent :meth:`_locked_admin_roster` (#487):
+
+        1. ``pg_advisory_xact_lock(hashtext(:user_id))`` keyed on the TARGET
+           user — transaction-scoped, released at commit, and a database object,
+           so it serializes every process sharing this database: separate uvicorn
+           workers, and the three core VMs pointing at one PostgreSQL. ``FOR
+           UPDATE`` locks only MATCHED rows, which locks nothing in the case that
+           must serialize (a user with no membership yet, where two first-grants
+           race); the advisory lock keyed on the user id is what covers an empty
+           set.
+        2. ``FOR UPDATE`` on the memberships that DO exist — the row-lock belt
+           that also interlocks this read with the admin-roster guards, which
+           lock the same table.
+
+        The caller must still be inside the transaction that WRITES the
+        membership: the lock lives until commit or rollback, so taking it here
+        and inserting on the same session is one atomic step.
+
+        Dialect guard (#366): ``pg_advisory_xact_lock``/``hashtext`` are
+        PostgreSQL-only — issued against SQLite the statement is a runtime "no
+        such function" error. The statement goes out only on a PostgreSQL bind;
+        a session that cannot report its dialect is treated as PostgreSQL so the
+        statement contract stays pinned. SQLite fallback, stated plainly: the
+        advisory lock is SKIPPED (cross-process serialization is a
+        PostgreSQL-production property) and SQLite ignores the ``FOR UPDATE``
+        clause; what the SQLite cells here prove is the ordering and the
+        behaviour, not the inter-process lock.
+
+        Returns:
+            The user's current memberships, read under the lock.
+        """
+        bind = self.db.get_bind() if hasattr(self.db, "get_bind") else None
+        if bind is None or bind.dialect.name == "postgresql":
+            self.db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:user_id))"),
+                {"user_id": f"{self.MEMBERSHIP_LOCK_PREFIX}{user_id}"},
+            )
+        return self.db.query(RoleMember).filter(RoleMember.user_id == user_id).with_for_update().all()
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -279,11 +333,14 @@ class RoleManager:
         if role is None:
             raise RoleManagerError(f"Role ID {role_id} not found")
 
+        # ONE serialized read for both checks below (#514): the per-user
+        # advisory lock plus FOR UPDATE, held until the caller's commit. Every
+        # read-then-write in this method now runs inside that step, so a
+        # concurrent grant for the same user cannot answer off a stale snapshot.
+        current = self._lock_user_memberships(user_id)
+
         # Check for duplicate
-        existing = (
-            self.db.query(RoleMember).filter(RoleMember.user_id == user_id, RoleMember.role_id == role_id).first()
-        )
-        if existing:
+        if any(m.role_id == role_id for m in current):
             raise RoleManagerError(f"User '{user_id}' is already a member of role {role_id}")
 
         # Separation of duties (auditor-role ruling 2'): the add may not
@@ -292,7 +349,13 @@ class RoleManager:
         # else is refused. No legacy-state migration is needed: the
         # auditor tier ships for the first time WITH this guard, so no
         # mixed state can pre-exist.
-        resulting = {m.role.permissions for m in self.get_user_roles(user_id)} | {role.permissions}
+        #
+        # Before #514 the tier set came from an UNLOCKED get_user_roles read, so
+        # two concurrent adds (auditor + non-auditor) each saw only their own
+        # tier, both passed, and the mixture the ruling calls impossible shipped.
+        # The class comment's "no mixed state can pre-exist" claim is exactly what
+        # the race created; the verdict now reads the locked set.
+        resulting = {m.role.permissions for m in current} | {role.permissions}
         if _mixed_auditor_tiers(resulting):
             raise SeparationOfDutiesError(
                 f"Separation of duties: user '{user_id}' cannot hold the auditor tier together "
@@ -333,6 +396,13 @@ class RoleManager:
             role_id=role_id,
             caller_user_id=caller_user_id,
         )
+        # #514: the delete path takes the SAME per-user lock the grant path
+        # takes. A removal can never PRODUCE a mixed tier-set (it only shrinks
+        # one), so the SoD verdict needs no delete-side half — what the shared
+        # key buys is a consistent lock order: a concurrent grant and removal
+        # for one user serialize instead of the grant answering off a row the
+        # removal is deleting.
+        self._lock_user_memberships(user_id)
         membership = (
             self.db.query(RoleMember).filter(RoleMember.user_id == user_id, RoleMember.role_id == role_id).first()
         )
