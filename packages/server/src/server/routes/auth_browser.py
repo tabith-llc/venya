@@ -384,6 +384,103 @@ async def browser_refresh(
     return response
 
 
+def _cookie_cleared_response() -> Response:
+    """200 + cleared cookie — the logout-completed shape."""
+    response = Response(
+        content='{"status": "ok"}',
+        media_type="application/json",
+    )
+    response.delete_cookie(key=COOKIE_NAME, path="/")
+    return response
+
+
+def _logout_when_session_unresolved(request: Request) -> Response:
+    """#523 (browser-logout-skips-revoke-when-idle-expired): the logout path
+    for a cookie that ``_get_session_from_cookie`` refused.
+
+    A refused cookie is NOT a dead row: ``check_refresh_window`` deliberately
+    keeps an IDLE-EXPIRED session refreshable until the hard cap, so a logout
+    that only clears the cookie leaves a credential the next person at a
+    shared browser can re-mint. Resolve the token with the same lookup the
+    rest of this module uses — ``SessionModel.access_token`` — with NO expiry
+    gate, and revoke the row if it exists.
+
+    Why the direct lookup is safe when the row may already be gone: it is a
+    ``.first()`` — a garbage/unknown token, or a row ``cleanup_expired``
+    deleted first, simply returns None; there is nothing to revoke and the
+    logout completes clean (200, cookie cleared, no exception, no audit row).
+    A found row is revoked fail-closed like the normal path: a revoke failure
+    lands the revoked=False row and refuses to claim logout (the cookie
+    stays as the retry handle — ruling 2026-10-01).
+    """
+    from core.iam.models import Session as SessionModel
+    from core.iam.session_manager import SessionConfig, SessionManager
+
+    from server.dependencies import get_backend
+
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        # No cookie at all — nothing presented, nothing to revoke.
+        return _cookie_cleared_response()
+
+    backend = get_backend(request)
+    db = backend.get_session()
+    actor_user_id = None
+    session_jti = None
+    revoked_ok = True
+    try:
+        row = db.query(SessionModel).filter(SessionModel.access_token == token).first()
+        if row is None:
+            return _cookie_cleared_response()
+
+        session_id = row.id
+        session_jti = getattr(row, "access_token_jti", None)
+        actor_user_id = row.user_id
+
+        sc = request.app.state.config.session
+        session_config = SessionConfig(
+            session_timeout=timedelta(seconds=sc.session_timeout),
+            access_token_ttl=timedelta(seconds=sc.access_token_ttl),
+            max_session_duration=timedelta(seconds=sc.max_session_duration),
+        )
+        manager = SessionManager(db, session_config)
+
+        manager.revoke_session(session_id)
+        # The session_expired flag distinguishes this path for operators
+        # (#524 AC4): the cookie was cleared on an EXPIRED row the normal
+        # validator refused, not on a live session.
+        audit_lifecycle(
+            db,
+            SESSION_ENDED,
+            actor_user_id,
+            {"mode": "browser", "session_jti": session_jti, "revoked": True, "session_expired": True},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Browser logout session revocation failed on the expired-row path (jti=%s)",
+            session_jti,
+        )
+        record_session_end_failure(request, db, actor_user_id, session_jti)
+        revoked_ok = False
+    finally:
+        db.close()
+
+    if not revoked_ok:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "revoked": False,
+                "detail": "session revocation failed; retry logout",
+            },
+            media_type="application/json",
+        )
+
+    return _cookie_cleared_response()
+
+
 @router.post(
     "/auth/logout/browser",
     status_code=status.HTTP_200_OK,
@@ -394,16 +491,13 @@ async def browser_logout(
     """Clear session cookie and invalidate the session.
 
     Removes the HttpOnly cookie and deletes the session from the database.
+    A cookie whose row the validator refuses (idle-expired inside the hard
+    cap — still revivable, #523) is resolved directly and revoked too, so
+    "logged out" means the row is gone on every presented-cookie path.
     """
     result = _get_session_from_cookie(request)
     if result is None:
-        # Still clear the cookie even if session is invalid
-        response = Response(
-            content='{"status": "ok"}',
-            media_type="application/json",
-        )
-        response.delete_cookie(key=COOKIE_NAME, path="/")
-        return response
+        return _logout_when_session_unresolved(request)
 
     db, session, user_info = result
     actor_user_id = user_info.get("user_id") if isinstance(user_info, dict) else user_info
@@ -450,12 +544,7 @@ async def browser_logout(
             media_type="application/json",
         )
 
-    response = Response(
-        content='{"status": "ok"}',
-        media_type="application/json",
-    )
-    response.delete_cookie(key=COOKIE_NAME, path="/")
-    return response
+    return _cookie_cleared_response()
 
 
 # --- Elevation endpoints ---

@@ -13,6 +13,7 @@ clients are untouched (paired negatives).
 """
 
 import inspect
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -129,3 +130,112 @@ def test_browser_refresh_handler_self_gates_without_cookie():
     src = inspect.getsource(auth_browser.browser_refresh)
     assert "session is None" in src
     assert "Invalid or expired session" in src
+
+
+# ---------------------------------------------------------------------------
+# #523 browser-logout-skips-revoke-when-idle-expired
+
+
+def _expired_row():
+    """Idle-expired (session_timeout 900s, expires_at 10 min past) but inside
+    the 4h hard cap — exactly the row check_refresh_window keeps revivable."""
+    now = datetime.now(UTC)
+    return SimpleNamespace(
+        id=7,
+        user_id="u1",
+        created_at=now - timedelta(hours=1),
+        expires_at=now - timedelta(minutes=10),
+        access_token="tok-idle",
+        access_token_jti="jti-idle",
+        user=SimpleNamespace(user_id="u1", status="active"),
+    )
+
+
+def _logout_app(row):
+    app = FastAPI()
+    app.state.config = SimpleNamespace(
+        session=SimpleNamespace(session_timeout=900, access_token_ttl=300, max_session_duration=14400),
+        admin_mtls=SimpleNamespace(enabled=False),
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = row
+    backend = MagicMock()
+    backend.get_session.return_value = db
+    app.state.backend = backend
+    app.include_router(auth_browser.router, prefix="/api/v1")
+    client = TestClient(app, raise_server_exceptions=False)
+    client.cookies.set(auth_browser.COOKIE_NAME, "tok-idle")
+    return app, client, db
+
+
+def _fields(event):
+    return json.loads(event.fields) if isinstance(event.fields, str) else event.fields
+
+
+def _audit_rows(db):
+    from core.iam.models import AuditEvent
+
+    return [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], AuditEvent)]
+
+
+def test_idle_expired_logout_revokes_the_row():
+    """#523 PAIRED NEGATIVE, RED at HEAD: a cookie whose session is
+    idle-expired-but-inside-the-hard-cap logs out -> the DB row is revoked
+    (deleted), not merely cookie-cleared. At HEAD the validator's None result
+    took an early return and revoke was never reached."""
+    row = _expired_row()
+    _, client, db = _logout_app(row)
+    resp = client.post("/api/v1/auth/logout/browser")
+    assert resp.status_code == 200
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert "Max-Age=0" in set_cookie  # cookie still cleared
+    db.delete.assert_called_once_with(row)  # the row itself revoked
+    ended = [e for e in _audit_rows(db) if e.event_type == "session_ended"]
+    assert len(ended) == 1
+    assert ended[0].user_id == "u1"
+    fields = _fields(ended[0])
+    assert fields["revoked"] is True
+    # AC4: the operator-readable distinction from a live-session logout.
+    assert fields["session_expired"] is True
+    assert fields["mode"] == "browser"
+
+
+def test_garbage_token_logout_is_clean_200_no_exception():
+    """#523 AC2 paired shape: a cookie holding an unknown/garbage token has
+    nothing to revoke — still a clean 200, cookie cleared, NO audit row (so
+    the negative case does not become a 500 or a fake logout event)."""
+    _, client, db = _logout_app(None)
+    resp = client.post("/api/v1/auth/logout/browser")
+    assert resp.status_code == 200
+    assert "Max-Age=0" in resp.headers.get("set-cookie", "")
+    db.delete.assert_not_called()
+    assert not _audit_rows(db)
+
+
+def test_expired_logout_revoke_failure_is_fail_closed():
+    """The ruling 2026-10-01 fail-closed shape carries to the revoked-row
+    half of #523: if the revoke raises, the logout refuses to claim success
+    (503, revoked=False row, cookie kept as the retry handle)."""
+    row = _expired_row()
+    _, client, db = _logout_app(row)
+    db.delete.side_effect = RuntimeError("db down")
+    resp = client.post("/api/v1/auth/logout/browser")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["revoked"] is False
+    set_cookie = resp.headers.get("set-cookie", "")
+    assert f"{auth_browser.COOKIE_NAME}=" not in set_cookie
+    ended = [e for e in _audit_rows(db) if e.event_type == "session_ended"]
+    assert len(ended) == 1
+    assert _fields(ended[0])["revoked"] is False
+
+
+def test_no_cookie_logout_still_clean_200():
+    """Paired negative retained: no cookie at all — the early path is
+    unchanged (200 + cookie-clear directive, nothing touched in the DB)."""
+    _, client, db = _logout_app(_expired_row())
+    client.cookies.clear()
+    resp = client.post("/api/v1/auth/logout/browser")
+    assert resp.status_code == 200
+    db.delete.assert_not_called()
+    assert not _audit_rows(db)
