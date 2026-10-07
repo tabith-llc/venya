@@ -2425,6 +2425,36 @@ def executor_register(client: APIClient, args: Any) -> int:
         )
         return 1
 
+    # #508: two things happen to the RESOLVED URL before a byte leaves this host.
+    #
+    # (1) A bare hostname (or host:port) means https, the same reading `venya setup`
+    # and `config set-server` already give it. This has to come first because
+    # httpx2 sends a scheme-less URL as a request with an empty scheme — measured on
+    # this venue: build_request("venya-core/api/v1/x") yields scheme '' — so the
+    # guard would otherwise refuse the very form the operator is told to type, and
+    # today that form cannot even be served. An explicit scheme is NEVER rewritten:
+    # no upgrade, no downgrade.
+    # (2) Plaintext is REFUSED before the keypair, before the CSR, before any file
+    # exists and before any transport — because this POST carries the CSR (and the
+    # enrollment token when supplied) and the CA that comes back in the response is
+    # written as this executor's trust anchor. Over http:// an on-path adversary
+    # would choose what this host trusts from now on.
+    #
+    # The VENYA_TLS_VERIFY knob is not consulted here: it means "distrust this
+    # certificate over https", never "no TLS" (#506 ruling, owner ruling on
+    # sec-sweep-low-informational #17). isinstance guard: MagicMock args in the
+    # sibling suites answer every attribute with a Mock, and a Mock is not a URL.
+    if isinstance(server_url, str) and "://" not in server_url:
+        server_url = "https://" + server_url
+
+    if not _require_https_server_url(
+        server_url,
+        site="the executor registration",
+        ticket="exec-register-ca-anchor-unchecked-scheme",
+        detail="the CA returned in this response is written as this executor's trust anchor",
+    ):
+        return 1
+
     # Step 1: Generate ECDSA P-256 keypair
     try:
         print("Generating ECDSA P-256 keypair...")
@@ -3072,17 +3102,20 @@ def executor_heartbeat(args: Any) -> int:
     executor_id = info["executor_id"]
     url = f"{server_url}/api/v1/heartbeat"
 
-    # Plaintext http:// is REJECTED (ticket sec-sweep-low-informational #17,
-    # user ruling 2026-09-21): this POST carries executor-identifying state,
-    # and silently disabling TLS for an http:// URL was the CLI's only
-    # non-knob TLS-off path. The sanctioned VENYA_TLS_VERIFY=false knob covers
-    # a DISTRUSTED CERT over https — it never means "no TLS".
-    if not server_url.startswith("https://"):
-        print(
-            f"Error: server URL must be https:// — got '{server_url}'. Plaintext http is "
-            "not supported for the executor heartbeat (ticket sec-sweep-low-informational #17).",
-            file=sys.stderr,
-        )
+    # Plaintext http:// is REJECTED (ticket sec-sweep-low-informational #17, user
+    # ruling 2026-09-21): this POST carries executor-identifying state, and silently
+    # disabling TLS for an http:// URL was the CLI's only non-knob TLS-off path.
+    # #508 AC5: this site held the original hand-written form of the rule; it now
+    # calls the same shared guard as setup / register / renew, so there is one
+    # refusal wording and one truth table instead of a copy per command. The ticket
+    # id and the "not supported for the executor heartbeat" wording class are
+    # preserved — the #17 pin in test_executor_heartbeat.py asserts both substrings.
+    if not _require_https_server_url(
+        server_url,
+        site="the executor heartbeat",
+        ticket="sec-sweep-low-informational #17",
+        detail="this POST carries executor-identifying state",
+    ):
         return 1
 
     # Build mTLS client
