@@ -12,10 +12,12 @@ create and the chmod on every boot and rotation. Fix pins here:
 
 1. daemonize sets umask 0o077, not 0 (no implicit-mode creation is ever
    group/other-permissive);
-2. secret writes land via _atomic_write — final mode AT CREATE
-   (os.open O_CREAT|O_EXCL) then os.replace; the target never exists at any
-   other mode, and pre-existing garbage at the deterministic temp name
-   fails loud without disturbing the target;
+2. secret writes land via _atomic_write — final mode AT CREATE (mkstemp-unique
+   temp in the target's own directory, fchmod-pinned, then os.replace); the
+   target never exists at any other mode, and — since #478 — a pre-existing
+   file at a deterministic ``<target>.tmp`` name cannot block the write (the
+   old O_EXCL shape wedged every later write to that target after one killed
+   writer; stale residue is now reclaimed at boot instead);
 3. freshly created key / cert / config files are never group-/world-
    accessible, even under an adversarial umask(0).
 """
@@ -70,17 +72,20 @@ class TestAtomicWrite:
         finally:
             os.umask(old)
 
-    def test_pre_existing_garbage_at_temp_name_fails_loud(self, tmp_path: Path):
-        """Negative half: attacker/stale garbage at <target>.tmp aborts the
-        write; the garbage and any existing target are untouched."""
+    def test_pre_existing_garbage_at_legacy_temp_name_does_not_wedge(self, tmp_path: Path):
+        """#478 AC3 (REVISES the pre-fix fails-loud pin): stale garbage at the
+        old deterministic name <target>.tmp used to raise FileExistsError and
+        wedge every later write to the target forever. The temp name is now
+        mkstemp-unique, so the write SUCCEEDS and the target lands the new
+        content; the garbage is never consumed as our temp (it stays put until
+        the boot sweep reclaims it at the age bound)."""
         target = tmp_path / "executor.key"
         _atomic_write(target, b"GOOD", 0o600)
         garbage = tmp_path / "executor.key.tmp"
         garbage.write_bytes(b"ATTACKER")
-        with pytest.raises(FileExistsError):
-            _atomic_write(target, b"NEW", 0o600)
+        _atomic_write(target, b"NEW", 0o600)  # must NOT raise
+        assert target.read_bytes() == b"NEW"  # target ends up with the new content
         assert garbage.read_bytes() == b"ATTACKER"  # never consumed as our temp
-        assert target.read_bytes() == b"GOOD"  # identity on disk unchanged
 
     def test_write_failure_leaves_no_temp_residue(self, tmp_path: Path):
         """Corrupt-write path still cleans up the temp (paired: normal write
@@ -93,7 +98,7 @@ class TestAtomicWrite:
         with pytest.raises(OSError):
             _atomic_write(target, b"KEY", 0o600)
         assert (target / "occupied").exists()  # nothing consumed
-        assert not (tmp_path / "executor.key.tmp").exists()  # temp unlinked
+        assert not list(tmp_path.glob("*.tmp"))  # mkstemp-unique temp unlinked too (no residue of any name)
 
     def test_readonly_target_refused_before_temp_created(self, tmp_path: Path):
         """erofs contract preserved: an existing target we cannot write is
@@ -105,7 +110,7 @@ class TestAtomicWrite:
             with pytest.raises(PermissionError):
                 _atomic_write(target, b"NEW", 0o644)
             assert target.read_bytes() == b"OLD"
-            assert not (tmp_path / "executor.crt.tmp").exists()
+            assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]  # refusal precedes any temp
         finally:
             target.chmod(0o600)
 
