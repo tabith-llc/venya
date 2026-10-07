@@ -59,6 +59,7 @@ EXECUTOR_REVOKED = "executor_revoked"
 EXECUTOR_CERT_REVOKED = "executor_cert_revoked"
 ADMIN_CERT_REVOKED = "admin_cert_revoked"
 USER_REENROLLED = "user_reenrolled"
+CORE_RESET_REFUSED = "core_reset_refused"  # #511: a reset the in-transaction guard stopped
 ENROLLMENT_TOKEN_ISSUED = "enrollment_token_issued"  # nosec B105 — audit event name, not a password
 ENROLLMENT_TOKEN_REVOKED = "enrollment_token_revoked"  # nosec B105 — audit event name, not a password
 COMMAND_POLICY_CHANGED = "command_policy_changed"
@@ -119,6 +120,7 @@ def audit_lifecycle(
         EXECUTOR_CERT_REVOKED,
         ADMIN_CERT_REVOKED,
         USER_REENROLLED,
+        CORE_RESET_REFUSED,
         ENROLLMENT_TOKEN_ISSUED,
         ENROLLMENT_TOKEN_REVOKED,
         COMMAND_POLICY_CHANGED,

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from ..audit_lifecycle import (
     ADMIN_INITIALIZED,
+    CORE_RESET_REFUSED,
     FIRST_ADMIN_ENROLLED,
     ROLE_DELETED,
     USER_DELETED,
@@ -239,6 +240,19 @@ async def init_reset(
     On a core with no enrolled user and no credential row the bootstrap caller
     (``venya init --installation-reset``) is still permitted, because no
     identity exists yet to require and there is no identity to destroy.
+
+    Gate staleness (#511): that gate is a FastAPI dependency, so it ran BEFORE
+    this body and its answer can go stale underneath us — an unauthenticated
+    caller passes while the core still looks uninitialized, the operator's
+    ``init_complete`` commits in between, and this body would then delete the
+    identity set that just landed. The precondition is therefore re-asserted
+    HERE, at the moment of the effect (the check-and-consume shape
+    ``routes/executors.py`` already uses), and it is re-asserted inside the
+    first-admin bootstrap lock, which every init step takes: a concurrent
+    ``init_complete`` cannot commit between the re-check and the deletes.
+    Multi-process caveat, stated rather than hidden: the advisory lock is
+    PostgreSQL-side, so on SQLite it is skipped (the #366 dialect guard) and
+    the in-transaction re-check is what the SQLite cells prove.
     """
     from core.iam.models import (
         EnrollmentToken,
@@ -252,6 +266,38 @@ async def init_reset(
     )
 
     try:
+        # #511: take the lock BEFORE the re-check below, so the refusal decision
+        # and (on a genuinely uninitialized core) the wipe are one serialized
+        # step against the bootstrap that would otherwise land in the middle.
+        _lock_first_admin_bootstrap(db)
+
+        # ``user_id`` is None only for the bootstrap pass-through the gate hands
+        # back when the core looked uninitialized; an admin caller arrives with
+        # an identity and is expected to see an initialized core.
+        if auth_user.get("user_id") is None and deployment_is_initialized(db):
+            # Denial-side shape from audit_lifecycle's own docstring: no action
+            # rides this event, so the audit row commits before the raise. The
+            # field table stays value-free and names no principal — this route is
+            # reachable unauthenticated, so a name here would be an oracle.
+            audit_lifecycle(
+                db,
+                CORE_RESET_REFUSED,
+                None,
+                {"outcome": "refused", "reason": "initialized_after_gate", "wipe_executed": False},
+            )
+            db.commit()
+            logger.warning(
+                "Core reset refused: an unauthenticated caller passed the #450 gate while this "
+                "core was uninitialized and identity appeared before the wipe could run"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "This core is now already initialized; an unauthenticated reset was refused. "
+                    "Sign in as an admin to reset an initialized core."
+                ),
+            )
+
         # Snapshot what the wipe is about to remove, both so the audit rows can
         # name the counts (AC: the destructive path is auditable) and because
         # a bulk delete leaves nothing to read afterwards.
