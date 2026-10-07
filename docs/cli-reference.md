@@ -1138,6 +1138,7 @@ venya exec cert renew [OPTIONS]
 |----------|----------|----------------|---------|-------------|
 | `--cert-path` | no | string | `/etc/venya/executor/executor.crt` | Path to executor certificate (default: /etc/venya/executor/executor.crt) |
 | `--key-path` | no | string | — | Path to executor private key (default: derive from --cert-path) |
+| `--ca-bundle` | no | string | — | Path to CA bundle for verifying core server TLS (default: config-dir CA, then ca_bundle in executor.toml, then the certificate-sibling ca.crt) |
 
 **Examples**
 
@@ -1178,6 +1179,7 @@ venya exec heartbeat [OPTIONS]
 | `--core-url`, `--server-url` | no | string | — | Core server URL (default: from config or VENYA_SERVER_URL) |
 | `--cert-path` | no | string | `/etc/venya/executor/executor.crt` | Path to executor certificate (default: /etc/venya/executor/executor.crt) |
 | `--key-path` | no | string | — | Path to executor private key (default: derive from --cert-path) |
+| `--ca-bundle` | no | string | — | Path to CA bundle for verifying core server TLS (default: config-dir CA, then ca_bundle in executor.toml, then the certificate-sibling ca.crt) |
 
 **Examples**
 

@@ -2214,25 +2214,120 @@ def _chown_secret_temp(fileno: int, service_ids: tuple[int, int] | None) -> None
         print(f"WARNING: cannot hand a staged temp file to {EXECUTOR_SERVICE_USER}: {e}", file=sys.stderr)
 
 
-def _resolve_register_verify_cafile(client: APIClient, ca_bundle: str | None) -> str:
-    """Trust source for the post-register verify call (#395, lead ruling).
+def _resolve_verify_cafile(
+    config_ca: Path,
+    ca_bundle: str | None,
+    *,
+    purpose: str,
+    sibling_ca: Path | None = None,
+) -> str:
+    """One trust-anchor resolver for every executor-plane mTLS call (#395 ruling, #507 reuse).
 
-    Build order: config-dir CA (what the plain ``client`` already trusts) if
-    present, ELSE the explicit ``--ca-bundle`` (already resolved from the
-    flag / executor.toml by the caller), ELSE fail loud. There is deliberately
-    no system-store or no-verify fallback: an unverifiable verification is an
-    error, never a silent pass (production mandate: propagate trust, never
-    weaken validation).
+    Build order: config-dir CA (what a plain ``APIClient`` already trusts) if
+    present, ELSE the explicit bundle (``--ca-bundle`` flag, or the
+    ``ca_bundle`` key in ``executor.toml``, as resolved by the caller), ELSE the
+    certificate-sibling ``ca.crt`` when the caller offers one (the layout
+    ``exec register`` writes), ELSE fail loud.
+
+    There is deliberately NO system-store or no-verify fallback: an unverifiable
+    verification is an error, never a silent pass (production mandate: propagate
+    trust, never weaken validation). The caller feeds the result to
+    ``_build_ssl_context``, which loads ONLY this anchor — the host trust store is
+    never consulted, so a publicly-signed certificate cannot be accepted in place
+    of the Venya CA (#507).
     """
-    config_ca = client.config.ca_path
     if config_ca.exists():
         return str(config_ca)
     if ca_bundle:
         return str(ca_bundle)
+    if sibling_ca is not None and sibling_ca.exists():
+        return str(sibling_ca)
+    searched = f"no config-dir CA ({config_ca}) and no --ca-bundle"
+    if sibling_ca is not None:
+        searched += f", and no certificate-sibling CA ({sibling_ca})"
     raise APIClientError(
-        "Cannot verify the registration: no TLS trust material found — no config-dir CA "
-        f"({config_ca}) and no --ca-bundle. Re-run with --ca-bundle <venya-ca.crt> "
-        "(the register response also saved the CA beside the certificate)."
+        f"Cannot verify {purpose}: no TLS trust material found — {searched}. "
+        "Re-run with --ca-bundle <venya-ca.crt>, or set ca_bundle in executor.toml, "
+        "or run 'venya setup <core>' on this workstation "
+        "(register also saves the CA beside the certificate)."
+    )
+
+
+def _resolve_register_verify_cafile(client: APIClient, ca_bundle: str | None) -> str:
+    """Trust source for the post-register verify call (#395, lead ruling).
+
+    Thin wrapper on the shared resolver (#507) — build order and the loud failure
+    are unchanged; renew and heartbeat now reuse the same rule instead of guessing
+    a sibling path and silently falling back to the system store.
+    """
+    bundle = ca_bundle if isinstance(ca_bundle, str) and ca_bundle else None
+    return _resolve_verify_cafile(client.config.ca_path, bundle, purpose="the registration")
+
+
+def _resolve_executor_ca_bundle(args: Any) -> str | None:
+    """The configured bundle for an executor-plane call (#507): the ``--ca-bundle``
+    flag if given, else the ``ca_bundle`` key in ``executor.toml``.
+
+    A present-but-unreadable toml is a WARNING on stderr, never a silent "no
+    bundle": the file that names the trust anchor failing to parse is exactly what
+    an operator needs to see. The run still ends at the loud gate below if no other
+    anchor exists, so a warning can never turn into a system-store dial.
+    """
+    bundle = getattr(args, "ca_bundle", None)
+    # MagicMock args in the sibling suites answer EVERY attribute; a non-str means
+    # "flag not given", not "a path to open" (register guards the same way, #395).
+    if isinstance(bundle, str) and bundle:
+        return bundle
+    path = Path(EXECUTOR_TOML_PATH)
+    if not path.exists():
+        return None
+    try:
+        import tomllib
+
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, ValueError) as e:
+        print(f"WARNING: cannot read {path}: {e}", file=sys.stderr)
+        return None
+    value = data.get("ca_bundle") if isinstance(data, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _executor_verify_cafile(args: Any, cert_path: str, *, purpose: str) -> str:
+    """Trust anchor for ``exec cert renew`` / ``exec heartbeat`` (#507).
+
+    The same rule as register — config-dir CA, then the configured bundle, then the
+    certificate sibling — with the sibling ALLOWED here because these two commands
+    have always loaded ``<cert dir>/ca.crt`` and hosts that only have that file must
+    keep working (the ticket's paired negative). What is dropped is the SILENT SKIP:
+    if none of the three exists this raises instead of letting
+    ``ssl.create_default_context()`` verify against the host store.
+    """
+    from .api_client import Config as CLIConfig
+
+    return _resolve_verify_cafile(
+        CLIConfig().ca_path,
+        _resolve_executor_ca_bundle(args),
+        purpose=purpose,
+        sibling_ca=Path(cert_path).parent / "ca.crt",
+    )
+
+
+def _executor_mtls_context(args: Any, cert_path: str, key_path: str, *, purpose: str) -> ssl.SSLContext:
+    """An mTLS context that trusts ONLY the Venya CA (#507), or raises
+    :class:`APIClientError` naming the trust source to provide.
+
+    ``_build_ssl_context(cafile=…)`` is the house builder and it deliberately never
+    calls ``load_default_certs()`` — that is what makes this a fix rather than a
+    re-ordered guess. The incumbent code built ``ssl.create_default_context()``
+    (host store LOADED, 152 anchors on this venue) and then ADDED the Venya CA when
+    it happened to be found, so a certificate signed by any public CA verified both
+    on a miss and on a hit: the Venya anchor only ever made the trust set BIGGER.
+    """
+    return _build_ssl_context(
+        cafile=_executor_verify_cafile(args, cert_path, purpose=purpose),
+        certfile=cert_path,
+        keyfile=key_path,
     )
 
 
@@ -2705,23 +2800,28 @@ def executor_cert_renew(args: Any) -> int:
     ):
         return 1
 
-    try:
-        tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
-        if tls_verify_env.lower() == "false":
-            tls_verify = False
-            print("WARNING: VENYA_TLS_VERIFY=false — TLS verification disabled (dev only)", file=sys.stderr)
-        else:
-            tls_verify = True
+    # #507: the trust anchor for both calls below is RESOLVED, never guessed from
+    # the leaf's directory, and it is resolved BEFORE any transport object exists.
+    # The knob keeps its ruled meaning (distrust this certificate over https), so
+    # the anchor is only needed on the verifying branch — the knob is not a way
+    # back into plaintext (#506) and not a way back into an unanchored context.
+    tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
+    tls_verify = tls_verify_env.lower() != "false"
+    verify_cafile = ""
+    if not tls_verify:
+        print("WARNING: VENYA_TLS_VERIFY=false — TLS verification disabled (dev only)", file=sys.stderr)
+    else:
+        try:
+            verify_cafile = _executor_verify_cafile(args, cert_path, purpose="the executor certificate renewal")
+        except APIClientError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
+    try:
         print("Submitting renewal request via mTLS...")
-        ca_cert_path = str(Path(cert_path).parent / "ca.crt")
-        if tls_verify:
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.load_cert_chain(cert_path, key_path)
-            if Path(ca_cert_path).exists():
-                ssl_ctx.load_verify_locations(ca_cert_path)
-        else:
-            ssl_ctx = False  # type: ignore[assignment]
+        ssl_ctx = (
+            _build_ssl_context(cafile=verify_cafile, certfile=cert_path, keyfile=key_path) if tls_verify else False
+        )
         with httpx2.Client(
             verify=ssl_ctx,
             timeout=30.0,
@@ -2839,13 +2939,9 @@ def executor_cert_renew(args: Any) -> int:
     # Verify auth with revocation list
     try:
         print("Verifying authentication...")
-        if tls_verify:
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.load_cert_chain(cert_path, key_path)
-            if Path(ca_cert_path).exists():
-                ssl_ctx.load_verify_locations(ca_cert_path)
-        else:
-            ssl_ctx = False  # type: ignore[assignment]
+        ssl_ctx = (
+            _build_ssl_context(cafile=verify_cafile, certfile=cert_path, keyfile=key_path) if tls_verify else False
+        )
         with httpx2.Client(
             verify=ssl_ctx,
             timeout=30.0,
@@ -3001,12 +3097,19 @@ def executor_heartbeat(args: Any) -> int:
         return 1
 
     # Build mTLS client
+    #
+    # #507: same anchor rule as renew. Note there is NO VENYA_TLS_VERIFY branch
+    # here — the heartbeat has never honoured the knob, so this command has no
+    # path that skips verification, and the anchor is always required. (Widening
+    # the knob to the heartbeat would be a NEW bypass surface, not a fix; it is
+    # deliberately not added here.)
     try:
-        ca_cert_path = str(Path(cert_path).parent / "ca.crt")
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.load_cert_chain(cert_path, key_path)
-        if Path(ca_cert_path).exists():
-            ssl_ctx.load_verify_locations(ca_cert_path)
+        verify_cafile = _executor_verify_cafile(args, cert_path, purpose="the executor heartbeat")
+    except APIClientError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    try:
+        ssl_ctx = _build_ssl_context(cafile=verify_cafile, certfile=cert_path, keyfile=key_path)
         with httpx2.Client(
             verify=ssl_ctx,
             timeout=10.0,

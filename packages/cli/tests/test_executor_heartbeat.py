@@ -25,6 +25,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -79,6 +80,46 @@ def _setup_cert_files(tmp_path, executor_id="test-exec", validity_days=30):
     key_path.write_bytes(key_pem)
 
     return cert_path, key_path, private_key
+
+
+# ---------------------------------------------------------------------------
+# #507 — trust material for these cells (autouse)
+# ---------------------------------------------------------------------------
+
+FAKE_SUITE_CA_CN = "venya-suite-ca"
+
+
+@pytest.fixture(autouse=True)
+def _venya_config_ca(tmp_path, monkeypatch):
+    """Give renew/heartbeat a RESOLVED anchor so these cells are deterministic.
+
+    #507 replaced the silent system-store fallback with an anchor gate (config-dir
+    CA -> configured bundle -> sibling ca.crt -> loud failure). Run without trust
+    material, every cell here would now read the ACCOUNT THAT RUNS THE SUITE'S real
+    ~/.config/venya/ca.crt — measured: 34 of these cells passed at the tip purely by
+    borrowing that file, which proves nothing on a clean venue. So each cell gets a
+    scratch config dir with a generated CA. A cell that wants the no-anchor path
+    points VENYA_CONFIG at a dir without a ca.crt (see test_renew_heartbeat_ca_anchor_507.py).
+    """
+    cfg_dir = tmp_path / "venya-config"
+    cfg_dir.mkdir(exist_ok=True)
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, FAKE_SUITE_CA_CN)])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    (cfg_dir / "ca.crt").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    monkeypatch.setenv("VENYA_CONFIG", str(cfg_dir / "config.json"))
+    return cfg_dir
 
 
 def _make_mock_response(status_code=200, json_data=None):

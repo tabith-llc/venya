@@ -618,6 +618,16 @@ def create_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to executor private key (default: derive from --cert-path)",
     )
+    # #507: renew verifies the core with a RESOLVED anchor, so the bundle has to be
+    # settable here like it is on register (else a host without a config-dir CA and
+    # without a sibling ca.crt could not renew at all).
+    cert_renew_parser.add_argument(
+        "--ca-bundle",
+        dest="ca_bundle",
+        default=None,
+        help="Path to CA bundle for verifying core server TLS (default: config-dir CA, "
+        "then ca_bundle in executor.toml, then the certificate-sibling ca.crt)",
+    )
 
     # exec cert revoke
     revoke_parser = cert_subparsers.add_parser("revoke", help="Revoke an executor certificate (admin action)")
@@ -652,6 +662,14 @@ def create_parser() -> argparse.ArgumentParser:
         dest="key_path",
         default=None,
         help="Path to executor private key (default: derive from --cert-path)",
+    )
+    # #507: same resolved-anchor rule as renew — see the cert-renew flag above.
+    heartbeat_parser.add_argument(
+        "--ca-bundle",
+        dest="ca_bundle",
+        default=None,
+        help="Path to CA bundle for verifying core server TLS (default: config-dir CA, "
+        "then ca_bundle in executor.toml, then the certificate-sibling ca.crt)",
     )
 
     # exec audit
