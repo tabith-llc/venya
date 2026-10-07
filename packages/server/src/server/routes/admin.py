@@ -91,7 +91,10 @@ class AdminCreateUserRequest(BaseModel):
     model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
     username: str = Field(..., description="User ID (e.g. 'jsmith')", pattern=USER_ID_PATTERN)
-    display_name: str | None = Field(None, description="Human-readable name")
+    # #520: bounded width field — User.display_name is String(128)
+    # (models.py:49); over-width rejected 422 pre-DB, never a psycopg 500
+    # after the ceremony-free create begins (#334 posture, reused).
+    display_name: str | None = Field(None, description="Human-readable name", max_length=128)
     roles: list[str] = Field(default_factory=list, description="Role names to assign")
 
 
@@ -147,7 +150,8 @@ class AdminUserListResponse(BaseModel):
 class AdminConfigureUserRequest(BaseModel):
     model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
-    display_name: str | None = None
+    # #520 second writer site (configure_user): same column, same bound.
+    display_name: str | None = Field(None, max_length=128)
     status: UserStatus | None = None
     auth_mode: AdminAuthMode | None = None
     session_timeout: int | None = None
