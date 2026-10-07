@@ -17,6 +17,7 @@ Orchestrates the full execution pipeline:
 
 import base64
 import contextlib
+import errno
 import hashlib
 import logging
 import os
@@ -109,6 +110,42 @@ DIRECT_PATH_TIMEOUT_ENV = "VENYA_DIRECT_PATH_TIMEOUT"
 # Extra patience for the reaping of a child we terminated ourselves (#470).
 # Generous relative to a kill and small relative to the bound it follows.
 DIRECT_CHILD_REAP_SECONDS = 5.0
+
+
+def _mark_cloexec_or_skip_vanished(fd_num: int) -> bool:
+    """Mark FD_CLOEXEC on one FD the scan reported, skipping one already closed.
+
+    ``scan_open_fds`` enumerates ``/proc/<pid>/fd`` and the loop below acts on
+    those numbers afterwards. A number can stop being an open descriptor in
+    that window: the listing's own directory FD appears in its own result and
+    ``os.listdir`` closes it before the loop reaches it, and other threads churn
+    numbers in flight. On a closed number ``fcntl(F_GETFD)`` raises EBADF, which
+    used to escape the middle of an otherwise-healthy command spawn and abort it
+    (ticket open-fd-scan-set-cloexec-toctou-ebadf #535).
+
+    A descriptor that is already closed has nothing left to leak into a child,
+    so EBADF is a SKIP, not a failure. Every other error is raised unchanged:
+    swallowing a blanket ``OSError`` here would silence a genuinely broken mark
+    and let the FD through to the child un-marked — the fail-open shape this
+    product forbids. An OSError carrying no ``errno`` is therefore also raised.
+
+    ``set_cloexec`` itself keeps its strict contract: an owner of a descriptor
+    it expects to be open still learns when it is not.
+
+    Returns:
+        True when the flag was set, False when the descriptor had vanished.
+    """
+    try:
+        set_cloexec(fd_num)
+    except OSError as exc:
+        if exc.errno != errno.EBADF:
+            raise
+        logger.debug(
+            "FD %d closed between the scan and the close-on-exec mark; skipped",
+            fd_num,
+        )
+        return False
+    return True
 
 
 def _close_child_stdin(process: subprocess.Popen) -> None:
@@ -684,7 +721,7 @@ class Executor:
         else:
             for fd_num in scanned_fds:
                 if fd_num not in allowed:
-                    set_cloexec(fd_num)
+                    _mark_cloexec_or_skip_vanished(fd_num)
 
         # Verify FD whitelist
         open_fds = scan_open_fds()
