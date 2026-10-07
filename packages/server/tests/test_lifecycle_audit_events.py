@@ -25,8 +25,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from core.iam.models import AuditEvent
 from fastapi import FastAPI
-from server.dependencies import get_current_user, require_admin
+from server.dependencies import get_current_user, get_db, require_admin
 from server.routes import admin as admin_routes
 from server.routes import auth as auth_routes
 from server.routes import auth_browser as auth_browser_routes
@@ -1296,17 +1297,54 @@ class TestKeyVersionLifecycle:
 
 
 class TestElevationGranted:
+    """#528 note: elevation challenge state moved to the DB, so these
+    cells seed a real elevation_challenges row on SQLite (house fixture
+    pattern: test_elevation_auditor_deny.py) instead of the retired
+    app.state dict; the pins themselves (grant row shape / absence) are
+    unchanged."""
+
+    def _db(self, session_id=None):
+        from datetime import timedelta
+
+        from core.iam.models import Base, ElevationChallenge, User, WebAuthnCredential
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import StaticPool
+
+        engine = create_engine(
+            "sqlite://",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(engine)
+        factory = sessionmaker(bind=engine)
+        s = factory()
+        s.add(User(user_id=USER_ID, status="active"))
+        s.add(WebAuthnCredential(user_id=USER_ID, credential_id=b"k1", public_key=b"p1", sign_count=0))
+        s.add(
+            ElevationChallenge(
+                challenge_id="cid",
+                user_id=USER_ID,
+                session_id=session_id,
+                state="created",
+                created_at=_now(),
+                expires_at=_now() + timedelta(seconds=300),
+            )
+        )
+        s.commit()
+        return engine, factory, s
+
     def test_cli_grant_row_value_free(self):
-        db = MagicMock()
+        engine, _factory, db = self._db()
         fido = MagicMock()
         fido.finish_authentication.return_value = {"user_id": USER_ID}
         app = _app(
             auth_elevation_routes.router,
             backend=MagicMock(get_session=MagicMock(return_value=db)),
             auth_user={"user_id": USER_ID},
-            extra_state={"_elevation_challenges": {"cid": {"user_id": USER_ID, "created_at": _now()}}},
             fido2_manager=fido,
         )
+        app.dependency_overrides[get_db] = lambda: db
         with (
             patch("server.routes.auth_elevation.browser_assertion_to_fido2", return_value={}),
             patch("core.iam.role_manager.RoleManager") as rm,
@@ -1315,26 +1353,32 @@ class TestElevationGranted:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/api/v1/auth/elevate/assert", json={"challenge_id": "cid", "response": {}})
         assert resp.status_code == 200
-        rows = _by_type(_lifecycle_events(db), "elevation_granted")
+        try:
+            rows = _by_type(db.query(AuditEvent).all(), "elevation_granted")
+        finally:
+            db.close()
+            engine.dispose()
         assert len(rows) == 1
         assert rows[0].user_id == USER_ID
         assert _f(rows[0]) == {"mode": "cli", "endpoint": "/api/v1/auth/elevate/assert"}
 
     def test_browser_grant_row_value_free(self):
-        db = MagicMock()
-        session_mock = SimpleNamespace(id=7, user_id=USER_ID)
+        from types import SimpleNamespace as _NS
+
+        engine, factory, db = self._db(session_id=7)
+        session_mock = _NS(id=7, user_id=USER_ID)
         fido = MagicMock()
         fido.finish_authentication.return_value = {"user_id": USER_ID}
         app = _app(
             auth_browser_routes.router,
             backend=MagicMock(get_session=MagicMock(return_value=db)),
-            extra_state={"_elevation_challenges": {"cid": {"session_id": 7, "created_at": _now()}}},
             fido2_manager=fido,
         )
+        # the handler closes the session it gets from the cookie resolver;
+        # each request receives a fresh one over the shared engine.
+        resolver = lambda request: (factory(), session_mock, {"user_id": USER_ID})
         with (
-            patch.object(
-                auth_browser_routes, "_get_session_from_cookie", return_value=(db, session_mock, {"user_id": USER_ID})
-            ),
+            patch.object(auth_browser_routes, "_get_session_from_cookie", side_effect=resolver),
             patch("server.routes.auth_browser.browser_assertion_to_fido2", return_value={}),
             patch("core.iam.role_manager.RoleManager") as rm,
         ):
@@ -1342,21 +1386,26 @@ class TestElevationGranted:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/api/v1/auth/elevate/browser/assert", json={"challenge_id": "cid", "response": {}})
         assert resp.status_code == 200
-        rows = _by_type(_lifecycle_events(db), "elevation_granted")
+        reader = factory()
+        try:
+            rows = _by_type(reader.query(AuditEvent).all(), "elevation_granted")
+        finally:
+            reader.close()
+            engine.dispose()
         assert len(rows) == 1
         assert _f(rows[0]) == {"mode": "browser", "endpoint": "/api/v1/auth/elevate/browser/assert"}
 
     def test_auditor_deny_writes_no_grant(self):
-        db = MagicMock()
+        engine, _factory, db = self._db()
         fido = MagicMock()
         fido.finish_authentication.return_value = {"user_id": USER_ID}
         app = _app(
             auth_elevation_routes.router,
             backend=MagicMock(get_session=MagicMock(return_value=db)),
             auth_user={"user_id": USER_ID},
-            extra_state={"_elevation_challenges": {"cid": {"user_id": USER_ID, "created_at": _now()}}},
             fido2_manager=fido,
         )
+        app.dependency_overrides[get_db] = lambda: db
         with (
             patch("server.routes.auth_elevation.browser_assertion_to_fido2", return_value={}),
             patch("core.iam.role_manager.RoleManager") as rm,
@@ -1365,21 +1414,25 @@ class TestElevationGranted:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/api/v1/auth/elevate/assert", json={"challenge_id": "cid", "response": {}})
         assert resp.status_code == 403
-        assert not _by_type(_lifecycle_events(db), "elevation_granted")
+        try:
+            assert not _by_type(db.query(AuditEvent).all(), "elevation_granted")
+        finally:
+            db.close()
+            engine.dispose()
 
     def test_bad_assertion_writes_no_grant(self):
         from server.fido2.manager import WebAuthnError
 
-        db = MagicMock()
+        engine, _factory, db = self._db()
         fido = MagicMock()
         fido.finish_authentication.side_effect = WebAuthnError("bad assertion")
         app = _app(
             auth_elevation_routes.router,
             backend=MagicMock(get_session=MagicMock(return_value=db)),
             auth_user={"user_id": USER_ID},
-            extra_state={"_elevation_challenges": {"cid": {"user_id": USER_ID, "created_at": _now()}}},
             fido2_manager=fido,
         )
+        app.dependency_overrides[get_db] = lambda: db
         with (
             patch("server.routes.auth_elevation.browser_assertion_to_fido2", return_value={}),
             patch("core.iam.role_manager.RoleManager") as rm,
@@ -1388,7 +1441,13 @@ class TestElevationGranted:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post("/api/v1/auth/elevate/assert", json={"challenge_id": "cid", "response": {}})
         assert resp.status_code == 401
-        assert not _lifecycle_events(db)
+        try:
+            # consumed-on-error is pinned in the lifecycle file; here the
+            # pin is: a failed ceremony writes NO lifecycle rows at all.
+            assert not db.query(AuditEvent).all()
+        finally:
+            db.close()
+            engine.dispose()
 
 
 # --- F3: revocation lifecycle (Q3: duplicate attempts EMIT) ---

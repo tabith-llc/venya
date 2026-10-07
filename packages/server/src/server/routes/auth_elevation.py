@@ -53,16 +53,108 @@ class ElevationAssertResponse(BaseModel):
     elevation_token: str
 
 
-def _cleanup_stale_challenges(challenges: dict, ttl_seconds: int) -> None:
-    """Remove expired elevation challenges from the app state dict.
+def _store_elevation_challenge(db: Session, challenge_id: str, user_id: str, session_id: int | None) -> None:
+    """Persist a pending elevation ceremony binding (#528).
 
-    Called at the start of both challenge and assert endpoints to prevent
-    unbounded growth of the challenges dict.
+    DB replacement for the old per-process app.state dict: the row is
+    committed immediately, so any worker on any core claims the SAME
+    record and a restart does not vaporise a live ceremony. Expired rows
+    are pruned here — the DB twin of the #345 stale sweep (abandoned
+    ceremonies die on the next touch, not at restart).
     """
+    from core.iam.models import ElevationChallenge
+
     now = datetime.now(UTC)
-    stale = [cid for cid, info in challenges.items() if (now - info["created_at"]).total_seconds() > ttl_seconds]
-    for cid in stale:
-        challenges.pop(cid, None)
+    db.query(ElevationChallenge).filter(ElevationChallenge.expires_at < now).delete(synchronize_session=False)
+    db.add(
+        ElevationChallenge(
+            challenge_id=challenge_id,
+            user_id=user_id,
+            session_id=session_id,
+            state="created",
+            created_at=now,
+            expires_at=now + timedelta(seconds=ELEVATION_TOKEN_TTL_SECONDS * 5),
+        )
+    )
+    db.commit()
+
+
+def _claim_elevation_challenge(
+    db: Session,
+    challenge_id: str,
+    caller_user_id: str,
+    caller_session_id: int | None,
+    endpoint: str,
+):
+    """Atomically consume the pending row, then verify the binding (#528).
+
+    Claim-COMMITS-BEFORE-CHECKS: the consumed state must survive every
+    refusal path — pop-up-front keeps its #345 meaning (a denied ceremony
+    never re-arms the challenge), and get_db rolls back escaped
+    exceptions, so an uncommitted claim would put the row back in play.
+    Single-consume is the atomic UPDATE ... WHERE state='created' (house
+    pattern: enrollment_tokens.state / elevation_tokens.used) — two
+    concurrent claims, exactly one gets rowcount 1.
+
+    A not-found/expired/already-consumed claim fails closed with the
+    uniform 401 and an audit row (value-free: no challenge id, no token
+    material — AC2). Returns the claimed row.
+    """
+    from core.iam.models import AuditEvent, ElevationChallenge
+
+    now = datetime.now(UTC)
+    claimed = (
+        db.query(ElevationChallenge)
+        .filter(
+            ElevationChallenge.challenge_id == challenge_id,
+            ElevationChallenge.state == "created",
+            ElevationChallenge.expires_at > now,
+        )
+        .update({"state": "consumed"}, synchronize_session=False)
+    )
+    db.commit()
+
+    if claimed != 1:
+        try:
+            db.add(
+                AuditEvent(
+                    event_type="elevation_challenge_denied",
+                    user_id=caller_user_id,
+                    fields={
+                        "outcome": "denied",
+                        "reason": "challenge_not_found",
+                        "user_id": caller_user_id,
+                        "endpoint": endpoint,
+                    },
+                    timestamp=datetime.now(UTC),
+                )
+            )
+            db.commit()
+        except Exception:
+            logger.exception("Audit write failed on elevation challenge deny (still denying)")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Elevation challenge not found or expired",
+        )
+
+    row = db.query(ElevationChallenge).filter(ElevationChallenge.challenge_id == challenge_id).one()
+
+    if row.user_id != caller_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Elevation challenge user mismatch",
+        )
+
+    # #527 gate, now on the DB row: a second session of the same user
+    # cannot finish a ceremony earned elsewhere. mTLS/admin contexts carry
+    # session_id None on both sides, so the comparison stays inert for them.
+    if row.session_id != caller_session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Elevation challenge session mismatch",
+        )
+
+    return row
 
 
 @router.post(
@@ -101,18 +193,14 @@ async def elevate_challenge(
     )
     browser_options = challenge_to_browser_options(challenge_id, options)
 
-    # Store challenge with timestamp for TTL-based cleanup
-    if not hasattr(request.app.state, "_elevation_challenges"):
-        request.app.state._elevation_challenges = {}
-    _cleanup_stale_challenges(
-        request.app.state._elevation_challenges,
-        ELEVATION_TOKEN_TTL_SECONDS * 5,
+    # Store the binding in the DB, not app.state (#528): any worker can
+    # claim it, a restart cannot lose it, and one consume is atomic.
+    _store_elevation_challenge(
+        db,
+        challenge_id,
+        user_info["user_id"],
+        user_info.get("session_id"),
     )
-    request.app.state._elevation_challenges[challenge_id] = {
-        "session_id": user_info.get("session_id"),
-        "user_id": user_info["user_id"],
-        "created_at": datetime.now(UTC),
-    }
 
     return ElevationChallengeResponse(
         challenge_id=challenge_id,
@@ -144,36 +232,16 @@ async def elevate_assert(
             detail="FIDO2 manager not initialized",
         )
 
-    elevation_challenges = getattr(request.app.state, "_elevation_challenges", {})
-    _cleanup_stale_challenges(elevation_challenges, ELEVATION_TOKEN_TTL_SECONDS * 5)
-
-    challenge_info = elevation_challenges.pop(req.challenge_id, None)
-
-    if challenge_info is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Elevation challenge not found or expired",
-        )
-
-    if challenge_info["user_id"] != user_info["user_id"]:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Elevation challenge user mismatch",
-        )
-
-    # #527 elevation-not-session-bound: the challenge STORES the session that
-    # started it but this path only read user_id, so a second session of the
-    # same user could complete a ceremony earned elsewhere. Assert-side check
-    # mirrors the browser twin (auth_browser: "Elevation challenge session
-    # mismatch"). Pop-up-front keeps its meaning: the entry is consumed on
-    # EVERY path (this refusal included) — a denied ceremony never leaves a
-    # live slot (pattern ruled #345). mTLS/admin contexts carry session_id
-    # None on both sides, so the comparison stays inert for them.
-    if challenge_info.get("session_id") != user_info.get("session_id"):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Elevation challenge session mismatch",
-        )
+    # #528: DB-backed claim (was the per-process dict pop). Consumed on
+    # EVERY path — success, WebAuthn error, mismatch, or auditor denial —
+    # so a denied or abandoned ceremony never re-arms the challenge.
+    _claim_elevation_challenge(
+        db,
+        req.challenge_id,
+        user_info["user_id"],
+        user_info.get("session_id"),
+        "/api/v1/auth/elevate/assert",
+    )
 
     # Verify the assertion
     fido2_response = browser_assertion_to_fido2(req.response)

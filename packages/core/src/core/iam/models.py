@@ -507,6 +507,39 @@ class ElevationToken(Base):
     used = Column(Boolean, default=False, nullable=False)
 
 
+class ElevationChallenge(Base):
+    """Pending elevation ceremonies, DB-backed (#528).
+
+    The auth binding of an elevation ceremony — which user (and session)
+    started it — used to live in a per-process dict, so a second worker or
+    a restart lost it and the ceremony died with 'challenge not found'.
+    One row per pending challenge; the claim is an atomic single-consume
+    UPDATE (house pattern: enrollment_tokens.state / elevation_tokens.used).
+    session_id carries no DB-level FK for the same reasons as
+    ElevationToken above. Rows are short-lived (TTL x5) and pruned at the
+    next challenge touch.
+    """
+
+    __tablename__ = "elevation_challenges"
+
+    id = Column(Integer, primary_key=True)
+    challenge_id = Column(String(64), unique=True, nullable=False)
+    user_id = Column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    session_id = Column(Integer, nullable=True)
+    # "created" -> "consumed" (vocabulary mirrors enrollment_tokens.state)
+    state = Column(String(16), nullable=False, default="created")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
 class WebAuthnCredential(Base):
     """WebAuthn credentials for user authentication."""
 
