@@ -25,6 +25,7 @@ from .. import metrics
 from ..audit_lifecycle import SESSION_STARTED, audit_lifecycle, record_login_failure
 from ..dependencies import get_db
 from ..fido2.manager import WebAuthnError
+from ..session_gate_config import build_core_session_config
 
 logger = logging.getLogger("venya.server")
 
@@ -128,18 +129,10 @@ async def auth_login_complete(
         ) from None
 
     # Create session and issue token
-    from datetime import timedelta
-
     from core.iam.role_manager import RoleManager
-    from core.iam.session_manager import SessionConfig as CoreSessionConfig
     from core.iam.session_manager import SessionManager, UserNotActiveError
 
-    sc = request.app.state.config.session
-    session_config = CoreSessionConfig(
-        session_timeout=timedelta(seconds=sc.session_timeout),
-        access_token_ttl=timedelta(seconds=sc.access_token_ttl),
-        max_session_duration=timedelta(seconds=sc.max_session_duration),
-    )
+    session_config = build_core_session_config(request.app.state.config)
 
     sm = SessionManager(db, session_config)
     rm = RoleManager(db)
@@ -201,10 +194,7 @@ async def auth_refresh(
     required. The distinction: API calls still 401 at idle expiry (middleware
     check_expiry unchanged); that 401 is what makes this route reachable.
     """
-    from datetime import timedelta
-
     from core.iam.models import Session as SessionModel
-    from core.iam.session_manager import SessionConfig as CoreSessionConfig
     from core.iam.session_manager import SessionManager, UserNotActiveError
 
     # Get the bearer token from the request
@@ -216,12 +206,7 @@ async def auth_refresh(
         )
     token = auth_header[7:]
 
-    sc = request.app.state.config.session
-    session_config = CoreSessionConfig(
-        session_timeout=timedelta(seconds=sc.session_timeout),
-        access_token_ttl=timedelta(seconds=sc.access_token_ttl),
-        max_session_duration=timedelta(seconds=sc.max_session_duration),
-    )
+    session_config = build_core_session_config(request.app.state.config)
     manager = SessionManager(db, session_config)
 
     # Find session by access token

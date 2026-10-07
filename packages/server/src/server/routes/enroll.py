@@ -12,7 +12,7 @@ Two-step enrollment flow:
 """
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -27,6 +27,7 @@ from ..fido2.browser_adapter import (
     challenge_to_browser_registration_options,
 )
 from ..fido2.manager import WebAuthnError
+from ..session_gate_config import build_core_session_config
 from ..utils.time import is_expired
 from ..utils.token_binding import verify_binding_hash
 
@@ -315,15 +316,9 @@ async def browser_enroll_complete(
         user.auth_mode = "webauthn"
 
         # Create session
-        from core.iam.session_manager import SessionConfig as CoreSessionConfig
         from core.iam.session_manager import SessionManager
 
-        sc = request.app.state.config.session
-        session_config = CoreSessionConfig(
-            session_timeout=timedelta(seconds=sc.session_timeout),
-            access_token_ttl=timedelta(seconds=sc.access_token_ttl),
-            max_session_duration=timedelta(seconds=sc.max_session_duration),
-        )
+        session_config = build_core_session_config(request.app.state.config)
 
         sm = SessionManager(db, session_config)
         roles = [rm.role_id for rm in user.roles] if user and user.roles else []
