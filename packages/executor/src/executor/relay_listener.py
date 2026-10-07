@@ -176,10 +176,14 @@ class ExecuteHandler(BaseHTTPRequestHandler):
         # execute() where the unwrapped bundles live — the listener never
         # touches plaintext.
         env_vars = [e.model_dump() for e in req.env] if req.env else None
+        executor: Any = None
         try:
-            result = self.server.executor_factory(session_id).execute(  # type: ignore[attr-defined]
-                command, secrets, env_vars=env_vars, askpass_helper=req.askpass_helper
-            )
+            # The factory call stays INSIDE the try: before this change a raising
+            # factory was covered by the flat 503 lane, and that has to keep
+            # holding. ``executor`` is initialised to None so the finally below
+            # still runs when the factory itself raises.
+            executor = self.server.executor_factory(session_id)  # type: ignore[attr-defined]
+            result = executor.execute(command, secrets, env_vars=env_vars, askpass_helper=req.askpass_helper)
         except CommandRejected as exc:
             # The reason describes the CALLER's own command (both gates run
             # before injection, so secret material is structurally absent) —
@@ -194,6 +198,16 @@ class ExecuteHandler(BaseHTTPRequestHandler):
             logger.exception("Relay /execute failed for session %s", session_id)
             self._reply(503, {"detail": "execution failed"})
             return
+        finally:
+            # #467: this is the code that ends the session, so this is where the
+            # session's AuditLogger forwarder is stopped. It runs on every lane,
+            # including a raising engine, so a session cannot leak its 1 s-poll
+            # thread. The hasattr guard keeps the injected stubs in
+            # test_relay_listener / test_relay_stop_477 — which model the engine,
+            # not a closable session — exactly as they are.
+            close = getattr(executor, "close", None)
+            if callable(close):
+                close()
 
         self._reply(
             200,

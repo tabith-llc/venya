@@ -16,6 +16,7 @@ Orchestrates the full execution pipeline:
 """
 
 import base64
+import contextlib
 import hashlib
 import logging
 import os
@@ -383,6 +384,7 @@ class Executor:
     config: Any = None  # ExecutorConfig for timeout access
     _injection_result: InjectionResult | None = field(init=False, default=None)
     _bundles: list[SecretBundle] = field(init=False, default_factory=list)
+    _closed: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
         """Validate the injection strategy before first use."""
@@ -394,6 +396,38 @@ class Executor:
         if self._sentinel_registry is None:
             self._sentinel_registry = SentinelRegistry(session_id=self.session_id)
         return self._sentinel_registry
+
+    def close(self) -> None:
+        """Tear down everything this session owns (ticket #467).
+
+        ``AuditLogger.__init__`` starts a 1 s-poll forwarder thread, and before
+        this hook existed only the BOOT instance was ever shut down — so every
+        command session leaked a live thread plus its spool handles for the
+        whole life of the daemon. The object that owns the logger is the
+        Executor, so the teardown lives here.
+
+        ``AuditLogger.shutdown()`` keeps the ruled per-session drain (ticket
+        #436): it performs a bounded final forward before stopping, so durable
+        spool contents are not dropped by closing. It is also idempotent, and
+        so is this method — a caller that closes twice gets one shutdown and
+        no error.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self.audit_logger is not None:
+            self.audit_logger.shutdown()
+
+    def __del__(self) -> None:
+        """Last-resort guard for a session that was never closed (ticket #467).
+
+        The deterministic path is ``close()`` from the code that ends the
+        session; this only exists so a dropped Executor cannot leak the
+        forwarder thread as well. It must never raise — interpreter shutdown
+        hands us partially torn-down state.
+        """
+        with contextlib.suppress(Exception):
+            self.close()
 
     def execute(
         self,
