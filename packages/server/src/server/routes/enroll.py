@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ..audit_lifecycle import SESSION_STARTED, audit_lifecycle
@@ -54,7 +54,28 @@ class BrowserEnrollCompleteRequest(BaseModel):
     enrollment_token: str = Field(..., description="Plaintext enrollment token")
     challenge_id: str = Field(..., description="Challenge ID from start response")
     response: dict[str, Any] = Field(..., description="WebAuthn attestation response")
-    label: str = Field(..., description="Credential label (e.g. 'Primary key')")
+    # #518 enroll-label-width-500-after-ceremony: bound the label to the
+    # WebAuthnCredential.label column (String(64), models.py:515) with the
+    # sibling credential-add posture (credentials.py:46-59) — max_length=64,
+    # min_length=1, and a strict-UTF-8 check. Pydantic runs this at request
+    # parse, BEFORE the handler completes the WebAuthn ceremony, so an
+    # over-width or lone-surrogate label 422s pre-DB and never burns the
+    # hardware step or surfaces a psycopg 500 after a completed ceremony.
+    label: str = Field(
+        ...,
+        description="Credential label (e.g. 'Primary key')",
+        max_length=64,
+        min_length=1,
+    )
+
+    @field_validator("label")
+    @classmethod
+    def _label_strict_utf8(cls, v: str) -> str:
+        try:
+            v.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("label is not valid strict UTF-8 (lone surrogate) — rejected pre-DB") from None
+        return v
 
 
 class BrowserEnrollCompleteResponse(BaseModel):
