@@ -14,6 +14,8 @@ is assumed compromised.
 """
 
 import importlib
+import os
+import subprocess
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -317,51 +319,81 @@ class TestRuntimeCapabilityIsolation:
     """
 
     CAP_IPC_LOCK_BIT = 14  # Linux kernel capability number (CAP_IPC_LOCK)
-    _SYSTEMD_UNIT_PATHS: ClassVar[list[str]] = [
+    # Per-service lookup order: /etc first (the installer writes the live unit
+    # to /etc/systemd/system — install-venya-core.sh SYSTEMD_DIR, and
+    # install-venya-executor.sh), /lib as the packaged fallback. The FIRST
+    # EXISTING candidate wins (#542: the old scan overwrote with no existence
+    # check, so the last-listed /lib path always won — a path that does not
+    # exist on a real install). Drop-in override dirs
+    # (/etc/systemd/system/<unit>.d/) are NOT parsed — designed for the
+    # fleet window, see refs 542.
+    _CORE_UNIT_CANDIDATES: ClassVar[list[str]] = [
         "/etc/systemd/system/venya-core.service",
-        "/etc/systemd/system/venya-executor.service",
         "/lib/systemd/system/venya-core.service",
+    ]
+    _EXECUTOR_UNIT_CANDIDATES: ClassVar[list[str]] = [
+        "/etc/systemd/system/venya-executor.service",
         "/lib/systemd/system/venya-executor.service",
     ]
 
     @staticmethod
-    def _parse_unit_file(path: str) -> dict[str, list[str]]:
-        """Parse a systemd unit file into {directive: [values]}."""
+    def _parse_unit_file(path: str) -> dict[str, list[str]] | None:
+        """Parse a systemd unit file into {directive: [values]}.
+
+        Returns None when the file is ABSENT and {} when it is present but
+        carries no parseable directives — "not installed here" and "installed
+        with no such directive" are different verdicts (#542: the old handler
+        folded absent into {} so negatives passed vacuously).
+        """
+        if not os.path.exists(path):
+            return None
         result: dict[str, list[str]] = {}
-        try:
-            with open(path) as f:
-                for line in f:
-                    line = line.strip()
-                    if "=" in line and not line.startswith("#") and not line.startswith(";"):
-                        key, _, value = line.partition("=")
-                        key = key.strip()
-                        value = value.strip()
-                        if key not in result:
-                            result[key] = []
-                        result[key].append(value)
-        except FileNotFoundError:
-            pass
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#") and not line.startswith(";"):
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip()
+                    if key not in result:
+                        result[key] = []
+                    result[key].append(value)
         return result
 
     @classmethod
     def _find_unit_file(cls) -> dict[str, str | None]:
-        """Find the unit file paths for core and executor services."""
+        """Resolve the unit file path for core and executor.
+
+        First EXISTING candidate per service wins, /etc taking precedence over
+        /lib; None means no candidate exists on this host.
+        """
         found: dict[str, str | None] = {"core": None, "executor": None}
-        for path in cls._SYSTEMD_UNIT_PATHS:
-            if "venya-core" in path:
-                found["core"] = path
-            elif "venya-executor" in path:
-                found["executor"] = path
+        for service, candidates in (
+            ("core", cls._CORE_UNIT_CANDIDATES),
+            ("executor", cls._EXECUTOR_UNIT_CANDIDATES),
+        ):
+            for path in candidates:
+                if os.path.exists(path):
+                    found[service] = path
+                    break
         return found
 
-    @staticmethod
-    def _get_running_pid(username: str) -> int | None:
-        """Find the PID of a process running as the given user."""
-        import subprocess
+    # Derived from the shipped unit templates, not guessed: systemd/venya-core.service
+    # and systemd/venya-executor.service both run User=venya; core ExecStart is
+    # /opt/venya/.venv/bin/venya-server, executor ExecStart is
+    # /opt/venya/.venv/bin/venya-executor. The old code passed the SERVICE name
+    # as the pgrep username and hardcoded -x venya-core, so pgrep exited 2
+    # (invalid user name) and both runtime cells skipped unconditionally (#542).
+    SERVICE_USER = "venya"
+    CORE_PROCESS = "venya-server"
+    EXECUTOR_PROCESS = "venya-executor"
 
+    @classmethod
+    def _get_running_pid(cls, process_name: str, username: str = SERVICE_USER) -> int | None:
+        """Find the PID of ``process_name`` running as ``username`` (None if not running)."""
         try:
             result = subprocess.run(
-                ["pgrep", "-u", username, "-x", "venya-core"],
+                ["pgrep", "-u", username, "-x", process_name],
                 capture_output=True,
                 text=True,
                 timeout=5,
@@ -399,12 +431,11 @@ class TestRuntimeCapabilityIsolation:
         units = self._find_unit_file()
         core_unit = units["core"]
         if core_unit is None:
-            pytest.skip("venya-core.service unit file not found")
+            pytest.skip("no venya-core.service unit exists on this host (/etc and /lib checked)")
 
         config = self._parse_unit_file(core_unit)
+        assert config is not None, f"{core_unit} resolved but did not parse — harness bug"
         ambient = config.get("AmbientCapabilities", [])
-        if not ambient:
-            pytest.skip(f"venya-core.service ({core_unit}) has no AmbientCapabilities")
         assert any("CAP_IPC_LOCK" in c for c in ambient), (
             f"venya-core.service ({core_unit}) missing AmbientCapabilities=CAP_IPC_LOCK. " f"Found: {ambient}"
         )
@@ -414,9 +445,10 @@ class TestRuntimeCapabilityIsolation:
         units = self._find_unit_file()
         executor_unit = units["executor"]
         if executor_unit is None:
-            pytest.skip("venya-executor.service unit file not found")
+            pytest.skip("no venya-executor.service unit exists on this host (/etc and /lib checked)")
 
         config = self._parse_unit_file(executor_unit)
+        assert config is not None, f"{executor_unit} resolved but did not parse — harness bug"
         ambient = config.get("AmbientCapabilities", [])
         assert not ambient or not any("CAP_IPC_LOCK" in c for c in ambient), (
             f"venya-executor.service ({executor_unit}) must NOT have AmbientCapabilities=CAP_IPC_LOCK. "
@@ -428,32 +460,187 @@ class TestRuntimeCapabilityIsolation:
         units = self._find_unit_file()
         executor_unit = units["executor"]
         if executor_unit is None:
-            pytest.skip("venya-executor.service not found")
+            pytest.skip("no venya-executor.service unit exists on this host (/etc and /lib checked)")
         config = self._parse_unit_file(executor_unit)
+        assert config is not None, f"{executor_unit} resolved but did not parse — harness bug"
         bounding = config.get("CapabilityBoundingSet", [])
         for b in bounding:
-            assert "CAP_IPC_LOCK" not in b, "venya-executor.service has CAP_IPC_LOCK in CapabilityBoundingSet"
+            assert "CAP_IPC_LOCK" not in b, "venya-executor.service has CAP_IPC_LOCK in CapabilityBoundingSet: " + b
 
     def test_core_running_has_cap_ipc_lock(self):
-        """If venya-core is running, verify CapEff includes CAP_IPC_LOCK at runtime."""
-        pid = self._get_running_pid("venya-core")
+        """If the core server process is running, verify CapEff includes CAP_IPC_LOCK at runtime."""
+        pid = self._get_running_pid(self.CORE_PROCESS)
         if pid is None:
-            pytest.skip("venya-core service is not running")
+            pytest.skip(f"no '{self.CORE_PROCESS}' process running as '{self.SERVICE_USER}' on this host")
         caps = self._read_proc_caps(pid)
         cap_eff = caps.get("CapEff", 0)
         assert self._has_capability(cap_eff, self.CAP_IPC_LOCK_BIT), (
-            f"venya-core PID {pid} CapEff=0x{cap_eff:x} missing CAP_IPC_LOCK (bit {self.CAP_IPC_LOCK_BIT}). "
+            f"core PID {pid} CapEff=0x{cap_eff:x} missing CAP_IPC_LOCK (bit {self.CAP_IPC_LOCK_BIT}). "
             f"All Cap fields: {caps}"
         )
 
     def test_executor_running_no_cap_ipc_lock(self):
-        """If venya-executor is running, verify CapEff does NOT include CAP_IPC_LOCK."""
-        pid = self._get_running_pid("venya-executor")
+        """If the executor process is running, verify CapEff does NOT include CAP_IPC_LOCK."""
+        pid = self._get_running_pid(self.EXECUTOR_PROCESS)
         if pid is None:
-            pytest.skip("venya-executor service is not running")
+            pytest.skip(f"no '{self.EXECUTOR_PROCESS}' process running as '{self.SERVICE_USER}' on this host")
         caps = self._read_proc_caps(pid)
         cap_eff = caps.get("CapEff", 0)
         assert not self._has_capability(cap_eff, self.CAP_IPC_LOCK_BIT), (
-            f"venya-executor PID {pid} CapEff=0x{cap_eff:x} has CAP_IPC_LOCK (bit {self.CAP_IPC_LOCK_BIT}). "
+            f"executor PID {pid} CapEff=0x{cap_eff:x} has CAP_IPC_LOCK (bit {self.CAP_IPC_LOCK_BIT}). "
             f"Executor must NEVER have CAP_IPC_LOCK. All Cap fields: {caps}"
         )
+
+
+class TestCapabilityIsolationHarness:
+    """Fixture-driven cells proving the runtime harness itself can fail.
+
+    The shipped unit cells above read the real host; on a machine with no
+    venya install they legitimately skip. These cells give the same harness
+    a synthetic install (tmp_path, monkeypatch — never a real /etc write) and
+    demand the paired negatives pass/fail as the security model requires.
+    """
+
+    @staticmethod
+    def _write_unit(path, content):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def test_find_unit_prefers_existing_etc_over_lib(self, tmp_path, monkeypatch):
+        """A real-install shape: /etc unit exists, /lib twin does not — /etc must win."""
+        etc = tmp_path / "etc" / "venya-core.service"
+        lib = tmp_path / "lib" / "venya-core.service"  # deliberately not created
+        self._write_unit(etc, "[Service]\nAmbientCapabilities=CAP_IPC_LOCK\n")
+        cls = TestRuntimeCapabilityIsolation
+        monkeypatch.setattr(cls, "_CORE_UNIT_CANDIDATES", [str(lib), str(etc)])
+        units = cls._find_unit_file()
+        assert units["core"] == str(etc)
+
+    def test_find_unit_falls_back_to_lib_when_etc_absent(self, tmp_path, monkeypatch):
+        """Packaged-install shape: only the /lib unit exists — it must resolve."""
+        etc = tmp_path / "etc" / "venya-core.service"  # not created
+        lib = tmp_path / "lib" / "venya-core.service"
+        self._write_unit(lib, "[Service]\nAmbientCapabilities=CAP_IPC_LOCK\n")
+        cls = TestRuntimeCapabilityIsolation
+        monkeypatch.setattr(cls, "_CORE_UNIT_CANDIDATES", [str(etc), str(lib)])
+        units = cls._find_unit_file()
+        assert units["core"] == str(lib)
+
+    def test_find_unit_none_when_no_candidate_exists(self, tmp_path, monkeypatch):
+        """Uninstalled host: no candidate exists -> None (skip), never a wrong path."""
+        cls = TestRuntimeCapabilityIsolation
+        monkeypatch.setattr(cls, "_CORE_UNIT_CANDIDATES", [str(tmp_path / "nope" / "venya-core.service")])
+        monkeypatch.setattr(cls, "_EXECUTOR_UNIT_CANDIDATES", [str(tmp_path / "nope" / "venya-executor.service")])
+        units = cls._find_unit_file()
+        assert units == {"core": None, "executor": None}
+
+    def test_parse_unit_absent_vs_present_empty(self, tmp_path):
+        """Absent returns None; present-but-directive-less returns {} — distinguishable."""
+        cls = TestRuntimeCapabilityIsolation
+        absent = tmp_path / "missing.service"
+        present = tmp_path / "bare.service"
+        self._write_unit(present, "[Service]\n")
+        assert cls._parse_unit_file(str(absent)) is None
+        assert cls._parse_unit_file(str(present)) == {}
+        withcap = tmp_path / "withcap.service"
+        self._write_unit(withcap, "[Service]\nAmbientCapabilities=CAP_IPC_LOCK\n")
+        assert cls._parse_unit_file(str(withcap))["AmbientCapabilities"] == ["CAP_IPC_LOCK"]
+
+    def test_positive_cell_passes_on_correct_etc_install(self, tmp_path, monkeypatch):
+        """The cell that could only skip before (#542 break 1) now PASSES."""
+        etc = tmp_path / "etc" / "venya-core.service"
+        lib = tmp_path / "lib" / "venya-core.service"  # nonexistent twin, as on a real install
+        self._write_unit(etc, "[Service]\nUser=venya\nAmbientCapabilities=CAP_IPC_LOCK\n")
+        cls = TestRuntimeCapabilityIsolation
+        monkeypatch.setattr(cls, "_CORE_UNIT_CANDIDATES", [str(etc), str(lib)])
+        cls().test_systemd_unit_has_cap_ipc_lock()
+
+    def test_poisoned_executor_unit_fails_the_negative_cell(self, tmp_path, monkeypatch):
+        """The paired negative that passed vacuously before (#542 break 2) now FAILS."""
+        etc_core = tmp_path / "etc" / "venya-core.service"
+        lib_core = tmp_path / "lib" / "venya-core.service"
+        etc_exec = tmp_path / "etc" / "venya-executor.service"
+        lib_exec = tmp_path / "lib" / "venya-executor.service"  # nonexistent twin
+        self._write_unit(etc_core, "[Service]\nAmbientCapabilities=CAP_IPC_LOCK\n")
+        self._write_unit(etc_exec, "[Service]\nUser=venya\nAmbientCapabilities=CAP_IPC_LOCK\n")  # poisoned
+        cls = TestRuntimeCapabilityIsolation
+        monkeypatch.setattr(cls, "_CORE_UNIT_CANDIDATES", [str(etc_core), str(lib_core)])
+        monkeypatch.setattr(cls, "_EXECUTOR_UNIT_CANDIDATES", [str(etc_exec), str(lib_exec)])
+        with pytest.raises(AssertionError, match="CAP_IPC_LOCK"):
+            cls().test_systemd_unit_no_cap_ipc_lock()
+
+    def test_poisoned_executor_bounding_caps_fails_the_cell(self, tmp_path, monkeypatch):
+        """Second paired negative: a CAP_IPC_LOCK bounding-set grant must trip it."""
+        etc_exec = tmp_path / "etc" / "venya-executor.service"
+        lib_exec = tmp_path / "lib" / "venya-executor.service"
+        self._write_unit(etc_exec, "[Service]\nCapabilityBoundingSet=CAP_IPC_LOCK\n")  # poisoned
+        cls = TestRuntimeCapabilityIsolation
+        monkeypatch.setattr(cls, "_EXECUTOR_UNIT_CANDIDATES", [str(etc_exec), str(lib_exec)])
+        with pytest.raises(AssertionError, match="CapabilityBoundingSet"):
+            cls().test_executor_no_bounding_caps()
+
+    def test_get_running_pid_wiring_exit0(self, monkeypatch):
+        """exit 0: pgrep is invoked with the real username AND the per-service process name."""
+        seen: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            seen.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="4242\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        cls = TestRuntimeCapabilityIsolation
+        assert cls._get_running_pid(cls.CORE_PROCESS) == 4242
+        assert seen[0] == ["pgrep", "-u", "venya", "-x", "venya-server"]
+        assert cls._get_running_pid(cls.EXECUTOR_PROCESS) == 4242
+        assert seen[1] == ["pgrep", "-u", "venya", "-x", "venya-executor"]
+
+    def test_get_running_pid_wiring_exit1(self, monkeypatch):
+        """exit 1 (pgrep found nothing): None -> the caller skips 'service not running'."""
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        cls = TestRuntimeCapabilityIsolation
+        assert cls._get_running_pid(cls.CORE_PROCESS) is None
+
+    def test_get_running_pid_wiring_exit2(self, monkeypatch):
+        """exit 2 (invalid user name — the old shipped wiring): None, never a fabricated PID."""
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, returncode=2, stdout="", stderr="pgrep: invalid user name")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        cls = TestRuntimeCapabilityIsolation
+        assert cls._get_running_pid(cls.CORE_PROCESS) is None
+
+    def test_running_cells_read_proc_status_for_resolved_pid(self, tmp_path, monkeypatch):
+        """A resolved PID is passed to /proc/[pid]/status parsing — the CapEff bit decides."""
+        fake = tmp_path / "status"
+        # CAP_IPC_LOCK is bit 14 -> 0x4000 set in this synthetic CapEff
+        fake.write_text(
+            "CapInh:\t0000000000004000\nCapPrm:\t0000000000004000\nCapEff:\t0000000000004000\n", encoding="utf-8"
+        )
+        cls = TestRuntimeCapabilityIsolation
+        monkeypatch.setattr(cls, "_read_proc_caps", staticmethod(lambda pid: _read_proc_caps_file(str(fake))))
+        caps = cls._read_proc_caps(4242)
+        assert cls._has_capability(
+            caps["CapEff"], cls.CAP_IPC_LOCK_BIT
+        ), "harness cannot see a CAP_IPC_LOCK grant in a real CapEff shape — the runtime positive would be vacuous"
+        # negative half: a CapEff WITHOUT bit 14 must read as no grant
+        plain = tmp_path / "status-plain"
+        plain.write_text("CapEff:\t0000000000000000\n", encoding="utf-8")
+        monkeypatch.setattr(cls, "_read_proc_caps", staticmethod(lambda pid: _read_proc_caps_file(str(plain))))
+        assert not cls._has_capability(cls._read_proc_caps(1)["CapEff"], cls.CAP_IPC_LOCK_BIT)
+
+
+def _read_proc_caps_file(path: str) -> dict[str, int]:
+    """Same parse as the shipped _read_proc_caps, applied to a fixture path."""
+    caps: dict[str, int] = {}
+    with open(path) as f:
+        for line in f:
+            if line.startswith("Cap"):
+                parts = line.split()
+                if len(parts) == 2:
+                    caps[parts[0].rstrip(":")] = int(parts[1], 16)
+    return caps
