@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx commands
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -151,6 +152,162 @@ def sweep_workspace_base(base: str = WORKSPACE_BASE) -> int:
     except OSError:
         logger.exception("Failed to sweep workspace base: %s", base)
     return swept
+
+
+# ---------------------------------------------------------------------------
+# Sandbox reaper (ticket sandbox-residue-unreaped-after-teardown-failure #474)
+# ---------------------------------------------------------------------------
+
+# Venya-created sandboxes are named `venya-<execution-session-id>-<run-id>`
+# (executor.py _run_command_sbx). The prefix is the reaper's scope: anything
+# else on the host belongs to someone else and is never touched.
+SBX_NAME_PREFIX = "venya-"
+
+# `sbx ls` (enumerate) and `sbx rm --force` (remove) are bounded CLI calls.
+# A reap pass must never outlive the boot/teardown path that invoked it.
+SBX_REAP_COMMAND_TIMEOUT = 30.0
+
+# OWNERSHIP KEY: the set below maps sandbox NAME -> owning execution-session
+# id for every sandbox THIS daemon process created and still holds live. A
+# name present here has a live owning session; a `venya-*` name absent from it
+# has none (a failed teardown that already gave the sandbox up, or a residue
+# from a previous, dead daemon at boot). Guarded by a lock because the reaper
+# thread/relay thread/boot path all read it while a command thread writes it.
+_LIVE_SANDBOX_SESSIONS: dict[str, str] = {}
+_LIVE_SANDBOX_LOCK = threading.Lock()
+
+
+def register_live_sandbox(sandbox_name: str, session_id: str) -> None:
+    """Record that a live session owns ``sandbox_name`` (ticket #474).
+
+    Called by ``create_sandbox`` on success, so a sandbox is claimed BEFORE
+    any later setup step can raise and hand it to the reaper.
+    """
+    with _LIVE_SANDBOX_LOCK:
+        _LIVE_SANDBOX_SESSIONS[sandbox_name] = session_id
+
+
+def release_live_sandbox(sandbox_name: str) -> None:
+    """Drop the ownership claim once the sandbox is really gone (#474).
+
+    Only a SUCCESSFUL ``sbx rm`` calls this: a failed removal leaves the
+    claim in place for the live session, and the teardown path hands the
+    residue to the reaper, which skips it while it is still claimed and
+    collects it on the next pass (a later boot, when the owner is gone).
+    """
+    with _LIVE_SANDBOX_LOCK:
+        _LIVE_SANDBOX_SESSIONS.pop(sandbox_name, None)
+
+
+def live_sandbox_names() -> set[str]:
+    """Snapshot of sandbox names with a live owning session (#474 AC3)."""
+    with _LIVE_SANDBOX_LOCK:
+        return set(_LIVE_SANDBOX_SESSIONS)
+
+
+def clear_live_sandboxes() -> None:
+    """Drop every ownership claim — test-harness helper (ticket #474).
+
+    The registry is process-global by design (one daemon per host); a unit
+    that registers a sandbox must not leak the claim into the next one.
+    Never called by production code: boot starts with an empty registry and
+    registration happens in create_sandbox.
+    """
+    with _LIVE_SANDBOX_LOCK:
+        _LIVE_SANDBOX_SESSIONS.clear()
+
+
+def list_sandbox_names(timeout: float = SBX_REAP_COMMAND_TIMEOUT) -> list[str]:
+    """Sandbox names reported by the sbx CLI; empty on any failure.
+
+    Best-effort by design — a boot must not die over debris it came to
+    clean, and the reaper is debris management, not a security gate. The
+    CLI output is parsed for whitespace-delimited tokens carrying the
+    ``venya-`` prefix instead of relying on a column layout, so a vendor
+    table-format change cannot make the pass silently over- or
+    under-collect (names never contain spaces: they are
+    ``venya-<uuid>-<hex>``).
+    """
+    try:
+        result = subprocess.run(  # nosec
+            ["sbx", "ls"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        logger.warning("sbx CLI unavailable — sandbox reap pass skipped")
+        return []
+    except subprocess.TimeoutExpired:
+        logger.warning("sbx ls timed out after %s s — sandbox reap pass skipped", timeout)
+        return []
+    except Exception:
+        logger.exception("sbx ls failed — sandbox reap pass skipped")
+        return []
+
+    if result.returncode != 0:
+        logger.warning(
+            "sbx ls exited %d — sandbox reap pass skipped: %s",
+            result.returncode,
+            (result.stderr or "").strip()[:200],
+        )
+        return []
+
+    names: list[str] = []
+    for token in (result.stdout or "").split():
+        if token.startswith(SBX_NAME_PREFIX) and token not in names:
+            names.append(token)
+    return names
+
+
+def reap_orphan_sandboxes(names: list[str] | None = None) -> int:
+    """Remove ``venya-*`` sandboxes that have NO live owning session.
+
+    Runs at daemon boot (before the relay listener can accept a command,
+    so the ownership set is empty and every residue is collectible) and
+    from the failed-teardown path. A name claimed by a live session is
+    skipped — the ownership check is enforced here, not assumed.
+
+    Args:
+        names: Sandbox names to consider. None enumerates them via the CLI.
+
+    Returns:
+        Number of residue sandboxes collected.
+    """
+    if names is None:
+        names = list_sandbox_names()
+
+    owned = live_sandbox_names()
+    reaped = 0
+    for name in names:
+        if not name.startswith(SBX_NAME_PREFIX):
+            continue
+        if name in owned:
+            logger.info("Sandbox reap: %s has a live owning session — skipped", name)
+            continue
+        try:
+            result = subprocess.run(  # nosec
+                ["sbx", "rm", "--force", name],
+                capture_output=True,
+                text=True,
+                timeout=SBX_REAP_COMMAND_TIMEOUT,
+                check=False,
+            )
+        except Exception:
+            logger.exception("Sandbox reap: failed to remove %s", name)
+            continue
+        if result.returncode == 0:
+            reaped += 1
+            logger.info("Sandbox reap: collected residue %s", name)
+        else:
+            logger.warning(
+                "Sandbox reap: sbx rm %s exited %d: %s",
+                name,
+                result.returncode,
+                (result.stderr or "").strip()[:200],
+            )
+    return reaped
 
 
 # Askpass helper script (ticket secret-shape-askpass-helpers): git/ssh invoke
@@ -302,7 +459,7 @@ class SbxStrategy(InjectionStrategy):
             cleanup_funcs=cleanup_funcs,
         )
 
-    def create_sandbox(self, sandbox_name: str, workspace: str | None = None) -> None:
+    def create_sandbox(self, sandbox_name: str, workspace: str | None = None, session_id: str | None = None) -> None:
         """Create a Docker Sandbox (microVM).
 
         Args:
@@ -313,6 +470,9 @@ class SbxStrategy(InjectionStrategy):
                 remove_sandbox deletes it. Ownership rule: the strategy
                 deletes only what it created — a caller-supplied workspace
                 is always passed through untouched and never deleted.
+            session_id: Executing session claiming ownership (#474). The
+                reaper's ownership key: a created sandbox is registered here
+                so a reap pass can never collect a VM a live session holds.
         """
         created_workspace = False
         if workspace is None:
@@ -341,6 +501,7 @@ class SbxStrategy(InjectionStrategy):
             raise RuntimeError(f"Failed to create sandbox: {result.stderr}")
 
         self._sandbox_name = sandbox_name
+        register_live_sandbox(sandbox_name, session_id or sandbox_name)
         logger.info("Created Docker Sandbox: %s", sandbox_name)
         self._copy_sshpass(sandbox_name)
 
@@ -731,13 +892,22 @@ class SbxStrategy(InjectionStrategy):
                 self._destroy_env_file(env_file)
         return result
 
-    def remove_sandbox(self) -> None:
+    def remove_sandbox(self) -> int:
         """Remove the sandbox and all its contents.
 
         Also deletes the per-run workspace this strategy created (ownership
         rule: only what it created). A caller-supplied workspace is left
         in place — the base directory itself always survives.
+
+        #474: the live-ownership claim drops ONLY when ``sbx rm`` really
+        succeeded. A failed removal leaves the sandbox claimed (its session is
+        still live) and returns rc != 0 so the caller can hand the residue to
+        the reaper instead of losing track of a secrets-bearing VM.
+
+        Returns:
+            ``sbx rm`` exit code, or 0 when there was no sandbox to remove.
         """
+        rc = 0
         if self._sandbox_name:
             result = subprocess.run(  # nosec
                 ["sbx", "rm", "--force", self._sandbox_name],
@@ -746,8 +916,10 @@ class SbxStrategy(InjectionStrategy):
                 timeout=30,
                 check=False,
             )
-            if result.returncode == 0:
+            rc = result.returncode
+            if rc == 0:
                 logger.debug("Removed sandbox: %s", self._sandbox_name)
+                release_live_sandbox(self._sandbox_name)
             else:
                 logger.warning("Failed to remove sandbox %s: %s", self._sandbox_name, result.stderr)
 
@@ -755,6 +927,8 @@ class SbxStrategy(InjectionStrategy):
             shutil.rmtree(self._workspace_dir, ignore_errors=True)
             logger.debug("Removed per-run workspace: %s", self._workspace_dir)
             self._workspace_dir = None
+
+        return rc
 
     def store_http_secret(self, secret_id: str, value: str) -> None:
         """Store an HTTP API key in sbx's proxy for header injection.
