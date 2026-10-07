@@ -385,6 +385,45 @@ def _get_ca_manager(request: Request) -> CAManager:
     return ca_manager
 
 
+def _claim_execution_session(db: Session, session_id: str, now: datetime) -> int:
+    """Atomically consume an execution session BEFORE the relay (#513).
+
+    Check-and-mark in ONE conditional UPDATE: the row is matched on ``id`` AND
+    ``completed_at IS NULL``, and the SAME statement stamps ``completed_at``.
+    Two concurrent submissions cannot both relay: under PostgreSQL READ
+    COMMITTED the loser's UPDATE blocks on the winner's row lock, then
+    re-evaluates its WHERE against the committed row (marker set) and matches
+    0 rows.
+
+    The claim rides the request transaction: the row lock is held across the
+    relay (bounded by the 300 s client timeout), and a FAILED relay — any
+    raise unwound by get_db's rollback — releases the marker so the operator
+    can retry the same session (the #407 retry posture). This replaces the
+    pre-#513 contract in which the marker was written only post-hoc by
+    ``_mark_execution_session_completed`` — there, a vanished row was a
+    silent no-op and an EXECUTED session stayed replayable for the rest of
+    its TTL. Post-#513, vanishing before the relay decision is a loud refusal
+    (the claim's 0-row case), and ``_mark_execution_session_completed``
+    remains as the post-relay result writer with its vanished-row tolerance
+    for the result fields.
+
+    Returns the affected row count: exactly 1 means THIS call claimed the
+    session and may relay.
+    """
+    from core.iam.models import ExecutionSession
+    from sqlalchemy import update
+
+    return db.execute(
+        update(ExecutionSession)
+        .where(
+            ExecutionSession.id == session_id,
+            ExecutionSession.completed_at.is_(None),
+        )
+        .values(completed_at=now)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+
+
 def _mark_execution_session_completed(
     db: Session,
     session_id: str,
@@ -1426,9 +1465,11 @@ async def execute_command_on_executor(
     """Relay command to executor over mTLS.
 
     1. Verify session exists and is not expired
-    2. Load wrapped secrets from session
-    3. POST to executor's /execute endpoint (mTLS)
-    4. Buffer response, mask output, return
+    2. Verify session ownership/binding, executor not revoked, and claim the
+       session atomically (single-use — completed sessions are refused, #513)
+    3. Load wrapped secrets from session
+    4. POST to executor's /execute endpoint (mTLS)
+    5. Buffer response, mask output, return
     """
     from core.iam.models import ExecutionSession, Executor, SessionSecret
 
@@ -1461,6 +1502,41 @@ async def execute_command_on_executor(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Executor '{id}' is revoked ({_rev.reason}) — refusing to route execution",
+        )
+
+    # Dial gate #3 (execute, #513): the session is single-use. The gates above
+    # never read completed_at, so a session that already relayed stayed usable
+    # for the rest of its 10-minute TTL — and two concurrent submissions both
+    # passed every check. The claim below is the atomic form of that gate: it
+    # stamps the completion marker in the SAME statement that checks it
+    # (``_claim_execution_session``), BEFORE the relay is attempted.
+    if _claim_execution_session(db, session.id, datetime.now(UTC)) == 0:
+        # Either the row vanished (TTL cleanup claimed the ground first) or a
+        # concurrent/earlier submission holds/used the marker. Re-read to name
+        # the refusal honestly — the same 404 shape as the top-of-route miss.
+        # expire() first: a bulk delete through another session leaves the
+        # identity map holding a row that no longer exists.
+        db.expire(session)
+        if db.query(ExecutionSession).filter(ExecutionSession.id == req.session_id).first() is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        db.add(
+            AuditEvent(
+                event_type="execution_session_replay_refused",
+                user_id=auth_user["user_id"],
+                fields={
+                    "session_id": session.id,
+                    "executor_id": id,
+                    "outcome": "refused_session_already_completed",
+                },
+                timestamp=datetime.now(UTC),
+            )
+        )
+        # commit-before-raise: get_db's rollback after the raise must not
+        # erase the refusal record (the #296 denial-audit idiom).
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Execution session already completed — one command per session",
         )
 
     # Load wrapped secrets from session
