@@ -56,6 +56,17 @@ def ca_dir(tmp_path):
     return str(d)
 
 
+@pytest.fixture(autouse=True)
+def passphrase_set(monkeypatch):
+    """Set both passphrase envs — the only CA configuration #537 allows.
+
+    The write path refuses to create an unencrypted key, so every CA built by
+    this file is initialized on the encrypted path.
+    """
+    monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "test-ca-passphrase-503")
+    monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", "test-admin-passphrase-503")
+
+
 @pytest.fixture
 def ca_manager(ca_dir):
     """Create and initialize a CAManager (P-256 CA — the root stays P-256)."""
