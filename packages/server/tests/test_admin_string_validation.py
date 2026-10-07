@@ -7,9 +7,11 @@
 """Admin-plane string validation (ticket admin-plane-string-validation #356):
 status/auth_mode/preset become Literal enums enumerated from source; user_id
 becomes a bounded pattern mirroring the alembic-009 CHECK on users.user_id
-(String(64), lowercase alnum + hyphen, 2-64); display_name/label get bounded
-pattern fields with the #334 strict-UTF-8 posture (lone surrogates rejected
-pre-commit — 422, never a psycopg 500 after side effects).
+(String(64), lowercase alnum + hyphen, 2-64); label gets a bounded
+pattern field with the #334 strict-UTF-8 posture (lone surrogates rejected
+pre-commit — 422, never a psycopg 500 after side effects). The docstring
+once claimed the same for display_name — that bound never landed here; it
+arrived in #520 (test_admin_display_name_width_520.py).
 
 Truth table: every accept has its paired reject, and every reject pins that
 the handler never ran (no DB mutation, no DB error surfaced).
