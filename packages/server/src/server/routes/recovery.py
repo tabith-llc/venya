@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ..audit_lifecycle import BREAK_GLASS_RECOVERY_USED, audit_lifecycle
 from ..dependencies import get_db
 from ..recovery_codes import hash_recovery_code
+from ..utils.user_id import USER_ID_PATTERN
 
 logger = logging.getLogger("venya.server")
 
@@ -30,7 +31,14 @@ class RecoveryRequest(BaseModel):
     model_config = {"extra": "forbid"}  # #357 sweep: silent-drop dies here (repo-wide extra=forbid ruling)
 
     code: str = Field(..., description="Break-glass recovery code")
-    new_user_id: str = Field(..., description="New admin user ID")
+    # #517: this value lands in users.user_id as a NEW ADMIN, so it has to satisfy
+    # the same grammar the admin surface requires to ADDRESS an admin
+    # (server.utils.user_id, shared with routes/admin.py). Unpatterned, break-glass
+    # could mint "Ops_Admin", "A", or a 70-character ID: the admin routes then
+    # answer 422 on the very account the operator just recovered, and an over-length
+    # value runs into the String(64) column / chk_user_id_format CHECK inside the
+    # transaction instead of being refused as a 422 before any write.
+    new_user_id: str = Field(..., description="New admin user ID", pattern=USER_ID_PATTERN)
 
 
 class RecoveryResponse(BaseModel):

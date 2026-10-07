@@ -43,6 +43,7 @@ from ..dependencies import enrollment_manager, get_current_user, get_db, require
 from ..rate_limit import rate_limit_admin_token_gen
 from ..utils.executor_id import validate_executor_id
 from ..utils.token_binding import compute_binding_hash
+from ..utils.user_id import USER_ID_PATTERN
 
 router = APIRouter()
 logger = logging.getLogger("venya.server")
@@ -65,8 +66,9 @@ logger = logging.getLogger("venya.server")
 #   user_id pattern: mirrors the alembic-009 CHECK on users.user_id
 #     (EXECUTOR_ID_PATTERN; String(64)). Route-layer reject = 422 PRE-commit,
 #     never the 500 class where junk dies inside the transaction (#289/#334
-#     lineage).
-USER_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$"
+#     lineage). The expression itself now lives in server.utils.user_id, shared
+#     with every other writer of users.user_id (#517); this module keeps
+#     importing it under the name its fields and path params already use.
 USER_ID_PATH = Annotated[str, Path(pattern=USER_ID_PATTERN)]
 UserStatus = Literal["pending_enrollment", "active", "disabled"]
 AdminAuthMode = Literal["security-key", "webauthn"]
