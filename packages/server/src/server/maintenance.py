@@ -29,10 +29,36 @@ def cleanup_expired_sessions(
     max_session_duration: int = 14400,
     tolerance: int = 60,
 ) -> int:
-    """Delete sessions past their hard cap. Returns the number deleted."""
+    """Delete sessions past their hard cap. Returns the number deleted.
+
+    Two legs (session-cleanup-skips-hard-cap-sessions #529):
+
+    - idle leg (the original one): deletes rows whose sliding ``expires_at``
+      has been dead so long that even continuous activity would have run
+      past the hard cap. Conservative by construction.
+    - hard-cap leg (the fix): ``created_at`` past ``max_session_duration``.
+      A session that keeps getting refreshed always has a future
+      ``expires_at``, so the idle leg alone never saw it — yet
+      ``check_refresh_window`` already refuses to refresh it (the gate is
+      ``created_at + max_session_duration >= now``). The refused row used
+      to stay in the table forever: the gate closed the door, nothing took
+      the body out. This leg mirrors the gate exactly.
+
+    Tolerance stays on the keep-live side in both legs (delete only what is
+    past the line by at least ``tolerance``), same rule as before.
+
+    Index note (AC4): ``expires_at`` is indexed, ``created_at`` is not, so
+    the cap leg is evaluated by scan of the sessions table per maintenance
+    tick. Acceptable while the table is bounded by active sessions (which
+    this fix restores); a ``created_at`` index is a follow-up candidate if
+    installs ever show the sweep hot — shipping one here would couple this
+    branch's Alembic chain to the elevation train's 035/036 for no measured
+    win at fleet scale.
+    """
     now = datetime.now(UTC)
     hard_cap_threshold = now - timedelta(seconds=max_session_duration - session_timeout)
     threshold = hard_cap_threshold - timedelta(seconds=tolerance)
+    cap_dead = now - timedelta(seconds=max_session_duration + tolerance)
     result = db.execute(
         text(
             """
@@ -40,11 +66,12 @@ def cleanup_expired_sessions(
             WHERE id IN (
                 SELECT id FROM sessions
                 WHERE expires_at < :threshold
+                   OR created_at < :cap_dead
                 LIMIT :limit
             )
         """
         ),
-        {"threshold": threshold, "limit": 1000},
+        {"threshold": threshold, "cap_dead": cap_dead, "limit": 1000},
     )
     db.commit()
     return result.rowcount
