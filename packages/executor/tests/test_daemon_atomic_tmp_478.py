@@ -203,6 +203,9 @@ class TestDaemonReclaimScope:
         with (
             patch("executor.daemon.require_supported_sbx", return_value="0.46.0"),
             patch("executor.daemon.sweep_workspace_base", return_value=0),
+            # #474 added a boot reap beside the sweep; stubbed so this cell
+            # never reaches a real `sbx ls`/`sbx rm` on a host that has the CLI.
+            patch("executor.daemon.reap_orphan_sandboxes", return_value=0),
         ):
             with pytest.raises(RuntimeError) as exc:
                 daemon.start()

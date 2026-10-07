@@ -41,7 +41,11 @@ from .injector import (
     verify_fd_whitelist,
 )
 from .strategies.base import InjectionResult, InjectionStrategy
-from .strategies.sbx_strategy import CONTAINER_SECRET_DIR, SbxStrategy
+from .strategies.sbx_strategy import (
+    CONTAINER_SECRET_DIR,
+    SbxStrategy,
+    reap_orphan_sandboxes,
+)
 
 logger = logging.getLogger("venya.executor")
 
@@ -767,7 +771,7 @@ class Executor:
             # prompt and fail with "user cancelled operation" in a non-TTY
             # subprocess).
             logger.info("Creating Docker Sandbox: %s", sandbox_name)
-            strategy.create_sandbox(sandbox_name, cwd)
+            strategy.create_sandbox(sandbox_name, cwd, session_id=self.session_id)
 
             # Copy secrets into sandbox
             if self._injection_result:
@@ -831,10 +835,24 @@ class Executor:
             # timeout, missing sbx binary) must never REPLACE the in-flight
             # origin exception (ticket sandbox-teardown-finally-raise-masks-
             # origin-error #417): swallow it and log, naming the sandbox.
+            #
+            # #474 adds the reaper behind the swallow — the row was always
+            # about the residue the ruled swallow leaves. A failed ``sbx rm``
+            # (raise OR non-zero exit) means a secrets-bearing microVM is
+            # still live, so the same except branch runs the bounded reap
+            # pass; a clean removal collects nothing. Neither case may mask
+            # the origin outcome, and #417's log line is unchanged. The
+            # isinstance half keeps a stand-in strategy that hands back a
+            # non-integer (a bare mock) from reading as "teardown failed".
             try:
-                strategy.remove_sandbox()
+                teardown_rc = strategy.remove_sandbox()
             except Exception:
                 logger.warning("Sandbox teardown failed for %s; origin outcome preserved", sandbox_name, exc_info=True)
+                reap_orphan_sandboxes()
+            else:
+                if isinstance(teardown_rc, int) and teardown_rc != 0:
+                    logger.warning("Sandbox teardown returned %d for %s; arming the reaper", teardown_rc, sandbox_name)
+                    reap_orphan_sandboxes()
 
     # ================================================================
     # SHARED FILTERING (used by both execution paths)

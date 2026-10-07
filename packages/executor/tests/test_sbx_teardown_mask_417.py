@@ -32,8 +32,12 @@ class TestTeardownSwallowAndLog:
         return ex, strategy
 
     def _run(self, ex):
+        # #474 armed a reaper behind this except branch; the reap call itself
+        # is covered in test_sbx_reap_474. Patched here so these #417 cells
+        # never reach the real `sbx ls`/`sbx rm` on a host that has the CLI.
         with patch("executor.executor.filter_and_redact", side_effect=lambda o, e, s: (o, e, [], [])):
-            return ex._run_command_sbx("cmd", [], None, None)
+            with patch("executor.executor.reap_orphan_sandboxes", return_value=0):
+                return ex._run_command_sbx("cmd", [], None, None)
 
     def test_setup_raise_and_teardown_raise_origin_surfaces(self, caplog):
         """Origin exception propagates untouched; teardown raise swallowed + logged."""

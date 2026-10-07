@@ -60,6 +60,7 @@ from .strategies.sbx_strategy import (
     SECRET_TMPFS_BASE,
     SbxStrategy,
     SbxVersionError,
+    reap_orphan_sandboxes,
     require_supported_sbx,
     sweep_workspace_base,
 )
@@ -1588,6 +1589,19 @@ class ExecutorDaemon:
         # once, at process start, before any execution can create new ones.
         swept = sweep_workspace_base()
         logger.info("Swept %d orphaned workspace dir(s) from previous run(s)", swept)
+
+        # Ticket sandbox-residue-unreaped-after-teardown-failure (#474): the
+        # workspace sweep above only reclaims DIRECTORIES. A sandbox that
+        # outlived its daemon (a failed `sbx rm`, or a kill mid-run) is a live
+        # microVM that held injected secret material, and nothing collected it.
+        # This pass runs HERE, before the relay listener binds, so the
+        # ownership registry is necessarily empty: every `venya-*` sandbox on
+        # the host is residue by definition. The pass is best-effort end to
+        # end (every CLI call inside it is logged, not raised) — a boot must
+        # not die over debris it came to clean.
+        reaped = reap_orphan_sandboxes()
+        if reaped:
+            logger.info("Collected %d orphaned sandbox(es) from previous run(s) (#474)", reaped)
 
         # #478: reclaim stale *.tmp left behind by a killed writer. The legacy
         # deterministic temp name (<target>.tmp) could wedge every later write
