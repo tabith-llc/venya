@@ -47,7 +47,7 @@ from ..fido2.browser_adapter import (
     challenge_to_browser_options,
 )
 from ..fido2.manager import WebAuthnError
-from .auth_elevation import _cleanup_stale_challenges
+from .auth_elevation import _claim_elevation_challenge, _store_elevation_challenge
 
 logger = logging.getLogger("venya.server")
 
@@ -624,22 +624,12 @@ def _create_elevation_challenge(db, session, fido2_manager, request):
 
     browser_options = challenge_to_browser_options(challenge_id, options)
 
-    # Store the session ID with the challenge so we can verify it matches
-    # The fido2 manager already stores challenge_id -> options mapping
-    # We attach session_id via app state temporarily. created_at + the sweep
-    # reuse the CLI twin's pattern (#345): abandoned ceremonies are pruned
-    # on the next touch instead of lingering until restart.
-    if not hasattr(request.app.state, "_elevation_challenges"):
-        request.app.state._elevation_challenges = {}
-    _cleanup_stale_challenges(
-        request.app.state._elevation_challenges,
-        ELEVATION_TOKEN_TTL_SECONDS * 5,
-    )
-    request.app.state._elevation_challenges[challenge_id] = {
-        "session_id": session.id,
-        "user_id": session.user_id,
-        "created_at": datetime.now(UTC),
-    }
+    # Store the binding in the DB, not app.state (#528, CLI twin's
+    # mechanism): any worker claims the same row, a restart does not vaporise
+    # a live ceremony, and one consume is atomic. The fido2 manager already
+    # stores its own challenge_id -> options mapping; this row is the auth
+    # binding (who/what session started it).
+    _store_elevation_challenge(db, challenge_id, session.user_id, session.id)
 
     return challenge_id, browser_options
 
@@ -723,25 +713,18 @@ async def browser_elevate_assert(
                 detail="FIDO2 manager not initialized",
             )
 
-        # Verify the challenge was issued for this session. Pop-up-front
-        # (#345, CLI twin's pattern): EVERY assert path — success, WebAuthn
-        # error, session mismatch, or auditor denial — consumes the entry,
-        # so a denied or abandoned ceremony never leaves a live slot.
-        elevation_challenges = getattr(request.app.state, "_elevation_challenges", {})
-        _cleanup_stale_challenges(elevation_challenges, ELEVATION_TOKEN_TTL_SECONDS * 5)
-        challenge_info = elevation_challenges.pop(req.challenge_id, None)
-
-        if challenge_info is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Elevation challenge not found or expired",
-            )
-
-        if challenge_info["session_id"] != session.id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Elevation challenge session mismatch",
-            )
+        # Verify the challenge was issued for this session. #528 DB-backed
+        # claim (was the per-process dict pop): EVERY assert path — success,
+        # WebAuthn error, session mismatch, or auditor denial — consumes the
+        # row, so a denied or abandoned ceremony never re-arms the challenge
+        # (pop-up-front's meaning, #345).
+        _claim_elevation_challenge(
+            db,
+            req.challenge_id,
+            session.user_id,
+            session.id,
+            "/api/v1/auth/elevate/browser/assert",
+        )
 
         # Verify the assertion
         fido2_response = browser_assertion_to_fido2(req.response)
