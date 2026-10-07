@@ -29,6 +29,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
 from .. import metrics
 from ..audit_lifecycle import (
@@ -39,7 +40,7 @@ from ..audit_lifecycle import (
     record_login_failure,
     record_session_end_failure,
 )
-from ..dependencies import get_current_session
+from ..dependencies import get_db
 from ..fido2.browser_adapter import (
     browser_assertion_to_fido2,
     challenge_to_browser_options,
@@ -339,22 +340,37 @@ async def browser_login_assert(
 )
 async def browser_refresh(
     request: Request,
-    session=Depends(get_current_session),
+    db: Session = Depends(get_db),
 ) -> Response:
     """Refresh an expiring session cookie.
 
-    Validates the existing session cookie and issues a new
-    access token cookie with a fresh expiry.
+    #526 (browser-refresh-unreachable-for-idle-expired-session): this handler
+    used to ride ``get_current_session``, whose IDLE check 401'd exactly the
+    sessions this endpoint exists for. It now self-gates with the bearer
+    tier's ruled semantics — ``check_refresh_window`` (HARD CAP only, Option A
+    ruling 2026-09-20) — so an idle-expired cookie inside
+    ``created_at + max_session_duration`` revives with a rotated token on the
+    SAME row (no new session minted), while past the cap the refresh dies and
+    re-auth (FIDO2) is required. The shared dependency is deliberately NOT
+    loosened: other callers (present and future) keep the strict idle check.
     """
-    if session is None:
+    from core.iam.models import Session as SessionModel
+    from core.iam.session_manager import SessionConfig, SessionManager, UserNotActiveError
+
+    current_token = request.cookies.get(COOKIE_NAME, "")
+    if not current_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
         )
 
-    db, session_model = session
-
-    from core.iam.session_manager import SessionConfig, SessionManager, UserNotActiveError
+    session_model = db.query(SessionModel).filter(SessionModel.access_token == current_token).first()
+    if session_model is None:
+        metrics.AUTH_REFRESH_TOTAL.labels(result="invalid").inc()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session",
+        )
 
     sc = request.app.state.config.session
     session_config = SessionConfig(
@@ -364,7 +380,14 @@ async def browser_refresh(
     )
     manager = SessionManager(db, session_config)
 
-    current_token = request.cookies.get(COOKIE_NAME, "")
+    # Hard cap only — the bearer twin's gate. Idle expiry must NOT reject
+    # here (#526: it is the whole reason this endpoint exists).
+    if not manager.check_refresh_window(session_model):
+        metrics.AUTH_REFRESH_TOTAL.labels(result="expired").inc()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session",
+        )
     try:
         new_token = manager.refresh_token(current_token)
     except UserNotActiveError:

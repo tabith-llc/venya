@@ -234,10 +234,13 @@ class SessionMiddleware(BaseHTTPMiddleware):
             "/api/v1/auth/login/browser/assert",
             "/api/v1/auth/refresh",
             # #341: the cookie-plane refresh twin. Public BY DESIGN — the
-            # handler self-gates (get_current_session returns None -> 401
-            # "Invalid or expired session" in browser_refresh); an
+            # handler self-gates; #526 (browser-refresh-unreachable-for-idle-
+            # expired-session) made the self-gate REAL: browser_refresh
+            # resolves the cookie row and applies check_refresh_window (HARD
+            # CAP only, Option A — the bearer tier's ruled semantics), so an
             # idle-expired cookie session stays refreshable until the hard
-            # cap, exactly like the bearer tier.
+            # cap, exactly like the bearer tier. Past the cap / unknown
+            # token: the uniform 401 "Invalid or expired session".
             "/api/v1/auth/refresh/browser",
             "/api/v1/init",
             "/api/v1/init/complete",
