@@ -135,6 +135,74 @@ def _make_executor_cert(
     return cert
 
 
+def _make_executor_keypair_and_cert(
+    ca_key: ec.EllipticCurvePrivateKey,
+    ca_cert: x509.Certificate,
+    executor_id: str,
+    validity_days: int = 30,
+) -> tuple[ec.EllipticCurvePrivateKey, x509.Certificate]:
+    """Like _make_executor_cert but RETURNS the keypair the cert was signed for.
+
+    Needed since #480: register()'s presence gate now validates that the
+    on-disk cert and key actually PAIR, so tests that exercise the skip/probe
+    path must seed a real matching pair (the older FAKE-byte seeds no longer
+    pass the pair check — by design).
+    """
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(UTC)
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, executor_id),
+        ]
+    )
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + timedelta(days=validity_days))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=False,
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(executor_id)]), critical=False)
+        .sign(ca_key, hashes.SHA256())
+    )
+    return key, cert
+
+
+def _seed_paired_identity(cert_manager, ca_key, ca_cert, executor_id: str = "test-executor"):
+    """Write a REAL paired cert+key to the manager's paths (post-#480 seed
+    shape for the skip/probe path). Returns (key, cert)."""
+    from pathlib import Path as _P
+
+    key, cert = _make_executor_keypair_and_cert(ca_key, ca_cert, executor_id)
+    _P(cert_manager.cert_path).write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    _P(cert_manager.key_path).write_bytes(
+        key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    return key, cert
+
+
 @pytest.fixture()
 def tmp_ca_dir(tmp_path: Path) -> Path:
     """Create a temporary CA directory with a valid CA cert."""
@@ -268,12 +336,14 @@ class TestRegister:
         assert saved_ca.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value == "Venya Root CA"
 
     def test_register_skips_when_cert_exists(self, cert_manager: CertificateManager):
-        """Skip path (paired negative, #361): cert+key on disk AND the core
-        RECOGNIZES the identity (heartbeat probe 200) -> skip registration,
-        no CSR churn — but the probe itself must have been asked."""
-        # Pre-create cert and key files
-        Path(cert_manager.cert_path).write_bytes(b"-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----")
-        Path(cert_manager.key_path).write_bytes(b"-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----")
+        """Skip path (paired negative, #361; re-seeded real-pair by #480):
+        a PAIRED cert+key on disk AND the core RECOGNIZES the identity
+        (heartbeat probe 200) -> skip registration, no CSR churn — but the
+        probe itself must have been asked. Pre-#480 this test seeded FAKE
+        bytes; a fake pair now takes the re-enrollment branch, so the healthy
+        path needs a real keypair (see _seed_paired_identity)."""
+        ca_key, ca_cert = _make_ca_pair()
+        _seed_paired_identity(cert_manager, ca_key, ca_cert)
 
         ok = MagicMock(spec=httpx2.Response)
         ok.status_code = 200
@@ -293,8 +363,12 @@ class TestRegisterErrors:
     """Error cases for CertificateManager.register()."""
 
     def _seed_existing_cert(self, cert_manager: CertificateManager):
-        Path(cert_manager.cert_path).write_bytes(b"-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----")
-        Path(cert_manager.key_path).write_bytes(b"-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----")
+        """Seed a REAL paired cert+key (re-seeded by #480: an unparseable
+        FAKE pair now takes the re-enrollment branch, but these tests probe
+        the #361/#369 recognized-vs-ghost semantics, which live BEHIND the
+        pair check — they need the pair to be valid to reach the probe)."""
+        ca_key, ca_cert = _make_ca_pair()
+        _seed_paired_identity(cert_manager, ca_key, ca_cert)
 
     def test_register_ghost_identity_refuses_boot(self, cert_manager: CertificateManager):
         """#361 ruled A: core does not recognize the on-disk cert (403-class on

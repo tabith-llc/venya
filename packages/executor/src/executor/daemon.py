@@ -326,18 +326,36 @@ class CertificateManager:
             httpx2.HTTPError: If the network request fails.
         """
         if os.path.exists(self.cert_path) and os.path.exists(self.key_path):
-            self._load_metadata()
-            # #361 ruled A (executor-stale-cert-ghost-identity): local file
-            # presence alone used to gate the skip — after a core rebuild
-            # (fresh CA + empty executors table) the daemon booted as a GHOST
-            # identity, silently refused by the core forever. Ask the core to
-            # recognize this certificate BEFORE skipping; a server-side
-            # refusal aborts the boot with the named re-enroll path. The
-            # decision to re-register stays with the installer/token ceremony
-            # — the daemon never self-mints (no token here, no CSR here).
-            self._verify_cert_recognized(executor_id)
-            logger.info("Certificate already exists — skipping registration for: %s", executor_id)
-            return
+            if not _cert_key_pair_matches(self.cert_path, self.key_path):
+                # #480: presence is not identity. A mismatched or unparseable
+                # pair (the usual cause: a kill between the rotate() replaces)
+                # used to pass this gate and then crash-loop the unit in
+                # _create_mtls_client. Chosen behavior per the ticket's
+                # acceptance: RE-ENROLL — fall through to the registration
+                # path below (fresh keypair, new CSR, POST). With a bootstrap
+                # token this self-heals; without one the server's rejection
+                # surfaces through the existing actionable token-required
+                # error, the same named path a fresh install takes — never a
+                # silent SystemExit with zero recovery attempt.
+                logger.error(
+                    "On-disk certificate/key pair is unusable (mismatched or unparseable — "
+                    "an interrupted rotation is the usual cause) — attempting re-enrollment "
+                    "for %s instead of booting a broken pair",
+                    executor_id,
+                )
+            else:
+                self._load_metadata()
+                # #361 ruled A (executor-stale-cert-ghost-identity): local file
+                # presence alone used to gate the skip — after a core rebuild
+                # (fresh CA + empty executors table) the daemon booted as a GHOST
+                # identity, silently refused by the core forever. Ask the core to
+                # recognize this certificate BEFORE skipping; a server-side
+                # refusal aborts the boot with the named re-enroll path. The
+                # decision to re-register stays with the installer/token ceremony
+                # — the daemon never self-mints (no token here, no CSR here).
+                self._verify_cert_recognized(executor_id)
+                logger.info("Certificate already exists — skipping registration for: %s", executor_id)
+                return
 
         # Fail before the HTTP call if a cert directory is not writable (e.g.
         # ReadOnlyPaths=/etc/venya with install-time registration skipped):
@@ -645,15 +663,22 @@ class CertificateManager:
         # Validate the leaf against the resolved anchor (AC4)
         validate_executor_certificate(cert_pem, anchor_pem, executor_id)
 
-        # Replace on disk
-        _atomic_write(self.cert_path, cert_pem, 0o644)
-
+        # Replace on disk — #480 AC1: the trio is STAGED before any write
+        # (anchor resolved, leaf validated against it, keypair generated in
+        # memory above), and the replaces follow an order the boot-time pair
+        # check can validate: KEY first, CERT second, CA last, so the new cert
+        # never sits on disk ahead of the key it pairs with — the cert replace
+        # is the commit point of the pair. A kill between any two replaces
+        # leaves a mismatch the register() presence check detects and
+        # re-enrolls (see the #480 branch there) instead of a crash-loop.
         key_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         )
         _atomic_write(self.key_path, key_pem, 0o600)
+
+        _atomic_write(self.cert_path, cert_pem, 0o644)
 
         # Update CA cert from server response
         _atomic_write(self.ca_cert_path, ca_cert_pem, 0o644)
@@ -865,6 +890,28 @@ def _create_csr(private_key: ec.EllipticCurvePrivateKey, executor_id: str) -> by
 
     csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(private_key, hashes.SHA256())
     return csr.public_bytes(serialization.Encoding.PEM)
+
+
+def _cert_key_pair_matches(cert_path: str | Path, key_path: str | Path) -> bool:
+    """True only when the on-disk certificate and private key are the same keypair.
+
+    File PRESENCE alone cannot prove a usable identity (ticket
+    interrupted-rotation-leaves-mismatched-cert-key-pair #480): a kill between
+    the cert and key replaces in CertificateManager.rotate() leaves a NEW
+    certificate beside the OLD key. That pair passed the presence gate, then
+    crash-looped the unit on ``ssl.load_cert_chain`` (key values mismatch).
+    Unparseable material (a half-written PEM from the same kill window) is the
+    same recovery class, so both shapes return False here. The comparison is
+    on the public key (DER / SubjectPublicKeyInfo).
+    """
+    try:
+        cert = x509.load_pem_x509_certificate(Path(cert_path).read_bytes())
+        key = serialization.load_pem_private_key(Path(key_path).read_bytes(), password=None)
+    except (OSError, ValueError):
+        return False
+    der = serialization.Encoding.DER
+    fmt = serialization.PublicFormat.SubjectPublicKeyInfo
+    return cert.public_key().public_bytes(der, fmt) == key.public_key().public_bytes(der, fmt)
 
 
 def _extract_common_name(cert: x509.Certificate) -> str | None:
