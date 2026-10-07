@@ -47,6 +47,7 @@ from ..fido2.browser_adapter import (
     challenge_to_browser_options,
 )
 from ..fido2.manager import WebAuthnError
+from ..session_gate_config import build_core_session_config
 from .auth_elevation import _claim_elevation_challenge, _store_elevation_challenge
 
 logger = logging.getLogger("venya.server")
@@ -159,14 +160,9 @@ def _get_session_from_cookie(
     try:
         from core.iam.models import Session as SessionModel
         from core.iam.role_manager import RoleManager
-        from core.iam.session_manager import SessionConfig, SessionManager
+        from core.iam.session_manager import SessionManager
 
-        sc = request.app.state.config.session
-        session_config = SessionConfig(
-            session_timeout=timedelta(seconds=sc.session_timeout),
-            access_token_ttl=timedelta(seconds=sc.access_token_ttl),
-            max_session_duration=timedelta(seconds=sc.max_session_duration),
-        )
+        session_config = build_core_session_config(request.app.state.config)
         manager = SessionManager(db, session_config)
 
         session = db.query(SessionModel).filter(SessionModel.access_token == token).first()
@@ -279,14 +275,10 @@ async def browser_login_assert(
     db = backend.get_session()
     try:
         from core.iam.role_manager import RoleManager
-        from core.iam.session_manager import SessionConfig, SessionManager, UserNotActiveError
+        from core.iam.session_manager import SessionManager, UserNotActiveError
 
         sc = request.app.state.config.session
-        session_config = SessionConfig(
-            session_timeout=timedelta(seconds=sc.session_timeout),
-            access_token_ttl=timedelta(seconds=sc.access_token_ttl),
-            max_session_duration=timedelta(seconds=sc.max_session_duration),
-        )
+        session_config = build_core_session_config(request.app.state.config)
         sm = SessionManager(db, session_config)
         rm = RoleManager(db)
 
@@ -356,7 +348,7 @@ async def browser_refresh(
     loosened: other callers (present and future) keep the strict idle check.
     """
     from core.iam.models import Session as SessionModel
-    from core.iam.session_manager import SessionConfig, SessionManager, UserNotActiveError
+    from core.iam.session_manager import SessionManager, UserNotActiveError
 
     current_token = request.cookies.get(COOKIE_NAME, "")
     if not current_token:
@@ -374,11 +366,7 @@ async def browser_refresh(
         )
 
     sc = request.app.state.config.session
-    session_config = SessionConfig(
-        session_timeout=timedelta(seconds=sc.session_timeout),
-        access_token_ttl=timedelta(seconds=sc.access_token_ttl),
-        max_session_duration=timedelta(seconds=sc.max_session_duration),
-    )
+    session_config = build_core_session_config(request.app.state.config)
     manager = SessionManager(db, session_config)
 
     # Hard cap only — the bearer twin's gate. Idle expiry must NOT reject
@@ -451,7 +439,7 @@ def _logout_when_session_unresolved(request: Request) -> Response:
     stays as the retry handle — ruling 2026-10-01).
     """
     from core.iam.models import Session as SessionModel
-    from core.iam.session_manager import SessionConfig, SessionManager
+    from core.iam.session_manager import SessionManager
 
     from server.dependencies import get_backend
 
@@ -474,12 +462,7 @@ def _logout_when_session_unresolved(request: Request) -> Response:
         session_jti = getattr(row, "access_token_jti", None)
         actor_user_id = row.user_id
 
-        sc = request.app.state.config.session
-        session_config = SessionConfig(
-            session_timeout=timedelta(seconds=sc.session_timeout),
-            access_token_ttl=timedelta(seconds=sc.access_token_ttl),
-            max_session_duration=timedelta(seconds=sc.max_session_duration),
-        )
+        session_config = build_core_session_config(request.app.state.config)
         manager = SessionManager(db, session_config)
 
         manager.revoke_session(session_id)
@@ -541,14 +524,9 @@ async def browser_logout(
     session_jti = getattr(session, "access_token_jti", None)
     revoked_ok = True
     try:
-        from core.iam.session_manager import SessionConfig, SessionManager
+        from core.iam.session_manager import SessionManager
 
-        sc = request.app.state.config.session
-        session_config = SessionConfig(
-            session_timeout=timedelta(seconds=sc.session_timeout),
-            access_token_ttl=timedelta(seconds=sc.access_token_ttl),
-            max_session_duration=timedelta(seconds=sc.max_session_duration),
-        )
+        session_config = build_core_session_config(request.app.state.config)
         manager = SessionManager(db, session_config)
 
         manager.revoke_session(session.id)

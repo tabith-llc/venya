@@ -795,18 +795,12 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
         db = backend.get_session()
         try:
-            from datetime import timedelta
-
             from core.iam.models import Session as SessionModel
-            from core.iam.session_manager import SessionConfig as CoreSessionConfig
             from core.iam.session_manager import SessionManager, is_user_active
 
-            sc = request.app.state.config.session
-            config = CoreSessionConfig(
-                session_timeout=timedelta(seconds=sc.session_timeout),
-                access_token_ttl=timedelta(seconds=sc.access_token_ttl),
-                max_session_duration=timedelta(seconds=sc.max_session_duration),
-            )
+            from ..session_gate_config import build_core_session_config
+
+            config = build_core_session_config(request.app.state.config)
             manager = SessionManager(db, config)
 
             # Find session by access token
