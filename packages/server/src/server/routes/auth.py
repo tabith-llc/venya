@@ -205,7 +205,7 @@ async def auth_refresh(
 
     from core.iam.models import Session as SessionModel
     from core.iam.session_manager import SessionConfig as CoreSessionConfig
-    from core.iam.session_manager import SessionManager
+    from core.iam.session_manager import SessionManager, UserNotActiveError
 
     # Get the bearer token from the request
     auth_header = request.headers.get("authorization", "")
@@ -243,7 +243,21 @@ async def auth_refresh(
         )
 
     # Issue new token
-    new_token = manager.refresh_token(token)
+    try:
+        new_token = manager.refresh_token(token)
+    except UserNotActiveError:
+        # #524 refresh status gate (auth-refresh-missing-active-user-gate):
+        # the session's user is disabled / pending / missing. Uniform 401 —
+        # account state is not disclosed to the caller (same shape as the
+        # unknown-token refusal); the denial-side audit row carries the
+        # reason for the operator.
+        metrics.AUTH_REFRESH_TOTAL.labels(result="invalid").inc()
+        record_login_failure(request, "cli", "refresh_status_gate")
+        logger.warning("Refresh refused: session user is not active (session_id=%s)", session.id)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        ) from None
     if new_token is None:
         metrics.AUTH_REFRESH_TOTAL.labels(result="failed").inc()
         raise HTTPException(

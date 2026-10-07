@@ -48,6 +48,9 @@ def test_refresh_rotates_persisted_expiry():
     session = SimpleNamespace(
         id=1,
         user_id="u1",
+        # #524: refresh_token reads session.user for the status gate — the
+        # mock row mirrors the model's user relationship (active user).
+        user=SimpleNamespace(user_id="u1", status="active"),
         created_at=datetime.now(UTC) - timedelta(minutes=5),
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
         access_token="tok-old",

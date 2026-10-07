@@ -21,15 +21,17 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from core.iam.session_manager import SessionConfig, SessionManager
 
 
-def _row(*, age: timedelta, idle_dead: bool, token: str = "tok-old"):
+def _row(*, age: timedelta, idle_dead: bool, token: str = "tok-old", user_status: str = "active"):
     cfg = SessionConfig()
     now = datetime.now(UTC)
     return SimpleNamespace(
         id=1,
         user_id="u1",
+        user=SimpleNamespace(user_id="u1", status=user_status),
         created_at=now - age,
         expires_at=now - timedelta(minutes=1) if idle_dead else now + cfg.session_timeout,
         access_token=token,
@@ -86,3 +88,54 @@ def test_live_session_refresh_positive_control():
 
 def test_unknown_token_refuses():
     assert _mgr([None]).refresh_token("never-issued") is None
+
+
+# --- #524 refresh status gate (auth-refresh-missing-active-user-gate) ---
+
+
+def test_disabled_user_refresh_refused_and_not_extended():
+    """PAIRED NEGATIVE, RED at HEAD: a session whose user is disabled gets
+    UserNotActiveError from refresh_token — no new token, and the session is
+    NOT extended (expires_at and rotated fields untouched)."""
+    from core.iam.session_manager import UserNotActiveError
+
+    row = _row(age=timedelta(hours=1), idle_dead=False, user_status="disabled")
+    before = row.expires_at
+    with pytest.raises(UserNotActiveError) as exc:
+        _mgr([row]).refresh_token("tok-old")
+    assert exc.value.status == "disabled"
+    assert row.expires_at == before  # not extended
+    assert row.access_token == "tok-old"  # not rotated
+
+
+@pytest.mark.parametrize("status_value", ["disabled", "pending_enrollment", "suspended"])
+def test_refresh_gate_is_the_predicate_not_one_string(status_value):
+    """#524 AC2: ANY non-active state the is_user_active predicate refuses
+    also refuses at refresh (the predicate, not one literal string)."""
+    from core.iam.session_manager import UserNotActiveError
+
+    row = _row(age=timedelta(minutes=5), idle_dead=False, user_status=status_value)
+    with pytest.raises(UserNotActiveError):
+        _mgr([row]).refresh_token("tok-old")
+
+
+def test_refresh_gate_missing_user_refused():
+    """is_user_active(None) is False — a session whose user row is gone
+    cannot refresh either."""
+    from core.iam.session_manager import UserNotActiveError
+
+    row = _row(age=timedelta(minutes=5), idle_dead=False)
+    row.user = None
+    with pytest.raises(UserNotActiveError) as exc:
+        _mgr([row]).refresh_token("tok-old")
+    assert exc.value.status is None
+
+
+def test_idle_expired_active_user_still_revives():
+    """#524 AC3 paired positive: the gate must NOT re-introduce the
+    mcp-refresh-path-unreachable dead path — an idle-expired session whose
+    user is active still revives inside the hard cap (Option A preserved)."""
+    row = _row(age=timedelta(hours=1), idle_dead=True)
+    new = _mgr([row, row]).refresh_token("tok-old")
+    assert new is not None
+    assert row.expires_at > datetime.now(UTC)

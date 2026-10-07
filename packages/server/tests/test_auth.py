@@ -216,6 +216,46 @@ class TestAuthRefresh:
         )
         assert resp.status_code == 401
 
+    def test_refresh_status_gate_401_uniform(self):
+        """#524 PAIRED NEGATIVE, RED at HEAD: refresh_token refusing a
+        non-active user (UserNotActiveError) maps to the uniform invalid-token
+        401 at the bearer route — no access_token in the body, no account-
+        state disclosure. The gate itself is pinned in core's
+        test_session_manager_refresh; this cell pins the route shape."""
+        from core.iam.session_manager import UserNotActiveError
+
+        session_mock = SimpleNamespace(id=1, access_token="old", access_token_jti="jti")
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = session_mock
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        with patch("core.iam.session_manager.SessionManager") as mock_sm:
+            mock_sm.return_value.check_refresh_window.return_value = True
+            mock_sm.return_value.refresh_token.side_effect = UserNotActiveError("u1", "disabled")
+
+            app = _create_test_app(backend=backend)
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/api/v1/auth/refresh", headers={"authorization": "Bearer old"})
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Invalid token"
+        assert "access_token" not in resp.json()
+
+    def test_refresh_unknown_token_refused_before_gate(self):
+        """#524 paired negative, other half: an unknown token still takes the
+        pre-existing 'Invalid token' path — the status gate must not change
+        the negative case into a 500 or a different shape."""
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = None
+        backend = MagicMock()
+        backend.get_session.return_value = db
+
+        app = _create_test_app(backend=backend)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.post("/api/v1/auth/refresh", headers={"authorization": "Bearer never"})
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Invalid token"
+
 
 class TestRegistrationEndpointsRemoved:
     """Ticket sec-unauth-webauthn-registration-takeover: the legacy PUBLIC
