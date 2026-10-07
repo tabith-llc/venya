@@ -10,6 +10,7 @@ Tracks failed attempts, enforces lockout, and persists failures
 to the DB for restart recovery.
 """
 
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -43,6 +44,24 @@ class RateLimiter:
     Default: 5 failed attempts within 300 seconds (5 minutes),
     then locked out for 15 minutes (lockout_reinstate_minutes).
 
+    Threading (ticket rate-limiter-unsynchronized-state #516): every read and
+    write of ``_failures`` happens under ``self._lock``, so concurrent
+    ``record_failure`` calls cannot lose an increment and a traversal cannot
+    trip over a concurrent insert.
+
+    SCOPE — this state is PER-PROCESS MEMORY and is NOT SHARED between
+    processes. The counter lives in one RateLimiter instance, and one instance
+    is built per core process (``Backend.get_core()`` /
+    ``CoreFactory.build()``). A deployment running N core processes behind a
+    load balancer therefore enforces ``max_attempts`` PER PROCESS: a caller who
+    spreads failed attempts across the N workers gets up to N x max_attempts
+    before any one worker arms the lockout, and a restart clears the state
+    entirely. A lock bounds the lost-update class inside a worker; it does not
+    and cannot bound that N x gap. Closing it needs the counters moved to
+    shared storage (the ``rate_limit_failures`` fixed-window table plus the
+    atomic UPSERT that ``server/middleware/rate_limit.py`` already uses is the
+    shape). That gap is recorded here on purpose rather than left implied.
+
     Attributes:
         max_attempts: Maximum failed attempts before lockout.
         window_seconds: Time window in seconds for counting failures.
@@ -65,6 +84,9 @@ class RateLimiter:
         self.window_seconds = window_seconds
         self.lockout_reinstate_minutes = lockout_reinstate_minutes
         self._failures: dict[str, FailureRecord] = {}
+        # One lock guards the whole dict (#516). Reentrant so a guarded method
+        # may call another guarded method without self-deadlocking.
+        self._lock = threading.RLock()
 
     def record_failure(self, user_id: str) -> None:
         """Record a failed attempt for a user.
@@ -76,21 +98,24 @@ class RateLimiter:
             RateLimitExceededError: If the user has exceeded the rate limit.
         """
         now = time.time()
-        record = self._failures.get(user_id)
+        with self._lock:
+            record = self._failures.get(user_id)
 
-        if record is None:
-            record = FailureRecord(user_id=user_id)
-            self._failures[user_id] = record
+            if record is None:
+                record = FailureRecord(user_id=user_id)
+                self._failures[user_id] = record
 
-        # Reset window if expired
-        if now - record.window_start > self.window_seconds:
-            record.failed_attempts = 0
-            record.window_start = now
+            # Reset window if expired
+            if now - record.window_start > self.window_seconds:
+                record.failed_attempts = 0
+                record.window_start = now
 
-        record.failed_attempts += 1
+            record.failed_attempts += 1
+            armed = record.failed_attempts >= self.max_attempts
+            if armed:
+                record.locked_at = now
 
-        if record.failed_attempts >= self.max_attempts:
-            record.locked_at = now
+        if armed:
             raise RateLimitExceededError(
                 f"User {user_id} has exceeded {self.max_attempts} failed attempts "
                 f"within {self.window_seconds} seconds. Locked out for {self.lockout_reinstate_minutes} minutes.",
@@ -109,40 +134,41 @@ class RateLimiter:
         Raises:
             RateLimitExceededError: If the user is rate-limited.
         """
-        record = self._failures.get(user_id)
-        if record is None:
-            return
-
-        now = time.time()
-
-        # If window has expired, clear the record entirely
-        if now - record.window_start > self.window_seconds:
-            del self._failures[user_id]
-            return
-
-        # If locked out, check if lockout period has elapsed
-        if record.failed_attempts >= self.max_attempts and record.locked_at > 0:
-            lockout_seconds = self.lockout_reinstate_minutes * 60
-            if now - record.locked_at >= lockout_seconds:
-                # Lockout period elapsed — reset and allow retries
-                record.failed_attempts = 0
-                record.locked_at = 0.0
-                record.window_start = now
+        with self._lock:
+            record = self._failures.get(user_id)
+            if record is None:
                 return
-            else:
-                # Still locked out
-                remaining = int(lockout_seconds - (now - record.locked_at))
-                raise RateLimitExceededError(
-                    f"User {user_id} is locked out. Unlock in {remaining} seconds.",
-                    retry_after_seconds=remaining,
-                )
 
-        if record.failed_attempts >= self.max_attempts:
-            raise RateLimitExceededError(
-                f"User {user_id} has exceeded {self.max_attempts} failed attempts "
-                f"within {self.window_seconds} seconds.",
-                retry_after_seconds=self.lockout_reinstate_minutes * 60,
-            )
+            now = time.time()
+
+            # If window has expired, clear the record entirely
+            if now - record.window_start > self.window_seconds:
+                del self._failures[user_id]
+                return
+
+            # If locked out, check if lockout period has elapsed
+            if record.failed_attempts >= self.max_attempts and record.locked_at > 0:
+                lockout_seconds = self.lockout_reinstate_minutes * 60
+                if now - record.locked_at >= lockout_seconds:
+                    # Lockout period elapsed — reset and allow retries
+                    record.failed_attempts = 0
+                    record.locked_at = 0.0
+                    record.window_start = now
+                    return
+                else:
+                    # Still locked out
+                    remaining = int(lockout_seconds - (now - record.locked_at))
+                    raise RateLimitExceededError(
+                        f"User {user_id} is locked out. Unlock in {remaining} seconds.",
+                        retry_after_seconds=remaining,
+                    )
+
+            if record.failed_attempts >= self.max_attempts:
+                raise RateLimitExceededError(
+                    f"User {user_id} has exceeded {self.max_attempts} failed attempts "
+                    f"within {self.window_seconds} seconds.",
+                    retry_after_seconds=self.lockout_reinstate_minutes * 60,
+                )
 
     def record_success(self, user_id: str) -> None:
         """Record a successful attempt, clearing the failure count.
@@ -150,7 +176,8 @@ class RateLimiter:
         Args:
             user_id: The user ID that succeeded.
         """
-        self._failures.pop(user_id, None)
+        with self._lock:
+            self._failures.pop(user_id, None)
 
     def get_remaining_attempts(self, user_id: str) -> int:
         """Get the number of remaining attempts for a user.
@@ -161,24 +188,25 @@ class RateLimiter:
         Returns:
             Number of remaining attempts before lockout.
         """
-        record = self._failures.get(user_id)
-        if record is None:
-            return self.max_attempts
-
-        now = time.time()
-        if now - record.window_start > self.window_seconds:
-            return self.max_attempts
-
-        # If locked out and lockout period has elapsed, reset
-        if record.failed_attempts >= self.max_attempts and record.locked_at > 0:
-            lockout_seconds = self.lockout_reinstate_minutes * 60
-            if now - record.locked_at >= lockout_seconds:
-                record.failed_attempts = 0
-                record.locked_at = 0.0
-                record.window_start = now
+        with self._lock:
+            record = self._failures.get(user_id)
+            if record is None:
                 return self.max_attempts
 
-        return max(0, self.max_attempts - record.failed_attempts)
+            now = time.time()
+            if now - record.window_start > self.window_seconds:
+                return self.max_attempts
+
+            # If locked out and lockout period has elapsed, reset
+            if record.failed_attempts >= self.max_attempts and record.locked_at > 0:
+                lockout_seconds = self.lockout_reinstate_minutes * 60
+                if now - record.locked_at >= lockout_seconds:
+                    record.failed_attempts = 0
+                    record.locked_at = 0.0
+                    record.window_start = now
+                    return self.max_attempts
+
+            return max(0, self.max_attempts - record.failed_attempts)
 
     def reset(self, user_id: str) -> None:
         """Reset the failure count for a user.
@@ -186,7 +214,8 @@ class RateLimiter:
         Args:
             user_id: The user ID to reset.
         """
-        self._failures.pop(user_id, None)
+        with self._lock:
+            self._failures.pop(user_id, None)
 
     def cleanup_expired(self) -> int:
         """Remove expired failure records.
@@ -195,15 +224,16 @@ class RateLimiter:
             Number of records removed.
         """
         now = time.time()
-        expired = []
-        for uid, record in self._failures.items():
-            # Window expired
-            if now - record.window_start > self.window_seconds or (
-                record.failed_attempts >= self.max_attempts
-                and record.locked_at > 0
-                and now - record.locked_at >= self.lockout_reinstate_minutes * 60
-            ):
-                expired.append(uid)
-        for uid in expired:
-            del self._failures[uid]
-        return len(expired)
+        with self._lock:
+            expired = []
+            for uid, record in self._failures.items():
+                # Window expired
+                if now - record.window_start > self.window_seconds or (
+                    record.failed_attempts >= self.max_attempts
+                    and record.locked_at > 0
+                    and now - record.locked_at >= self.lockout_reinstate_minutes * 60
+                ):
+                    expired.append(uid)
+            for uid in expired:
+                del self._failures[uid]
+            return len(expired)
