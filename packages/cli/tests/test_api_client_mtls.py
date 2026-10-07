@@ -102,14 +102,29 @@ class TestBuildSslContext:
         with pytest.raises(APIClientError, match="mTLS"):
             _build_ssl_context(cafile=str(ca), certfile=str(cert), keyfile=str(key))
 
-    def test_no_cafile_falls_back_to_system_trust(self):
-        ctx = _build_ssl_context(cafile=None, certfile=None, keyfile=None)
-        assert ctx.verify_mode == ssl.CERT_REQUIRED
-        assert ctx.check_hostname is True
-        # NOTE: get_ca_certs() stays empty here BY DESIGN — load_default_certs()
-        # routes through OpenSSL's default-path lookup (set_default_verify_paths),
-        # which does not populate the introspectable store. Construction success
-        # + strict verify flags are the observable contract.
+    def test_no_cafile_refuses_loudly_never_host_store(self, monkeypatch):
+        """#530: the no-anchor branch is a REFUSAL, not a system-store fallback.
+
+        Prohibition shape, not an anchor count: on this Python/OpenSSL build
+        create_default_context() reports get_ca_certs()==0 while the host store
+        is live, so counting anchors would pass while the bug was present. Here
+        load_default_certs() is rigged to explode, and the builder must never
+        reach it.
+        """
+        boom = AssertionError("load_default_certs() reached — host store fallback (#530)")
+        monkeypatch.setattr(ssl.SSLContext, "load_default_certs", lambda *a, **k: (_ for _ in ()).throw(boom))
+        with pytest.raises(APIClientError, match="venya setup"):
+            _build_ssl_context(cafile=None, certfile=None, keyfile=None)
+
+    def test_empty_string_cafile_refuses_like_none(self, monkeypatch):
+        """Paired negative: a blank resolved anchor is refused, not trusted.
+
+        The executor renew site initializes verify_cafile="" on the
+        VENYA_TLS_VERIFY=false branch; a falsy-string guard keeps a future
+        mis-wiring from building an unanchored context.
+        """
+        with pytest.raises(APIClientError, match="trust anchor"):
+            _build_ssl_context(cafile="", certfile=None, keyfile=None)
 
 
 class TestRealConstructionNoMock:
@@ -154,6 +169,9 @@ class TestRealConstructionNoMock:
         monkeypatch.setattr(mod, "_build_ssl_context", spy)
         client = APIClient(config_file=tmp_path / "config.json")
         try:
+            # #530: the transport (and so the context) is built on first DIAL,
+            # not at construction — touching client._http is the dial seam.
+            _ = client._http
             assert captured["cafile"] == str(env_ca)
         finally:
             client.close()
@@ -178,6 +196,7 @@ class TestRealConstructionNoMock:
         monkeypatch.setattr(mod, "_build_ssl_context", spy)
         client = APIClient(config_file=tmp_path / "config.json")
         try:
+            _ = client._http  # #530 dial seam — the transport is built here, not at construction
             assert captured["cafile"] == str(tmp_path / "ca.crt")
         finally:
             client.close()
@@ -193,27 +212,46 @@ class TestAdminMtlsClientCert:
         cli-admin-mtls-verify-cert-conflict: cert= + string verify TypeErrors
         on httpx2 >= 2.12, breaking every admin-mTLS command)."""
         cert, key = _make_cert_key(tmp_path, "admin")
+        # #530: no anchor means no transport is ever built, so an admin-mTLS
+        # construction cell needs one — the setup-installed CA location.
+        ca, _ = _make_cert_key(tmp_path, "setup-ca")
+        (tmp_path / "ca.crt").write_bytes(ca.read_bytes())
         monkeypatch.setenv("VENYA_ADMIN_CERT", str(cert))
         monkeypatch.setenv("VENYA_ADMIN_KEY", str(key))
 
-        APIClient(config_file=tmp_path / "config.json")
+        client = APIClient(config_file=tmp_path / "config.json")
+        try:
+            _ = client._http  # #530 dial seam — the transport is built here, not at construction
 
-        mock_client_cls.assert_called_once()
-        kwargs = mock_client_cls.call_args.kwargs
-        assert "cert" not in kwargs
-        assert isinstance(kwargs["verify"], ssl.SSLContext)
+            mock_client_cls.assert_called_once()
+            kwargs = mock_client_cls.call_args.kwargs
+            assert "cert" not in kwargs
+            assert isinstance(kwargs["verify"], ssl.SSLContext)
+        finally:
+            client.close()
 
     @patch("venya_cli.api_client.httpx2.Client")
     def test_neither_set_no_cert_param(self, mock_client_cls, tmp_path: Path, monkeypatch):
-        """Neither env var set → no cert key in Client kwargs."""
+        """Neither env var set → no cert key in Client kwargs.
+
+        A setup CA is planted (#530): without an anchor the transport is never
+        built at all, and this cell is about the cert= kwarg shape, not anchoring.
+        """
         monkeypatch.delenv("VENYA_ADMIN_CERT", raising=False)
         monkeypatch.delenv("VENYA_ADMIN_KEY", raising=False)
+        ca, _ = _make_cert_key(tmp_path, "setup-ca")
+        (tmp_path / "ca.crt").write_bytes(ca.read_bytes())
 
-        APIClient(config_file=tmp_path / "config.json")
+        client = APIClient(config_file=tmp_path / "config.json")
+        try:
+            _ = client._http  # #530 dial seam — the transport is built here, not at construction
 
-        mock_client_cls.assert_called_once()
-        kwargs = mock_client_cls.call_args.kwargs
-        assert "cert" not in kwargs
+            mock_client_cls.assert_called_once()
+            kwargs = mock_client_cls.call_args.kwargs
+            assert "cert" not in kwargs
+            assert isinstance(kwargs["verify"], ssl.SSLContext)
+        finally:
+            client.close()
 
     @patch("venya_cli.api_client.httpx2.Client")
     def test_only_cert_set_raises_naming_key(self, mock_client_cls, tmp_path: Path, monkeypatch):

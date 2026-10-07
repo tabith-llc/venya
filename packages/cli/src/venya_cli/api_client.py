@@ -126,6 +126,23 @@ class APIClientAuthenticationError(APIClientError):
     """Authentication failed — requires re-auth."""
 
 
+def _anchor_refusal(searched: str) -> APIClientError:
+    """The loud refusal for a dial with no Venya trust anchor (#530).
+
+    One wording, shared by the house builder and the resolver, so every path
+    that cannot name an anchor reads the same: what was searched, why the host
+    store is not the answer, and the repair.
+    """
+    return APIClientError(
+        f"Cannot dial the core: no Venya TLS trust anchor is configured — {searched}. "
+        "Venya does not fall back to the host's system trust store on a token-bearing "
+        "call: a certificate for this hostname issued by any public CA is not proof "
+        "you reached your core. Repair: run `venya setup <core>` on this workstation, "
+        "or set SSL_CERT_FILE to a CA bundle you trust — a core served by a public "
+        "certificate is the operator naming that bundle, never an implicit host store."
+    )
+
+
 def _build_ssl_context(cafile: str | None, certfile: str | None, keyfile: str | None) -> ssl.SSLContext:
     """Build the single TLS context for APIClient.
 
@@ -133,26 +150,39 @@ def _build_ssl_context(cafile: str | None, certfile: str | None, keyfile: str | 
     rejects `cert=` combined with a string `verify` — the natural admin flow
     (setup-installed config CA + VENYA_ADMIN_CERT/KEY, no SSL_CERT_FILE)
     TypeErrored on every command before any request was sent. One context
-    carries both directions: server-trust anchors (cafile=None → system
-    store) and, when admin mTLS is configured, the client cert chain.
+    carries both directions: the Venya anchor and, when admin mTLS is
+    configured, the client cert chain.
+
+    Ticket cli-bearer-dial-falls-back-to-host-store (#530): an absent anchor is
+    a REFUSAL, never ``load_default_certs()``. The old ``else`` branch trusted
+    the HOST system store, so a token-bearing request to a name-confused host
+    could be satisfied by any publicly-issued certificate for that name — the
+    same trust-set defect #501 closed on the server relay, on the workstation
+    side. Shape mirrors the landed relay builder (#501, ``_build_relay_ssl_context``):
+    a bare ``PROTOCOL_TLS_CLIENT`` context (already ``CERT_REQUIRED`` +
+    ``check_hostname``) loaded with ONLY the configured anchor. The repair for a
+    missing anchor is ``venya setup <core>``; for a genuinely public-CA-served core
+    the operator names that bundle through ``SSL_CERT_FILE`` — still an explicit
+    anchor, never an implicit host store.
     """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    if cafile:
-        try:
-            ctx.load_verify_locations(cafile=cafile)
-        except (ssl.SSLError, OSError) as e:
-            # Ticket 439: the refusal is correct behaviour, but the raw OpenSSL
-            # text named neither the file we tried to load nor the repair.
-            # Wrap — never silence — and append the original text after the
-            # guidance (production mandate: loud failure, full context).
-            raise APIClientError(
-                f"TLS trust file {cafile!r} is present but could not be loaded as a "
-                "certificate (corrupt, empty, or not PEM). Repair: run "
-                "`venya setup <core>` to reinstall the core CA, or set SSL_CERT_FILE "
-                f"to a valid bundle. Underlying OpenSSL error: {e}"
-            ) from e
-    else:
-        ctx.load_default_certs()
+    if not cafile:
+        # Defense in depth: callers resolve the anchor first and name what they
+        # searched, so a blank cafile here means no anchor was ever resolved.
+        raise _anchor_refusal("no CA file was resolved for this context")
+    try:
+        ctx.load_verify_locations(cafile=cafile)
+    except (ssl.SSLError, OSError) as e:
+        # Ticket 439: the refusal is correct behaviour, but the raw OpenSSL
+        # text named neither the file we tried to load nor the repair.
+        # Wrap — never silence — and append the original text after the
+        # guidance (production mandate: loud failure, full context).
+        raise APIClientError(
+            f"TLS trust file {cafile!r} is present but could not be loaded as a "
+            "certificate (corrupt, empty, or not PEM). Repair: run "
+            "`venya setup <core>` to reinstall the core CA, or set SSL_CERT_FILE "
+            f"to a valid bundle. Underlying OpenSSL error: {e}"
+        ) from e
     if certfile and keyfile:
         try:
             ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
@@ -329,22 +359,68 @@ class APIClient:
                     )
         # Server-TLS verification precedence: SSL_CERT_FILE env wins (the
         # full-lifecycle-test.md and cert-rotation-runbook flows drive the CLI
-        # that way); then the CA installed by `venya setup` beside config.json;
-        # then system trust. All three paths unify into one ssl.SSLContext
-        # that also carries the admin client cert when mTLS is set — the
-        # former cert= + string-verify combination TypeErrors on httpx2
-        # >= 2.12 (ticket cli-admin-mtls-verify-cert-conflict, option (a)).
-        cafile: str | None = os.environ.get("SSL_CERT_FILE")
-        if not cafile:
-            ca_path = self.config.ca_path
-            if ca_path.exists():
-                cafile = str(ca_path)
-        http_kwargs["verify"] = _build_ssl_context(
-            cafile=cafile,
-            certfile=cert_path if (cert_path and key_path) else None,
-            keyfile=key_path if (cert_path and key_path) else None,
-        )
-        self._http = httpx2.Client(**http_kwargs)
+        # that way); then the CA installed by `venya setup` beside config.json.
+        # Ticket cli-bearer-dial-falls-back-to-host-store (#530) removed the
+        # third historical branch — "then system trust" — so a name with no
+        # Venya anchor is never resolved here and the refusal is built from
+        # `searched`, which names exactly what was looked for.
+        cafile, searched = self._resolve_tls_anchor()
+        self._anchor = cafile
+        self._anchor_searched = searched
+        # The admin client cert rides the SAME context (ticket
+        # cli-admin-mtls-verify-cert-conflict, option (a)): httpx2 >= 2.12
+        # rejects a string verify= combined with cert=, so both directions
+        # unify into one ssl.SSLContext handed over as verify=.
+        self._admin_certfile = cert_path if (cert_path and key_path) else None
+        self._admin_keyfile = key_path if (cert_path and key_path) else None
+        self._http_kwargs: dict[str, Any] = http_kwargs
+        # #530: the transport is built on the FIRST DIAL, not here. Two reasons,
+        # both load-bearing: (1) `run_command()` constructs an APIClient for
+        # every command BEFORE dispatch, so an anchor check at construction would
+        # make `venya setup <core>` — the very repair the refusal names —
+        # unreachable on exactly the anchor-less host that needs it; (2) AC1
+        # requires the refusal land "before any HTTP client is constructed", so
+        # construction must not itself construct one. Tests that inject a stub
+        # into `_http` still bypass the real build (the setter stores it).
+        self.__http: httpx2.Client | None = None
+
+    def _resolve_tls_anchor(self) -> tuple[str | None, str]:
+        """The Venya trust anchor for this workstation, or None + what was searched.
+
+        Order is the landed one (SSL_CERT_FILE, then the `venya setup` CA beside
+        config.json). Nothing here ever consults the host trust store.
+        """
+        env_ca = os.environ.get("SSL_CERT_FILE")
+        if env_ca:
+            return env_ca, f"SSL_CERT_FILE={env_ca!r}"
+        ca_path = self.config.ca_path
+        if ca_path.exists():
+            return str(ca_path), f"no SSL_CERT_FILE set and no config-dir CA at {ca_path}"
+        return None, f"no SSL_CERT_FILE set and no config-dir CA at {ca_path}"
+
+    @property
+    def _http(self) -> httpx2.Client:
+        """The dial transport, built once on first use (#530).
+
+        Refuses with the loud anchor message BEFORE any HTTP client exists when
+        this workstation has no Venya trust anchor — the token-bearing call is
+        never made against the host system store.
+        """
+        if self.__http is None:
+            if not self._anchor:
+                raise _anchor_refusal(self._anchor_searched)
+            verify = _build_ssl_context(
+                cafile=self._anchor,
+                certfile=self._admin_certfile,
+                keyfile=self._admin_keyfile,
+            )
+            self.__http = httpx2.Client(**self._http_kwargs, verify=verify)
+        return self.__http
+
+    @_http.setter
+    def _http(self, value: httpx2.Client | None) -> None:
+        """Set the transport — test seams inject a stub here; None forces a rebuild."""
+        self.__http = value
 
     def _get_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         """Get request headers including auth token."""
@@ -394,8 +470,14 @@ class APIClient:
         # override when set, so every other call keeps the client default (30s).
         request_kwargs: dict[str, Any] = {"timeout": timeout} if timeout is not None else {}
 
+        # #530: resolved OUTSIDE the try, so the no-anchor refusal is never at
+        # risk of being caught and re-worded as a connection error by the httpx
+        # handlers below. No HTTP client exists yet at this line on an
+        # anchor-less host — nothing has left the machine.
+        http = self._http
+
         try:
-            response = self._http.request(
+            response = http.request(
                 method,
                 path,
                 json=json_data,
@@ -418,7 +500,7 @@ class APIClient:
                         self.refresh_token()
                         # Retry the original request with new token
                         headers = self._get_headers(extra_headers)
-                        response = self._http.request(
+                        response = http.request(
                             method,
                             path,
                             json=json_data,
@@ -512,9 +594,11 @@ class APIClient:
     def _post_raw(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
         """Make a POST request without auto-refresh (for auth endpoints)."""
         headers = self._get_headers()
+        # #530: anchor refusal resolved before the try (see _request).
+        http = self._http
 
         try:
-            response = self._http.request(
+            response = http.request(
                 "POST",
                 path,
                 json=json_data,
@@ -680,7 +764,9 @@ class APIClient:
 
     def close(self) -> None:
         """Close the underlying HTTP client."""
-        self._http.close()
+        # #530: a client that never dialed never built a transport — nothing to close.
+        if self.__http is not None:
+            self.__http.close()
 
     def __enter__(self):
         return self
