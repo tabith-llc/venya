@@ -515,7 +515,7 @@ class TestExecuteCommandOnExecutor:
         mock_ssl_ctx = MagicMock()
 
         with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -619,7 +619,7 @@ class TestExecuteCommandOnExecutor:
         mock_ssl_ctx = MagicMock()
 
         with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -733,7 +733,7 @@ class TestExecutorReachability:
         mock_ssl_ctx = MagicMock()
         with patch("server.routes.executors.httpx2.AsyncClient") as mock_client_cls:
             mock_client_cls.side_effect = connect_err
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -796,7 +796,7 @@ class TestExecutorReachability:
         mock_ssl_ctx = MagicMock()
         with patch("server.routes.executors.httpx2.AsyncClient") as mock_client_cls:
             mock_client_cls.side_effect = connect_err
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -866,7 +866,7 @@ class TestExecutorReachability:
         mock_ssl_ctx = MagicMock()
         with patch("server.routes.executors.httpx2.AsyncClient") as mock_client_cls:
             mock_client_cls.side_effect = protocol_err
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -929,7 +929,7 @@ class TestExecutorReachability:
         mock_ssl_ctx = MagicMock()
         with patch("server.routes.executors.httpx2.AsyncClient") as mock_client_cls:
             mock_client_cls.side_effect = connect_err
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -1020,7 +1020,7 @@ class TestMalformedExecutorResponse:
             {"exit_code": 0, "stdout": "ok\n"},  # missing stderr
         )
         with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -1035,7 +1035,7 @@ class TestMalformedExecutorResponse:
             {"exit_code": "zero", "stdout": "ok\n", "stderr": ""},
         )
         with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -1066,7 +1066,7 @@ class TestMalformedExecutorResponse:
             },
         )
         with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -1095,7 +1095,7 @@ class TestMalformedExecutorResponse:
             },
         )
         with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 with caplog.at_level(logging.WARNING):
                     resp = client.post(
@@ -1171,7 +1171,7 @@ class TestTlsMisconfiguration:
         mock_ssl_ctx = MagicMock()
         mock_ssl_ctx.load_verify_locations.side_effect = FileNotFoundError("ca.crt not found")
 
-        with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+        with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/executors/exec-1/execute",
@@ -1185,7 +1185,7 @@ class TestTlsMisconfiguration:
         mock_ssl_ctx = MagicMock()
         mock_ssl_ctx.load_verify_locations.side_effect = TypeError("load_verify_locations expects a path, not None")
 
-        with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+        with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/executors/exec-1/execute",
@@ -1203,7 +1203,7 @@ class TestTlsMisconfiguration:
         mock_ssl_ctx = MagicMock()
         mock_ssl_ctx.load_cert_chain.side_effect = FileNotFoundError("relay-client.crt not found")
 
-        with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+        with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
                 "/api/v1/executors/exec-1/execute",
@@ -1280,7 +1280,7 @@ def _execute_env_harness(meta: dict, version: str | None, plaintext: str = "s3cr
 
 def _run_execute(app, mock_client):
     with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
-        with patch("server.routes.executors.ssl.create_default_context", return_value=MagicMock()):
+        with patch("server.routes.executors.ssl.SSLContext", return_value=MagicMock()):
             client = TestClient(app, raise_server_exceptions=False)
             return client.post(
                 "/api/v1/executors/exec-1/execute",
@@ -1545,7 +1545,7 @@ class TestRelayTimeoutAudit407:
     def _post_execute(self, app, side_effect):
         mock_ssl_ctx = MagicMock()
         with patch("server.routes.executors.httpx2.AsyncClient", side_effect=side_effect):
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 return client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -1616,7 +1616,7 @@ class TestRelayTimeoutAudit407:
 
         mock_ssl_ctx = MagicMock()
         with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
-            with patch("server.routes.executors.ssl.create_default_context", return_value=mock_ssl_ctx):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=mock_ssl_ctx):
                 client = TestClient(app, raise_server_exceptions=False)
                 resp = client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -1687,7 +1687,7 @@ class TestPolicyRejectionRelay410:
         mock_client.post = AsyncMock(return_value=response)
 
         with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
-            with patch("server.routes.executors.ssl.create_default_context", return_value=MagicMock()):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=MagicMock()):
                 tc = TestClient(app, raise_server_exceptions=False)
                 resp = tc.post(
                     "/api/v1/executors/exec-1/execute",
@@ -1842,7 +1842,7 @@ class TestRelayRejectionAudit424:
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.post = AsyncMock(return_value=response)
         with patch("server.routes.executors.httpx2.AsyncClient", return_value=mock_client):
-            with patch("server.routes.executors.ssl.create_default_context", return_value=MagicMock()):
+            with patch("server.routes.executors.ssl.SSLContext", return_value=MagicMock()):
                 client = TestClient(app, raise_server_exceptions=False)
                 return client.post(
                     "/api/v1/executors/exec-1/execute",
@@ -1901,9 +1901,7 @@ class TestRelayRejectionAudit424:
         """Paired negative: a 422 without the CommandRejected prefix (the #410
         allow-list lane) keeps the generic detail and records NO rejection row."""
         app, mock_db = self._harness()
-        resp = self._post(
-            app, self._relay(422, {"detail": "malformed request: WrappedSecret(wrapped_value='...')"})
-        )
+        resp = self._post(app, self._relay(422, {"detail": "malformed request: WrappedSecret(wrapped_value='...')"}))
         assert resp.status_code == 422
         assert resp.json()["detail"] == "Executor returned an error"
         assert self._rejected_rows(mock_db) == []
@@ -1928,7 +1926,7 @@ class TestRelayRejectionAudit424:
     def test_audit_commit_failure_still_returns_422_reason(self, caplog):
         """Best-effort half: the audit commit raising must not mask the 422 or its
         forwarded reason (record_login_failure posture, same as the #407 helper)."""
-        app, mock_db = self._harness(commit_side_effect=RuntimeError("db down"))
+        app, _mock_db = self._harness(commit_side_effect=RuntimeError("db down"))
         with caplog.at_level(logging.ERROR, logger="venya.server"):
             resp = self._post(app, self._relay(422, {"detail": self._REASON}))
         assert resp.status_code == 422

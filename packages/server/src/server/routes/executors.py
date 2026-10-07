@@ -532,6 +532,47 @@ def _record_rejection_audit(
 # --- Endpoints ---
 
 
+def _build_relay_ssl_context(
+    ca_cert_path: str | None,
+    mtls_cert: str | None = None,
+    mtls_key: str | None = None,
+) -> ssl.SSLContext:
+    """TLS context for the core->executor relay dial — Venya CA anchors ONLY.
+
+    Deliberately NOT ``ssl.create_default_context()`` (#501): that helper calls
+    ``load_default_certs()``, which pulls the HOST system CA store into the
+    trust set, and ``load_verify_locations()`` ADDS the Venya root to that set
+    rather than replacing it. The relay carries wrapped secret material to
+    ``https://<executor hostname>:8443/execute``, so with the system store
+    loaded a leaf for that hostname issued by ANY public CA would validate the
+    destination — the private control plane sharing its trust set with the
+    public PKI, and reachable through a name-confused hostname.
+
+    House shape (same posture as ``executor.audit`` and
+    ``venya_cli.api_client._build_ssl_context``): a bare ``PROTOCOL_TLS_CLIENT``
+    context, which already means ``verify_mode=CERT_REQUIRED`` +
+    ``check_hostname=True``, loading ONLY the configured anchor. The two
+    verification flags ``create_default_context()`` used to add are set
+    explicitly so this fix changes the anchor set and nothing else.
+
+    No-anchor case is a loud failure, never a system-store fallback: the relay
+    has no legitimate "trust whatever the host trusts" mode, and a missing
+    ``app.state.config`` already maps to 503 through the caller's handler
+    (``load_verify_locations`` raises ``TypeError`` when every argument is
+    omitted).
+
+    Raises:
+        OSError/ssl.SSLError: unreadable or corrupt anchor/client material.
+        TypeError: no anchor configured at all.
+    """
+    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ssl_ctx.verify_flags |= ssl.VERIFY_X509_STRICT | ssl.VERIFY_X509_PARTIAL_CHAIN
+    ssl_ctx.load_verify_locations(cafile=ca_cert_path)
+    if mtls_cert and mtls_key:
+        ssl_ctx.load_cert_chain(mtls_cert, mtls_key)
+    return ssl_ctx
+
+
 def _dial_hostname_resolvable(hostname: str) -> bool:
     """True if hostname resolves locally.
 
@@ -1529,10 +1570,7 @@ async def execute_command_on_executor(
 
     # OSError also catches ssl.SSLError (corrupt cert contents) — keep broad deliberately
     try:
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.load_verify_locations(ca_cert_path)
-        if mtls_cert and mtls_key:
-            ssl_ctx.load_cert_chain(mtls_cert, mtls_key)
+        ssl_ctx = _build_relay_ssl_context(ca_cert_path, mtls_cert, mtls_key)
     except (OSError, TypeError) as e:
         logger.warning("TLS misconfiguration: %s", e)
         raise HTTPException(status_code=503, detail="Server TLS misconfiguration")
