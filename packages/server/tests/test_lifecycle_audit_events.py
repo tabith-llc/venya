@@ -68,6 +68,7 @@ LIFECYCLE_EVENT_STRINGS = [
     "executor_cert_revoked",
     "admin_cert_revoked",
     "user_reenrolled",
+    "core_reset_refused",
     "enrollment_token_issued",
     "enrollment_token_revoked",
     "command_policy_changed",
