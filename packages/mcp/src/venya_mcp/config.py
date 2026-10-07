@@ -30,6 +30,31 @@ from typing import Any
 logger = logging.getLogger("venya.mcp")
 
 
+class InsecureServerURLError(ValueError):
+    """The configured ``server_url`` is not an https:// core URL (#540).
+
+    Subclasses ValueError so the broad handler in server.py tool dispatch
+    (which catches Exception) surfaces the refusal to the agent as a tool
+    error carrying the repair wording, instead of a cleartext dial.
+    """
+
+
+def _https_refusal(server_url: str, *, site: str, ticket: str, detail: str = "") -> str:
+    """The ONE refusal wording for a non-https core URL, as a string.
+
+    Deliberate copy of ``venya_cli.commands._https_refusal``: the mcp package
+    does not depend on venya-cli (see packages/mcp/pyproject.toml), so product
+    code must not import the CLI helper — the same arrangement as
+    ``default_config_dir`` above. tests/test_client.py pins the two copies
+    byte-for-byte for identical inputs so they cannot drift.
+    """
+    suffix = f" — {detail}" if detail else ""
+    return (
+        f"Error: server URL must be https:// — got '{server_url}'. Plaintext http is "
+        f"not supported for {site}{suffix} (ticket {ticket})."
+    )
+
+
 def default_config_dir() -> Path:
     """Platform-appropriate config directory.
 
@@ -81,7 +106,34 @@ class MCPConfig:
 
     @property
     def server_url(self) -> str:
+        """The core URL every dial composes from — https:// only (#540).
+
+        Same rule and the same wording as the CLI dial seam
+        (venya_cli.api_client.APIClient._http, ticket
+        cli-dial-sites-missing-https-guard): the check lives at the point the
+        URL is resolved for dialing, NOT in an ``__init__``, so loading a
+        config or constructing a client for an offline repair is never
+        bricked — the reasoning the CLI comment records transfers.
+
+        The value is REFUSED, never rewritten: an automatic http -> https
+        upgrade would hide a config error and can turn a working local-dial
+        config into a confusing failure. The shipped default (https://localhost)
+        passes the guard unchanged.
+        """
         url = self._data.get("server_url", "https://localhost")
+        if not (isinstance(url, str) and url.startswith("https://")):
+            raise InsecureServerURLError(
+                _https_refusal(
+                    str(url),
+                    site="the Venya MCP server dial",
+                    ticket="mcp-dial-missing-https-guard",
+                    detail=(
+                        'set "server_url" in the Venya config file to the '
+                        "https:// core URL; this transport carries your bearer "
+                        "token and every tool call"
+                    ),
+                )
+            )
         return url.rstrip("/")
 
     @property

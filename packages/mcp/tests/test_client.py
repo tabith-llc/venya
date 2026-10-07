@@ -20,7 +20,7 @@ from venya_mcp.client import (
     VenyaClient,
     _bootstrap_tls_verify,
 )
-from venya_mcp.config import MCPConfig
+from venya_mcp.config import InsecureServerURLError, MCPConfig, _https_refusal
 
 # --- Config tests ---
 
@@ -531,3 +531,103 @@ async def test_api_error(mock_config: MCPConfig) -> None:
 
     assert exc_info.value.status_code == 500
     assert "Internal server error" in str(exc_info.value)
+
+
+# --- HTTPS scheme guard on server_url (#540) ---
+#
+# Truth table for the guard at the MCPConfig.server_url choke point: the
+# positive halves (https URL, shipped default) and the negative halves
+# (http, uppercase, no scheme, non-string) both ship, per the AGENTS.md
+# filter/gate rule. The refusal must land BEFORE any dial leaves — an
+# http:// entry otherwise sends the bearer token and every tool call in
+# cleartext.
+
+
+def _write_url_config(tmp_path: Path, server_url: object) -> MCPConfig:
+    """Real MCPConfig from tmp JSON — the file's own fixture shape (#540)."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"server_url": server_url, "access_token": "initial-token"}))
+    return MCPConfig(config_file)
+
+
+def test_server_url_https_allowed_unchanged(tmp_path: Path) -> None:
+    """POSITIVE: an https:// config passes the guard — the working case is not bricked."""
+    config = _write_url_config(tmp_path, "https://venya-core-1")
+    assert config.server_url == "https://venya-core-1"
+
+
+def test_server_url_default_localhost_allowed(tmp_path: Path) -> None:
+    """POSITIVE: the shipped default (no server_url key) still passes the guard."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(json.dumps({"access_token": "initial-token"}))
+    config = MCPConfig(config_file)
+    assert config.server_url == "https://localhost"
+
+
+@pytest.mark.parametrize("bad_url", ["http://venya-core-1", "HTTP://venya-core-1", "venya-core-1", 8443])
+def test_server_url_non_https_refused(tmp_path: Path, bad_url: object) -> None:
+    """NEGATIVE: http, uppercase-HTTP, no-scheme and non-string values are refused."""
+    config = _write_url_config(tmp_path, bad_url)
+    with pytest.raises(InsecureServerURLError) as exc_info:
+        _ = config.server_url
+    assert "server URL must be https://" in str(exc_info.value)
+    assert "mcp-dial-missing-https-guard" in str(exc_info.value)
+
+
+async def test_refusal_happens_before_any_connection_attempt(tmp_path: Path) -> None:
+    """The guard trips while the URL f-string is composed — no request is ever issued.
+
+    Tripwire: client._http is replaced with mocks that FAIL the test if
+    called. Both dials (token refresh at client.py:141, tool call at
+    client.py:180) read config.server_url first, so the raise lands and the
+    tripwire stays uncalled.
+    """
+    config = _write_url_config(tmp_path, "http://venya-core-1")
+    client = VenyaClient(config, verify=False)
+    tripwire_post = AsyncMock(side_effect=AssertionError("dial attempted before guard"))
+    tripwire_request = AsyncMock(side_effect=AssertionError("dial attempted before guard"))
+    client._http = MagicMock(post=tripwire_post, request=tripwire_request)
+
+    with pytest.raises(InsecureServerURLError):
+        await client._refresh()
+    with pytest.raises(InsecureServerURLError):
+        await client._request("GET", "/api/v1/test")
+
+    assert tripwire_post.await_count == 0
+    assert tripwire_request.await_count == 0
+
+
+def test_refusal_text_excludes_bearer_token(tmp_path: Path) -> None:
+    """Truth-table half: the refusal names the bad URL but never leaks the token."""
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "server_url": "http://venya-core-1",
+                "access_token": "super-secret-token-xyz",
+            }
+        )
+    )
+    config = MCPConfig(config_file)
+    with pytest.raises(InsecureServerURLError) as exc_info:
+        _ = config.server_url
+    assert "super-secret-token-xyz" not in str(exc_info.value)
+    assert "http://venya-core-1" in str(exc_info.value)
+
+
+def test_mcp_refusal_wording_matches_cli_copy() -> None:
+    """The mcp _https_refusal is pinned to the CLI template — one wording, no variant.
+
+    Same arrangement as test_config_path.py pins default_config_dir: the
+    product copies are separate (mcp does not depend on venya-cli), the test
+    compares them. venya_cli is imported HERE (test code), never in product
+    code.
+    """
+    from venya_cli.commands import _https_refusal as cli_refusal
+
+    for site in ("a", "the Venya MCP server dial"):
+        for ticket in ("cli-dial-sites-missing-https-guard", "mcp-dial-missing-https-guard"):
+            for detail in ("", "carries your bearer token"):
+                assert _https_refusal("http://x", site=site, ticket=ticket, detail=detail) == cli_refusal(
+                    "http://x", site=site, ticket=ticket, detail=detail
+                )
