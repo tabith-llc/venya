@@ -65,9 +65,47 @@ def cert_pair(tmp_path: Path) -> tuple[str, str]:
     return make_cert_pair(tmp_path)
 
 
+def make_anchor(dir_: Path) -> str:
+    """Write a CA-shaped self-signed PEM into dir_ and return its path (#531).
+
+    ``make_config`` hands this to every cell as the default ``ca_cert_path``.
+    Reason: in a served install the anchor is MANDATORY
+    (``AuditForwarderConfig._require_verified_https_remote`` refuses
+    remote_url-without-CA), and #531 removed the no-anchor host-store fallback —
+    so a transport cell that mutates ``remote_url`` in by hand must also name an
+    anchor, or it lands on the refusal branch instead of the POST path it means
+    to exercise. The no-anchor cells below pass ``ca_cert_path=None`` on purpose.
+    """
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(UTC)
+    name = x509.Name(
+        [
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "audit-test-anchor"),
+        ]
+    )
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=365))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    path = dir_ / "anchor-ca.crt"
+    path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return str(path)
+
+
 def make_config(spool_dir: Path, **overrides) -> AuditForwarderConfig:
     base = {
         "remote_url": None,
+        # #531: the anchor is the served shape (the config validator requires it);
+        # pass ca_cert_path=None to reach the no-anchor refusal branch.
+        "ca_cert_path": make_anchor(spool_dir),
         "max_buffer_size": 100,
         "max_batch_lines": 50,
         "alert_threshold": 0.8,
@@ -297,20 +335,28 @@ class TestForward:
         finally:
             log.shutdown()
 
-    def test_bypassed_validator_never_disables_verify(
+    def test_no_anchor_never_disables_verify_never_the_host_store(
         self, spool_dir: Path, cert_pair: tuple[str, str], success_mock: MagicMock
     ):
-        """Negative guard: direct mutation bypasses pydantic validation —
-        the call site must fall back to a system-trust SSLContext, never
-        False (regression guard for verify=False fallback; #432 retires the
-        old verify=True shape into load_default_certs())."""
-        log = self._logger_prepped(spool_dir, cert_pair)
+        """Negative guard (#531 rewrote this cell): direct mutation bypasses the
+        pydantic validator, and the call site must then REFUSE — never
+        ``verify=False``, never a host-store context, and never a POST. Lines
+        stay spooled. The retired shape fell back to ``load_default_certs()``;
+        the prohibition shape below is the proof it does not come back."""
+        log = self._logger_prepped(spool_dir, cert_pair, ca_cert_path=None)
         log.emit("credential_injected", strategy="memfd")
-        with patch("executor.audit.httpx2.Client", return_value=success_mock) as cls:
-            assert log._forward_once() is True
-        verify = cls.call_args.kwargs["verify"]
-        assert isinstance(verify, ssl.SSLContext)
-        assert verify is not False
+
+        def _boom(*_a, **_k):
+            raise AssertionError("load_default_certs() reached — host-store fallback (#531)")
+
+        with (
+            patch.object(ssl.SSLContext, "load_default_certs", side_effect=_boom) as ldc,
+            patch("executor.audit.httpx2.Client", return_value=success_mock) as cls,
+        ):
+            assert log._forward_once() is False
+        ldc.assert_not_called()
+        cls.assert_not_called()
+        assert len(read_spool(spool_dir)) == 1
 
     def test_forward_noop_without_remote_url(self, spool_dir: Path, success_mock: MagicMock):
         """T5 pin (#307): no remote_url ⇒ inert-by-absence — True, spool
@@ -785,28 +831,39 @@ class TestForwardSSLContext:
         with pytest.raises(TypeError):
             httpx2.Client(verify=str(tmp_ca_dir / "ca.crt"), cert=cert_pair, timeout=10)
 
-    def test_no_ca_configured_falls_back_to_system_store(
-        self, spool_dir: Path, cert_pair: tuple[str, str], success_mock: MagicMock
-    ):
-        """AC3 half (no-CA): ca_cert_path unset → context carries the SYSTEM
-        trust store (load_default_certs), never False. Direct mutation
-        bypasses the validator to simulate the fail-closed fallback branch.
-        The wiring is pinned via the load_default_certs call — OpenSSL counts
-        capath-dir anchors lazily, so cert_store_stats stays 0 even with the
-        system store loaded."""
-        log = AuditLogger(make_config(spool_dir), session_id="s1", client_cert=cert_pair)
+    def test_no_ca_configured_refuses_and_keeps_the_spool(self, spool_dir: Path, cert_pair: tuple[str, str], caplog):
+        """#531 RED-then-GREEN (was: AC3 half 'no CA → system trust store').
+
+        With no ``ca_cert_path`` the forwarder must REFUSE at context-build
+        time, loudly and by name — it must not pull the host trust store into
+        the trust set, and it must not dial at all. Proof is the PROHIBITION
+        SHAPE (``load_default_certs`` rigged to explode and asserted never
+        reached), never an anchor count: this build's default context reports
+        ``get_ca_certs() == 0`` / ``cert_store_stats() == 0`` while the store is
+        live (documented in #530/#531 — counting is a lying cell).
+        """
+        log = AuditLogger(
+            make_config(spool_dir, ca_cert_path=None),
+            session_id="s1",
+            client_cert=cert_pair,
+        )
         self._stop(log)
-        log._config.remote_url = "http://127.0.0.1:1/audit"
+        log._config.remote_url = "https://sink.invalid/audit"
         log.emit("credential_injected", strategy="memfd")
+
+        def _boom(*_a, **_k):
+            raise AssertionError("load_default_certs() reached — host-store fallback (#531)")
+
         with (
-            patch.object(ssl.SSLContext, "load_default_certs", autospec=True) as ldc,
-            patch("executor.audit.httpx2.Client", return_value=success_mock) as cls,
+            patch.object(ssl.SSLContext, "load_default_certs", side_effect=_boom) as ldc,
+            patch("executor.audit.httpx2.Client") as cls,
+            caplog.at_level("WARNING", logger="venya.executor.audit"),
         ):
-            assert log._forward_once() is True
-        verify = cls.call_args.kwargs["verify"]
-        assert isinstance(verify, ssl.SSLContext)
-        ldc.assert_called_once_with(verify)
-        assert read_spool(spool_dir) == []
+            assert log._forward_once() is False
+        ldc.assert_not_called()
+        cls.assert_not_called()
+        assert "no trust anchor" in caplog.text
+        assert len(read_spool(spool_dir)) == 1, "refusal keeps the line for the operator"
 
     def test_missing_cert_files_keep_lines_and_log_loud(self, spool_dir: Path, caplog):
         """AC3 negative half (cert files): paths that fail load_cert_chain
