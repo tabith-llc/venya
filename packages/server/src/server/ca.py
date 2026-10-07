@@ -488,18 +488,6 @@ class CAManager:
         """
         return canonical_serial(serial)
 
-    def get_ca_key_pem(self) -> bytes:
-        """Get the CA private key in PEM format.
-
-        WARNING: This returns the plaintext key. Use only for
-        backup/export operations. The key should be zeroized
-        immediately after use by the caller.
-
-        Returns:
-            PEM-encoded CA private key bytes.
-        """
-        return self.ca_key_path.read_bytes()
-
     def generate_crl(self, db_session, max_entries: int = 1000, revocations=None) -> bytes:
         """Generate a DER-encoded Certificate Revocation List.
 
