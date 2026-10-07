@@ -186,9 +186,18 @@ class TestInitComplete:
             def filter(self, *args, **kwargs):
                 return self
 
+            def with_for_update(self):
+                # #510: step 2's already-initialized re-check is the locked
+                # variant, so the chain has to answer that call too.
+                return self
+
             def first(self):
                 if self._model is not None and "Role" in str(self._model):
                     return admin_role
+                if self._model is not None and "user_id" in str(self._model):
+                    # #510: the re-check selects User.user_id; None answers
+                    # "no enrolled admin yet", which is this cell's state.
+                    return None
                 return pending_user
 
         db = MagicMock()
@@ -236,9 +245,18 @@ class TestInitComplete:
             def filter(self, *args, **kwargs):
                 return self
 
+            def with_for_update(self):
+                # #510: step 2's already-initialized re-check is the locked
+                # variant, so the chain has to answer that call too.
+                return self
+
             def first(self):
                 if self._model is not None and "Role" in str(self._model):
                     return admin_role
+                if self._model is not None and "user_id" in str(self._model):
+                    # #510: the re-check selects User.user_id; None answers
+                    # "no enrolled admin yet", which is this cell's state.
+                    return None
                 return pending_user
 
         db = MagicMock()

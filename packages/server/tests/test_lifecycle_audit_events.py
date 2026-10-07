@@ -212,6 +212,11 @@ class TestInitEvents:
             def join(self, *a, **k):
                 return self
 
+            def with_for_update(self, *a, **k):
+                # #510: step 2's already-initialized re-check is the locked
+                # variant, so the fake answers that call and returns the chain.
+                return self
+
             def first(self):
                 return admin_role  # role lookup; user query handled below
 
@@ -227,6 +232,12 @@ class TestInitEvents:
 
         def first():
             calls["n"] += 1
+            if calls["n"] == 3:
+                # #510: the new in-transaction re-check answers None — no
+                # enrolled admin yet — so this ceremony is allowed to complete.
+                # Placed as a guard ahead of the existing line so that line is
+                # untouched: 1 -> role, 2 -> the pending user, else orig_first.
+                return None
             return pending if calls["n"] == 2 else orig_first()
 
         q.first = first  # type: ignore[method-assign]
