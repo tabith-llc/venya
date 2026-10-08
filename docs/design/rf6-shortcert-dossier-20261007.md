@@ -201,7 +201,7 @@ route and section 7 publishes it that way.
 - **RF-11 (rollout/age-out/docs):** problems 7 and 8, §1.2 4c's accounting law, and the §1.6 count of 8 so the
   docs state the audited number rather than the remembered nine.
 
-<!-- SECTIONS 2-5 FOLLOW IN THIS CHUNK; 6-10 ARE A LATER DISPATCH. -->
+
 
 ---
 
@@ -931,3 +931,767 @@ Required properties of the refusal strings (server side; they reach the operator
 - **RF-11:** **the NTP mass-lockout note is a first-class ops statement** (§5.4): core-side clock drift is an
   admin-plane outage mechanism at minutes-scale lifetimes. Also the deployment-sizing/time-sync guidance for
   HA cores, where each core's clock judges every admin's request.
+
+---
+
+## 6. Disposition of `sign_admin_cert`
+
+Ruling 3 orders a disposition — **fix or remove, stated explicitly, with the test cells handled in the same
+breath** — and forbids leaving it unused-and-unreviewed. The premise the ruling was written on ("dead production
+code; zero callers outside `packages/server/tests/`") does not hold at the tip this dossier is written against, so
+the disposition below is built on the live caller rather than on the premise. Flag 1 restates it.
+
+### 6.1 The live caller — re-verified at `d8a5cda`
+
+The grep that produced ruling 3's premise was scoped to `packages/`. The installer is outside that scope and calls
+the function:
+
+| Fact | Verbatim line | Site |
+|---|---|---|
+| The mint call itself | `cert, key_pem, cert_pem = cm.sign_admin_cert(sys.argv[1])` | `install-venya-core.sh:420` |
+| It is the abort point on a re-run | `# undecryptable and aborts the run at sign_admin_cert. Precedence:` | `install-venya-core.sh:341` |
+| The block's own purpose comment | `# Generate first admin cert. sign_admin_cert loads the CA key — now` | `install-venya-core.sh:408` |
+
+Definition and key material, re-grepped at `d8a5cda`:
+
+| Item | Site |
+|---|---|
+| `def sign_admin_cert(self, admin_identity: str) -> tuple[x509.Certificate, bytes, bytes]` | `packages/server/src/server/ca.py:732` |
+| Keypair generated **by the signer** | `ca.py:749` (`ec.generate_private_key(ec.SECP256R1())`) |
+| Lifetime from the constant | `ca.py:766` (`ADMIN_CERT_VALIDITY_DAYS = 90`, `ca.py:566`) |
+| Private key serialized unencrypted | `ca.py:815` (`serialization.NoEncryption()`) |
+| Returns `(cert, key_pem, cert_pem)` | `ca.py:819` |
+
+And the reachability check that bounds the risk: the symbol appears in **no** server route, and in
+`backend.py` / `app.py` — the count from
+`grep -rn 'sign_admin_cert' packages/server/src/server/routes/ packages/server/src/server/backend.py packages/server/src/server/app.py`
+is **0**. So it is not an HTTP-reachable key export; it is a library entry point whose only production caller is
+the installer's local `python -c` block (`install-venya-core.sh:411-429`), running **on the core**, as user
+`venya`, reading the CA passphrase on stdin.
+
+### 6.2 What the bootstrap actually needs (this is what makes the disposition possible)
+
+The function's output is not only the human handoff. It serves **two consumers on two different planes**, and
+only one of them is the credential this program retires:
+
+1. **The machine-plane / loopback credential.** The installer writes the pair to `/etc/venya/admin/admin.crt` +
+   `admin.key` (`:423-426`, modes `0644`/`0600`), records the identity into `known_admin_ids`
+   (`VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS` is written from `$ADMIN_IDENTITY` at `:584`, key enumerated at `:555`),
+   and the default identity is hostname-shaped — `admin@${CORE_HOSTNAME}` (`:368`). The install banner then
+   documents the **on-core headless** use of that same pair: `VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt` +
+   `VENYA_ADMIN_KEY=/etc/venya/admin/admin.key` with the CLI (`:1001-1007`), with the honest note that a plain
+   `venya admin ...` "falls back to an interactive FIDO2 login and dies without a workstation key".
+   Under ruling 1 that credential is the **machine plane**: long-lived, slot-shaped, checked against
+   `known_admin_ids`, stays on the core. **It is not retired by this design.**
+2. **The human handoff.** The `scp` instruction at `:978-981` is the exposure this program exists to close, and
+   the only part of the bootstrap that is about a person.
+
+That split is the whole disposition: the mint survives as the machine-plane bootstrap; the human handoff dies.
+
+### 6.3 Disposition: **fix** (narrow to the bootstrap/machine plane), not remove
+
+**Ruled design, stated explicitly:** keep a single server-side mint on the core, narrowed so that it can only
+produce a machine-plane credential, and delete the human handoff instead of the function. Concretely:
+
+1. **`AdminCAManager.sign_admin_cert` is retired as a public entry point and replaced by
+   `AdminCAManager.sign_admin_csr(csr, identity, lifetime_seconds, crl_url=None)`** (§2.5b) for the human plane,
+   and by a **bootstrap-only** signer for the machine plane. The bootstrap signer may keep generating its own
+   keypair — the key is created and consumed in the same process on the same machine, it never crosses the
+   network — but its contract changes to name that fact: machine plane, hostname-shaped identity, no human
+   session, and the plane marker written at mint (§3.2).
+2. **The unencrypted return at `ca.py:815` stays, and is ruled.** That site *is* the Q4a question: the core-side
+   admin key. Ruling 4d scopes Q4a to exactly this key, and the owner's bydesign word is carried in the carrier
+   verbatim — *"leave admin.key unencrypted on the core"* — with filesystem permission as the control (the
+   installer's `0600` write, `:426`). What was never acceptable is the **delivery** of that key to a home
+   directory, and that is item 4 below, not this line.
+3. **A caller interlock cell replaces the deleted premise.** The design does not trust "nobody calls this": it
+   asserts it. Precedent in-repo, both shapes:
+   - **attribute-shape**: `packages/server/tests/test_ca_key_accessor_retired_539.py:31-49` — the negative half
+     (the key accessor is gone) paired with the positive half (the certificate accessors remain), so the cell
+     cannot pass on a diff that deleted the wrong thing.
+   - **source-scan**: `packages/server/tests/test_header_trust_interlock.py:44-57` — `_iter_source()` over
+     shipped source, asserting a retired surface does not creep back.
+   The new cell scans `packages/server/src/` (and the installer, if RF-10 wants it) for calls to the
+   key-exporting mint and allows **only** the bootstrap call site, with its own plane marker. A route that ever
+   reaches it is a red suite, not a review finding.
+4. **The human handoff retires in the installer, not in `packages/`.** The `scp` lines (`:978-981`) and the
+   copy-to-workstation framing become a ceremony instruction. **That edit is owner-ok-gated** (this program's
+   standing rule on the git-tracked root installer copies; the RF-6 carrier's mission line says the same), this
+   leg holds no ok and does not ask for one. RF-10 owns it.
+
+Why not the other option: **remove outright.** Removal is *possible* but it is not a `packages/`-only edit, and
+the order is load-bearing:
+
+- The bootstrap needs *a* mint on the core (item 1 of 6.2). If `sign_admin_cert` goes without a replacement in
+  place, every fresh install aborts inside the `python -c` block at `install-venya-core.sh:411-429`, and every
+  re-run aborts at the documented point (`:341`) — a broken installer, not a hardened one.
+- The safe sequence is therefore: (i) RF-7 lands the replacement signer plus the bootstrap mint's narrowed
+  contract; (ii) RF-10 lands the installer change against it (**owner's ok, per specific change, per
+  `## Installer scripts`** — the gate is owned by the owner, and no lane may treat the standing provisioning
+  grant or the standing-approval amendment as an installer ok for an unnarrived change); (iii) only then does
+  the old signature come out. A delete commit must never precede the installer commit that stops calling it.
+- Ruling 3's "standing temptation" argument is answered by the interlock in item 3, which is enforceable, rather
+  than by deletion, which in this shape would only relocate the problem into the installer.
+
+**What is NOT the design** (stated so a later lane does not try it): exposing the bootstrap mint over HTTP
+"just for first setup"; returning a private key from `sign_admin_csr`; or having the server generate the human
+keypair and POST it back. Each reintroduces the server-side key export that ruling 3 exists to close.
+
+### 6.4 The CLI twin — `admin generate-admin-cert` dispositioned in the same breath
+
+The same mint exists a second time, outside the server, and ruling 3's "must not be left as a temptation" applies
+to it equally. Re-derived at `d8a5cda`:
+
+| Item | Site |
+|---|---|
+| `cmd_admin_generate_admin_cert(args)` | `packages/cli/src/venya_cli/commands.py:3888` |
+| Keypair generated locally | `commands.py:3944` |
+| Lifetime **hardcoded literal**, not the constant | `commands.py:3963` (`not_valid_after(now + timedelta(days=90))`) |
+| SAN built DNS-only, no RFC822 branch | `commands.py:3987` (`x509.SubjectAlternativeName([x509.DNSName(identity)])`) |
+| Key written unencrypted | `commands.py:4000` (`NoEncryption()`) |
+| Identity shape guard | `_identity_forgery_error` (`commands.py:3872`), refuses RDN/SAN structural characters |
+| Registered surface | `cli.py:435-446`, dispatched at `commands.py:688-689` |
+
+Consequences for this design:
+
+- **Authorization is absent by construction, and that is honest only for an offline operator.** The command takes
+  the admin CA key from a local path (`VENYA_ADMIN_CA_DIR`, default `/var/lib/venya/ca/admin-ca`,
+  `commands.py:3911`) and needs `VENYA_ADMIN_CA_KEY_PASSPHRASE` (`:3929-3936`). Whoever holds those two things is
+  the CA. That is acceptable for a break-glass/offline bootstrap and **not** acceptable as the human admin path,
+  because ruling 2's attribution and the per-use role check (§3) both start at the ceremony.
+- **Plane marker is mandatory here too**: a cert minted by this command after §3.2 lands, with no marker, is
+  refused on the human path (403 naming the re-issue requirement). So the command becomes machine-plane-only by
+  documentation and by the marker it writes; RF-8/RF-10 own the text.
+- **The `days=90` literal is a drift hazard** — the server reads `ADMIN_CERT_VALIDITY_DAYS` (`ca.py:566`), the CLI
+  hardcodes it. Do not fix this with an import from `server` in the CLI; §4.1's capability-isolation rule
+  (`tests/test_capability_isolation.py`) says duplicate the literal, cite the source, and **bind it with a
+  contract test** that compares the two numbers, which is the same treatment the canonical-serial duplication
+  already gets (`commands.py:4005-4008` region). RF-8's cell, RF-11's docs.
+- The server-side mint has **no** identity-forgery guard (a grep for forgery/`_IDENTITY_FORGERY_CHARS` in
+  `ca.py` returns 0) while the CLI twin does. After §2.6 (identity derived from the session, never from the
+  caller) the human path no longer needs that guard, but the bootstrap mint still takes a caller-supplied
+  identity string from the installer (`$ADMIN_IDENTITY`, gated only by `venya_guard_injection` for shell
+  safety — `install-venya-core.sh:244`, `:372`). RF-7: carry the structural-character check to the bootstrap
+  signer; it is the cheap half of closing problem 3.
+
+### 6.5 The first-human chicken-and-egg (finding F-3; input to RF-7)
+
+Section 2.2 anchors issuance on **bearer session + elevation**, not on a cert — which is right, and which hits a
+middleware wall that chunk 1 did not record. Re-derived at `d8a5cda`:
+
+- `_is_admin_route(path)` is a prefix test: `path.startswith("/api/v1/admin/")` (`middleware/auth.py:313-322`).
+- When `admin_mtls.enabled`, an admin route goes through `_validate_admin_mtls(request)` (`:583-590`) with
+  `deny_on_missing_cert: bool = True` (`:328`) — so a **cert-less bearer session on an `/api/v1/admin/` path is
+  refused 403 before the handler runs** (`:378` shows the non-denying variant is opt-in).
+- The product already solves this shape twice, and RF-7 should use one of those mechanisms rather than invent a
+  third: `BOOTSTRAP_PATHS` (`:273`, used at `:565-578` with `deny_on_missing_cert=False` plus explicit token
+  validation — the #450 pre-init treatment), or `SESSION_REQUIRED_ADMIN_PATHS` (`:285-289`, the #340-A
+  cert-opens-the-channel/session-is-the-second-credential treatment).
+
+**Design position:** the issuance endpoint must not be reachable only behind an admin certificate — the first
+human has none. Either name it outside the `/api/v1/admin/` prefix, or classify it as a bootstrap path with the
+`deny_on_missing_cert=False` + session-must-validate shape already proven at `:565-578`. The choice is RF-7's, the
+requirement is not optional, and §2.7's rate-limit prefix question (§2.7) is decided by the same answer: a path
+that is *not* under `/api/v1/admin/` still has to be added to the DB-backed middleware's classified set
+(`middleware/rate_limit.py:268-274`) or it ships unlimited.
+
+If the design instead keeps the installer mint for the first human (6.3 item 1's narrower reading — machine plane
+minted by the installer, first human cert minted the same way and handed over once), then F-3 dissolves but the
+original exposure survives one install, and §10's age-out accounting has to count that cert too. Stated both
+ways so the owner can pick with the trade-off visible; this dossier's recommendation is the ceremony path plus
+the bootstrap fix.
+
+### 6.6 Test cells — the ones that exercise the retiring surface
+
+No suites were run for this leg (markdown only, per the dispatch). The cell inventory below is from grep at
+`d8a5cda`; RF-7 owns the rewrite.
+
+| Cell group | Count / site | Disposition |
+|---|---|---|
+| `TestAdminSignCert` (`packages/server/tests/test_admin_mtls.py:196`) | **12** cells, `:196-342`; 11 references to `sign_admin_cert` in the file | Positive-structure cells (CN, SAN RFC822 vs DNS branch, CLIENT_AUTH EKU, not-a-CA, signed-by-CA, P-256 key) migrate onto the narrowed bootstrap signer. `test_admin_cert_validity_90_days` becomes a **lifetime-parameter** cell, not a 90-day pin — the human plane lives in minutes (§5), the machine plane keeps the long lifetime (§1.2 R1) |
+| The key-return assertions in the same class | `test_admin_mtls.py:205`, `:321` (`_cert, key_pem, _ = …`) | `key_pem` keeps meaning for the bootstrap signer only; the human-path signer's cells must assert **no key in the return**, which is the pair to §2.5's rule |
+| SKI/AKI placement | `packages/server/tests/test_admin_cert_ski_aki_504.py:87, :106, :153, :199` (4 references) | Carried unchanged onto the new signer — the #504 placement law does not care who generated the key. `:152` (`test_incumbent_admin_ca_without_ski_still_signs_valid_leaves`) is the incumbent-deployment cell and is the template for §10's dual-path honesty |
+| New: caller interlock | does not exist | §6.3 item 3; both halves required (retired surface absent **and** the accessors that must remain, present) |
+| New: first-human reachability | does not exist | a session-only caller can obtain a first human cert with no admin certificate presented (§6.5); paired negative: a **cert-only** caller with no session must be refused, which is the #340-A ruling carried to the mint |
+
+### 6.7 Inheritance — what later legs take from this section
+
+- **RF-7:** the narrowed bootstrap contract (§6.3 item 1), the caller-interlock cell with both halves (§6.3 item
+  3), "no private key in the human-path return" (§6.3 not-the-design), the forgery-guard carry-over (§6.4 last
+  bullet), and the F-3 decision on first-human reachability (§6.5).
+- **RF-8:** the CLI twin's machine-plane-only framing and the `days=90` ↔ `ADMIN_CERT_VALIDITY_DAYS` contract
+  test (§6.4), plus its error text naming `venya admin init-admin-ca` as the prerequisite (already live at
+  `commands.py:3919`, `:3924`).
+- **RF-9:** the machine-plane credential's origin is this section — the loopback pair the core uses headlessly
+  (`install-venya-core.sh:1001-1007`) is what a service identity falls back on when it has no ceremony (§9).
+- **RF-10:** owns the two installer edits — the `scp` handoff text (`:978-981`) and the bootstrap call site
+  (`:411-429`) — and **both are owner-ok-gated per specific change**; the ordering law in §6.3 (installer commit
+  before the delete commit) is its acceptance criterion.
+- **RF-11:** the docs must say the core-side admin key stays unencrypted *because Q4a ruled it* (4d scope, the
+  carrier's verbatim word), must not let that sentence be quoted as cover for the seven other sites (§7), and
+  must carry the first-human story (§6.5) so an operator with a fresh install knows how a person gets a cert.
+
+<!-- SECTIONS 7-10 FOLLOW IN THIS DISPATCH. -->
+
+---
+
+## 7. The `NoEncryption()` audited list and the Q4a boundary
+
+**This section is mandatory statement 5.** The carrier's instruction is that the count be **audited, not
+remembered**, published with the enclosing function per site, with the ref it was measured at stated, and closed
+with the Q4a boundary sentence word-for-word. Ruling 4d scopes Q4a to the **core-side admin key ONLY**; that
+scope is law here and is not re-opened.
+
+### 7.1 The measurement
+
+Ref measured: **dev `d8a5cda`** (the `origin/dev` tip this dispatch fast-forwarded to; also the tip the KEK design
+note merged at). Command, verbatim:
+
+```
+grep -rn 'NoEncryption()' packages/ --include=*.py | grep -v '/tests/' | grep -v __pycache__
+```
+
+Result: **8 live non-test sites.** Test-file hits are a separate population (39 lines across 27 test files, plus
+`packages/executor/tests/conftest.py` and `helpers/cert_factory.py`) and are excluded from the boundary by
+classification, not by silence — see 7.4.
+
+| # | File:line | Enclosing function (`def` line) | What key it serializes | Classification |
+|---|---|---|---|---|
+| 1 | `packages/server/src/server/ca.py:815` | `AdminCAManager.sign_admin_cert` (`:732`) | the **core-side admin key** it generates at `:749` | **IN Q4a scope** (ruling 4d) |
+| 2 | `packages/cli/src/venya_cli/commands.py:2573` | `executor_register` (`:2389`) | executor keypair, workstation-built | outside the admin-path boundary |
+| 3 | `packages/cli/src/venya_cli/commands.py:2969` | `executor_cert_renew` (`:2799`) | executor keypair, renewal | outside the admin-path boundary |
+| 4 | `packages/cli/src/venya_cli/commands.py:3780` | `cmd_admin_init_admin_ca` (`:3737`) | **admin CA** key, no-passphrase branch | outside Q4a (CA key, not admin key) — #537 territory |
+| 5 | `packages/cli/src/venya_cli/commands.py:4000` | `cmd_admin_generate_admin_cert` (`:3888`) | admin keypair, CLI-side mint | outside Q4a as scoped (4d is core-side only) — flagged, 7.5 |
+| 6 | `packages/cli/src/venya_cli/at_rest_key.py:87` | `unwrap_at_rest` (`:53`) | decrypts to plaintext in memory | outside — #538 envelope territory |
+| 7 | `packages/executor/src/executor/daemon.py:594` | `register` (`:410`) | executor keypair at registration | outside the admin-path boundary |
+| 8 | `packages/executor/src/executor/daemon.py:774` | `rotate` (`:692`) | executor keypair at rotation | outside the admin-path boundary |
+
+Count by class: **1 in Q4a scope**, **7 outside the admin-path boundary** (sites 2-8), 0 test-file sites admitted
+into the product posture.
+
+### 7.2 Reconciliation — three counts, and which one this dossier measured
+
+The carrier orders the difference stated rather than smoothed, so it is stated three ways:
+
+| Claim | Source | Count | Status |
+|---|---|---|---|
+| **Nine** sites, two of them "this admin path" (9 − 2 = 7 outside) | `features/admin-key-short-lived-certs.md` scope guard | 9 | a **pin, not a measurement**; two of its nine are gone from the tree (7.3) |
+| **Eight** live non-test sites, one in `server/ca.py` | lead re-derivation at `d0bfbb4`, carried in the RF-6 carrier | 8 | matches this dossier's count, not all its line numbers |
+| **Eight** live non-test sites, one in `server/ca.py:815` | **this dossier, at `d8a5cda`** | **8** | the measurement this file publishes |
+
+**This dossier measured 8, at `d8a5cda`, and the 7-outside-the-boundary destination is reached by the live count
+(8 − 1 site in scope = 7), not by the pin's arithmetic (9 − 2 = 7).** Same destination, different route — exactly
+the divergence the carrier ordered kept visible.
+
+### 7.3 Why the pin's nine is not in the tree
+
+| Pin's site | What happened |
+|---|---|
+| `ca.py:94` — the `_serialize_key_encrypted` plaintext branch | **removed by #537** (`e3a760d`, "a set passphrase now refuses to write an unencrypted CA key"). At `d8a5cda` the else-branch is `raise RuntimeError(_unencrypted_key_refusal(passphrase_env))` (`ca.py:148`); the function's own docstring says the plaintext branch is gone and nothing is written (`ca.py:136-139`) |
+| `ca.py:747` / `:827` — the `sign_admin_cert` admin-key serialization | **still present, moved to `:815`** as `ca.py` shrank above it (the #539 accessor retirement, `d0d3d0d`) |
+| `get_ca_key_pem` (`CAManager`) | **retired by #539** (`d0d3d0d`); it is pinned-gone by `packages/server/tests/test_ca_key_accessor_retired_539.py:33` |
+
+The KEK design note (`docs/design-secure-memory-kek.md`, OPEN 3, merged at `d8a5cda`) still carries the older pin
+set — `ca.py:94`, `ca.py:747`, `commands.py:2551 / :2947 / :3758 / :3978`, `daemon.py:565 / :745`. **All of those
+line numbers are stale at `d8a5cda`** (the CLI sites moved to `:2573 / :2969 / :3780 / :4000`, the executor sites
+`:565 → :594` and `:745 → :774`). That note states its own non-correction policy — it does not amend docs outside
+itself — so this section is where the correction lands for the RF-6 series, and **RF-11 owns the note's OPEN 3
+pins** (finding F-5).
+
+**One more consumer of the same numbers, for the assembly pass:** §1.6 (chunk 1) published its table at
+`d0d3d0d`, and six of its eight pins moved between that tip and `d8a5cda` — `commands.py:2551 → :2573`,
+`:2947 → :2969`, `:3758 → :3780`, `:3978 → :4000` (carried by `bf1a462`, the #509 CLI change) and
+`daemon.py:573 → :594`, `:753 → :774` (carried by `0cfe661`/`e16c26b`, the #479 executor change). The count (8),
+the `ca.py:815` site, and `at_rest_key.py:87` did **not** move. §1.6 was correct when it was measured;
+**7.1 is the table that is correct at this tip**, and chunk 3's assembly pass should reconcile §1.6 to 7.1 rather
+than leave two pin sets in one file.
+
+### 7.4 The test-file population
+
+39 `NoEncryption()` hits live under `packages/*/tests/` (plus `conftest.py` and
+`packages/executor/tests/helpers/cert_factory.py`). They are test fixtures building executor/admin keypairs for
+assertions, not product delivery paths, and they are **not** in Q4a's scope or anyone's posture claim. They are
+listed here so that a future lane running an unfiltered `grep -rn 'NoEncryption()' packages/` gets 47 hits and does
+not conclude the audited count is 47, or start "fixing" fixtures. If a later change moves a product site into a
+helper, the count in 7.1 — not this paragraph — is the one that has to be updated.
+
+### 7.5 What Q4a does and does not cover (the boundary, stated for checkability)
+
+**In scope — one site.** `ca.py:815`, inside `AdminCAManager.sign_admin_cert`: the **core-side admin key**, which
+is the key the ruling `bydesign` speaks about ("leave admin.key unencrypted on the core", filesystem permission as
+the control). §6 dispositions that function; the disposition does not re-open the ruling — under §6.3 the pair
+stays core-side and stays `0600` (`install-venya-core.sh:426`), so the posture holds regardless of which
+disposition is chosen.
+
+**Out of scope — seven sites.** Everything else in 7.1. Two are worth naming because a reviewer may reach for the
+wrong cover:
+
+- **`commands.py:3780` (`cmd_admin_init_admin_ca`)** writes the **admin CA key**, not an admin key. The CA-key
+  posture question is #537 (write half) / #541 (load half), already live: the server-side equivalent now refuses
+  plaintext (`ca.py:148`) while this CLI branch still has a no-passphrase `else` that writes unencrypted. That
+  asymmetry is **a real gap and it is not Q4a's to cover** — RF-6 records it for the CA cluster as finding F-6.
+- **`commands.py:4000` (`cmd_admin_generate_admin_cert`)** writes an admin key, but **CLI-side**, in the
+  `venya admin generate-admin-cert` offline path (§6.4). Ruling 4d scopes Q4a to the *core-side* admin key, so
+  this site does not inherit the ruling. RF-10/RF-11 should treat the two admin-key paths together for operator
+text, and must not extend the `bydesign` word to this call site without a new ruling.
+
+**Test files** are out of scope by classification (7.4).
+
+### 7.6 The boundary sentence, verbatim (mandatory statement 5)
+
+> **The other sites are #537/#538 CA-cluster territory and must not be read as blanket-approved.**
+
+Carried word-for-word from ruling 4d as the carrier requires. Its purpose is specific and it is the reason 7.1
+exists as a table rather than a number: no future lane may cite the Q4a `bydesign` ruling as cover for any
+`NoEncryption()` site other than the core-side admin key at `ca.py:815` as measured at `d8a5cda`. The checkable
+form of the boundary is the enumerated list plus its ref: **re-run the 7.1 grep, and if the set differs from
+eight sites with one at `server/ca.py`, this section is stale and must be re-measured before anyone quotes
+it.**
+
+Also carried forward from the input contract, unchanged and still binding: **Q4a SCOPE IS RULED 4d — core-side
+admin key ONLY** (`features/admin-key-short-lived-certs.md`, "Rulings already made": *the core-side* `admin.key`
+*stays unencrypted; filesystem permission is the control*). This section neither widens nor narrows it.
+
+### 7.7 Inheritance — what later legs take from this section
+
+- **RF-7:** nothing here is its code surface — the one in-scope site belongs to the function §6 dispositions, and
+  RF-7 must not "fix" it as a drive-by; a CSR-path change leaves `ca.py:815` exactly as ruled.
+- **RF-8:** its mint-adjacent text must not imply the CLI-side admin key site (`commands.py:4000`) is ruled
+  (7.5); if RF-8 touches `init-admin-ca`/`generate-admin-cert`, the generated `docs/cli-reference.md` moves with
+  it and the generator interlock applies (§4.1 lineage).
+- **RF-9:** the executor-plane sites (2, 3, 7, 8) are the machine plane's own key handling — unchanged by this
+  design, and outside Q4a (§3.2's machine plane does not become a Q4a claim). Relevant to §9's renewal story.
+- **RF-10:** its installer edits must preserve the `0600` write behind the Q4a posture
+  (`install-venya-core.sh:426`), and it owns the two installer-adjacent CLI paths 7.5 names.
+- **RF-11:** publish **8, measured at `d8a5cda`** with the in-scope/out-of-scope split (1 + 7), never the
+  remembered nine (the same rule §1.7 carried from chunk 1 now has its audited source); carry the boundary
+  sentence in 7.6 into the docs where the posture question is discussed; and fix the KEK note's OPEN 3 pins
+  (F-5) in the changeset that touches that doc.
+- **CA cluster (#537 / #538 / #541):** F-6 — the `init-admin-ca` no-passphrase branch at `commands.py:3780` still
+  writes an unencrypted **CA** key while the server-side path refuses since `e3a760d`. Filed here as a finding,
+  not designed here: the envelope/CA-cluster legs own it, and RF-6 deliberately proposes no fix (4d boundary).
+
+<!-- SECTIONS 8-10 FOLLOW. -->
+
+---
+
+## 8. Windows remote-bootstrap limitation
+
+Problem 9 ("Windows admins cannot bootstrap remotely") is live and is **documented here rather than discovered
+mid-incident**. This section states the mechanism, what it does and does not forbid, and the consequence for
+admin issuance from a Windows workstation. It cites the venue laws and the shipped code, and it designs no
+Windows-specific branch.
+
+### 8.1 The mechanism, cited
+
+Re-verified facts, from the venue reference (`info/reference-win11-venue.md`, hard law 1, marked **RV-1006** —
+verified against the installed library) and the shipped CLI:
+
+| Fact | Evidence |
+|---|---|
+| On Windows the CLI uses the **platform WebAuthn API**, never raw CTAP | `packages/cli/src/venya_cli/fido2_client.py:152-167` (`WindowsClient`, lazy import of `fido2.client.windows`); `_make_webauthn_client` docstring `:137-156` |
+| Raw CTAP/HID on Windows 10 1903+ is restricted to elevated processes, and **enumeration itself is admin-only** — which is why there is no fallback | `fido2_client.py:140-149`: a fallback "would reproduce the silent admin-only failure this factory exists to eliminate"; callers get an explicit `Fido2ClientError` |
+| The platform API needs a **foreground window**: `fido2/client/windows.py:154` — `self.handle = handle or user32.GetForegroundWindow()`. Over SSH/WinRM that handle is `0` (no desktop), so **no ceremony can be driven or verified remotely** | venue law 1 (RV-1006), record `windows-fido2-requires-elevation` |
+| **The precondition is Medium integrity + a provably interactive desktop — NOT elevation.** The WebAuthn API docs state no elevation and no interactive-session requirement; the elevation line sits at the HID transport classes and the machine-wide install | venue law 1 second half (RV-1006, python-fido2 class docstring line 141: "…require admin priveleges to run (**unlike this one**)") |
+| **Device enumeration DOES work over SSH** (network-logon session, unfiltered token: `COUNT=1`, `U2F_V2/FIDO_2_0/…`, `clientPin: True`, `credMgmt: True`) | venue law 2 (2026-09-19 record) |
+| Windows dialogs own PIN/touch, and when no key is attached they **wait for insertion** — so terminal text written for raw CTAP ("touch your key") contradicts what the operator sees | `_win_ceremony_hint` (`commands.py:234-252`), win32-only, `None` elsewhere |
+
+**The venue's own technique statement is the design constraint:** "Preflight remotely, ceremony at the console —
+that split is the whole technique" (venue law 2). Never plan a remote-driven ceremony.
+
+### 8.2 What this means for the §2 path, item by item
+
+| §2 step | From a Windows workstation, at the console | From a Windows workstation, over SSH/WinRM |
+|---|---|---|
+| 1-2 login + elevate/assert (FIDO2 **assertion**) | works — the OS dialog owns PIN/touch | **impossible** (no desktop handle) |
+| 3 keygen + CSR | works — pure local crypto, no desktop needed | works — same, no ceremony |
+| 4 `POST /admin/certs/issue` | works | works — it is bearer + elevation-token auth, no ceremony in the request |
+| 5-6 store and use the short cert | works; NTFS ACL, not mode bits | works |
+
+So the limitation is **exactly the ceremony, not the credential**. The mint is reachable from a remote Windows
+session **only if the elevation assertion already succeeded somewhere with a desktop**, and the elevation token
+lives 60 seconds (`auth_elevation.py:36`, carried in §2.2). That pairing — 60-second token, ceremony requires a
+console — is what makes the combination unusable as a remote-bootstrap trick: there is no window in which a
+remote lane can hold a ceremony result it did not obtain at the console.
+
+**Stated as a rule for RF-7/RF-8: do not design or document any flow that assumes a Windows ceremony can be
+driven remotely, and do not lengthen the elevation window to make one work.** Two numbers are in play and only one
+of them is the tempting knob: the pending **challenge** row lives `ELEVATION_TOKEN_TTL_SECONDS * 5` = 300 s
+(`auth_elevation.py:76`) and the mint **token** the assertion produces lives 60 s (`:36`, `:309`). Widening either
+to rescue a remote Windows mint weakens the single-use/fresh-ceremony property §2.2 depends on.
+
+### 8.3 The consequence for admin issuance from a Windows workstation
+
+1. **A Windows admin must be physically at that machine's console for each mint** — first issuance and every
+   explicit renew (4b forbids automatic ceremony mid-run, so renew is also a console event). One FIDO2 touch
+   per hour of admin work is the operational cost, and 4a's word applies: cadence is driven by job length, not by
+   fear of expiry. A long job started from Windows should be pre-flighted (§4.5) and, if it will outlive the
+   cert, either be split or be run from a plane that can renew without a console — see item 3.
+2. **Remote Windows headless admin work is the machine plane's job, not the human plane's.** A scheduled task or
+   CI job on a Windows box cannot mint. Under `split` (§1.2 R1, §3.2) the answer for that workload is the
+   loopback/machine credential on the core, which the installer already documents in exactly that form
+   (`install-venya-core.sh:1001-1007`, the headless-core admin-mTLS CLI form). RF-9 owns that story (§9); this
+   section only records that Windows makes the boundary visible rather than creating it.
+3. **The `status` / lifetime-readable check (§4.5) works over SSH, and that is the Windows win.** It parses a
+   local file and needs no ceremony, so a remote preflight can tell the operator "this cert dies in 12 minutes —
+   go touch the key at the console before starting the job". RF-11's Windows doc should lead with
+   remote-`status` → console-ceremony → remote-run, which is venue law 2's split expressed as an admin workflow.
+4. **Break-glass stays platform-neutral.** The recovery-code path (`routes/recovery.py`, §3.7) is a typed code,
+   not a WebAuthn assertion, so it is usable from a remote Windows session — that matters precisely because a
+   Windows admin who cannot reach a console cannot mint. RF-11 must say this plainly rather than leaving it to
+   be found under pressure.
+5. **At-rest handling on Windows has no POSIX mode bits.** §2.4's `0600`/`0700` discipline is expressible as NTFS
+   ACLs, not modes; the honesty requirement is the one `modewarn` already carries (§1.4: POSIX-only check with the
+   Windows behavior stated). Related: the CLI's install-vs-use elevation split is by design and must not be
+   "fixed" (venue law 4 — machine-wide elevated install, unelevated use, `--link-mode copy` load-bearing), and
+   the first-use setup that trusts the core CA (`cmd_setup`, `commands.py:1544-1556`, refuses plaintext `http://`
+   per #497) is a non-ceremony step, so it can be done remotely.
+
+### 8.4 The test/venue rule for anyone accepting a Windows cell
+
+RF-8's Windows cells must follow the venue laws, and the dossier records them so a lane does not re-derive them:
+
+- A ceremony cell on `win11` is **interactive-desktop-only**; plan remote preflight + one console line. Session
+  `0` (`win`, elevated sshd, `INTEG=High`) has no desktop; the console session (`venyastd`, session 1,
+  `INTEG=Medium`, `USERINTERACTIVE=True`) is the ceremony plane — and the standard-user case needs that account,
+  not `win` (venue laws 1, 3; venue readout lines on session ids are marked decisive there).
+- Any "without elevation" criterion must be **proven at the desktop** and the paste must print its own integrity
+  answer (venue law 3 / the integrity-readout rule).
+- The win11 venue is a single-running box (at most one running network-wide, check both hypervisors before any
+  boot) and its lease must be re-derived at use time. **This RF-6 leg runs no cells and boots nothing** — no
+  fleet, per the dispatch.
+- FIDO2 asks to the owner name the key (A=admin / B=auditor / C=user in the owner's vocabulary) and go direct to
+  the owner in the lane's own harness, never through the lead, with a complete paste-ready command and zero
+  placeholders. The ceremony itself cannot be automated away, so the ask is the design's last mile on Windows.
+
+### 8.5 What this section does NOT say
+
+- It does not say Windows cannot be an admin workstation. It can: mint at the console, work remotely afterward.
+- It does not say the CLI is broken on Windows. `WindowsClient` is the supported unelevated path
+  (`fido2_client.py:143-146`) and HRESULTs are translated to operator text with the observed-code table at
+  `fido2_client.py:178-200`, deliberately evidence-driven ("accurate, never invented").
+- It does not propose a workaround that weakens the model: no remote ceremony, no longer-lived elevation token,
+  no server-side key export for Windows users (§6.3's "not the design" applies identically here), and no
+  standing human cert kept "because Windows is awkward".
+
+### 8.6 Inheritance — what later legs take from this section
+
+- **RF-7:** do not size the elevation TTL around remote Windows needs (§8.2 rule); nothing else in the mint
+  changes for Windows.
+- **RF-8:** the Windows ceremony guidance rides the existing `_win_ceremony_hint` mechanism
+  (`commands.py:234-252`), win32-only with POSIX output byte-identical — a renew/status string must follow that
+  same shape, and refusal text must not say "touch your key" on Windows where a dialog owns the touch (§8.1 last
+  row).
+- **RF-9:** remote/headless Windows admin work belongs to the machine plane (§8.3 item 2) — its service-identity
+  answer is where that workload lands.
+- **RF-10:** any Windows-facing installer/CLI text keeps the elevated-install / unelevated-use split (venue law
+  4) and the `--link-mode copy` behavior untouched.
+- **RF-11:** publish the Windows limitation in the admin docs, not in a footnote: console needed to mint and to
+  renew, remote `status` for preflight, recovery code reachable remotely, and the NTFS-vs-mode-bit honesty
+  (§8.3 items 1, 3, 4, 5). Pair it with the §3.6 disclosure note — a cert file synced out of a Windows profile
+  discloses the admin identity like any other copy.
+
+<!-- SECTIONS 9-10 FOLLOW. -->
+
+---
+
+## 9. Headless / service identity inside the `split` model
+
+RF-9's input. The question this section has to answer is the one ruling 1 leaves open: a machine has no person,
+so it has no ceremony — **what does a service identity do when its credential needs re-issuing and there is no
+human to touch a key?** The machine plane is unchanged by this design (§3.2 restated), and the answer is built
+from a mechanism the product already ships rather than a new one.
+
+### 9.1 The two planes, restated as RF-9's contract
+
+| | Machine plane | Human plane |
+|---|---|---|
+| Credential | loopback/service cert, **long-lived** | short admin cert, **60 minutes** (4a) |
+| Shape | **slot-shaped** — identity checked against `known_admin_ids` (`middleware/auth.py:415-431`, empty list fails closed `:416`) | **person-shaped** — identity is the session's `user_id`, allowlist does not apply, per-use role check (§3.3) |
+| Authorization | no role check, by ruling 2's own words (machines have no person) | role check every use; DB down ⇒ fail closed (§3.5) |
+| Ceremony | none, ever | one FIDO2 touch per mint (§2.1) |
+| Revocation | serial kill (`admin_cert_revocations`, `models.py:564`) + rotation | role removal is instant (§3.3); serial kill still available |
+| Handled by | unchanged by this design | RF-7 / RF-8 |
+
+**The plane is carried by the CA-written marker (§3.2), not inferred.** For RF-9 the consequence is that a
+service identity is not a degraded human identity — it is a different class with its own rules, and it must never
+be minted through the human endpoint (§2.7 route + §2.6 identity derivation is session-bound and cannot express a
+machine). That is why §2.2 refuses cert-based self-service.
+
+### 9.2 What the core already runs headless (re-derived, not assumed)
+
+The installer's own banner describes the live headless pattern — and it is the credential this design retires:
+
+```
+install-venya-core.sh:1001-1006
+  "On this HEADLESS core the CLI must use the admin-mTLS form (a plain 'venya admin ...' falls back to an"
+  "interactive FIDO2 login and dies without a workstation key):"
+    sudo -u venya env … VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt \\ VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \\ … venya admin executor-enroll <executor-id>
+```
+
+So today "headless admin" means: the `venya` service user on the core presents the installer-minted pair — an
+identity of the form `admin@${CORE_HOSTNAME}` (`:368`), which is also the value written into
+`known_admin_ids` (`:584`). It is a **slot identity by construction**: hostname-shaped, one per core, not a
+person. That is exactly the machine plane of §3.2, and it is the thing ruling 1 keeps long-lived and on the core.
+
+Two facts RF-9 must not lose:
+
+- The CLI's headless exemption is command-scoped: `admin_mtls_exempt = command == "admin" and … has_admin_mtls`
+  (`commands.py:167`), with `has_admin_mtls` set from the presence of both files (`api_client.py:357`), and
+  role-gated commands (`list/store/audit/…`) still require a token/FIDO2 per the comment at `:159-165`. The
+  headless surface is narrower than it looks, and the design does not widen it.
+- `dependencies.py:324-330` denies executor callers on admin routes outright — **the executor plane is not an
+  admin plane**, and no service-identity design should smuggle one in by reusing executor certs.
+
+### 9.3 The answer: ceremony-free re-issue already exists — the enrollment-token pattern
+
+The product's existing solution for "a machine needs a credential and has no human to ceremony" is executor
+enrollment, and it is a clean precedent because every piece is already implemented and audited:
+
+| Piece | Live shape | Site |
+|---|---|---|
+| An **admin** mints a short-lived, single-use bootstrap token | `enrl_exec_{base64url}`, `token_ttl_seconds` default **1800**, hashed with HMAC-SHA256 before storage, plaintext never stored | `routes/admin.py:1628-1680` (mint), `config.py:148-156` (`ExecutorEnrollmentConfig`, default 1800 s, `ge=120 le=86400`), wired at `config.py:373` |
+| The token is rate-limited and admin-gated | `Depends(rate_limit_admin_token_gen)` + `Depends(require_admin)` | `admin.py:1635-1636` |
+| Attribution survives the machine | `created_by` stores the acting principal **verbatim**, FK intentionally absent because mTLS CNs have no users row; forensic columns (`created_from_ip`, `created_from_user_agent`) are nullified after 90 days | `models.py:221-258` (`ExecutorEnrollmentToken`) |
+| The **machine** exchanges the token for a cert, key generated locally | `POST /api/v1/executors/register` with `executor_id` + `csr_pem`, token verified/consumed by hash (`executors.py:730-802`) | `routes/executors.py:140-141`, `:694`, `:730-802` |
+| The machine renews **without** a ceremony, before expiry | daemon generates a fresh keypair + CSR and re-registers; validates against the resolved anchor first (`_resolve_rotation_anchor`, #500) and stages writes key→cert→CA (#480) | `executor/daemon.py:692-790` (`rotate`), `:594` (`register`) |
+| Failure text is actionable and never silently degrades | `_token_required_error(rotation=True)` names the knob and the re-enrollment path | `daemon.py:740-748` |
+
+**Design answer for RF-9: a service identity behaves exactly like an executor.** It holds a long-lived machine
+credential minted by an admin-authorized bootstrap (token-shaped, single-use, TTL-bounded, attributed to the
+admin who minted it), it generates its own keypair where the key lives, and when its credential needs re-issuing
+it re-runs **its own enrollment/rotation**, not a ceremony. "No ceremony to re-run" is therefore not a gap: the
+rotation trigger is a **clock**, not an **expiry panic** — which is the same principle 4b states for humans
+(cadence by job length) applied to the plane that has no human at all.
+
+RF-9's open choices, named rather than decided here (none of them is a ruling): whether the admin-plane service
+token is a new table or a reuse of `executor_enrollment_tokens` with a scope column; the TTL for admin-plane
+service certs (ruling 4a bounds humans only); and whether the marker (§3.2) for a service identity is the
+`machine` value or a third value. **What is not optional:** whatever RF-9 picks, the minting event carries an
+attributable `created_by`, is rate-limited, is audited, and never mints a *person*-shaped credential.
+
+### 9.4 The four headless cases and their answers
+
+| Case | Today | Under this design |
+|---|---|---|
+| **A script a human starts and walks away from** | the copied standing cert works indefinitely | runs on a 60-minute human cert; if the job outlives it, it fails with the §4.4 refusal naming `venya admin cert renew` — 4b's ruled position (a paused script holding admin privileges is worse than a clean failure) |
+| **A long-running daemon with admin needs** (the `install-venya-core.sh:1001-1006` shape) | presents the installer-minted pair, no ceremony ever | stays on the **machine plane** with its own slot identity and marker; re-issued by §9.3's ceremony-free path, never by the human endpoint |
+| **CI / scheduled automation** | would have had the copied file | gets a service identity (§9.3) scoped to what it needs, or is refused; a shared human identity in a CI variable is the standing-credential hole re-dug in a different room |
+| **A core that lost its admin's key** | the copied file was the accidental answer | recovery code (§2.3, §3.7) plus machine-plane continuity — the core keeps running because its own credential never depended on a person (§8.3 item 4 notes recovery is also the remote Windows path) |
+
+### 9.5 What must be true of every service identity (acceptance list for RF-9)
+
+1. **Machine marker, no per-use role check** (§3.2, §3.3) — and a human-shaped request must not be able to obtain
+   it: the minting surface is admin-gated and the identity is a slot name, never a `user_id` (§2.6).
+2. **Key generated where it lives.** A service credential is never POSTed back as a key file; the machine submits
+   a CSR. This is both ruling 3's rule and the executor precedent's actual shape (`executors.py:694`).
+3. **Rotation is planned, not emergency.** A long-lived machine credential still needs a rotation story with a
+   window; the executor model shows the honest version — rotate before expiry, refuse to install a rotation
+   response that ships its own trust anchor (`daemon.py:758`, `:799`, #500), and fail loudly if the write target is
+   read-only (`daemon.py:715-721`, #480/erofs). RF-9 should copy those three properties, not just the happy path.
+4. **Attribution survives the machine.** The `created_by`-verbatim pattern (`models.py:227-233`) is how "which
+   human provisioned this service credential" stays answerable after that human's short cert is long dead. Audit
+   rows for admin *use* of a service credential name the slot, not a person (§3.4's negative case).
+5. **Allowlist membership is the machine's only authorization gate, so it must be tight** — `known_admin_ids` is
+   a config value the installer seeds from one operator string (`:584`, `config.py:271`). Every service identity
+   added to that list is a standing credential by definition; RF-9's docs must treat additions as a deliberate
+   act, and RF-11's runbook must state how to remove one (rotation + revocation, not just deletion of config).
+6. **No new capability** — ruling 1's third clause ("no new capability is required to remove the standing human
+   credential") is a budget on this section: RF-9's answer is the existing token/enrollment/rotation machinery
+   plus the §3.2 marker, not a new protocol.
+
+### 9.6 Inheritance — what later legs take from this section
+
+- **RF-7:** the service mint must not be reachable through the human issuance endpoint (§9.5 item 1); if RF-9
+  needs a mint surface, it is RF-7's sibling, not a flag on §2.7.
+- **RF-8:** a service identity is a CLI caller that never sees a ceremony prompt; the §4.4 refusal text must not
+  tell a daemon to "renew" in words that imply a human touch — the machine-plane renewal is a different command
+  story (§9.3), and §8's Windows honesty applies to any console-attached helper box.
+- **RF-9 (owner of this section):** the §9.3 mechanism choice, the §9.5 acceptance list, and the three named open
+  choices in §9.3's closing paragraph.
+- **RF-10:** the on-core headless credential and its banner (`:1001-1007`) are the installer's service-identity
+  surface; the marker write on that mint is RF-10's, and the `known_admin_ids` seeding (`:584`) is where a
+  service slot gets added or refused.
+- **RF-11:** the runbook must distinguish "the core is down because a human's clock or key failed" from "the core
+  is down because a machine credential aged out" — the second is the only one that should ever page, since the
+  first is now a person's `renew` away (§9.4 last row).
+
+<!-- SECTION 10 FOLLOWS. -->
+
+---
+
+## 10. Dual-path rollout, age-out accounting, and the installer consequence
+
+**This section carries mandatory statement 4.** It also carries the §5.3 skew consequence without re-deriving a
+different number (flag 2), and ends with the installer-return-shape item RF-10 must land.
+
+### 10.1 Statement 4, in full
+
+> **THE AGE-OUT DATE IS THE CLOSURE DATE OF THE ORIGINAL EXPOSURE.** Until the last 90-day admin certificate
+> dies, the scp'd-into-a-home-directory credential remains live in the wild. **The clock starts only when the
+> installer stops minting the old handoff — so RF-10's banner/mint change lands WITH OR AHEAD OF the rollout,
+> never trailing it** — otherwise the ceremony improved while the exposure kept being manufactured. **The
+> published date is COMPUTED as `max(install date) + 90 days` from the cut-over commit — not guessed.**
+
+That is ruling 4c carried as law, and every number below follows it.
+
+### 10.2 Why dual-path is safe, and why it is still an exposure (both halves stated)
+
+Safe on the mechanics — re-derived at `d8a5cda`:
+
+| Fact | Site |
+|---|---|
+| Old 90-day admin certs chain to the same Admin CA | `ADMIN_CA_VALIDITY_DAYS = 3650` (`ca.py:565`), so the CA does not move during rollout and nginx verification needs no edit (§1.3 problem 7) |
+| Old leaf lifetime is the 90-day constant | `ADMIN_CERT_VALIDITY_DAYS = 90` (`ca.py:566`), consumed at `ca.py:766` |
+| The app-side window check is the enforcer, not nginx | `middleware/auth.py:198-202` with `ssl_verify_client optional` at `install-venya-core.sh:911` (§4.1's corrected premise) |
+| Revocation-by-serial stays available for an early kill | `admin_cert_revocations` (`models.py:564`), enforced in-process at `auth.py:435-470` |
+
+Not safe on the posture — stated plainly, because this is the half a rollout doc tends to soften: for up to 90
+days after cut-over, **two credentials authenticate admin operations**, and one of them needs no ceremony, no
+session, and no role check (`dependencies.py:332-333` shortcut until §3.3 lands; CLI exemption at
+`commands.py:167`). A copy made before cut-over is indistinguishable, at the TLS layer, from the original.
+The design does not hide this behind "they're just legacy certs": the marker rule (§3.2) makes it **loud** — a
+no-marker cert is refused 403 on the human path with text naming the re-issue requirement — and the refusal is
+what makes the age-out observable rather than assumed.
+
+**One option the ruling closed, recorded so nobody re-litigates it:** re-rooting the Admin CA would end the dual
+path on day one, and 4c rules **against** it (`no re-root`). The costs the ruling accepted instead: a bounded
+90-day window, and the honest published date. If an operator needs the window shorter, the mechanism is
+**revocation of the known pre-cut-over serials** (a deliberate act, per §9.5 item 5), not a silent CA swap.
+
+### 10.3 The gate that starts the clock: the installer must stop minting the old handoff
+
+The mint-stop is two edits, both in `install-venya-core.sh`, both **owner-ok-gated per specific change** (Rules
+#1 and the Installer scripts section; the standing-approval amendment applies only once the shape is ruled in the
+ticket body and lead-verified):
+
+| # | What stops | Site | Nature of the change |
+|---|---|---|---|
+| M1 | The server-side key-returning mint for the first human cert | `:408-429` (call at `:420`, writes `admin.key` at `:424`/`:426`) | RF-7's replacement signer (§2.5b, §6.3) plus the installer commit that calls it. The delete of the old signature must NEVER precede this commit (§6.3 ordering law) |
+| M2 | The `scp` handoff instruction that creates the exposure | `:978-981` (`scp root@<core>:/etc/venya/admin/admin.{crt,key} ~/venya-admin.{crt,key}`) | text-only change to a ceremony instruction (§6.3 item 4) |
+
+**M2 is the exposure stop, M1 is the mint stop — and 4c's clock is tied to the LATER of the two, per deployment.**
+An installer that mints the old shape but stops advertising the copy still manufactures the standing credential;
+an installer that stops minting but keeps printing the `scp` line points operators at a file that no longer
+exists. Both must land together for the clock to be honest. The banner's "Until you do, admin endpoints will
+return 403" line (`:988`) is replaced in the same change, since after cut-over the true statement is "run
+`venya admin cert issue`" (§4.4's naming law applied to install text).
+
+### 10.4 The published date, computed
+
+The formula is `max(install date) + 90 days`, taken **from the cut-over commit**, and it is computable — here is
+the arithmetic and the inputs, with the measurement caveats that make it a computation rather than a guess.
+
+1. **Per-deployment age-out instant** = that deployment's admin-cert mint instant + 90 days. The mint instant is
+   not guessed: it is inside the certificate (`not_valid_before`/`not_valid_after`, set from
+   `datetime.now(UTC)` at `ca.py:745`/`:766`), so the authoritative per-install value is read, not estimated:
+   `openssl x509 -in /etc/venya/admin/admin.crt -noout -enddate`. On a deployment whose cert was re-minted, the
+   newest cert is the one that matters.
+2. **Fleet/estate-wide published date** = `max` over deployments of item 1. For a single organization's own
+   estate that is an enumerable set (the `ADMIN_CERT_ISSUED` audit rows carry `not_valid_after` per §2.8 once
+   RF-7 lands; pre-cut-over installs have **no** such rows — see item 4).
+3. **The cut-over commit is the anchor for anything you cannot observe.** 90 days from the cut-over commit is the
+   first date after which **no** pre-cut-over credential can still validate anywhere — because every
+   pre-cut-over cert was minted at or before the moment the new installer shipped. Late installs from an
+   **old** tarball break that reasoning, which is why the carrier's "WITH OR AHEAD OF" rule (§10.3) is about the
+   mint, not the docs.
+4. **Honest limit — the copy is the unknown, not the date.** A pre-cut-over `venya-admin.key` copied to a home
+   directory validates on its own schedule; nothing in the system knows where copies exist. So the published date
+   is stated as: **"the exposure window closes on `<computed date>` at the latest; a copy made earlier stays live
+   until then unless its serial is revoked."** The escrowed answer for anyone who cannot wait is revocation
+   (§2.9) — which is a decision with a lockout cost, since the same serial may be the core's own loopback
+   credential (§9.2): revoke the right serial, not the plane.
+5. **Worked example, labelled as an example, not a measurement.** If cut-over commits on 2026-10-15, the published
+   date is 2027-01-13 (90 days), and any cert minted earlier is dead by then — while the §5 skew tail (§10.5)
+   means the effective instant is the cert's `not_valid_after` plus the deployment's tolerance, not the timestamp
+   on the poster.
+
+The one-line rule for RF-11: **the date is produced by running something, never by writing a date.** If RF-11
+publishes a date it cannot tie to step 1, 2, or 3, it is guessing and the statement is void.
+
+### 10.5 The skew tail, carried from §5.3 (flag 2) — no new number
+
+Section 5.3 measured, at this tip, that `cert_tolerance_seconds` defaults to **300** (`config.py:248-253`,
+`ge=0 le=600`), is consumed at `middleware/auth.py:198`, and therefore turns a ruled 60-minute life into a
+**65-minute effective window (+8.3 %)**; its design position is to lower the default to **≤ 60 s** and bind the
+relationship with an assertion cell at `tolerance ≤ lifetime/20`, with **RF-7 owning the value**. This section
+adopts that recommendation unchanged and states its rollout consequences:
+
+- **The age-out instant has a tail.** A credential is replayable until `not_valid_after + tolerance` (§5.3's
+  mechanism is the application's own admission decision at `auth.py:202`). With the default unlit at 300 s, every
+  published date in §10.4 is **five minutes optimistic**. So the computed date is published with the tolerance
+  stated alongside — `max(...) + 90 days + cert_tolerance_seconds`, current value read from the deployment's
+  config — or the tolerance change lands before the date is published. Rounding a published closure date down is
+  the failure mode this bullet exists to prevent.
+- **The tail shrinks with the fix, and the fix is not this leg's to size.** §5.3 already owns the fraction
+  arithmetic (300 s = 8.3 % at 60 minutes; 60 s = 1.7 %). RF-7 picks the value; rollout text quotes it.
+- **Tolerance also applies to the 90-day legacy path**, where it is 0.08 % of life and harmless — which is exactly
+  §5.3's point about a default sized for the old lifetime. Dual-path rollout therefore has a **worse** relative
+  skew exposure on the short path than the legacy path until RF-7 lowers the default, and the rollout doc must not
+  present the short path as strictly better on day one.
+- **Do not** resolve the tail by widening `token_tolerance_seconds` (§5.5's "do not unify the knobs") or by
+  setting tolerance to 0 as a headline without the §5.6 cell that proves the refusal text still names drift.
+- **The knob stays unmanaged in the installer** — no `VENYA_CLOCK_SKEW*` entry in `MANAGED_ENV_KEYS`
+  (`install-venya-core.sh:555`, §5.5), so a deployment's tolerance is an operator act, and §10.4's computed date
+  must read it per deployment rather than assume the default.
+
+### 10.6 Rollout sequence (what lands when), with the owner-gated items marked
+
+| Step | Lands | Gate |
+|---|---|---|
+| 0 | `modewarn` (`features/admin-key-mode-warn.md`, RULED YES) — interim, independent, ships now (§1.4) | none new |
+| 1 | RF-7: the issuance endpoint, the narrowed signer, the plane marker, the tolerance value + assertion cell, the §6.5 first-human reachability fix | code review; **no installer text** |
+| 2 | RF-8: CLI keygen/CSR, `renew`, `status`, refusal strings | code review |
+| 3 | **RF-10: M1 + M2 — the mint stop and the `scp` stop** | **owner's ok per specific installer change**, and it must land WITH OR AHEAD OF step 4 |
+| 4 | Rollout to the fleet: new server/CLI builds, operators re-issue via ceremony | the age-out clock starts here, not at step 1 |
+| 5 | RF-11: published computed date (§10.4), NTP note (§5.4), Windows story (§8), lockout paths (§3.7) | docs |
+| 6 | On the published date: verify no pre-cut-over serial validates; anything still live is revoked by serial (§2.9) | ops; the **evidence** is the §10.4 step-1 read, not a calendar |
+
+Step 3 before step 4 is the whole content of 4c's "mint-stop-first". If a fleet update ships without it, the
+ceremony improved, the exposure kept being manufactured, and the published date is a lie about closure.
+
+### 10.7 The installer return-shape consequence (RF-10's item, ending this section as the carrier requires)
+
+The installer's bootstrap block is written against `sign_admin_cert`'s **three-value return**. At `d8a5cda`:
+
+- `install-venya-core.sh:420` — `cert, key_pem, cert_pem = cm.sign_admin_cert(sys.argv[1])`
+- `:423-424` — writes `cert_pem` to `admin.crt` and **`key_pem` to `admin.key`**
+- `:425-426` — `0644` on the cert, `0600` on the key (the control behind the Q4a posture, §7.5)
+- `:978-981` — the copy instruction that turns that on-core pair into a home-directory credential
+
+Under §2.5b and §6.3 the human-path signer returns **a certificate and nothing else**. So the installer's
+unpacking is the exact point where the new design and the old handoff part company, and the consequence for RF-10
+is a short list of concrete shape changes, all owner-ok-gated:
+
+1. **A human-path call site must not unpack a key.** The tuple `cert, key_pem, cert_pem` is the old contract; if
+   the bootstrap keeps a key-returning mint (machine plane, §6.3 item 1), that call must be visibly the
+   *bootstrap* one, and no human-path flow may reach a `key_pem` variable. §6.3 item 3's interlock cell is what
+   keeps this honest in CI.
+2. **The `0600` write stays where Q4a rules it** (core-side admin key, §7.5) and disappears from any human-path
+   write, because there is no human-path key file to write.
+3. **The copy block (`:978-981`) becomes a ceremony instruction** naming the real command, and the "admin
+   endpoints will return 403" line (`:988`) is rewritten in the same edit — 4b's naming law applies to install
+   text, not just to errors.
+4. **`known_admin_ids` seeding stays** (`:584`, from `$ADMIN_IDENTITY`, default `admin@${CORE_HOSTNAME}` `:368`,
+   key managed at `:555`) because the machine plane still uses the allowlist (§3.2, §9.5 item 5) — but its
+   **meaning shifts** on the human path, which is exactly the transition ruling 2 assigned to RF-10/RF-11.
+   It is not a semantics edit to the config field; it is a doc + banner change about who appears in it.
+5. **The re-run passphrase carry must keep working** — the block at `:333-347` reuses the stored admin CA
+   passphrase precisely because a re-mint against a preserved encrypted CA key otherwise "aborts the run at
+   `sign_admin_cert`" (`:341`). Any RF-10 edit that renames or replaces that function must update this comment
+   and preserve the precedence chain (explicit env > stored > prompt > random), or a re-run on an existing
+   install breaks in a way that looks like a passphrase bug.
+
+### 10.8 Inheritance — what later legs take from this section
+
+- **RF-7:** the tolerance value and the `lifetime/20` assertion cell (§10.5, owned there, sized in §5.3), and the
+  marker rule that makes the dual path observable (§10.2).
+- **RF-8:** nothing here changes its code surface; its strings feed §10.7 item 3's banner text.
+- **RF-9:** the revocation-with-lockout-cost note (§10.4 item 4) — a pre-cut-over serial may be the core's own
+  loopback credential, so serial kills need the §9 plane map first.
+- **RF-10:** **this section is its spec** — M1/M2 (§10.3), the ordering law (step 3 before step 4), the
+  return-shape list (§10.7 items 1-5), and the owner-ok gate on every installer edit.
+- **RF-11:** statement 4 verbatim (§10.1), the computed-date procedure with its honest limit (§10.4 items 1-5),
+  the tolerance tail in the published date (§10.5 first bullet), the "the date is produced by running something"
+  rule, and the dual-path honesty (§10.2's second paragraph) — including that the short path is not strictly
+  better than the legacy path until the tolerance default comes down.
