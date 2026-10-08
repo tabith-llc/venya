@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 from core.engine.rate_limiter import RateLimitExceededError
 from fastapi import HTTPException, Request, status
+from sqlalchemy.exc import SQLAlchemyError
 
 from .utils.rate_limiter import SlidingWindowRateLimiter
 
@@ -134,8 +135,26 @@ async def rate_limit_registration(request: Request) -> None:
     # ImportError, swallowed by the blanket except below, so is_first was ALWAYS
     # False and the first-attempt path was dead. Correct depth is `.dependencies`.
     # (Making the limiter persistent alone would not have made it live.)
+    #
+    # #442 site 2: the fault case now selects the STRICTER reading, not the looser
+    # one. Inside the probe block `is_first` starts True and only a probe that
+    # COMPLETES is allowed to move it to False — so "we could not tell" is treated
+    # as "first attempt", and the tight registration_first_attempt_per_minute
+    # limiter holds the IP key. The same ImportError class that killed M-63 is
+    # still the shape of the risk: a silent fall-open here was invisible, and this
+    # file's own comment records it. An unanticipated exception class propagates
+    # (the request is refused with a 500), which is still the stricter side — no
+    # code path grants the loose limit on uncertainty. Narrowed from the blanket
+    # `except Exception: pass`, which swallowed everything including the ImportError
+    # above.
+    #
+    # The default OUTSIDE the block stays False, deliberately: a request with no
+    # executor_id never had a probe that could fail, and this fix changes the FAULT
+    # case only. That path keeps its per-IP limiter behavior unchanged.
     is_first = False
     if executor_id and ip_limiter is not None:
+        # No answer yet, so no loosening yet: strict until the lookup completes.
+        is_first = True
         try:
             from .dependencies import get_backend
 
@@ -145,11 +164,23 @@ async def rate_limit_registration(request: Request) -> None:
                 from core.iam.models import ExecutorCert
 
                 cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
+                # The one assignment that may loosen: evidence that a cert exists.
                 is_first = cert is None
             finally:
                 db.close()
-        except Exception:  # nosec B110 — best-effort DB query, None falls through  # noqa: S110
-            pass
+        except (
+            HTTPException,
+            ImportError,
+            AttributeError,
+            TypeError,
+            SQLAlchemyError,
+        ) as exc:  # named classes only — no blanket swallow, and never silent
+            logger.warning(
+                "First-registration probe failed (%s: %s) — applying the stricter first-attempt limiter",
+                type(exc).__name__,
+                getattr(exc, "detail", None) or str(exc) or "no message",
+            )
+            is_first = True
 
     # Dual-key AND check. Every key is guarded by ITS OWN dedicated limiter, so
     # per-IP and per-executor throttle independently. Both must pass: a request
