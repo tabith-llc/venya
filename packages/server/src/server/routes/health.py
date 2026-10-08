@@ -111,11 +111,17 @@ def _determine_status(checks: dict[str, str]) -> tuple[str, int]:
     - "ok" → HTTP 200 (all checks ok or skipped)
     - "degraded" → HTTP 200 (non-critical check failed, e.g. admin CA)
     - "error" → HTTP 503 (critical check failed, e.g. main CA)
+
+    Failure values counted toward "degraded": "error", "check_failed" and
+    "uninitialized" (refs #455 — a component whose probe could not be wired
+    yet reads degraded, not "ok": an unchecked state is never proof of
+    health). HTTP codes are unchanged from the pre-#455 contract: only the
+    ``checks`` value distinguishes "not initialized yet" from "probe broke".
     """
     critical_keys = {"ca"}
     values = list(checks.values())
 
-    has_error = any(v in ("error", "check_failed") for v in values)
+    has_error = any(v in ("error", "check_failed", "uninitialized") for v in values)
     has_critical_error = any(checks[k] in ("error", "check_failed") for k in critical_keys if k in checks)
 
     if has_critical_error:
@@ -150,15 +156,31 @@ async def health_check(request: Request) -> JSONResponse:
     else:
         checks["ca"] = "skipped"
 
-    # Admin CA check — only when config exists and admin_mtls is enabled
+    # Admin CA check — only when config exists and admin_mtls is enabled.
+    #
+    # #455: admin_mtls enabled but the manager not yet on state is its OWN
+    # state ("uninitialized", logged at WARNING), not a silent pass and not
+    # the "check_failed" answer a broken probe yields. The old
+    # ``except RuntimeError: pass`` never fired — _get_cached_check already
+    # swallows every exception into "check_failed" — so an uninitialized
+    # manager and a broken one returned byte-identical bodies. Presence of
+    # the manager is inspected directly (mirroring the honest "skipped"
+    # vocabulary the main CA check uses above) so the two states read
+    # differently.
     config = getattr(request.app.state, "config", None)
-    if config is not None and getattr(config, "admin_mtls", None) is not None and config.admin_mtls.enabled:
-        try:
+    admin_mtls = getattr(config, "admin_mtls", None) if config is not None else None
+    if admin_mtls is not None and admin_mtls.enabled:
+        if getattr(request.app.state, "admin_ca_manager", None) is None:
+            checks["admin_ca"] = "uninitialized"
+            logger.warning(
+                "admin CA readiness probe NOT RUN: admin_mtls is enabled but "
+                "admin_ca_manager is not initialized yet — reporting "
+                "'uninitialized' (degraded), not 'ok'"
+            )
+        else:
             admin_ca_result = _get_cached_check("admin_ca", lambda: _check_admin_ca(request.app))
             if admin_ca_result != "skipped":
                 checks["admin_ca"] = admin_ca_result
-        except RuntimeError:
-            pass  # admin_ca_manager not yet initialized
 
     status, http_status = _determine_status(checks)
     return JSONResponse(
