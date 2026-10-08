@@ -1392,3 +1392,128 @@ RF-8's Windows cells must follow the venue laws, and the dossier records them so
   discloses the admin identity like any other copy.
 
 <!-- SECTIONS 9-10 FOLLOW. -->
+
+---
+
+## 9. Headless / service identity inside the `split` model
+
+RF-9's input. The question this section has to answer is the one ruling 1 leaves open: a machine has no person,
+so it has no ceremony — **what does a service identity do when its credential needs re-issuing and there is no
+human to touch a key?** The machine plane is unchanged by this design (§3.2 restated), and the answer is built
+from a mechanism the product already ships rather than a new one.
+
+### 9.1 The two planes, restated as RF-9's contract
+
+| | Machine plane | Human plane |
+|---|---|---|
+| Credential | loopback/service cert, **long-lived** | short admin cert, **60 minutes** (4a) |
+| Shape | **slot-shaped** — identity checked against `known_admin_ids` (`middleware/auth.py:415-431`, empty list fails closed `:416`) | **person-shaped** — identity is the session's `user_id`, allowlist does not apply, per-use role check (§3.3) |
+| Authorization | no role check, by ruling 2's own words (machines have no person) | role check every use; DB down ⇒ fail closed (§3.5) |
+| Ceremony | none, ever | one FIDO2 touch per mint (§2.1) |
+| Revocation | serial kill (`admin_cert_revocations`, `models.py:564`) + rotation | role removal is instant (§3.3); serial kill still available |
+| Handled by | unchanged by this design | RF-7 / RF-8 |
+
+**The plane is carried by the CA-written marker (§3.2), not inferred.** For RF-9 the consequence is that a
+service identity is not a degraded human identity — it is a different class with its own rules, and it must never
+be minted through the human endpoint (§2.7 route + §2.6 identity derivation is session-bound and cannot express a
+machine). That is why §2.2 refuses cert-based self-service.
+
+### 9.2 What the core already runs headless (re-derived, not assumed)
+
+The installer's own banner describes the live headless pattern — and it is the credential this design retires:
+
+```
+install-venya-core.sh:1001-1006
+  "On this HEADLESS core the CLI must use the admin-mTLS form (a plain 'venya admin ...' falls back to an"
+  "interactive FIDO2 login and dies without a workstation key):"
+    sudo -u venya env … VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt \\ VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \\ … venya admin executor-enroll <executor-id>
+```
+
+So today "headless admin" means: the `venya` service user on the core presents the installer-minted pair — an
+identity of the form `admin@${CORE_HOSTNAME}` (`:368`), which is also the value written into
+`known_admin_ids` (`:584`). It is a **slot identity by construction**: hostname-shaped, one per core, not a
+person. That is exactly the machine plane of §3.2, and it is the thing ruling 1 keeps long-lived and on the core.
+
+Two facts RF-9 must not lose:
+
+- The CLI's headless exemption is command-scoped: `admin_mtls_exempt = command == "admin" and … has_admin_mtls`
+  (`commands.py:167`), with `has_admin_mtls` set from the presence of both files (`api_client.py:357`), and
+  role-gated commands (`list/store/audit/…`) still require a token/FIDO2 per the comment at `:159-165`. The
+  headless surface is narrower than it looks, and the design does not widen it.
+- `dependencies.py:324-330` denies executor callers on admin routes outright — **the executor plane is not an
+  admin plane**, and no service-identity design should smuggle one in by reusing executor certs.
+
+### 9.3 The answer: ceremony-free re-issue already exists — the enrollment-token pattern
+
+The product's existing solution for "a machine needs a credential and has no human to ceremony" is executor
+enrollment, and it is a clean precedent because every piece is already implemented and audited:
+
+| Piece | Live shape | Site |
+|---|---|---|
+| An **admin** mints a short-lived, single-use bootstrap token | `enrl_exec_{base64url}`, `token_ttl_seconds` default **1800**, hashed with HMAC-SHA256 before storage, plaintext never stored | `routes/admin.py:1628-1680` (mint), `config.py:148-156` (`ExecutorEnrollmentConfig`, default 1800 s, `ge=120 le=86400`), wired at `config.py:373` |
+| The token is rate-limited and admin-gated | `Depends(rate_limit_admin_token_gen)` + `Depends(require_admin)` | `admin.py:1635-1636` |
+| Attribution survives the machine | `created_by` stores the acting principal **verbatim**, FK intentionally absent because mTLS CNs have no users row; forensic columns (`created_from_ip`, `created_from_user_agent`) are nullified after 90 days | `models.py:221-258` (`ExecutorEnrollmentToken`) |
+| The **machine** exchanges the token for a cert, key generated locally | `POST /api/v1/executors/register` with `executor_id` + `csr_pem`, token verified/consumed by hash (`executors.py:730-802`) | `routes/executors.py:140-141`, `:694`, `:730-802` |
+| The machine renews **without** a ceremony, before expiry | daemon generates a fresh keypair + CSR and re-registers; validates against the resolved anchor first (`_resolve_rotation_anchor`, #500) and stages writes key→cert→CA (#480) | `executor/daemon.py:692-790` (`rotate`), `:594` (`register`) |
+| Failure text is actionable and never silently degrades | `_token_required_error(rotation=True)` names the knob and the re-enrollment path | `daemon.py:740-748` |
+
+**Design answer for RF-9: a service identity behaves exactly like an executor.** It holds a long-lived machine
+credential minted by an admin-authorized bootstrap (token-shaped, single-use, TTL-bounded, attributed to the
+admin who minted it), it generates its own keypair where the key lives, and when its credential needs re-issuing
+it re-runs **its own enrollment/rotation**, not a ceremony. "No ceremony to re-run" is therefore not a gap: the
+rotation trigger is a **clock**, not an **expiry panic** — which is the same principle 4b states for humans
+(cadence by job length) applied to the plane that has no human at all.
+
+RF-9's open choices, named rather than decided here (none of them is a ruling): whether the admin-plane service
+token is a new table or a reuse of `executor_enrollment_tokens` with a scope column; the TTL for admin-plane
+service certs (ruling 4a bounds humans only); and whether the marker (§3.2) for a service identity is the
+`machine` value or a third value. **What is not optional:** whatever RF-9 picks, the minting event carries an
+attributable `created_by`, is rate-limited, is audited, and never mints a *person*-shaped credential.
+
+### 9.4 The four headless cases and their answers
+
+| Case | Today | Under this design |
+|---|---|---|
+| **A script a human starts and walks away from** | the copied standing cert works indefinitely | runs on a 60-minute human cert; if the job outlives it, it fails with the §4.4 refusal naming `venya admin cert renew` — 4b's ruled position (a paused script holding admin privileges is worse than a clean failure) |
+| **A long-running daemon with admin needs** (the `install-venya-core.sh:1001-1006` shape) | presents the installer-minted pair, no ceremony ever | stays on the **machine plane** with its own slot identity and marker; re-issued by §9.3's ceremony-free path, never by the human endpoint |
+| **CI / scheduled automation** | would have had the copied file | gets a service identity (§9.3) scoped to what it needs, or is refused; a shared human identity in a CI variable is the standing-credential hole re-dug in a different room |
+| **A core that lost its admin's key** | the copied file was the accidental answer | recovery code (§2.3, §3.7) plus machine-plane continuity — the core keeps running because its own credential never depended on a person (§8.3 item 4 notes recovery is also the remote Windows path) |
+
+### 9.5 What must be true of every service identity (acceptance list for RF-9)
+
+1. **Machine marker, no per-use role check** (§3.2, §3.3) — and a human-shaped request must not be able to obtain
+   it: the minting surface is admin-gated and the identity is a slot name, never a `user_id` (§2.6).
+2. **Key generated where it lives.** A service credential is never POSTed back as a key file; the machine submits
+   a CSR. This is both ruling 3's rule and the executor precedent's actual shape (`executors.py:694`).
+3. **Rotation is planned, not emergency.** A long-lived machine credential still needs a rotation story with a
+   window; the executor model shows the honest version — rotate before expiry, refuse to install a rotation
+   response that ships its own trust anchor (`daemon.py:758`, `:799`, #500), and fail loudly if the write target is
+   read-only (`daemon.py:715-721`, #480/erofs). RF-9 should copy those three properties, not just the happy path.
+4. **Attribution survives the machine.** The `created_by`-verbatim pattern (`models.py:227-233`) is how "which
+   human provisioned this service credential" stays answerable after that human's short cert is long dead. Audit
+   rows for admin *use* of a service credential name the slot, not a person (§3.4's negative case).
+5. **Allowlist membership is the machine's only authorization gate, so it must be tight** — `known_admin_ids` is
+   a config value the installer seeds from one operator string (`:584`, `config.py:271`). Every service identity
+   added to that list is a standing credential by definition; RF-9's docs must treat additions as a deliberate
+   act, and RF-11's runbook must state how to remove one (rotation + revocation, not just deletion of config).
+6. **No new capability** — ruling 1's third clause ("no new capability is required to remove the standing human
+   credential") is a budget on this section: RF-9's answer is the existing token/enrollment/rotation machinery
+   plus the §3.2 marker, not a new protocol.
+
+### 9.6 Inheritance — what later legs take from this section
+
+- **RF-7:** the service mint must not be reachable through the human issuance endpoint (§9.5 item 1); if RF-9
+  needs a mint surface, it is RF-7's sibling, not a flag on §2.7.
+- **RF-8:** a service identity is a CLI caller that never sees a ceremony prompt; the §4.4 refusal text must not
+  tell a daemon to "renew" in words that imply a human touch — the machine-plane renewal is a different command
+  story (§9.3), and §8's Windows honesty applies to any console-attached helper box.
+- **RF-9 (owner of this section):** the §9.3 mechanism choice, the §9.5 acceptance list, and the three named open
+  choices in §9.3's closing paragraph.
+- **RF-10:** the on-core headless credential and its banner (`:1001-1007`) are the installer's service-identity
+  surface; the marker write on that mint is RF-10's, and the `known_admin_ids` seeding (`:584`) is where a
+  service slot gets added or refused.
+- **RF-11:** the runbook must distinguish "the core is down because a human's clock or key failed" from "the core
+  is down because a machine credential aged out" — the second is the only one that should ever page, since the
+  first is now a person's `renew` away (§9.4 last row).
+
+<!-- SECTION 10 FOLLOWS. -->
