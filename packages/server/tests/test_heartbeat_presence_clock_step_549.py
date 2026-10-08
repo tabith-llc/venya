@@ -27,11 +27,13 @@ presence is the claim that routes work at a target, and a stamp the reader
 cannot place in its own past is a claim it cannot prove — false LIVE is the
 unsafe direction. The cost is the other half of the sentence: a genuinely live
 executor whose stamp sits ahead of a stepped-back reader clock reads absent
-until its next beat lands on the corrected clock, which the daemon writes every
-30 s (``HeartbeatIntervalSeconds``-class default; see ``executor/daemon.py``).
+until its next beat lands on the corrected clock, which is a short gap — the
+daemon's main loop beats on a literal 30 s cadence
+(``self._shutdown_event.wait(30.0)`` in ``executor/daemon.py`` ``_main_loop``,
+verified at this base; it is not a config knob).
 So the failure is a short, self-healing display gap, not a stale routing
 target. Option (b) (a skew tolerance window) was rejected: it would keep the
-false-LIVE half open by the width of the tolerance, and the tolerance value
+false-LIVE half open by the width of the tolerance, and that tolerance value
 belongs to certificate validity in ``executor/daemon.py``, not to presence.
 
 The 60 s window VALUE is unchanged and no config knob is added; the response
