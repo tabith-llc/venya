@@ -15,8 +15,8 @@ import hashlib
 import json
 import logging
 import secrets
-import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from core.utils.entropy import get_secure_token
@@ -26,8 +26,9 @@ from .browser_adapter import base64url_encode
 logger = logging.getLogger(__name__)
 
 # Ceremony timeout (ms) actually sent to the authenticator in both option
-# builders below. Stored challenges are swept with a x5 grace factor,
-# mirroring the #345 elevation precedent (ELEVATION_TOKEN_TTL_SECONDS * 5).
+# builders below. Stored challenges expire with a x5 grace factor,
+# mirroring the #345 elevation precedent (ELEVATION_TOKEN_TTL_SECONDS * 5);
+# since #534 the window is the row's expires_at, swept at the next touch.
 CHALLENGE_TIMEOUT_MS = 60_000
 CHALLENGE_TTL_SECONDS = CHALLENGE_TIMEOUT_MS // 1000 * 5
 
@@ -54,9 +55,41 @@ def _b64_decode(s: str) -> bytes:
     return base64.b64decode(padded, validate=True)
 
 
+def _encode_payload(value: Any) -> Any:
+    """JSON-safe encode: bytes become {"__b64__": ...}, recursively.
+
+    A ceremony payload carries raw_challenge (bytes) and
+    existing_credential_ids (a list of bytes), and the DB column is JSON
+    text, so byte values are tagged rather than stringified (#534).
+    """
+    if isinstance(value, bytes):
+        return {"__b64__": base64.b64encode(value).decode("ascii")}
+    if isinstance(value, dict):
+        return {k: _encode_payload(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_encode_payload(v) for v in value]
+    return value
+
+
+def _decode_payload(value: Any) -> Any:
+    """Inverse of _encode_payload: tagged dicts become bytes, recursing."""
+    if isinstance(value, dict):
+        if set(value) == {"__b64__"}:
+            return base64.b64decode(value["__b64__"])
+        return {k: _decode_payload(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decode_payload(v) for v in value]
+    return value
+
+
+def _as_utc(dt: datetime) -> datetime:
+    """SQLite hands back naive datetimes; the column is UTC by house law."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 @dataclass
 class StoredChallenge:
-    """A stored WebAuthn challenge."""
+    """A claimed WebAuthn challenge, read back from the table (#534)."""
 
     user_id: str
     data: dict[str, Any]
@@ -75,40 +108,120 @@ class StoredCredential:
 
 
 class Fido2Store:
-    """In-memory store for WebAuthn challenges and credentials.
+    """WebAuthn challenge store (database) + credential startup cache (memory).
 
-    In production, backed by the database.
+    #534: a pending ceremony challenge lives in the fido2_challenges table,
+    so a core restart or a worker hop no longer vaporises a live ceremony,
+    and the claim is an atomic single-consume UPDATE (house pattern:
+    elevation_challenges.state from #528). Expired rows are pruned at the
+    next touch — the #408 sweep, now on the DB side. Credentials keep their
+    per-process cache loaded at startup (#441); that path is unchanged (AC7).
+
+    session_factory is a zero-arg callable returning a Session. Production
+    derives it from the backend (app.py passes backend only); the explicit
+    kwarg on Fido2Manager lets challenge-only tests keep the credential-side
+    DB gate skipped exactly as a backend-less manager skipped it before.
     """
 
-    def __init__(self) -> None:
-        self._challenges: dict[str, StoredChallenge] = {}
+    def __init__(self, session_factory: Any = None) -> None:
+        self._sessions = session_factory
         self._credentials: dict[bytes, StoredCredential] = {}
 
+    def _session(self):
+        if self._sessions is None:
+            # Fail closed loudly: with the dict gone there is no in-process
+            # place to put a ceremony, so a store without a session source
+            # cannot issue or claim one. Never a silent memory fallback.
+            raise RuntimeError("Fido2Store challenge operations require a database session factory (#534)")
+        return self._sessions()
+
+    def _prune_expired(self, db, now: datetime) -> None:
+        """Drop rows past their TTL — the #408 sweep, moved onto the table."""
+        from core.iam.models import Fido2Challenge
+
+        db.query(Fido2Challenge).filter(Fido2Challenge.expires_at < now).delete(synchronize_session=False)
+
     def store_challenge(self, challenge_id: str, user_id: str, data: dict) -> None:
-        self._sweep_stale_challenges()
-        self._challenges[challenge_id] = StoredChallenge(
-            user_id=user_id,
-            data=data,
-            created_at=time.time(),
-        )
+        from core.iam.models import Fido2Challenge
+
+        now = datetime.now(UTC)
+        db = self._session()
+        try:
+            # Abandoned ceremonies die on the next touch, not at restart —
+            # same shape as the elevation-challenge store (#528/#345).
+            self._prune_expired(db, now)
+            db.add(
+                Fido2Challenge(
+                    challenge_id=challenge_id,
+                    user_id=user_id,
+                    payload=json.dumps(_encode_payload(data)),
+                    state="created",
+                    created_at=now,
+                    expires_at=now + timedelta(seconds=CHALLENGE_TTL_SECONDS),
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
 
     def get_challenge(self, challenge_id: str) -> StoredChallenge | None:
-        # Aged entries are dropped before the pop, so a timed-out challenge
-        # returns None even when touched and "Challenge not found or expired"
-        # becomes honest.
-        self._sweep_stale_challenges()
-        return self._challenges.pop(challenge_id, None)
+        """Atomically claim the pending row — the consume commits before any check.
 
-    def _sweep_stale_challenges(self) -> None:
-        """Prune challenges older than CHALLENGE_TTL_SECONDS (#408).
-
-        Abandoned ceremonies are pruned on the next store/get touch instead
-        of lingering until restart — same shape as the #345 elevation sweep.
+        Mirrors the #528 elevation claim: UPDATE ... WHERE state='created'
+        AND expires_at > now lands first, so a denied or failed ceremony
+        never re-arms the challenge (the #345 pop-on-all-paths meaning
+        survives). Unknown, expired, and already-consumed all take the SAME
+        branch — a uniform None, no oracle on which half failed — and the
+        denial writes a value-free audit row: no challenge id, no ceremony
+        material (AC2).
         """
-        now = time.time()
-        stale = [cid for cid, ch in self._challenges.items() if now - ch.created_at > CHALLENGE_TTL_SECONDS]
-        for cid in stale:
-            self._challenges.pop(cid, None)
+        from core.iam.models import AuditEvent, Fido2Challenge
+
+        now = datetime.now(UTC)
+        db = self._session()
+        try:
+            claimed = (
+                db.query(Fido2Challenge)
+                .filter(
+                    Fido2Challenge.challenge_id == challenge_id,
+                    Fido2Challenge.state == "created",
+                    Fido2Challenge.expires_at > now,
+                )
+                .update({"state": "consumed"}, synchronize_session=False)
+            )
+            # The claim commits before anything else reads the row: a claim
+            # that is later refused (or a process that dies mid-ceremony)
+            # must not leave the challenge live for a second attempt.
+            db.commit()
+            # The prune rides the same touch and commits on both branches.
+            self._prune_expired(db, now)
+            db.commit()
+            if claimed != 1:
+                try:
+                    db.add(
+                        AuditEvent(
+                            event_type="fido2_challenge_denied",
+                            user_id=None,
+                            fields={
+                                "outcome": "denied",
+                                "reason": "challenge_not_found",
+                            },
+                            timestamp=datetime.now(UTC),
+                        )
+                    )
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.exception("Audit write failed on FIDO2 challenge deny (still denying)")
+                return None
+            row = db.query(Fido2Challenge).filter(Fido2Challenge.challenge_id == challenge_id).one()
+            return StoredChallenge(
+                user_id=row.user_id,
+                data=_decode_payload(json.loads(row.payload)),
+                created_at=_as_utc(row.created_at).timestamp(),
+            )
+        finally:
+            db.close()
 
     def store_credential(self, cred: StoredCredential) -> None:
         self._credentials[cred.credential_id] = cred
@@ -130,7 +243,9 @@ class Fido2Manager:
     """Manages WebAuthn/FIDO2 registration and authentication flows.
 
     Provides challenge/response interfaces that the routes use.
-    The actual FIDO2 library integration is wrapped here.
+    The actual FIDO2 library integration is wrapped here. Pending ceremony
+    state is shared through the database (#534); the credential side stays
+    a per-process cache loaded at startup (#441).
     """
 
     def __init__(
@@ -140,6 +255,7 @@ class Fido2Manager:
         origins: list[str] | None = None,
         backend: Any = None,
         user_verification: str = "discouraged",
+        session_factory: Any = None,
     ) -> None:
         self.rp_id = rp_id
         self.rp_name = rp_name
@@ -147,8 +263,17 @@ class Fido2Manager:
         # Server-side UV policy for auth ceremonies (#413): recorded on each
         # challenge and enforced by the assertion-side UV branch.
         self.user_verification = user_verification
-        self.store = Fido2Store()
+        # Challenge storage needs a session source (#534). Production wires
+        # only the backend (app.py), so the store derives its sessions from
+        # it; the explicit session_factory kwarg is for DB-only ceremony
+        # tests that must keep the credential-side backend gate (active-state
+        # check + sign_count persist) skipped exactly as a backend-less
+        # manager skipped it before this change.
         self.backend = backend
+        factory = session_factory
+        if factory is None and backend is not None:
+            factory = getattr(backend, "get_session", None)
+        self.store = Fido2Store(factory)
         if backend is not None:
             self._load_credentials_from_db()
 
