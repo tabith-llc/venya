@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives import hashes
 
 from executor.command_validator import DEFAULT_DANGEROUS_PATTERNS, DEFAULT_TRUSTED_PATHS
 from executor.config import ExecutorConfig, ReaperConfig
-from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop
+from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop, RevocationStatus
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -511,7 +511,7 @@ class TestMainLoop:
         daemon.state.running = True
 
         with patch.object(daemon.cert_manager, "needs_rotation", return_value=False):
-            with patch.object(daemon.cert_manager, "check_revocation", return_value=True):
+            with patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.REVOKED):
                 with patch.object(daemon, "_send_heartbeat"):
                     with patch.object(daemon._shutdown_event, "wait", return_value=False):
                         daemon._main_loop()
@@ -525,7 +525,7 @@ class TestMainLoop:
 
         # Set running to False immediately — loop should not enter
         with patch.object(daemon.cert_manager, "needs_rotation", return_value=False):
-            with patch.object(daemon.cert_manager, "check_revocation", return_value=False):
+            with patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.NOT_REVOKED):
                 with patch.object(daemon._shutdown_event, "wait", return_value=False):
                     daemon._main_loop()
 
@@ -549,7 +549,7 @@ class TestMainLoop:
                 daemon.state.running = False
 
         with patch.object(daemon.cert_manager, "needs_rotation", return_value=False):
-            with patch.object(daemon.cert_manager, "check_revocation", return_value=False):
+            with patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.NOT_REVOKED):
                 with patch.object(daemon, "_send_heartbeat", side_effect=set_running_false):
                     with patch.object(daemon._shutdown_event, "wait", return_value=False):
                         daemon._main_loop()
@@ -570,7 +570,7 @@ class TestMainLoop:
 
         with patch.object(daemon.cert_manager, "needs_rotation", return_value=True):
             with patch.object(daemon.cert_manager, "rotate", side_effect=do_rotate):
-                with patch.object(daemon.cert_manager, "check_revocation", return_value=False):
+                with patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.NOT_REVOKED):
                     with patch.object(daemon, "_send_heartbeat"):
                         with patch.object(daemon._shutdown_event, "wait", return_value=False):
                             daemon._main_loop()
@@ -587,7 +587,7 @@ class TestMainLoop:
             patch.object(daemon.cert_manager, "needs_rotation", return_value=True),
             patch.object(daemon.cert_manager, "rotate", side_effect=do_rotate),
             patch.object(daemon, "_create_mtls_client", return_value=new_client),
-            patch.object(daemon.cert_manager, "check_revocation", return_value=False),
+            patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.NOT_REVOKED),
             patch.object(daemon, "_send_heartbeat"),
             patch.object(daemon._shutdown_event, "wait", return_value=False),
         ):
@@ -670,7 +670,7 @@ class TestMainLoop:
 
         with (
             patch.object(daemon.cert_manager, "needs_rotation", return_value=False),
-            patch.object(daemon.cert_manager, "check_revocation", return_value=False),
+            patch.object(daemon.cert_manager, "check_revocation", return_value=RevocationStatus.NOT_REVOKED),
             patch.object(daemon, "_create_mtls_client") as create_mock,
             patch.object(daemon, "_send_heartbeat", side_effect=stop_after_two),
             patch.object(daemon._shutdown_event, "wait", return_value=False),

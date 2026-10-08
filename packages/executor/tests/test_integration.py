@@ -32,7 +32,7 @@ from server.routes import executors as executors_routes
 from starlette.testclient import TestClient
 
 from executor.config import ExecutorConfig
-from executor.daemon import CertificateManager, CertificateValidationError
+from executor.daemon import CertificateManager, CertificateValidationError, RevocationStatus
 
 from .conftest import (
     MockExecutorCert,
@@ -452,7 +452,10 @@ class TestRevocation:
     """Revocation detection: admin revokes cert, executor detects and shuts down."""
 
     def test_revocation_detected_by_executor(self, cert_manager, ca_key, ca_cert, cert_files):
-        """check_revocation() returns True when serial is in revocation list."""
+        """check_revocation() answers REVOKED when the serial is in the list.
+
+        #442 site 4: the verdict is the same as the bool era, only named — the
+        contract no longer returns a value that is also the outage answer."""
         _cert_path, _ = cert_files
 
         # Register a cert first
@@ -470,10 +473,11 @@ class TestRevocation:
         with MagicMock() as mock_get:
             mock_get.return_value = mock_response
             cert_manager.client.get = mock_get
-            assert cert_manager.check_revocation() is True
+            assert cert_manager.check_revocation() is RevocationStatus.REVOKED
 
     def test_revocation_not_detected_when_clean(self, cert_manager, ca_key, ca_cert, cert_files):
-        """check_revocation() returns False when serial is NOT in revocation list."""
+        """check_revocation() answers NOT_REVOKED when the serial is absent — the
+        server ANSWERED, which is the only thing that may reset the failure count."""
         _cert_path, _ = cert_files
 
         initial_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
@@ -489,10 +493,15 @@ class TestRevocation:
         with MagicMock() as mock_get:
             mock_get.return_value = mock_response
             cert_manager.client.get = mock_get
-            assert cert_manager.check_revocation() is False
+            assert cert_manager.check_revocation() is RevocationStatus.NOT_REVOKED
 
     def test_revocation_server_unreachable_graceful(self, cert_manager, ca_key, ca_cert, cert_files):
-        """check_revocation() returns False (not True) when server is unreachable."""
+        """#442 site 4 (ruling R3): an unreachable server is UNREACHABLE.
+
+        This cell used to read "returns False (not True) when server is
+        unreachable" — that False was indistinguishable from the server having
+        answered "live", and it reset the caller's consecutive-failure count
+        during an outage. Same no-raise contract, honest name."""
         _cert_path, _ = cert_files
 
         initial_cert = _sign_executor_cert(ca_key, ca_cert, "test-executor", validity_days=30)
@@ -503,8 +512,8 @@ class TestRevocation:
         with MagicMock() as mock_get:
             mock_get.side_effect = httpx2.RequestError("Connection refused", request=MagicMock())
             cert_manager.client.get = mock_get
-            # Should return False, not raise — graceful degradation
-            assert cert_manager.check_revocation() is False
+            # Must not raise — graceful degradation — but must not claim liveness
+            assert cert_manager.check_revocation() is RevocationStatus.UNREACHABLE
 
     def test_revocation_detected_via_heartbeat(self, ca_manager, ca_key, ca_cert, executor_cert):
         """Heartbeat returns revoked=True when cert serial is in revocation list."""
@@ -595,8 +604,9 @@ class TestRevocation:
         assert set(data["revoked_serials"]) == {serial1, serial2}
 
     def test_revocation_no_serial_returns_false(self, cert_manager):
-        """check_revocation() returns False when serial is not set."""
+        """check_revocation() answers NOT_REVOKED when no serial is loaded — the
+        pre-registration verdict is unchanged by #442, only named."""
         cert_manager.serial = None
         with MagicMock() as mock_get:
-            assert cert_manager.check_revocation() is False
+            assert cert_manager.check_revocation() is RevocationStatus.NOT_REVOKED
             mock_get.assert_not_called()
