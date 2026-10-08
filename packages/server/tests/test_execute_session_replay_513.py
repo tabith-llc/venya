@@ -451,7 +451,7 @@ class TestConcurrentExecutePostgresql:
     design in the leg report only (owner-present venue required).
     """
 
-    def test_two_threads_one_relay(self):
+    def test_two_threads_one_relay(self, tmp_path):
         import os
         import threading
 
@@ -495,7 +495,11 @@ class TestConcurrentExecutePostgresql:
 
         app = FastAPI()
         app.state.backend = _PerRequest(SessionLocal)
-        app.state.config = SimpleNamespace(ca_dir="/tmp/tabichat", mtls_cert=None, mtls_key=None)
+        # #548: per-test tmp dir, matching _make_stack() above. The CA path is
+        # never read in this cell (the relay SSL-context build is patched out by
+        # _relay_patched), so pointing it at the SHARED scratch dir bought nothing
+        # and risked reading another lane's files.
+        app.state.config = SimpleNamespace(ca_dir=str(tmp_path), mtls_cert=None, mtls_key=None)
         app.dependency_overrides[get_current_user] = lambda: TEST_USER
         app.include_router(executors_routes.router, prefix="/api/v1")
         client = TestClient(app, raise_server_exceptions=False)

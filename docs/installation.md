@@ -132,6 +132,17 @@ ssh <core-vm> "sudo cat /etc/venya/admin/admin.key" > admin-cert/admin.key
 chmod 600 admin-cert/admin.key
 ```
 
+Keep both files **outside your home directory** (for example `/etc/venya/admin/`),
+at mode `0600` on the key. Sync, backup, and desktop-index agents read home
+directories by default, and the admin **key** authorizes admin operations
+*without a security-key touch* — a group- or other-readable key is a credential
+anyone on the machine can borrow. On POSIX systems the CLI prints one `warning:`
+line on stderr (and proceeds — it never blocks) when the key it is about to use
+grants read to group or other; `chmod 600` and a path outside the home clears
+it. **Windows has no such check** (NTFS has no POSIX mode bits), so secure the
+key there with NTFS ACLs instead — the CLI stays silent on that platform rather
+than claiming a mode it cannot read.
+
 ## 3. Install executors
 
 Executors need a single-use enrollment token minted by an admin. With admin
