@@ -214,7 +214,7 @@ class TestDaemonRegistrationTLSVerification:
             "cert_pem": "CERT",
             "ca_cert_pem": "CA",
             "serial_number": "01",
-            "not_after": "2026-09-01",
+            "not_after": "2026-09-01T00:00:00+00:00",
         }
         success_response.raise_for_status.return_value = None
 
@@ -255,7 +255,7 @@ class TestDaemonRegistrationTLSVerification:
             "cert_pem": "CERT",
             "ca_cert_pem": "CA",
             "serial_number": "01",
-            "not_after": "2026-09-01",
+            "not_after": "2026-09-01T00:00:00+00:00",
         }
         success_response.raise_for_status.return_value = None
 
@@ -295,7 +295,7 @@ class TestDaemonRegistrationTLSVerification:
             "cert_pem": "CERT",
             "ca_cert_pem": "CA",
             "serial_number": "01",
-            "not_after": "2026-09-01",
+            "not_after": "2026-09-01T00:00:00+00:00",
         }
         success_response.raise_for_status.return_value = None
 
@@ -419,7 +419,7 @@ class TestDaemonRegistrationTLSVerification:
             "cert_pem": "CERT",
             "ca_cert_pem": "CA",
             "serial_number": "01",
-            "not_after": "2026-09-01",
+            "not_after": "2026-09-01T00:00:00+00:00",
         }
         success_response.raise_for_status.return_value = None
 

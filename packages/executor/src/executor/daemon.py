@@ -330,6 +330,36 @@ def _permanent_rejection_error(exc: httpx2.HTTPStatusError) -> RuntimeError:
     return RuntimeError(msg)
 
 
+def _expiry_clock_with_tz(value: str, *, where: str) -> datetime:
+    """Parse the server-issued cert expiry for the executor's expiry clock.
+
+    Guarded form (ticket #465), mirroring the server-side pattern at
+    ``packages/server/src/server/routes/executors.py:1247-1248``
+    (``if not_after.tzinfo is None: not_after = not_after.replace(tzinfo=UTC)``)
+    with one ruled strengthening: a NAIVE value is REJECTED rather than stamped.
+    Rotation timing consumes this value, and guessing an offset for a value that
+    states none is how a serialization change would silently shift the clock —
+    fail-closed outranks tidy.
+
+    - Aware input: PRESERVED exactly as the server sent it. A ``+02:00`` value
+      keeps its offset; it is never converted and never relabelled.
+    - Naive input: ``RuntimeError`` (the named error path of both ``register()``
+      and ``rotate()`), so the boot/rotation path fails loudly.
+
+    Producers today emit ``not_valid_after_utc.isoformat()`` → ``+00:00``, which
+    parses aware and yields the same instant as the previous unconditional
+    relabel: behavior-preserving for every current server.
+    """
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise RuntimeError(
+            f"Certificate rotation: server sent expiry {value!r} with no timezone "
+            f"information (parse site: {where}); cannot build a trustworthy expiry "
+            "clock. The server must emit an offset-aware value (e.g. +00:00)."
+        )
+    return parsed
+
+
 def _is_tls_handshake_failure(exc: BaseException) -> bool:
     """True when a transport error is a TLS-level rejection, not plain connectivity.
 
@@ -576,7 +606,7 @@ class CertificateManager:
         cert_pem = data["cert_pem"].encode()
         ca_cert_pem = data["ca_cert_pem"].encode()
         self.serial = data["serial_number"]
-        self._not_after = datetime.fromisoformat(data["not_after"]).replace(tzinfo=UTC)
+        self._not_after = _expiry_clock_with_tz(data["not_after"], where="register")
 
         # Validate certificate before saving
         validate_executor_certificate(cert_pem, ca_cert_pem, executor_id)
@@ -788,7 +818,7 @@ class CertificateManager:
         # diverges the server record from disk; tracked separately (ticket
         # executor-revocation-by-identity).
         self.serial = data["serial_number"]
-        self._not_after = datetime.fromisoformat(data["not_after"]).replace(tzinfo=UTC)
+        self._not_after = _expiry_clock_with_tz(data["not_after"], where="rotate")
 
         logger.info(
             "Certificate rotated: serial=%s, expires=%s",
