@@ -34,6 +34,20 @@ _SERVER_VERSION = _dist_version()
 
 # Module-level cache for CA key checks — avoids decrypting passphrase-protected
 # keys on every LB probe. 15s TTL balances freshness against disk I/O cost.
+#
+# #464: the age is measured on ``time.monotonic()``, not the wall clock. This
+# cache is per-process memory (a module dict, never persisted, never shared
+# across workers), and the thing being measured is elapsed real time since the
+# entry was written — exactly what a monotonic clock answers. Reading
+# ``time.time()`` here let a BACKWARD clock step (NTP correction, snapshot
+# restore) make the age negative, and a negative age is always "young", so a
+# cached ``ok`` kept answering the readiness probe for the whole skew interval
+# even after the CA key became unreadable (fail-open on the signal a load
+# balancer acts on). A backward step can no longer resurrect a dead entry, and
+# a forward step cannot make a live one look stale.
+#
+# The wall stamp is still recorded (``"time"``) for log/diagnostic readers; the
+# guard itself never consults it.
 _health_cache: dict[str, dict[str, Any]] = {}
 _HEALTH_CACHE_TTL = 15  # seconds
 
@@ -45,9 +59,9 @@ def _reset_health_cache() -> None:
 
 def _get_cached_check(name: str, check_fn) -> str:
     """Return cached check result or re-run check_fn if cache expired."""
-    now = time.time()
+    now_mono = time.monotonic()
     cached = _health_cache.get(name)
-    if cached and (now - cached["time"]) < _HEALTH_CACHE_TTL:
+    if cached and (now_mono - cached["mono"]) < _HEALTH_CACHE_TTL:
         return cached["result"]
 
     try:
@@ -57,7 +71,7 @@ def _get_cached_check(name: str, check_fn) -> str:
         logger.error("Health check '%s' failed: %s", name, e)
         result = "check_failed"
 
-    _health_cache[name] = {"time": now, "result": result}
+    _health_cache[name] = {"mono": now_mono, "time": time.time(), "result": result}
     return result
 
 
