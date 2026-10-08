@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from .encryption import KEK_SIZE, derive_kek
+from .secure_memory import KekCache
 
 
 class BackendError(Exception):
@@ -81,7 +82,7 @@ class SentinelCheck:
     failures: int = 0
 
 
-def ensure_kek_sentinel(session: Session, kek: bytes) -> None:
+def ensure_kek_sentinel(session: Session, kek: bytes | memoryview) -> None:
     """Idempotent get-or-create of the single sentinel row.
 
     Minted at the one convergence point every KEK-wrapped envelope funnels
@@ -105,7 +106,7 @@ def ensure_kek_sentinel(session: Session, kek: bytes) -> None:
         session.rollback()
 
 
-def verify_kek_sentinel(session: Session, kek: bytes) -> SentinelCheck:
+def verify_kek_sentinel(session: Session, kek: bytes | memoryview) -> SentinelCheck:
     """Prove the configured passphrase against stored key material.
 
     Sentinel-first (the ruling's posture: anything else leaves the
@@ -148,8 +149,11 @@ class BackendConfig:
     Attributes:
         database_url: PostgreSQL connection URL (e.g. postgresql+psycopg2://user:pass@host/db).
         passphrase: Master passphrase for key derivation (used to derive KEK).
-        kek: Optional raw 32-byte KEK. If provided, passphrase is ignored for
-            key derivation but KEK is used for wrapping/unwrap.
+        kek: Write-once INTAKE slot for a raw 32-byte KEK. If provided,
+            passphrase is ignored for key derivation. ``Backend`` copies this
+            value into its KEK cache on construction and clears the slot to
+            ``None`` — the stored form of the key is the protected buffer, not
+            a ``bytes`` field on this object (#472).
         wal_mode: Whether to enable WAL mode (default True, PostgreSQL default).
         audit_enabled: Whether to enable audit event logging (default True).
     """
@@ -172,7 +176,9 @@ class BackendConfig:
         # NOTE: for a passphrase-only config, kek stays None until
         # Backend.bootstrap_kek() resolves it from the persisted salt. Deriving
         # here with a random salt (the old behavior) produced a non-reproducible
-        # KEK across restarts (C-11) and must not be done.
+        # KEK across restarts (C-11) and must not be done. This field is the
+        # intake slot only: Backend moves the value into the KEK cache and
+        # clears it, so nothing reads it afterwards.
         self.kek = kek
         self.wal_mode = wal_mode
         self.audit_enabled = audit_enabled
@@ -229,13 +235,32 @@ def ensure_kek_salt(session: Session) -> bytes:
 class Backend:
     """PostgreSQL backend wrapper.
 
-    Provides database engine creation, session management, and connection setup.
+    Provides database engine creation, session management, and connection
+    setup, and owns the one KEK cache for this process (#472): the key lives
+    in a protected buffer, and readers get a scoped read-only view of it.
     """
 
     def __init__(self, config: BackendConfig) -> None:
         self.config = config
         self._engine: Engine | None = None
         self._session_factory: sessionmaker[Session] | None = None
+        # One owner, one buffer. Pinning is attempted here and reported; the
+        # outcome never decides whether the core starts.
+        self._kek_cache = KekCache(KEK_SIZE)
+        intake = config.kek
+        if intake is not None:
+            self._kek_cache.populate(intake)
+            # Write-once: the intake slot stops being the stored form.
+            config.kek = None
+
+    @property
+    def kek_cache(self) -> KekCache:
+        """The KEK cache this backend owns.
+
+        Readers use ``cache.view()`` for scoped key access; nothing hands out
+        the buffer or a ``bytes`` copy of the key.
+        """
+        return self._kek_cache
 
     @property
     def engine(self) -> Engine:
@@ -284,38 +309,44 @@ class Backend:
                 cursor.close()
                 raise
 
-    def bootstrap_kek(self, passphrase: bytes | None = None) -> bytes:
+    def bootstrap_kek(self, passphrase: bytes | None = None) -> KekCache:
         """Resolve the KEK from the passphrase using the persisted salt (C-11).
 
         Reads the Argon2 salt from ``venya_config`` (generating and persisting
         it on first boot) and derives the KEK deterministically. The resolved
-        KEK is cached on ``self.config.kek`` so every consumer (and, e.g., the
-        filter endpoint via ``backend.config.kek``) shares a single KEK.
+        key is copied into this backend's KEK cache, which is the one place
+        the key is kept: every consumer (the core facade, the filter endpoint,
+        the startup sentinel check) shares that single cache.
+
+        Calling it again with no passphrase neither re-derives nor re-fills —
+        an already-populated cache is returned as it is.
 
         Args:
             passphrase: Passphrase bytes; falls back to ``config.passphrase``.
 
         Returns:
-            The 32-byte KEK.
+            The populated KEK cache.
 
         Raises:
             KekSaltMissingError: if the salt is missing but secrets exist
                 (unrecoverable data loss).
             BackendConfigurationError: if no passphrase or KEK is available.
         """
+        if passphrase is None and self._kek_cache.is_populated:
+            return self._kek_cache
         if passphrase is None:
             passphrase = self.config.passphrase
         if passphrase is None:
-            if self.config.kek is not None:
-                return self.config.kek
+            if self._kek_cache.is_populated:
+                return self._kek_cache
             raise BackendConfigurationError("bootstrap_kek: no passphrase or KEK available")
 
         session = self.get_session()
         try:
             salt = ensure_kek_salt(session)
             kek, _ = derive_kek(passphrase, salt)
-            self.config.kek = kek
-            return kek
+            self._kek_cache.populate(kek)
+            return self._kek_cache
         except Exception:
             session.rollback()
             raise
@@ -326,8 +357,9 @@ class Backend:
         """Create and return a configured Core instance.
 
         The KEK is resolved via ``bootstrap_kek()`` (persisted salt) whenever a
-        passphrase is in play; an explicitly-provided raw KEK (``config.kek``)
-        is used as-is when no passphrase is involved.
+        passphrase is in play; a raw KEK given to the backend (for example
+        ``CoreFactory.with_kek()``) is already in the cache when no passphrase
+        is involved. Either way the Core receives the cache, not the key.
 
         Args:
             passphrase: Optional passphrase override for key derivation.
@@ -339,28 +371,30 @@ class Backend:
         from .rate_limiter import RateLimiter
 
         if passphrase is not None:
-            kek = self.bootstrap_kek(passphrase.encode("utf-8"))
+            self.bootstrap_kek(passphrase.encode("utf-8"))
         elif self.config.passphrase is not None:
-            kek = self.bootstrap_kek()
-        elif self.config.kek is not None:
-            # No passphrase in play: use the raw KEK given to the backend
-            # (e.g., CoreFactory.with_kek()).
-            kek = self.config.kek
-        else:
-            kek = None
+            self.bootstrap_kek()
+        # else: raw-KEK intake already filled the cache, or nothing is
+        # configured and the Core guards report that.
 
         return Core(
             backend=self,
             rate_limiter=RateLimiter(),
-            kek=kek,
+            kek=self._kek_cache,
         )
 
     def dispose(self) -> None:
-        """Dispose of the engine and release resources."""
+        """Dispose of the engine and release the KEK cache.
+
+        The cache release runs here, at process lifetime — never per request
+        and never per session. What the buffer was holding is erased on the
+        way out; see ``kek cache: released`` in the log for the report.
+        """
         if self._engine is not None:
             self._engine.dispose()
             self._engine = None
             self._session_factory = None
+        self._kek_cache.release()
 
     def __enter__(self) -> Self:
         return self

@@ -50,7 +50,10 @@ def derive_kek(passphrase: bytes, salt: bytes | None = None) -> tuple[bytes, byt
     """Derive a 32-byte KEK from a passphrase using Argon2id.
 
     Args:
-        passphrase: The master passphrase.
+        passphrase: The master passphrase. This one signature deliberately
+            stays ``bytes``: the Argon2 binding rejects ``bytearray`` and
+            ``memoryview`` input, so the passphrase cannot ride the scoped-view
+            path the way the KEK does (#472).
         salt: Optional salt (16 bytes). If not provided, a random salt is generated.
 
     Returns:
@@ -71,11 +74,13 @@ def derive_kek(passphrase: bytes, salt: bytes | None = None) -> tuple[bytes, byt
     return kek, salt
 
 
-def wrap_key(kek: bytes, plaintext_key: bytes) -> bytes:
+def wrap_key(kek: bytes | memoryview, plaintext_key: bytes) -> bytes:
     """Wrap a DEK using AES-256-KW (RFC 5649).
 
     Args:
-        kek: 32-byte Key Encryption Key.
+        kek: 32-byte Key Encryption Key, as ``bytes`` or as a read-only
+            ``memoryview`` from the KEK cache (#472 — both crypto back-ends
+            accept the view, and the length guards read ``len()``).
         plaintext_key: 32-byte Data Encryption Key to wrap.
 
     Returns:
@@ -92,7 +97,7 @@ def wrap_key(kek: bytes, plaintext_key: bytes) -> bytes:
     return _aes_kw_wrap(kek, plaintext_key)
 
 
-def unwrap_key(kek: bytes, wrapped_key: bytes) -> bytes:
+def unwrap_key(kek: bytes | memoryview, wrapped_key: bytes) -> bytes:
     """Unwrap a DEK using AES-256-KW (RFC 5649).
 
     Args:
@@ -113,7 +118,7 @@ def unwrap_key(kek: bytes, wrapped_key: bytes) -> bytes:
     return _aes_kw_unwrap(kek, wrapped_key)
 
 
-def encrypt_secret(kek: bytes, secret_value: bytes) -> tuple[bytes, bytes, bytes]:
+def encrypt_secret(kek: bytes | memoryview, secret_value: bytes) -> tuple[bytes, bytes, bytes]:
     """Encrypt a secret value using per-secret random DEK and nonce.
 
     Uses DEK/KEK model:
@@ -142,7 +147,7 @@ def encrypt_secret(kek: bytes, secret_value: bytes) -> tuple[bytes, bytes, bytes
     return wrapped_dek, nonce, ciphertext
 
 
-def decrypt_secret(kek: bytes, wrapped_dek: bytes, nonce: bytes, ciphertext: bytes) -> bytes:
+def decrypt_secret(kek: bytes | memoryview, wrapped_dek: bytes, nonce: bytes, ciphertext: bytes) -> bytes:
     """Decrypt a secret value.
 
     Uses DEK/KEK model:
@@ -174,7 +179,7 @@ def decrypt_secret(kek: bytes, wrapped_dek: bytes, nonce: bytes, ciphertext: byt
     return plaintext
 
 
-def _aes_kw_wrap(kek: bytes, plaintext: bytes) -> bytes:
+def _aes_kw_wrap(kek: bytes | memoryview, plaintext: bytes) -> bytes:
     """AES-Key-Wrap per RFC 5649 using pycryptodome.
 
     Args:
@@ -210,7 +215,7 @@ def _aes_kw_wrap(kek: bytes, plaintext: bytes) -> bytes:
     return a + plaintext
 
 
-def _aes_kw_unwrap(kek: bytes, ciphertext: bytes) -> bytes:
+def _aes_kw_unwrap(kek: bytes | memoryview, ciphertext: bytes) -> bytes:
     """AES-Key-Unwrap per RFC 5649 using pycryptodome.
 
     Args:

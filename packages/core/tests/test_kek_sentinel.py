@@ -31,6 +31,7 @@ from core.engine.backend import (
 )
 from core.engine.core import Core
 from core.engine.encryption import derive_kek, encrypt_secret, wrap_key
+from core.engine.secure_memory import KekCache
 from core.iam.models import Base, KekSentinel, Secret
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -171,7 +172,7 @@ class TestSentinelMint:
         plain = create_engine(url)
         backend._engine = plain
         backend._session_factory = sessionmaker(bind=plain)
-        core = Core(backend=backend, kek=kek)
+        core = Core(backend=backend, kek=KekCache.from_bytes(kek, mlock=False))
         core.encrypt(b"value-one")
         core.encrypt(b"value-two")
         s = backend.get_session()

@@ -44,6 +44,7 @@ from unittest.mock import MagicMock
 import pytest
 from core.engine.backend import Backend
 from core.engine.core import Core
+from core.engine.secure_memory import KekCache
 from core.iam.models import Base, Role, Secret, SecretRole, User
 from sqlalchemy import create_engine
 from sqlalchemy.dialects import postgresql
@@ -188,7 +189,7 @@ def _core_on(session):
     """Core wired to ONE fixed session (what Core.put uses is get_session())."""
     backend = MagicMock(spec=Backend)
     backend.get_session.return_value = session
-    return Core(backend=backend, kek=KEK)
+    return Core(backend=backend, kek=KekCache.from_bytes(KEK, mlock=False))
 
 
 def _seed(session, users, roles):
@@ -359,7 +360,7 @@ def _seed_users_and_roles(engine_and_factory, users, roles):
 def _core_on_session(maker, session=None):
     backend = Backend.__new__(Backend)  # not used: Core.put only calls get_session()
     backend.get_session = lambda: (session or maker())  # type: ignore[assignment]
-    return Core(backend=backend, kek=KEK)
+    return Core(backend=backend, kek=KekCache.from_bytes(KEK, mlock=False))
 
 
 def test_intended_multiplicity_is_not_collapsed(engine_and_factory):

@@ -16,7 +16,7 @@ A fresh engine to the same file simulates a process restart.
 """
 
 import os
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from core.engine.backend import (
@@ -138,6 +138,12 @@ class TestEnsureKekSalt:
         engine.dispose()
 
 
+def read_cache(cache) -> bytes:
+    """The key material a cache holds, read through its scoped view."""
+    with cache.view() as kek:
+        return bytes(kek)
+
+
 class TestBootstrapKek:
     """bootstrap_kek resolves the KEK from the persisted salt and caches it."""
 
@@ -154,33 +160,55 @@ class TestBootstrapKek:
     def test_bootstrap_uses_persisted_salt(self):
         known_salt = b"\x01" * ARGON2_SALT_LEN
         backend, config = self._backend_with_mock_session(known_salt)
-        kek = backend.bootstrap_kek()
+        cache = backend.bootstrap_kek()
         expected, _ = derive_kek(b"pw", known_salt)
-        assert kek == expected
-        # Cached so other consumers (e.g. filter endpoint) share one KEK.
-        assert config.kek == expected
+        assert read_cache(cache) == expected
+        # The cache is the one stored form: the intake slot is cleared, and
+        # every consumer (the core facade, the filter endpoint) shares this one.
+        assert config.kek is None
+        assert backend.kek_cache is cache
 
-    def test_get_core_core_kek_equals_config_kek(self):
+    def test_second_bootstrap_does_not_re_derive_or_refill(self):
+        """Paired negative (refs 472): a populated cache is returned as it is.
+
+        The persisted-salt path (C-11) is unchanged; a second no-arg call must
+        not derive again and must not re-fill.
+        """
+        known_salt = b"\x0e" * ARGON2_SALT_LEN
+        backend, _ = self._backend_with_mock_session(known_salt)
+        first = backend.bootstrap_kek()
+        key = read_cache(first)
+        with patch("core.engine.backend.derive_kek") as derive, patch("core.engine.backend.ensure_kek_salt") as salt:
+            again = backend.bootstrap_kek()
+        derive.assert_not_called()
+        salt.assert_not_called()
+        assert again is first
+        assert read_cache(again) == key
+
+    def test_get_core_core_kek_is_the_backend_cache(self):
         known_salt = b"\x02" * ARGON2_SALT_LEN
         backend, config = self._backend_with_mock_session(known_salt)
         core = backend.get_core(passphrase="pw")
         expected, _ = derive_kek(b"pw", known_salt)
-        assert core.kek == expected
-        assert core.kek == config.kek
+        assert core.kek is backend.kek_cache
+        assert read_cache(core.kek) == expected
+        assert config.kek is None
 
     def test_bootstrap_kek_only_backend_no_db(self):
         # A raw-KEK backend (with_kek path) must not touch the DB for the salt.
         config = BackendConfig(database_url="postgresql://x/x", kek=b"\xab" * 32)
         backend = Backend(config)
         backend.get_session = lambda: pytest.fail("get_session must not be called")
-        assert backend.bootstrap_kek() == b"\xab" * 32
+        assert read_cache(backend.bootstrap_kek()) == b"\xab" * 32
+        # The intake was consumed at construction, not at bootstrap.
+        assert config.kek is None
 
-    def test_get_core_kek_only_falls_back_to_config_kek(self):
+    def test_get_core_kek_only_falls_back_to_the_cache(self):
         config = BackendConfig(database_url="postgresql://x/x", kek=b"\xcd" * 32)
         backend = Backend(config)
         backend.get_session = lambda: pytest.fail("get_session must not be called")
         core = backend.get_core(passphrase=None)
-        assert core.kek == b"\xcd" * 32
+        assert read_cache(core.kek) == b"\xcd" * 32
 
 
 class TestTwoProcessRoundTrip:

@@ -131,16 +131,22 @@ class TestSecureMemoryIsolation:
         assert "SecureBuffer" not in content, "Core should not use SecureBuffer"
         assert "secure_mlock" not in content, "Core should not call secure_mlock"
 
-    def test_backend_does_not_use_secure_memory(self):
-        """Backend should not import secure_memory."""
+    def test_backend_uses_the_cache_but_not_the_primitives(self):
+        """Backend is the cache owner: it may hold a cache, never call a primitive.
+
+        The direct-call ban stays real (#472 rewrite of the old "does not
+        import secure_memory" cell): Backend goes through the cache, so
+        ``secure_mlock``/``secure_munlock``/``secure_zero``/``SecureBuffer``
+        must not appear in this file at all.
+        """
         import core.engine.backend
 
         source = core.engine.backend.__file__
         with open(source) as f:
             content = f.read()
-        assert "secure_memory" not in content, "Backend should not import secure_memory"
-        assert "SecureBuffer" not in content, "Backend should not use SecureBuffer"
-        assert "secure_mlock" not in content, "Backend should not call secure_mlock"
+        assert "KekCache" in content, "Backend should hold the KEK cache"
+        for primitive in ("secure_mlock", "secure_munlock", "secure_zero", "SecureBuffer", "_load_system_lib"):
+            assert primitive not in content, f"Backend should not call {primitive} directly"
 
     def test_encryption_does_not_use_secure_memory(self):
         """Encryption module should not import secure_memory."""

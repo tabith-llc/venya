@@ -22,6 +22,12 @@ from core.engine.encryption import derive_kek
 FIXED_SALT = b"\x11" * 16
 
 
+def read_cache(cache) -> bytes:
+    """The key material a cache holds, read through its scoped view."""
+    with cache.view() as kek:
+        return bytes(kek)
+
+
 def _backend_with_mock_salt(config: BackendConfig, salt: bytes = FIXED_SALT) -> Backend:
     """Build a backend whose salt lookup returns a fixed salt (no real DB)."""
     backend = Backend(config)
@@ -46,7 +52,7 @@ class TestGetCorePassphrase:
         core = backend.get_core(passphrase="explicit-passphrase")
 
         expected, _ = derive_kek(b"explicit-passphrase", FIXED_SALT)
-        assert core.kek == expected
+        assert read_cache(core.kek) == expected
 
     def test_get_core_falls_back_to_config(self):
         """get_core(None) derives from the config passphrase."""
@@ -54,7 +60,7 @@ class TestGetCorePassphrase:
         core = backend.get_core(passphrase=None)
 
         expected, _ = derive_kek(b"config-passphrase", FIXED_SALT)
-        assert core.kek == expected
+        assert read_cache(core.kek) == expected
 
     def test_get_core_kek_only_backend_with_none_passphrase(self):
         """get_core(None) on a raw-KEK backend uses that KEK without touching the DB."""
@@ -62,7 +68,7 @@ class TestGetCorePassphrase:
         backend.get_session = lambda: pytest.fail("get_session must not be called for raw-KEK backends")
         core = backend.get_core(passphrase=None)
 
-        assert core.kek == b"\xaa" * 32
+        assert read_cache(core.kek) == b"\xaa" * 32
 
     def test_get_core_preserves_empty_string_passphrase(self):
         """get_core('') passes the empty string through to derivation (not config fallback)."""
@@ -70,7 +76,7 @@ class TestGetCorePassphrase:
         core = backend.get_core(passphrase="")
 
         expected, _ = derive_kek(b"", FIXED_SALT)
-        assert core.kek == expected
+        assert read_cache(core.kek) == expected
 
     def test_get_core_explicit_passphrase_overrides_config(self):
         """Explicit passphrase overrides the config passphrase."""
@@ -79,5 +85,5 @@ class TestGetCorePassphrase:
 
         expected, _ = derive_kek(b"override-passphrase", FIXED_SALT)
         config_expected, _ = derive_kek(b"config-passphrase", FIXED_SALT)
-        assert core.kek == expected
-        assert core.kek != config_expected
+        assert read_cache(core.kek) == expected
+        assert read_cache(core.kek) != config_expected

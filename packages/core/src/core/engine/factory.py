@@ -8,6 +8,7 @@
 
 from .backend import Backend, BackendConfig
 from .core import Core
+from .encryption import KEK_SIZE
 from .rate_limiter import RateLimiter
 
 
@@ -25,7 +26,6 @@ class CoreFactory:
     def __init__(self, config: BackendConfig) -> None:
         self._config = config
         self._rate_limiter: RateLimiter | None = None
-        self._kek: bytes | None = None
 
     @classmethod
     def from_config(cls, config: BackendConfig) -> CoreFactory:
@@ -83,15 +83,24 @@ class CoreFactory:
         return self
 
     def with_kek(self, kek: bytes) -> CoreFactory:
-        """Set the KEK explicitly.
+        """Set the KEK explicitly, through the config intake slot.
+
+        The bytes go into ``BackendConfig.kek`` and are copied into the
+        backend's KEK cache when ``build()`` constructs it; the factory keeps
+        no key material of its own (#472).
 
         Args:
             kek: 32-byte Key Encryption Key.
 
         Returns:
             self for chaining.
+
+        Raises:
+            CoreFactoryError: If the KEK is not the required size.
         """
-        self._kek = kek
+        if len(kek) != KEK_SIZE:
+            raise CoreFactoryError(f"KEK must be {KEK_SIZE} bytes, got {len(kek)}")
+        self._config.kek = kek
         return self
 
     def build(self) -> Core:
@@ -104,12 +113,13 @@ class CoreFactory:
             CoreFactoryError: If KEK is not available.
         """
         backend = Backend(self._config)
-        if self._kek is None:
-            # Resolve the KEK from the config passphrase using the persisted
-            # salt (C-11). bootstrap_kek() reads/creates the salt and also
-            # populates backend.config.kek.
+        # Backend() has already moved any raw intake into the cache and cleared
+        # the intake slot. Resolve from the passphrase only when the cache is
+        # still empty: bootstrap_kek() reads/creates the persisted salt (C-11)
+        # and fills that one cache — it is the only derivation point.
+        if not backend.kek_cache.is_populated:
             if self._config.passphrase is not None:
-                self._kek = backend.bootstrap_kek()
+                backend.bootstrap_kek()
             else:
                 raise CoreFactoryError(
                     "KEK not available: provide either a passphrase or call " "with_kek() before build()"
@@ -120,5 +130,5 @@ class CoreFactory:
         return Core(
             backend=backend,
             rate_limiter=rate_limiter,
-            kek=self._kek,
+            kek=backend.kek_cache,
         )

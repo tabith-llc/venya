@@ -7,8 +7,10 @@
 """Core facade: get/put/delete/list with RBAC enforcement and rate limiting."""
 
 import logging
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Protocol
 
 from sqlalchemy import or_, text
 
@@ -57,6 +59,21 @@ class CoreRateLimitError(CoreError):
     """Rate limit exceeded."""
 
 
+class KekHolder(Protocol):
+    """The shape of the KEK cache as the facade sees it (#472).
+
+    Declared structurally so this module keeps its distance from the
+    protected-memory surface: the cache is created and owned by
+    ``Backend`` alone, and the facade only ever asks it for a scoped,
+    read-only view.
+    """
+
+    @property
+    def is_populated(self) -> bool: ...
+
+    def view(self) -> AbstractContextManager[memoryview]: ...
+
+
 class Core:
     """Core facade providing get/put/delete/list with RBAC and rate limiting.
 
@@ -69,11 +86,34 @@ class Core:
         self,
         backend: Backend,
         rate_limiter: RateLimiter | None = None,
-        kek: bytes | None = None,
+        kek: KekHolder | None = None,
     ) -> None:
+        """Create the facade.
+
+        Args:
+            backend: The backend, which owns the KEK cache.
+            rate_limiter: Optional rate limiter.
+            kek: The KEK cache — a ``KekHolder``, not key bytes. Readers get a
+                scoped read-only view from it; nothing here holds the key.
+        """
         self.backend = backend
         self.rate_limiter = rate_limiter or RateLimiter()
         self.kek = kek
+
+    def _require_kek(self) -> KekHolder:
+        """The KEK cache when it holds a key, or the existing config error.
+
+        Raises:
+            CoreError: If no cache was given, or the cache is released or was
+                never populated. Asking a released cache for key material is
+                refused rather than answered with zero bytes: an all-zero KEK
+                is a valid AES-256 key, so a quiet answer would keep the
+                service green while writing secrets nobody can read back.
+        """
+        kek = self.kek
+        if kek is None or not kek.is_populated:
+            raise CoreError("KEK not configured")
+        return kek
 
     #: Advisory-lock namespace for per-key secret upserts (#515). Combined with
     #: the key under ``hashtext`` so this lock cannot collide with the #339
@@ -298,12 +338,11 @@ class Core:
             if offending:
                 raise CoreAccessError("Role not held by caller: " + ", ".join(offending))
 
-        if self.kek is None:
+        if self.kek is None or not self.kek.is_populated:
             raise CoreError("KEK not configured")
 
         # Encrypt the secret
         wrapped_dek, nonce, ciphertext = self.encrypt(value)
-
         session = self.backend.get_session()
         try:
             # #515: the upsert's resolve-then-write is ONE serialized step. The
@@ -559,37 +598,39 @@ class Core:
         Raises:
             CoreError: If KEK not configured.
         """
-        if self.kek is None:
-            raise CoreError("KEK not configured")
+        kek_cache = self._require_kek()
 
         from .encryption import encrypt_secret
 
-        result = encrypt_secret(self.kek, value)
+        with kek_cache.view() as kek:
+            result = encrypt_secret(kek, value)
 
-        # Sentinel mint after a successful wrap — best-effort: the wrap above
-        # is the customer's data path and must not be lost to a belt failure.
-        # The boot-time check (#304) falls back to DEK sampling if the row
-        # never lands, so a mint failure degrades detection, never security.
-        try:
-            session = self.backend.get_session()
+            # Sentinel mint after a successful wrap — best-effort: the wrap above
+            # is the customer's data path and must not be lost to a belt failure.
+            # The boot-time check (#304) falls back to DEK sampling if the row
+            # never lands, so a mint failure degrades detection, never security.
             try:
-                ensure_kek_sentinel(session, self.kek)
-            finally:
-                session.close()
-        except Exception:
-            logger.warning("KEK sentinel mint failed; startup verification falls back to DEK sampling", exc_info=True)
+                session = self.backend.get_session()
+                try:
+                    ensure_kek_sentinel(session, kek)
+                finally:
+                    session.close()
+            except Exception:
+                logger.warning(
+                    "KEK sentinel mint failed; startup verification falls back to DEK sampling", exc_info=True
+                )
 
         return result
 
     def decrypt_secret(self, secret: Secret) -> str:
         """Decrypt and return a secret value from a Secret ORM object."""
-        if self.kek is None:
-            raise CoreError("KEK not configured")
+        kek_cache = self._require_kek()
 
-        plaintext = _decrypt_secret_impl(
-            self.kek,
-            secret.wrapped_dek,
-            secret.nonce,
-            secret.encrypted_value,
-        )
+        with kek_cache.view() as kek:
+            plaintext = _decrypt_secret_impl(
+                kek,
+                secret.wrapped_dek,
+                secret.nonce,
+                secret.encrypted_value,
+            )
         return plaintext.decode("utf-8")

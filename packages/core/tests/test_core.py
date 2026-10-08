@@ -13,16 +13,17 @@ import pytest
 from core.engine.backend import Backend
 from core.engine.core import Core, CoreAccessError, CoreError, SecretRecord
 from core.engine.encryption import derive_kek
+from core.engine.secure_memory import KekCache
 
 
 class TestCoreGet:
     """Test core.get() logic."""
 
     def _make_core(self):
-        """Create a core with a mock backend."""
+        """Create a core with a mock backend and a populated KEK cache."""
         kek, _ = derive_kek(b"test-key")
         backend = MagicMock(spec=Backend)
-        return Core(backend=backend, kek=kek)
+        return Core(backend=backend, kek=KekCache.from_bytes(kek, mlock=False))
 
     def test_get_requires_user_id(self):
         """Raises CoreAccessError when user_id is not provided."""
@@ -85,10 +86,10 @@ class TestCorePut:
     """Test core.put() logic."""
 
     def _make_core(self):
-        """Create a core with a mock backend."""
+        """Create a core with a mock backend and a populated KEK cache."""
         kek, _ = derive_kek(b"test-key")
         backend = MagicMock(spec=Backend)
-        return Core(backend=backend, kek=kek)
+        return Core(backend=backend, kek=KekCache.from_bytes(kek, mlock=False))
 
     def test_put_requires_roles(self):
         """Raises CoreAccessError when no roles provided."""
@@ -177,10 +178,10 @@ class TestCoreDelete:
     """Test core.delete() logic."""
 
     def _make_core(self):
-        """Create a core with a mock backend."""
+        """Create a core with a mock backend and a populated KEK cache."""
         kek, _ = derive_kek(b"test-key")
         backend = MagicMock(spec=Backend)
-        return Core(backend=backend, kek=kek)
+        return Core(backend=backend, kek=KekCache.from_bytes(kek, mlock=False))
 
     def test_delete_secret_not_found(self):
         """Returns False when secret doesn't exist."""
@@ -261,10 +262,10 @@ class TestCoreList:
     """Test core.list() logic."""
 
     def _make_core(self):
-        """Create a core with a mock backend."""
+        """Create a core with a mock backend and a populated KEK cache."""
         kek, _ = derive_kek(b"test-key")
         backend = MagicMock(spec=Backend)
-        return Core(backend=backend, kek=kek)
+        return Core(backend=backend, kek=KekCache.from_bytes(kek, mlock=False))
 
     def test_list_returns_records(self):
         """Returns list of SecretRecord objects."""

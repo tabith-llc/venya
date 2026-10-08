@@ -19,7 +19,8 @@ import pytest
 from core.engine.backend import Backend
 from core.engine.core import Core, CoreAccessError
 from core.engine.encryption import DecryptionError, encrypt_secret
-from core.engine.rate_limiter import RateLimitExceededError, RateLimiter
+from core.engine.rate_limiter import RateLimiter, RateLimitExceededError
+from core.engine.secure_memory import KekCache
 
 KEK = b"\x11" * 32
 MAX_ATTEMPTS = 5
@@ -40,7 +41,7 @@ def _secret(value: bytes = b"hunter2", corrupt: bool = False) -> SimpleNamespace
 
 
 def _core(resolve_result: object) -> Core:
-    core = Core(backend=MagicMock(spec=Backend), kek=KEK)
+    core = Core(backend=MagicMock(spec=Backend), kek=KekCache.from_bytes(KEK, mlock=False))
     core._resolve_secret_in = MagicMock(return_value=resolve_result)  # type: ignore[method-assign]
     return core
 
