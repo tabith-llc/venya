@@ -3255,6 +3255,19 @@ def executor_cert_renew(args: Any) -> int:
                     pass
         print(f"Failed to save certificate: {e}", file=sys.stderr)
         return 1
+    except BaseException:
+        # #476: an abort that is not an OSError (a serialization ValueError, a
+        # KeyboardInterrupt at the wrong moment) must not leave staged plaintext
+        # key material on disk either. Same cleanup-then-re-raise shape as the
+        # executor_register staging arms; the OSError arm above keeps its
+        # user-facing sentence and its rc=1 path untouched.
+        for leftover in (cert_tmp_name, ca_tmp_name, key_tmp_name):
+            if leftover is not None:
+                try:
+                    os.unlink(leftover)
+                except OSError:
+                    pass
+        raise
 
     # Verify auth with revocation list
     try:
