@@ -48,6 +48,44 @@ EVENT_TYPES = (
 # forwarding is not latency-critical; this bounds worst-case forward lag.
 FORWARDER_IDLE_POLL_SECONDS = 1.0
 
+# #468: the spool path is process-scoped — _resolve_spool_path derives it
+# from config or a fixed default with NO session identity in the name — but
+# the daemon runs TWO AuditLogger instances over that one path in ONE
+# process (the per-session logger, daemon.py create_executor, and the
+# session-less boot forwarder, audit_boot_forwarder). A per-instance lock
+# therefore serialized nothing between them: one instance could compute a
+# rewrite from a stale read and os.replace it over lines the other had just
+# appended — a lost update that silently deletes durable audit events.
+# All spool mutation is now serialized on a process-wide registry of locks
+# keyed by the RESOLVED spool path: instances sharing one path share one
+# lock; instances on different paths never block each other.
+#
+# Guarantee this gives: mutual exclusion across EVERY AuditLogger instance
+# in this process (any threads) that resolves to the same file. Guarantee
+# it does NOT give: cross-PROCESS exclusion — two executor processes
+# sharing one spool home remain the documented unsupported shape
+# ("one executor per host" in _resolve_spool_path's ponytail note).
+# Entries live for the process lifetime; the count is bounded by the number
+# of distinct spool paths a deployment resolves (one), so no eviction.
+_SPOOL_LOCKS: dict[Path, threading.Lock] = {}
+_SPOOL_LOCKS_GUARD = threading.Lock()
+
+
+def _spool_lock_for(path: Path) -> threading.Lock:
+    """Return the one lock shared by all in-process loggers writing ``path``.
+
+    The key is the fully resolved path (symlinks and ``..`` normalized) so
+    two spellings of one file cannot land on two locks — that would ship
+    the #468 defect right back.
+    """
+    key = path.resolve()
+    with _SPOOL_LOCKS_GUARD:
+        lock = _SPOOL_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SPOOL_LOCKS[key] = lock
+        return lock
+
 
 @dataclass
 class AuditEvent:
@@ -100,6 +138,20 @@ class AuditLogger:
          dropped (with a warning) so a long outage cannot grow it without
          bound.
 
+    Lock scope (#468 — read this before constructing another instance):
+    ``self._lock`` is NOT per-instance. It is the process-wide lock
+    registered for this logger's RESOLVED spool path (``_spool_lock_for``),
+    so every spool mutation — append, capacity drop-oldest, drain read,
+    content removal and ``_rewrite_spool`` — serializes across ALL
+    AuditLogger instances in this process sharing that path (the daemon's
+    real shape: per-session logger + boot forwarder). Two loggers on two
+    different paths hold two different locks and never block each other.
+    OUT OF SCOPE: cross-process writers of one spool path — that remains
+    the unsupported multi-executor-per-home shape (``_resolve_spool_path``
+    ponytail note), and a new caller must not treat the shared lock as a
+    file lock. Duplicated forwards between coexisting drains stay possible
+    and are tolerated (at-least-once, above).
+
     flush() performs one best-effort drain. shutdown() runs a bounded final
     drain and stops the forwarder thread.
     """
@@ -113,11 +165,14 @@ class AuditLogger:
         self._config = config
         self._client_cert = client_cert
         self._session_id = session_id
-        self._lock = threading.Lock()
         self._wakeup = threading.Event()
         self._forwarding = False
         self._shutdown = False
         self._spool_path = self._resolve_spool_path(config.spool_path)
+        # #468: the lock is keyed by the RESOLVED spool path, not by this
+        # object — two instances over one file MUST share one lock (see
+        # _spool_lock_for and the class docstring's lock-scope note).
+        self._lock = _spool_lock_for(self._spool_path)
         self._spool_path.parent.mkdir(parents=True, exist_ok=True)
         # The spool holds FULL command lines (a caller inlining credentials
         # puts plaintext here) — create it 0600 and REPAIR a legacy
