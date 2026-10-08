@@ -1132,3 +1132,143 @@ No suites were run for this leg (markdown only, per the dispatch). The cell inve
   must carry the first-human story (§6.5) so an operator with a fresh install knows how a person gets a cert.
 
 <!-- SECTIONS 7-10 FOLLOW IN THIS DISPATCH. -->
+
+---
+
+## 7. The `NoEncryption()` audited list and the Q4a boundary
+
+**This section is mandatory statement 5.** The carrier's instruction is that the count be **audited, not
+remembered**, published with the enclosing function per site, with the ref it was measured at stated, and closed
+with the Q4a boundary sentence word-for-word. Ruling 4d scopes Q4a to the **core-side admin key ONLY**; that
+scope is law here and is not re-opened.
+
+### 7.1 The measurement
+
+Ref measured: **dev `d8a5cda`** (the `origin/dev` tip this dispatch fast-forwarded to; also the tip the KEK design
+note merged at). Command, verbatim:
+
+```
+grep -rn 'NoEncryption()' packages/ --include=*.py | grep -v '/tests/' | grep -v __pycache__
+```
+
+Result: **8 live non-test sites.** Test-file hits are a separate population (39 lines across 27 test files, plus
+`packages/executor/tests/conftest.py` and `helpers/cert_factory.py`) and are excluded from the boundary by
+classification, not by silence — see 7.4.
+
+| # | File:line | Enclosing function (`def` line) | What key it serializes | Classification |
+|---|---|---|---|---|
+| 1 | `packages/server/src/server/ca.py:815` | `AdminCAManager.sign_admin_cert` (`:732`) | the **core-side admin key** it generates at `:749` | **IN Q4a scope** (ruling 4d) |
+| 2 | `packages/cli/src/venya_cli/commands.py:2573` | `executor_register` (`:2389`) | executor keypair, workstation-built | outside the admin-path boundary |
+| 3 | `packages/cli/src/venya_cli/commands.py:2969` | `executor_cert_renew` (`:2799`) | executor keypair, renewal | outside the admin-path boundary |
+| 4 | `packages/cli/src/venya_cli/commands.py:3780` | `cmd_admin_init_admin_ca` (`:3737`) | **admin CA** key, no-passphrase branch | outside Q4a (CA key, not admin key) — #537 territory |
+| 5 | `packages/cli/src/venya_cli/commands.py:4000` | `cmd_admin_generate_admin_cert` (`:3888`) | admin keypair, CLI-side mint | outside Q4a as scoped (4d is core-side only) — flagged, 7.5 |
+| 6 | `packages/cli/src/venya_cli/at_rest_key.py:87` | `unwrap_at_rest` (`:53`) | decrypts to plaintext in memory | outside — #538 envelope territory |
+| 7 | `packages/executor/src/executor/daemon.py:594` | `register` (`:410`) | executor keypair at registration | outside the admin-path boundary |
+| 8 | `packages/executor/src/executor/daemon.py:774` | `rotate` (`:692`) | executor keypair at rotation | outside the admin-path boundary |
+
+Count by class: **1 in Q4a scope**, **7 outside the admin-path boundary** (sites 2-8), 0 test-file sites admitted
+into the product posture.
+
+### 7.2 Reconciliation — three counts, and which one this dossier measured
+
+The carrier orders the difference stated rather than smoothed, so it is stated three ways:
+
+| Claim | Source | Count | Status |
+|---|---|---|---|
+| **Nine** sites, two of them "this admin path" (9 − 2 = 7 outside) | `features/admin-key-short-lived-certs.md` scope guard | 9 | a **pin, not a measurement**; two of its nine are gone from the tree (7.3) |
+| **Eight** live non-test sites, one in `server/ca.py` | lead re-derivation at `d0bfbb4`, carried in the RF-6 carrier | 8 | matches this dossier's count, not all its line numbers |
+| **Eight** live non-test sites, one in `server/ca.py:815` | **this dossier, at `d8a5cda`** | **8** | the measurement this file publishes |
+
+**This dossier measured 8, at `d8a5cda`, and the 7-outside-the-boundary destination is reached by the live count
+(8 − 1 site in scope = 7), not by the pin's arithmetic (9 − 2 = 7).** Same destination, different route — exactly
+the divergence the carrier ordered kept visible.
+
+### 7.3 Why the pin's nine is not in the tree
+
+| Pin's site | What happened |
+|---|---|
+| `ca.py:94` — the `_serialize_key_encrypted` plaintext branch | **removed by #537** (`e3a760d`, "a set passphrase now refuses to write an unencrypted CA key"). At `d8a5cda` the else-branch is `raise RuntimeError(_unencrypted_key_refusal(passphrase_env))` (`ca.py:148`); the function's own docstring says the plaintext branch is gone and nothing is written (`ca.py:136-139`) |
+| `ca.py:747` / `:827` — the `sign_admin_cert` admin-key serialization | **still present, moved to `:815`** as `ca.py` shrank above it (the #539 accessor retirement, `d0d3d0d`) |
+| `get_ca_key_pem` (`CAManager`) | **retired by #539** (`d0d3d0d`); it is pinned-gone by `packages/server/tests/test_ca_key_accessor_retired_539.py:33` |
+
+The KEK design note (`docs/design-secure-memory-kek.md`, OPEN 3, merged at `d8a5cda`) still carries the older pin
+set — `ca.py:94`, `ca.py:747`, `commands.py:2551 / :2947 / :3758 / :3978`, `daemon.py:565 / :745`. **All of those
+line numbers are stale at `d8a5cda`** (the CLI sites moved to `:2573 / :2969 / :3780 / :4000`, the executor sites
+`:565 → :594` and `:745 → :774`). That note states its own non-correction policy — it does not amend docs outside
+itself — so this section is where the correction lands for the RF-6 series, and **RF-11 owns the note's OPEN 3
+pins** (finding F-5).
+
+**One more consumer of the same numbers, for the assembly pass:** §1.6 (chunk 1) published its table at
+`d0d3d0d`, and six of its eight pins moved between that tip and `d8a5cda` — `commands.py:2551 → :2573`,
+`:2947 → :2969`, `:3758 → :3780`, `:3978 → :4000` (carried by `bf1a462`, the #509 CLI change) and
+`daemon.py:573 → :594`, `:753 → :774` (carried by `0cfe661`/`e16c26b`, the #479 executor change). The count (8),
+the `ca.py:815` site, and `at_rest_key.py:87` did **not** move. §1.6 was correct when it was measured;
+**7.1 is the table that is correct at this tip**, and chunk 3's assembly pass should reconcile §1.6 to 7.1 rather
+than leave two pin sets in one file.
+
+### 7.4 The test-file population
+
+39 `NoEncryption()` hits live under `packages/*/tests/` (plus `conftest.py` and
+`packages/executor/tests/helpers/cert_factory.py`). They are test fixtures building executor/admin keypairs for
+assertions, not product delivery paths, and they are **not** in Q4a's scope or anyone's posture claim. They are
+listed here so that a future lane running an unfiltered `grep -rn 'NoEncryption()' packages/` gets 47 hits and does
+not conclude the audited count is 47, or start "fixing" fixtures. If a later change moves a product site into a
+helper, the count in 7.1 — not this paragraph — is the one that has to be updated.
+
+### 7.5 What Q4a does and does not cover (the boundary, stated for checkability)
+
+**In scope — one site.** `ca.py:815`, inside `AdminCAManager.sign_admin_cert`: the **core-side admin key**, which
+is the key the ruling `bydesign` speaks about ("leave admin.key unencrypted on the core", filesystem permission as
+the control). §6 dispositions that function; the disposition does not re-open the ruling — under §6.3 the pair
+stays core-side and stays `0600` (`install-venya-core.sh:426`), so the posture holds regardless of which
+disposition is chosen.
+
+**Out of scope — seven sites.** Everything else in 7.1. Two are worth naming because a reviewer may reach for the
+wrong cover:
+
+- **`commands.py:3780` (`cmd_admin_init_admin_ca`)** writes the **admin CA key**, not an admin key. The CA-key
+  posture question is #537 (write half) / #541 (load half), already live: the server-side equivalent now refuses
+  plaintext (`ca.py:148`) while this CLI branch still has a no-passphrase `else` that writes unencrypted. That
+  asymmetry is **a real gap and it is not Q4a's to cover** — RF-6 records it for the CA cluster as finding F-6.
+- **`commands.py:4000` (`cmd_admin_generate_admin_cert`)** writes an admin key, but **CLI-side**, in the
+  `venya admin generate-admin-cert` offline path (§6.4). Ruling 4d scopes Q4a to the *core-side* admin key, so
+  this site does not inherit the ruling. RF-10/RF-11 should treat the two admin-key paths together for operator
+text, and must not extend the `bydesign` word to this call site without a new ruling.
+
+**Test files** are out of scope by classification (7.4).
+
+### 7.6 The boundary sentence, verbatim (mandatory statement 5)
+
+> **The other sites are #537/#538 CA-cluster territory and must not be read as blanket-approved.**
+
+Carried word-for-word from ruling 4d as the carrier requires. Its purpose is specific and it is the reason 7.1
+exists as a table rather than a number: no future lane may cite the Q4a `bydesign` ruling as cover for any
+`NoEncryption()` site other than the core-side admin key at `ca.py:815` as measured at `d8a5cda`. The checkable
+form of the boundary is the enumerated list plus its ref: **re-run the 7.1 grep, and if the set differs from
+eight sites with one at `server/ca.py`, this section is stale and must be re-measured before anyone quotes
+it.**
+
+Also carried forward from the input contract, unchanged and still binding: **Q4a SCOPE IS RULED 4d — core-side
+admin key ONLY** (`features/admin-key-short-lived-certs.md`, "Rulings already made": *the core-side* `admin.key`
+*stays unencrypted; filesystem permission is the control*). This section neither widens nor narrows it.
+
+### 7.7 Inheritance — what later legs take from this section
+
+- **RF-7:** nothing here is its code surface — the one in-scope site belongs to the function §6 dispositions, and
+  RF-7 must not "fix" it as a drive-by; a CSR-path change leaves `ca.py:815` exactly as ruled.
+- **RF-8:** its mint-adjacent text must not imply the CLI-side admin key site (`commands.py:4000`) is ruled
+  (7.5); if RF-8 touches `init-admin-ca`/`generate-admin-cert`, the generated `docs/cli-reference.md` moves with
+  it and the generator interlock applies (§4.1 lineage).
+- **RF-9:** the executor-plane sites (2, 3, 7, 8) are the machine plane's own key handling — unchanged by this
+  design, and outside Q4a (§3.2's machine plane does not become a Q4a claim). Relevant to §9's renewal story.
+- **RF-10:** its installer edits must preserve the `0600` write behind the Q4a posture
+  (`install-venya-core.sh:426`), and it owns the two installer-adjacent CLI paths 7.5 names.
+- **RF-11:** publish **8, measured at `d8a5cda`** with the in-scope/out-of-scope split (1 + 7), never the
+  remembered nine (the same rule §1.7 carried from chunk 1 now has its audited source); carry the boundary
+  sentence in 7.6 into the docs where the posture question is discussed; and fix the KEK note's OPEN 3 pins
+  (F-5) in the changeset that touches that doc.
+- **CA cluster (#537 / #538 / #541):** F-6 — the `init-admin-ca` no-passphrase branch at `commands.py:3780` still
+  writes an unencrypted **CA** key while the server-side path refuses since `e3a760d`. Filed here as a finding,
+  not designed here: the envelope/CA-cluster legs own it, and RF-6 deliberately proposes no fix (4d boundary).
+
+<!-- SECTIONS 8-10 FOLLOW. -->
