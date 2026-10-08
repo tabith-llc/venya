@@ -1517,3 +1517,181 @@ attributable `created_by`, is rate-limited, is audited, and never mints a *perso
   first is now a person's `renew` away (§9.4 last row).
 
 <!-- SECTION 10 FOLLOWS. -->
+
+---
+
+## 10. Dual-path rollout, age-out accounting, and the installer consequence
+
+**This section carries mandatory statement 4.** It also carries the §5.3 skew consequence without re-deriving a
+different number (flag 2), and ends with the installer-return-shape item RF-10 must land.
+
+### 10.1 Statement 4, in full
+
+> **THE AGE-OUT DATE IS THE CLOSURE DATE OF THE ORIGINAL EXPOSURE.** Until the last 90-day admin certificate
+> dies, the scp'd-into-a-home-directory credential remains live in the wild. **The clock starts only when the
+> installer stops minting the old handoff — so RF-10's banner/mint change lands WITH OR AHEAD OF the rollout,
+> never trailing it** — otherwise the ceremony improved while the exposure kept being manufactured. **The
+> published date is COMPUTED as `max(install date) + 90 days` from the cut-over commit — not guessed.**
+
+That is ruling 4c carried as law, and every number below follows it.
+
+### 10.2 Why dual-path is safe, and why it is still an exposure (both halves stated)
+
+Safe on the mechanics — re-derived at `d8a5cda`:
+
+| Fact | Site |
+|---|---|
+| Old 90-day admin certs chain to the same Admin CA | `ADMIN_CA_VALIDITY_DAYS = 3650` (`ca.py:565`), so the CA does not move during rollout and nginx verification needs no edit (§1.3 problem 7) |
+| Old leaf lifetime is the 90-day constant | `ADMIN_CERT_VALIDITY_DAYS = 90` (`ca.py:566`), consumed at `ca.py:766` |
+| The app-side window check is the enforcer, not nginx | `middleware/auth.py:198-202` with `ssl_verify_client optional` at `install-venya-core.sh:911` (§4.1's corrected premise) |
+| Revocation-by-serial stays available for an early kill | `admin_cert_revocations` (`models.py:564`), enforced in-process at `auth.py:435-470` |
+
+Not safe on the posture — stated plainly, because this is the half a rollout doc tends to soften: for up to 90
+days after cut-over, **two credentials authenticate admin operations**, and one of them needs no ceremony, no
+session, and no role check (`dependencies.py:332-333` shortcut until §3.3 lands; CLI exemption at
+`commands.py:167`). A copy made before cut-over is indistinguishable, at the TLS layer, from the original.
+The design does not hide this behind "they're just legacy certs": the marker rule (§3.2) makes it **loud** — a
+no-marker cert is refused 403 on the human path with text naming the re-issue requirement — and the refusal is
+what makes the age-out observable rather than assumed.
+
+**One option the ruling closed, recorded so nobody re-litigates it:** re-rooting the Admin CA would end the dual
+path on day one, and 4c rules **against** it (`no re-root`). The costs the ruling accepted instead: a bounded
+90-day window, and the honest published date. If an operator needs the window shorter, the mechanism is
+**revocation of the known pre-cut-over serials** (a deliberate act, per §9.5 item 5), not a silent CA swap.
+
+### 10.3 The gate that starts the clock: the installer must stop minting the old handoff
+
+The mint-stop is two edits, both in `install-venya-core.sh`, both **owner-ok-gated per specific change** (Rules
+#1 and the Installer scripts section; the standing-approval amendment applies only once the shape is ruled in the
+ticket body and lead-verified):
+
+| # | What stops | Site | Nature of the change |
+|---|---|---|---|
+| M1 | The server-side key-returning mint for the first human cert | `:408-429` (call at `:420`, writes `admin.key` at `:424`/`:426`) | RF-7's replacement signer (§2.5b, §6.3) plus the installer commit that calls it. The delete of the old signature must NEVER precede this commit (§6.3 ordering law) |
+| M2 | The `scp` handoff instruction that creates the exposure | `:978-981` (`scp root@<core>:/etc/venya/admin/admin.{crt,key} ~/venya-admin.{crt,key}`) | text-only change to a ceremony instruction (§6.3 item 4) |
+
+**M2 is the exposure stop, M1 is the mint stop — and 4c's clock is tied to the LATER of the two, per deployment.**
+An installer that mints the old shape but stops advertising the copy still manufactures the standing credential;
+an installer that stops minting but keeps printing the `scp` line points operators at a file that no longer
+exists. Both must land together for the clock to be honest. The banner's "Until you do, admin endpoints will
+return 403" line (`:988`) is replaced in the same change, since after cut-over the true statement is "run
+`venya admin cert issue`" (§4.4's naming law applied to install text).
+
+### 10.4 The published date, computed
+
+The formula is `max(install date) + 90 days`, taken **from the cut-over commit**, and it is computable — here is
+the arithmetic and the inputs, with the measurement caveats that make it a computation rather than a guess.
+
+1. **Per-deployment age-out instant** = that deployment's admin-cert mint instant + 90 days. The mint instant is
+   not guessed: it is inside the certificate (`not_valid_before`/`not_valid_after`, set from
+   `datetime.now(UTC)` at `ca.py:745`/`:766`), so the authoritative per-install value is read, not estimated:
+   `openssl x509 -in /etc/venya/admin/admin.crt -noout -enddate`. On a deployment whose cert was re-minted, the
+   newest cert is the one that matters.
+2. **Fleet/estate-wide published date** = `max` over deployments of item 1. For a single organization's own
+   estate that is an enumerable set (the `ADMIN_CERT_ISSUED` audit rows carry `not_valid_after` per §2.8 once
+   RF-7 lands; pre-cut-over installs have **no** such rows — see item 4).
+3. **The cut-over commit is the anchor for anything you cannot observe.** 90 days from the cut-over commit is the
+   first date after which **no** pre-cut-over credential can still validate anywhere — because every
+   pre-cut-over cert was minted at or before the moment the new installer shipped. Late installs from an
+   **old** tarball break that reasoning, which is why the carrier's "WITH OR AHEAD OF" rule (§10.3) is about the
+   mint, not the docs.
+4. **Honest limit — the copy is the unknown, not the date.** A pre-cut-over `venya-admin.key` copied to a home
+   directory validates on its own schedule; nothing in the system knows where copies exist. So the published date
+   is stated as: **"the exposure window closes on `<computed date>` at the latest; a copy made earlier stays live
+   until then unless its serial is revoked."** The escrowed answer for anyone who cannot wait is revocation
+   (§2.9) — which is a decision with a lockout cost, since the same serial may be the core's own loopback
+   credential (§9.2): revoke the right serial, not the plane.
+5. **Worked example, labelled as an example, not a measurement.** If cut-over commits on 2026-10-15, the published
+   date is 2027-01-13 (90 days), and any cert minted earlier is dead by then — while the §5 skew tail (§10.5)
+   means the effective instant is the cert's `not_valid_after` plus the deployment's tolerance, not the timestamp
+   on the poster.
+
+The one-line rule for RF-11: **the date is produced by running something, never by writing a date.** If RF-11
+publishes a date it cannot tie to step 1, 2, or 3, it is guessing and the statement is void.
+
+### 10.5 The skew tail, carried from §5.3 (flag 2) — no new number
+
+Section 5.3 measured, at this tip, that `cert_tolerance_seconds` defaults to **300** (`config.py:248-253`,
+`ge=0 le=600`), is consumed at `middleware/auth.py:198`, and therefore turns a ruled 60-minute life into a
+**65-minute effective window (+8.3 %)**; its design position is to lower the default to **≤ 60 s** and bind the
+relationship with an assertion cell at `tolerance ≤ lifetime/20`, with **RF-7 owning the value**. This section
+adopts that recommendation unchanged and states its rollout consequences:
+
+- **The age-out instant has a tail.** A credential is replayable until `not_valid_after + tolerance` (§5.3's
+  mechanism is the application's own admission decision at `auth.py:202`). With the default unlit at 300 s, every
+  published date in §10.4 is **five minutes optimistic**. So the computed date is published with the tolerance
+  stated alongside — `max(...) + 90 days + cert_tolerance_seconds`, current value read from the deployment's
+  config — or the tolerance change lands before the date is published. Rounding a published closure date down is
+  the failure mode this bullet exists to prevent.
+- **The tail shrinks with the fix, and the fix is not this leg's to size.** §5.3 already owns the fraction
+  arithmetic (300 s = 8.3 % at 60 minutes; 60 s = 1.7 %). RF-7 picks the value; rollout text quotes it.
+- **Tolerance also applies to the 90-day legacy path**, where it is 0.08 % of life and harmless — which is exactly
+  §5.3's point about a default sized for the old lifetime. Dual-path rollout therefore has a **worse** relative
+  skew exposure on the short path than the legacy path until RF-7 lowers the default, and the rollout doc must not
+  present the short path as strictly better on day one.
+- **Do not** resolve the tail by widening `token_tolerance_seconds` (§5.5's "do not unify the knobs") or by
+  setting tolerance to 0 as a headline without the §5.6 cell that proves the refusal text still names drift.
+- **The knob stays unmanaged in the installer** — no `VENYA_CLOCK_SKEW*` entry in `MANAGED_ENV_KEYS`
+  (`install-venya-core.sh:555`, §5.5), so a deployment's tolerance is an operator act, and §10.4's computed date
+  must read it per deployment rather than assume the default.
+
+### 10.6 Rollout sequence (what lands when), with the owner-gated items marked
+
+| Step | Lands | Gate |
+|---|---|---|
+| 0 | `modewarn` (`features/admin-key-mode-warn.md`, RULED YES) — interim, independent, ships now (§1.4) | none new |
+| 1 | RF-7: the issuance endpoint, the narrowed signer, the plane marker, the tolerance value + assertion cell, the §6.5 first-human reachability fix | code review; **no installer text** |
+| 2 | RF-8: CLI keygen/CSR, `renew`, `status`, refusal strings | code review |
+| 3 | **RF-10: M1 + M2 — the mint stop and the `scp` stop** | **owner's ok per specific installer change**, and it must land WITH OR AHEAD OF step 4 |
+| 4 | Rollout to the fleet: new server/CLI builds, operators re-issue via ceremony | the age-out clock starts here, not at step 1 |
+| 5 | RF-11: published computed date (§10.4), NTP note (§5.4), Windows story (§8), lockout paths (§3.7) | docs |
+| 6 | On the published date: verify no pre-cut-over serial validates; anything still live is revoked by serial (§2.9) | ops; the **evidence** is the §10.4 step-1 read, not a calendar |
+
+Step 3 before step 4 is the whole content of 4c's "mint-stop-first". If a fleet update ships without it, the
+ceremony improved, the exposure kept being manufactured, and the published date is a lie about closure.
+
+### 10.7 The installer return-shape consequence (RF-10's item, ending this section as the carrier requires)
+
+The installer's bootstrap block is written against `sign_admin_cert`'s **three-value return**. At `d8a5cda`:
+
+- `install-venya-core.sh:420` — `cert, key_pem, cert_pem = cm.sign_admin_cert(sys.argv[1])`
+- `:423-424` — writes `cert_pem` to `admin.crt` and **`key_pem` to `admin.key`**
+- `:425-426` — `0644` on the cert, `0600` on the key (the control behind the Q4a posture, §7.5)
+- `:978-981` — the copy instruction that turns that on-core pair into a home-directory credential
+
+Under §2.5b and §6.3 the human-path signer returns **a certificate and nothing else**. So the installer's
+unpacking is the exact point where the new design and the old handoff part company, and the consequence for RF-10
+is a short list of concrete shape changes, all owner-ok-gated:
+
+1. **A human-path call site must not unpack a key.** The tuple `cert, key_pem, cert_pem` is the old contract; if
+   the bootstrap keeps a key-returning mint (machine plane, §6.3 item 1), that call must be visibly the
+   *bootstrap* one, and no human-path flow may reach a `key_pem` variable. §6.3 item 3's interlock cell is what
+   keeps this honest in CI.
+2. **The `0600` write stays where Q4a rules it** (core-side admin key, §7.5) and disappears from any human-path
+   write, because there is no human-path key file to write.
+3. **The copy block (`:978-981`) becomes a ceremony instruction** naming the real command, and the "admin
+   endpoints will return 403" line (`:988`) is rewritten in the same edit — 4b's naming law applies to install
+   text, not just to errors.
+4. **`known_admin_ids` seeding stays** (`:584`, from `$ADMIN_IDENTITY`, default `admin@${CORE_HOSTNAME}` `:368`,
+   key managed at `:555`) because the machine plane still uses the allowlist (§3.2, §9.5 item 5) — but its
+   **meaning shifts** on the human path, which is exactly the transition ruling 2 assigned to RF-10/RF-11.
+   It is not a semantics edit to the config field; it is a doc + banner change about who appears in it.
+5. **The re-run passphrase carry must keep working** — the block at `:333-347` reuses the stored admin CA
+   passphrase precisely because a re-mint against a preserved encrypted CA key otherwise "aborts the run at
+   `sign_admin_cert`" (`:341`). Any RF-10 edit that renames or replaces that function must update this comment
+   and preserve the precedence chain (explicit env > stored > prompt > random), or a re-run on an existing
+   install breaks in a way that looks like a passphrase bug.
+
+### 10.8 Inheritance — what later legs take from this section
+
+- **RF-7:** the tolerance value and the `lifetime/20` assertion cell (§10.5, owned there, sized in §5.3), and the
+  marker rule that makes the dual path observable (§10.2).
+- **RF-8:** nothing here changes its code surface; its strings feed §10.7 item 3's banner text.
+- **RF-9:** the revocation-with-lockout-cost note (§10.4 item 4) — a pre-cut-over serial may be the core's own
+  loopback credential, so serial kills need the §9 plane map first.
+- **RF-10:** **this section is its spec** — M1/M2 (§10.3), the ordering law (step 3 before step 4), the
+  return-shape list (§10.7 items 1-5), and the owner-ok gate on every installer edit.
+- **RF-11:** statement 4 verbatim (§10.1), the computed-date procedure with its honest limit (§10.4 items 1-5),
+  the tolerance tail in the published date (§10.5 first bullet), the "the date is produced by running something"
+  rule, and the dual-path honesty (§10.2's second paragraph) — including that the short path is not strictly
+  better than the legacy path until the tolerance default comes down.
