@@ -614,3 +614,175 @@ Every row is a rejection that must be proven, not assumed:
   meaning shift (config `:271`; installer `:555`/`:584`) becomes a rollout transition, not a semantics edit.
 - **RF-11:** the two mandatory statements (§3.5, §3.6) are runbook and doc text, plus the lockout path (§3.7) and
   the "do not copy the loopback key" rule.
+
+---
+
+## 4. Renewal plumbing — explicit renew, a real seam, and the lifetime-readable check
+
+Ruling 4b: renewal is **explicit, never an automatic ceremony mid-run**. The owner's reasoning is carried as
+design law: a paused headless script holding admin privileges while it waits for a human is a worse state than a
+clean failure. The helpful-refusal precedent governs and the error text names the exact command. 4b additionally
+orders a **lifetime-readable check** so a long job can be pre-flighted. This section designs all of it against the
+code that actually exists.
+
+### 4.1 The mechanism, verified (and one inherited premise corrected)
+
+What the CLI does today, re-derived at `d0d3d0d`:
+
+| Step | Live code | Site |
+|---|---|---|
+| Admin pair resolved from env at construction | `VENYA_ADMIN_CERT` / `VENYA_ADMIN_KEY` | `api_client.py:342-343` |
+| Existence checked, content never inspected | `os.path.isfile` → `APIClientError` | `:364-370` |
+| Paths stored | `self._admin_certfile` / `_admin_keyfile` | `:385-386` |
+| Transport built **lazily on the FIRST DIAL**, once | `if self.__http is None: … self.__http = httpx2.Client(**kwargs, verify=verify)` | `:412-453`, guard `:429`, build `:452`; comment `:395-396` says an already-built `_http` still bypasses the real build |
+| Context built from the stored paths | `_build_ssl_context(cafile, certfile, keyfile)` | `:447-451`, function `:157-205` |
+| Key+chain handed to OpenSSL once | `ctx.load_cert_chain(certfile=…, keyfile=…)` | `:199` |
+| Client closed only on `close()` / context exit | `if self.__http is not None: self.__http.close()` | `:800-805`, `:806-810` |
+
+**Premise correction, stated because it changes the fix:** the input file's problem 4 cites "`api_client.py:199`"
+and says "the CLI builds its TLS context once". True at the time of writing, but the live site is `:412-453` and
+the number that matters is *when*: the build is deferred to the first request (ticket #530 moved it off
+construction, precisely because `run_command()` builds an `APIClient` for **every** command before dispatch). So
+"once per process" is right, and "once at startup" would be wrong — and the seam below exploits that: **there is
+already a single choke point through which every request passes.**
+
+**Corrected premise 2 — the proxy is not the strict enforcer.** Problem 5's framing ("short validity is strictly
+enforced by OpenSSL at the proxy") is not what the shipped config does. nginx runs
+`ssl_verify_client optional` (`install-venya-core.sh:911`) and there is **no `ssl_crl` and no CDP fetching** in
+the served config; the client cert is forwarded and the **application is the enforcement point**, as
+`_verify_forwarded_cert`'s own docstring states ("nginx dropped expired certs at the outer TLS layer; end-to-end
+the app must check too, since app-side verification is now the gate", `middleware/auth.py:182-185`), with the
+window check at `:198-202`. Consequence: the skew fix in §5 is a **product config knob that already exists**, not
+an OpenSSL/nginx change. Handled fully in §5.
+
+**Capability-isolation constraint (not negotiable, from the source itself):** the CLI is barred from importing
+`core` — `tests/test_capability_isolation.py` keeps `venya-cli` standalone, which is why the canonical serial
+format is deliberately duplicated in the CLI with an instruction to keep it byte-identical to
+`core.utils.cert_serial.canonical_serial` (`commands.py:4005-4008`). Any lifetime/serial formatting added here
+follows that same rule: **duplicate the literal, cite the source, do not import.**
+
+### 4.2 The renew command (the mint path, re-invoked)
+
+`venya admin cert renew` is not new plumbing — it is §2's issuance flow re-entered, with the existing cert as
+input rather than a fresh keypair:
+
+- Same transport, same authorization (bearer session + single-use elevation token), same signer
+  (`AdminCAManager.sign_admin_csr`, §2.5b), same audit (`ADMIN_CERT_ISSUED`, mint reason `renew`, §2.8).
+- **Key handling, the choice RF-8 must implement:** reuse the **existing** workstation keypair and submit a fresh
+  CSR signed by it. Rationale: the key never left the machine, so a re-key buys nothing, and reusing it means a
+  renewal cannot orphan an in-flight connection or require re-distributing a key. The CLI must still refuse to
+  renew when the key file is missing or unreadable, with text naming both paths. (A `--rekey` flag is
+  deferrable; it is not required by any ruling.)
+- **One consequence RF-8 must not miss:** `known_admin_ids` plays no part here, but the **identity must come from
+  the session again** (§2.6), not from the old cert's subject. Renewing must not become a way to launder a
+  subject an operator edited locally.
+- Renewal is allowed while the current cert is still valid (that is the pre-flight case, §4.5) and while it is
+  expired (that is the recovery case). It is **not** allowed to be triggered by the request path — see §4.6.
+
+### 4.3 Expiry-mid-process: the design makes it work, and says how
+
+The naive expectation — "a renewal written by another process is picked up automatically" — is false at the
+mechanism level, so it must be designed against: `load_cert_chain` (`:199`) copies the chain into the OpenSSL
+context at build time, and the built client is cached (`:452`) until `close()` (`:800-805`). Rewriting the file
+under a live process changes nothing it will send.
+
+**Design: fingerprint-triggered context rebuild at the existing choke point.**
+
+- At context build, record a fingerprint of the admin cert file: **`sha256` of the file bytes**, computed once per
+  dial (a certificate is ~1 KB; the cost is irrelevant next to the network round trip).
+- Before each request, at the `_http` property (`:413`), re-read and re-hash the cert file. If the hash differs →
+  **rebuild the context and the client** (close the old client, rebuild via the same `_build_ssl_context` call),
+  then send. If it matches → send on the existing client, zero added syscalls beyond one read.
+- **Why content-hash and not `mtime`/size:** `cp`, `rsync`, and a re-download of an identical file all change
+  `mtime` without changing material, which would rebuild contexts on noise; and — the failure that matters — a
+  restore that leaves `mtime` behind (archive tools, some `cp -p` paths, filesystem clock oddities) would **not**
+  rebuild, silently continuing to present the old, soon-to-be-dead cert. Size-only comparison is worse: two
+  certs for the same identity are the same length by construction. Content hash is the only cheap signal that
+  cannot lie in both directions.
+- Negative case that must be proven (truth-table law): renew to a **different file** and point `VENYA_ADMIN_CERT`
+  there — a process holding the old path must keep using the old file and must not silently adopt anything.
+  And: replacing the file with byte-identical content must **not** rebuild (no churn, no connection storm).
+- Why not "rebuild every request": correct but wasteful, and it throws away connection reuse for every command
+  including the non-admin ones. Why not "never rebuild": it means a long-running admin script dies at the 60-minute
+  mark even after a successful renew, which turns 4b's explicit renew into "restart your job" — a worse operator
+  story than the one ruled, and one that would push people toward the standing credential this design deletes.
+
+### 4.4 What expiry looks like when no renewal happened — the helpful refusal
+
+If the material on disk is past its own `not_valid_after`, the CLI refuses **before** dialing, in the product's
+established style. Two precedents, both live:
+
+- **One wording, reused not copied:** `_https_refusal` / `_require_https_server_url` (`commands.py:1505-1530`)
+  exist as "the ONE refusal wording … Split out … so the sites that cannot print then return 1 … reuse the SAME
+  text instead of hand-copying it. One check, one wording, no variant." The expiry guard is built the same way:
+  one function, called from every dial site, no hand-written variants per command.
+- **Wrap, never silence, and name the repair:** `_build_ssl_context` already models this — an unloadable anchor
+  raises text that names the file, says what is wrong, gives the repair command, and appends the original OpenSSL
+  error (`api_client.py:184-196`); the admin pair load failure does the same for the cert/key pair
+  (`:197-203`).
+
+Required properties of the refusal (RF-8 implements the string; these are the acceptance criteria):
+
+1. **Names the exact command** — `venya admin cert renew` (4b's law). Not "refresh your credentials", not a
+   generic "re-authenticate".
+2. **Names the file and the instant**: the path from `VENYA_ADMIN_CERT`, `not_valid_after` in ISO-8601 with offset,
+   and how long ago it expired — all computed locally, so the text is honest about being local (§5.3).
+3. **Distinguishes the two clock faults**: "expired" (past `not_valid_after`) and "not yet valid" (before
+   `not_valid_before`) are different failures with different causes; the second one is almost always skew (§5).
+4. **Surfaces the server's reason when the dial happened anyway** — the CLI prints the server `detail` verbatim
+   (`api_client.py:528`, `:647`, `:784`), so the server-side strings in §3.5 and §5.4 reach the operator as
+   written.
+5. **Exit non-zero, stdout clean** — same discipline as `modewarn` (§1.4): diagnostics on stderr, so a script's
+   captured output does not change shape when a cert dies.
+6. It is a **refusal, not a prompt.** No "touch your key now?" y/n. A script must die cleanly; a human must be
+   told the one command to run.
+
+### 4.5 Mandatory statement (4b) — the lifetime-readable check
+
+The owner's addition exists so headless work stays composable without hiding a ceremony inside it:
+**`venya admin cert status`** (or `renew --dry-run`, RF-8's naming call) must print remaining lifetime and **make
+no credential mutation**. Design requirements:
+
+- **Reuse the existing shape.** The CLI already does exactly this for executor certs: a read-local-parse-report
+  helper returning `serial`, `subject`, `not_after`, `days_remaining` (`commands.py:2670-2700`), and the admin
+  mint already prints `Serial` / `Expires` / `Key … permissions` / `Cert … permissions`
+  (`commands.py:4010-4016`). The admin status command is the same two pieces bolted to the admin pair — not a new
+  reporting framework.
+- **`days_remaining` is the wrong unit at 60 minutes.** Print **minutes remaining** (and the absolute expiry
+  instant). A 0.75-day figure is how a lifetime check becomes useless.
+- **Three answers, not two:** no valid cert file → say so and name the mint/renew command; valid but expiring
+  within the job window the operator can state → say "renew before starting"; valid → print the lifetime and exit
+  0. This is the pre-flight that 4b asks for: *renew at script start, run the job, fail cleanly if the job outlives
+  the cert.*
+- **Honesty clause:** the figure is computed against the **local** clock. The authority is the server's window check
+  with §5's tolerance (`middleware/auth.py:198-202`). If the local clock is skewed the printed lifetime can be
+  wrong in either direction — the output must label it (one line, not a lecture), and the "not yet valid" case must
+  point at §5.4's text rather than silently reporting a bogus negative lifetime.
+- **Zero-mutation guarantee is testable:** the command performs no POST, no ceremony, no key read of the private
+  material, and no file write. A cell must assert that (a transport spy sees no request), because the moment a
+  "status" command can trigger a mint, 4b's "no ceremony mid-run" is quietly dead.
+- Suggested operator flow in the docs (RF-11): `status` → `renew` if needed → run the job → the job fails with the
+  §4.4 refusal if it outlived the cert → re-invoke after renew (and §4.3's rebuild means a *long-lived* process
+  that renewed out-of-band does not even need re-invocation).
+
+### 4.6 The boundary 4b draws — no automatic ceremony, stated as a testable rule
+
+The request path **never** initiates a ceremony, never opens a browser, never waits on a prompt, and never
+re-mints on a 401/403. Contrast with the bearer session, which *does* have a refresh concept elsewhere in the
+product (`middleware/auth.py:236-243` discusses the refreshable idle-expired session); that pattern must not be
+copied onto the admin-cert path, because the refresh there costs no human and the refresh here costs a FIDO2
+touch. Acceptance: a cell driving a request with an expired cert must observe **exactly one** attempt and a clean
+refusal — no ceremony call, no retry loop.
+
+### 4.7 Inheritance — what later legs take from this section
+
+- **RF-7:** renew is the §2 endpoint with reason `renew` (§4.2); the identity stays session-derived (§4.2).
+- **RF-8:** the fingerprint-triggered rebuild at the `_http` choke point with **content hash**, the one-function
+  refusal wording, the six refusal properties (§4.4), the status command's three answers plus its zero-mutation
+  cell (§4.5), and the no-import constraint on serial/lifetime formatting (§4.1).
+- **RF-9:** service identities renew **without** a ceremony — which means they cannot use §4.2 as written; the
+  split's machine plane needs its own answer (§9). Do not extend "explicit renew only" to the machine plane
+  without saying so there.
+- **RF-10:** the installer's printed workflow must name `renew`/`status`, replacing the `scp` handoff lines
+  (`install-venya-core.sh:978-981`) — proposed text only, owner-ok-gated.
+- **RF-11:** the operator runbook text for §4.5's pre-flight flow, plus the refusal strings' user-visible wording.
