@@ -175,7 +175,13 @@ class TestFilterSessionOutput:
         assert resp.status_code == 503
 
     def test_filter_invalid_b64(self):
-        """POST /sessions/{id}/filter should handle invalid base64 gracefully."""
+        """POST /sessions/{id}/filter REFUSES invalid base64 with 400.
+
+        Was: swallowed to b"" and answered 200 with empty output — the
+        zero-knowledge passthrough (refs #452). The 400 carries only a
+        ``detail`` string, naming WHICH field failed; no masked_count ever
+        ships for an undecodable body. Full matrix lives in
+        test_stage2_decode_refusal_452.py."""
         backend = MagicMock()
         backend.get_session.return_value = _db_stub(exec_session=_exec_session("sess-123"))
         app = _create_test_app(backend=backend)
@@ -185,11 +191,14 @@ class TestFilterSessionOutput:
             "/api/v1/sessions/sess-123/filter",
             json={"stdout": "not-valid-base64!!!", "stderr": "also!invalid"},
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 400
         data = resp.json()
-        # Should return empty output for invalid base64
-        assert data["stdout"] == ""
-        assert data["stderr"] == ""
+        # The refusal names the offending field and the base64 requirement:
+        assert "stdout" in data["detail"]
+        assert "base64" in data["detail"].lower()
+        # No empty-knowledge answer rides along with the refusal:
+        assert "masked_count" not in data
+        assert "masked_hashes" not in data
 
     def test_filter_with_session_no_secrets(self):
         """POST /sessions/{id}/filter should handle session with no secrets."""

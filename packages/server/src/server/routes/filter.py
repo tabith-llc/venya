@@ -139,6 +139,36 @@ def filter_output(
 # --- Endpoints ---
 
 
+def _decode_required_b64(field: str, value: str, session_id: str) -> bytes:
+    """Decode one required base64 stage-2 body field, refusing junk (refs #452).
+
+    The former handler swallowed decode failures into ``b""`` and answered
+    HTTP 200 with ``masked_count=0`` — the route could not tell "nothing
+    matched" from "I could not parse you", and the executor adopts a 200 over
+    its own Stage-1 masking, so the empty answer shipped unmasked knowledge.
+    One check, one wording (the ``_https_refusal`` family's house shape):
+    ``validate=True`` so silently-dropped non-alphabet junk is refused too,
+    a ``logger.warning`` naming session id + field (AC3 — no silent branch),
+    and a 400 the executor's existing non-200 fallback already handles
+    ("Stage 2 filter failed — using Stage 1 results"). An empty string is
+    LEGAL base64 (decodes to ``b""``) and still answers 200-with-zero.
+    """
+    import binascii
+
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        logger.warning(
+            "Stage-2 filter refused session %s: field '%s' is not valid base64",
+            session_id,
+            field,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Field '{field}' must be valid base64",
+        ) from None
+
+
 @router.post(
     "/sessions/{session_id}/filter",
     response_model=FilterResponse,
@@ -233,6 +263,13 @@ async def filter_session_output(
             detail="Session belongs to another executor",
         )
 
+    # DECODE-AND-VALIDATE FIRST (refs #452): an undecodable body is refused
+    # with 400 BEFORE any secret is decrypted — no decryption work is spent
+    # (or leaked through timing/behavior) for a request that gets no answer.
+    # The secrets walk below now runs only for well-formed bodies.
+    stdout = _decode_required_b64("stdout", req.stdout, session_id)
+    stderr = _decode_required_b64("stderr", req.stderr, session_id)
+
     session_secrets: dict[str, bytes] = {}
     bindings = db.query(SessionSecret).filter(SessionSecret.session_id == session_id).all()
 
@@ -271,17 +308,6 @@ async def filter_session_output(
                 continue
             hash_hex = hashlib.sha256(plaintext).hexdigest()
             session_secrets[hash_hex] = plaintext
-
-    # Decode base64 input
-    try:
-        stdout = base64.b64decode(req.stdout)
-    except Exception:
-        stdout = b""
-
-    try:
-        stderr = base64.b64decode(req.stderr)
-    except Exception:
-        stderr = b""
 
     filtered_stdout, stdout_hashes = filter_output(stdout, session_secrets)
     filtered_stderr, stderr_hashes = filter_output(stderr, session_secrets)
