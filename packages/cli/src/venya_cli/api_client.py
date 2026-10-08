@@ -462,6 +462,17 @@ class APIClient:
         refusal names — on exactly the host that needs it, and would hide the
         repair hint behind a construction error. Landing at the build branch (and
         NOT in the setter) keeps the test seam that injects a stub usable.
+
+        RF-8a (dossier §4.4): a third refusal joins the family here, on the same
+        reasoning. When the admin mTLS pair is configured and the CERTIFICATE on
+        disk is outside its own validity window, the CLI refuses at this seam
+        before the transport exists — the operator gets the one helpful sentence
+        naming `venya admin cert renew` instead of a TLS-layer rejection or a
+        server 401 that says nothing about the cause. Because the guard runs
+        inside the build branch, a single request attempt passes it EXACTLY once:
+        there is no re-mint, no ceremony, no retry loop (§4.6's testable boundary),
+        and nothing is ever put on the wire. The read is of the certificate file
+        only — the private key is never opened to answer a lifetime question.
         """
         if self.__http is None:
             if not self._anchor:
@@ -481,6 +492,17 @@ class APIClient:
                         detail="this transport carries your bearer token, secrets and audit calls",
                     )
                 )
+            if self._admin_certfile:
+                # Same deferred-import shape; only the ADMIN-pair dial is guarded,
+                # because only that certificate can die inside a work session.
+                from .commands import admin_cert_expiry_refusal
+
+                refusal = admin_cert_expiry_refusal(
+                    self._admin_certfile,
+                    site="this admin request",
+                )
+                if refusal is not None:
+                    raise APIClientError(refusal)
             verify = _build_ssl_context(
                 cafile=self._anchor,
                 certfile=self._admin_certfile,

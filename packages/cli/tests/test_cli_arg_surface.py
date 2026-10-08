@@ -261,8 +261,13 @@ EXPECTED_SUBCOMMAND_COUNTS: dict[tuple[str, ...], int] = {
     # admin 24→25: `admin remove-executor` added by
     # feature/admin-executor-removal-391 (deliberate interlock update,
     # cli-reference regenerated in the same commit).
-    ("admin",): 25,
+    # admin 25→26: `admin cert` group added by feature/rf8-cert-status-expiry-refusal
+    # (RF-8a — deliberate interlock update, cli-reference regenerated in the same
+    # commit; the leaf is `admin cert status`, read-local, no network).
+    ("admin",): 26,
     ("admin", "key-version"): 5,
+    # New nesting level: only `status` today (`renew` is RF-8b, `cert` rebuild RF-8c).
+    ("admin", "cert"): 1,
     ("role",): 7,
     # exec 5→6: `exec list` added by feature/version-surfaces (ruling
     # condition 6 — deliberate interlock update, cli-reference regenerated

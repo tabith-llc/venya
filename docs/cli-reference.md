@@ -59,6 +59,8 @@ and exits `1`.
   - [`venya admin generate-admin-cert`](#venya-admin-generate-admin-cert)
   - [`venya admin revoke-admin-cert`](#venya-admin-revoke-admin-cert)
   - [`venya admin reissue-recovery-code`](#venya-admin-reissue-recovery-code)
+  - [`venya admin cert`](#venya-admin-cert) *(group)*
+    - [`venya admin cert status`](#venya-admin-cert-status)
 - [`venya role`](#venya-role) *(group)*
   - [`venya role create`](#venya-role-create)
   - [`venya role list`](#venya-role-list)
@@ -291,6 +293,7 @@ Subcommands:
 - [`venya admin generate-admin-cert`](#venya-admin-generate-admin-cert) — Sign an admin client certificate
 - [`venya admin revoke-admin-cert`](#venya-admin-revoke-admin-cert) — Revoke an admin certificate by serial number
 - [`venya admin reissue-recovery-code`](#venya-admin-reissue-recovery-code) — Reissue your own break-glass recovery code (session + elevation + admin mTLS)
+- [`venya admin cert`](#venya-admin-cert) — Admin certificate management (status)
 
 ### `venya admin enroll`
 
@@ -852,6 +855,39 @@ venya admin reissue-recovery-code
 
 ```bash
 venya admin reissue-recovery-code  # reissue your own break-glass code (session bearer + elevation touch + admin mTLS); the new code prints ONCE and the old one dies immediately
+```
+
+### `venya admin cert`
+
+Admin certificate management (status)
+
+```
+venya admin cert
+```
+
+Subcommands:
+
+- [`venya admin cert status`](#venya-admin-cert-status) — Show the admin certificate's remaining lifetime (read-local, no network)
+
+#### `venya admin cert status`
+
+Show the admin certificate's remaining lifetime (read-local, no network)
+
+```
+venya admin cert status [OPTIONS]
+```
+
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `--cert-path` | no | string | — | Path to the admin certificate (default: $VENYA_ADMIN_CERT). The private key is never read — a lifetime check needs only the certificate. |
+| `--within` | no | int | — | Also advise renewing if the certificate dies inside MINUTES of job-window minutes (the advisory never changes the exit code) |
+
+**Examples**
+
+```bash
+venya admin cert status  # remaining lifetime of $VENYA_ADMIN_CERT (read-local; no request, no ceremony, no key read)
+venya admin cert status --within 15  # also advise renewing if it dies inside a 15-minute job window
+venya admin cert status --cert-path /opt/venya/admin/admin.crt  # explicit certificate path
 ```
 
 ## `venya role`

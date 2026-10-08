@@ -137,6 +137,18 @@ def run_command(args: Any) -> int:
             )
             return 1
 
+    # RF-8a read-local gate (dossier §4.5): `venya admin cert status` must make NO
+    # request — not even the /health version advisory fetch — and must work with the
+    # private key absent. So it dispatches BEFORE the APIClient is constructed, in
+    # exactly the spirit of the #334 probe above: the zero-mutation guarantee is a
+    # property of the code path, not of a mock in a test.
+    if (
+        getattr(args, "command", None) == "admin"
+        and getattr(args, "admin_command", None) == "cert"
+        and getattr(args, "admin_cert_command", None) == "status"
+    ):
+        return cmd_admin_cert_status(args)
+
     # Server URL precedence (matches the --server-url help text and the
     # revoke-admin-cert handler): explicit flag > VENYA_SERVER_URL env >
     # config.json (APIClient fallback). Empty env falls through (ticket
@@ -691,6 +703,8 @@ def cmd_admin(client: APIClient, args: Any) -> int:
         return cmd_admin_revoke_admin_cert(client, args)
     elif admin_command == "reissue-recovery-code":
         return cmd_admin_reissue_recovery_code(client, args)
+    elif admin_command == "cert":
+        return cmd_admin_cert(client, args)
     else:
         print(f"Unknown admin command: {admin_command}", file=sys.stderr)
         return 1
@@ -1539,6 +1553,242 @@ def _require_https_server_url(server_url: str, *, site: str, ticket: str, detail
         return True
     print(_https_refusal(server_url, site=site, ticket=ticket, detail=detail), file=sys.stderr)
     return False
+
+
+# --- Admin certificate: read-local parse + the ONE expiry refusal wording (RF-8a) ---
+#
+# Design record: docs/design/rf6-shortcert-dossier-20261007.md §4.4 (the helpful
+# refusal) and §4.5 (the lifetime-readable check). Both halves read ONE file — the
+# admin CERTIFICATE — and never the private key, never the network. The wording
+# lives here, beside `_https_refusal`, because the dossier's own precedent is
+# "one wording, reused not copied": `venya admin cert status` and the pre-dial
+# guard in `APIClient._http` print the SAME sentence rather than hand-copying two
+# variants that would rot apart.
+
+
+def _parse_admin_cert(cert_path: str) -> dict[str, Any] | None:
+    """Parse the admin certificate at `cert_path` and return its lifetime metadata.
+
+    Mirrors the shape of `_parse_executor_cert` (read-local, parse, report) with
+    MINUTES replacing DAYS: the short-lived admin cert can live about an hour, so a
+    `days_remaining` figure rounds to 0 and tells the operator nothing (dossier §4.5,
+    ruled). Returns None when the file is missing, unreadable or not a PEM
+    certificate — the caller decides how loudly to be, and an unreadable file is NOT
+    an expired file, so this helper never guesses at a validity window.
+
+    Reads ONLY the certificate. The private key is never opened: `status` must work
+    with the cert file alone, and a lifetime readout has no business touching key
+    material (owner-ruled zero-mutation half of RF-8a).
+    """
+    from datetime import datetime
+
+    from cryptography.x509 import load_pem_x509_certificate
+
+    path = Path(cert_path)
+    if not path.is_file():
+        return None
+
+    try:
+        cert = load_pem_x509_certificate(path.read_bytes())
+    except Exception:
+        return None
+
+    now = datetime.now(UTC)
+    not_before = cert.not_valid_before_utc
+    not_after = cert.not_valid_after_utc
+    # Floor division keeps "42 minutes remaining" honest while those minutes are
+    # actually still left; a cert with 90 seconds reports 1, not 2.
+    minutes_remaining = int((not_after - now).total_seconds() // 60)
+    delta = now - not_after
+    expired = now > not_after
+    future = now < not_before
+
+    cn = "unknown"
+    for attr in cert.subject:
+        if attr.oid == x509.oid.NameOID.COMMON_NAME:
+            cn = attr.value
+            break
+
+    # Canonical serial form (lowercase hex, zero-padded to 16) — the value an
+    # operator pastes into `venya admin revoke-admin-cert --serial`. core.utils
+    # .cert_serial.canonical_serial defines it; the CLI is barred from importing
+    # core (tests/test_capability_isolation.py), so the literal is repeated HERE on
+    # purpose. Keep it byte-identical to the admin mint print further down.
+    serial_hex = format(cert.serial_number, "016x")
+
+    return {
+        "identity": cn,
+        "serial": serial_hex,
+        "subject": cert.subject.rfc4514_string(),
+        "not_before": not_before,
+        "not_after": not_after,
+        "minutes_remaining": minutes_remaining,
+        # Whole minutes PAST not_valid_after, ceiling so a cert that died 10 seconds
+        # ago does not read as "0 minutes ago". Zero when not expired.
+        "minutes_expired": int((delta.total_seconds() + 59) // 60) if expired else 0,
+        # Whole minutes UNTIL not_valid_before, floored. Zero when already valid.
+        "minutes_until_valid": int((not_before - now).total_seconds() // 60) if future else 0,
+        "expired": expired,
+        "not_yet_valid": future,
+    }
+
+
+def admin_cert_expiry_refusal(cert_path: str, *, site: str) -> str | None:
+    """The ONE expiry-refusal sentence for the admin cert on disk, or None if usable.
+
+    Built like `_https_refusal`: one wording, every caller reuses it. Returns the
+    text when the certificate is past `not_valid_after` (EXPIRED) or before
+    `not_valid_before` (NOT YET VALID) as measured on THIS workstation's clock, and
+    None for everything else — including a file that cannot be parsed, because an
+    unreadable certificate is not an expired one and the existing TLS load path is
+    the honest place for THAT error to surface (never silenced, never invented here).
+
+    Carries the six ruled properties of dossier §4.4:
+    1. names `venya admin cert renew` — the exact command, not "refresh credentials";
+    2. names the file, the instant in ISO-8601 with its offset, and how long ago;
+    3. expired and not-yet-valid are DIFFERENT sentences with different repairs;
+    4. says nothing about what the core thinks (the server's own window is wider by
+       its clock-skew tolerance on purpose — §5.7; the CLI is advising, not deciding);
+    5. this function only returns text — the caller routes it to stderr and exits
+       non-zero, so a script's captured stdout never changes shape;
+    6. it is a refusal, not a prompt: no question, no ceremony offer, no retry.
+    """
+    info = _parse_admin_cert(cert_path)
+    if info is None:
+        return None
+
+    not_before = info["not_before"]
+    not_after = info["not_after"]
+
+    if info["expired"]:
+        return (
+            f"Error: the admin certificate at {cert_path} EXPIRED at {not_after.isoformat()} "
+            f"({info['minutes_expired']} minutes ago by this workstation's clock) — refusing "
+            f"{site} without contacting the core. Repair: run `venya admin cert renew`, then "
+            "re-run this command. On Windows that ceremony opens only from an interactive "
+            "desktop session, not from a remote or scheduled shell."
+        )
+
+    if info["not_yet_valid"]:
+        return (
+            f"Error: the admin certificate at {cert_path} is NOT YET VALID — it becomes valid "
+            f"at {not_before.isoformat()}, {info['minutes_until_valid']} minutes from now on "
+            "this workstation's clock — refusing "
+            f"{site} without contacting the core. A freshly minted certificate that is 'not yet "
+            "valid' locally almost always means CLOCK SKEW: fix the clock (NTP sync) FIRST; the "
+            "core judges the window by its own clock. Only once the clock is right, if this is "
+            "the wrong certificate, run `venya admin cert renew`."
+        )
+
+    return None
+
+
+def cmd_admin_cert_status(args: Any) -> int:
+    """`venya admin cert status` — the readable lifetime of the local admin certificate.
+
+    Dossier §4.5 (owner-ruled addition to ruling 4b): a headless job must be able to
+    pre-flight its own credential without hiding a ceremony inside the check. So this
+    command reads ONE file — the admin CERTIFICATE named by ``--cert-path`` or
+    ``VENYA_ADMIN_CERT`` — prints its remaining lifetime in MINUTES (the ruled unit: at
+    short-cert lifetimes a `days` figure rounds to 0 and lies), and stops.
+
+    Zero mutation, stated as three things the code never does: no HTTP request of any
+    kind (the caller dispatches this BEFORE an APIClient exists — see the gate in
+    ``run_command``), no FIDO2 ceremony, and no read of the private key. That last one
+    is why the command works with ``VENYA_ADMIN_KEY`` unset, which is also the shape a
+    locked-out operator is in: the key may be present, absent or on another machine,
+    and the lifetime readout must not care.
+
+    Three answers, per the ruled three-answers law:
+      * no readable certificate -> say so, name the mint/renew path, exit non-zero;
+      * readable but dying inside ``--within MINUTES`` -> "renew before starting", exit 0
+        (an advisory is information, not a failure);
+      * readable and comfortably valid -> print the lifetime, exit 0.
+    A certificate already OUTSIDE its validity window is the first case wearing the
+    second one's clothes: it prints the ONE refusal wording and exits non-zero.
+
+    Honesty clause: every number here is computed against THIS workstation's clock, and
+    the core is the authority on the real window (§5). The output says so in one line
+    rather than lecturing, and a future-dated certificate is labelled as likely clock
+    skew instead of printing a silently negative lifetime.
+
+    Windows carrier line: on Windows the renew ceremony this command points at opens
+    only from an interactive desktop session, not from a remote or scheduled shell.
+    """
+    cert_path = getattr(args, "cert_path", None) or os.environ.get("VENYA_ADMIN_CERT")
+    within = getattr(args, "within", None)
+
+    if within is not None and within < 0:
+        print(
+            f"Error: --within must be a non-negative number of minutes (got {within}).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not cert_path:
+        print(
+            "Error: no admin certificate to read — pass --cert-path or set VENYA_ADMIN_CERT. "
+            "Repair: mint/renew one with `venya admin cert renew` (or the workstation mint path "
+            "in the installer banner), then re-run this command.",
+            file=sys.stderr,
+        )
+        return 1
+
+    info = _parse_admin_cert(cert_path)
+    if info is None:
+        print(
+            f"Error: no admin certificate readable at {cert_path} — the file is missing, empty "
+            "or not a PEM certificate. Repair: run `venya admin cert renew`, or point "
+            "VENYA_ADMIN_CERT at the certificate this workstation actually holds.",
+            file=sys.stderr,
+        )
+        return 1
+
+    refusal = admin_cert_expiry_refusal(cert_path, site="the certificate readout")
+    if refusal is not None:
+        # Expired / not-yet-valid: the ONE wording, on stderr, stdout left clean, and
+        # still no network. Same sentence the pre-dial guard prints.
+        print(refusal, file=sys.stderr)
+        return 1
+
+    print("Admin certificate")
+    print(f"  File:             {cert_path}")
+    print(f"  Identity:         {info['identity']}")
+    print(f"  Serial:           {info['serial']}")
+    print(f"  Subject:          {info['subject']}")
+    print(f"  Valid from:       {info['not_before'].isoformat()}")
+    print(f"  Expires:          {info['not_after'].isoformat()}")
+    print(f"  Minutes remaining: {info['minutes_remaining']}")
+    print("  Clock:            local — computed on this workstation's clock, not the core's")
+
+    if within is not None and info["minutes_remaining"] < within:
+        print(
+            f"  ADVISORY: fewer than {within} minutes left — run `venya admin cert renew` "
+            "before starting the job. (Advisory only: exit code is unchanged.)",
+            file=sys.stderr,
+        )
+    print("  STATUS: OK")
+    return 0
+
+
+def cmd_admin_cert(client: APIClient, args: Any) -> int:
+    """`venya admin cert ...` dispatch. `renew` (RF-8b) is not implemented yet.
+
+    `status` is normally served by the read-local gate at the head of `run_command`
+    and never reaches here; this branch exists so a direct dispatch answers with the
+    command name rather than "Unknown admin command".
+    """
+    cert_command = getattr(args, "admin_cert_command", None)
+    if cert_command == "status":
+        return cmd_admin_cert_status(args)
+    if cert_command is None:
+        print("Error: admin cert subcommand required (status)", file=sys.stderr)
+        return 1
+    print(
+        f"Unknown admin cert command: {cert_command} (implemented: status; " "`renew` arrives with RF-8b)",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def cmd_setup(client: APIClient, args: Any) -> int:
