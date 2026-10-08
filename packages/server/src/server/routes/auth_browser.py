@@ -14,7 +14,9 @@ self-gated handler); every other route in this module —
 /auth/logout/browser,
 /auth/elevate/browser/challenge, /auth/elevate/browser/assert,
 /auth/me — is LIVE and gated by SessionMiddleware, satisfied by the
-HttpOnly session cookie or a Bearer token.
+HttpOnly session cookie or a Bearer token; since #445 the handler reads
+the identity the middleware already validated (request.state.auth_user),
+so both credential planes are honored as documented here.
 
 The CLI/API elevation endpoints moved to auth_elevation.py (bearer
 auth); the browser elevation ceremony stays here.
@@ -818,6 +820,36 @@ async def browser_elevate_assert(
         db.close()
 
 
+def _auth_me_payload(db: Session, user_id: str) -> AuthMeResponse:
+    """Build the /auth/me response for a user id from a live DB session.
+
+    Shared tail for both identity sources (the middleware-validated
+    request.state.auth_user and the cookie fallback) so the response
+    fields the dashboard gates admin nav on cannot diverge between them.
+    """
+    from core.iam.models import User
+
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    from core.iam.role_manager import RoleManager
+
+    role_manager = RoleManager(db)
+    role_members = role_manager.get_user_roles(user_id)
+    role_names = [member.role.name for member in role_members]
+
+    return AuthMeResponse(
+        user_id=user_id,
+        display_name=user.display_name,
+        status=user.status,
+        roles=role_names,
+    )
+
+
 @router.get(
     "/auth/me",
     response_model=AuthMeResponse,
@@ -826,10 +858,55 @@ async def browser_elevate_assert(
 async def auth_me(request: Request) -> AuthMeResponse:
     """Return current authenticated user info.
 
-    Reads the session cookie and returns the current user's
-    identity, status, and roles. Used by the dashboard to
-    gate admin-only navigation links.
+    Identity is read from ``request.state.auth_user`` — the credential the
+    SessionMiddleware has ALREADY validated, whether it rode the HttpOnly
+    session cookie or a Bearer token (refs #445: a bearer caller used to
+    be told "Invalid or expired session" by its own who-am-I call while
+    the same token worked everywhere else). One source of truth: this
+    handler parses no Authorization header and runs no second token
+    validator. Only when no middleware-attached identity is present (a
+    mount without SessionMiddleware) does it fall back to the original
+    cookie path. A middleware-authenticated caller class that cannot
+    produce a session row (admin-mTLS plane, executor plane — their
+    ``auth_user`` carries no ``session_id``) is refused fail-closed:
+    no fabricated identity, no widened answer surface.
+
+    Returns the current user's identity, status, and roles. Used by the
+    dashboard to gate admin-only navigation links.
     """
+    auth_user = getattr(request.state, "auth_user", None)
+
+    if isinstance(auth_user, dict) and auth_user.get("session_id") is not None:
+        # Session-bearing caller (bearer or cookie — the middleware already
+        # applied the documented cookie-priority pick). Open a DB session
+        # for the profile read; the credential itself is NOT re-validated.
+        from server.dependencies import get_backend
+
+        db = get_backend(request).get_session()
+        try:
+            return _auth_me_payload(db, str(auth_user["user_id"]))
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Auth me failed: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve user info",
+            )
+        finally:
+            db.close()
+
+    if isinstance(auth_user, dict):
+        # Middleware-authenticated, but NOT a session plane (admin-mTLS /
+        # executor caller). /auth/me is a session surface: refuse
+        # fail-closed rather than answer with a fabricated identity.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not a session-authenticated caller",
+        )
+
+    # Fallback: no middleware-attached identity at all — the original
+    # cookie path, byte-for-byte for browser callers on a bare mount.
     result = _get_session_from_cookie(request)
     if result is None:
         raise HTTPException(
@@ -837,29 +914,9 @@ async def auth_me(request: Request) -> AuthMeResponse:
             detail="Invalid or expired session",
         )
 
-    db, session, user_info = result
+    db, session, _user_info = result
     try:
-        from core.iam.models import User
-
-        user = db.query(User).filter(User.user_id == session.user_id).first()
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found",
-            )
-
-        from core.iam.role_manager import RoleManager
-
-        role_manager = RoleManager(db)
-        role_members = role_manager.get_user_roles(session.user_id)
-        role_names = [member.role.name for member in role_members]
-
-        return AuthMeResponse(
-            user_id=session.user_id,
-            display_name=user.display_name,
-            status=user.status,
-            roles=role_names,
-        )
+        return _auth_me_payload(db, session.user_id)
     except HTTPException:
         raise
     except Exception as e:
