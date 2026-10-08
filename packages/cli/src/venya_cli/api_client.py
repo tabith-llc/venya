@@ -154,6 +154,38 @@ def _anchor_refusal(searched: str) -> APIClientError:
     return APIClientError(_anchor_refusal_text(searched))
 
 
+def _warn_if_loose_admin_key(path: str) -> None:
+    """POSIX-only mode-bit check on the admin mTLS key file: warn, never block.
+
+    The admin key authorizes admin operations WITHOUT a security-key touch, so a
+    key that group or other can read is a real exposure. This prints one line on
+    stderr naming the path, the mode found, the wanted ``0600`` and that fact —
+    it does NOT change the exit code, stdout, or any request the CLI makes.
+
+    Correct modes stay silent: the trigger is the group/other READ bits
+    (``mode & 0o044``), so ``0600`` and stricter (``0400``) print nothing. An
+    owner-only bit above ``0600`` (e.g. the ``0700`` exec bit) is NOT flagged —
+    the ruled trigger is the read-to-others class, not owner permissions.
+
+    Windows (NTFS) has no POSIX mode bits, so the check is skipped there; we
+    never print a fabricated "looks fine" — platform honesty, not a fake OK.
+    """
+    if os.name != "posix":
+        return  # no POSIX mode bits on this platform: skip, never a fabricated OK
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        return  # unstatable / raced away: the existence check at the caller owns it
+    if not (mode & 0o044):
+        return  # 0600-or-stricter: the correct case is silent
+    print(
+        f"warning: {path} is mode {mode:04o} — the admin key authorizes admin "
+        "operations without a security-key touch; keep it 0600 (chmod 600), "
+        "stored outside your home directory.",
+        file=sys.stderr,
+    )
+
+
 def _build_ssl_context(cafile: str | None, certfile: str | None, keyfile: str | None) -> ssl.SSLContext:
     """Build the single TLS context for APIClient.
 
@@ -368,6 +400,11 @@ class APIClient:
                         f"{var} points at {p!r}, which does not exist. "
                         "Copy the admin cert/key from the core (see installer banner) and retry."
                     )
+            # Existence AND, on POSIX, group/other-unreadable — one legible block.
+            # The KEY authorizes admin operations without a security-key touch, so
+            # its mode bits matter: warn (never block) if group or other can read it.
+            # The cert is public — no mode warning there.
+            _warn_if_loose_admin_key(key_path)
         # Server-TLS verification precedence: SSL_CERT_FILE env wins (the
         # full-lifecycle-test.md and cert-rotation-runbook flows drive the CLI
         # that way); then the CA installed by `venya setup` beside config.json.
