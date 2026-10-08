@@ -26,6 +26,8 @@ from fido2.webauthn import ES256
 from server.fido2.manager import Fido2Manager, StoredCredential, WebAuthnError
 from starlette.testclient import TestClient
 
+from tests.fido2_db import manager_with_db, peek_challenge_data
+
 RP_ID = "venya-core-1"
 RP_ID_HASH = hashlib.sha256(RP_ID.encode()).digest()
 ATTESTED_ID = b"\xaa" * 32
@@ -45,8 +47,8 @@ def _build_attestation_object(cred_id: bytes, cose_key: dict, counter: int = 1) 
 
 
 def _reg_client_data(manager: Fido2Manager, challenge_id: str) -> str:
-    """clientDataJSON answering the manager's issued challenge (reads raw challenge before pop)."""
-    raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+    """clientDataJSON answering the manager's issued challenge (reads the DB row before the claim)."""
+    raw = peek_challenge_data(manager.store._sessions, challenge_id)["raw_challenge"]
     data = {
         "type": "webauthn.create",
         "challenge": _b64url(raw),
@@ -96,8 +98,10 @@ def cose():
     return ES256.from_cryptography_key(private_key.public_key())
 
 
-def _manager():
-    return Fido2Manager(rp_id=RP_ID, rp_name="Venya")
+def _manager(tmp_path):
+    # #534: challenges live in the DB, so the test manager gets a real store.
+    manager, _ = manager_with_db(tmp_path, rp_id=RP_ID, rp_name="Venya")
+    return manager
 
 
 def _registration_body(
@@ -123,8 +127,8 @@ def _registration_body(
 class TestManagerCrosscheck:
     """(a): response.id must equal auth_data.credential_data.credential_id, rejected before any store write."""
 
-    def test_mismatch_poison_rejected_victim_entry_unchanged(self, cose):
-        manager = _manager()
+    def test_mismatch_poison_rejected_victim_entry_unchanged(self, tmp_path, cose):
+        manager = _manager(tmp_path)
         manager.store.store_credential(
             StoredCredential(user_id="victim", credential_id=VICTIM_ID, public_key=b"victim-pub", sign_count=7)
         )
@@ -141,8 +145,8 @@ class TestManagerCrosscheck:
         assert manager.store.get_credential(ATTESTED_ID) is None
         assert len(manager.store._credentials) == 1
 
-    def test_honest_ceremony_accepted_keyed_on_attested(self, cose):
-        manager = _manager()
+    def test_honest_ceremony_accepted_keyed_on_attested(self, tmp_path, cose):
+        manager = _manager(tmp_path)
         challenge_id, _ = manager.start_registration(user_id="u1", username="user1")
 
         body = _registration_body(ATTESTED_ID, ATTESTED_ID, dict(cose), challenge_id, manager)
@@ -151,9 +155,9 @@ class TestManagerCrosscheck:
         assert cred.credential_id == ATTESTED_ID
         assert cred.user_id == "u1"
 
-    def test_success_defers_store_to_handler(self, cose):
+    def test_success_defers_store_to_handler(self, tmp_path, cose):
         """(b) contract: finish_registration does NOT store — the handler persists after its DB write."""
-        manager = _manager()
+        manager = _manager(tmp_path)
         challenge_id, _ = manager.start_registration(user_id="u1", username="user1")
 
         body = _registration_body(ATTESTED_ID, ATTESTED_ID, dict(cose), challenge_id, manager)
@@ -176,8 +180,8 @@ class TestCredentialsAddCompleteOrdering:
             headers={"X-Elevation-Token": "elev-token-123"},
         )
 
-    def test_forced_db_flush_failure_leaves_no_store_entry(self, cose):
-        manager = _manager()
+    def test_forced_db_flush_failure_leaves_no_store_entry(self, tmp_path, cose):
+        manager = _manager(tmp_path)
         challenge_id, _ = manager.start_registration(user_id="user1", username="user1")
         db = _make_valid_elevation_db()
         db.flush.side_effect = RuntimeError("simulated unique violation")
@@ -189,8 +193,8 @@ class TestCredentialsAddCompleteOrdering:
         # THE POINT: the failed DB write leaves no surviving store entry.
         assert manager.store._credentials == {}
 
-    def test_success_stores_after_commit_and_db_row_keyed_attested(self, cose):
-        manager = _manager()
+    def test_success_stores_after_commit_and_db_row_keyed_attested(self, tmp_path, cose):
+        manager = _manager(tmp_path)
         challenge_id, _ = manager.start_registration(user_id="user1", username="user1")
         db = _make_valid_elevation_db()
 
@@ -205,8 +209,8 @@ class TestCredentialsAddCompleteOrdering:
         ]
         assert [c.credential_id for c in added_creds] == [ATTESTED_ID]
 
-    def test_mismatch_rejected_400_no_db_add_no_store(self, cose):
-        manager = _manager()
+    def test_mismatch_rejected_400_no_db_add_no_store(self, tmp_path, cose):
+        manager = _manager(tmp_path)
         manager.store.store_credential(
             StoredCredential(user_id="victim", credential_id=VICTIM_ID, public_key=b"victim-pub", sign_count=7)
         )

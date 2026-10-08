@@ -100,14 +100,28 @@ class TestAdminCertSkiAki504:
 
     def test_ac2_leaf_still_verifies_after_identifier_addition(self, admin_manager, tmp_path):
         """Adding the identifiers must not break chain verification — the CA
-        signs the leaf and OpenSSL (default and -x509_strict) accepts it."""
+        signs the leaf and OpenSSL accepts it.
+
+        RF-7 re-scope (refs RF-6 §3.2): the bootstrap mint now writes the
+        two-plane marker as a CRITICAL extension, so a stock OpenSSL CLI —
+        which does not know the Venya OID — refuses the leaf with error 34
+        (unhandled critical extension) by design: the marker is a statement
+        a verifier must not skip silently. The verification cells below keep
+        their original point (SKI/AKI did not break the chain) under
+        -ignore_critical, and the paired negative pins that the refusal
+        without the flag is the marker's critical bit, not a broken leaf.
+        The product is unaffected: the app re-verifies with cryptography
+        (middleware/auth.py _verify_forwarded_cert), which does not enforce
+        path-validation criticality policy, and nginx ``ssl_verify_client
+        optional`` forwards the PEM either way (RF-6 §5.2).
+        """
         import subprocess
 
         _cert, key_pem, cert_pem = admin_manager.sign_admin_cert(_ADMIN_IDENTITY)
         leaf = tmp_path / "leaf.crt"
         leaf.write_bytes(cert_pem)
         ca = admin_manager.ca_cert_path
-        for extra in ([], ["-x509_strict"]):
+        for extra in (["-ignore_critical"], ["-ignore_critical", "-x509_strict"]):
             proc = subprocess.run(
                 ["openssl", "verify", *extra, "-CAfile", str(ca), str(leaf)],
                 capture_output=True,
@@ -115,6 +129,18 @@ class TestAdminCertSkiAki504:
                 check=False,
             )
             assert proc.returncode == 0, f"openssl verify {extra} failed: {proc.stdout}{proc.stderr}"
+        # Paired negative: without -ignore_critical the CLI must refuse, and
+        # the refusal reason must be the critical marker — nothing else.
+        refused = subprocess.run(
+            ["openssl", "verify", "-CAfile", str(ca), str(leaf)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert refused.returncode != 0, "critical plane marker must make stock openssl verify refuse"
+        assert (
+            "unhandled critical extension" in refused.stdout + refused.stderr
+        ), f"refusal must name the critical extension, got: {refused.stdout}{refused.stderr}"
         assert key_pem  # returned keypair still present
 
     def test_ac3_root_executor_plane_unchanged(self, tmp_path):

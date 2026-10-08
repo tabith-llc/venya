@@ -752,6 +752,27 @@ class APIClient:
 
         url = f"{server_url or self.config.server_url}/api/v1/executors/register"
 
+        # #545: the scheme rule lives at the dial, not only at the caller. This
+        # path builds its OWN httpx2.Client below, so it never rides the gated
+        # ``_http`` seam; without this check, any new caller — or the
+        # ``or self.config.server_url`` fallback reaching a stored plaintext
+        # value (config files written before #509/#497) — would dial http with
+        # the CSR and the enrollment token aboard. Same shared wording as the
+        # ``_http`` gate (#521): one rule, one wording, no hand-copied variant.
+        # Deferred import: commands.py imports this module at its top, so a
+        # module-level back-import would be a cycle.
+        if not (isinstance(url, str) and url.startswith("https://")):
+            from .commands import _https_refusal
+
+            raise APIClientError(
+                _https_refusal(
+                    str(url),
+                    site="the executor registration POST",
+                    ticket="api-client-register-executor-raw-dial-missing-scheme-gate",
+                    detail="this POST carries the CSR and the enrollment token",
+                )
+            )
+
         tls_verify_env = os.environ.get("VENYA_TLS_VERIFY", "")
         if tls_verify_env == "" or tls_verify_env.lower() == "true":
             tls_verify = True

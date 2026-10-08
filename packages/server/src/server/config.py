@@ -246,10 +246,14 @@ class ClockSkewConfig(BaseModel):
         description="Clock skew tolerance for token/session expiration checks (0-300s)",
     )
     cert_tolerance_seconds: int = Field(
-        default=300,
+        default=60,
         ge=0,
         le=600,
-        description="Clock skew tolerance for certificate validity checks (0-600s)",
+        description=(
+            "Clock skew tolerance for certificate validity checks (0-600s). "
+            "Default 60s: RF-6 §5.3 sizes it against the 60-minute short-cert "
+            "life (tolerance <= lifetime/20 is asserted, not remembered)."
+        ),
     )
 
 

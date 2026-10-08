@@ -195,6 +195,45 @@ class TestSetupHttpsRequired:
         assert not (tmp_path / "config.json").exists()
         assert "https://" in capsys.readouterr().err
 
+    def test_uppercase_http_scheme_refused_not_massaged(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture,
+        ca_pem: bytes,
+    ):
+        """#544 NEGATIVE: `venya setup HTTP://core-1` — the old case-sensitive
+        prefix test glued https:// in front of the uppercase scheme, producing
+        ``https://HTTP://core-1``, which passed the guard and was WRITTEN. On the
+        fills-only rule the value reaches the guard verbatim and fails closed:
+        rc=1, no GET, nothing written — asserted by content equality."""
+        client = APIClient(config_file=tmp_path / "config.json")
+        with patch("venya_cli.commands.httpx2.get", return_value=_resp(200, ca_pem)) as mock_get:
+            rc = commands_mod.cmd_setup(client, _args("HTTP://venya-core-1"))
+        assert rc == 1
+        mock_get.assert_not_called()
+        assert not client.config.ca_path.exists()
+        assert not (tmp_path / "config.json").exists()
+        assert client.config.server_url == "http://localhost:8000"  # untouched default
+        err = capsys.readouterr().err
+        assert "HTTP://venya-core-1" in err  # refused verbatim, not massaged
+        assert "cli-setup-ca-fetch-plaintext-http" in err
+
+    def test_mixed_case_scheme_refused_verbatim(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture,
+        ca_pem: bytes,
+    ):
+        """#544 paired negative, mixed case: ``HtTp://`` behaves exactly like
+        ``HTTP://`` — the fills-only test keys on \"://\", never on case."""
+        client = APIClient(config_file=tmp_path / "config.json")
+        with patch("venya_cli.commands.httpx2.get", return_value=_resp(200, ca_pem)) as mock_get:
+            rc = commands_mod.cmd_setup(client, _args("HtTp://venya-core-1"))
+        assert rc == 1
+        mock_get.assert_not_called()
+        assert client.config.server_url == "http://localhost:8000"  # untouched default
+        assert "HtTp://venya-core-1" in capsys.readouterr().err
+
     def test_bare_hostname_still_normalizes_to_https(self, tmp_path: Path, ca_pem: bytes):
         """Paired positive: the refusal is scheme-specific, not a lockdown — the
         documented bare-hostname form keeps working exactly as before."""

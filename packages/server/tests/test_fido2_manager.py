@@ -22,6 +22,8 @@ from fido2 import cbor as fido2_cbor
 from fido2.webauthn import ES256
 from server.fido2.manager import Fido2Manager, StoredCredential, _b64_decode
 
+from tests.fido2_db import manager_with_db, peek_challenge_data
+
 RP_ID = "venya-core-1"
 RP_ID_HASH = hashlib.sha256(RP_ID.encode()).digest()
 
@@ -42,9 +44,21 @@ def es256_keypair():
 
 
 @pytest.fixture()
-def manager(es256_keypair):
-    """Fido2Manager with no backend (in-memory only)."""
-    return Fido2Manager(rp_id=RP_ID, rp_name="Venya")
+def manager(es256_keypair, tmp_path):
+    """Fido2Manager over a real DB challenge store (#534), no backend — so
+    the credential-side active-state gate stays skipped exactly as before."""
+    mgr, _factory = manager_with_db(tmp_path, rp_id=RP_ID, rp_name="Venya")
+    return mgr
+
+
+def _peek_challenge(manager: Fido2Manager, challenge_id: str) -> dict:
+    """The pending ceremony dict, read from the table WITHOUT claiming it.
+
+    The store is consume-only by design (single-consume claim, AC3), so a
+    cell forging a client response reads the row directly — the honest
+    stand-in for the old ``store._challenges[cid].data`` dict pokes.
+    """
+    return peek_challenge_data(manager.store._sessions, challenge_id)
 
 
 @pytest.fixture()
@@ -74,9 +88,9 @@ def _build_attestation_object(
 def _reg_client_data(manager, challenge_id, type_="webauthn.create", origin=None, challenge=None) -> str:
     """Build b64url clientDataJSON answering the manager's issued challenge.
 
-    Reads the raw challenge from the store BEFORE finish_registration pops it.
+    Reads the raw challenge from the DB row BEFORE finish_registration claims it.
     """
-    raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+    raw = _peek_challenge(manager, challenge_id)["raw_challenge"]
     data = {
         "type": type_,
         "challenge": _b64url(challenge if challenge is not None else raw),
@@ -361,7 +375,7 @@ class TestFinishAuthentication:
         _store_credential(manager, "u1", cred_id, cose_key_bytes, sign_count=0)
 
         challenge_id, _ = manager.start_authentication(user_id="u1")
-        raw_challenge = manager.store._challenges[challenge_id].data["raw_challenge"]
+        raw_challenge = _peek_challenge(manager, challenge_id)["raw_challenge"]
 
         response = _build_assertion_response(cred_id, private_key, raw_challenge, counter=1)
         result = manager.finish_authentication(challenge_id, response)
@@ -387,7 +401,7 @@ class TestFinishAuthentication:
         _store_credential(manager, "u1", cred_id, cose_key_bytes, sign_count=0)
 
         challenge_id, _ = manager.start_authentication(user_id="u1")
-        raw_challenge = manager.store._challenges[challenge_id].data["raw_challenge"]
+        raw_challenge = _peek_challenge(manager, challenge_id)["raw_challenge"]
         response = _build_assertion_response(cred_id, private_key, raw_challenge, counter=1)
         result = manager.finish_authentication(challenge_id, response)
 
@@ -402,7 +416,7 @@ class TestFinishAuthentication:
         _store_credential(manager, "u1", cred_id, cose_key_bytes, sign_count=0)
 
         challenge_id, _ = manager.start_authentication(user_id="u1")
-        raw_challenge = manager.store._challenges[challenge_id].data["raw_challenge"]
+        raw_challenge = _peek_challenge(manager, challenge_id)["raw_challenge"]
 
         response = _build_assertion_response(cred_id, private_key, raw_challenge, counter=1, tamper_signature=True)
         with pytest.raises(ValueError, match="Signature verification failed"):
@@ -415,7 +429,7 @@ class TestFinishAuthentication:
         _store_credential(manager, "u1", cred_id, cose_key_bytes, sign_count=0)
 
         challenge_id, _ = manager.start_authentication(user_id="u1")
-        raw_challenge = manager.store._challenges[challenge_id].data["raw_challenge"]
+        raw_challenge = _peek_challenge(manager, challenge_id)["raw_challenge"]
 
         response = _build_assertion_response(cred_id, private_key, raw_challenge, counter=1)
 
@@ -446,7 +460,7 @@ class TestFinishAuthentication:
         _store_credential(manager, "u1", b"\x22" * 32, cose_key_bytes, sign_count=0)
 
         challenge_id, _ = manager.start_authentication(user_id="u1")
-        raw_challenge = manager.store._challenges[challenge_id].data["raw_challenge"]
+        raw_challenge = _peek_challenge(manager, challenge_id)["raw_challenge"]
 
         # Use a credential ID that doesn't exist in the store
         unknown_cred_id = b"\x33" * 32
@@ -463,7 +477,7 @@ class TestFinishAuthentication:
         _store_credential(manager, "u1", cred_id, cose_key_bytes, sign_count=10)
 
         challenge_id, _ = manager.start_authentication(user_id="u1")
-        raw_challenge = manager.store._challenges[challenge_id].data["raw_challenge"]
+        raw_challenge = _peek_challenge(manager, challenge_id)["raw_challenge"]
 
         response = _build_assertion_response(cred_id, private_key, raw_challenge, counter=5)
 
@@ -561,7 +575,7 @@ class TestFinishAuthenticationActiveGate:
         cred_id = b"\xdd" * 32
         manager, _ = self._real_manager(tmp_path, cred_id, cose_key_bytes)
         challenge_id, _ = manager.start_authentication(user_id="u1")
-        raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+        raw = _peek_challenge(manager, challenge_id)["raw_challenge"]
         response = _build_assertion_response(cred_id, private_key, raw, counter=1)
         result = manager.finish_authentication(challenge_id, response)
         assert result["user_id"] == "u1"
@@ -582,7 +596,7 @@ class TestFinishAuthenticationActiveGate:
         assert manager.store.get_credential(cred_id) is not None  # still cached
 
         challenge_id, _ = manager.start_authentication(user_id="u1")
-        raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+        raw = _peek_challenge(manager, challenge_id)["raw_challenge"]
         response = _build_assertion_response(cred_id, private_key, raw, counter=1)
         with pytest.raises(ValueError, match="Credential not found"):
             manager.finish_authentication(challenge_id, response)
@@ -615,7 +629,7 @@ class TestFinishAuthenticationActiveGate:
         manager.backend.get_session = broken_commit_get_session
 
         challenge_id, _ = manager.start_authentication(user_id="u1")
-        raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+        raw = _peek_challenge(manager, challenge_id)["raw_challenge"]
         response = _build_assertion_response(cred_id, private_key, raw, counter=1)
         with pytest.raises(ValueError, match="Sign-count persistence failed"):
             manager.finish_authentication(challenge_id, response)

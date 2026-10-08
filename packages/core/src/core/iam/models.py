@@ -6,9 +6,10 @@
 
 """SQLAlchemy ORM models for the core database.
 
-20 tables covering IAM, secrets, sessions, key rotation, rate limiting,
+21 tables covering IAM, secrets, sessions, key rotation, rate limiting,
 command policies, executor certificates, elevation tokens, WebAuthn
-credentials, execution relay, and the KEK boot-sentinel.
+credentials and pending ceremonies, execution relay, and the KEK
+boot-sentinel.
 
 Schema is created via Alembic migrations on install. Models are the ORM interface.
 """
@@ -531,6 +532,45 @@ class ElevationChallenge(Base):
     )
     session_id = Column(Integer, nullable=True)
     # "created" -> "consumed" (vocabulary mirrors enrollment_tokens.state)
+    state = Column(String(16), nullable=False, default="created")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class Fido2Challenge(Base):
+    """Pending WebAuthn ceremony challenges, DB-backed (#534).
+
+    The protocol half of a FIDO2 ceremony — the issued challenge bytes plus
+    its ceremony metadata — used to live in a per-process dict inside
+    Fido2Store, so a core restart (or, under any future multi-worker
+    routing, a ceremony step landing on another process) lost it and the
+    response 401'd 'Challenge not found or expired'. One row per pending
+    challenge; the claim is an atomic single-consume UPDATE (house pattern:
+    elevation_challenges.state from #528, enrollment_tokens.state).
+    `payload` is the ceremony dict as JSON text with bytes values
+    base64-tagged (raw_challenge, existing_credential_ids).
+
+    user_id carries NO DB-level FK — deliberate. A registration challenge
+    can be issued while the user row is still pending-created (init flow)
+    or not present yet at all (the enrollment-token flow binds the id, the
+    row lands later), and an untargeted login start carries an empty
+    binding; a FK would refuse live ceremonies. The lifecycle rule is an
+    application rule: rows are short-lived (CHALLENGE_TTL_SECONDS) and are
+    pruned at the next challenge touch. Same ruling class as
+    elevation_challenges.session_id and audit_events.user_id (022).
+    """
+
+    __tablename__ = "fido2_challenges"
+
+    id = Column(Integer, primary_key=True)
+    challenge_id = Column(String(64), unique=True, nullable=False)
+    user_id = Column(String(64), nullable=False)
+    payload = Column(Text, nullable=False)
+    # "created" -> "consumed" (vocabulary mirrors elevation_challenges.state)
     state = Column(String(16), nullable=False, default="created")
     created_at = Column(
         DateTime(timezone=True),
