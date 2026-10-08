@@ -103,6 +103,11 @@ def _atomic_write(path: str | Path, payload: bytes, mode: int) -> None:
     only publish step is still a single ``os.replace`` from an exclusive
     temp. Residue (including legacy deterministic names from older builds)
     is reclaimed at boot by ``sweep_stale_tmp_files`` below.
+
+    #479: the raw descriptor returned by ``mkstemp`` is owned by this frame until
+    ``os.fdopen`` takes it, and every path that does not reach that handoff closes
+    it before re-raising. Both #478 properties (unique temp, temp-unlink on
+    failure) are unchanged by that.
     """
     path = str(path)
     # Refuse BEFORE creating a temp when the target itself is not writable
@@ -117,9 +122,25 @@ def _atomic_write(path: str | Path, payload: bytes, mode: int) -> None:
         suffix=".tmp",
     )
     try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "wb") as f:  # mkstemp creates 0600; fchmod above pins the final mode
-            f.write(payload)
+        try:
+            os.fchmod(fd, mode)
+            # Ownership of ``fd`` moves to ``stream`` on this line and nowhere
+            # earlier. #479: anything that fails BEFORE the handoff — ``fchmod``
+            # raising (EROFS/EPERM on a hardened unit) or ``fdopen`` itself
+            # failing — left the descriptor open, because the unlink below gives
+            # a name back, never a descriptor. One leak per failed write, in a
+            # process that also holds the relay listener, the reaper, the
+            # heartbeat pool and the audit forwarder. AFTER the handoff the file
+            # object owns it and closes it, which is why the close sits here and
+            # not in the outer handler (an unconditional close there would be a
+            # double close over a descriptor somebody else just released).
+            stream = os.fdopen(fd, "wb")  # mkstemp creates 0600; fchmod above pins the final mode
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(fd)  # still ours: hand back the descriptor, then let the cause travel
+            raise
+        with stream:
+            stream.write(payload)
         os.replace(tmp_name, path)
     except BaseException:
         with contextlib.suppress(OSError):
