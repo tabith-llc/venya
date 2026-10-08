@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID, NameOID
 from fastapi import FastAPI, Request
-from server.ca import AdminCAManager
+from server.ca import PLANE_MACHINE, AdminCAManager
 from server.config import AdminMTLSConfig, CASecurityConfig, InnerTLSConfig, ServerConfig
 from server.dependencies import get_current_user, require_admin
 from server.middleware.auth import SessionMiddleware
@@ -603,6 +603,14 @@ def _admin_leaf(
         serial=serial,
         expired=expired,
         san_email=cn if san_email and "@" in cn else san_email,
+        # RF-7 chunk 2: these leaves stand in for MACHINE-plane admin certs
+        # (identities enumerated in known_admin_ids), which is exactly what the
+        # narrowed bootstrap mint writes — the CA's own PLANE_MACHINE marker.
+        # Assertions in this file are untouched; the double now matches what the
+        # product mints at this tip (RF-6 §3.2/§6.3), and the pre-two-plane
+        # (markerless) shape has its own refusal cells in
+        # test_plane_marker_middleware_rf7.py.
+        plane=PLANE_MACHINE,
     )
 
 

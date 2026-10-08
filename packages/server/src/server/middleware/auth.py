@@ -32,6 +32,8 @@ from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import JSONResponse, Response
 
+from ..ca import PLANE_MACHINE, parse_plane_marker
+
 logger = logging.getLogger("venya.server")
 
 
@@ -270,7 +272,14 @@ class SessionMiddleware(BaseHTTPMiddleware):
     # `venya init --installation-reset` bootstrap call posts here before any
     # admin account exists (see cli/commands.py cmd_init). The route's own
     # "is the deployment initialized?" predicate is the gate.
-    BOOTSTRAP_PATHS = frozenset({"/api/v1/init/reset"})
+    #
+    # RF-7 chunk 2 (RF-6 §6.5, first-human chicken-and-egg):
+    # /api/v1/admin/certs/issue joins this set because the credential it mints
+    # IS the credential an admin-cert gate would require — a brand-new install
+    # has no human cert to present. This is the #450 treatment reused as the
+    # dossier recommends ("reuse an existing mechanism ... do not invent a
+    # third"), not a new mechanism: opportunistic identity, handler decides.
+    BOOTSTRAP_PATHS = frozenset({"/api/v1/init/reset", "/api/v1/admin/certs/issue"})
 
     # Prefixes that don't require authentication
     PUBLIC_PREFIXES = ("/static/",)  # static assets (CSS, JS, images)
@@ -285,6 +294,15 @@ class SessionMiddleware(BaseHTTPMiddleware):
     SESSION_REQUIRED_ADMIN_PATHS = frozenset(
         {
             "/api/v1/admin/recovery-code/reissue",
+            # RF-7 chunk 2: the mint path is in BOTH sets, and the two existing
+            # treatments compose (see the branch in dispatch) — BOOTSTRAP makes
+            # the certificate OPTIONAL, this set makes the presented session the
+            # SECOND credential and the identity the mint runs as. Membership in
+            # existing sets, evaluated by existing code: no third mechanism.
+            # The handler still refuses a cert-only caller (routes/
+            # admin_certs.py::_require_human_session) — #340-A: cert-alone
+            # never mints.
+            "/api/v1/admin/certs/issue",
         }
     )
 
@@ -405,30 +423,68 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Admin access requires valid client certificate"},
             )
 
+        # Step 2.5 — the credential PLANE, read from the CA's own marker
+        # (RF-6 §3.2, refs RF-7 chunk 2). This runs BEFORE the static allowlist
+        # because the plane is what DECIDES which policy applies: a machine cert
+        # is slot-shaped and stays checked against known_admin_ids; a human cert
+        # is person-shaped and the allowlist does not apply to it (§3.2). A
+        # marker read placed after the allowlist could never admit a human cert
+        # at all.
+        #
+        # Fails closed: no marker, an unparseable marker, or a value outside
+        # {machine, human} all refuse 403 with the re-issue requirement named
+        # (§3.2, §3.8 row 5). Nothing here defaults into a plane.
+        try:
+            plane = parse_plane_marker(cert)
+        except ValueError as e:
+            logger.warning("Admin route %s: plane marker refused — failing closed (%s)", path, e)
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "detail": (
+                        "Admin certificate predates the two-plane model and must be re-issued — "
+                        "it carries no credential-plane marker. Repair: sign in and pass the "
+                        "security-key ceremony again for a short-lived certificate."
+                    )
+                },
+            )
+
         # Allowlist FAILS CLOSED when empty (ticket
-        # sec-admin-mtls-allowlist-revocation #15). Ruled-Q4 per-plane anchors
-        # already refuse Root-CA certs at the chain check above, but the
-        # allowlist stays a defense-in-depth layer (any Admin-CA cert must
-        # still name an enumerated identity). The 403 detail stays generic
-        # here (the caller may be any cert holder); recovery guidance goes to
-        # the server-side log.
+        # sec-admin-mtls-allowlist-revocation #15) and stays a defense-in-depth
+        # layer ON THE MACHINE PLANE ONLY: an Admin-CA machine cert must still
+        # name an enumerated identity, byte-for-byte as before this change. The
+        # human plane skips the list by ruling (RF-6 §3.2) — its identity is a
+        # person's user_id, which is not and must not be enumerated in a config
+        # slot; what authorizes a human on EVERY use is the role lookup in
+        # require_admin (§3.3), not this list.
         known_ids = config.admin_mtls.known_admin_ids  # type: ignore[union-attr]
-        if not known_ids:
-            logger.warning(
-                "Admin route %s: known_admin_ids is EMPTY — failing closed. "
-                "Set VENYA_ADMIN_IDENTITY (the installer writes it); ticket "
-                "sec-admin-mtls-allowlist-revocation.",
+        if plane == PLANE_MACHINE:
+            if not known_ids:
+                logger.warning(
+                    "Admin route %s: known_admin_ids is EMPTY — failing closed. "
+                    "Set VENYA_ADMIN_IDENTITY (the installer writes it); ticket "
+                    "sec-admin-mtls-allowlist-revocation.",
+                    path,
+                )
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "Admin access requires valid client certificate"},
+                )
+            if identity not in known_ids:
+                logger.warning("Admin route %s: identity '%s' not in known_admin_ids", path, identity)
+                return JSONResponse(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"detail": "Admin access requires valid client certificate"},
+                )
+        elif not known_ids:
+            # Records that an empty slot list no longer stands between a HUMAN
+            # cert and the role table. The gate moved; it did not disappear.
+            logger.info(
+                "Admin route %s: human-plane cert '%s' admitted with known_admin_ids EMPTY — "
+                "the list does not apply to this plane (RF-6 §3.2); require_admin's "
+                "role lookup is the gate.",
                 path,
-            )
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={"detail": "Admin access requires valid client certificate"},
-            )
-        if identity not in known_ids:
-            logger.warning("Admin route %s: identity '%s' not in known_admin_ids", path, identity)
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={"detail": "Admin access requires valid client certificate"},
+                identity,
             )
 
         # Step 3: in-process revocation check on the VERIFIED cert's serial
@@ -495,8 +551,13 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Admin certificate revoked"},
             )
 
-        # All checks passed
-        request.state.auth_user = {"caller": "admin", "user_id": identity}
+        # All checks passed. The `caller` key stays for plane identification
+        # (logging, audit, plane-aware route logic); what §3.3 removes is the
+        # authorization BYPASS on the human plane, and that lives in
+        # require_admin — plus the plane itself, so a dependency can tell the
+        # two shapes apart without re-reading the certificate.
+        request.state.admin_cert_plane = plane
+        request.state.auth_user = {"caller": "admin", "user_id": identity, "plane": plane}
         return None
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
@@ -571,6 +632,25 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 token = self._extract_session_token(request)
                 if token:
                     session_user = await self._validate_token(request, token)
+                    if session_user is None:
+                        return JSONResponse(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            content={"detail": "Invalid or expired token"},
+                        )
+                    request.state.auth_user = session_user
+            elif path in self.SESSION_REQUIRED_ADMIN_PATHS:
+                # A path in BOTH sets (the mint): the verified certificate opened
+                # the CHANNEL, so a session offered alongside it is validated and
+                # BECOMES the identity — the same fall-through the admin-route
+                # branch performs for the recovery-code reissue (#340-A), and the
+                # only way the mint can bind a certificate-bearing caller (a
+                # renewal) to the person's own session. With NO session offered,
+                # the cert identity stays and the route's own session guard
+                # denies: cert-alone never mints.
+                request.state.admin_cert_verified = True
+                session_token = self._extract_session_token(request)
+                if session_token:
+                    session_user = await self._validate_token(request, session_token)
                     if session_user is None:
                         return JSONResponse(
                             status_code=status.HTTP_401_UNAUTHORIZED,

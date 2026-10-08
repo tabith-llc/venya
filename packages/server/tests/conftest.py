@@ -95,8 +95,30 @@ def inner_tls_config(prefix=None):
     )
 
 
-def make_leaf(ca_cert, ca_key, *, cn, serial=None, days_valid=90, san_dns=None, san_email=None, expired=False):
-    """Build a leaf signed by (ca_cert, ca_key) with a controllable serial/window."""
+def make_leaf(
+    ca_cert,
+    ca_key,
+    *,
+    cn,
+    serial=None,
+    days_valid=90,
+    san_dns=None,
+    san_email=None,
+    expired=False,
+    plane=None,
+):
+    """Build a leaf signed by (ca_cert, ca_key) with a controllable serial/window.
+
+    ``plane`` (RF-7 chunk 2) writes the CA's credential-plane marker — the
+    extension every Admin-CA mint carries at this tip (``sign_admin_cert``
+    writes ``machine``, ``sign_admin_csr`` writes ``human``). Pass
+    ``PLANE_MACHINE`` for a double that stands in for an admin certificate; the
+    middleware refuses an admin leaf with NO marker (RF-6 §3.2, fail closed),
+    so an admin-plane double that omits it is a PRE-TWO-PLANE certificate and
+    belongs in the cells that prove exactly that refusal.
+    Left as ``None`` for root/executor-CA leaves, which carry no plane marker at
+    all (the marker is an Admin-CA statement).
+    """
     import uuid as _uuid
     from datetime import UTC, datetime, timedelta
 
@@ -130,4 +152,11 @@ def make_leaf(ca_cert, ca_key, *, cn, serial=None, days_valid=90, san_dns=None, 
         san.append(x509.DNSName(san_dns))
     if san:
         builder = builder.add_extension(x509.SubjectAlternativeName(san), critical=False)
+    if plane is not None:
+        # The CA's own signer writes this extension (server/ca.py
+        # _plane_marker_extension); the double reuses that function so a test
+        # leaf and a minted leaf cannot drift apart.
+        from server.ca import _plane_marker_extension
+
+        builder = builder.add_extension(_plane_marker_extension(plane), critical=True)
     return builder.sign(ca_key, SHA256())

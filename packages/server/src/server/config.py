@@ -83,6 +83,16 @@ class RateLimitConfig(BaseModel):
         default=5,
         description="Maximum break-glass (recovery) requests per IP per hour",
     )
+    cert_issuance_requests_per_hour: int = Field(
+        default=5,
+        description=(
+            "Maximum admin-certificate mints per key per hour (RF-6 §2.7: single "
+            "digits, because the honest cost of one mint is one FIDO2 touch and "
+            "ruling 4a says cadence is driven by job length, not by fear of "
+            "expiry). Env override: VENYA_RATE_LIMIT__CERT_ISSUANCE_REQUESTS_PER_HOUR. "
+            "Keys the classified POST /api/v1/admin/certs/issue path."
+        ),
+    )
     lockout_reinstate_minutes: int = Field(
         default=15,
         description="Minutes before a locked-out user can try again",

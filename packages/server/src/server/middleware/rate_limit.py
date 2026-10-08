@@ -27,6 +27,12 @@ logger = logging.getLogger("venya.server")
 _GENERIC_WINDOW = timedelta(minutes=1)
 _AUTH_WINDOW = timedelta(minutes=1)
 _BREAK_GLASS_WINDOW = timedelta(hours=1)
+# Credential-mint window (RF-6 §2.7): a mint costs one FIDO2 touch, so the cap
+# is hourly and small, never the generic 1-minute tier — and a mint path left
+# unclassified does NOT ship unlimited, it ships at the generic per-IP tier
+# (config.rate_limit.ip_rate_limit, default 1000/min), which is no cap on a
+# credential at all. Classified explicitly below for that reason.
+_ISSUANCE_WINDOW = timedelta(hours=1)
 
 
 def _truncate_to_window(dt: datetime, window: timedelta) -> datetime:
@@ -37,7 +43,7 @@ def _truncate_to_window(dt: datetime, window: timedelta) -> datetime:
     """
     if window == _GENERIC_WINDOW:
         return dt.replace(second=0, microsecond=0)
-    elif window == _BREAK_GLASS_WINDOW:
+    elif window in (_BREAK_GLASS_WINDOW, _ISSUANCE_WINDOW):
         return dt.replace(minute=0, second=0, microsecond=0)
     return dt.replace(second=0, microsecond=0)
 
@@ -69,6 +75,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         requests_per_minute: int = 100,
         auth_requests_per_minute: int = 20,
         break_glass_per_hour: int = 5,
+        issuance_per_hour: int = 5,
     ) -> None:
         super().__init__(app)
 
@@ -81,11 +88,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             # restores it; env override VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE.
             self.auth_requests_per_minute = config.auth_requests_per_minute
             self.break_glass_per_hour = config.break_glass_requests_per_hour
+            # Credential-mint tier (RF-6 §2.7). getattr because test doubles and
+            # older .env files may carry no key — the default is the ruled value,
+            # never "unlimited".
+            self.issuance_per_hour = getattr(config, "cert_issuance_requests_per_hour", 5)
         else:
             self.enforce = True
             self.requests_per_minute = requests_per_minute
             self.auth_requests_per_minute = auth_requests_per_minute
             self.break_glass_per_hour = 5
+            self.issuance_per_hour = issuance_per_hour
 
         # In-memory break-glass failure tracking for exponential backoff.
         # Short-lived (seconds), doesn't need to be shared across workers.
@@ -103,6 +115,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             endpoint_type = "break_glass"
             limit = self.break_glass_per_hour
             window = _BREAK_GLASS_WINDOW
+        elif self._is_cert_issuance_endpoint(request.url.path):
+            # Admin-certificate mint tier (RF-6 §2.7). Keyed per ACCOUNT when an
+            # identity is attached, so the cap follows the person across cores
+            # and survives a restart; IP only as the fallback for a caller with
+            # no identity yet. The counter is the same DB-backed UPSERT as every
+            # other tier — that is the property §2.7 rules on for a mint cap
+            # (the in-memory limiters enforce N× on N workers and forget on
+            # restart).
+            endpoint_type = "cert_issuance"
+            limit = self.issuance_per_hour
+            window = _ISSUANCE_WINDOW
         elif self._is_auth_endpoint(request.url.path):
             endpoint_type = "auth"
             limit = self.auth_requests_per_minute
@@ -125,6 +148,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # UPSERT: atomic increment, returns new count
         now = datetime.now(UTC)
         window_start = _truncate_to_window(now, window)
+        identifier = ip if endpoint_type != "cert_issuance" else self._issuance_identifier(request, ip)
 
         db = None
         try:
@@ -136,7 +160,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 )
             db = backend.get_session()
 
-            count = self._increment_counter(db, ip, endpoint_type, window_start)
+            count = self._increment_counter(db, identifier, endpoint_type, window_start)
 
             if count > limit:
                 metrics.RATE_LIMIT_HIT_TOTAL.labels(limit_type=endpoint_type).inc()
@@ -145,6 +169,18 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     return JSONResponse(
                         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                         content={"detail": "Break-glass endpoint rate limited: too many requests per hour"},
+                        headers=retry_after,
+                    )
+                elif endpoint_type == "cert_issuance":
+                    return JSONResponse(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        content={
+                            "detail": (
+                                "Admin certificate issuance rate limited: too many mints this hour — "
+                                "one mint costs one security-key touch. Repair: wait for the window "
+                                "to reset, or reuse the certificate you already hold until it expires."
+                            )
+                        },
                         headers=retry_after,
                     )
                 elif endpoint_type == "auth":
@@ -276,3 +312,44 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def _is_break_glass_endpoint(self, path: str) -> bool:
         """Check if path is a break-glass endpoint."""
         return path == "/api/v1/recovery"
+
+    def _is_cert_issuance_endpoint(self, path: str) -> bool:
+        """Check if path is an admin-certificate mint (RF-6 §2.7).
+
+        Exact-path match, not a prefix: the tier belongs to the one endpoint
+        that mints a credential. A mint path that is NOT classified here falls
+        through to the generic per-IP tier (ip_rate_limit, default 1000/min),
+        which is not a cap on credential issuance at all — so the classification
+        is the cap, and its paired test asserts this path is in the set.
+        """
+        return path.rstrip("/") == "/api/v1/admin/certs/issue"
+
+    def _issuance_identifier(self, request: Request, ip: str) -> str:
+        """Per-account mint key when an identity is attached, IP otherwise.
+
+        ``SessionMiddleware`` is registered OUTERMOST of the two (app.py adds
+        RateLimit, then Session, and Starlette treats the last-added as the
+        outermost), so by the time this middleware runs the auth layer has
+        already attached ``request.state.auth_user`` — that ordering is what
+        makes a per-account cap possible here, and
+        ``test_issuance_tier_keys_by_account_when_identity_is_attached`` pins it
+        instead of trusting it.
+
+        The value lands in the counter's ``identifier`` column (String(64),
+        documented in core/iam/models.py as "IP address or user_id depending on
+        scope"), so the account form is the column's own second documented use
+        and needs no schema change. NO prefix is prepended on purpose: a
+        ``user:`` tag on a 64-char user_id would exceed the column width, and
+        the ``(identifier, endpoint_type, window_start)`` primary key already
+        separates this tier's rows from every other tier's.
+
+        Fail-safe: with no identity (401-class callers) the tier degrades to the
+        per-IP key, so an unauthenticated flood of mint attempts is still
+        counted — never skipped.
+        """
+        auth_user = getattr(request.state, "auth_user", None)
+        if isinstance(auth_user, dict):
+            user_id = auth_user.get("user_id")
+            if isinstance(user_id, str) and user_id:
+                return user_id[:64]
+        return ip

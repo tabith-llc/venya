@@ -68,6 +68,8 @@ LIFECYCLE_EVENT_STRINGS = [
     "executor_revoked",
     "executor_cert_revoked",
     "admin_cert_revoked",
+    # RF-7 chunk 2 (refs RF-6 §2.8): the issuance side of the revoke/issue pair.
+    "admin_cert_issued",
     "user_reenrolled",
     "core_reset_refused",
     "enrollment_token_issued",
