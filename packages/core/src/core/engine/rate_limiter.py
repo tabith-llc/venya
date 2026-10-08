@@ -6,8 +6,9 @@
 
 """Per-account failure tracking and rate limiting.
 
-Tracks failed attempts, enforces lockout, and persists failures
-to the DB for restart recovery.
+Tracks failed attempts and enforces the lockout window. The counters are
+per-process memory — see the ``RateLimiter`` SCOPE note below; nothing here is
+written to the database, so a restart clears them.
 """
 
 import threading
@@ -149,7 +150,20 @@ class RateLimiter:
             # If locked out, check if lockout period has elapsed
             if record.failed_attempts >= self.max_attempts and record.locked_at > 0:
                 lockout_seconds = self.lockout_reinstate_minutes * 60
-                if now - record.locked_at >= lockout_seconds:
+                # #464: the lockout age is clamped at zero. A BACKWARD clock step
+                # (NTP correction, snapshot restore) makes ``now - locked_at``
+                # negative, which read as "the window has been over for 400
+                # seconds", and the figure we hand back inflates by the whole
+                # skew (measured: a 60 s window reported 460 s). Clamping keeps
+                # Retry-After inside the configured window and never releases
+                # early — a negative age must not be treated as elapsed time.
+                # What the clamp does NOT do is shorten the wall-clock wait: the
+                # record still releases when the wall clock returns to
+                # ``locked_at + lockout_seconds``, i.e. after lockout + skew. That
+                # remainder is availability-only (fail-closed) and is stated in
+                # the #464 report rather than papered over.
+                lockout_elapsed = max(0.0, now - record.locked_at)
+                if lockout_elapsed >= lockout_seconds:
                     # Lockout period elapsed — reset and allow retries
                     record.failed_attempts = 0
                     record.locked_at = 0.0
@@ -157,7 +171,7 @@ class RateLimiter:
                     return
                 else:
                     # Still locked out
-                    remaining = int(lockout_seconds - (now - record.locked_at))
+                    remaining = int(lockout_seconds - lockout_elapsed)
                     raise RateLimitExceededError(
                         f"User {user_id} is locked out. Unlock in {remaining} seconds.",
                         retry_after_seconds=remaining,
@@ -200,7 +214,8 @@ class RateLimiter:
             # If locked out and lockout period has elapsed, reset
             if record.failed_attempts >= self.max_attempts and record.locked_at > 0:
                 lockout_seconds = self.lockout_reinstate_minutes * 60
-                if now - record.locked_at >= lockout_seconds:
+                # #464: same clamp as check() — a negative age is not elapsed time.
+                if max(0.0, now - record.locked_at) >= lockout_seconds:
                     record.failed_attempts = 0
                     record.locked_at = 0.0
                     record.window_start = now
@@ -231,7 +246,8 @@ class RateLimiter:
                 if now - record.window_start > self.window_seconds or (
                     record.failed_attempts >= self.max_attempts
                     and record.locked_at > 0
-                    and now - record.locked_at >= self.lockout_reinstate_minutes * 60
+                    # #464: clamp, so a backward step cannot read as "elapsed" here either.
+                    and max(0.0, now - record.locked_at) >= self.lockout_reinstate_minutes * 60
                 ):
                     expired.append(uid)
             for uid in expired:
