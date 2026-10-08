@@ -522,15 +522,28 @@ async def secrets_get(
             db.flush()
 
             if result.rowcount == 0:
-                # Token already consumed by another request, expired, or not found
-                value = core.get(
-                    secret_key=key,
-                    caller=Caller.HUMAN,
-                    unmask=False,
-                    user_id=user_id,
-                    role_names=role_names,
+                # #442 site 1: this branch used to fall through to a normal MASKED
+                # 200 answer. rowcount == 0 means the conditional burn matched no
+                # row — the token is unknown, already consumed, or past expiry — so
+                # a caller who FAILED elevation got a successful-looking response,
+                # indistinguishable on the wire from a real masked read. Fail-closed:
+                # refuse. 401, not 403, because the failing thing is the caller's
+                # elevation CREDENTIAL, not their authorization — the home vocabulary
+                # for this credential is auth_elevation.py, where every such failure
+                # is 401 (:136/:144/:153/:256/:262). The 403s in this file (:434/
+                # :459/:492) are the token-REQUIRED and role denies, a different
+                # condition from a token that FAILED. No core.get call at all here,
+                # so neither plaintext nor a masked value escapes, and the burn
+                # commit never happens (get_db rolls back on the raise).
+                logger.warning(
+                    "Elevation refused — token invalid, expired, or already used (key=%s, user_id=%s)",
+                    key,
+                    user_info["user_id"],
                 )
-                return SecretGetResponse(key=key, value=value, masked=True)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Elevation token is invalid, expired, or already used",
+                )
 
             # Token consumed atomically — now fetch plaintext
             try:
