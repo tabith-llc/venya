@@ -58,6 +58,11 @@ ELEVATION_GRANTED = "elevation_granted"
 EXECUTOR_REVOKED = "executor_revoked"
 EXECUTOR_CERT_REVOKED = "executor_cert_revoked"
 ADMIN_CERT_REVOKED = "admin_cert_revoked"
+# RF-7 chunk 2 (refs RF-6 §2.8): the issuance side of the same pair. Field table
+# is the §2.8 list — canonical serial, embedded identity, validity window, curve,
+# requesting user_id, mint reason. NEVER the CSR bytes, the public key, or the
+# cert PEM: the audit row is readable by non-admin auditors.
+ADMIN_CERT_ISSUED = "admin_cert_issued"
 USER_REENROLLED = "user_reenrolled"
 CORE_RESET_REFUSED = "core_reset_refused"  # #511: a reset the in-transaction guard stopped
 ENROLLMENT_TOKEN_ISSUED = "enrollment_token_issued"  # nosec B105 — audit event name, not a password
@@ -119,6 +124,7 @@ def audit_lifecycle(
         EXECUTOR_REVOKED,
         EXECUTOR_CERT_REVOKED,
         ADMIN_CERT_REVOKED,
+        ADMIN_CERT_ISSUED,
         USER_REENROLLED,
         CORE_RESET_REFUSED,
         ENROLLMENT_TOKEN_ISSUED,
