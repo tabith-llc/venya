@@ -8,8 +8,9 @@ Tip this dossier is re-derived against: **dev `d0d3d0d`** (`Merge branch 'bug/ca
 Every line number below was produced by grep at that tip on the day of writing. Line numbers rot: **grep the
 symbol, never trust the pin** — including the pins in this file.
 
-Sections 1-5 are in this chunk. Sections 6-10 and the assembly pass are separate, sequenced dispatches on the
-same branch.
+The dossier is **complete at 10/10 sections**: sections 1-5 (chunk 1) and 6-10 (chunk 2) landed as sequenced
+dispatches on this branch, and the chunk-3 assembly pass reconciled §1.6 to §7.1 and verified the file at dev
+`4778602`. **§7.1 is the enumeration of record** — a reader who lands on §1.6 first is redirected there.
 
 ---
 
@@ -1707,3 +1708,13 @@ is a short list of concrete shape changes, all owner-ok-gated:
   the tolerance tail in the published date (§10.5 first bullet), the "the date is produced by running something"
   rule, and the dual-path honesty (§10.2's second paragraph) — including that the short path is not strictly
   better than the legacy path until the tolerance default comes down.
+
+---
+
+**Assembly pass — closing note (chunk 3, dev `4778602`).** The dossier is complete at 10/10 sections on
+`feature/rf6-shortcert-dossier`. §1.6 is reconciled to §7.1, and **§7.1 is the enumeration of record**: 8 live
+non-test `NoEncryption()` sites with the 1-in / 7-out Q4a split (`server/ca.py:815` in scope), re-measured at
+`4778602` by this pass and unchanged in shape from what §7.1 published at `d8a5cda`. A later leg reading §1.6
+first is redirected here: take the numbers from §7.1. Beyond the §1.6 reconciliation, the header scope line
+above, and this note, nothing in the file changed in the assembly pass; the ten section commits stand as
+written, each carrying its own measurement provenance.
