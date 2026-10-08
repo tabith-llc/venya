@@ -392,8 +392,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         caller turns it into the 429's Retry-After header (ticket
         delta-b-run-low-bundle O2). Truthiness-compatible with the old bool
         contract. Backoff: 1s, 2s, 4s, 8s, 16s (capped at 16s).
+
+        #549: the stamps and this reading come from ``time.monotonic()``, not
+        the wall clock. The state is per-process memory and every question
+        asked of it (``elapsed``, the 1-hour prune) is elapsed REAL time, so a
+        wall-clock step must not move the window: a forward step used to age
+        the recorded failures out inside their true backoff (and the prune at
+        the same ``now`` dropped the history), and a backward step made
+        ``elapsed`` negative and inflated the returned Retry-After past the
+        cap (measured: a 3600 s step back returned 3601). One clock per
+        structure — both this read and ``_record_break_glass_failure``'s stamp
+        are monotonic. The returned figure is a DURATION in int seconds, which
+        no clock choice changes.
         """
-        now = time.time()
+        now = time.monotonic()
         failures = self._break_glass_failures.get(ip, [])
 
         # Only keep failures within the last hour
@@ -414,8 +426,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return 0
 
     def _record_break_glass_failure(self, ip: str) -> None:
-        """Record a break-glass failure for exponential backoff."""
-        now = time.time()
+        """Record a break-glass failure for exponential backoff.
+
+        #549: monotonic stamp — see ``_check_break_glass_backoff`` for why the
+        backoff window is measured on real time, not the wall clock.
+        """
+        now = time.monotonic()
         if ip not in self._break_glass_failures:
             self._break_glass_failures[ip] = []
         self._break_glass_failures[ip].append(now)
