@@ -169,7 +169,14 @@ async def audit_list(
     total = query.count()
 
     # Apply pagination and ordering
-    events = query.order_by(AuditEvent.timestamp.desc()).offset(offset).limit(limit).all()
+    # #463: timestamp is NOT unique, so this single-key order was partial — two
+    # same-timestamp rows could land on either side of an OFFSET/LIMIT page
+    # boundary differently between calls, silently skipping or duplicating rows
+    # in a paged review (and `total` above hides that, being the same filtered
+    # count). The stable PK breaks the tie, so the order is total. Secondary
+    # direction mirrors the existing precedent in routes/executors.py:1109
+    # (desc(primary), asc(stable key)).
+    events = query.order_by(AuditEvent.timestamp.desc(), AuditEvent.id.asc()).offset(offset).limit(limit).all()
 
     result = [
         AuditEventResponse(

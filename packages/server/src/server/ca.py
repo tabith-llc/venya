@@ -508,15 +508,22 @@ class CAManager:
             DER-encoded CRL bytes.
         """
         from core.iam.models import ExecutorCertRevocation
-        from sqlalchemy import desc
+        from sqlalchemy import asc, desc
 
         ca_cert, ca_key = self.load_ca()
         now = datetime.now(UTC)
 
         if revocations is None:
+            # #463: revoked_at is NOT unique (a bulk revoke stamps one `now` per
+            # request), so ordering on it alone left the CAPPED population
+            # undetermined — at the max_entries boundary a tie decides which
+            # serial is listed, and a listed serial is signed into the DER.
+            # asc(serial_number) makes the order total; it is the same secondary
+            # key the sibling production fetch already uses
+            # (routes/executors.py:1109), so this is drift-to-precedent.
             revocations = (
                 db_session.query(ExecutorCertRevocation)
-                .order_by(desc(ExecutorCertRevocation.revoked_at))
+                .order_by(desc(ExecutorCertRevocation.revoked_at), asc(ExecutorCertRevocation.serial_number))
                 .limit(max_entries)
                 .all()
             )
@@ -1136,14 +1143,17 @@ class AdminCAManager:
             DER-encoded CRL bytes.
         """
         from core.iam.models import AdminCertRevocation
-        from sqlalchemy import desc
+        from sqlalchemy import asc, desc
 
         ca_cert, ca_key = self._load_ca_cert_and_key()
         now = datetime.now(UTC)
 
+        # #463: same non-unique revoked_at class as the executor CRL above — the
+        # admin family gets the identical tiebreaker, mirroring the executors.py
+        # precedent so both CRL populations are determined by a total order.
         revocations = (
             db_session.query(AdminCertRevocation)
-            .order_by(desc(AdminCertRevocation.revoked_at))
+            .order_by(desc(AdminCertRevocation.revoked_at), asc(AdminCertRevocation.serial_number))
             .limit(max_entries)
             .all()
         )
