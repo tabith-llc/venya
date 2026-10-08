@@ -394,7 +394,7 @@ Mirror the revoke path's shape (`routes/admin.py:2086-2099`): `audit_lifecycle(d
   (`issue` / `renew` — §4.4). **It must NOT carry** the CSR bytes, the public key PEM, or the cert PEM: the audit
   row is readable by non-admin auditors, and the public key plus CSR would let a log reader reconstruct subject
   detail we did not decide to publish. `user_id` on `AuditEvent` intentionally has no FK and stores the principal
-  verbatim, including mTLS CNs (`models.py:172-179` comment) — for this event the human `user_id` is the point
+  verbatim, including mTLS CNs (`models.py:173-180` comment) — for this event the human `user_id` is the point
   (ruling 2's "the used identity is written into the audit row").
 - Metrics: `CA_SIGNED_TOTAL.labels(cert_type=...)` already exists with `cert_type="executor"`
   (`executors.py:905`); the admin mint should emit the same counter with a distinct label rather than invent a
@@ -425,3 +425,192 @@ strings, and the case/padding-insensitive match is what keeps a revocation from 
   a live caller.
 - **RF-11:** issuance audit is the data source for age-out accounting (§10) — the event carries the lifetime so
   the rollout can prove which certs are still live.
+
+---
+
+## 3. Two-plane identity — person identity with a per-use role check
+
+Ruling 2 is the load-bearing decision of this design: **the credential stops naming a slot and starts naming a
+person, and the role is checked every time it is used.** Revocation therefore becomes behavioral (remove the
+role → the next request is refused) instead of lifetime-shaped. This section specifies both planes and the
+boundary between them.
+
+### 3.1 The current state is ONE plane serving both uses
+
+Re-derived at `d0d3d0d`. The admin route path in `packages/server/src/server/middleware/auth.py`:
+
+| Step | Live behavior | Site |
+|---|---|---|
+| 1 | Verify the forwarded leaf against the **admin-plane** anchors (`_admin_ca_certs`), which also applies the validity window + skew tolerance and the signature link | `_verify_forwarded_cert` `:178-220`, called at `:385`; anchors `_admin_ca_certs` `:123` |
+| 2 | Extract identity: SAN RFC822 → SAN DNS → CN | `_extract_identity_from_cert` `:38-65`, called `:400` |
+| 3 | **Static allowlist** — empty list fails closed, identity must be enumerated | `:413-431`; `known_ids = config.admin_mtls.known_admin_ids` `:415`, empty-list branch `:416`, membership branch `:427` |
+| 4 | In-process serial-revocation lookup, **opens a DB session**, all failures 403 | `:435-497` (session `:457`, `except Exception` `:477`) |
+| 5 | Attach `{"caller": "admin", "user_id": identity}` — the cert identity IS the user_id | `:499` |
+| 6 | Route-level `require_admin` returns immediately for `caller == "admin"`, **no DB role check** | `dependencies.py:332-333` |
+
+So today a single code path authenticates the loopback machine cert and (in the installer's design) a human's
+copied file identically, and step 6 means neither is ever re-authorized against the role table. `known_admin_ids`
+is a config field (`server/config.py:271`, `AdminMTLSConfig` `:256`), written by the installer from one operator
+value (`install-venya-core.sh:584`, key enumerated at `:555`).
+
+### 3.2 The design: two planes, and how a request knows which one it is on
+
+- **Machine plane (unchanged).** The loopback/service cert stays long-lived and **slot-shaped**: it is checked
+  against `known_admin_ids` exactly as today, and it gets **no** per-use role check — machines have no person, and
+  putting one on the loopback path would make an internal hop depend on the role table for no benefit. Ruling 1
+  keeps this cert on the core and out of human hands.
+- **Human plane (new).** A short cert is **person-shaped**: identity is the `user_id` the ceremony produced
+  (§2.6), the static allowlist does **not** apply to it, and `require_admin` performs a real role lookup on
+  every use.
+
+**The boundary cannot be inferred from the identity string, and it cannot be inferred from lifetime.** Both
+inferences fail the same way: a misclassified credential silently walks the wrong policy path. A long-lived
+bootstrap cert whose identity is *not* in `known_admin_ids` would be treated as a person cert and 403 with a
+confusing message; a human short cert *named* in the allowlist would silently keep the old no-revocation
+behavior, which is precisely the hole ruling 2 closes. The design therefore requires an **explicit,
+CA-written marker**:
+
+- **Marker:** a dedicated X.509 extension with a Venya private OID carrying the plane (`machine` | `human`),
+  written by the server's own signer, never taken from a CSR. (The product already relies on signer-written
+  extensions for identity: SAN and CN are overwritten in `sign_csr`, `ca.py:383-389`, `:428-431`.)
+- **Why an extension and not an OU string:** OU is also signer-written today (`ca.py:753-754` sets `O=Venya`,
+  `OU=Admin`) and is a workable fallback, but an extension with a critical bit is a statement the verifier can
+  refuse to parse rather than a name that can drift. RF-7 may implement the marker as OU if it prefers a
+  human-readable dump; what is **not** negotiable is that the plane is explicit and CA-set.
+- **A cert with no marker, an unparseable marker, or a value outside {machine, human} fails closed at step 3.5**
+  with a 403 whose text says the certificate predates the two-plane model and must be re-issued. That is the
+  rollout-facing behavior (§3.8, §10): old certs are refused *loudly on the human path* rather than silently
+  defaulting into either plane. Machine certs get their marker written at the same time the change lands, by the
+  core's own bootstrap path (RF-10's scope, not this design's).
+
+### 3.3 The per-use role check — exact semantics
+
+`require_admin` (`dependencies.py:307-358`) already does the right thing for **token** callers: role lookup via
+`RoleManager.get_role_by_name("admin")` (`core/iam/role_manager.py:279`) +
+`has_permission(user_id, role.id, "read-write")` (`:647-664`), 403 on miss. The design **removes the shortcut
+branch at `:332-333` so admin-mTLS callers run the same lookup**, with one structural addition:
+
+1. `user_info["user_id"]` for a human-plane cert is the embedded identity. Because §2.6 derives it from the
+   authenticated session's `user_id`, it resolves against `User.user_id` (`core/iam/models.py:48`, `String(64) unique`) by construction — no fuzzy name matching, no email-to-user mapping table.
+2. The lookup requires: user row exists, `status` admits admin use, the `admin` role exists, and membership has
+   `read-write` (`Role.permissions`, `models.py:69`). Any miss → 403, same body shape as today's
+   `detail="Admin permission required"` (`dependencies.py:351`, token-path denial).
+3. **Executor callers stay denied outright** (`dependencies.py:325-330`) — unchanged, and unchanged in reason:
+   admin routes are human-only, and the executor identity carries no `user_id`.
+4. The **`caller` key stays** for plane identification (logging, audit, and any plane-aware route logic); what
+   dies is the *bypass*. The docstring at `dependencies.py:332` ("mTLS admin callers are already verified by
+   nginx + middleware") must be corrected in the same commit — it states the very premise ruling 2 replaces, and
+   note it is already partly wrong: nginx runs `ssl_verify_client optional` (`install-venya-core.sh:911`) and the
+   middleware docstring says app-side verification is the gate (`middleware/auth.py:182-185`).
+
+Where the check lives: **route dependency, not middleware.** The middleware authenticates (who presented a valid,
+non-revoked cert of plane X); the dependency authorizes (does that person hold admin now). That split already
+exists in the code and keeps one lookup per request on the path that needs it.
+
+### 3.4 Audit: the used identity in the row
+
+Ruling 2's last clause. The admin request path must write the acting identity the way the mint does (§2.8):
+`user_id` = the embedded person identity, plus the serial and the plane marker, so an audit reader can tell
+"person X used cert serial S" from "the loopback machine used cert serial S". `AuditEvent.user_id` deliberately
+has no FK and stores the principal verbatim, including mTLS CNs (`core/iam/models.py:173-180`), so this needs no
+schema change — it needs the route paths to pass the identity they now actually have. Paired negative (truth-table
+law): a human-plane request refused by the per-use role check still produces its denial record, and a
+machine-plane request must **not** be written up as if a person acted.
+
+### 3.5 Mandatory statement 1 — DB reachability becomes an AUTHORIZATION dependency
+
+> **Stated plainly, not glided past:** per-use role checks make the human admin path depend on database
+> reachability for **authorization**, not merely authentication. **If the database is down, admin operations from
+> a human short cert FAIL CLOSED.** A degraded DB is an admin lockout. This is ruled correct-by-design — the
+> alternative is an admin cache that outlives the role removal ruling 2 exists to make effective — and it is a
+> **documented behavior change**, not a hidden one.
+
+Honest framing of the delta, because the carrier's caveat overstates the novelty and the next lane must not
+discover the nuance mid-review: the admin path **already** touches the DB on every request. Step 4 opens a
+session (`middleware/auth.py:457`) and its `except Exception` at `:463` turns a dead DB into a 403. So a DB outage
+locks admins out today. What changes is the *layer and the meaning*: authorization moves onto that dependency, so
+the failure is no longer "we could not check your revocation status" but "we could not establish that you are an
+admin". Consequences:
+
+- **Distinguish the two 403s.** The revocation-lookup failure text stays as-is; the role-lookup failure should be
+  a **503** (service unavailable) rather than a 403 (permission denied), because an operator reading 403 will
+  debug certificates and roles while the actual fault is the database. The CLI surfaces the server's `detail`
+  string to the operator verbatim (`api_client.py:528`, `:647`, `:784`), so the text is the operator's only
+  diagnostic and must name the cause. Fail-closed is satisfied by either code; clarity is only achieved by 503.
+- **Pool reality:** `Backend.get_session()` is a fresh `session_factory()` per call (`core/engine/backend.py:254`)
+  on an engine with `pool_pre_ping=True`, `pool_size=5`, `max_overflow=10` (`backend.py:260-264`). A per-use
+  role check adds one lightweight query (`RoleMember` filter, `role_manager.py:658-665`) to a path that already
+  opens a session — not a new connection source. No caching is proposed; a cache is a revocation delay wearing
+  a performance costume.
+- **Docs obligation (RF-11):** the admin runbook must state that an admin can be locked out by infrastructure,
+  and that the recovery-code path (§2.3) is the escape hatch.
+
+### 3.6 Mandatory statement 2 — the embedded identity DISCLOSES ADMIN USERNAMES
+
+> **Stated plainly, not glided past:** a certificate is a public object. The person identity embedded per ruling 2
+> is **readable by anyone who holds the file** — no key, no password, no server. `subject` and the SAN are not
+> secret; they are covered by nothing more than the file's permission bits. **This design therefore discloses
+> admin usernames to every party that can read the cert file** — a workstation backup agent, a synced home
+> directory, a copied artifact in a support ticket, or the proxy logs that carry the forwarded PEM. The owner
+> **accepted** this at 60-minute lifetimes with FIDO2-gated issuance. It is a consequence of the ruling, not a
+> defect in the design, and it is not remedied here.
+
+What the design does do is keep the disclosure surface as small as honesty allows:
+
+- **Username = the `user_id` the system already exposes.** The User model has no `username` or `email` column
+  (`core/iam/models.py:42-58`: `user_id`, `display_name`, `status`, `auth_mode`, …), and `user_id` is already
+  rendered in the admin user list and in audit rows. Embedding it adds no name that was previously private inside
+  the deployment; it adds the name to *files outside* the deployment. That is the disclosure.
+- **Nothing else goes in the subject.** No `display_name`, no email beyond what `user_id` already is, no tenant
+  or site metadata. `_build_san_for_identity` (`ca.py:569-585`) keeps `@`-shaped ids in the RFC822 branch and
+  plain ids in the DNS branch — it does not synthesize either.
+- **The audit row is not a leak channel and must not become one:** `ADMIN_CERT_ISSUED` carries the identity
+  (§2.8) because attribution requires it, and deliberately omits cert/CSR/public-key material.
+- **Pairing matters:** the identity is disclosed while the **private key stays on the workstation** (§2.4). A
+  reader who has the cert file but not the key cannot authenticate. The combined-file case — both in one
+  directory, world-readable — is what `modewarn` exists to complain about (§1.4).
+
+### 3.7 The key becomes the lock (problem 8)
+
+Under this design a lost security key means no ceremony, therefore no mint, therefore no human admin path — while
+the cert file that used to be the escape hatch no longer exists as a standing credential. Two paths must be
+specified, and both already exist:
+
+1. **Recovery code** (ruling 1, third clause): `routes/recovery.py`, break-glass rate limiting
+   (`middleware/rate_limit.py:276-279`, `:205-240`). This is the *admin-lockout* answer.
+2. **Re-enrollment** under the roster guard `assert_removal_keeps_admin` (`core/iam/role_manager.py:416`), which
+   is what stops an operator from removing the last admin by accident.
+
+What is **not** an answer: keeping a standing human cert "for emergencies". That reintroduces the exact exposure
+this program retires. RF-9 owns the service-identity detail; RF-11 owns the runbook text that tells a locked-out
+admin which of the two paths to walk (the machine plane stays up regardless, so a lost key never stops the core —
+it stops *human* admin work).
+
+### 3.8 Negative tests required at this boundary (truth-table law)
+
+Every row is a rejection that must be proven, not assumed:
+
+| Case | Expected |
+|---|---|
+| Human-plane cert, role removed after mint | 403 on the very next request (§3.3) — this is ruling 2's whole point |
+| Human-plane cert, DB down | fail closed (503 per §3.5), never a silent allow |
+| Machine-plane cert, identity absent from `known_admin_ids` | 403 (today's behavior, unchanged — `auth.py:415-431`) |
+| Machine-plane cert held by a human (copied off the core) | refused by *not being mintable* for a human (§2.6) and by plane marker discipline; RF-11 must state that copying the loopback key is unsupported |
+| Cert with **no plane marker** (pre-change cert) | 403 naming the re-issue requirement (§3.2) |
+| Cert with a marker **self-signed by the caller** in a CSR | impossible — marker is signer-written only; a cell must prove a CSR-supplied marker is discarded (§2.6.1) |
+| Human cert whose `user_id` was deleted | 403 (lookup miss), no 500 (`dependencies.py:325-330` precedent for clean denial) |
+| Revoked serial, valid person, intact role | 403 at step 4, before the role check ever runs |
+
+### 3.9 Inheritance — what later legs take from this section
+
+- **RF-7:** the plane marker as a signer-written extension with fail-closed parsing (§3.2), `ADMIN_CERT_ISSUED`
+  audit fields (§3.4), and the 503-vs-403 distinction for DB faults (§3.5).
+- **RF-8:** the operator-facing text consequences — the CLI prints the server `detail` verbatim
+  (`api_client.py:528`, `:647`, `:784`), so a DB-down refusal and a no-permission refusal must be
+  distinguishable *from the string alone*, and the pre-two-plane-cert refusal must name the re-issue command.
+- **RF-9:** the machine plane's rules restated here are its contract — slot-shaped, allowlist-checked, no role
+  check, never handed to a human (§3.2).
+- **RF-10:** writing the marker at the machine/bootstrap mint, and the `VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS`
+  meaning shift (config `:271`; installer `:555`/`:584`) becomes a rollout transition, not a semantics edit.
+- **RF-11:** the two mandatory statements (§3.5, §3.6) are runbook and doc text, plus the lockout path (§3.7) and
+  the "do not copy the loopback key" rule.
