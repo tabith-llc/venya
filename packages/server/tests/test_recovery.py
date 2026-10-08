@@ -781,7 +781,7 @@ except ImportError:  # flat import fallback (matches test_admin_mtls.py)
 
 def _r340_ca_and_leaf(tmp_path):
     """Initialize a real Admin CA in tmp and mint an admin@example.com leaf."""
-    from server.ca import AdminCAManager
+    from server.ca import PLANE_MACHINE, AdminCAManager
     from server.config import CASecurityConfig
 
     ca_dir = tmp_path / "r340-admin-ca"
@@ -789,7 +789,14 @@ def _r340_ca_and_leaf(tmp_path):
     AdminCAManager(ca_dir, CASecurityConfig(key_passphrase_env="VENYA_ADMIN_CA_KEY_PASSPHRASE")).initialize()
     ca_cert = x509.load_pem_x509_certificate((ca_dir / "admin-ca.crt").read_bytes())
     ca_key = serialization.load_pem_private_key((ca_dir / "admin-ca.key").read_bytes(), password=b"test_passphrase")
-    return ca_dir, make_leaf(ca_cert, ca_key, cn="admin@example.com", serial=int(ADMIN_SERIAL_HEX, 16))
+    # RF-7 chunk 2: this leaf stands in for a MACHINE-plane admin certificate
+    # (the identity is enumerated in known_admin_ids), so it carries the marker
+    # the bootstrap mint writes at this tip (PLANE_MACHINE). Assertions are
+    # untouched; the pre-two-plane markerless shape is refused by design and has
+    # its own cells in test_plane_marker_middleware_rf7.py.
+    return ca_dir, make_leaf(
+        ca_cert, ca_key, cn="admin@example.com", serial=int(ADMIN_SERIAL_HEX, 16), plane=PLANE_MACHINE
+    )
 
 
 def _build_reissue_middleware_app(tmp_path, *, bearer="valid-bearer", session_expires=None):

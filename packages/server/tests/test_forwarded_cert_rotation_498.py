@@ -57,11 +57,21 @@ def _make_leaf(
     leaf_key=None,
     not_before=None,
     not_after=None,
+    plane: str | None = None,
 ) -> x509.Certificate:
+    """Leaf double. ``plane`` writes the CA's credential-plane marker.
+
+    RF-7 chunk 2: the admin-plane call site under test (#498's rotation bundle)
+    now consumes the marker before the allowlist (RF-6 §3.2), so a leaf that
+    stands in for a machine-plane admin certificate must carry what the
+    bootstrap mint actually writes at this tip. Executor/root-CA leaves keep
+    plane=None — the marker is an Admin-CA statement and #498's rotation
+    behavior under test is unchanged by it.
+    """
     now = datetime.now(UTC)
     if leaf_key is None:
         leaf_key = ec.generate_private_key(ec.SECP256R1())
-    return (
+    builder = (
         x509.CertificateBuilder()
         .subject_name(subject_name)
         .issuer_name(issuer_name)
@@ -70,8 +80,12 @@ def _make_leaf(
         .not_valid_before(not_before or (now - timedelta(hours=1)))
         .not_valid_after(not_after or (now + timedelta(days=30)))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .sign(ca_key, hashes.SHA256())
     )
+    if plane is not None:
+        from server.ca import _plane_marker_extension
+
+        builder = builder.add_extension(_plane_marker_extension(plane), critical=True)
+    return builder.sign(ca_key, hashes.SHA256())
 
 
 def _request_stub():
@@ -289,7 +303,9 @@ def test_admin_plane_call_site_two_ca_rotation_bundle(tmp_path):
             x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
         ]
     )
-    leaf2 = _make_leaf(key2, ca_subject, leaf_subject, serial=201)
+    from server.ca import PLANE_MACHINE
+
+    leaf2 = _make_leaf(key2, ca_subject, leaf_subject, serial=201, plane=PLANE_MACHINE)
 
     app = FastAPI()
     app.add_middleware(SessionMiddleware)

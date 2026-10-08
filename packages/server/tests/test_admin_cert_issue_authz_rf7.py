@@ -65,7 +65,7 @@ _ELEVATION_TTL = 60
 
 @pytest.fixture(autouse=True)
 def _passphrase_env(monkeypatch):
-    monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", "test_admin_passphrase_rf7c2b")
+    monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", "test_passphrase")
 
 
 @pytest.fixture
@@ -428,15 +428,15 @@ class TestIssuanceIsClassifiedInTheDbBackedLimiter:
         mw = self._mw()
         attached = MagicMock()
         attached.state.auth_user = {"user_id": _IDENTITY, "session_id": 11}
-        assert mw._issuance_identifier(attached, "10.0.0.9") == _IDENTITY
+        assert mw._issuance_identifier(attached, "198.51.100.9") == _IDENTITY
 
         anonymous = MagicMock()
         anonymous.state.auth_user = None
-        assert mw._issuance_identifier(anonymous, "10.0.0.9") == "10.0.0.9", "no identity never means uncapped"
+        assert mw._issuance_identifier(anonymous, "198.51.100.9") == "198.51.100.9", "no identity never means uncapped"
 
         cert_shaped = MagicMock()
         cert_shaped.state.auth_user = {"caller": "admin", "user_id": "admin@core-1"}
-        assert mw._issuance_identifier(cert_shaped, "10.0.0.9") == "admin@core-1"
+        assert mw._issuance_identifier(cert_shaped, "198.51.100.9") == "admin@core-1"
 
 
 def _limiter_config(*, issuance_per_hour: int):

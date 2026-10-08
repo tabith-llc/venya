@@ -21,6 +21,7 @@ from core.engine.backend import Backend, BackendConfig
 from core.iam.models import Session as SessionModel
 from core.iam.role_manager import RoleManager
 
+from .ca import PLANE_HUMAN
 from .utils.time import is_expired
 
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -308,16 +309,26 @@ def require_admin(
     user_info: dict = Depends(get_current_user),
     backend: Backend = Depends(get_backend),
 ) -> dict:
-    """FastAPI dependency that requires admin role.
+    """FastAPI dependency that requires the admin ROLE, on every use.
 
-    Checks that the authenticated user has the admin role by querying
-    the database. Returns user info dict on success, raises HTTPException
-    on failure.
+    Ruling 2 (RF-6 §3.3, refs RF-7 chunk 2) is that the credential names a
+    PERSON and the role is checked each time it is used — so revocation is
+    behavioral (remove the role → the next request is refused) instead of
+    lifetime-shaped. The former ``caller == "admin"`` short-circuit stated the
+    premise ruling 2 replaces ("already verified by nginx + middleware"); it is
+    now scoped to the MACHINE plane only, which ruling 1 keeps slot-shaped on
+    purpose (machines have no person, and a role table lookup on a loopback hop
+    would add a DB dependency for no authorization benefit).
+
+    Returns:
+        The caller dict on success.
 
     Raises:
-        HTTPException 403: User lacks admin role. Executor (mTLS) callers
-            are denied outright (they carry no user_id; admin routes are
-            human-only).
+        HTTPException 403: Executor (mTLS) callers are denied outright — they
+            carry no user_id and admin routes are human-only. A HUMAN caller
+            without the admin role, or whose user row no longer exists, is
+            denied the same way, and that denial is the point: a certificate
+            still inside its validity window does not outlive the role.
     """
     # Executors (mTLS) carry no user_id; the role lookup below would raise
     # KeyError and surface as a 500. Admin routes are human-only, so deny
@@ -329,10 +340,26 @@ def require_admin(
             detail="Admin permission required",
         )
 
-    # mTLS admin callers are already verified by nginx + middleware
-    if user_info.get("caller") == "admin":
+    # MACHINE plane only: a crypto-verified Admin-CA certificate naming an
+    # enumerated known_admin_ids slot. The middleware performed the chain
+    # verify, the revocation lookup, the plane-marker parse (§3.2) and this
+    # plane's slot check, and the mint that produced it is the installer's
+    # loopback path — no person, no role row, no lookup (§3.2, ruling 1).
+    #
+    # A caller dict with `caller == "admin"` and NO plane key is treated as
+    # machine. That state is unreachable from the real middleware, which always
+    # writes the plane after §3.2's fail-closed parse; it exists only in
+    # hand-built test doubles, and defaulting them to the long-standing
+    # behavior keeps this change from silently reclassifying a fixture into the
+    # stricter path. The certificate itself can never arrive without a marker —
+    # the middleware refuses that before this dependency is ever consulted
+    # (cells: TestPlaneMarkerMiddlewareConsumption).
+    if user_info.get("caller") == "admin" and user_info.get("plane") != PLANE_HUMAN:
         return user_info
 
+    # Everything else — a bearer/cookie SESSION, or a HUMAN-plane certificate —
+    # runs the same lookup. This is the bypass dying for the human plane, not a
+    # new check being added to the machine plane.
     db = backend.get_session()
     try:
         from core.iam.role_manager import RoleManager
