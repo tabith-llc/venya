@@ -1683,10 +1683,32 @@ def cmd_config_show(client: APIClient) -> int:
 
 
 def cmd_config_set_server(client: APIClient, args: Any) -> int:
-    """Set the server URL."""
+    """Set the server URL.
+
+    #509: the value written here becomes the ``base_url`` every later API call
+    dials (bearer tokens, session material, secret payloads), so an explicit
+    plaintext scheme is REFUSED at this counter BEFORE any write — the shared
+    guard, not a hand-copied fifth check. A bare hostname still normalizes to
+    ``https://`` and persists; an explicit scheme is never rewritten (no
+    upgrade, no downgrade), so ``http://`` and ``HTTP://`` both fall to the
+    guard's case-sensitive https whitelist and fail closed. No ``--force``
+    escape, no dev opt-out (AC3); the ``VENYA_TLS_VERIFY`` knob means
+    "distrust this certificate over https", never "no TLS", and is not
+    consulted here.
+    """
     url = args.url
-    if not url.startswith(("http://", "https://")):
+    # Same normalization rule the register site (#508) uses: anything WITHOUT a
+    # scheme means https; anything WITH one reaches the guard verbatim, so an
+    # uppercase ``HTTP://`` can no longer be massaged into a written value.
+    if "://" not in url:
         url = "https://" + url
+    if not _require_https_server_url(
+        url,
+        site="venya config set-server",
+        ticket="config-set-server-accepts-plaintext-url",
+        detail="every later API call dials the value this command writes",
+    ):
+        return 1
     client.config.server_url = url
     print(f"Server URL set to: {url}")
     return 0
