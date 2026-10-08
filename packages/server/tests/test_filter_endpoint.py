@@ -9,6 +9,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from core.engine.secure_memory import KekCache
 from fastapi import FastAPI
 from server.routes import filter as filter_routes
 from starlette.testclient import TestClient
@@ -226,7 +227,7 @@ class TestFilterSessionOutput:
             bindings=[SimpleNamespace(secret_id=1)],
             secrets=[_secret_row(1, "aws_api_key")],
         )
-        backend.config.kek = b"A" * 32  # 32-byte KEK
+        backend.kek_cache = KekCache.from_bytes(b"A" * 32, mlock=False)  # 32-byte KEK
         app = _create_test_app(backend=backend)
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -263,7 +264,7 @@ class TestFilterSessionOutput:
             bindings=[SimpleNamespace(secret_id=1)],
             secrets=[_secret_row(1, "mysecret")],
         )
-        backend.config.kek = b"A" * 32
+        backend.kek_cache = KekCache.from_bytes(b"A" * 32, mlock=False)
         app = _create_test_app(backend=backend)
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -297,7 +298,7 @@ class TestFilterSessionOutput:
             bindings=[SimpleNamespace(secret_id=1)],
             secrets=[_secret_row(1, "mysecret")],
         )
-        backend.config.kek = None
+        backend.kek_cache = KekCache(32, mlock=False)  # unpopulated cache: "no KEK" now means this
         app = _create_test_app(backend=backend)
 
         client = TestClient(app, raise_server_exceptions=False)
@@ -360,7 +361,7 @@ class TestFilterSessionOutput:
 
         backend = MagicMock()
         backend.get_session.return_value = db
-        backend.config.kek = b"A" * 32
+        backend.kek_cache = KekCache.from_bytes(b"A" * 32, mlock=False)
         app = _create_test_app(backend=backend)
 
         client = TestClient(app, raise_server_exceptions=False)

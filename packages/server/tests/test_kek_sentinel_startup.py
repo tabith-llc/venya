@@ -91,7 +91,8 @@ class TestSentinelStartupProof:
     def test_sentinel_match_boots(self, tmp_path):
         backend = _backend(tmp_path, _RIGHT)
         session = backend.get_session()
-        ensure_kek_sentinel(session, backend.config.kek)
+        with backend.kek_cache.view() as kek:
+            ensure_kek_sentinel(session, kek)
         session.close()
 
         with patch.object(app, "logger") as mock_logger:
@@ -103,7 +104,8 @@ class TestSentinelStartupProof:
         """The paired negative proving the old silent-green boot is gone."""
         backend = _backend(tmp_path, _RIGHT)
         session = backend.get_session()
-        ensure_kek_sentinel(session, backend.config.kek)
+        with backend.kek_cache.view() as kek:
+            ensure_kek_sentinel(session, kek)
         session.close()
 
         wrong = _backend(tmp_path, _WRONG)

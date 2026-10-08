@@ -244,13 +244,14 @@ def _verify_kek_sentinel(backend) -> None:  # type: ignore[no-untyped-def]
     """
     from core.engine.backend import KekPassphraseMismatchError, SentinelStatus, verify_kek_sentinel
 
-    kek = backend.config.kek
-    if kek is None:
+    kek_cache = backend.kek_cache
+    if not kek_cache.is_populated:
         raise KekPassphraseMismatchError("no KEK at sentinel verification — bootstrap_kek must run first")
 
     session = backend.get_session()
     try:
-        check = verify_kek_sentinel(session, kek)
+        with kek_cache.view() as kek:
+            check = verify_kek_sentinel(session, kek)
     finally:
         session.close()
 

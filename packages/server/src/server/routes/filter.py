@@ -251,8 +251,8 @@ async def filter_session_output(
                     session_id,
                 )
                 continue
-            kek = backend.config.kek
-            if kek is None:
+            kek_cache = backend.kek_cache
+            if not kek_cache.is_populated:
                 logger.warning(
                     "No KEK configured, cannot decrypt secret %s for session %s",
                     binding.secret_id,
@@ -260,7 +260,8 @@ async def filter_session_output(
                 )
                 continue
             try:
-                plaintext = _decrypt_secret_impl(kek, secret.wrapped_dek, secret.nonce, secret.encrypted_value)
+                with kek_cache.view() as kek:
+                    plaintext = _decrypt_secret_impl(kek, secret.wrapped_dek, secret.nonce, secret.encrypted_value)
             except DecryptionError:
                 logger.warning(
                     "Failed to decrypt secret %s for session %s",
