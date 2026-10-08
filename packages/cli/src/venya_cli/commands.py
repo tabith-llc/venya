@@ -1553,7 +1553,9 @@ def cmd_setup(client: APIClient, args: Any) -> int:
     An explicit http:// URL is REFUSED before anything is written (#497): the
     fetched bytes become the trust anchor every later call verifies against, so
     a plaintext answer from an on-path adversary would be installed as the CA.
-    A bare hostname still normalizes to https://.
+    Normalization is fills-only (#544): a bare hostname gets the https:// fill;
+    a value that already carries ANY scheme reaches the shared guard verbatim,
+    so an uppercase HTTP:// is refused, never massaged into a written value.
 
     The fetch is a scoped, unverified GET (trust-on-first-use): the cert it
     returns becomes the verification anchor, and its subject + SHA-256
@@ -1561,11 +1563,13 @@ def cmd_setup(client: APIClient, args: Any) -> int:
     No subsequent call reuses that unverified client.
     """
     core = args.corename
-    if not core.startswith(("http://", "https://")):
+    if "://" not in core:
         core = "https://" + core
     # #497, now on the shared guard: the fetched bytes become this workstation's
     # trust anchor, so a plaintext answer from an on-path adversary would be
-    # installed as the CA. Bare hostnames still normalize to https:// above.
+    # installed as the CA. Fills-only rule above (#544), same as set-server
+    # (#509) and register (#508): only a schemeless answer gets https://; any
+    # value that already carries a scheme reaches the guard verbatim.
     if not _require_https_server_url(
         core,
         site="venya setup",
