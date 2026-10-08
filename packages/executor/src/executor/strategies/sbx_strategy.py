@@ -411,40 +411,21 @@ class SbxStrategy(InjectionStrategy):
         # a fresh install has no /dev/shm/venya-secrets)
         os.makedirs(SECRET_TMPFS_BASE, mode=0o700, exist_ok=True)
         self._session_dir = tempfile.mkdtemp(prefix=f"session_{session_id}_", dir=SECRET_TMPFS_BASE)
-        os.chmod(self._session_dir, 0o700)
 
+        # From the moment the directory exists, it is owned (refs #446).
+        # Register the cleanup callable IMMEDIATELY — before any secret is
+        # written — and wrap the whole window up to "callable registered"
+        # in a rollback that removes the directory (with its contents) on
+        # ANY error and re-raises. A failure here never returns an
+        # InjectionResult, so the caller cannot run cleanup_funcs itself
+        # (executor.py only holds _injection_result after prepare() returns):
+        # the try/except rollback is the load-bearing guarantee on the raise
+        # path; the early registration is double-safety and keeps ownership
+        # starting at creation. Same fail-closed style as the in-guest
+        # secret-copy chmod-400 rollback in this file.
+        session_dir = self._session_dir
         mounts: list[SecretMount] = []
         cleanup_funcs: list[Callable[[], None]] = []
-
-        for bundle, secret_id in zip(secrets, secret_ids):
-            secret_path = os.path.join(self._session_dir, secret_id)
-
-            # Write secret to tmpfs file
-            fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT, 0o400)
-            try:
-                os.write(fd, bundle.value)
-            finally:
-                os.close(fd)
-
-            # Lock down permissions
-            os.chmod(secret_path, 0o400)
-
-            mount = SecretMount(
-                secret_id=secret_id,
-                path=secret_path,
-                container_path=f"{CONTAINER_SECRET_DIR}/{secret_id}",
-            )
-            mounts.append(mount)
-
-            logger.debug(
-                "Wrote secret %s to tmpfs: %s -> %s",
-                secret_id,
-                secret_path,
-                mount.container_path,
-            )
-
-        # Cleanup: remove entire session directory from tmpfs
-        session_dir = self._session_dir
 
         def _cleanup():
             if session_dir and os.path.exists(session_dir):
@@ -452,6 +433,45 @@ class SbxStrategy(InjectionStrategy):
                 logger.debug("Cleaned up tmpfs session dir: %s", session_dir)
 
         cleanup_funcs.append(_cleanup)
+
+        try:
+            os.chmod(self._session_dir, 0o700)
+
+            for bundle, secret_id in zip(secrets, secret_ids):
+                secret_path = os.path.join(self._session_dir, secret_id)
+
+                # Write secret to tmpfs file
+                fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT, 0o400)
+                try:
+                    os.write(fd, bundle.value)
+                finally:
+                    os.close(fd)
+
+                # Lock down permissions
+                os.chmod(secret_path, 0o400)
+
+                mount = SecretMount(
+                    secret_id=secret_id,
+                    path=secret_path,
+                    container_path=f"{CONTAINER_SECRET_DIR}/{secret_id}",
+                )
+                mounts.append(mount)
+
+                logger.debug(
+                    "Wrote secret %s to tmpfs: %s -> %s",
+                    secret_id,
+                    secret_path,
+                    mount.container_path,
+                )
+        except BaseException:
+            # Ownership closes the write window: an interrupted prepare()
+            # must not leave a session_* dir (possibly holding staged
+            # secret material) unreferenced on tmpfs. ignore_errors=True
+            # because a tmpfs broken enough to fail a write can fail a
+            # delete too — but the attempt is made in EVERY failure path.
+            shutil.rmtree(session_dir, ignore_errors=True)
+            self._session_dir = None
+            raise
 
         return InjectionResult(
             extra_fds=[],  # No FDs — using file copies instead
