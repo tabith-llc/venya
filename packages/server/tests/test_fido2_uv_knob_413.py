@@ -27,6 +27,8 @@ from pydantic import ValidationError
 from server.config import Fido2Config
 from server.fido2.manager import Fido2Manager, StoredCredential, WebAuthnError
 
+from tests.fido2_db import manager_with_db, peek_challenge_data
+
 RP_ID = "venya-core-1"
 RP_ID_HASH = hashlib.sha256(RP_ID.encode()).digest()
 
@@ -90,42 +92,42 @@ def _run_auth(manager: Fido2Manager, keypair, cose_key_bytes, uv: bool):
         StoredCredential(user_id="u1", credential_id=cred_id, public_key=cose_key_bytes, sign_count=0)
     )
     challenge_id, options = manager.start_authentication(user_id="u1")
-    raw_challenge = manager.store._challenges[challenge_id].data["raw_challenge"]
+    raw_challenge = peek_challenge_data(manager.store._sessions, challenge_id)["raw_challenge"]
     response = _assertion_response(cred_id, private_key, raw_challenge, counter=1, uv=uv)
     return challenge_id, options, response
 
 
 class TestUvKnobRecording:
-    def test_knob_recorded_on_challenge_and_options(self, keypair, cose_key_bytes):
-        manager = Fido2Manager(rp_id=RP_ID, user_verification="required")
+    def test_knob_recorded_on_challenge_and_options(self, keypair, cose_key_bytes, tmp_path):
+        manager, factory = manager_with_db(tmp_path, rp_id=RP_ID, user_verification="required")
         challenge_id, options = manager.start_authentication(user_id="u1")
-        assert manager.store._challenges[challenge_id].data["user_verification"] == "required"
+        assert peek_challenge_data(factory, challenge_id)["user_verification"] == "required"
         assert options["userVerification"] == "required"
 
-    def test_default_knob_is_discouraged(self, keypair, cose_key_bytes):
-        manager = Fido2Manager(rp_id=RP_ID)
+    def test_default_knob_is_discouraged(self, keypair, cose_key_bytes, tmp_path):
+        manager, factory = manager_with_db(tmp_path, rp_id=RP_ID)
         challenge_id, options = manager.start_authentication(user_id="u1")
-        assert manager.store._challenges[challenge_id].data["user_verification"] == "discouraged"
+        assert peek_challenge_data(factory, challenge_id)["user_verification"] == "discouraged"
         assert options["userVerification"] == "discouraged"
 
 
 class TestUvAssertionTruthTable:
-    def test_required_no_uv_rejected(self, keypair, cose_key_bytes):
-        manager = Fido2Manager(rp_id=RP_ID, user_verification="required")
+    def test_required_no_uv_rejected(self, keypair, cose_key_bytes, tmp_path):
+        manager, _ = manager_with_db(tmp_path, rp_id=RP_ID, user_verification="required")
         challenge_id, _, response = _run_auth(manager, keypair, cose_key_bytes, uv=False)
         with pytest.raises(WebAuthnError, match="User verification flag not set"):
             manager.finish_authentication(challenge_id, response)
 
-    def test_required_with_uv_passes_gate(self, keypair, cose_key_bytes):
-        manager = Fido2Manager(rp_id=RP_ID, user_verification="required")
+    def test_required_with_uv_passes_gate(self, keypair, cose_key_bytes, tmp_path):
+        manager, _ = manager_with_db(tmp_path, rp_id=RP_ID, user_verification="required")
         challenge_id, _, response = _run_auth(manager, keypair, cose_key_bytes, uv=True)
         result = manager.finish_authentication(challenge_id, response)
         assert result["user_id"] == "u1"
 
     @pytest.mark.parametrize("knob", ["discouraged", "preferred"])
-    def test_non_required_no_uv_accepted(self, knob, keypair, cose_key_bytes):
+    def test_non_required_no_uv_accepted(self, knob, keypair, cose_key_bytes, tmp_path):
         """Regression half: exactly the pre-fix behavior — the UV gate does not fire."""
-        manager = Fido2Manager(rp_id=RP_ID, user_verification=knob)
+        manager, _ = manager_with_db(tmp_path, rp_id=RP_ID, user_verification=knob)
         challenge_id, _, response = _run_auth(manager, keypair, cose_key_bytes, uv=False)
         result = manager.finish_authentication(challenge_id, response)
         assert result["user_id"] == "u1"

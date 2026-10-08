@@ -67,15 +67,33 @@ def _build_attestation_object(cred_id: bytes, cose_key: dict, counter: int = 0) 
     return bytes(fido2_cbor.encode({"fmt": "none", "authData": auth_data, "attStmt": {}}))
 
 
+def _peek_challenge_data(manager, challenge_id: str) -> dict:
+    """Claim-free read of a pending challenge's ceremony dict (#534).
+
+    Challenges moved from the Fido2Store dict to the fido2_challenges
+    table; this is the honest test-side stand-in for the old dict poke —
+    production keeps the store consume-only (single-consume claim).
+    """
+    from core.iam.models import Fido2Challenge
+    from server.fido2.manager import _decode_payload
+
+    db = manager.store._sessions()
+    try:
+        row = db.query(Fido2Challenge).filter(Fido2Challenge.challenge_id == challenge_id).one()
+        return _decode_payload(json.loads(row.payload))
+    finally:
+        db.close()
+
+
 def _reg_client_data_json(manager, challenge_id: str) -> str:
     """Real webauthn.create clientDataJSON answering the issued challenge.
 
     Server-side ceremony verification (sec-auth-elevation-authz-hardening #4)
     rejects the formerly-forged empty {} — registration now proves
     type/challenge/origin exactly like the authentication side always did.
-    Reads the raw challenge from the store BEFORE finish pops it.
+    Reads the raw challenge from the DB row BEFORE finish claims it.
     """
-    raw = manager.store._challenges[challenge_id].data["raw_challenge"]
+    raw = _peek_challenge_data(manager, challenge_id)["raw_challenge"]
     return _b64url(
         json.dumps(
             {
