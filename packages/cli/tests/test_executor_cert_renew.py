@@ -20,6 +20,7 @@ Tests cover:
 import json
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -879,3 +880,125 @@ class TestRenewHardening373:
         assert chown_calls == []
         assert fchown_calls == []
         assert cert_path.exists()  # renew completed as before; only ownership is untouched
+
+
+class TestRenewCleanupGuard476:
+    """#476: the renew staging-cleanup guard covers every abort, not only OSError.
+
+    The cert/CA/key temps are PLAINTEXT until ``os.replace`` publishes them, so an
+    abort that is not an ``OSError`` (a serialization ``ValueError``, a
+    ``KeyboardInterrupt`` at the wrong moment) must still remove whatever was
+    staged — the same ``except BaseException`` guard the ``executor_register``
+    staging sites use. The ``except OSError`` arm keeps its own sentence and rc=1.
+    """
+
+    @staticmethod
+    def _renew_args(cert_path):
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core"
+        return args
+
+    @staticmethod
+    def _leftovers(tmp_path):
+        return sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(".venya-"))
+
+    @pytest.mark.parametrize(
+        "boom",
+        [ValueError("staged material rejected"), KeyboardInterrupt()],
+        ids=["ValueError", "KeyboardInterrupt"],
+    )
+    def test_non_oserror_abort_removes_every_staged_temp(self, tmp_path, boom):
+        """Load-bearing cell: a non-OSError abort at the key publish leaves NOTHING staged."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        original_cert = cert_path.read_bytes()
+        original_key = key_path.read_bytes()
+        real_replace = os.replace
+
+        def abort_on_key_publish(src, dst, *a, **kw):
+            if str(dst) == str(key_path):
+                raise boom
+            return real_replace(src, dst, *a, **kw)
+
+        with (
+            patch("venya_cli.commands.httpx2.Client", return_value=_make_mock_httpx_client()),
+            patch("venya_cli.commands.os.replace", side_effect=abort_on_key_publish),
+            pytest.raises(type(boom)),
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            executor_cert_renew(self._renew_args(cert_path))
+
+        assert self._leftovers(tmp_path) == []
+        # paired: the published targets are still the originals
+        assert cert_path.read_bytes() == original_cert
+        assert key_path.read_bytes() == original_key
+
+    def test_non_oserror_abort_at_the_ca_publish_clears_cert_and_ca_temps(self, tmp_path):
+        """Same guard, second staging point — proves the cert/CA names are both covered."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        real_replace = os.replace
+
+        def abort_on_ca_publish(src, dst, *a, **kw):
+            if Path(dst).name == "ca.crt":
+                raise ValueError("staged material rejected")
+            return real_replace(src, dst, *a, **kw)
+
+        with (
+            patch("venya_cli.commands.httpx2.Client", return_value=_make_mock_httpx_client()),
+            patch("venya_cli.commands.os.replace", side_effect=abort_on_ca_publish),
+            pytest.raises(ValueError),
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            executor_cert_renew(self._renew_args(cert_path))
+
+        assert self._leftovers(tmp_path) == []
+        assert key_path.read_bytes() != b""  # the key published before the abort stays
+
+    def test_normal_save_path_unchanged(self, tmp_path):
+        """AC3 paired positive: the widening moves no file, mode, or rename."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        ca_path = tmp_path / "ca.crt"
+        old = os.umask(0o022)
+        try:
+            with patch("venya_cli.commands.httpx2.Client", return_value=_make_mock_httpx_client()):
+                from venya_cli.commands import executor_cert_renew
+
+                rc = executor_cert_renew(self._renew_args(cert_path))
+        finally:
+            os.umask(old)
+
+        assert rc == 0
+        assert key_path.stat().st_mode & 0o777 == 0o600
+        assert cert_path.stat().st_mode & 0o777 == 0o644
+        assert ca_path.stat().st_mode & 0o777 == 0o644
+        assert serialization.load_pem_private_key(key_path.read_bytes(), password=None) is not None
+        assert b"CERTIFICATE" in cert_path.read_bytes()
+        assert self._leftovers(tmp_path) == []
+
+    def test_oserror_abort_still_cleans_and_still_prints_the_same_sentence(self, tmp_path, capsys):
+        """Pre-existing behavior must not regress: rc=1, same stderr sentence, no temps."""
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+        original_cert = cert_path.read_bytes()
+        real_replace = os.replace
+
+        def fail_on_key_publish(src, dst, *a, **kw):
+            if str(dst) == str(key_path):
+                raise OSError("Disk full")
+            return real_replace(src, dst, *a, **kw)
+
+        with (
+            patch("venya_cli.commands.httpx2.Client", return_value=_make_mock_httpx_client()),
+            patch("venya_cli.commands.os.replace", side_effect=fail_on_key_publish),
+        ):
+            from venya_cli.commands import executor_cert_renew
+
+            rc = executor_cert_renew(self._renew_args(cert_path))
+
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "Failed to save certificate: Disk full" in err
+        assert self._leftovers(tmp_path) == []
+        assert cert_path.read_bytes() == original_cert
