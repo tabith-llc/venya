@@ -1272,3 +1272,123 @@ admin key ONLY** (`features/admin-key-short-lived-certs.md`, "Rulings already ma
   not designed here: the envelope/CA-cluster legs own it, and RF-6 deliberately proposes no fix (4d boundary).
 
 <!-- SECTIONS 8-10 FOLLOW. -->
+
+---
+
+## 8. Windows remote-bootstrap limitation
+
+Problem 9 ("Windows admins cannot bootstrap remotely") is live and is **documented here rather than discovered
+mid-incident**. This section states the mechanism, what it does and does not forbid, and the consequence for
+admin issuance from a Windows workstation. It cites the venue laws and the shipped code, and it designs no
+Windows-specific branch.
+
+### 8.1 The mechanism, cited
+
+Re-verified facts, from the venue reference (`info/reference-win11-venue.md`, hard law 1, marked **RV-1006** —
+verified against the installed library) and the shipped CLI:
+
+| Fact | Evidence |
+|---|---|
+| On Windows the CLI uses the **platform WebAuthn API**, never raw CTAP | `packages/cli/src/venya_cli/fido2_client.py:152-167` (`WindowsClient`, lazy import of `fido2.client.windows`); `_make_webauthn_client` docstring `:137-156` |
+| Raw CTAP/HID on Windows 10 1903+ is restricted to elevated processes, and **enumeration itself is admin-only** — which is why there is no fallback | `fido2_client.py:140-149`: a fallback "would reproduce the silent admin-only failure this factory exists to eliminate"; callers get an explicit `Fido2ClientError` |
+| The platform API needs a **foreground window**: `fido2/client/windows.py:154` — `self.handle = handle or user32.GetForegroundWindow()`. Over SSH/WinRM that handle is `0` (no desktop), so **no ceremony can be driven or verified remotely** | venue law 1 (RV-1006), record `windows-fido2-requires-elevation` |
+| **The precondition is Medium integrity + a provably interactive desktop — NOT elevation.** The WebAuthn API docs state no elevation and no interactive-session requirement; the elevation line sits at the HID transport classes and the machine-wide install | venue law 1 second half (RV-1006, python-fido2 class docstring line 141: "…require admin priveleges to run (**unlike this one**)") |
+| **Device enumeration DOES work over SSH** (network-logon session, unfiltered token: `COUNT=1`, `U2F_V2/FIDO_2_0/…`, `clientPin: True`, `credMgmt: True`) | venue law 2 (2026-09-19 record) |
+| Windows dialogs own PIN/touch, and when no key is attached they **wait for insertion** — so terminal text written for raw CTAP ("touch your key") contradicts what the operator sees | `_win_ceremony_hint` (`commands.py:234-252`), win32-only, `None` elsewhere |
+
+**The venue's own technique statement is the design constraint:** "Preflight remotely, ceremony at the console —
+that split is the whole technique" (venue law 2). Never plan a remote-driven ceremony.
+
+### 8.2 What this means for the §2 path, item by item
+
+| §2 step | From a Windows workstation, at the console | From a Windows workstation, over SSH/WinRM |
+|---|---|---|
+| 1-2 login + elevate/assert (FIDO2 **assertion**) | works — the OS dialog owns PIN/touch | **impossible** (no desktop handle) |
+| 3 keygen + CSR | works — pure local crypto, no desktop needed | works — same, no ceremony |
+| 4 `POST /admin/certs/issue` | works | works — it is bearer + elevation-token auth, no ceremony in the request |
+| 5-6 store and use the short cert | works; NTFS ACL, not mode bits | works |
+
+So the limitation is **exactly the ceremony, not the credential**. The mint is reachable from a remote Windows
+session **only if the elevation assertion already succeeded somewhere with a desktop**, and the elevation token
+lives 60 seconds (`auth_elevation.py:36`, carried in §2.2). That pairing — 60-second token, ceremony requires a
+console — is what makes the combination unusable as a remote-bootstrap trick: there is no window in which a
+remote lane can hold a ceremony result it did not obtain at the console.
+
+**Stated as a rule for RF-7/RF-8: do not design or document any flow that assumes a Windows ceremony can be
+driven remotely, and do not lengthen the elevation window to make one work.** Two numbers are in play and only one
+of them is the tempting knob: the pending **challenge** row lives `ELEVATION_TOKEN_TTL_SECONDS * 5` = 300 s
+(`auth_elevation.py:76`) and the mint **token** the assertion produces lives 60 s (`:36`, `:309`). Widening either
+to rescue a remote Windows mint weakens the single-use/fresh-ceremony property §2.2 depends on.
+
+### 8.3 The consequence for admin issuance from a Windows workstation
+
+1. **A Windows admin must be physically at that machine's console for each mint** — first issuance and every
+   explicit renew (4b forbids automatic ceremony mid-run, so renew is also a console event). One FIDO2 touch
+   per hour of admin work is the operational cost, and 4a's word applies: cadence is driven by job length, not by
+   fear of expiry. A long job started from Windows should be pre-flighted (§4.5) and, if it will outlive the
+   cert, either be split or be run from a plane that can renew without a console — see item 3.
+2. **Remote Windows headless admin work is the machine plane's job, not the human plane's.** A scheduled task or
+   CI job on a Windows box cannot mint. Under `split` (§1.2 R1, §3.2) the answer for that workload is the
+   loopback/machine credential on the core, which the installer already documents in exactly that form
+   (`install-venya-core.sh:1001-1007`, the headless-core admin-mTLS CLI form). RF-9 owns that story (§9); this
+   section only records that Windows makes the boundary visible rather than creating it.
+3. **The `status` / lifetime-readable check (§4.5) works over SSH, and that is the Windows win.** It parses a
+   local file and needs no ceremony, so a remote preflight can tell the operator "this cert dies in 12 minutes —
+   go touch the key at the console before starting the job". RF-11's Windows doc should lead with
+   remote-`status` → console-ceremony → remote-run, which is venue law 2's split expressed as an admin workflow.
+4. **Break-glass stays platform-neutral.** The recovery-code path (`routes/recovery.py`, §3.7) is a typed code,
+   not a WebAuthn assertion, so it is usable from a remote Windows session — that matters precisely because a
+   Windows admin who cannot reach a console cannot mint. RF-11 must say this plainly rather than leaving it to
+   be found under pressure.
+5. **At-rest handling on Windows has no POSIX mode bits.** §2.4's `0600`/`0700` discipline is expressible as NTFS
+   ACLs, not modes; the honesty requirement is the one `modewarn` already carries (§1.4: POSIX-only check with the
+   Windows behavior stated). Related: the CLI's install-vs-use elevation split is by design and must not be
+   "fixed" (venue law 4 — machine-wide elevated install, unelevated use, `--link-mode copy` load-bearing), and
+   the first-use setup that trusts the core CA (`cmd_setup`, `commands.py:1544-1556`, refuses plaintext `http://`
+   per #497) is a non-ceremony step, so it can be done remotely.
+
+### 8.4 The test/venue rule for anyone accepting a Windows cell
+
+RF-8's Windows cells must follow the venue laws, and the dossier records them so a lane does not re-derive them:
+
+- A ceremony cell on `win11` is **interactive-desktop-only**; plan remote preflight + one console line. Session
+  `0` (`win`, elevated sshd, `INTEG=High`) has no desktop; the console session (`venyastd`, session 1,
+  `INTEG=Medium`, `USERINTERACTIVE=True`) is the ceremony plane — and the standard-user case needs that account,
+  not `win` (venue laws 1, 3; venue readout lines on session ids are marked decisive there).
+- Any "without elevation" criterion must be **proven at the desktop** and the paste must print its own integrity
+  answer (venue law 3 / the integrity-readout rule).
+- The win11 venue is a single-running box (at most one running network-wide, check both hypervisors before any
+  boot) and its lease must be re-derived at use time. **This RF-6 leg runs no cells and boots nothing** — no
+  fleet, per the dispatch.
+- FIDO2 asks to the owner name the key (A=admin / B=auditor / C=user in the owner's vocabulary) and go direct to
+  the owner in the lane's own harness, never through the lead, with a complete paste-ready command and zero
+  placeholders. The ceremony itself cannot be automated away, so the ask is the design's last mile on Windows.
+
+### 8.5 What this section does NOT say
+
+- It does not say Windows cannot be an admin workstation. It can: mint at the console, work remotely afterward.
+- It does not say the CLI is broken on Windows. `WindowsClient` is the supported unelevated path
+  (`fido2_client.py:143-146`) and HRESULTs are translated to operator text with the observed-code table at
+  `fido2_client.py:178-200`, deliberately evidence-driven ("accurate, never invented").
+- It does not propose a workaround that weakens the model: no remote ceremony, no longer-lived elevation token,
+  no server-side key export for Windows users (§6.3's "not the design" applies identically here), and no
+  standing human cert kept "because Windows is awkward".
+
+### 8.6 Inheritance — what later legs take from this section
+
+- **RF-7:** do not size the elevation TTL around remote Windows needs (§8.2 rule); nothing else in the mint
+  changes for Windows.
+- **RF-8:** the Windows ceremony guidance rides the existing `_win_ceremony_hint` mechanism
+  (`commands.py:234-252`), win32-only with POSIX output byte-identical — a renew/status string must follow that
+  same shape, and refusal text must not say "touch your key" on Windows where a dialog owns the touch (§8.1 last
+  row).
+- **RF-9:** remote/headless Windows admin work belongs to the machine plane (§8.3 item 2) — its service-identity
+  answer is where that workload lands.
+- **RF-10:** any Windows-facing installer/CLI text keeps the elevated-install / unelevated-use split (venue law
+  4) and the `--link-mode copy` behavior untouched.
+- **RF-11:** publish the Windows limitation in the admin docs, not in a footnote: console needed to mint and to
+  renew, remote `status` for preflight, recovery code reachable remotely, and the NTFS-vs-mode-bit honesty
+  (§8.3 items 1, 3, 4, 5). Pair it with the §3.6 disclosure note — a cert file synced out of a Windows profile
+  discloses the admin identity like any other copy.
+
+<!-- SECTIONS 9-10 FOLLOW. -->
