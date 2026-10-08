@@ -79,13 +79,9 @@ class TestBreakGlassBackoffIgnoresWallSteps:
 
         remaining = mw._check_break_glass_backoff(IP)
         assert remaining > 0, "the caller must stay blocked inside the true backoff"
-        assert remaining <= BACKOFF_CAP, (
-            f"a wall step extended the block past the {BACKOFF_CAP} s cap: {remaining}"
-        )
+        assert remaining <= BACKOFF_CAP, f"a wall step extended the block past the {BACKOFF_CAP} s cap: {remaining}"
 
-    def test_forward_step_does_not_forget_failures_inside_their_true_window(
-        self, monkeypatch
-    ):
+    def test_forward_step_does_not_forget_failures_inside_their_true_window(self, monkeypatch):
         """Forward half — the security side. Five failures arm the capped 16 s
         backoff; one second of real time passes; the wall clock then jumps an
         hour ahead. The recorded failures must NOT be forgotten (and the 1-hour
@@ -105,9 +101,7 @@ class TestBreakGlassBackoffIgnoresWallSteps:
         remaining = mw._check_break_glass_backoff(IP)
         assert remaining > 0, "forward wall step silently dropped the recorded failures"
         assert remaining <= BACKOFF_CAP, f"figure left the configured cap: {remaining}"
-        assert remaining == 15, (
-            f"history not retained or prune fired on the fake step: expected 15, got {remaining}"
-        )
+        assert remaining == 15, f"history not retained or prune fired on the fake step: expected 15, got {remaining}"
 
     def test_real_hour_still_prunes_the_history(self, monkeypatch):
         """Paired negative: an hour of REAL time (both dials together) prunes
