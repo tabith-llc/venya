@@ -786,3 +786,148 @@ refusal — no ceremony call, no retry loop.
 - **RF-10:** the installer's printed workflow must name `renew`/`status`, replacing the `scp` handoff lines
   (`install-venya-core.sh:978-981`) — proposed text only, owner-ok-gated.
 - **RF-11:** the operator runbook text for §4.5's pre-flight flow, plus the refusal strings' user-visible wording.
+
+---
+
+## 5. Clock skew — tolerance as a fraction of a 60-minute life
+
+Ruling 4a attaches two conditions to the 60-minute number, and both land here: **skew tolerance must be a small
+fraction of lifetime (minutes, not tens of minutes)**, and **NTP drift on a workstation is now a plausible
+admin-lockout cause that the error text must say so**. Problem 5's framing ("short validity is strictly enforced
+by OpenSSL at the proxy") needed correction against the shipped config; §4.1 did the correction, and this section
+carries the consequence.
+
+### 5.1 The law this section implements
+
+> **Tolerance is a fraction of lifetime, not a constant.** With lifetime at 60 minutes, the tolerance budget is
+> **minutes**. Any tolerance value must be justified as a stated fraction of the current lifetime, and a lane that
+> changes either number must re-check the fraction. **A tolerance that is large relative to the lifetime converts
+> the theft window into a suggestion.**
+
+The fraction test is what makes this checkable rather than rhetorical: at 60 minutes, 300 s is 8.3 %, 60 s is
+1.7 %, 30 s is 0.8 %. RF-7/RF-11 can argue about 30 vs 60; neither number can quietly be 3000.
+
+### 5.2 Where validity is actually enforced (verified)
+
+| Layer | What it does with validity | Verified at |
+|---|---|---|
+| nginx outer TLS | `ssl_client_certificate` + `ssl_verify_client optional` — no `ssl_crl`, no explicit verify-mode in the served config. With `optional`, a verification failure does not kill the handshake; the PEM is forwarded anyway | `install-venya-core.sh:910-911` |
+| **Application (the gate)** | `_verify_forwarded_cert` re-does chain + validity end-to-end, **and this is the layer that applies the product's skew tolerance**: `tolerance = config.clock_skew.cert_tolerance_seconds` (or 0), then `now < not_before - tol` / `now > not_after + tol` both fail closed | `middleware/auth.py:198-202`; docstring `:182-185`; per-plane anchors `:123`, `:140` |
+| Executor/session layer | same builder, executor anchors | `:688`, `:715` |
+| Token/session layer | separate knob, `token_tolerance_seconds`, consumed by `session_manager` / `enrollment_manager` via `clock_skew_tolerance_seconds` | `config.py:242`, `session_manager.py:174`, `:338`, `:361`, `enrollment_manager.py:97`, `:157`, `:256` |
+| CLI (local, pre-flight) | reads its own cert for lifetime display; no clock authority | §4.5 |
+
+Consequence: **skew policy is a product config value the application already reads**, not an OpenSSL build
+decision. That makes the fix cheap and makes the current default a real review item rather than a curiosity.
+
+### 5.3 The current default silently extends the theft window — with the arithmetic
+
+`cert_tolerance_seconds` defaults to **300** (`config.py:248-251`, `ge=0, le=600`) and is documented as such
+(`docs/ease-of-use.md:208`: "60 s tokens / 300 s certs"). It was sized when an admin cert lived **90 days**
+(`ADMIN_CERT_VALIDITY_DAYS = 90`, `ca.py:566`), where 300 s is 0.08 % of life and free of consequence.
+
+At a 60-minute life the same default means:
+
+```
+tolerance:    now > not_valid_after + 300s  → still admitted  (middleware/auth.py:202)
+theft window: 60 min + 5 min = 65 min       → +8.3 % over the ruled number
+```
+
+That is not a hypothetical: the replay path is the application's own admission decision. A copied short cert is
+replayable for five minutes past expiry, on the machine that holds it, with no ceremony. 8.3 % is still a "small
+fraction" by §5.1's test, so this is **not** a blocker — but a design that rules 60 minutes as *the theft window*
+should not leave the effective window at 65 by inherited default.
+
+**Design position:** lower the admin-relevant `cert_tolerance_seconds` default to **≤ 60 s** (a 1.7 % fraction),
+and make the relationship **asserted rather than remembered** — one test cell that reads the lifetime constant and
+the tolerance constant and fails if `tolerance > lifetime/20`. Constant-coupling tests are the only defense against
+a future lane raising one number and not the other. RF-7 owns the value choice; the fraction bound is the
+requirement.
+
+**Direction asymmetry, stated because it is uncomfortable and one-sided:** a tolerance window is applied in both
+directions (`:200` and `:202`), so the same number that rescues a clock running slightly *behind* also grants a
+stolen cert extra life on a clock running *right*. A forward-skewed verifier grants life; a backward-skewed
+verifier causes lockout. If the product later wants different budgets per direction (tight forward, looser
+backward — or, since the server's clock governs minting, applied only to the verifier's own clock), that is an
+implementation detail for RF-7 to rule on; what is **not** optional is that the *total* stay inside §5.1's
+fraction, and that whoever splits the knob re-runs §5.3's arithmetic on the forward half.
+
+### 5.4 The two lockout shapes, and what the error text must say
+
+The ruled condition is that the error text **names NTP drift as a plausible cause**. It must also name the right
+*subject*, because the two shapes have different blast radii and different fixes:
+
+- **Workstation-side drift (individual lockout).** The core's clock is authoritative for the window check
+  (`:199`), so a skewed client clock does **not** usually cause rejection — the server's `now` decides. It causes
+  lockout in two real ways: (a) the **local pre-flight lies** (§4.5's honesty clause — a machine 10 minutes behind
+  reports 70 minutes of life on a 60-minute cert, then the job dies mid-run); and (b) **inner-TLS deployments**,
+  where the client's certificate is validated at a TLS layer whose clock is the verifier's
+  (`config.InnerTLSConfig`, `:277`; the inner channel's client cert is the *inner* cert at
+  `install-venya-core.sh:932-933`, so the human cert is not on that hop, but the same class applies to any
+  verifier-side skew).
+- **Core-side drift (mass lockout).** Every admin's request is judged against **one** clock. If a core's clock
+  steps forward, `not_before - tol` is unattainable and every short cert is "not yet valid" at once; step it back
+  and every cert is expired at once. At 90-day lifetimes, clock drift of minutes was noise; at 60-minute
+  lifetimes **it is an outage of the entire admin plane, all installs sharing that host's clock, within the
+  tolerance plus one mint.** NTP discipline on the cores is now an availability dependency of admin access, not
+  just a logging nicety. This is the note the carrier asked for and RF-11 must put in the ops docs, not in a
+  footnote.
+
+Required properties of the refusal strings (server side; they reach the operator because the CLI prints the server
+`detail` verbatim — `api_client.py:528`, `:647`, `:784`):
+
+1. **Name the fault class, not just the outcome.** "Certificate is not yet valid according to this core's clock"
+   and "certificate has expired according to this core's clock" are separate strings from the generic
+   `Admin access requires valid client certificate` (`auth.py:395`, `:405`, `:425`, `:431`, `:454`, `:481`).
+2. **Name NTP/clock drift as a plausible cause** in both, per ruling 4a's condition — verbatim intent: a
+   not-yet-valid rejection on a cert that was minted seconds ago means *someone's clock* is the problem.
+3. **Name the direction and the delta where the server can compute them**: presented `not_before`/`not_after`,
+   server `now`, and the difference — so an operator can tell "core clock 40 minutes fast" from "wrong cert".
+4. **Name the operator's next command** (4b's naming law applied to skew): the repair is time sync plus a fresh
+   `venya admin cert renew` for the expired case; for the not-yet-valid case it is time sync only, and the text
+   must not tell a user to re-mint against a clock that will still be wrong.
+5. **Fail closed regardless.** None of this is a reason to widen tolerance ad hoc; a deployment that genuinely
+   cannot sync clocks raises the value in `/opt/venya/.env` (§5.5) and accepts the §5.3 arithmetic on its own head.
+
+### 5.5 What this design changes, and what it leaves alone
+
+- **Changes:** the `cert_tolerance_seconds` default (RF-7), the two refusal strings and their delta reporting
+  (RF-7 server, RF-8 CLI), the fraction-assertion test cell (RF-7), and the ops-doc NTP note (RF-11).
+- **Does not change:** `token_tolerance_seconds` (60 s, `config.py:242-247`) — it governs sessions/tokens, not the
+  cert window, and its consumer set is different (§5.2). Do not "unify the knobs" as a drive-by: one value serving
+  two policies is how §5.3's inherited default happened in the first place.
+- **Not a fix:** relying on `ssl_verify_client optional` at nginx to police expiry. The app is the gate
+  (`auth.py:182-185`) and stays the gate; per-plane anchoring already refuses cross-plane certs there
+  (`admin_cas` `:377`, executor path `:688`).
+- **Config surface stays as-is and is already reachable:** `VENYA_CLOCK_SKEW__CERT_TOLERANCE_SECONDS` via
+  `env_prefix="VENYA_"` + `env_nested_delimiter="__"` (`config.py:330-332`), file `/opt/venya/.env`
+  (`docs/ease-of-use.md:208`). The installer does **not** write it today (no `VENYA_CLOCK_SKEW*` in
+  `MANAGED_ENV_KEYS`, `install-venya-core.sh:555`) — which is correct: the default is the policy, and a
+  per-deployment raise is an explicit operator act, not something an install script should be deciding.
+
+### 5.6 Negative tests (truth-table law)
+
+| Case | Expected |
+|---|---|
+| Cert expired, `now - not_after` < tolerance | admitted (documented leniency, bounded by §5.1) |
+| Cert expired, delta > tolerance | refused, text names expiry + drift + renew (§5.4.1-4) |
+| Fresh cert, verifier clock ahead by > tolerance | refused as **not yet valid**, text names drift — **and must NOT tell the user to re-mint** |
+| Fresh cert, verifier clock ahead by < tolerance | admitted |
+| Tolerance raised above lifetime/20 | the §5.3 assertion cell goes red |
+| Tolerance set to 0 (`ge=0`) | strict window, still no crash and no 500 — and the refusal text still names drift as a cause |
+| Local `status` on a 10-minutes-behind workstation | prints the lifetime it computed **and** labels the clock as local (§4.5) — the lie must be visible |
+
+### 5.7 Inheritance — what later legs take from this section
+
+- **RF-7:** the fraction bound plus the **assertion cell** (§5.1, §5.3), the two new refusal strings with
+  delta/direction (§5.4), and the "don't unify the token knob" rule (§5.5).
+- **RF-8:** its local lifetime display must label the clock as local (§4.5 × §5.3), and its pre-dial expiry
+  refusal (§4.4) must not contradict the server's tolerance window — the CLI refuses at `not_after`, the server
+  admits until `not_after + tol`; that gap is **intentional** (the CLI is advising, the server is deciding) and the
+  strings must not imply the other layer is broken.
+- **RF-9:** a service identity on the machine plane has the same clock dependency but no ceremony to re-run — its
+  renewal must survive transient verifier-side skew (§9).
+- **RF-10:** nothing to write in the installer — the knob is deliberately unmanaged (§5.5); the ops text is RF-11's.
+- **RF-11:** **the NTP mass-lockout note is a first-class ops statement** (§5.4): core-side clock drift is an
+  admin-plane outage mechanism at minutes-scale lifetimes. Also the deployment-sizing/time-sync guidance for
+  HA cores, where each core's clock judges every admin's request.
