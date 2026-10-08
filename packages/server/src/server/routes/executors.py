@@ -785,15 +785,20 @@ async def register_executor(
 
         # Authoritative atomic consumption — closes race window
         now_minus_tolerance = effective_expiry_check_time(tolerance)
+        # #462: two clocks, two bind params. The WHERE predicate keeps the
+        # tolerance-adjusted clock (the skew relaxation is by design), while the
+        # forensic record column gets the TRUE server now — same construction the
+        # executor_registered audit event below uses, so row and audit twin agree.
+        # The ORM sibling already does this (core/iam/enrollment_manager.py:204).
         result = db.execute(
             text(
                 """
                 UPDATE executor_enrollment_tokens
-                SET state = 'consumed', used_at = :now
+                SET state = 'consumed', used_at = :used_at
                 WHERE token_hash = :hash AND state = 'created' AND expires_at > :now
             """
             ),
-            {"hash": token_hash, "now": now_minus_tolerance},
+            {"hash": token_hash, "now": now_minus_tolerance, "used_at": datetime.now(UTC)},
         )
 
         if result.rowcount != 1:
