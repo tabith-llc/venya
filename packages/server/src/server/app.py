@@ -135,6 +135,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     # Register routes at creation time (needed for OpenAPI docs)
     from .routes import (
         admin,
+        admin_certs,
         audit,
         auth,
         auth_browser,
@@ -169,6 +170,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(secrets.router, prefix="/api/v1")
     app.include_router(roles.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
+    app.include_router(admin_certs.router, prefix="/api/v1")
     app.include_router(debug.router, prefix="/api/v1/admin")
     app.include_router(credentials.router, prefix="/api/v1")
     app.include_router(filter_routes.router, prefix="/api/v1")

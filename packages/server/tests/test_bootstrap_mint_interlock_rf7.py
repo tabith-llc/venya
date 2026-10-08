@@ -97,15 +97,46 @@ class TestCallerInterlockSourceScan:
         ("filename", "has_call"),
         [(str(p.relative_to(SRC_ROOT)), bool(_CSR_SIGNER_RE.search(c))) for p, c in _iter_source()],
     )
-    def test_csr_signer_not_wired_to_a_route_yet_in_this_chunk(self, filename, has_call):
-        """Chunk-2 boundary marker, stated as a fact: sign_admin_csr has no
-        caller inside server source yet — the endpoint is chunk 2. This is NOT
-        a permanent interlock (chunk 2 WILL add its caller and update this
-        file); it is here so the chunk boundary is visible and the report can
-        say the endpoint was not reached. Routes directory only, so a chunk-2
-        diff trips a named directory, not the whole tree."""
-        if filename.startswith("routes/"):
-            assert not has_call, (
-                f"{filename}: a route already calls sign_admin_csr — if this is "
-                "intentional (chunk 2 landed), update this cell in that changeset."
+    def test_csr_signer_wired_to_exactly_the_issuance_route(self, filename, has_call):
+        """Chunk-2 boundary, re-scoped as this cell always said it would be.
+
+        Chunk 1 pinned "no route calls ``sign_admin_csr`` yet" so the chunk
+        boundary was visible. Chunk 2 ships the issuance endpoint, so the
+        interlock is now a two-sided statement over the SAME route-layer
+        population chunk 1 walked: inside ``routes/``, a file calls the
+        human-plane signer IF AND ONLY IF it is ``routes/admin_certs.py``.
+        A second route reaching the mint is a red suite, not a review finding
+        (RF-6 §6.3 item 3, §2.5b). Non-route files stay outside the assertion,
+        exactly as in chunk 1 — the population walked does not change size.
+        """
+        if not filename.startswith("routes/"):
+            return
+        if filename == "routes/admin_certs.py":
+            assert has_call, (
+                "routes/admin_certs.py no longer calls sign_admin_csr — the issuance "
+                "endpoint is the human-plane mint's only caller (RF-6 §2.5b); if the "
+                "endpoint moved, the caller interlock moved with it, never ahead."
             )
+        else:
+            assert not has_call, (
+                f"{filename}: a route calls sign_admin_csr — the human-plane mint has "
+                "exactly one caller (RF-6 §2.5b). Route issuance through "
+                "POST /api/v1/admin/certs/issue instead."
+            )
+
+    def test_the_issuance_route_is_the_one_caller(self):
+        """Positive half of the chunk-2 pair: the issuance route exists AND is
+        the single signer caller. A branch that deleted the endpoint while
+        relaxing the negative above would pass vacuously — this cell is what
+        keeps the pair honest (both halves required, RF-6 §6.3 item 3)."""
+        caller_files = [
+            filename
+            for filename, has_call in [
+                (str(p.relative_to(SRC_ROOT)), bool(_CSR_SIGNER_RE.search(c))) for p, c in _iter_source()
+            ]
+            if has_call
+        ]
+        assert caller_files == ["routes/admin_certs.py"], (
+            f"sign_admin_csr callers changed shape: {caller_files} — the human-plane "
+            "mint must be reached only through the issuance endpoint (RF-6 §2.5b)."
+        )

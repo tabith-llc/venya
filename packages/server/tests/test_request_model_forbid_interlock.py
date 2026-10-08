@@ -60,7 +60,11 @@ ORPHANS = {
 # auth 2, credentials 2, enroll 2, init 2, filter 1, recovery 1,
 # auth_elevation 1). Drift in EITHER direction trips this pin before the
 # behavior pins can silently absorb it.
-EXPECTED_DEFINED_REQUEST_MODELS = 38
+# RF-7 chunk 2 (refs RF-6 §2.7) added ONE model to the surface:
+# AdminIssueCertRequest (routes/admin_certs.py), shipped with extra="forbid"
+# because the §2.6 no-self-described-identity rule IS that field's absence.
+# 38 -> 39 defined, 37 -> 38 forbidden; the 2 ruled exemptions are unchanged.
+EXPECTED_DEFINED_REQUEST_MODELS = 39
 
 
 def _route_modules():
@@ -151,16 +155,17 @@ def test_exemption_list_is_still_true_and_tight():
 
 
 def test_inventory_count_pin():
-    """Non-vacuity: the definition walk must find the ruled 38 *Request
+    """Non-vacuity: the definition walk must find the ruled 39 *Request
     models — a broken walk (import failure, module renamed) must not pass
     silently."""
     defined = _defined_request_models()
     assert len(defined) == EXPECTED_DEFINED_REQUEST_MODELS
-    # #371 re-sweep pins the split: 37 of the 38 defined forbid, the ruled
-    # exemptions are exactly SecretMetadata + FilterRequest (2).
+    # #371 re-sweep pinned the split at 37 of 38; RF-7 chunk 2 added one
+    # forbid-shipped model, so 38 of 39. The ruled exemptions stay exactly
+    # SecretMetadata + FilterRequest (2).
     assert len(EXEMPT) == 2, "exemption list grew/shrank — new candidates are STOP-and-report, not list edits"
     forbidden = [n for n, m in defined.items() if m.model_config.get("extra") == "forbid"]
-    assert len(forbidden) == 37, f"forbidden defined models: {len(forbidden)} != 37 (post-#371)"
+    assert len(forbidden) == 38, f"forbidden defined models: {len(forbidden)} != 38 (post-RF-7 chunk 2)"
 
 
 def test_orphan_flag_still_listed():
