@@ -477,7 +477,7 @@ venya_create_venv() {
 
     # Clear stale bytecode to prevent old .py from being used with new .pyc
     info "Clearing bytecode cache..."
-    sudo -H -u venya bash -c "find '$INSTALL_DIR/.venv' -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true; find '$INSTALL_DIR/.venv' -name '*.pyc' -delete 2>/dev/null || true"
+    sudo -H -u venya bash -c 'find "$1/.venv" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true; find "$1/.venv" -name "*.pyc" -delete 2>/dev/null || true' _ "$INSTALL_DIR"
 
     chown -R venya:venya "$INSTALL_DIR/.venv"
     info "Python venv created at $INSTALL_DIR/.venv"
