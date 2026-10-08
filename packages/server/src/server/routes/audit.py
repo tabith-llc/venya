@@ -266,8 +266,20 @@ async def audit_ingest(
 
     from compression import zstd
 
+    # Decompression-bomb brake applied DURING the decompression: ask the
+    # streaming decompressor for exactly cap+1 bytes, so a small frame whose
+    # full expansion is huge never materializes beyond cap+1 (the class API
+    # bounds output via max_length; the module-level zstd.decompress()
+    # would decompress the whole body first and pay for it in RAM before
+    # the length check below could refuse it).
+    decompressor = zstd.ZstdDecompressor()
     try:
-        payload = zstd.decompress(body)
+        payload = decompressor.decompress(body, max_length=INGEST_MAX_DECOMPRESSED_BYTES + 1)
+        if not decompressor.eof and decompressor.needs_input:
+            # Frame ended early (truncated input): module-level
+            # zstd.decompress() raised on this shape — keep refusing it with
+            # 400 rather than accepting the partial payload.
+            raise ValueError("incomplete zstd frame")
     except Exception:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="zstd decompression failed")
 
