@@ -180,19 +180,29 @@ def _init_db(admin_role=None):
 
 
 class TestInitEvents:
-    def test_admin_initialized_row(self):
+    def test_admin_initialized_row(self, tmp_path, monkeypatch):
+        # #548: no pinned /tmp path. The CA is built INSIDE this test, in a
+        # per-test tmp dir, with the passphrase supplied through the env the
+        # product reads (VENYA_CA_KEY_PASSPHRASE) — so the cell exercises the
+        # real CAManager.initialize() branch instead of passing on whatever
+        # disk residue happens to sit at a fixed path on the host.
+        monkeypatch.setenv("VENYA_CA_KEY_PASSPHRASE", "test-ca-passphrase-548")
         db = _init_db()
         fido = MagicMock()
         fido.start_registration.return_value = ("cid", {"challenge": "dGVzdA=="})
         app = _app(
             init_routes.router,
             backend=MagicMock(get_session=MagicMock(return_value=db)),
-            extra_state={"config": SimpleNamespace(ca_dir="/tmp/ca", ca_security=None)},
+            extra_state={"config": SimpleNamespace(ca_dir=str(tmp_path / "ca"), ca_security=None)},
             fido2_manager=fido,
         )
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/init", json={"user_id": "firstadmin"})
-        assert resp.status_code == 201
+        assert resp.status_code == 201, resp.text
+        # The CA this cell relies on is the one it made: both files landed in
+        # the test's own directory (nothing under /tmp is involved).
+        assert (tmp_path / "ca" / "ca.crt").exists()
+        assert (tmp_path / "ca" / "ca.key").exists()
         rows = _by_type(_lifecycle_events(db), "admin_initialized")
         assert len(rows) == 1
         assert rows[0].user_id == "firstadmin"  # self-asserted id as stored (ruled Q5)
@@ -277,7 +287,12 @@ class TestInitEvents:
 
 
 class TestInitNegatives:
-    def test_already_initialized_409_writes_no_lifecycle_row(self):
+    def test_already_initialized_409_writes_no_lifecycle_row(self, tmp_path):
+        # #548: the pinned /tmp/ca2 path is gone. This cell's 409 comes from the
+        # enrolled-member query, which the route checks BEFORE any CA work, so
+        # the refusal is driven by DB state — an empty per-test CA dir keeps the
+        # assertion honest: the conflict still answers 409, and it does not
+        # borrow a CA from the host filesystem.
         enrolled = SimpleNamespace(user_id="boss")
         db = MagicMock()
 
@@ -301,13 +316,16 @@ class TestInitNegatives:
         app = _app(
             init_routes.router,
             backend=MagicMock(get_session=MagicMock(return_value=db)),
-            extra_state={"config": SimpleNamespace(ca_dir="/tmp/ca2", ca_security=None)},
+            extra_state={"config": SimpleNamespace(ca_dir=str(tmp_path / "ca-conflict"), ca_security=None)},
             fido2_manager=MagicMock(),
         )
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.post("/api/v1/init", json={"user_id": "second"})
-        assert resp.status_code == 409
+        assert resp.status_code == 409, resp.text
         assert not _lifecycle_events(db)
+        # The CA directory this cell points at stayed empty: the route refused
+        # on the enrolled-member count before touching it (no CA created here).
+        assert not (tmp_path / "ca-conflict").exists()
 
 
 # ---------------------------------------------------------------------------
