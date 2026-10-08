@@ -21,11 +21,40 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-from server.ca import CAManager
 
 from executor.config import CertificateRotationConfig, ExecutorConfig, MtlsConfig
 from executor.daemon import CertificateManager
 from executor.strategies.sbx_strategy import SECRET_TMPFS_BASE
+
+# The executor suite must also run on an executor-only install, where the
+# server package is not shipped (#466). Guard the server import so the suite
+# collects there; the skip is named and attributable, never silent.
+try:
+    from server.ca import CAManager
+
+    SERVER_AVAILABLE = True
+except ImportError:
+    CAManager = None  # type: ignore[assignment]
+    SERVER_AVAILABLE = False
+
+SERVER_ABSENT_REASON = "server package absent — executor-only install (#466)"
+
+if not SERVER_AVAILABLE:
+    # test_integration.py imports server.routes at module level; without the
+    # server package it is ignored BY NAME (never a collection crash, rc=4).
+    # Header + guard cells below keep the skip loud and enumerated.
+    collect_ignore = ["test_integration.py"]
+
+
+def pytest_report_header(config):
+    """Announce the #466 server-absent state so a skip is never anonymous."""
+    if not SERVER_AVAILABLE:
+        return [
+            f"#466: {SERVER_ABSENT_REASON}",
+            "#466: not collected (server-dependent, skipped by name): tests/test_integration.py",
+        ]
+    return []
+
 
 # ---------------------------------------------------------------------------
 # CA and certificate helpers
@@ -183,6 +212,8 @@ def ca_cert(tmp_ca_dir: Path) -> x509.Certificate:
 @pytest.fixture()
 def ca_manager(tmp_ca_dir: Path) -> CAManager:
     """Create and initialize a CAManager pointing to the test CA directory."""
+    if not SERVER_AVAILABLE:
+        pytest.skip(SERVER_ABSENT_REASON)
     manager = CAManager(str(tmp_ca_dir))
     # Load the pre-generated CA (don't re-initialize)
     cert = x509.load_pem_x509_certificate((tmp_ca_dir / "ca.crt").read_bytes())
