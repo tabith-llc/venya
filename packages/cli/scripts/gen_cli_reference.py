@@ -241,6 +241,17 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
             ),
         ),
     ],
+    ("admin", "cert", "status"): [
+        (
+            ["admin", "cert", "status"],
+            "remaining lifetime of $VENYA_ADMIN_CERT (read-local; no request, no ceremony, no key read)",
+        ),
+        (
+            ["admin", "cert", "status", "--within", "15"],
+            "also advise renewing if it dies inside a 15-minute job window",
+        ),
+        (["admin", "cert", "status", "--cert-path", "/opt/venya/admin/admin.crt"], "explicit certificate path"),
+    ],
     ("role", "create"): [
         (["role", "create", "app"], "read-only role (default tier)"),
         (

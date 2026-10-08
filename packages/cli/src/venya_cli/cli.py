@@ -475,6 +475,43 @@ def create_parser() -> argparse.ArgumentParser:
         help="Reissue your own break-glass recovery code (session + elevation + admin mTLS)",
     )
 
+    # admin cert — the admin certificate readout (RF-8a). `renew` lands with RF-8b.
+    admin_cert_parser = admin_sub.add_parser(
+        "cert",
+        help="Admin certificate management (status)",
+        description=(
+            "Read-local admin certificate management. `status` reads the certificate "
+            "only — no request, no security-key ceremony, no private key."
+        ),
+    )
+    admin_cert_sub = admin_cert_parser.add_subparsers(dest="admin_cert_command")
+
+    # admin cert status
+    admin_cert_status_parser = admin_cert_sub.add_parser(
+        "status",
+        help="Show the admin certificate's remaining lifetime (read-local, no network)",
+    )
+    admin_cert_status_parser.add_argument(
+        "--cert-path",
+        dest="cert_path",
+        default=None,
+        help=(
+            "Path to the admin certificate (default: $VENYA_ADMIN_CERT). "
+            "The private key is never read — a lifetime check needs only the certificate."
+        ),
+    )
+    admin_cert_status_parser.add_argument(
+        "--within",
+        dest="within",
+        type=int,
+        default=None,
+        metavar="MINUTES",
+        help=(
+            "Also advise renewing if the certificate dies inside MINUTES of job-window "
+            "minutes (the advisory never changes the exit code)"
+        ),
+    )
+
     # role
     role_parser = subparsers.add_parser("role", help="Role management")
     role_sub = role_parser.add_subparsers(dest="role_command")
