@@ -8,8 +8,9 @@ Tip this dossier is re-derived against: **dev `d0d3d0d`** (`Merge branch 'bug/ca
 Every line number below was produced by grep at that tip on the day of writing. Line numbers rot: **grep the
 symbol, never trust the pin** — including the pins in this file.
 
-Sections 1-5 are in this chunk. Sections 6-10 and the assembly pass are separate, sequenced dispatches on the
-same branch.
+The dossier is **complete at 10/10 sections**: sections 1-5 (chunk 1) and 6-10 (chunk 2) landed as sequenced
+dispatches on this branch, and the chunk-3 assembly pass reconciled §1.6 to §7.1 and verified the file at dev
+`4778602`. **§7.1 is the enumeration of record** — a reader who lands on §1.6 first is redirected there.
 
 ---
 
@@ -170,8 +171,10 @@ Counted here, audited in section 7 (chunk 2). Command run at `d0d3d0d`:
 grep -rn "NoEncryption()" packages/ --include='*.py' | grep -v '/tests/' | grep -v __pycache__
 ```
 
-**8 live non-test sites** — matching the carrier's `d0bfbb4` re-derivation, with the site inside `server/ca.py`
-now at `:815` rather than `:827` (the #539 removal shifted it):
+**SUPERSEDED AS A PIN SET — the table below is the measurement at `d0d3d0d`; §7.1 is the enumeration of
+record at the tip.** It stood as published on the day it was measured — **8 live non-test sites** — matching
+the carrier's `d0bfbb4` re-derivation, with the site inside `server/ca.py` at `:815` rather than `:827`
+(the #539 removal shifted it):
 
 | # | File:line | Enclosing function | Plane |
 |---|---|---|---|
@@ -183,6 +186,16 @@ now at `:815` rather than `:827` (the #539 removal shifted it):
 | 6 | `packages/cli/src/venya_cli/at_rest_key.py:87` | `unwrap_at_rest` | at-rest envelope |
 | 7 | `packages/executor/src/executor/daemon.py:573` | `register` | executor |
 | 8 | `packages/executor/src/executor/daemon.py:753` | `rotate` | executor |
+
+**Reconciliation to §7.1 (assembly pass, chunk 3, measured fresh at dev `4778602`):** six of the eight pins
+above moved between `d0d3d0d` and `d8a5cda` — `commands.py 2551→2573, 2947→2969, 3758→3780, 3978→4000`
+(carried by `bf1a462`, the #509 CLI change) and `daemon.py 573→594, 753→774` (carried by `0cfe661`/`e16c26b`,
+the #479 executor change). `ca.py:815` and `at_rest_key.py:87` did not move, and the count did not either: the
+command above, re-run at `4778602` by this pass, returns **8 live non-test sites — 1 in Q4a scope
+(`server/ca.py:815`), 7 outside** — the same shape §7.1 published at `d8a5cda`. The original measurement is
+kept, not deleted: §1.6 was correct when it was measured; **§7.1 is the table that is correct at the tip**,
+and §7.3 carries the pin-by-pin provenance. A later leg taking a number from this file takes it from §7.1,
+not from the table above.
 
 Arithmetic stated rather than smoothed, per the carrier: the input file says NINE with TWO on the admin path
 (9−2 = 7); the live grep says EIGHT with the ninth already removed by the #537 refusal (`e3a760d`) and the #539
@@ -1695,3 +1708,13 @@ is a short list of concrete shape changes, all owner-ok-gated:
   the tolerance tail in the published date (§10.5 first bullet), the "the date is produced by running something"
   rule, and the dual-path honesty (§10.2's second paragraph) — including that the short path is not strictly
   better than the legacy path until the tolerance default comes down.
+
+---
+
+**Assembly pass — closing note (chunk 3, dev `4778602`).** The dossier is complete at 10/10 sections on
+`feature/rf6-shortcert-dossier`. §1.6 is reconciled to §7.1, and **§7.1 is the enumeration of record**: 8 live
+non-test `NoEncryption()` sites with the 1-in / 7-out Q4a split (`server/ca.py:815` in scope), re-measured at
+`4778602` by this pass and unchanged in shape from what §7.1 published at `d8a5cda`. A later leg reading §1.6
+first is redirected here: take the numbers from §7.1. Beyond the §1.6 reconciliation, the header scope line
+above, and this note, nothing in the file changed in the assembly pass; the ten section commits stand as
+written, each carrying its own measurement provenance.
