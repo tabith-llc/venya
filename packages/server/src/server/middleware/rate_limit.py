@@ -7,13 +7,26 @@
 """Rate limiting middleware.
 
 Per-IP and per-session throttling to prevent brute force attacks.
-Uses PostgreSQL fixed-window counters for multi-worker safety.
+
+Counters live in the SHARED ``rate_limit_failures`` table and are incremented
+by one atomic UPSERT, so N core replicas over one database add up to ONE
+counter. The fixed-window bucket key comes from the DATABASE clock inside that
+same statement and never from the wall clock of whichever replica happens to be
+handling the request (ticket #460): the key is part of the table's primary key,
+so a replica-local key splits one client into a bucket per replica — the
+effective limit becomes limit x buckets and ``Retry-After`` varies per replica.
+PostgreSQL's UPSERT buys counter agreement; the shared clock buys bucket
+agreement, and ``RETURNING`` carries the new count together with the seconds
+left in that same DB-clock window so a 429 and its counter share one authority.
+
+Fixed-window trade-off: a burst at a window boundary allows up to 2x the
+limit. Acceptable for this use case.
 """
 
 import logging
 import math
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from fastapi import Request, status
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -34,35 +47,114 @@ _BREAK_GLASS_WINDOW = timedelta(hours=1)
 # credential at all. Classified explicitly below for that reason.
 _ISSUANCE_WINDOW = timedelta(hours=1)
 
+# Bucket shape per window: (date_trunc unit, window length in seconds). Every
+# window this middleware uses is a whole minute or a whole hour, which is what
+# makes the key expressible as a database-side truncation (#460). The fallback
+# for an unlisted window mirrors the old replica-side truncation exactly —
+# truncate to the minute — so bucketing behaviour cannot shift silently.
+# The break-glass and RF-6 mint windows are equal timedeltas (both one hour), so
+# they share the single "hour" entry below — same value, same bucket.
+_WINDOW_BUCKET_SHAPE: dict[timedelta, tuple[str, int]] = {
+    _GENERIC_WINDOW: ("minute", 60),
+    _AUTH_WINDOW: ("minute", 60),
+    _BREAK_GLASS_WINDOW: ("hour", 3600),
+}
 
-def _truncate_to_window(dt: datetime, window: timedelta) -> datetime:
-    """Truncate datetime to the start of its fixed-window bucket.
+# SQLite rendering of the same truncation, per unit. The product deployment is
+# PostgreSQL; SQLite is what the unit suite binds, and this is the #366 dialect
+# guard pattern already in the tree (routes/init.py, core/iam/role_manager.py):
+# PostgreSQL-only functions never go out over a SQLite bind. 'now' in SQLite is
+# UTC, and the format carries the "+00:00" offset so the bucket string lands in
+# the DateTime(timezone=True) column exactly like a bound aware datetime.
+_SQLITE_BUCKET_FORMAT: dict[str, str] = {
+    "minute": "%Y-%m-%d %H:%M:00+00:00",
+    "hour": "%Y-%m-%d %H:00:00+00:00",
+}
 
-    For 1-minute windows: truncates to the minute.
-    For 1-hour windows: truncates to the hour.
+# The counter UPSERT with the window key derived by the DATABASE clock
+# (ticket #460). One statement, one round trip, one clock authority:
+#   * window_start is produced by date_trunc over the server clock — no
+#     replica-supplied key travels in the bind params at all;
+#   * RETURNING carries the new count AND retry_seconds derived from the same
+#     statement's now(), so the counter and its Retry-After cannot disagree.
+# `AT TIME ZONE 'UTC'` twice pins the truncation to UTC boundaries whatever the
+# session TimeZone is. now() is the transaction timestamp, so the returned
+# window and the returned remaining seconds are read off one clock. Every value
+# is a bind param — nothing is interpolated into the statement text.
+_SHARED_CLOCK_UPSERT_POSTGRESQL = """
+                INSERT INTO rate_limit_failures (identifier, endpoint_type, window_start, count)
+                VALUES (
+                    :identifier,
+                    :endpoint_type,
+                    date_trunc(CAST(:unit AS text), (now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'),
+                    1
+                )
+                ON CONFLICT (identifier, endpoint_type, window_start)
+                DO UPDATE SET count = rate_limit_failures.count + 1
+                RETURNING count,
+                          window_start,
+                          CAST(CEIL(EXTRACT(EPOCH FROM (window_start
+                              + CAST(:window_seconds AS double precision) * interval '1 second'
+                              - now()))) AS integer) AS retry_seconds
+"""
+
+# SQLite form of the same contract: strftime truncates the database clock to
+# the bucket, and the remaining seconds come from that same stored bucket plus
+# the window length against the database clock.
+_SHARED_CLOCK_UPSERT_SQLITE = """
+                INSERT INTO rate_limit_failures (identifier, endpoint_type, window_start, count)
+                VALUES (
+                    :identifier,
+                    :endpoint_type,
+                    strftime(:bucket_format, 'now'),
+                    1
+                )
+                ON CONFLICT (identifier, endpoint_type, window_start)
+                DO UPDATE SET count = rate_limit_failures.count + 1
+                RETURNING count,
+                          window_start,
+                          CAST(strftime('%s', window_start, '+' || :window_seconds || ' seconds') AS INTEGER)
+                            - CAST(strftime('%s', 'now') AS INTEGER) AS retry_seconds
+"""
+
+
+def _window_bucket_shape(window: timedelta) -> tuple[str, int]:
+    """Return ``(date_trunc unit, window seconds)`` for a bucket size.
+
+    Unknown windows fall back to the minute unit, which is exactly what the
+    removed replica-side truncation did (ticket #460 keeps that behaviour
+    rather than quietly re-bucketing a window this table has never used).
+
+    Note the one dict entry for two hour tiers: ``_BREAK_GLASS_WINDOW`` and the
+    RF-6 §2.7 ``_ISSUANCE_WINDOW`` are equal timedelta VALUES, so they share a
+    bucket shape — which is what the removed truncation did with its
+    `window in (_BREAK_GLASS_WINDOW, _ISSUANCE_WINDOW)` test.
     """
-    if window == _GENERIC_WINDOW:
-        return dt.replace(second=0, microsecond=0)
-    elif window in (_BREAK_GLASS_WINDOW, _ISSUANCE_WINDOW):
-        return dt.replace(minute=0, second=0, microsecond=0)
-    return dt.replace(second=0, microsecond=0)
+    return _WINDOW_BUCKET_SHAPE.get(window, ("minute", 60))
 
 
-def _window_retry_after(now: datetime, window_start: datetime, window: timedelta) -> int:
-    """Seconds until the fixed-window bucket resets (always >= 1).
+def _clamp_retry_after(retry_seconds: int | None) -> int:
+    """Seconds until the DB-derived window resets (always >= 1).
 
     Retry-After contract (ticket delta-b-run-low-bundle O2): EVERY 429 this
     middleware emits carries the header — client backoff without it is
-    guesswork. Delta-seconds form (RFC 9110 §10.2.3), never HTTP-date.
+    guesswork. Delta-seconds form (RFC 9110 §10.2.3), never HTTP-date. The
+    value arrives from the window's own database clock (#460); the clamp only
+    keeps the header positive.
     """
-    return max(1, math.ceil((window_start + window - now).total_seconds()))
+    if retry_seconds is None:
+        return 1
+    return max(1, math.ceil(retry_seconds))
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Per-IP rate limiting middleware backed by PostgreSQL.
 
     Uses fixed-window counters stored in the rate_limit_failures table.
-    Each request does a single UPSERT round-trip to increment the counter.
+    Each request does a single UPSERT round-trip to increment the counter, and
+    that same statement derives the window key from the database clock — the
+    counters AND the buckets are shared state, so replicas that disagree about
+    the time still count one client in one bucket (#460).
 
     Fixed-window trade-off: a burst at window boundary allows up to 2x
     the limit. Acceptable for this use case.
@@ -145,11 +237,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": str(backoff_remaining)},
                 )
 
-        # UPSERT: atomic increment, returns new count
-        now = datetime.now(UTC)
-        window_start = _truncate_to_window(now, window)
+        # UPSERT: atomic increment against the shared clock. No local time is
+        # read here — the bucket key and the seconds left in it both come back
+        # from the database (ticket #460). The counter KEY is still chosen here:
+        # the mint tier follows the account, every other tier the client IP
+        # (RF-6 §2.7).
         identifier = ip if endpoint_type != "cert_issuance" else self._issuance_identifier(request, ip)
-
         db = None
         try:
             backend = getattr(request.app.state, "backend", None)
@@ -160,11 +253,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 )
             db = backend.get_session()
 
-            count = self._increment_counter(db, identifier, endpoint_type, window_start)
+            count, retry_seconds = self._increment_shared_clock_counter(db, identifier, endpoint_type, window)
 
             if count > limit:
                 metrics.RATE_LIMIT_HIT_TOTAL.labels(limit_type=endpoint_type).inc()
-                retry_after = {"Retry-After": str(_window_retry_after(now, window_start, window))}
+                retry_after = {"Retry-After": str(retry_seconds)}
                 if endpoint_type == "break_glass":
                     return JSONResponse(
                         status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -208,10 +301,64 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         return response
 
+    def _increment_shared_clock_counter(
+        self, db, identifier: str, endpoint_type: str, window: timedelta
+    ) -> tuple[int, int]:
+        """Atomically increment the counter for the window the DATABASE opens.
+
+        Returns ``(count, retry_seconds)`` read off one statement: the new count
+        after the increment, and the seconds left in the window that count was
+        taken from. The window key never comes from this process — that is the
+        whole point (ticket #460): N replicas over a shared table must land one
+        client in one bucket, and a replica-clock key splits it into one bucket
+        per replica, which multiplies the limit and makes Retry-After depend on
+        which core answered.
+
+        Dialect guard (#366 shape, see routes/init.py): ``date_trunc``/``now()``
+        are PostgreSQL-side, so the production statement goes out on a
+        PostgreSQL bind (a session that cannot report its dialect is treated as
+        PostgreSQL so the production contract stays pinned) and the SQLite bind
+        gets the ``strftime`` form of the same contract.
+        """
+        from sqlalchemy import text
+
+        unit, window_seconds = _window_bucket_shape(window)
+        bind = db.get_bind() if hasattr(db, "get_bind") else None
+        if bind is None or bind.dialect.name == "postgresql":
+            sql = _SHARED_CLOCK_UPSERT_POSTGRESQL
+            params = {
+                "identifier": identifier,
+                "endpoint_type": endpoint_type,
+                "unit": unit,
+                "window_seconds": window_seconds,
+            }
+        else:
+            sql = _SHARED_CLOCK_UPSERT_SQLITE
+            params = {
+                "identifier": identifier,
+                "endpoint_type": endpoint_type,
+                "bucket_format": _SQLITE_BUCKET_FORMAT[unit],
+                "window_seconds": window_seconds,
+            }
+
+        row = db.execute(text(sql), params).one()
+        # Same commit contract as _increment_counter below: the dispatch
+        # `finally: db.close()` rolls back anything uncommitted, and an
+        # uncommitted counter never enforces anything (ticket
+        # ratelimit-counter-upsert-never-commits).
+        db.commit()
+        return int(row.count), _clamp_retry_after(row.retry_seconds)
+
     def _increment_counter(self, db, identifier: str, endpoint_type: str, window_start: datetime) -> int:
-        """Atomically increment a rate limit counter via UPSERT.
+        """Atomically increment a rate limit counter via UPSERT for an EXACT,
+        caller-supplied window key.
 
         Returns the new count after increment.
+
+        NOT the dispatch path since #460: a key supplied by a replica is the
+        per-replica-bucket defect this ticket fixes. This form stays for callers
+        that must pin a bucket precisely (the window-rollover cell) and is the
+        retirement candidate for a follow-up once that cell is re-ruled.
         """
         from sqlalchemy import text
 
