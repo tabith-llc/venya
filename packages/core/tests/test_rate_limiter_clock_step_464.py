@@ -23,10 +23,13 @@ wall clock returns to ``locked_at + window``; that remainder is fail-closed
 (availability only), and closing it needs a high-water-mark anchor, which #464
 did not rule.
 
-Clock control: the module's own ``time`` name is replaced with a single-dial
-fake, so only ``core.engine.rate_limiter`` sees the moved clock — the stdlib
-module is untouched and no other code in the process is affected. Patched symbol
-per cell: ``time.time`` (the clock the clamped site uses).
+Clock control: the module's own ``time`` name is replaced with a fake, so only
+``core.engine.rate_limiter`` sees the moved clock — the stdlib module is
+untouched and no other code in the process is affected. Patched symbol per
+cell: ``time`` — and since #549 the site ages records on ``time.monotonic()``,
+so the fake below answers BOTH dials from the same number: a cell that moves
+the dial moves the clock the code reads, and every assertion here keeps its
+#464 meaning unchanged (the clamp half still gets its negative age).
 
 Paired negatives are the ordinary paths: a forward-running clock still releases
 exactly at the window, and the shrink-to-zero countdown is unchanged. The
@@ -46,12 +49,20 @@ LOCKOUT_SECONDS = LOCKOUT_MINUTES * 60
 
 
 class _FakeTime:
-    """Stand-in for the ``time`` module inside ``core/engine/rate_limiter.py``."""
+    """Stand-in for the ``time`` module inside ``core/engine/rate_limiter.py``.
+
+    #549: the clamped site now reads ``time.monotonic()``; both dials answer
+    from the same number so this file's cells keep moving one clock, exactly
+    as before.
+    """
 
     def __init__(self, wall: float = 10_000.0) -> None:
         self.wall = wall
 
     def time(self) -> float:
+        return self.wall
+
+    def monotonic(self) -> float:
         return self.wall
 
 
@@ -67,11 +78,11 @@ def _locked_out(clock: _FakeTime) -> RateLimiter:
     with pytest.raises(RateLimitExceededError) as arm:
         limiter.record_failure("u1")
     assert arm.value.retry_after_seconds == LOCKOUT_SECONDS, "arming must report the full window"
-    # ``FailureRecord.window_start`` uses ``field(default_factory=time.time)``, which
-    # is bound to the REAL clock at class-creation time and so ignores the fake.
-    # Normalise it onto the fake clock: these cells are about the lockout age, and
-    # a mixed-clock record would make the window-expiry branch do bookkeeping we
-    # are not testing.
+    # ``FailureRecord.window_start``'s ``default_factory`` binds the REAL clock
+    # at class-creation time and so ignores the fake (and since #549 it is a
+    # monotonic factory). Normalise it onto the fake clock: these cells are
+    # about the lockout age, and a mixed-clock record would make the
+    # window-expiry branch do bookkeeping we are not testing.
     limiter._failures["u1"].window_start = clock.wall
     return limiter
 

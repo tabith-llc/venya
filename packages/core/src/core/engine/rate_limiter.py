@@ -9,6 +9,20 @@
 Tracks failed attempts and enforces the lockout window. The counters are
 per-process memory — see the ``RateLimiter`` SCOPE note below; nothing here is
 written to the database, so a restart clears them.
+
+#549: every stamp in here (``FailureRecord.window_start``, ``locked_at``) and
+every ``now`` that ages them comes from ``time.monotonic()`` — elapsed REAL
+time, the clock #464 ruled for per-process state. A wall-clock step (NTP
+correction, snapshot restore) must not move the failure/lockout windows: a
+forward step used to read as "window expired" and reset a live counter (and
+delete a live lockout in ``check``/``cleanup_expired``), and a backward step
+held records past their true length. One clock per structure — the record is
+the structure, and the four methods that read it (``record_failure``,
+``check``, ``get_remaining_attempts``, ``cleanup_expired``) all age it against
+the same monotonic ``now``; a mixed pair (wall ``now`` against monotonic
+stamps) would differ by the whole epoch and make ``cleanup_expired`` sweep
+every live record. Figures reported OUT of this class (``retry_after_seconds``)
+are durations — clock-independent.
 """
 
 import threading
@@ -22,7 +36,12 @@ class FailureRecord:
 
     user_id: str
     failed_attempts: int = 0
-    window_start: float = field(default_factory=time.time)
+    # #549: monotonic stamp (per-process state; see the module docstring).
+    # NOTE for tests: ``default_factory`` binds the REAL ``time.monotonic`` at
+    # class-creation time, so a fake patched onto the module's ``time`` name
+    # does not reach it — ``record_failure`` stamps ``window_start=now``
+    # explicitly for records it creates.
+    window_start: float = field(default_factory=time.monotonic)
     locked_at: float = 0.0
 
 
@@ -98,12 +117,12 @@ class RateLimiter:
         Raises:
             RateLimitExceededError: If the user has exceeded the rate limit.
         """
-        now = time.time()
+        now = time.monotonic()  # #549: see the module docstring
         with self._lock:
             record = self._failures.get(user_id)
 
             if record is None:
-                record = FailureRecord(user_id=user_id)
+                record = FailureRecord(user_id=user_id, window_start=now)
                 self._failures[user_id] = record
 
             # Reset window if expired
@@ -140,7 +159,7 @@ class RateLimiter:
             if record is None:
                 return
 
-            now = time.time()
+            now = time.monotonic()  # #549: see the module docstring
 
             # If window has expired, clear the record entirely
             if now - record.window_start > self.window_seconds:
@@ -162,6 +181,10 @@ class RateLimiter:
                 # ``locked_at + lockout_seconds``, i.e. after lockout + skew. That
                 # remainder is availability-only (fail-closed) and is stated in
                 # the #464 report rather than papered over.
+                # #549 update: the stamps and this ``now`` are monotonic now, so
+                # a wall-clock step does not move this window at all — the
+                # fail-closed remainder above no longer arises from wall skew;
+                # the clamp stays as the guard for any negative age.
                 lockout_elapsed = max(0.0, now - record.locked_at)
                 if lockout_elapsed >= lockout_seconds:
                     # Lockout period elapsed — reset and allow retries
@@ -207,7 +230,7 @@ class RateLimiter:
             if record is None:
                 return self.max_attempts
 
-            now = time.time()
+            now = time.monotonic()  # #549: see the module docstring
             if now - record.window_start > self.window_seconds:
                 return self.max_attempts
 
@@ -238,7 +261,10 @@ class RateLimiter:
         Returns:
             Number of records removed.
         """
-        now = time.time()
+        # #549: same monotonic clock as the stamps this sweep ages — a wall
+        # ``now`` against monotonic stamps differs by the whole epoch and would
+        # read every record as expired.
+        now = time.monotonic()
         with self._lock:
             expired = []
             for uid, record in self._failures.items():
