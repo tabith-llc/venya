@@ -107,6 +107,14 @@ def _get_coro_name(task: asyncio.Task) -> str:
         return "<inspect_failed>"
 
 
+# Sentinels this endpoint can emit inside an HTTP 200 body (refs #455):
+# values that mean "the inspection itself could not read this field" — they
+# are NOT proof of health. The response always carries an ``advisory`` list
+# naming them (and the affected task handles) so a 200 body with a sentinel
+# cannot be misread as an all-clear.
+_INSPECTION_SENTINELS = frozenset({"<inspect_failed>", "<unknown>"})
+
+
 def _build_db_pool_stats(pool: Pool) -> dict[str, Any]:
     """Build DB pool statistics from SQLAlchemy pool.
 
@@ -225,6 +233,22 @@ async def get_asyncio_state(
     # Count pending vs total
     pending_count = sum(1 for t in tasks if t["state"] == "pending")
 
+    # #455: collect tasks whose coro_name is an inspection sentinel so the
+    # advisory can name them — a "<inspect_failed>" buried in a 200 body
+    # must not read as health.
+    sentinel_handles = [t["handle"] for t in tasks if t["coro_name"] in _INSPECTION_SENTINELS]
+    advisory: list[str] = [
+        "Fields in this body may carry inspection sentinels "
+        + repr(sorted(_INSPECTION_SENTINELS))
+        + "; a sentinel means the inspection could not read the value — "
+        "it is not proof of health.",
+    ]
+    if sentinel_handles:
+        advisory.append(
+            f"{len(sentinel_handles)} task(s) have unresolved coro names "
+            f"(sentinel value present): {', '.join(sentinel_handles)}"
+        )
+
     # Build DB pool stats
     engine = getattr(backend, "engine", None)
     pool = engine.pool if engine is not None and hasattr(engine, "pool") else None
@@ -234,6 +258,7 @@ async def get_asyncio_state(
 
     # Build response
     return {
+        "advisory": advisory,
         "pending_tasks": pending_count,
         "total_tasks": len(tasks),
         "tasks": tasks,
