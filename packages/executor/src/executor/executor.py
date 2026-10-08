@@ -1133,10 +1133,20 @@ class Executor:
         Runs strategy cleanup functions, zeros secret values, clears registry.
         A failed destroy is reported as a degraded teardown: it never aborts the
         rest of the cleanup, and it never changes how the run ends.
+
+        The completion INFO is emitted only when every destroy step succeeded.
+        Printing "Cleanup complete" while secret material is still resident
+        would say the opposite of what happened on the one surface an operator
+        reads. On the degraded path there is no completion line at all: the
+        WARNING above already names the failed steps, their count and the
+        resident resources, so no second summary line is invented to replace it
+        (lead ruling, #456 follow-up).
         """
+        degraded = False
         if self._injection_result:
             failures = self._injection_result.cleanup()
             if failures:
+                degraded = True
                 logger.warning(
                     "Secret cleanup degraded: %d of %d destroy step(s) failed; secret material may still be resident — held by this result: %s (%s)",
                     len(failures),
@@ -1155,7 +1165,8 @@ class Executor:
         if self._sentinel_registry:
             self._sentinel_registry.clear()
 
-        logger.info("Cleanup complete")
+        if not degraded:
+            logger.info("Cleanup complete")
 
     def revoke_tokens(self, secret_ids: list[str]) -> None:
         """Revoke tokens for given secrets.

@@ -231,3 +231,64 @@ class TestExecutorSurfacesDegradedTeardown:
         assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
         assert bundle.value == b"\x00" * len(b"hunter2")
         assert executor._injection_result is None
+
+
+class TestCompletionInfoOnlyWhenClean:
+    """#456 follow-up — the lead's SUPPRESS ruling, both halves.
+
+    Pre-change: ``_cleanup_injections()`` logged ``"Cleanup complete"`` at INFO
+    unconditionally, so a teardown that left secret material resident still read
+    as complete in the log stream.
+    """
+
+    def _executor(self, result: InjectionResult) -> Executor:
+        executor = Executor(
+            command_validator=CommandValidator(),
+            session_id="test-session-456",
+            injection_strategy=MagicMock(),
+        )
+        executor._injection_result = result
+        executor._bundles = [_bundle("db-password", b"hunter2")]
+        executor._sentinel_registry = MagicMock()
+        return executor
+
+    def _infos(self, caplog) -> list[str]:
+        return [r.getMessage() for r in caplog.records if r.name == "venya.executor" and r.levelno == logging.INFO]
+
+    def test_clean_teardown_still_logs_completion_info(self, caplog):
+        """Half one: green teardown keeps the INFO line."""
+        executor = self._executor(_result([lambda: None]))
+
+        with caplog.at_level(logging.INFO, logger="venya.executor"):
+            executor._cleanup_injections()
+
+        assert "Cleanup complete" in self._infos(caplog)
+
+    def test_degraded_teardown_logs_no_completion_info_but_does_warn(self, caplog):
+        """Half two: material still resident means no completion line, and the
+        degraded WARNING is there instead."""
+
+        def boom() -> None:
+            raise OSError("tmpfs destroy failed")
+
+        result = _result(
+            [boom],
+            mounts=[
+                SecretMount(
+                    secret_id="db-password",
+                    path="/dev/shm/venya-secrets/s1/db-password",
+                    container_path="/run/secrets/venya/db-password",
+                )
+            ],
+        )
+        executor = self._executor(result)
+
+        with caplog.at_level(logging.INFO, logger="venya.executor"):
+            executor._cleanup_injections()
+
+        assert "Cleanup complete" not in self._infos(caplog)
+        warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("Secret cleanup degraded" in message for message in warnings), warnings
+        # the teardown itself still finished the rest of its work
+        assert executor._bundles[0].value == b"\x00" * len(b"hunter2")
+        executor._sentinel_registry.clear.assert_called_once()
