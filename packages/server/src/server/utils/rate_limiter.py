@@ -8,6 +8,16 @@
 
 Atomic all-or-nothing multi-key check-and-consume for rate limiting.
 Uses asyncio.Lock for compatibility with FastAPI's async context.
+
+Clock (#464): every timestamp here comes from ``time.monotonic()``. The store is
+per-process memory (``rate_limit.py``'s ``_LIMITERS`` cache) and is never
+persisted, serialised, or shared between workers — verified at the tip before
+the switch: the only values that leave the object are DERIVED durations
+(``Retry-After``, ``X-RateLimit-Remaining``/``-Reset``), never a stamp. With the
+wall clock a FORWARD jump pushed the cutoff past every stored timestamp and
+silently reset counters to zero (a looser limit than configured), and a
+backward step made stamps look future-born so they never pruned; both directions
+are real-elapsed-time questions, which is exactly what a monotonic clock answers.
 """
 
 import asyncio
@@ -53,7 +63,7 @@ class SlidingWindowRateLimiter:
             If allowed is False, retry_after is seconds until the oldest
             exceeding key has a slot available.
         """
-        now = time.time()
+        now = time.monotonic()
         cutoff = now - self.window_seconds
 
         async with self._lock:
@@ -97,7 +107,7 @@ class SlidingWindowRateLimiter:
         Returns:
             Number of remaining requests in the current window.
         """
-        now = time.time()
+        now = time.monotonic()
         cutoff = now - self.window_seconds
 
         async with self._lock:
@@ -113,7 +123,7 @@ class SlidingWindowRateLimiter:
         Returns:
             Seconds until reset (0 if no requests in window).
         """
-        now = time.time()
+        now = time.monotonic()
         cutoff = now - self.window_seconds
 
         async with self._lock:
@@ -129,7 +139,7 @@ class SlidingWindowRateLimiter:
         Returns:
             Number of entries removed.
         """
-        now = time.time()
+        now = time.monotonic()
         cutoff = now - self.window_seconds
         removed = 0
 
