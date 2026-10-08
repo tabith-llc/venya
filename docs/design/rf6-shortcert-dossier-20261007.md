@@ -202,3 +202,226 @@ route and section 7 publishes it that way.
   docs state the audited number rather than the remembered nine.
 
 <!-- SECTIONS 2-5 FOLLOW IN THIS CHUNK; 6-10 ARE A LATER DISPATCH. -->
+
+---
+
+## 2. Issuance path — ceremony to workstation-held short cert
+
+Ruling 3 fixes the shape: **the workstation generates the keypair and the server only signs.** This section
+turns that into an end-to-end path and pins each piece to code that exists at `d0d3d0d`.
+
+### 2.1 Path at a glance
+
+```
+ human CLI                        core (server)                       admin CA
+ ─────────                       ─────────────                       ────────
+ 1. login (bearer) ────────────► session
+ 2. elevate/challenge ─────────► Fido2Manager.start_authentication
+    elevate/assert ───────────► verify assertion → ElevationToken row (60s TTL, single-use)
+ 3. keygen (P-256) + CSR  ──┐
+ 4. POST /admin/certs/issue ─┴► authorize: bearer + elevation token
+   (PEM CSR, no private key)    derive identity FROM THE SESSION (never from the CSR)
+                                rate-limit → sign CSR (Admin CA) → audit ADMIN_CERT_ISSUED
+ 5. receive cert PEM ◄───────── 201 with certificate only
+ 6. write 0600 outside the home dir; use until expiry; renew is an EXPLICIT command (§4)
+```
+
+Private-key material crosses the boundary in exactly one direction: **outbound inside a CSR**. Nothing in this
+design returns a private key from the server to a human.
+
+### 2.2 The bootstrap problem, and why the elevation path is the right anchor
+
+The new issuance endpoint cannot be protected by an admin **certificate**, because a brand-new install has no
+human short cert to present — the credential it mints is the credential it would require. The fix is to anchor
+authorization on the plane that does not depend on the cert being retired: **bearer session + fresh FIDO2
+assertion**.
+
+This primitive already exists and is already the product's answer to "prove you are the person, again, for one
+sensitive operation": `packages/server/src/server/routes/auth_elevation.py` — `POST` challenge at `:160`
+(`elevate_challenge`) and `POST` assert at `:211` (`elevate_assert`). Its properties, re-derived:
+
+| Property | Live value | Site |
+|---|---|---|
+| Requires bearer auth | yes, `Depends(get_current_user)` | module docstring `:8-16` + route signatures |
+| Ceremony | WebAuthn assertion via `Fido2Manager` (`start_authentication` `fido2/manager.py:387`, `finish_authentication` `:440`) | `auth_elevation.py` |
+| Token lifetime | `ELEVATION_TOKEN_TTL_SECONDS = 60` | `auth_elevation.py:36` |
+| Pending-ceremony binding | DB row, committed immediately so **any worker on any core claims the same challenge** (#528) | `_store_elevation_challenge` `:56`, `:76` |
+| Single-use consumption | `ElevationToken` row matched on `token_hash`, `user_id`, `used.is_(False)`, `expires_at > cutoff` | consumer pattern at `routes/secrets.py:496-518` |
+| Audit on grant | `ELEVATION_GRANTED` lifecycle event | `auth_elevation.py:327`, name at `audit_lifecycle.py:57` |
+| Rate-limited by the auth middleware | yes — `/api/v1/auth/` prefix | `middleware/rate_limit.py:268-274` |
+
+Two consequences worth stating plainly:
+
+1. **The 60-second elevation TTL and the 60-minute cert lifetime are unrelated numbers that happen to match.**
+   The elevation token authorizes *one mint request*; the cert it returns is valid for an hour. A reviewer
+   should not read the coincidence as a design dependency.
+2. **The cross-worker property is load-bearing, not incidental.** The #528 move of the pending challenge into the
+   DB exists because the old per-process `app.state` dict stranded ceremonies on the wrong worker. Issuance must
+   use the DB-backed elevation record for the same reason — a mint that starts on core-1 and completes on core-2
+   is normal in the HA deployment (`features/beta-highly-available-core.md`).
+
+**Not** an option, and stated so a later lane does not try it: authorizing issuance with the caller's existing
+admin cert (the `require_admin` shape at `routes/admin.py:2042-2046`) reproduces exactly the standing-credential
+dependency this whole program exists to delete. A first-human bootstrap is served by the existing
+installer/`cmd_admin_init_admin_ca` + recovery-code paths (§2.3, §9), not by cert-based self-service.
+
+### 2.3 Bootstrap and recovery stay on existing paths
+
+- **First admin:** unchanged — the installer's admin CA init plus first-cert mint, which today is the
+  `sign_admin_cert` call at `install-venya-core.sh:420`. Section 6 (chunk 2) dispositions that call; RF-10 owns
+  the installer text. This design does not add a bootstrap capability.
+- **Lost security key:** ruling 1's third clause — the existing **recovery-code** path
+  (`routes/recovery.py`; break-glass endpoint `/api/v1/recovery`, rate-limited separately at
+  `middleware/rate_limit.py:276-279` with its own backoff at `:205-240`). Problem 8's "the key is now the lock"
+  is answered by that path plus the roster guard, not by a backdoor mint. Detail in §9 (chunk 2).
+
+### 2.4 Key and CSR generation on the workstation (RF-8's contract)
+
+The CLI generates an ECDSA keypair and builds the CSR locally. Design constraints, each traced to what the
+signing authority will actually accept:
+
+- **Curve:** must be on the accepted CSR list. That list is a single source of truth —
+  `ACCEPTED_CSR_CURVE_LABELS` (`ca.py:59-63`) = **P-256 / P-384 / P-521**, read at call time by
+  `accepted_csr_curve_names()` (`ca.py:66`), with `csr_curve_hint()` (`ca.py:71`) building the error text from
+  the same dict so a refusal can never advertise a different list than the vault enforces (#503 option A).
+  **The CLI default for admin short certs is P-256 (`secp256r1`)** — the curve every CA key and every leaf in
+  this product uses today (`ca.py:228`, `:636`, `:749` are all `SECP256R1`). P-384 is the declared direction of
+  `features/p384-end-to-end-pki-reroot.md`, which is **OPEN** work; a design that pinned P-384 would ship a CLI
+  that mints CSRs the current CA signs but that mismatch the CA doing the signing. Acceptance stays
+  list-driven, so the re-root needs no CLI change.
+- **The CSR's subject is advisory only.** See §2.6 — the server overwrites identity. Generating the CSR with an
+  empty or placeholder CN is fine and should not be treated as the identity carrier.
+- **Private key never leaves the workstation process.** It is never POSTed, never logged, never placed in an
+  env var. The CLI writes it `0600` in a `0700` directory outside the home directory where that is expressible
+  (the product's own standard `ensure_secret_dir` in `at_rest_key.py`; the CLI's config save already does
+  `mkdir(mode=0o700)` + `fchmod(0o600)` at `api_client.py:233-248`). On Windows the mode-bit story does not
+  exist — same honesty requirement `modewarn` carries (§1.4, §8).
+- **CSR transport shape:** mirror the executor registration contract — a PEM string field with a length bound
+  (`csr_pem: str = Field(..., max_length=2048)`, `routes/executors.py:140`), parsed with
+  `x509.load_pem_x509_csr` (`executors.py:694`), and a parse failure mapped to a 400, never a 500.
+
+### 2.5 The signing authority — reusing the `sign_csr` shape at the ADMIN CA
+
+Ruling 3 says reuse or extend `sign_csr`. Its behavior, re-derived at `ca.py:340-451`, with what each item means
+for an admin variant:
+
+| `sign_csr` behavior | Site | Carry to the admin signer? |
+|---|---|---|
+| Verifies the CSR self-signature; `ValueError` → caller maps to 400 | `:368-370` | **Yes, unchanged.** Same error-class contract: bad CSR is client input, a CA that cannot load is a service fault (`RuntimeError` → 503) |
+| ECDSA-only, curve must be on the accepted list, hint text from the same dict | `:372-381` | **Yes, unchanged** — reads the shared list, no admin-specific curve fork |
+| **Replaces the CSR CN** with a server-supplied id | `:383-389` | **Yes — and this is the security-critical reuse.** §2.6 |
+| Serial from `secrets.token_bytes(8)` | `:365` | **Yes** — also what `sign_admin_cert` does (`:746`), and keeps serials compatible with the canonical-form revocation lookup (§2.9) |
+| `not_valid_before = now`, `not_valid_after = now + EXECUTOR_VALIDITY_DAYS` (30d) | `:396-397` | **Structure yes, value no** — admin uses a minutes-scale lifetime (ruling 4a, §5) |
+| SKI from subject public key, AKI `from_issuer_public_key` | `:398-405` | **Yes** — the #504 placement rule, already mirrored in `sign_admin_cert` (`:767-781` comment) |
+| `BasicConstraints(ca=False)`, `KeyUsage(digital_signature only)`, both critical | `:406-423` | **Yes, identical** |
+| EKU = `EXECUTOR_LEAF_EKU` = SERVER_AUTH + CLIENT_AUTH | `:424-427`, `ca.py:50` | **Narrow it: CLIENT_AUTH only.** An admin leaf is a client credential; `sign_admin_cert` already does exactly this (`:796-803`). Carrying SERVER_AUTH would let an admin cert impersonate a core endpoint |
+| SAN = `DNSName(executor_id)` | `:428-431` | **No — use the identity-shape-aware builder.** `_build_san_for_identity` (`ca.py:569-585`) emits RFC822 for `@`-bearing identities, DNS otherwise, matching the middleware's extraction order (RFC822 → DNS → CN, `middleware/auth.py:52-64`). Person identities are email-shaped, so the RFC822 branch is the one that matters |
+| Optional CRL Distribution Points from `crl_url` | `:434-448`; caller passes `config.crl.crl_url` at `executors.py:901-904` | **Yes, same optional wiring** — but note the enforcement reality: nginx has no `ssl_crl`, so CDP is informational and the real revocation point is the in-process serial check (§2.9) |
+| Signed with `SHA256` | `:450` | Yes |
+
+Two ways to get there, and the choice:
+
+- **(a) Generalize `CAManager.sign_csr`** with lifetime/EKU/SAN parameters. Cheaper diff, but it puts an
+  ADMIN-plane leaf behind the executor CA's manager and its `load_ca()` (Root/executor CA), which the middleware's
+  per-plane chain anchors already refuse for admin routes. Rejected.
+- **(b) Add `AdminCAManager.sign_admin_csr(csr, identity, lifetime_seconds, crl_url=None)`** — the admin CA's own
+  `_load_ca_cert_and_key` (`ca.py:821-828`), the §2.5 column above, and *no* private-key return. The CSR variant
+  replaces the keypair-generating `sign_admin_cert` rather than sitting beside it. **This is the design.** It also
+  gives section 6 a clean disposition target: the new function takes the old one's job, and the old one's caller
+  problem (F-1) is resolved in the same breath.
+
+**A signing function that returns a private key must not survive this change** — that is the whole content of
+ruling 3, and the reason §6 exists.
+
+### 2.6 Identity binding — the mint must not be self-described
+
+The naive shape ("sign whatever CSR the caller sends") leaks identity: the caller controls the CSR subject.
+`sign_csr`'s CN-replacement (`ca.py:383-389`) is the existing defense and is mandatory here:
+
+1. **Subject CN, SAN RFC822/DNS, O and OU are all set from the server-derived identity** — the `user_id` of the
+   authenticated session that produced the elevation assertion (`get_current_user` → `user_info["user_id"]`, the
+   same value the elevation row is bound to at `auth_elevation.py:307-320`). Every attribute in the CSR subject is
+   discarded; the caller's subject carries no authority.
+2. **No delegation.** The asserted user is the identity in the cert. A request that wants a cert for someone else
+   is not a thing this endpoint can express.
+3. **Role re-checked at mint time too, not only at use time.** §3 puts the per-use role check on the request path;
+   the mint additionally refuses a caller with no admin role, so the endpoint is not a general "cert for any user"
+   factory. Both checks are required: mint-time keeps the factory closed, per-use keeps revocation live (ruling 2).
+4. `sign_admin_cert` took `admin_identity` as a **free-form string from its caller** (`ca.py:732`) with no
+   authorization and no derivation — with zero production callers in `packages/` that was latent; with the
+   installer as its real caller (F-1) the identity comes from `ADMIN_IDENTITY`, an operator-supplied value
+   (`install-venya-core.sh:584`). The server-derived rule above is what closes that class.
+
+### 2.7 Caller authorization, rate limiting, and the route contract
+
+- **Route:** `POST /api/v1/admin/certs/issue` (name per RF-7; must sit under a prefix the rate limiter classifies
+  — see next bullet). Requires: valid bearer session, valid unused unexpired `ElevationToken` for that session's
+  user (consumed atomically, the `secrets.py:496-518` UPDATE-`used` pattern, so two concurrent requests cannot
+  both spend one ceremony), and the admin role (§2.6.3).
+- **Rate limiting — choose the DB-backed middleware, not the in-memory limiter.** The carrier points at "the
+  server's RateLimiter"; both exist and only one is correct for a multi-core deployment:
+  - `core/engine/rate_limiter.py:41` — `RateLimiter`, in-memory, per-process. Its own docstring is explicit
+    (#516): state is **NOT shared between processes**, one instance per core process
+    (`backend.py:354`, `factory.py:79`, `core.py:75`), so N workers enforce `max_attempts` **N×** and a restart
+    clears it. Fine for login lockout heuristics; wrong for a mint cap.
+  - `server/middleware/rate_limit.py` — `RateLimitMiddleware`, fixed-window counters in the
+    **`rate_limit_failures` table with an atomic UPSERT** (`_increment_counter` `:175-190`), `Retry-After` on
+    every 429 (`:48-56`, `:143`). Wired at `app.py:184`. Classified prefixes are `/api/v1/auth/` and
+    `/api/v1/enrollment/` (`:268-274`); `/api/v1/recovery` is break-glass (`:276-279`).
+  - **Design: the issuance endpoint must be added to the DB-backed middleware's classified set** (prefix or exact
+    path, RF-7's call) so the cap is per-account across cores and survives a restart. Suggested starting shape,
+    for RF-7 to rule on: a small number of mints per user per window (single digits per hour), since the honest
+    cost of one mint is one FIDO2 touch and 4a says cadence is driven by job length, not by fear of expiry.
+- **Failure modes, all loud, none of them a 500:** bad/expired/used elevation token → 401/403 with text naming
+  the exact repair command (`venya admin elevate`-class, per 4b's naming law); CSR parse or curve refusal → 400
+  naming the accepted curves from `csr_curve_hint()`; missing admin role → 403; CA material unusable → 503
+  (`RuntimeError` from `_load_ca_cert_and_key`, kept distinct from client error exactly as `sign_csr`'s
+  docstring does at `ca.py:357-361`); rate limit → 429 + `Retry-After`.
+- **Response body carries the certificate PEM and nothing else** — no key, no CSR echo. The core-side copy is not
+  written to disk as a key file; the server holds no private material for this flow at any point.
+
+### 2.8 Issuance audit event
+
+Mirror the revoke path's shape (`routes/admin.py:2086-2099`): `audit_lifecycle(db, event, user_id, fields)` +
+`db.commit()`, event name defined as a module constant in `server/audit_lifecycle.py` alongside
+`ADMIN_CERT_REVOKED` (`:60`) and `ELEVATION_GRANTED` (`:57`).
+
+- **New event: `ADMIN_CERT_ISSUED`** (constant name per RF-7; the `AuditEvent.event_type` column is
+  `String(64)` — `core/iam/models.py:164-172`).
+- **`fields` should carry** at minimum: canonical serial (`canonical_serial`, the one form the revocation lookup
+  compares — `#481`), identity as embedded in the cert, `not_valid_before`/`not_valid_after` (offset-aware UTC,
+  per the datetime rule), curve name, the requesting `user_id`, and a mint reason
+  (`issue` / `renew` — §4.4). **It must NOT carry** the CSR bytes, the public key PEM, or the cert PEM: the audit
+  row is readable by non-admin auditors, and the public key plus CSR would let a log reader reconstruct subject
+  detail we did not decide to publish. `user_id` on `AuditEvent` intentionally has no FK and stores the principal
+  verbatim, including mTLS CNs (`models.py:172-179` comment) — for this event the human `user_id` is the point
+  (ruling 2's "the used identity is written into the audit row").
+- Metrics: `CA_SIGNED_TOTAL.labels(cert_type=...)` already exists with `cert_type="executor"`
+  (`executors.py:905`); the admin mint should emit the same counter with a distinct label rather than invent a
+  metric.
+- Paired negative test per the truth-table rule: a mint with an **already-spent** elevation token is refused and
+  produces **no** `ADMIN_CERT_ISSUED` row and no `CA_SIGNED_TOTAL` increment.
+
+### 2.9 Revocation still works, and is the mechanism ruling 2 relies on
+
+Per-use re-check makes revocation *behavioral* (role removed → next request refused). Serial revocation stays as
+the *credential*-level kill, and it already exists end to end: `POST /admin/certs/revoke` (`admin.py:2042`),
+`AdminCertRevocation` rows (`models.py:564`), enforced in-process at `middleware/auth.py:435-470` because nginx
+has no `ssl_crl` (`:436-438`). Short lifetime changes the economics, not the plumbing: a stolen 60-minute cert
+expires on its own, so revocation is for the case where you want it dead **now**. The canonical-serial discipline
+(`:446`, `#481`) is mandatory for the new mint — 8-byte serials from `secrets.token_bytes(8)` can be short hex
+strings, and the case/padding-insensitive match is what keeps a revocation from silently missing.
+
+### 2.10 Inheritance — what later legs take from this section
+
+- **RF-7:** the endpoint contract (§2.7), `AdminCAManager.sign_admin_csr` (§2.5b), the server-derived-identity
+  rule (§2.6), the DB-backed rate-limit choice with its rationale (§2.7), and `ADMIN_CERT_ISSUED` field set (§2.8).
+- **RF-8:** keygen/CSR constraints (§2.4) — curve default, P-256, the "subject is advisory" rule, `0600`/`0700`
+  write discipline, and the requirement that its error text name the repair command.
+- **RF-9:** the two-plane rule — this section mints **human** certs only; the loopback machine cert is never
+  issued through it (§1.2 R1, §9).
+- **RF-10:** the return-shape change (cert only, never a key) is what breaks the installer's current
+  key-file dependency at `install-venya-core.sh:408-426`/`:978-981`; plus F-1 — the function it would remove has
+  a live caller.
+- **RF-11:** issuance audit is the data source for age-out accounting (§10) — the event carries the lifetime so
+  the rollout can prove which certs are still live.
