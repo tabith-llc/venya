@@ -1131,9 +1131,19 @@ class Executor:
         """Clean up all secret injections.
 
         Runs strategy cleanup functions, zeros secret values, clears registry.
+        A failed destroy is reported as a degraded teardown: it never aborts the
+        rest of the cleanup, and it never changes how the run ends.
         """
         if self._injection_result:
-            self._injection_result.cleanup()
+            failures = self._injection_result.cleanup()
+            if failures:
+                logger.warning(
+                    "Secret cleanup degraded: %d of %d destroy step(s) failed; secret material may still be resident — held by this result: %s (%s)",
+                    len(failures),
+                    len(self._injection_result.cleanup_funcs),
+                    self._injection_result.resident_resources(),
+                    "; ".join(f"{f.label} -> {f.error}" for f in failures),
+                )
             self._injection_result = None
 
         # Zero secret values in all bundles
