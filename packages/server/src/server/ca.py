@@ -563,7 +563,109 @@ class CAManager:
 # --- Admin CA constants ---
 
 ADMIN_CA_VALIDITY_DAYS = 3650  # 10 years
-ADMIN_CERT_VALIDITY_DAYS = 90  # 90 days
+ADMIN_CERT_VALIDITY_DAYS = 90  # 90 days — bootstrap/machine-plane legacy path (RF-6 §10.5)
+
+# The ruled short-cert lifetime (RF-6 §1.2 ruling 4a — 60 minutes). The
+# human-plane signer takes lifetime_seconds per request; this constant is the
+# pairing value for the clock-skew fraction interlock (RF-6 §5.3): a lane that
+# changes either number trips the assertion cell, never a remembered ratio.
+ADMIN_SHORT_CERT_LIFETIME_SECONDS = 3600
+
+# EKU for admin leaf certs — CLIENT_AUTH only (RF-6 §2.5: an admin leaf is a
+# client credential; carrying SERVER_AUTH would let it impersonate a core
+# endpoint). Single source of truth, shared by sign_admin_csr and the
+# narrowed bootstrap mint (refs RF-7).
+ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
+
+# --- Two-plane marker (RF-6 §3.2, refs RF-7) ---
+#
+# A dedicated X.509 extension carrying the credential plane, written by the
+# CA's own signer and NEVER taken from a CSR. The bit is critical: a verifier
+# that does not know the OID must refuse to parse the certificate rather than
+# silently drift past the plane statement (measured at this tip: stock
+# ``openssl verify`` rejects such a leaf with error 34, and -ignore_critical
+# is what lets the rest of the chain still verify — see
+# tests/test_admin_cert_ski_aki_504.py for the re-scoped cells).
+#
+# OID home: RFC 6996 private-use experimental arc (1.3.6.1.4.1.64496-64511),
+# provisional until a registered Private Enterprise Number exists for Tabith
+# LLC; swapping the number is a one-constant change plus its cells (flagged
+# to the lead in the RF-7 chunk-1 report).
+VENYA_PLANE_MARKER_OID = x509.ObjectIdentifier("1.3.6.1.4.1.64496.1.1")
+PLANE_MACHINE = "machine"
+PLANE_HUMAN = "human"
+_VENYA_PLANES: tuple[str, ...] = (PLANE_MACHINE, PLANE_HUMAN)
+
+
+def _plane_marker_extension(plane: str) -> x509.UnrecognizedExtension:
+    """Build the signer-written plane-marker extension for one plane.
+
+    The value is a DER-encoded UTF8String (tag 0x0C, short-form definite
+    length). Only the two ruled plane values are accepted at mint time —
+    a lane asking for a third plane fails loudly here.
+
+    Args:
+        plane: PLANE_MACHINE or PLANE_HUMAN.
+
+    Returns:
+        The extension value to add with ``critical=True``.
+    """
+    if plane not in _VENYA_PLANES:
+        raise ValueError(f"Unknown credential plane {plane!r}; accepted: {_VENYA_PLANES}")
+    body = plane.encode("ascii")
+    return x509.UnrecognizedExtension(VENYA_PLANE_MARKER_OID, bytes([0x0C, len(body)]) + body)
+
+
+def parse_plane_marker(cert: x509.Certificate) -> str:
+    """Return the plane a CA-signed admin certificate carries (RF-6 §3.2).
+
+    Fails closed — every miss raises ValueError and the caller refuses the
+    certificate; nothing in this parser defaults into a plane:
+
+    * no marker at all (a certificate predating the two-plane model),
+    * an unparseable marker value (not a short-form DER UTF8String, a length
+      mismatch, or a non-ASCII body),
+    * a value outside the accepted set {machine, human}.
+
+    The middleware consumption of this result is RF-7 chunk 2; the parser
+    ships and is tested with the signer (chunk 1).
+
+    Args:
+        cert: The certificate to read.
+
+    Returns:
+        PLANE_MACHINE or PLANE_HUMAN.
+
+    Raises:
+        ValueError: Missing / unparseable / out-of-set marker (see above).
+    """
+    try:
+        ext = cert.extensions.get_extension_for_oid(VENYA_PLANE_MARKER_OID)
+    except x509.ExtensionNotFound:
+        raise ValueError(
+            "certificate carries no Venya plane marker — it predates the "
+            "two-plane model and must be re-issued (RF-6 §3.2)"
+        ) from None
+    raw = ext.value
+    if not isinstance(raw, x509.UnrecognizedExtension):
+        # TRY004 would prefer TypeError, but this parser's contract is
+        # fail-closed ValueError on every miss (§3.2) — a defensive guard for
+        # a shape the library does not produce today.
+        raise ValueError("plane marker is not the shipped unrecognized type — refusing")  # noqa: TRY004
+    content = raw.value
+    # Expect exactly one short-form DER UTF8String: tag 0x0C, definite
+    # short-form length (< 0x80), no trailing bytes.
+    if len(content) < 2 or content[0] != 0x0C or content[1] >= 0x80:
+        raise ValueError("unparseable plane marker (not a short-form DER UTF8String)")
+    if len(content) != 2 + content[1]:
+        raise ValueError("unparseable plane marker (length mismatch)")
+    try:
+        plane = content[2:].decode("ascii")
+    except UnicodeDecodeError:
+        raise ValueError("unparseable plane marker (non-ASCII body)") from None
+    if plane not in _VENYA_PLANES:
+        raise ValueError(f"plane marker {plane!r} is outside the accepted set {_VENYA_PLANES}")
+    return plane
 
 
 def _build_san_for_identity(identity: str) -> x509.SubjectAlternativeName:
@@ -730,10 +832,32 @@ class AdminCAManager:
         return _deserialize_key(key_data, passphrase)
 
     def sign_admin_cert(self, admin_identity: str) -> tuple[x509.Certificate, bytes, bytes]:
-        """Sign an admin certificate for the given identity.
+        """Mint the bootstrap/machine-plane admin certificate (RF-6 §6.3, refs RF-7).
 
-        Generates a new ECDSA P-256 keypair, signs it with the admin CA,
-        and returns the certificate, private key PEM, and certificate PEM.
+        This is the BOOTSTRAP path and nothing else. Its contract:
+
+        * machine plane — the loopback/service credential the core uses
+          against its own admin routes; no human session is involved, the
+          identity is hostname-shaped (the installer's ``ADMIN_IDENTITY``),
+          and the two-plane marker (RF-6 §3.2) is written at mint as
+          ``machine``;
+        * the keypair is generated and consumed in the same process on the
+          same machine — the returned private key never crosses the network
+          (ruling 4d scopes the unencrypted-on-disk question to exactly this
+          key; the filesystem control is the installer's ``0600`` write);
+        * the only allowed caller is the installer bootstrap
+          (``install-venya-core.sh``, the ``sign_admin_cert`` unpack). A
+          caller-interlock cell asserts it — a route reaching this mint is
+          a red suite, not a review finding
+          (tests/test_rf7_bootstrap_mint_interlock.py);
+        * the signature and return shape ``(cert, key_pem, cert_pem)`` stay
+          byte-compatible with that unpack until RF-10's installer commit
+          retires the key handoff. Changing the arity here breaks every
+          fresh install.
+
+        Human-plane certificates are NOT minted here — the elevation path is
+        ``sign_admin_csr`` below (RF-6 §2.5b), which takes a caller-supplied
+        CSR and returns a certificate and no private key.
 
         Args:
             admin_identity: The admin identity (used as CN and SAN DNS name).
@@ -794,16 +918,19 @@ class AdminCAManager:
                 critical=True,
             )
             .add_extension(
-                x509.ExtendedKeyUsage(
-                    [
-                        ExtendedKeyUsageOID.CLIENT_AUTH,
-                    ]
-                ),
+                x509.ExtendedKeyUsage(ADMIN_LEAF_EKU),
                 critical=False,
             )
             .add_extension(
                 _build_san_for_identity(admin_identity),
                 critical=False,
+            )
+            # Bootstrap/machine plane, CA-written (RF-6 §3.2): this mint is
+            # the marker's machine half, landed with the change itself so a
+            # cert this path produces is never marker-less.
+            .add_extension(
+                _plane_marker_extension(PLANE_MACHINE),
+                critical=True,
             )
         )
 
@@ -818,11 +945,173 @@ class AdminCAManager:
 
         return cert, key_pem, cert_pem
 
+    def sign_admin_csr(
+        self,
+        csr: x509.CertificateSigningRequest,
+        identity: str,
+        lifetime_seconds: int,
+        crl_url: str | None = None,
+    ) -> x509.Certificate:
+        """Sign a CSR with the admin CA, producing a human-plane leaf (RF-6 §2.5b, §2.6).
+
+        The admin variant of ``CAManager.sign_csr`` — same behavior table, with
+        the two deltas that table names: EKU is CLIENT_AUTH only (an admin leaf
+        is a client credential; SERVER_AUTH would let it impersonate a core
+        endpoint), and the SAN comes from ``_build_san_for_identity`` (RFC822
+        for ``@``-bearing identities, DNS otherwise) instead of a bare
+        ``DNSName(executor_id)``. Lifetime is the caller's minutes-scale value
+        — never a days-scale constant.
+
+        The mint is not self-described (§2.6): every attribute of the CSR
+        subject is discarded and the subject is rebuilt from the server-derived
+        identity (O=Venya, OU=Admin, CN=identity), the SAN is built from that
+        identity, and the two-plane marker (§3.2) is CA-written as ``human`` —
+        a marker a CSR claims is never copied. The caller's public key is the
+        only thing taken from the request.
+
+        No private key is returned, and none is generated here — the keypair
+        lives on the workstation that produced the CSR (ruling 3).
+
+        Args:
+            csr: The certificate signing request to sign (workstation-generated).
+            identity: Server-derived admin identity (used as CN and SAN).
+            lifetime_seconds: Leaf validity in seconds (minutes-scale by design;
+                the authorization layer that chooses the value is chunk 2).
+            crl_url: Optional CRL Distribution Point URL for CDP extension.
+
+        Returns:
+            Signed X.509 certificate — certificate only, never a key.
+
+        Raises:
+            ValueError: If the CSR self-signature does not verify, its public
+                key is not an accepted ECDSA curve, or the identity/lifetime is
+                not usable. Same error-class contract as ``sign_csr``: callers
+                map ValueError to a client error (400) — it is bad input, not a
+                CA fault. A RuntimeError from ``_load_ca_cert_and_key`` means
+                the CA material itself is unusable and stays a service fault
+                (503).
+        """
+        ca_cert, ca_key = self._load_ca_cert_and_key()
+        now = datetime.now(UTC)
+        serial = int.from_bytes(secrets.token_bytes(8), "big")
+
+        # Validate CSR — the shared contract with sign_csr, same error texts.
+        if not csr.is_signature_valid:
+            raise ValueError("CSR signature verification failed")
+
+        pub_key = csr.public_key()
+        if not isinstance(pub_key, ec.EllipticCurvePublicKey):
+            # ValueError, not TypeError (#503): this is caller-supplied CSR material,
+            # and the caller maps ValueError to a clean 400. A TypeError here would
+            # escape the route's error handling as a 500.
+            raise ValueError(  # noqa: TRY004 — CA input validation; ValueError → 400 at caller
+                f"Unsupported CSR key type: {type(pub_key).__name__}. {csr_curve_hint()}"
+            )
+        if pub_key.curve.name not in accepted_csr_curve_names():
+            raise ValueError(f"Unsupported curve: {pub_key.curve.name}. {csr_curve_hint()}")
+
+        # Server-derived identity and caller-supplied lifetime, both checked here
+        # because both are part of what the mint binds (§2.6).
+        if not identity:
+            raise ValueError("identity must be a non-empty server-derived string")
+        if lifetime_seconds <= 0:
+            raise ValueError(f"lifetime_seconds must be positive, got {lifetime_seconds}")
+
+        # Subject rebuilt from the server-supplied identity; the CSR subject
+        # carries no authority (§2.6.1) — no CN passthrough, no O/OU copy.
+        subject = x509.Name(
+            [
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, "Admin"),
+                x509.NameAttribute(NameOID.COMMON_NAME, identity),
+            ]
+        )
+
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(ca_cert.subject)
+            .public_key(csr.public_key())
+            .serial_number(serial)
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(seconds=lifetime_seconds))
+            # #504 placement rule, mirrored from sign_csr and sign_admin_cert:
+            # SKI from the leaf public key, AKI from_issuer_public_key.
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(csr.public_key()),
+                critical=False,
+            )
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_cert.public_key()),
+                critical=False,
+            )
+            .add_extension(
+                x509.BasicConstraints(ca=False, path_length=None),
+                critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    key_encipherment=False,
+                    content_commitment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.ExtendedKeyUsage(ADMIN_LEAF_EKU),
+                critical=False,
+            )
+            .add_extension(
+                _build_san_for_identity(identity),
+                critical=False,
+            )
+            # Human plane, CA-written (RF-6 §3.2) — critical: a verifier that
+            # cannot see it must refuse the certificate, not infer a plane.
+            .add_extension(
+                _plane_marker_extension(PLANE_HUMAN),
+                critical=True,
+            )
+        )
+
+        # Add CRL Distribution Point if URL is provided (same optional wiring as
+        # sign_csr; informational here — the real revocation point is the
+        # in-process serial check, RF-6 §2.9).
+        if crl_url:
+            builder = builder.add_extension(
+                x509.CRLDistributionPoints(
+                    [
+                        x509.DistributionPoint(
+                            full_name=[x509.UniformResourceIdentifier(crl_url)],
+                            relative_name=None,
+                            reasons=None,
+                            crl_issuer=None,
+                        )
+                    ]
+                ),
+                critical=False,
+            )
+
+        cert = builder.sign(ca_key, hashes.SHA256())
+        return cert
+
     def _load_ca_cert_and_key(self) -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
         """Load the admin CA certificate and private key.
 
         Returns:
             Tuple of (certificate, private_key).
+
+        Raises:
+            FileNotFoundError if a CA file is missing (pre-existing behavior —
+                chunk 2's route is expected to check ``has_ca`` and map it to
+                the service-fault class); RuntimeError when the key is present
+                but unusable. Neither path is a ValueError: a CA that cannot
+                load is never client input (RF-6 §2.5/§2.7 error-class contract).
         """
         ca_cert = x509.load_pem_x509_certificate(self.ca_cert_path.read_bytes())
         ca_key = self._load_ca_key()
