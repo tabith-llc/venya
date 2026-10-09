@@ -22,10 +22,30 @@ repos:
     rev: v1.5.0
     hooks:
       - id: detect-secrets
-        args: ["--baseline", ".detect-secrets-baseline", "--exclude-files", "target/"]
+        args: ["--baseline", ".detect-secrets-baseline", "--exclude-files", "target/", "--exclude-files", "\\.detect-secrets-baseline$"]
 
   - repo: local
     hooks:
+      # Refs #546: the detect-secrets hook above rewrites .detect-secrets-baseline
+      # mid-commit and asks the committer to stage it, so a vanished detection can
+      # otherwise ship quietly. One implementation, two thin entries (R9.1): the
+      # default stage cannot see the commit message, so it fails on any vanish; the
+      # commit-msg stage is where a declared removal (Baseline-removal-reason) is
+      # honoured. The core interlock stays the enforcement; this chain is the early
+      # and kindly catch.
+      - id: baseline-shrink-guard
+        name: detect-secrets baseline shrink guard
+        entry: python3 scripts/detect_secrets_baseline_guard.py --stage pre-commit
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: baseline-shrink-guard-message
+        name: detect-secrets baseline removal declared?
+        entry: python3 scripts/detect_secrets_baseline_guard.py --stage commit-msg
+        language: system
+        stages: [commit-msg]
+
       - id: uv-lock
         name: uv-lock (check)
         entry: uv lock --check
