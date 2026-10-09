@@ -19,8 +19,39 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fastapi import FastAPI
 from server.ca import CAManager
+from server.config import ExecutorEnrollmentConfig, ServerConfig
 from server.routes import executors as executors_routes
 from starlette.testclient import TestClient
+
+from tests.test_executor_enrollment import _make_mock_token
+
+# #442 site 3 (ruling A+): these registration cells used to build apps with NO
+# app.state.config at all, which is the fault shape — the route could not read a
+# policy and used to fall through to "token not required". They now stand on the
+# ENFORCED path: the shipped default (require_token=True) plus a real enrollment
+# token per cell. The pepper is the house value _make_mock_token hashes against.
+_ENROLLMENT_PEPPER = "test-pepper-12345"
+_ENROLLMENT_TOKEN = "enrl_exec_442_executor_server"
+
+
+@pytest.fixture(autouse=True)
+def _fresh_limiters():
+    """Isolate the process-global limiter cache in server.rate_limit.
+
+    A PRESENT config switches the registration limiter on (it early-returns while
+    config is absent), and the limiter windows are shared across the whole run —
+    without this isolation the registration cells below inherit consumed slots and
+    die as 429s unrelated to the token gate. Same isolation fixture
+    test_executor_enrollment.py and test_rate_limiter.py use.
+    """
+    from server import rate_limit as _rl
+
+    saved = dict(_rl._LIMITERS)
+    _rl._LIMITERS.clear()
+    yield
+    _rl._LIMITERS.clear()
+    _rl._LIMITERS.update(saved)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -255,8 +286,15 @@ class TestCAManager:
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_db(executor_certs=None, revocations=None, command_policies=None):
-    """Create a mock DB session for testing endpoints."""
+def _make_mock_db(
+    executor_certs=None, revocations=None, command_policies=None, enrollment_executor_id: str | None = None
+):
+    """Create a mock DB session for testing endpoints.
+
+    #442 site 3 (ruling A+): ``enrollment_executor_id`` arms the ENFORCED path — a
+    created, unexpired token row for that identity plus the atomic-consumption
+    answer the route reads (``rowcount == 1``). Left None, nothing is armed.
+    """
     if executor_certs is None:
         executor_certs = []
     if revocations is None:
@@ -282,6 +320,13 @@ def _make_mock_db(executor_certs=None, revocations=None, command_policies=None):
                     results = list(revocations)
                 elif model.__name__ == "CommandPolicy":
                     results = list(command_policies)
+                elif model.__name__ == "ExecutorEnrollmentToken":
+                    # Armed only for the moved registration cells; the equality filter
+                    # below still has to MATCH the token_hash the route computes, so a
+                    # wrong pepper or a wrong identity does not silently pass.
+                    if enrollment_executor_id is None:
+                        return None
+                    results = [_make_mock_token(enrollment_executor_id, _ENROLLMENT_TOKEN)]
                 elif model.__name__ == "User":
                     return None
                 else:
@@ -319,6 +364,8 @@ def _make_mock_db(executor_certs=None, revocations=None, command_policies=None):
         return m
 
     db.query.side_effect = mock_query
+    # The token consumption is an atomic UPDATE; the route requires rowcount == 1.
+    db.execute.return_value = MagicMock(rowcount=1)
     return db
 
 
@@ -349,19 +396,26 @@ class TestExecutorRegistration:
         app.state.backend = MagicMock()
         app.state.backend.get_session.return_value = db
         app.state.ca_manager = ca_manager
+        # #442 site 3 (ruling A+): config present on the SHIPPED default
+        # (require_token=True), so this builder's cells exercise the enforced
+        # registration path rather than the config-absent fault shape.
+        app.state.config = ServerConfig(
+            recovery_code_pepper=_ENROLLMENT_PEPPER,
+            executor_enrollment=ExecutorEnrollmentConfig(require_token=True),
+        )
         app.include_router(executors_routes.router, prefix="/api/v1")
         if auth_executor_id is not None:
             _add_executor_auth(app, auth_executor_id)
         return app
 
     def test_register_success(self, ca_manager, executor_csr, executor_keypair):
-        db = _make_mock_db()
+        db = _make_mock_db(enrollment_executor_id="test-exec-1")
         app = self._create_app(ca_manager, db)
         client = TestClient(app)
         csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
         resp = client.post(
             "/api/v1/executors/register",
-            json={"executor_id": "test-exec-1", "csr_pem": csr_pem},
+            json={"executor_id": "test-exec-1", "csr_pem": csr_pem, "enrollment_token": _ENROLLMENT_TOKEN},
         )
         assert resp.status_code == 201
         data = resp.json()
@@ -417,13 +471,13 @@ class TestExecutorRegistration:
         assert "curve" in resp.json()["detail"].lower() or "unsupported" in resp.json()["detail"].lower()
 
     def test_register_auto_creates_user(self, ca_manager, executor_csr, executor_keypair):
-        db = _make_mock_db()
+        db = _make_mock_db(enrollment_executor_id="new-exec")
         app = self._create_app(ca_manager, db)
         client = TestClient(app)
         csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
         resp = client.post(
             "/api/v1/executors/register",
-            json={"executor_id": "new-exec", "csr_pem": csr_pem},
+            json={"executor_id": "new-exec", "csr_pem": csr_pem, "enrollment_token": _ENROLLMENT_TOKEN},
         )
         assert resp.status_code == 201
         data = resp.json()
@@ -433,13 +487,18 @@ class TestExecutorRegistration:
         """New-row upsert stores executor_id as hostname, ignoring any supplied value."""
         from core.iam.models import Executor
 
-        db = _make_mock_db()
+        db = _make_mock_db(enrollment_executor_id="web-server-3")
         app = self._create_app(ca_manager, db)
         client = TestClient(app)
         csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
         resp = client.post(
             "/api/v1/executors/register",
-            json={"executor_id": "web-server-3", "csr_pem": csr_pem, "hostname": "web-server-3.internal"},
+            json={
+                "executor_id": "web-server-3",
+                "csr_pem": csr_pem,
+                "hostname": "web-server-3.internal",
+                "enrollment_token": _ENROLLMENT_TOKEN,
+            },
         )
         assert resp.status_code == 201
         added = [c.args[0] for c in db.add.call_args_list if c.args and isinstance(c.args[0], Executor)]
@@ -459,14 +518,18 @@ class TestExecutorRegistration:
         from core.iam.models import Executor
         from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-        db = _make_mock_db()
+        db = _make_mock_db(enrollment_executor_id="web-server-3")
         app = self._create_app(ca_manager, db)
         app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="127.0.0.1, testclient")
         client = TestClient(app, base_url="http://127.0.0.1:8080")
         csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
         resp = client.post(
             "/api/v1/executors/register",
-            json={"executor_id": "web-server-3", "csr_pem": csr_pem},  # no hostname
+            json={
+                "executor_id": "web-server-3",
+                "csr_pem": csr_pem,
+                "enrollment_token": _ENROLLMENT_TOKEN,
+            },  # no hostname
             headers={"X-Forwarded-For": "192.0.2.14"},
         )
         assert resp.status_code == 201
@@ -484,14 +547,19 @@ class TestExecutorRegistration:
 
         existing = Executor(id="web-server-3", hostname="192.0.2.14", status="active")
         existing.enrolled_at = datetime(2026, 1, 1, tzinfo=UTC)
-        db = _make_mock_db()
+        db = _make_mock_db(enrollment_executor_id="web-server-3")
         self._make_db_with_executor(db, existing)
         app = self._create_app(ca_manager, db)
         client = TestClient(app)
         csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
         resp = client.post(
             "/api/v1/executors/register",
-            json={"executor_id": "web-server-3", "csr_pem": csr_pem, "hostname": "web-server-3.internal"},
+            json={
+                "executor_id": "web-server-3",
+                "csr_pem": csr_pem,
+                "hostname": "web-server-3.internal",
+                "enrollment_token": _ENROLLMENT_TOKEN,
+            },
         )
         assert resp.status_code == 201
         # Re-registration updates the existing row in place, does not add a new one.
@@ -776,6 +844,12 @@ class TestCommandPolicyPropagation:
         app.state.backend = MagicMock()
         app.state.backend.get_session.return_value = db
         app.state.ca_manager = ca_manager
+        # #442 site 3 (ruling A+): shipped-default config so the two registration
+        # cells in this class exercise the enforced path, not the config-absent fault shape.
+        app.state.config = ServerConfig(
+            recovery_code_pepper=_ENROLLMENT_PEPPER,
+            executor_enrollment=ExecutorEnrollmentConfig(require_token=True),
+        )
         app.include_router(executors_routes.router, prefix="/api/v1")
         if auth_executor_id is not None:
             _add_executor_auth(app, auth_executor_id)
@@ -836,12 +910,12 @@ class TestCommandPolicyPropagation:
             dangerous_patterns='["curl "]',
             updated_at=datetime(2026, 9, 26, tzinfo=UTC),
         )
-        db = _make_mock_db(command_policies=[row])
+        db = _make_mock_db(command_policies=[row], enrollment_executor_id="test-exec-1")
         app = self._create_app(ca_manager, db)
         csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
         resp = TestClient(app).post(
             "/api/v1/executors/register",
-            json={"executor_id": "test-exec-1", "csr_pem": csr_pem},
+            json={"executor_id": "test-exec-1", "csr_pem": csr_pem, "enrollment_token": _ENROLLMENT_TOKEN},
         )
         assert resp.status_code == 201
         policy = resp.json()["command_policy"]
@@ -850,12 +924,12 @@ class TestCommandPolicyPropagation:
         assert policy["dangerous_patterns"] == ["curl "]
 
     def test_register_policy_null_when_unset(self, ca_manager, executor_csr):
-        db = _make_mock_db()
+        db = _make_mock_db(enrollment_executor_id="test-exec-1")
         app = self._create_app(ca_manager, db)
         csr_pem = executor_csr.public_bytes(serialization.Encoding.PEM).decode()
         resp = TestClient(app).post(
             "/api/v1/executors/register",
-            json={"executor_id": "test-exec-1", "csr_pem": csr_pem},
+            json={"executor_id": "test-exec-1", "csr_pem": csr_pem, "enrollment_token": _ENROLLMENT_TOKEN},
         )
         assert resp.status_code == 201
         assert resp.json()["command_policy"] is None

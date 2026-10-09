@@ -35,8 +35,11 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, ExtensionOID, NameOID
 from fastapi import FastAPI
 from server import ca as ca_module
 from server.ca import CAManager
+from server.config import ExecutorEnrollmentConfig, ServerConfig
 from server.routes import executors as executors_routes
 from starlette.testclient import TestClient
+
+from tests.test_executor_enrollment import _make_mock_token
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -54,6 +57,21 @@ def ca_dir(tmp_path):
     d = tmp_path / "ca"
     d.mkdir()
     return str(d)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_limiters():
+    """#442 site 3: a PRESENT config switches the registration limiter on (it early-
+    returns while config is absent), and the limiter cache is process-global — so
+    without this isolation the cells here inherit consumed slots and die as 429s
+    unrelated to the gate under test. Same fixture test_rate_limiter.py uses."""
+    from server import rate_limit as _rl
+
+    saved = dict(_rl._LIMITERS)
+    _rl._LIMITERS.clear()
+    yield
+    _rl._LIMITERS.clear()
+    _rl._LIMITERS.update(saved)
 
 
 @pytest.fixture(autouse=True)
@@ -103,8 +121,17 @@ def _tampered_csr(csr: x509.CertificateSigningRequest) -> x509.CertificateSignin
     return broken
 
 
-def _mock_db() -> MagicMock:
-    """Minimal session double: no existing rows, all writes accepted."""
+_ENROLLMENT_PEPPER = "test-pepper-12345"  # the house pepper from test_executor_enrollment
+_ENROLLMENT_TOKEN = "enrl_exec_curve_contract_503"
+
+
+def _mock_db(enrollment_executor_id: str | None = None) -> MagicMock:
+    """Minimal session double: no existing rows, all writes accepted.
+
+    #442 site 3 (ruling A+): ``enrollment_executor_id`` arms the ENFORCED path — a
+    created, unexpired token row for that identity plus the atomic-consumption
+    answer the route reads (``rowcount == 1``). Left None, nothing is armed.
+    """
     db = MagicMock()
     db.add = MagicMock()
     db.flush = MagicMock()
@@ -115,9 +142,13 @@ def _mock_db() -> MagicMock:
         m.filter = lambda *a, **k: m
         m.first = lambda: None
         m.all = list
+        if enrollment_executor_id is not None and getattr(model, "__tablename__", None) == "executor_enrollment_tokens":
+            token = _make_mock_token(enrollment_executor_id, _ENROLLMENT_TOKEN)
+            m.first = lambda: token
         return m
 
     db.query.side_effect = query
+    db.execute.return_value = MagicMock(rowcount=1)
     return db
 
 
@@ -126,6 +157,12 @@ def _register_client(ca_manager_obj: CAManager, db: MagicMock) -> TestClient:
     app.state.backend = MagicMock()
     app.state.backend.get_session.return_value = db
     app.state.ca_manager = ca_manager_obj
+    # #442 site 3 (ruling A+): config present on the SHIPPED default (require_token
+    # True), so these cells exercise the enforced registration path, not the opt-out.
+    app.state.config = ServerConfig(
+        recovery_code_pepper=_ENROLLMENT_PEPPER,
+        executor_enrollment=ExecutorEnrollmentConfig(require_token=True),
+    )
     app.include_router(executors_routes.router, prefix="/api/v1")
     # raise_server_exceptions=False: an escaping defect must land as a 500 status
     # we can assert on, not as an exception out of the client.
@@ -134,7 +171,8 @@ def _register_client(ca_manager_obj: CAManager, db: MagicMock) -> TestClient:
 
 def _post_register(client: TestClient, csr: x509.CertificateSigningRequest, executor_id: str = "curve-exec"):
     csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
-    return client.post("/api/v1/executors/register", json={"executor_id": executor_id, "csr_pem": csr_pem})
+    body = {"executor_id": executor_id, "csr_pem": csr_pem, "enrollment_token": _ENROLLMENT_TOKEN}
+    return client.post("/api/v1/executors/register", json=body)
 
 
 def _ext_set(cert: x509.Certificate) -> list[tuple[object, bool]]:
@@ -207,7 +245,7 @@ class TestSignerAcceptsAdvertisedCurves:
 
     def test_endpoint_registers_a_p384_executor(self, ca_manager, _executor_ids_resolvable):
         """The 500 at HEAD becomes a 201: a P-384 CSR passes the validator AND signs."""
-        client = _register_client(ca_manager, _mock_db())
+        client = _register_client(ca_manager, _mock_db(enrollment_executor_id="curve-exec"))
         resp = _post_register(client, _ec_csr(ec.SECP384R1), "curve-exec")
 
         assert resp.status_code == 201, resp.text
@@ -216,7 +254,7 @@ class TestSignerAcceptsAdvertisedCurves:
         assert [a.value for a in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)] == ["curve-exec"]
 
     def test_endpoint_registers_a_p521_executor(self, ca_manager, _executor_ids_resolvable):
-        client = _register_client(ca_manager, _mock_db())
+        client = _register_client(ca_manager, _mock_db(enrollment_executor_id="curve-exec"))
         resp = _post_register(client, _ec_csr(ec.SECP521R1), "curve-exec")
 
         assert resp.status_code == 201, resp.text
@@ -265,7 +303,7 @@ class TestRefusalsAreClientErrors:
         """The half the validator cannot cover: the CSR advertises P-256, so it
         clears key strength and only the signer sees the broken signature. At HEAD
         that ValueError escaped the sign block (RuntimeError→503 only) as a 500."""
-        client = _register_client(ca_manager, _mock_db())
+        client = _register_client(ca_manager, _mock_db(enrollment_executor_id="curve-exec"))
         resp = _post_register(client, _tampered_csr(_ec_csr(ec.SECP256R1)), "curve-exec")
 
         assert resp.status_code == 400, resp.text
@@ -275,7 +313,7 @@ class TestRefusalsAreClientErrors:
         """Paired negative for the new 400 path: a CA that cannot be loaded is a
         SERVICE fault. The RuntimeError→503 mapping is untouched by #503."""
         empty_manager = CAManager(ca_dir)  # never initialize()d — no ca.key on disk
-        client = _register_client(empty_manager, _mock_db())
+        client = _register_client(empty_manager, _mock_db(enrollment_executor_id="curve-exec"))
         resp = _post_register(client, _ec_csr(ec.SECP256R1), "curve-exec")
 
         assert resp.status_code == 503, resp.text

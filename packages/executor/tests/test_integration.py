@@ -28,6 +28,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from fastapi import FastAPI
+from server.config import ExecutorEnrollmentConfig, ServerConfig
 from server.routes import executors as executors_routes
 from starlette.testclient import TestClient
 
@@ -41,13 +42,65 @@ from .conftest import (
     _sign_executor_cert,
 )
 
+# #442 site 3 (ruling A+): the registration cell below used to build its app with NO
+# app.state.config at all — the fault shape, where the route could not read a policy
+# and used to fall through to "token not required". It now stands on the ENFORCED
+# path: the shipped default (require_token=True) plus a real enrollment token.
+# Built locally (no cross-package import of the server test suite).
+_ENROLLMENT_PEPPER = "test-pepper-12345"
+_ENROLLMENT_TOKEN = "enrl_exec_442_integration"
+
+
+def _make_mock_enrollment_token(executor_id: str, plaintext: str):
+    """A created, unexpired enrollment token for ``executor_id``.
+
+    ``token_hash`` is the HMAC the route computes from the config pepper, so the
+    mock DB's equality filter has to MATCH it — a wrong pepper or a wrong identity
+    does not silently pass.
+    """
+    import hmac
+
+    token = MagicMock()
+    token.id = 442
+    token.executor_id = executor_id
+    token.state = "created"
+    token.token_hash = hmac.new(
+        _ENROLLMENT_PEPPER.encode("utf-8"), plaintext.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    token.expires_at = datetime.now(UTC) + timedelta(minutes=10)
+    return token
+
+
+@pytest.fixture(autouse=True)
+def _fresh_limiters():
+    """Isolate the process-global limiter cache in server.rate_limit.
+
+    A PRESENT config switches the registration limiter on (it early-returns while
+    config is absent) and the windows are shared across the run; without this the
+    cells that register would inherit consumed slots and die as 429s unrelated to
+    the token gate. Same isolation fixture test_executor_enrollment.py uses.
+    """
+    from server import rate_limit as _rl
+
+    saved = dict(_rl._LIMITERS)
+    _rl._LIMITERS.clear()
+    yield
+    _rl._LIMITERS.clear()
+    _rl._LIMITERS.update(saved)
+
+
 # ---------------------------------------------------------------------------
 # Mock DB helper (same pattern as test_executor_server.py)
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_db(executor_certs=None, revocations=None):
-    """Create a mock DB session for testing server endpoints."""
+def _make_mock_db(executor_certs=None, revocations=None, enrollment_executor_id: str | None = None):
+    """Create a mock DB session for testing server endpoints.
+
+    #442 site 3 (ruling A+): ``enrollment_executor_id`` arms the ENFORCED path — a
+    created, unexpired token row for that identity plus the atomic-consumption
+    answer the route reads (``rowcount == 1``). Left None, nothing is armed.
+    """
     if executor_certs is None:
         executor_certs = []
     if revocations is None:
@@ -71,6 +124,12 @@ def _make_mock_db(executor_certs=None, revocations=None):
                     results = list(revocations)
                 elif model.__name__ == "User":
                     return None
+                elif model.__name__ == "ExecutorEnrollmentToken":
+                    # Armed only for the moved registration cell; the equality filter
+                    # below still has to MATCH the token_hash the route computes.
+                    if enrollment_executor_id is None:
+                        return None
+                    return _make_mock_enrollment_token(enrollment_executor_id, _ENROLLMENT_TOKEN)
                 else:
                     return None
 
@@ -105,6 +164,8 @@ def _make_mock_db(executor_certs=None, revocations=None):
         return m
 
     db.query.side_effect = mock_query
+    # The token consumption is an atomic UPDATE; the route requires rowcount == 1.
+    db.execute.return_value = MagicMock(rowcount=1)
     return db
 
 
@@ -127,12 +188,23 @@ def _add_executor_auth(app, executor_id):
     app.add_middleware(_ExecutorAuth)
 
 
-def _create_test_app(ca_manager, db, auth_executor_id=None):
-    """Create a FastAPI app with executor routes and mock DB."""
+def _create_test_app(ca_manager, db, auth_executor_id=None, require_enrollment=False):
+    """Create a FastAPI app with executor routes and mock DB.
+
+    ``require_enrollment=True`` installs the SHIPPED-default config
+    (require_token=True) for the registration cells (#442 site 3, ruling A+); the
+    heartbeat/revocation callers leave it False and keep the app shape they have
+    always had.
+    """
     app = FastAPI()
     app.state.backend = MagicMock()
     app.state.backend.get_session.return_value = db
     app.state.ca_manager = ca_manager
+    if require_enrollment:
+        app.state.config = ServerConfig(
+            recovery_code_pepper=_ENROLLMENT_PEPPER,
+            executor_enrollment=ExecutorEnrollmentConfig(require_token=True),
+        )
     app.include_router(executors_routes.router, prefix="/api/v1")
     if auth_executor_id is not None:
         _add_executor_auth(app, auth_executor_id)
@@ -160,8 +232,8 @@ class TestMTLSHandshake:
         # (tls_client has mTLS cert but the TestClient doesn't do real TLS,
         #  so we use it just for HTTP; the real TLS validation happens via
         #  the httpx2.Client cert= parameter proving the cert/key are valid)
-        db = _make_mock_db()
-        app = _create_test_app(ca_manager, db)
+        db = _make_mock_db(enrollment_executor_id="test-executor")
+        app = _create_test_app(ca_manager, db, require_enrollment=True)
         test_client = TestClient(app)
 
         # Step 1: Executor generates a NEW keypair + CSR (not using the fixture's)
@@ -172,7 +244,7 @@ class TestMTLSHandshake:
         csr_pem_str = csr_pem.decode() if isinstance(csr_pem, bytes) else csr_pem
         resp = test_client.post(
             "/api/v1/executors/register",
-            json={"executor_id": "test-executor", "csr_pem": csr_pem_str},
+            json={"executor_id": "test-executor", "csr_pem": csr_pem_str, "enrollment_token": _ENROLLMENT_TOKEN},
         )
         assert resp.status_code == 201
         data = resp.json()
