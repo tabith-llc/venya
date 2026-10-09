@@ -394,9 +394,21 @@ note stops at the question.
   needed: which is the product's promise -- boot-time abort, or first-use failure -- and which
   document carries it.
 - **OPEN 3 (the admin-key `NoEncryption()` delivery).** Several paths serialize private key
-  material with `serialization.NoEncryption()` -- `ca.py:94` and `ca.py:747` (server CA and admin
-  CA key material), `at_rest_key.py:87` (the CLI unwrap-to-plaintext path #538 sits on), the CLI
-  sites at `commands.py:2551`, `:2947`, `:3758`, `:3978`, and the executor daemon at
-  `daemon.py:565`, `:745`. Is unencrypted in-process/on-disk delivery of those keys an accepted
+  material with `serialization.NoEncryption()` -- `ca.py:966` (the server admin-CA key material),
+  `at_rest_key.py:87` (the CLI unwrap-to-plaintext path #538 sits on), the CLI sites at
+  `commands.py:1972` (`cmd_admin_cert_renew`, added by RF-8b), `commands.py:3092`
+  (`executor_register`), `commands.py:3488` (`executor_cert_renew`), `commands.py:4562`
+  (`cmd_admin_generate_admin_cert`), and the executor daemon at `daemon.py:711` (`register`) and
+  `daemon.py:891` (`rotate`). Is unencrypted in-process/on-disk delivery of those keys an accepted
   posture, a defect to be fixed in the #537/#538 legs, or in scope for this protected-buffer
   contract? This note does not extend the contract to them.
+  **Pin refresh (2026-10-09, AC4 of issue #547, re-derived at dev `262527d`) — cite these by SYMBOL,
+  the line numbers above are a snapshot of that one tree and they have moved twice already.** Two
+  changes since the original enumeration: the `cmd_admin_init_admin_ca` no-passphrase branch is NO
+  LONGER one of these sites (it now refuses before any filesystem work, per the owner's ruling
+  "match server. no passphrase? then no key"), and `cmd_admin_cert_renew` ADDED one. The count is
+  therefore still eight. The renew site matches the documented posture of its neighbours and of the
+  installer's own `admin.key` (`0600` inside `0700`, passphrase-free at rest by design, because the
+  operator's login session -- not the file -- is the second factor for an admin leaf), so it is
+  listed rather than ruled; whether ANY of the eight should move onto the protected-buffer path
+  remains the open question above and is the owner's to answer.
