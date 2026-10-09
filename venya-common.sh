@@ -625,14 +625,23 @@ venya_create_directories() {
 # Validate a bare IPv4 address: exactly four dot-separated numeric octets.
 # Digits-and-dots input with an out-of-range octet fails here (loud) rather
 # than masquerading as an inert hostname entry later.
+# #491: the split reads into an array with a quoted expansion, so a field can
+# never be word-split or pathname-expanded against the working directory — the
+# verdict for one string is the same in every directory. The alphabet guard is
+# what keeps `read` (which stops at the first line) from accepting a multi-line
+# value that the old word-split loop rejected.
 _venya_valid_ipv4() {
     local ip="$1" o count=0
-    local IFS=.
+    local -a octets=()
+    case "$ip" in
+        *[!0-9.]*) return 1 ;;
+    esac
     case "$ip" in
         *.*.*.*) ;;
         *) return 1 ;;
     esac
-    for o in $ip; do
+    IFS=. read -r -a octets <<< "$ip"
+    for o in "${octets[@]}"; do
         count=$((count + 1))
         case "$o" in
             ''|*[!0-9]*) return 1 ;;
