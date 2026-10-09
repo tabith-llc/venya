@@ -298,9 +298,17 @@ class TestDirectDispatch:
         assert "admin cert subcommand required" in capsys.readouterr().err
 
     def test_unknown_cert_subcommand_names_what_exists(self, capsys):
+        """RF-8b updated this cell honestly.
+
+        It used to pass `renew` as the unknown name, because that was the one
+        subcommand that genuinely did not exist. `renew` landed with RF-8b, so the
+        negative half now uses a name that is really absent — the point of the cell
+        is the unknown-subcommand branch, not a placeholder that rotted.
+        """
         from venya_cli.commands import cmd_admin_cert
 
-        assert cmd_admin_cert(MagicMock(), SimpleNamespace(admin_cert_command="renew")) == 1
+        assert cmd_admin_cert(MagicMock(), SimpleNamespace(admin_cert_command="rotate")) == 1
         err = capsys.readouterr().err
+        assert "rotate" in err
         assert "status" in err
-        assert "RF-8b" in err
+        assert "renew" in err

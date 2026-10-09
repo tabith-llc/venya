@@ -421,6 +421,13 @@ class APIClient:
         # unify into one ssl.SSLContext handed over as verify=.
         self._admin_certfile = cert_path if (cert_path and key_path) else None
         self._admin_keyfile = key_path if (cert_path and key_path) else None
+        # RF-8b: the ONE narrow, default-OFF escape from presenting the admin client
+        # credential. `admin cert renew` flips this (see `use_session_only_transport`)
+        # because the mint route is session-shaped by ruling — RF-6 §2.2 makes the
+        # caller's existing admin certificate "not an option", and the middleware
+        # fails an out-of-window forwarded cert CLOSED, so the old leaf is not a
+        # credential that request wants. Nothing else in the CLI ever sets it.
+        self._session_only_dial = False
         self._http_kwargs: dict[str, Any] = http_kwargs
         # #530: the transport is built on the FIRST DIAL, not here. Two reasons,
         # both load-bearing: (1) `run_command()` constructs an APIClient for
@@ -492,21 +499,30 @@ class APIClient:
                         detail="this transport carries your bearer token, secrets and audit calls",
                     )
                 )
-            if self._admin_certfile:
+            # What this dial actually presents. The RF-8b session-only seam clears the
+            # pair here and ONLY here, so the expiry guard below is keyed on the
+            # credential in play rather than on the credential configured — a request
+            # that presents no certificate has no certificate to refuse.
+            presented_certfile = None if self._session_only_dial else self._admin_certfile
+            presented_keyfile = None if self._session_only_dial else self._admin_keyfile
+            if presented_certfile:
                 # Same deferred-import shape; only the ADMIN-pair dial is guarded,
-                # because only that certificate can die inside a work session.
+                # because only that certificate can die inside a work session. The
+                # escape for the one request class that must NOT carry the pair at all
+                # (the RF-8b mint) is `use_session_only_transport`, which arrives here
+                # with nothing to present — never by scoping or weakening this guard.
                 from .commands import admin_cert_expiry_refusal
 
                 refusal = admin_cert_expiry_refusal(
-                    self._admin_certfile,
+                    presented_certfile,
                     site="this admin request",
                 )
                 if refusal is not None:
                     raise APIClientError(refusal)
             verify = _build_ssl_context(
                 cafile=self._anchor,
-                certfile=self._admin_certfile,
-                keyfile=self._admin_keyfile,
+                certfile=presented_certfile,
+                keyfile=presented_keyfile,
             )
             self.__http = httpx2.Client(**self._http_kwargs, verify=verify)
         return self.__http
@@ -515,6 +531,39 @@ class APIClient:
     def _http(self, value: httpx2.Client | None) -> None:
         """Set the transport — test seams inject a stub here; None forces a rebuild."""
         self.__http = value
+
+    def use_session_only_transport(self) -> None:
+        """Dial this client with the LOGIN SESSION only — no admin client credential.
+
+        RF-8b `venya admin cert renew`, and nothing else. The mint it drives
+        (`POST /api/v1/admin/certs/issue`) is session-shaped by ruling: RF-6 §2.2
+        says authorizing issuance with the caller's existing admin certificate is
+        "not an option", `routes/admin_certs.py::_require_human_session` refuses a
+        certificate-shaped caller 403, and the middleware's own cert check
+        (`middleware/auth.py::_verify_forwarded_cert`) fails a certificate outside
+        its validity window CLOSED. So a renewal whose old certificate already
+        lapsed must not put that dead leaf on the wire — and it must not be refused
+        by the RF-8a dial guard that exists to stop a dead leaf being used as a
+        credential. Presenting nothing is the honest answer to both.
+
+        What this does NOT do, stated plainly because the neighbours are security
+        load-bearing:
+          * it does not touch the server-TLS anchor. `_resolve_tls_anchor` and the
+            anchored-or-refuse rule (#530/#533/#536) run exactly as before; there
+            is no `verify=False`, no `SSL_CERT_FILE` fallback, no new TLS knob.
+          * it does not weaken the RF-8a expiry guard or scope it by request path.
+            The guard is keyed on presenting a certificate; with none presented it
+            simply has nothing to check.
+          * it is DEFAULT OFF. No other command path reads this flag, so every
+            existing transport is built byte-identically (there is a cell for that
+            in tests/test_cli_admin_cert_renew_rf8b.py).
+
+        Clearing the staged transport is the point: an earlier request in the same
+        process (the `/health` version advisory) may already have built a context
+        that DOES carry the pair, and the bearer-only mint must not ride it.
+        """
+        self._session_only_dial = True
+        self.__http = None  # force the next dial to rebuild without the pair
 
     def _get_headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         """Get request headers including auth token."""

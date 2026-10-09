@@ -255,6 +255,28 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
         ),
         (["admin", "cert", "status", "--cert-path", "/opt/venya/admin/admin.crt"], "explicit certificate path"),
     ],
+    ("admin", "cert", "renew"): [
+        (
+            ["admin", "cert", "renew"],
+            "mint a fresh short-lived admin certificate at the configured pair (login session + security-key ceremony)",
+        ),
+        (
+            [
+                "admin",
+                "cert",
+                "renew",
+                "--cert-path",
+                "/opt/venya/admin/admin.crt",
+                "--key-path",
+                "/opt/venya/admin/admin.key",
+            ],
+            "name both output paths explicitly",
+        ),
+        (
+            ["admin", "cert", "renew", "--server-url", "https://core.example.com", "--user-id", "jsmith"],
+            "dial a named core and authenticate as a named user for the session",
+        ),
+    ],
     ("role", "create"): [
         (["role", "create", "app"], "read-only role (default tier)"),
         (

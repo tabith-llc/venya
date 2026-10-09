@@ -264,10 +264,14 @@ EXPECTED_SUBCOMMAND_COUNTS: dict[tuple[str, ...], int] = {
     # admin 25→26: `admin cert` group added by feature/rf8-cert-status-expiry-refusal
     # (RF-8a — deliberate interlock update, cli-reference regenerated in the same
     # commit; the leaf is `admin cert status`, read-local, no network).
+    # (`admin cert renew`, RF-8b) rides the level BELOW, so this count stays 26 — see
+    # the ("admin", "cert") entry.
     ("admin",): 26,
     ("admin", "key-version"): 5,
-    # New nesting level: only `status` today (`renew` is RF-8b, `cert` rebuild RF-8c).
-    ("admin", "cert"): 1,
+    # New nesting level: RF-8a shipped `status`; RF-8b added `renew` (the mint a
+    # session + elevation ceremony drives), so this level is 1 -> 2 — deliberate
+    # interlock update, cli-reference regenerated in the same commit.
+    ("admin", "cert"): 2,
     ("role",): 7,
     # exec 5→6: `exec list` added by feature/version-surfaces (ruling
     # condition 6 — deliberate interlock update, cli-reference regenerated
