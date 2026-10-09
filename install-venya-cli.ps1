@@ -248,7 +248,10 @@ Possible MITM or corrupted download. Aborting.
     $verified = 0
     $notChecked = 0
     $enumErr = @()
-    Get-ChildItem $Base -Recurse -Force -File -ErrorAction SilentlyContinue -ErrorVariable enumErr | ForEach-Object {
+    # -LiteralPath, not the positional -Path: -Path parses wildcards, so an
+    # install directory containing brackets matches nothing and this gate then
+    # counts zero files and reports a pass (#493).
+    Get-ChildItem -LiteralPath $Base -Recurse -Force -File -ErrorAction SilentlyContinue -ErrorVariable enumErr | ForEach-Object {
         try {
             $a = Get-Acl -LiteralPath $_.FullName -ErrorAction Stop
             if ($a.AreAccessRulesProtected) { $protected++ }
@@ -260,6 +263,12 @@ Possible MITM or corrupted download. Aborting.
     $notChecked += @($enumErr).Count
     if ($protected -gt 0) {
         Fail "$protected file(s) under $Base carry a protected DACL and would be unreadable by standard users. Likely cause: --link-mode copy was dropped. Refusing to leave a broken install."
+    }
+    # Zero-enumeration guard (#493): a gate that read no file has verified
+    # nothing, so it must not read as a pass. An install that reached this step
+    # always has files under $Base; zero means the path was not enumerated.
+    if ($verified -eq 0 -and (Test-Path -LiteralPath $Base)) {
+        Fail "ACL check could not verify any file: 0 file(s) enumerated under an existing $Base, so this check proved nothing. Refusing to report a pass - report this message with the install directory."
     }
     if ($notChecked -gt 0) {
         Warn "ACL check INCOMPLETE: $notChecked item(s) could not be enumerated or read and were NOT checked; $verified file(s) verified with 0 protected DACLs."
