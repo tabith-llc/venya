@@ -396,7 +396,10 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     admin_ca_dir = Path(config.ca_dir) / "admin-ca"
     admin_ca_manager = AdminCAManager(admin_ca_dir, _admin_ca_security(config))
     if config.admin_mtls.enabled and not admin_ca_manager.has_ca:
-        raise RuntimeError("admin_mtls.enabled but admin CA not found at admin-ca/. " "Run: venya admin init-admin-ca")
+        raise RuntimeError(
+            "admin_mtls.enabled but admin CA not found at admin-ca/. "
+            "Set VENYA_ADMIN_CA_KEY_PASSPHRASE, then run: venya admin init-admin-ca"
+        )
     app.state.admin_ca_manager = admin_ca_manager  # type: ignore[attr-defined]
 
     # Load admin CA PEM bundle (supports rotation — multiple certs concatenated)

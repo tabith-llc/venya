@@ -290,7 +290,7 @@ Subcommands:
 - [`venya admin export-ca-key`](#venya-admin-export-ca-key) — Export the CA private key (encrypted with passphrase)
 - [`venya admin split-ca-key`](#venya-admin-split-ca-key) — Split CA key using Shamir's Secret Sharing
 - [`venya admin restore-ca-key`](#venya-admin-restore-ca-key) — Restore CA key from shares or encrypted backup
-- [`venya admin init-admin-ca`](#venya-admin-init-admin-ca) — Initialize the admin CA (create key/cert pair)
+- [`venya admin init-admin-ca`](#venya-admin-init-admin-ca) — Initialize the admin CA (create key/cert pair; requires VENYA_ADMIN_CA_KEY_PASSPHRASE)
 - [`venya admin generate-admin-cert`](#venya-admin-generate-admin-cert) — Sign an admin client certificate
 - [`venya admin revoke-admin-cert`](#venya-admin-revoke-admin-cert) — Revoke an admin certificate by serial number
 - [`venya admin reissue-recovery-code`](#venya-admin-reissue-recovery-code) — Reissue your own break-glass recovery code (session + elevation + admin mTLS)
@@ -786,7 +786,7 @@ venya admin restore-ca-key --mode backup --backup-file /secure/admin-ca.key.enc 
 
 ### `venya admin init-admin-ca`
 
-Initialize the admin CA (create key/cert pair)
+Initialize the admin CA (create key/cert pair; requires VENYA_ADMIN_CA_KEY_PASSPHRASE)
 
 ```
 venya admin init-admin-ca --output-dir OUTPUT_DIR
