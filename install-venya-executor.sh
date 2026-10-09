@@ -43,7 +43,18 @@ umask 077
 #   VENYA_CORE_IP          - Core IP for /etc/hosts resolution (no default —
 #                            required only when the core hostname resolves
 #                            neither via /etc/hosts nor DNS; explicit value
-#                            always wins over an existing hosts entry)
+#                            always wins over an existing hosts entry; STRICT
+#                            IPv4 — a value that is not four dot-separated
+#                            numeric octets aborts the install (#490))
+#   VENYA_HOSTS_FILE       - The hosts file this installer reads and updates
+#                            (default: /etc/hosts). Test/packaging seam for the
+#                            #490 core-entry cells; when SET it must name an
+#                            EXISTING writable regular file — a mistyped value
+#                            aborts the install rather than creating a file no
+#                            resolver reads. The entry is matched on the SECOND
+#                            whitespace field (the name), and a file with no
+#                            trailing newline gains exactly one newline in total
+#                            on append — the row is never concatenated.
 #   VENYA_VENYA_CA_FILE    - Path to pre-copied Venya CA cert (offline/air-gapped deployments)
 #   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
 #                                    (REQUIRED on a fresh install — no executor
@@ -341,41 +352,95 @@ CORE_HOSTNAME="${VENYA_CORE_HOSTNAME:-$(printf '%s' "$SERVER_URL" | sed -E 's#^[
 # the relay CN + a /etc/hosts entry).
 venya_guard_injection "CORE_HOSTNAME" "$CORE_HOSTNAME" '"' '\' ' '
 
-# Ensure the core hostname is resolvable in /etc/hosts (skip IP hosts: an IP
+# Ensure the core hostname is resolvable in the hosts file (skip IP hosts: an IP
 # needs no resolution, and writing an IP "name" would misroute).
+# VENYA_HOSTS_FILE (#490, test seam) names the file; the default is /etc/hosts.
+HOSTS_FILE="${VENYA_HOSTS_FILE:-/etc/hosts}"
 # Resolution precedence (fail-closed — no hardcoded default IP; guessing one
 # silently misroutes TLS to the wrong core, see ticket
 # executor-installer-core-ip-misroute):
-#   1. Explicit VENYA_CORE_IP wins: add/update the /etc/hosts entry to it.
-#   2. No explicit IP + existing /etc/hosts entry: KEEP the provisioned entry
+#   1. Explicit VENYA_CORE_IP wins: add/update the hosts entry to it. An
+#      explicit value must be a bare IPv4 — #490 refuses anything else here,
+#      before any read or write, rather than interpolating it into the file.
+#   2. No explicit IP + existing hosts entry: KEEP the provisioned entry
 #      (provisioning owns /etc/hosts; the old code overwrote a correct entry
 #      with a hardcoded default — the 2026-09-15 exec-3 clobber variant).
 #   3. No explicit IP + no entry: accept DNS resolution if it works.
 #   4. Nothing resolves: abort with an actionable error (set VENYA_CORE_IP).
+# Entry matching is FIELD-BASED (#490): the hosts file has no syntax a hostname
+# can escape, so field 2 (the primary name) is compared as data, never as a
+# pattern. The old `grep " ${CORE_HOSTNAME}$"` / `sed -i "..."` pair read and
+# deleted through a regex built from an operator-supplied name — a `/` or a
+# sed delimiter in the value aborted the install, and a `.` or `*` matched
+# unrelated rows.
 if [[ "$CORE_HOSTNAME" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
-    info "VENYA_SERVER_URL host is an IP — no /etc/hosts entry needed"
+    info "VENYA_SERVER_URL host is an IP — no ${HOSTS_FILE} entry needed"
 else
-    # awk 'NR==1' reads all input before exiting — no head early-close, so no
-    # SIGPIPE→141→pipefail silent death in the duplicate-entry case this handles.
-    EXISTING_IP=$( (grep " ${CORE_HOSTNAME}$" /etc/hosts 2>/dev/null || true) | awk 'NR==1 {print $1}' )
+    # #490 addendum: an EXPLICITLY supplied VENYA_HOSTS_FILE must name an
+    # existing, writable regular file. Without this the seam recreates the
+    # silent-wrong-target class the ticket just closed: a mistyped path plus a
+    # VALID VENYA_CORE_IP would create that file, append the row to it, and
+    # continue as a successful install — the mapping lands in a file no resolver
+    # reads, and the real failure surfaces much later as a relay dial error. No
+    # create-if-missing path is offered: that would make the typo permanent. The
+    # guard is conditional on the variable being set, so the /etc/hosts default
+    # (present on every real host) is untouched. Ordered BEFORE the validator
+    # gate and before any read or write.
+    if [ -n "${VENYA_HOSTS_FILE:-}" ] && { [ ! -f "$HOSTS_FILE" ] || [ ! -w "$HOSTS_FILE" ]; }; then
+        error "VENYA_HOSTS_FILE is set to '$HOSTS_FILE', which is not an existing, writable regular file."
+        error "Point VENYA_HOSTS_FILE at the real hosts file (the default is /etc/hosts), or unset it. Nothing was written."
+        exit 1
+    fi
+    # #490: the validator is the whole gate. A string that passes strict IPv4
+    # validation carries no space, newline, ';' or metacharacter, so
+    # _venya_valid_ipv4 subsumes venya_guard_injection here (R3) — and an
+    # operator who SUPPLIES a bad value is refused, not coerced (R5).
+    if [ -n "${VENYA_CORE_IP:-}" ] && ! _venya_valid_ipv4 "$VENYA_CORE_IP"; then
+        error "VENYA_CORE_IP is not a bare IPv4 address (four dot-separated numeric octets, each 0-255): the supplied value carries characters a hosts entry cannot hold."
+        error "Fix it to the core's address (example: VENYA_CORE_IP=203.0.113.10), or unset it to use the provisioned ${HOSTS_FILE} entry or DNS. Nothing was written."
+        exit 1
+    fi
+    # Field-2 equality, first match only; `exit` stops awk, no pipe to close, so no
+    # SIGPIPE→141→pipefail silent death in the duplicate-entry case handled. A line
+    # whose first token starts with '#' is a hosts(5) comment, never a mapping, so a
+    # comment naming the hostname is not read as an entry and not deleted by the
+    # rewrite below (R2 byte-preservation).
+    EXISTING_IP=$(awk -v host="$CORE_HOSTNAME" 'substr($1, 1, 1) != "#" && $2 == host { print $1; exit }' "$HOSTS_FILE" 2>/dev/null || true)
     if [ -n "${VENYA_CORE_IP:-}" ]; then
         if [ -n "$EXISTING_IP" ] && [ "$EXISTING_IP" != "$VENYA_CORE_IP" ]; then
-            warn "Found ${CORE_HOSTNAME} in /etc/hosts with IP ${EXISTING_IP}; explicit VENYA_CORE_IP=${VENYA_CORE_IP} wins. Updating."
-            sed -i "/ ${CORE_HOSTNAME}$/d" /etc/hosts
-            echo "${VENYA_CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+            warn "Found ${CORE_HOSTNAME} in ${HOSTS_FILE} with IP ${EXISTING_IP}; explicit VENYA_CORE_IP=${VENYA_CORE_IP} wins. Updating."
+            # Line-level deletion of exact field-2 matches. Every other line —
+            # comments, aliases, the localhost row — is printed verbatim ($0 is
+            # not rebuilt, so its spacing is preserved), and the rewrite goes back
+            # through the target with `cat >` so its owner and mode survive. The
+            # comment test is the KEEP half here: a comment is kept by definition,
+            # only a non-comment line whose field 2 is the name is dropped.
+            HOSTS_TMP=$(mktemp)
+            awk -v host="$CORE_HOSTNAME" 'substr($1, 1, 1) == "#" || $2 != host' "$HOSTS_FILE" > "$HOSTS_TMP" 2>/dev/null
+            cat "$HOSTS_TMP" > "$HOSTS_FILE"
+            rm -f "$HOSTS_TMP"
+            printf '%s\n' "${VENYA_CORE_IP} ${CORE_HOSTNAME}" >> "$HOSTS_FILE"
         elif [ -z "$EXISTING_IP" ]; then
-            info "Adding ${CORE_HOSTNAME} (${VENYA_CORE_IP}) to /etc/hosts"
-            echo "${VENYA_CORE_IP} ${CORE_HOSTNAME}" >> /etc/hosts
+            info "Adding ${CORE_HOSTNAME} (${VENYA_CORE_IP}) to ${HOSTS_FILE}"
+            # The new row always starts on its own line: a hosts file whose last
+            # byte is not a newline is given the ONE newline it is missing first,
+            # so an append can never concatenate onto the incumbent row.
+            if [ -s "$HOSTS_FILE" ] && [ -n "$(tail -c 1 "$HOSTS_FILE")" ]; then
+                printf '\n' >> "$HOSTS_FILE"
+            fi
+            # `printf '%s\n'` so the write is a copy of the validated value, with
+            # no escape interpretation between validation and the file (R5).
+            printf '%s\n' "${VENYA_CORE_IP} ${CORE_HOSTNAME}" >> "$HOSTS_FILE"
         else
-            info "/etc/hosts entry for ${CORE_HOSTNAME} matches VENYA_CORE_IP (${VENYA_CORE_IP})"
+            info "${HOSTS_FILE} entry for ${CORE_HOSTNAME} matches VENYA_CORE_IP (${VENYA_CORE_IP})"
         fi
     elif [ -n "$EXISTING_IP" ]; then
-        info "Using provisioned /etc/hosts entry: ${CORE_HOSTNAME} -> ${EXISTING_IP} (set VENYA_CORE_IP to override)"
+        info "Using provisioned ${HOSTS_FILE} entry: ${CORE_HOSTNAME} -> ${EXISTING_IP} (set VENYA_CORE_IP to override)"
     elif RESOLVED_IP=$(getent hosts "$CORE_HOSTNAME" 2>/dev/null | awk '{print $1}' | head -1) && [ -n "$RESOLVED_IP" ]; then
-        info "Resolved ${CORE_HOSTNAME} -> ${RESOLVED_IP} via name service (no /etc/hosts entry needed)"
+        info "Resolved ${CORE_HOSTNAME} -> ${RESOLVED_IP} via name service (no ${HOSTS_FILE} entry needed)"
     else
-        error "Cannot resolve ${CORE_HOSTNAME}: no /etc/hosts entry, no DNS resolution, and VENYA_CORE_IP not set."
-        error "Set VENYA_CORE_IP=<core-ip> (or fix provisioning). Refusing to guess a default IP — a wrong guess silently misroutes mTLS/CA fetches to another host."
+        error "Cannot resolve ${CORE_HOSTNAME}: no ${HOSTS_FILE} entry, no DNS resolution, and VENYA_CORE_IP not set."
+        error "Set VENYA_CORE_IP=<core-ip> (a bare IPv4; or fix provisioning). Refusing to guess a default IP — a wrong guess silently misroutes mTLS/CA fetches to another host."
         exit 1
     fi
 fi
@@ -473,7 +538,7 @@ else
     warn "CONTRACT: the ID is the relay dial hostname + client-cert SAN — it must resolve FROM EVERY CORE,"
     warn "or the core rejects registration (400) and relay calls cannot dial this executor."
     warn "A rejected attempt does NOT burn the enrollment token — retry is free."
-    warn "Remedy — on EACH core host: echo \"<executor-ip> $EXECUTOR_ID\" >> /etc/hosts  (or add a DNS record)"
+    warn "Remedy — on EACH core host: add one '<executor-ip> $EXECUTOR_ID' line to /etc/hosts — address first, the name as the SECOND field (the shape this installer writes and matches; #490) — or add a DNS record"
 fi
 
 # --- Register mTLS certificate (if enrollment token provided) ---
@@ -544,13 +609,13 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
                 error "CLASS: executor-id NOT RESOLVABLE from the core. The ID is the relay dial"
                 error "  hostname + cert SAN — every core must resolve it. The rejected attempt did"
                 error "  NOT burn the enrollment token (the check precedes the token gate)."
-                error "Remedy — on EACH core host: echo \"<executor-ip> $EXECUTOR_ID\" >> /etc/hosts  (or DNS record)"
+                error "Remedy — on EACH core host: add one '<executor-ip> $EXECUTOR_ID' line to /etc/hosts — address first, name as the SECOND field (#490 shape) — or a DNS record"
                 error "Then re-run this installer (or just the registration) with the SAME token."
             else
                 error "Check that VENYA_EXECUTOR_ENROLLMENT_TOKEN is valid (server detail above names the"
                 error "  class: invalid / revoked / consumed / bound to a different executor_id), that the"
                 error "  core is reachable, and that every core can resolve '$EXECUTOR_ID' (relay dial"
-                error "  hostname + cert SAN — remedy: echo \"<executor-ip> $EXECUTOR_ID\" >> /etc/hosts on each core)."
+                error "  hostname + cert SAN — remedy: one '<executor-ip> $EXECUTOR_ID' line per core in its /etc/hosts, address first and the name as the SECOND field (#490 shape))."
             fi
             exit 1
         fi
@@ -824,7 +889,7 @@ echo ""
 echo "Executor ID contract:"
 echo "  '$EXECUTOR_ID' is the relay dial hostname + client-cert SAN — EVERY core"
 echo "  must resolve it (DNS or core-side /etc/hosts:"
-echo "  echo \"<executor-ip> $EXECUTOR_ID\" >> /etc/hosts)."
+echo "  one '<executor-ip> $EXECUTOR_ID' line — address first, the name as the SECOND field, which is how this installer matches entries (#490))."
 echo ""
 echo "==============================================================="
 echo "  RELAY WIRING (CN match contract)"
