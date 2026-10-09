@@ -221,7 +221,10 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
         ),
     ],
     ("admin", "init-admin-ca"): [
-        (["admin", "init-admin-ca", "--output-dir", "/var/lib/venya/ca/admin-ca"], "create the admin CA key/cert pair"),
+        (
+            ["admin", "init-admin-ca", "--output-dir", "/var/lib/venya/ca/admin-ca"],
+            "create the admin CA key/cert pair (VENYA_ADMIN_CA_KEY_PASSPHRASE must be set; #547)",
+        ),
     ],
     ("admin", "generate-admin-cert"): [
         (
