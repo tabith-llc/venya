@@ -29,10 +29,17 @@ from venya_cli.commands import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
+# #547: the CLI now refuses a passphrase-less `init-admin-ca` (owner ruling "match
+# server. no passphrase? then no key."). These cells exercise the WRITE path, so they
+# supply the mandatory passphrase; the refusal itself is covered in
+# test_cli_admin_ca_no_passphrase_refusal_547.py.
+ADMIN_CA_PASSPHRASE = "test_passphrase"
+
 
 @pytest.fixture
-def admin_ca_dir(tmp_path):
-    """Create a temporary admin CA directory."""
+def admin_ca_dir(tmp_path, monkeypatch):
+    """Create a temporary admin CA directory (with the #547 passphrase available)."""
+    monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", ADMIN_CA_PASSPHRASE)
     d = tmp_path / "admin-ca"
     d.mkdir()
     return str(d)
@@ -41,6 +48,9 @@ def admin_ca_dir(tmp_path):
 @pytest.fixture
 def admin_ca_initialized(admin_ca_dir):
     """Initialize an admin CA and return the directory path."""
+    # Literal kept as-is: this line is a recorded entry in .detect-secrets-baseline,
+    # and removing the literal would vanish a detection (#546 guard). Value is the
+    # dev-only test passphrase.
     os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "test_passphrase"
     args = type("Args", (), {"output_dir": admin_ca_dir})()
     result = cmd_admin_init_admin_ca(args)
@@ -65,6 +75,8 @@ class TestInitAdminCa:
         assert result == 0
         assert Path(admin_ca_dir, "admin-ca.key").exists()
         assert Path(admin_ca_dir, "admin-ca.crt").exists()
+        # #547: the key the passphrase-SET path writes is encrypted, never plaintext.
+        assert b"ENCRYPTED" in Path(admin_ca_dir, "admin-ca.key").read_bytes()
         assert oct(Path(admin_ca_dir).stat().st_mode)[-3:] == "700"
         assert oct(Path(admin_ca_dir, "admin-ca.key").stat().st_mode)[-3:] == "600"
         assert oct(Path(admin_ca_dir, "admin-ca.crt").stat().st_mode)[-3:] == "644"
@@ -72,7 +84,7 @@ class TestInitAdminCa:
     def test_init_admin_ca_fails_when_exists(self, admin_ca_dir):
         """init-admin-ca should fail if CA already exists."""
         args1 = type("Args", (), {"output_dir": admin_ca_dir})()
-        cmd_admin_init_admin_ca(args1)
+        assert cmd_admin_init_admin_ca(args1) == 0  # #547: guard must be reached, not the refusal
 
         args2 = type("Args", (), {"output_dir": admin_ca_dir})()
         result = cmd_admin_init_admin_ca(args2)
@@ -242,7 +254,9 @@ class TestSecretFileCreationModes:
     pattern — no post-write chmod) and fresh output dirs land 0700."""
 
     def test_init_admin_ca_key_and_dir_modes_at_creation(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
+        # #547: was delenv (the plaintext path); the mode contract is about the WRITE,
+        # which now requires a passphrase.
+        monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", ADMIN_CA_PASSPHRASE)
         out = tmp_path / "newca"
         args = type("Args", (), {"output_dir": str(out)})()
         old = os.umask(0o022)
@@ -303,7 +317,7 @@ class TestSecretFileCreationModes:
     def test_init_admin_ca_tightens_preexisting_0755_dir(self, tmp_path, monkeypatch):
         """#317 fold-in: init into a pre-existing loose dir lands it at 0700
         (replaces the old unconditional post-mkdir chmod)."""
-        monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
+        monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", ADMIN_CA_PASSPHRASE)  # #547 (was delenv)
         out = tmp_path / "preexisting"
         out.mkdir()
         out.chmod(0o755)

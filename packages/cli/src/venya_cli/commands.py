@@ -4001,11 +4001,41 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
 # --- Admin CA Management Commands ---
 
 
+def _admin_ca_no_passphrase_refusal() -> str:
+    """#547: refusal text for a passphrase-less ``venya admin init-admin-ca``.
+
+    Shape copied from the shipped server rule (``server/ca.py``
+    ``_unencrypted_key_refusal``, #537) — REFUSED / why it matters / numbered fix /
+    "nothing was modified" / doc reference. Two facts are corrected for this caller:
+    the key at stake is the ADMIN CA key written by the workstation CLI, and the CLI
+    reads its OWN process environment, so step 1 names that environment first and
+    mentions the installed core's env file only as where the same value already sits.
+    """
+    return (
+        "REFUSED: the Venya admin CA key must never be stored unencrypted. Nothing was written.\n"
+        "Why it matters: anyone who can read an unencrypted admin CA key can mint admin\n"
+        "certificates that every Venya deployment trusts.\n"
+        "To fix it:\n"
+        "  1. Set VENYA_ADMIN_CA_KEY_PASSPHRASE in the environment of this command before you\n"
+        "     run it. On an installed core the same value is already stored as\n"
+        "     VENYA_ADMIN_CA_KEY_PASSPHRASE=... in /etc/venya/venya-core.env.\n"
+        "  2. If this machine was set up with the Venya installer, re-running the installer reuses that\n"
+        "     value and PRESERVES your existing admin CA key - it is not replaced.\n"
+        "  3. Provide the passphrase through the environment, never as a command-line argument\n"
+        "     (command-line values are visible to other processes on the machine).\n"
+        "Nothing was created by this refusal: no directory, no key, no certificate.\n"
+        "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md (CA file locations and rotation)."
+    )
+
+
 def cmd_admin_init_admin_ca(args: Any) -> int:
     """Initialize the admin CA (create key/cert pair locally).
 
-    Creates a new ECDSA P-256 keypair and self-signed admin CA certificate.
-    If VENYA_ADMIN_CA_KEY_PASSPHRASE is set, the key is encrypted on disk.
+    Creates a new ECDSA P-256 keypair and self-signed admin CA certificate. The key
+    is always written encrypted with the passphrase from VENYA_ADMIN_CA_KEY_PASSPHRASE.
+    If that variable is unset or empty, the command refuses before touching the
+    filesystem — no directory, no key, no certificate — and exits non-zero (#547,
+    matching the server rule in ``server/ca.py``, #537).
     """
     import os
     from datetime import datetime, timedelta
@@ -4020,6 +4050,15 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
     )
     from cryptography.x509.oid import NameOID
 
+    # #547: refuse before ANY filesystem work — the server rule does exactly this
+    # (``server/ca.py`` ``initialize()``, "#537: refuse before ANY filesystem work").
+    # An empty value counts as unset, the same treatment the old encryption branch gave
+    # it (`passphrase.encode() if passphrase else None`).
+    passphrase = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
+    if not passphrase:
+        print(_admin_ca_no_passphrase_refusal(), file=sys.stderr)
+        return 1
+
     output_dir = Path(args.output_dir)
 
     if output_dir.exists() and (output_dir / "admin-ca.key").exists():
@@ -4030,22 +4069,13 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
         # Generate ECDSA P-256 keypair
         private_key = ec.generate_private_key(ec.SECP256R1())
 
-        # Load passphrase for encryption
-        passphrase = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
-        passphrase_bytes = passphrase.encode("utf-8") if passphrase else None
-
-        if passphrase_bytes:
-            key_pem = private_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=PrivateFormat.PKCS8,
-                encryption_algorithm=BestAvailableEncryption(passphrase_bytes),
-            )
-        else:
-            key_pem = private_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
+        # Serialize the key — always encrypted; the guard at the top of this handler
+        # refuses the passphrase-less case before any work is done (#547).
+        key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=PrivateFormat.PKCS8,
+            encryption_algorithm=BestAvailableEncryption(passphrase.encode("utf-8")),
+        )
 
         # Create directory
         output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)

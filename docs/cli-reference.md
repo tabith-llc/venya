@@ -798,7 +798,7 @@ venya admin init-admin-ca --output-dir OUTPUT_DIR
 **Examples**
 
 ```bash
-venya admin init-admin-ca --output-dir /var/lib/venya/ca/admin-ca  # create the admin CA key/cert pair
+venya admin init-admin-ca --output-dir /var/lib/venya/ca/admin-ca  # create the admin CA key/cert pair (VENYA_ADMIN_CA_KEY_PASSPHRASE must be set; #547)
 ```
 
 ### `venya admin generate-admin-cert`
