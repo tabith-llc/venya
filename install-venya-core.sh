@@ -1143,9 +1143,22 @@ echo "==============================================================="
 echo ""
 
 # Start Nginx
+# Ticket #454: the restart result used to be discarded and the success line
+# printed anyway, so a core install could announce a reverse proxy that is
+# not running. The restart rc and the unit state are now PROVED before the
+# claim, and a failure shows the config test then exits non-zero.
+# The is-active idiom is copied from venya-common.sh (venya_service_retry at
+# :846 and venya_service_sync at :898); the `nginx -t` call shape already
+# exists at uninstall-venya-core.sh:82.
 info "Starting Nginx..."
 systemctl enable nginx > /dev/null 2>&1
-systemctl restart nginx > /dev/null 2>&1 || true
+NGINX_RESTART_RC=0
+systemctl restart nginx || NGINX_RESTART_RC=$?
+if [ "$NGINX_RESTART_RC" -ne 0 ] || ! systemctl is-active --quiet nginx.service 2>/dev/null; then
+    error "Nginx did not come up (restart rc=$NGINX_RESTART_RC, unit not active) — config test output:"
+    nginx -t 2>&1 || error "nginx -t also failed — see the config-test output above"
+    exit 1
+fi
 info "Nginx enabled and started"
 
 # --- Pre-upgrade database backup (ticket installer-upgrade-version-guard-and-backup) ---
