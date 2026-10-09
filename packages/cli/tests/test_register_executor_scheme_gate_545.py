@@ -25,6 +25,7 @@ Truth table, both halves:
 """
 
 import json
+import ssl
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -32,6 +33,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from venya_cli.api_client import APIClient, APIClientError
 from venya_cli.commands import _https_refusal
+
+# #536: this dial anchors OR refuses, so a registration POST that is expected to
+# go out needs a Venya trust anchor on the host. The anchor comes from
+# ``conftest.venya_tls_anchor_536`` (``monkeypatch.setenv`` per cell, overwriting
+# any ambient ``SSL_CERT_FILE``), never from this machine's shell or its /tmp.
+# Fixture-only — no assertion below changed to get it; the two #536 re-pins in
+# TestRegisterStillWorks change the SHAPE they assert and keep their own subject.
+pytestmark = pytest.mark.usefixtures("venya_tls_anchor_536")
 
 TICKET = "api-client-register-executor-raw-dial-missing-scheme-gate"
 SITE = "the executor registration POST"
@@ -222,7 +231,17 @@ class TestKnobDoesNotReopenPlaintext:
 
 
 class TestRegisterStillWorks:
-    def test_https_arg_still_registers(self, monkeypatch):
+    def test_https_arg_still_registers(self, monkeypatch, venya_tls_anchor_536):
+        """Paired positive after #536: the https register still goes out, and it
+        goes out ANCHORED.
+
+        This cell used to pin ``built == [{"verify": True, ...}]`` — the bare bool
+        that meant "ask OpenSSL for the workstation host store" on the POST
+        carrying the CSR and the enrollment token. #536 removed that branch, so the
+        pin moved to the new contract: exactly one transport, the fixed 30 s, and a
+        context whose ONLY trust material is the Venya anchor. A reintroduced
+        host-store path fails on both halves below.
+        """
         monkeypatch.delenv("VENYA_TLS_VERIFY", raising=False)
         client = _client_with_config(None)
         cls, built = _mock_client_cls(PAYLOAD)
@@ -231,12 +250,26 @@ class TestRegisterStillWorks:
             result = client.register_executor("test-1", "CSR_PEM", server_url="https://core-1")
 
         assert result == PAYLOAD
-        assert built == [{"verify": True, "timeout": 30}]
+        assert len(built) == 1
+        verify = built[0]["verify"]
+        assert isinstance(verify, ssl.SSLContext), "a bare bool verify= is the host store (#536)"
+        assert venya_tls_anchor_536.cns(verify) == {venya_tls_anchor_536.cn}
+        assert built[0]["timeout"] == 30
         assert cls.posted == [f"https://core-1{REGISTER_PATH}"]
 
-    def test_stored_https_fallback_still_registers(self, monkeypatch):
+        # The paired refusal, same cell: with no anchor this dial constructs NO
+        # transport at all — that is the half the old verify=True pin could not see.
+        refused = venya_tls_anchor_536.without_anchor()
+        with patch("venya_cli.api_client.httpx2.Client", MagicMock()) as NoClient:
+            with pytest.raises(APIClientError, match="no Venya TLS trust anchor"):
+                refused.register_executor("test-1", "CSR_PEM", server_url="https://core-1")
+            NoClient.assert_not_called()
+
+    def test_stored_https_fallback_still_registers(self, monkeypatch, venya_tls_anchor_536):
         """The same fallback the negative half exercises: with a STORED https
-        value and no argument, registration rides through untouched."""
+        value and no argument, registration rides through untouched — anchored
+        (#536 re-pin of the old ``verify=True`` pin), and refused with no anchor.
+        """
         monkeypatch.delenv("VENYA_TLS_VERIFY", raising=False)
         client = _client_with_config("https://core.example.com")
         cls, built = _mock_client_cls(PAYLOAD)
@@ -245,8 +278,18 @@ class TestRegisterStillWorks:
             result = client.register_executor("test-1", "CSR_PEM")
 
         assert result == PAYLOAD
-        assert built == [{"verify": True, "timeout": 30}]
+        assert len(built) == 1
+        verify = built[0]["verify"]
+        assert isinstance(verify, ssl.SSLContext), "a bare bool verify= is the host store (#536)"
+        assert venya_tls_anchor_536.cns(verify) == {venya_tls_anchor_536.cn}
+        assert built[0]["timeout"] == 30
         assert cls.posted == [f"https://core.example.com{REGISTER_PATH}"]
+
+        refused = venya_tls_anchor_536.without_anchor(server_url="https://stored.example.com")
+        with patch("venya_cli.api_client.httpx2.Client", MagicMock()) as NoClient:
+            with pytest.raises(APIClientError, match="no Venya TLS trust anchor"):
+                refused.register_executor("test-1", "CSR_PEM")
+            NoClient.assert_not_called()
 
     def test_ca_bundle_verify_precedence_unchanged(self, monkeypatch):
         """#508 ordering pin, positive side: tls_verify AND ca_bundle ⇒ the

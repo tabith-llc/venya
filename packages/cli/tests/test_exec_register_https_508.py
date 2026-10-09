@@ -38,6 +38,15 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from venya_cli.api_client import APIClient
 
+# #536: the registration dial now anchors OR refuses instead of handing the CSR
+# POST to the workstation host store, so the 3 cells here that expect registration
+# to succeed need a Venya trust anchor present. Per cell from
+# ``conftest.venya_tls_anchor_536`` (``monkeypatch.setenv``, overwriting any
+# ambient ``SSL_CERT_FILE``). Fixture-only — no assertion in this file changed to
+# get it, and the scheme-refusal cells are unaffected because that gate still
+# fires before the trust question.
+pytestmark = pytest.mark.usefixtures("venya_tls_anchor_536")
+
 # ---------------------------------------------------------------------------
 # Helpers (house shapes from test_executor_register.py)
 # ---------------------------------------------------------------------------
