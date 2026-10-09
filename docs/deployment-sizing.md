@@ -41,7 +41,7 @@ Single executor, warm agent template, serial path:
 | Warm-command latency (end-to-end, n=25) | mean **7.2 s**, median 7.4 s, p95 7.8 s (stdev 0.54 s) |
 | Sustained throughput (serial, one executor) | **8.3 commands/min** |
 | Queue delay (concurrent clients → one executor) | ≈ (position − 1) × 7.2 s; the **300 s relay budget is reached at ~41 queued commands** |
-| Executor RAM | idle ~620 MB; **~527 MB per active sandbox (serial)**; serial floor ~1.2 GB |
+| Executor RAM | idle ~620 MB; **~527 MB per active sandbox**; serial floor ~1.2 GB |
 | Executor disk (post-install, warm template) | **7.0 GB used** (≈ 3.7 GB is the warm sandbox template) |
 | Per-command steady-state disk growth | ~0 (zero-leak verified: sandboxes, workspaces, and secret files all cleaned up after each run) |
 | Audit growth | **~1.6 KB per command** (2 audit events each) |
@@ -89,26 +89,23 @@ new enrollment token. No code changes required.
 | Role | CPU / RAM | Disk | Notes |
 |------|-----------|------|-------|
 | Core server | 2 vCPU / 4–8 GB | 10 GB class | nginx + PostgreSQL + core service |
-| Executor | 2 vCPU / 5 GB | 60 GB provisioned; ~7 GB used post-install (warm template ~3.7 GB) | needs `/dev/kvm`; ~1.2 GB RAM floor measured on the serial path (one active sandbox); RAM for several concurrent sandboxes is **not measured** at this size |
+| Executor | 2 vCPU / 5 GB | 60 GB provisioned; ~7 GB used post-install (warm template ~3.7 GB) | needs `/dev/kvm`; ~1.2 GB RAM floor measured on the serial path (one active sandbox); concurrent-sandbox RAM on this shape is **unmeasured beyond 2** |
 
 Both: Ubuntu 24.04 LTS. The "5–8 GB RAM" sizing figure is **headroom**, not a
 floor — the measured serial floor is ~1.2 GB per executor (OS + services + one
 ~527 MB sandbox); the extra room covers OS overhead and safety margin.
 
 Every figure above is a **serial** measurement — one active sandbox per executor
-at a time. How much RAM several concurrent sandboxes need on a 5 GB executor is
-**not measured**, so nothing in this table should be read as a concurrency
-budget. The one spike that exercised concurrency (RF-1, 2026-10-09, #567) found
-both halves: three concurrent sandboxes ran a 5 GB executor guest out of memory
-(the guest's own out-of-memory handling ended the sandbox daemon), while three
-and four concurrent each ran clean on a 16 GiB test guest (peak 5,134 MiB used at
-three). That passing guest is larger than the executor row above, and those runs
-were made on tree `6cf0bb16` with `sbx` v0.46.0 — so the figures describe the
-probe, not a shipped deployment, and they set no sizing here.
-
-This guide publishes no concurrency capacity. A published number belongs to the
-benchmark that measures it — #186 (its duplicate #124) — and capacity publication
-stays with RF-5.
+at a time — and each carries that method basis where it appears. Concurrency on
+the shipped 5 GB executor shape is **unmeasured beyond 2**. The one spike that
+probed it (RF-1, 2026-10-09, #567) ran three concurrent sandboxes on a 5 GB
+executor guest and ran that guest out of memory, which ended the sandbox daemon;
+the same three- and four-sandbox runs completed cleanly on a larger test guest.
+That guest is a probe condition above every shape this product ships, not a
+deployment recommendation, and a clean pass on it says nothing about the 5 GB row
+above. So this guide publishes **no** concurrency capacity: a published number
+belongs to the benchmark that measures it — #186 (its duplicate #124) — and
+capacity publication stays with RF-5.
 
 ## Reference deployment
 
