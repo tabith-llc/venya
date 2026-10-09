@@ -23,6 +23,11 @@ repos:
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".detect-secrets-baseline", "--exclude-files", "target/", "--exclude-files", "\\.detect-secrets-baseline$"]
+        # Refs #550: count this baseline by JSON parsing, never by grepping it — the
+        # scan's is_baseline_file filter records the baseline's own filename inside
+        # filters_used, so the document references itself and a document-wide
+        # "filename" token grep over-counts by one. The read-only method lives in
+        # scripts/detect_secrets_baseline_stats.py.
 
   - repo: local
     hooks:

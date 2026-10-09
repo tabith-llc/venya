@@ -35,6 +35,20 @@ stage the message file still holds the PREVIOUS commit's text; the commit-msg
 stage is where a declared removal is honoured. This file is the enforcement half
 (the hook chain is UX): a trailer can excuse the hook, it cannot excuse the
 committed-state cells above.
+
+## #550 — how to count this file (and how not to)
+
+The baseline is JSON whose top-level `results` object is keyed by scanned filename, so
+the file count is `len(json['results'])` and nothing else: 22 files / 44 findings /
+491 lines at dev `dbbf1dc`. Grepping the document over-counts, because the `filename`
+key appears twice over — once per recorded finding, and once in `filters_used`, where
+the `is_baseline_file` entry carries `"filename": ".detect-secrets-baseline"`: the
+baseline references ITSELF as filter configuration, not as a scanned file. So a
+line-count of the quoted key reads 45, unique filename strings read 23 (one too many),
+and an unquoted `filename:` grep reads 0. A lane that trusts one of those "discovers"
+drift that does not exist and may then regenerate a correct file — the anti-weakening
+failure this repo forbids. `scripts/detect_secrets_baseline_stats.py` is the read-only
+tool that prints each number with its method; the cells below keep it honest.
 """
 
 import importlib.util
@@ -42,6 +56,8 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BASELINE = REPO_ROOT / ".detect-secrets-baseline"
@@ -51,6 +67,11 @@ _GUARD_SCRIPT = REPO_ROOT / "scripts" / "detect_secrets_baseline_guard.py"
 _spec = importlib.util.spec_from_file_location("detect_secrets_baseline_guard", _GUARD_SCRIPT)
 guard = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(guard)
+
+_STATS_SCRIPT = REPO_ROOT / "scripts" / "detect_secrets_baseline_stats.py"
+_stats_spec = importlib.util.spec_from_file_location("detect_secrets_baseline_stats", _STATS_SCRIPT)
+stats = importlib.util.module_from_spec(_stats_spec)
+_stats_spec.loader.exec_module(stats)
 
 
 def _findings(scan_output: dict) -> set:
@@ -298,3 +319,49 @@ def test_hook_args_and_interlock_scan_agree(tmp_path):
         f"the config-driven scan path and the committed baseline disagree: "
         f"+{sorted(scanned - committed)} -{sorted(committed - scanned)}"
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# ## #550 — counting this file is a JSON question, not a grep question
+#
+# `results` is keyed by scanned filename, but the document ALSO carries a "filename" key once per
+# recorded finding and once inside `filters_used` (the is_baseline_file entry names the baseline
+# itself as filter configuration). So any method that tokenizes the document over-counts, a lane
+# that trusts the over-count "discovers" drift that does not exist, and the tempting remedy --
+# regenerate or hand-edit a correct baseline -- is exactly what the anti-weakening rule forbids.
+# Positive half: the helper's numbers equal the JSON-method numbers. Negative half: the naive
+# token count is provably not the file count, and the unquoted grep finds nothing at all.
+
+
+def test_baseline_stats_helper_matches_the_json_method():
+    """Positive half (#550 AC-3): files / findings / lines from the helper are the JSON counts."""
+    text = BASELINE.read_text(encoding="utf-8")
+    committed = json.loads(text)
+    assert stats.stats_of(text) == {
+        "files": len(committed["results"]),
+        "findings": sum(len(secrets) for secrets in committed["results"].values()),
+        "lines": text.count("\n"),
+    }
+    assert stats.main(["--baseline", str(BASELINE)]) == 0
+
+
+def test_baseline_filename_tokens_are_not_the_file_count():
+    """Negative half (#550): the document-wide `"filename"` count is the finding count plus the
+    self-reference -- never the file count -- and the unquoted `filename:` grep reads zero."""
+    text = BASELINE.read_text(encoding="utf-8")
+    committed = json.loads(text)
+    files = len(committed["results"])
+    findings = sum(len(secrets) for secrets in committed["results"].values())
+    assert text.count('"filename"') == findings + 1  # +1: is_baseline_file names the baseline
+    assert text.count('"filename"') != files
+    assert f'"filename": "{BASELINE.name}"' in text  # the self-reference, in filters_used
+    assert "filename:" not in text  # the key is quoted, so the bare grep reads 0
+
+
+def test_baseline_stats_helper_refuses_an_unreadable_document():
+    """Paired negative: a document with no `results` object, or no JSON at all, is an error, not
+    a zero. A guard that reports numbers it could not read is worse than no guard."""
+    for bad in ('{"version": "1.5.0"}', '{"results": []}', "not json at all"):
+        with pytest.raises((TypeError, ValueError)):
+            stats.stats_of(bad)
+    assert stats.main(["--baseline", "does-not-exist-baseline.json"]) == 1
