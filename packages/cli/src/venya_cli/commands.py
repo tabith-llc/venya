@@ -176,7 +176,19 @@ def run_command(args: Any) -> int:
     # FIDO2/token, matching the server, which 401s cert-only callers on
     # require_role routes.
     command = args.command
-    admin_mtls_exempt = command == "admin" and getattr(client, "has_admin_mtls", False)
+    # RF-8b: `admin cert renew` is the one admin command that must NOT be waved
+    # through on the admin certificate — the mint it calls refuses a
+    # certificate-shaped caller (RF-6 §2.2; routes/admin_certs.py::_require_human_session),
+    # so the exemption is narrowed for this subcommand only and the existing
+    # authenticate-with-security-key branch below establishes the session bearer the
+    # route requires. Every other `admin` command keeps the headless exemption
+    # byte-identically.
+    admin_cert_renew = (
+        command == "admin"
+        and getattr(args, "admin_command", None) == "cert"
+        and getattr(args, "admin_cert_command", None) == "renew"
+    )
+    admin_mtls_exempt = command == "admin" and getattr(client, "has_admin_mtls", False) and not admin_cert_renew
     if admin_mtls_exempt and not client.config.access_token:
         print("Using admin mTLS certificate (VENYA_ADMIN_CERT) for authentication.")
     elif (
@@ -1566,32 +1578,15 @@ def _require_https_server_url(server_url: str, *, site: str, ticket: str, detail
 # variants that would rot apart.
 
 
-def _parse_admin_cert(cert_path: str) -> dict[str, Any] | None:
-    """Parse the admin certificate at `cert_path` and return its lifetime metadata.
+def _admin_cert_info(cert: x509.Certificate) -> dict[str, Any]:
+    """The lifetime/identity readout of a parsed admin certificate.
 
-    Mirrors the shape of `_parse_executor_cert` (read-local, parse, report) with
-    MINUTES replacing DAYS: the short-lived admin cert can live about an hour, so a
-    `days_remaining` figure rounds to 0 and tells the operator nothing (dossier §4.5,
-    ruled). Returns None when the file is missing, unreadable or not a PEM
-    certificate — the caller decides how loudly to be, and an unreadable file is NOT
-    an expired file, so this helper never guesses at a validity window.
-
-    Reads ONLY the certificate. The private key is never opened: `status` must work
-    with the cert file alone, and a lifetime readout has no business touching key
-    material (owner-ruled zero-mutation half of RF-8a).
+    Split out of `_parse_admin_cert` for RF-8b: a freshly minted certificate exists
+    as PEM bytes in the handler's memory before it exists as a file, and the renewal
+    printout has to read the SAME fields the core just signed. One parse path, two
+    carriers — never a second implementation that can rot apart from the first.
     """
     from datetime import datetime
-
-    from cryptography.x509 import load_pem_x509_certificate
-
-    path = Path(cert_path)
-    if not path.is_file():
-        return None
-
-    try:
-        cert = load_pem_x509_certificate(path.read_bytes())
-    except Exception:
-        return None
 
     now = datetime.now(UTC)
     not_before = cert.not_valid_before_utc
@@ -1631,6 +1626,35 @@ def _parse_admin_cert(cert_path: str) -> dict[str, Any] | None:
         "expired": expired,
         "not_yet_valid": future,
     }
+
+
+def _parse_admin_cert(cert_path: str) -> dict[str, Any] | None:
+    """Parse the admin certificate at `cert_path` and return its lifetime metadata.
+
+    Mirrors the shape of `_parse_executor_cert` (read-local, parse, report) with
+    MINUTES replacing DAYS: the short-lived admin cert can live about an hour, so a
+    `days_remaining` figure rounds to 0 and tells the operator nothing (dossier §4.5,
+    ruled). Returns None when the file is missing, unreadable or not a PEM
+    certificate — the caller decides how loudly to be, and an unreadable file is NOT
+    an expired file, so this helper never guesses at a validity window.
+
+    Reads ONLY the certificate. The private key is never opened: `status` must work
+    with the cert file alone, and a lifetime readout has no business touching key
+    material (owner-ruled zero-mutation half of RF-8a).
+    """
+
+    from cryptography.x509 import load_pem_x509_certificate
+
+    path = Path(cert_path)
+    if not path.is_file():
+        return None
+
+    try:
+        cert = load_pem_x509_certificate(path.read_bytes())
+    except Exception:
+        return None
+
+    return _admin_cert_info(cert)
 
 
 def admin_cert_expiry_refusal(cert_path: str, *, site: str) -> str | None:
@@ -1771,21 +1795,262 @@ def cmd_admin_cert_status(args: Any) -> int:
     return 0
 
 
+# --- RF-8b: the CSR curve list the admin CA accepts, mirrored for the client side ---
+#
+# `packages/server/src/server/ca.py::ACCEPTED_CSR_CURVE_LABELS` is the authority and
+# `accepted_csr_curve_names()` is its reader. The CLI package is standalone (it must
+# not import `server` — tests/test_capability_isolation.py keeps it that way), so the
+# names are repeated HERE on purpose, exactly as the canonical-serial literal above is
+# repeated, and a CLI test asserts this tuple against the server function so the two
+# can never rot apart silently.
+ADMIN_CSR_CURVE_NAMES: tuple[str, ...] = ("secp256r1", "secp384r1", "secp521r1")
+
+
+def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
+    """`venya admin cert renew` — mint a fresh short-lived admin certificate (RF-8b).
+
+    What it does: generate an ECDSA P-256 keypair HERE, send only the CSR, and write
+    the returned certificate plus the brand-new private key atomically to the paths
+    the operator named. The private key never leaves this workstation and never comes
+    back down the wire — `routes/admin_certs.py::sign_admin_csr`: "No private key is
+    returned, and none is generated here — the keypair lives on the workstation".
+
+    Two halves of the auth posture, both load-bearing:
+
+    1. SESSION, NOT CERTIFICATE. The mint route refuses a certificate-shaped caller
+       (RF-6 §2.2 makes the caller's existing admin certificate "not an option") and
+       runs on a login session plus one spent elevation ceremony. So renew requires a
+       session bearer before it touches the network — `run_command` narrows the
+       headless admin-mTLS exemption for this subcommand, and that is what puts the
+       bearer in place — and a renewal with no session is refused LOUDLY here rather
+       than shipped as a request the core would only 403.
+    2. NOTHING TO PRESENT. The transport is rebuilt without the admin pair
+       (`APIClient.use_session_only_transport`), because the old leaf is not a
+       credential this request can use — and when the operator renews precisely
+       because that leaf expired, presenting it is what the RF-8a dial guard exists to
+       refuse. Not presenting it is the answer that works whichever way the forwarded
+       certificate check falls.
+
+    Output discipline is RF-8a's: the readout on stdout ending `STATUS: OK`, every
+    refusal on stderr with a non-zero code, and no private key material in either.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    cert_path = getattr(args, "cert_path", None) or os.environ.get("VENYA_ADMIN_CERT")
+    key_path = getattr(args, "key_path", None) or os.environ.get("VENYA_ADMIN_KEY")
+
+    # Refusal order is the cheap one: nothing below this block opens a connection or
+    # asks anyone to touch a security key.
+    if not cert_path or not key_path:
+        missing = "--cert-path / VENYA_ADMIN_CERT" if not cert_path else "--key-path / VENYA_ADMIN_KEY"
+        print(
+            f"Error: renew has nowhere to write — {missing} is not set. Name both an "
+            "output certificate path and an output key path (or set the pair this "
+            "workstation already uses, VENYA_ADMIN_CERT / VENYA_ADMIN_KEY). Nothing "
+            "was minted, no request was sent and no ceremony was asked for.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not client.config.access_token:
+        print(
+            "Error: `venya admin cert renew` needs a login session, not an admin "
+            "certificate — no session bearer is available, so nothing was sent and "
+            "the security key was not asked for. Repair: run `venya login`, then "
+            "re-run this command.",
+            file=sys.stderr,
+        )
+        return 1
+
+    private_key: Any = None
+    try:
+        # Half 2, set BEFORE the first dial: the elevation calls ride this same
+        # client, and none of them may carry the old pair.
+        client.use_session_only_transport()
+
+        print("Generating ECDSA P-256 keypair on this workstation...")
+        private_key = ec.generate_private_key(ec.SECP256R1())
+
+        # The subject is built plainly and claims NO identity — sign_admin_csr
+        # discards every attribute of it and rebuilds the subject from the
+        # server-derived session identity, so anything asserted here would be
+        # theatre. The only thing the mint takes from the request is the public key.
+        subject = x509.Name(
+            [
+                x509.NameAttribute(x509.oid.NameOID.ORGANIZATION_NAME, "Venya"),
+                x509.NameAttribute(x509.oid.NameOID.ORGANIZATIONAL_UNIT_NAME, "admin-cert-renew"),
+            ]
+        )
+        csr = x509.CertificateSigningRequestBuilder().subject_name(subject).sign(private_key, hashes.SHA256())
+        csr_pem = csr.public_bytes(serialization.Encoding.PEM).decode()
+
+        # Validate what we built, before any ceremony is spent. The server refuses a
+        # bad curve as a 400 WITHOUT burning the elevation token, so a typo never
+        # costs the operator a touch there — but sending a CSR that cannot be signed
+        # would still make them touch the key for a request that must fail.
+        from cryptography.hazmat.primitives.asymmetric import ec as ec_types
+
+        reparsed = x509.load_pem_x509_csr(csr_pem.encode())
+        public_key = reparsed.public_key()
+        if not isinstance(public_key, ec_types.EllipticCurvePublicKey):
+            print(
+                f"Error: the CSR this workstation built is not an EC key ({type(public_key).__name__}) "
+                "— nothing was sent. That is a defect in the renew path, not in your key.",
+                file=sys.stderr,
+            )
+            return 1
+        if public_key.curve.name not in ADMIN_CSR_CURVE_NAMES:
+            print(
+                f"Error: the CSR curve {public_key.curve.name!r} is not one the admin CA accepts "
+                f"({', '.join(ADMIN_CSR_CURVE_NAMES)}) — nothing was sent and no ceremony was asked for.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # One elevation ceremony, then exactly ONE mint request. The token is spent
+        # mid-handler server-side, so a spent token is never re-presented: any retry
+        # re-runs _elevate or refuses.
+        print("Authenticating with security key for elevation...")
+        hint = _win_ceremony_hint("assertion")
+        if hint:
+            print(hint)
+        elevation_token = _elevate(client)
+
+        result = client.post(
+            "/api/v1/admin/certs/issue",
+            json={"csr_pem": csr_pem},
+            extra_headers={"X-Elevation-Token": elevation_token},
+        )
+        cert_pem = result.get("certificate_pem") or ""
+        if not cert_pem.strip():
+            print(
+                "Renewal failed: the core returned no certificate, so nothing was written. "
+                "The existing certificate is untouched.",
+                file=sys.stderr,
+            )
+            return 1
+
+        # The window is read back off the certificate the core signed — the core's
+        # clock is the authority, never a local `now + lifetime` computation.
+        issued = x509.load_pem_x509_certificate(cert_pem.encode())
+        info = _admin_cert_info(issued)
+    except APIClientError as e:
+        # APIClientAuthenticationError is a subclass, so both shapes land here. The
+        # server's own wording is the useful half ("requires a login session", "one
+        # touch mints one certificate"), so it is relayed verbatim, then the repair.
+        print(f"Renewal failed: {e}", file=sys.stderr)
+        print(
+            "Repair: run `venya login`, then re-run `venya admin cert renew`. Nothing "
+            "was written and the existing certificate is untouched.",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as e:
+        print(f"Renewal failed: {e}", file=sys.stderr)
+        return 1
+
+    # Write AFTER success, atomically: staged random-name temps, fchmod pinned at the
+    # write, os.replace into place, every temp unlinked on any abort (the #476 shape —
+    # a non-OSError abort must not leave staged plaintext key material behind either).
+    # Modes: key 0600 is the installer's own admin.key posture (install-venya-core.sh,
+    # the admin pair) and cert 0644 is the #376/#388 pinned posture for public
+    # material. This command never deletes, revokes or otherwise touches the OLD pair.
+    key_tmp: str | None = None
+    cert_tmp: str | None = None
+    try:
+        key_dir = Path(key_path).parent
+        key_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ensure_secret_dir(key_dir)
+        cert_dir = Path(cert_path).parent
+        cert_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ensure_secret_dir(cert_dir)
+
+        key_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        with tempfile.NamedTemporaryFile(dir=key_dir, prefix=".venya-key-", delete=False) as fd:
+            key_tmp = fd.name
+            fd.write(key_pem)
+            fd.flush()
+            os.fchmod(fd.fileno(), 0o600)
+        os.replace(key_tmp, key_path)
+        key_tmp = None
+
+        with tempfile.NamedTemporaryFile(dir=cert_dir, prefix=".venya-cert-", suffix=".pem", delete=False) as fd:
+            cert_tmp = fd.name
+            fd.write(cert_pem.encode())
+            fd.flush()
+            os.fchmod(fd.fileno(), 0o644)
+        os.replace(cert_tmp, cert_path)
+        cert_tmp = None
+    except OSError as e:
+        for leftover in (key_tmp, cert_tmp):
+            if leftover is not None:
+                try:
+                    os.unlink(leftover)
+                except OSError:
+                    pass
+        # A minted certificate is not something to discard quietly, and claiming it is
+        # installed when it is not would be worse. Both facts get said.
+        print(
+            f"Renewal: the core MINTED the certificate, but it could not be written: {e}",
+            file=sys.stderr,
+        )
+        print(
+            f"  Serial:   {info['serial']}\n"
+            f"  Expires:  {info['not_after'].isoformat()}\n"
+            f"  That mint is valid to the instant above; point --cert-path and --key-path "
+            "at a writable location and re-run to store one (a fresh ceremony will be "
+            "asked for). The existing certificate is untouched.",
+            file=sys.stderr,
+        )
+        return 1
+    except BaseException:
+        for leftover in (key_tmp, cert_tmp):
+            if leftover is not None:
+                try:
+                    os.unlink(leftover)
+                except OSError:
+                    pass
+        raise
+
+    print("Admin certificate renewed")
+    print(f"  Certificate:      {cert_path}")
+    print(f"  Private key:      {key_path} (permissions: 600)")
+    print(f"  Identity:         {info['identity']}")
+    print(f"  Serial:           {info['serial']}")
+    print(f"  Subject:          {info['subject']}")
+    print(f"  Valid from:       {info['not_before'].isoformat()}")
+    print(f"  Expires:          {info['not_after'].isoformat()}")
+    print(f"  Minutes remaining: {info['minutes_remaining']}")
+    print("  Clock:            local — computed on this workstation's clock, not the core's")
+    print("  Note:             renew is not a revoke — the previous certificate was not revoked.")
+    print("  STATUS: OK")
+    return 0
+
+
 def cmd_admin_cert(client: APIClient, args: Any) -> int:
-    """`venya admin cert ...` dispatch. `renew` (RF-8b) is not implemented yet.
+    """`venya admin cert ...` dispatch — `status` (RF-8a) and `renew` (RF-8b).
 
     `status` is normally served by the read-local gate at the head of `run_command`
     and never reaches here; this branch exists so a direct dispatch answers with the
-    command name rather than "Unknown admin command".
+    command name rather than "Unknown admin command". `renew` deliberately does NOT
+    join that gate: it needs the network and the ceremony, so it rides the ordinary
+    dispatch below, after the client exists.
     """
     cert_command = getattr(args, "admin_cert_command", None)
     if cert_command == "status":
         return cmd_admin_cert_status(args)
+    if cert_command == "renew":
+        return cmd_admin_cert_renew(client, args)
     if cert_command is None:
-        print("Error: admin cert subcommand required (status)", file=sys.stderr)
+        print("Error: admin cert subcommand required (status, renew)", file=sys.stderr)
         return 1
     print(
-        f"Unknown admin cert command: {cert_command} (implemented: status; " "`renew` arrives with RF-8b)",
+        f"Unknown admin cert command: {cert_command} (implemented: status, renew)",
         file=sys.stderr,
     )
     return 1

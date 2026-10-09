@@ -475,13 +475,17 @@ def create_parser() -> argparse.ArgumentParser:
         help="Reissue your own break-glass recovery code (session + elevation + admin mTLS)",
     )
 
-    # admin cert — the admin certificate readout (RF-8a). `renew` lands with RF-8b.
+    # admin cert — the readout (RF-8a `status`) and the renewal (RF-8b `renew`).
     admin_cert_parser = admin_sub.add_parser(
         "cert",
-        help="Admin certificate management (status)",
+        help="Admin certificate management (status, renew)",
         description=(
-            "Read-local admin certificate management. `status` reads the certificate "
-            "only — no request, no security-key ceremony, no private key."
+            "Admin certificate management. `status` is read-local — it reads the "
+            "certificate only, with no request, no security-key ceremony and no "
+            "private key. `renew` mints a fresh short-lived certificate from the "
+            "core, which takes a login session plus a security-key ceremony; on "
+            "Windows that ceremony opens only from an interactive desktop session, "
+            "not from a remote or scheduled shell."
         ),
     )
     admin_cert_sub = admin_cert_parser.add_subparsers(dest="admin_cert_command")
@@ -510,6 +514,58 @@ def create_parser() -> argparse.ArgumentParser:
             "Also advise renewing if the certificate dies inside MINUTES of job-window "
             "minutes (the advisory never changes the exit code)"
         ),
+    )
+
+    # admin cert renew
+    admin_cert_renew_parser = admin_cert_sub.add_parser(
+        "renew",
+        help="Mint a fresh short-lived admin certificate (session + security-key ceremony)",
+        description=(
+            "Mint a fresh short-lived admin certificate from the core and write the "
+            "certificate and its NEW private key locally, atomically. This needs a "
+            "login session (run `venya login` first) and one security-key ceremony. "
+            "The renewal never presents the old certificate: the mint is bound to the "
+            "session, so an already-expired credential is not a credential this "
+            "request can use. On Windows the ceremony opens only from an interactive "
+            "desktop session, not from a remote or scheduled shell."
+        ),
+    )
+    admin_cert_renew_parser.add_argument(
+        "--cert-path",
+        dest="cert_path",
+        default=None,
+        help=(
+            "Where to write the new certificate (default: $VENYA_ADMIN_CERT). This is "
+            "an OUTPUT path — `renew` writes it and never reads a certificate from it."
+        ),
+    )
+    admin_cert_renew_parser.add_argument(
+        "--key-path",
+        dest="key_path",
+        default=None,
+        help=(
+            "Where to write the new private key, mode 0600 (default: $VENYA_ADMIN_KEY). "
+            "Unlike `admin cert status`, the key path is an OUTPUT: the keypair is "
+            "generated on this workstation and the private key never leaves it."
+        ),
+    )
+    admin_cert_renew_parser.add_argument(
+        "--server-url",
+        dest="server_url",
+        default=None,
+        help="Core server URL (default: from config or VENYA_SERVER_URL)",
+    )
+    # No --print/stdout escape, on purpose and stated for the record: the certificate
+    # and its private key are a matched pair, and the key never crosses the CLI
+    # boundary (RF-6 §2.1), so piping one half invites splitting the halves across
+    # unrelated places. An operator who does not want the configured pair touched
+    # passes --cert-path and --key-path, which writes the pair where they choose and
+    # overwrites nothing that was not asked for.
+    admin_cert_renew_parser.add_argument(
+        "--user-id",
+        dest="user_id",
+        default=None,
+        help="User ID to authenticate as for the login session (default: from config)",
     )
 
     # role
