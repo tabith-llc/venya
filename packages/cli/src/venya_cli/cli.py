@@ -425,7 +425,10 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # admin init-admin-ca
-    init_admin_ca_parser = admin_sub.add_parser("init-admin-ca", help="Initialize the admin CA (create key/cert pair)")
+    init_admin_ca_parser = admin_sub.add_parser(
+        "init-admin-ca",
+        help="Initialize the admin CA (create key/cert pair; requires VENYA_ADMIN_CA_KEY_PASSPHRASE)",
+    )
     init_admin_ca_parser.add_argument(
         "--output-dir",
         required=True,

@@ -164,7 +164,8 @@ def _get_admin_ca_manager(request: Request) -> AdminCAManager:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
                 "Admin CA is not initialized — cannot sign. "
-                "Repair: venya admin init-admin-ca (the core installer runs it during installation)."
+                "Repair: set VENYA_ADMIN_CA_KEY_PASSPHRASE, then run: venya admin init-admin-ca "
+                "(the core installer runs it during installation)."
             ),
         )
     return manager
