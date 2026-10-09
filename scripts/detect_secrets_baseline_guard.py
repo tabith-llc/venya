@@ -43,6 +43,17 @@ The laws this module implements (R2/R3/R7/R9/R9.1 + the s79 amendment):
 Findings are keyed by the same ``(filename, type, hashed_secret)`` triple the core
 interlock uses (``packages/core/tests/test_detect_secrets_baseline.py``), so both
 halves compare the same thing.
+
+Counting the baseline is a separate question, and grep is the wrong tool for it
+(refs #550). ``.detect-secrets-baseline`` is JSON whose ``results`` object is keyed by
+scanned filename, so the file count is ``len(json['results'])`` — 22 at dev ``dbbf1dc``
+(44 findings, 491 lines). The document also carries the ``filename`` key inside every
+recorded finding and once in ``filters_used`` (the ``is_baseline_file`` entry names the
+baseline itself as filter configuration), so document-wide tokenizers over-count:
+line-counting the quoted key reads 45, unique filename strings read 23, and an
+unquoted ``filename:`` grep reads 0. Publish a baseline number with its method or it is
+a guess with three digits; the one place that method is written down is
+``scripts/detect_secrets_baseline_stats.py`` (read-only — it never writes the file).
 """
 
 from __future__ import annotations
