@@ -1296,7 +1296,8 @@ async def list_executors(
     For operators and LLMs to discover available execution targets.
     Does not expose enrollment tokens, CA details, or admin metadata.
 
-    Online status: true if heartbeat within the last 60 seconds.
+    Online status: true if a heartbeat landed inside the last 60 seconds.
+    A stamp AHEAD of this reading is not online (#549 site 2, see below).
     """
     from core.iam.models import Executor
 
@@ -1309,7 +1310,23 @@ async def list_executors(
         is_online = False
         if exec_rec.last_heartbeat:
             delta = now - exec_rec.last_heartbeat
-            is_online = delta.total_seconds() < 60
+            # #549 site 2: the window is TWO-SIDED. Both sides of `delta` are
+            # DB timestamptz WALL stamps (the heartbeat handler writes
+            # datetime.now(UTC)), so this is #464's "clamp where wall stamps
+            # persist" half, not a monotonic conversion — a monotonic reading
+            # taken here would mean nothing against a stamp written by another
+            # process. A NEGATIVE delta is a stamp ahead of this reading (a
+            # forward step at the writer, or a backward step at this reader),
+            # and the old one-sided `delta < 60` read it LIVE: after an
+            # hour-long backward step every pre-step stamp looked live for that
+            # whole hour, and a live-looking row is a routing target. Presence
+            # is refused when it cannot be PROVEN, so the lower bound is the
+            # clamp and the 60 s window VALUE is unchanged (option (a); a skew
+            # tolerance would keep the false-LIVE half open by its own width).
+            # Mirrors the shape of core/engine/rate_limiter.py's
+            # max(0.0, now - locked_at) clamp — not its import (capability
+            # isolation).
+            is_online = 0.0 <= delta.total_seconds() < 60
 
         # Status display is a CLIENT of the shared revocation state (condition 2
         # — no second revoked-ness implementation). Note: this also surfaces
