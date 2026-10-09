@@ -66,8 +66,8 @@ repos:
         files: "^(uv\\.lock|venya-(core|executor)-requirements\\.txt|pyproject\\.toml|packages/[^/]+/pyproject\\.toml)$"
 
       - id: pip-audit
-        name: pip-audit (dependency CVEs)
-        entry: uv run pip-audit
+        name: pip-audit (dependency CVEs, OSV feed)
+        entry: uv run pip-audit --vulnerability-service osv
         language: system
         pass_filenames: false
         files: "^packages/.*pyproject\\.toml$"
