@@ -324,5 +324,7 @@ class SecretHolder:
         """
         try:
             self.release()
-        except Exception:  # pragma: no cover - teardown path, nothing to unwind
+        except Exception:
+            # Teardown path with no caller left to tell. Recorded, not raised: an
+            # interpreter shutting down must not lose the erase attempt silently.
             logger.debug("secret holder: release skipped during teardown", exc_info=True)
