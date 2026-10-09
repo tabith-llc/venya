@@ -484,11 +484,127 @@ sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='venya'" 2>/
 sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='venya_audit'" 2>/dev/null | grep -q 1 || \
     sudo -u postgres psql -c "CREATE ROLE venya_audit LOGIN;" > /dev/null 2>&1
 
-PG_MAIN_DIR=$(ls -d /etc/postgresql/*/main 2>/dev/null | head -n1)
+# --- Active PostgreSQL cluster resolution (issue #496) ---
+# Selection used to be `ls -d /etc/postgresql/*/main | head -n1`, which takes
+# the LOWEST installed version by sort order — not the cluster the server
+# actually runs. On a host carrying more than one PostgreSQL major the
+# venya_map peer map landed in an inactive cluster and venya-core died at
+# startup on peer auth while the installer reported the step successful.
+#
+# Ruled shape (s77-ruling-496-recon R1-R4): resolve the ONLINE cluster from
+# `pg_lsclusters` (Debian/Ubuntu packaging), fall back to the running server's
+# own `SHOW config_file` when that tool is absent, and ABORT with the
+# candidate list whenever resolution is not exactly one cluster — an installer
+# writing a peer map must never guess its target. Diagnostics go to stderr via
+# error()/warn(); the function's stdout carries the single chosen path only.
+venya_resolve_pg_cluster() {
+    local _root="/etc/postgresql"
+    local _line="" _ver="" _cluster="" _port="" _status="" _rest=""
+    local _d="" _chosen="" _cands=""
+    local _online=0
+
+    if command -v pg_lsclusters > /dev/null 2>&1; then
+        # Primary (R1): the packaging tool knows each cluster's state.
+        # Columns: Ver Cluster Port Status Owner Data-directory Log-file.
+        local _lsc_out=""
+        if ! _lsc_out=$(pg_lsclusters --no-header); then
+            error "pg_lsclusters --no-header failed — cannot resolve the active PostgreSQL cluster." >&2
+            return 1
+        fi
+        while IFS= read -r _line; do
+            [ -n "$_line" ] || continue
+            read -r _ver _cluster _port _status _rest <<< "$_line"
+            _cands="${_cands}  ${_root}/${_ver}/${_cluster} [status: ${_status:-unknown}]"$'\n'
+            if [ "$_status" = "online" ]; then
+                _online=$((_online + 1))
+                _chosen="${_root}/${_ver}/${_cluster}"
+            fi
+        done <<< "$_lsc_out"
+
+        if [ "$_online" -gt 1 ]; then
+            # R2: ambiguity is fatal, never guessed.
+            error "More than one PostgreSQL cluster reports status 'online' — refusing to guess which one to configure:" >&2
+            printf '%s' "$_cands" >&2
+            error "Exactly one online cluster is supported; stop the others (pg_ctlcluster <ver> <cluster> stop) and re-run." >&2
+            return 1
+        fi
+        if [ "$_online" -eq 1 ] && [ ! -d "$_chosen" ]; then
+            error "pg_lsclusters reports an online cluster at '$_chosen' but that config dir is missing:" >&2
+            printf '%s' "$_cands" >&2
+            return 1
+        fi
+    else
+        # R1 fallback: packaging without pg_lsclusters (non-Debian) — ask the
+        # running server where its own config lives, then take that file's
+        # directory. Parameter expansion, no external command, no ls parsing.
+        local _cfg=""
+        if ! _cfg=$(sudo -u postgres psql -tAc 'SHOW config_file'); then
+            error "pg_lsclusters is absent and 'SHOW config_file' did not answer — cannot resolve the active PostgreSQL cluster." >&2
+            return 1
+        fi
+        _cfg="${_cfg%[[:space:]]}"
+        if [ -z "$_cfg" ]; then
+            error "'SHOW config_file' returned no path — the server did not answer the probe." >&2
+        else
+            _chosen="${_cfg%/*}"
+        fi
+        for _d in "$_root"/*/main; do
+            [ -d "$_d" ] || continue
+            _cands="${_cands}  ${_d}"$'\n'
+        done
+    fi
+
+    if [ -z "$_chosen" ]; then
+        error "No ACTIVE PostgreSQL cluster resolved." >&2
+        if [ -n "$_cands" ]; then
+            error "Cluster config dirs on disk:" >&2
+            printf '%s' "$_cands" >&2
+        else
+            error "No cluster config dirs exist under $_root." >&2
+        fi
+        return 1
+    fi
+    if [ ! -d "$_chosen" ]; then
+        error "Resolved cluster config dir is missing: $_chosen" >&2
+        return 1
+    fi
+    printf '%s\n' "$_chosen"
+}
+
+# R3: a stale venya_map marker left in a cluster the server does NOT run is a
+# live foot-gun for the next resolution pass, so strip the stray markers from
+# the inactive clusters after selecting. Best-effort and warn-only — cleanup
+# never aborts an install (same shape as the core uninstaller's loop).
+venya_strip_inactive_pg_markers() {
+    local _active="$1"
+    local _d
+    for _d in /etc/postgresql/*/main; do
+        if [ ! -d "$_d" ]; then
+            continue
+        fi
+        if [ "$_d" = "$_active" ]; then
+            continue
+        fi
+        if [ -f "$_d/pg_ident.conf" ]; then
+            sudo -u postgres sed -i "/^venya_map venya venya_audit$/d" "$_d/pg_ident.conf" \
+                || warn "pg_ident.conf marker cleanup failed in $_d — check manually."
+        fi
+        if [ -f "$_d/pg_hba.conf" ]; then
+            sudo -u postgres sed -i "/venya_audit.*peer map=venya_map/d" "$_d/pg_hba.conf" \
+                || warn "pg_hba.conf marker cleanup failed in $_d — check manually."
+        fi
+    done
+    return 0
+}
+
+PG_MAIN_DIR=$(venya_resolve_pg_cluster) || PG_MAIN_DIR=""
 if [ -z "$PG_MAIN_DIR" ]; then
     error "PostgreSQL main config dir not found — cannot install the venya_audit peer map."
     exit 1
 fi
+# R3 (issue #496): keep the NON-active clusters marker-free after the target
+# is chosen; warn-only, the install proceeds either way.
+venya_strip_inactive_pg_markers "$PG_MAIN_DIR"
 # pg_ident peer map: OS user 'venya' -> DB role 'venya_audit' (marker-guarded idempotent).
 if ! grep -q "^venya_map venya venya_audit" "$PG_MAIN_DIR/pg_ident.conf" 2>/dev/null; then
     sudo -u postgres bash -c "echo 'venya_map venya venya_audit' >> '$PG_MAIN_DIR/pg_ident.conf'"
