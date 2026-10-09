@@ -394,21 +394,40 @@ note stops at the question.
   needed: which is the product's promise -- boot-time abort, or first-use failure -- and which
   document carries it.
 - **OPEN 3 (the admin-key `NoEncryption()` delivery).** Several paths serialize private key
-  material with `serialization.NoEncryption()` -- `ca.py:966` (the server admin-CA key material),
-  `at_rest_key.py:87` (the CLI unwrap-to-plaintext path #538 sits on), the CLI sites at
-  `commands.py:1972` (`cmd_admin_cert_renew`, added by RF-8b), `commands.py:3092`
-  (`executor_register`), `commands.py:3488` (`executor_cert_renew`), `commands.py:4562`
-  (`cmd_admin_generate_admin_cert`), and the executor daemon at `daemon.py:711` (`register`) and
-  `daemon.py:891` (`rotate`). Is unencrypted in-process/on-disk delivery of those keys an accepted
-  posture, a defect to be fixed in the #537/#538 legs, or in scope for this protected-buffer
-  contract? This note does not extend the contract to them.
-  **Pin refresh (2026-10-09, AC4 of issue #547, re-derived at dev `262527d`) — cite these by SYMBOL,
-  the line numbers above are a snapshot of that one tree and they have moved twice already.** Two
-  changes since the original enumeration: the `cmd_admin_init_admin_ca` no-passphrase branch is NO
-  LONGER one of these sites (it now refuses before any filesystem work, per the owner's ruling
-  "match server. no passphrase? then no key"), and `cmd_admin_cert_renew` ADDED one. The count is
-  therefore still eight. The renew site matches the documented posture of its neighbours and of the
-  installer's own `admin.key` (`0600` inside `0700`, passphrase-free at rest by design, because the
-  operator's login session -- not the file -- is the second factor for an admin leaf), so it is
-  listed rather than ruled; whether ANY of the eight should move onto the protected-buffer path
-  remains the open question above and is the owner's to answer.
+  material with `serialization.NoEncryption()`. **Cite these by SYMBOL** -- line numbers are a
+  snapshot of one tree and they have moved three times already. The live set is **six** paths
+  (line numbers below are the `e3a82b8` snapshot, given only as a convenience):
+
+  | symbol | file | line at `e3a82b8` |
+  |---|---|---|
+  | `AdminCAManager.sign_admin_cert` (the server admin-CA key material) | `packages/server/src/server/ca.py` | `:966` |
+  | `unwrap_at_rest` (the CLI unwrap-to-plaintext path #538 sits on) | `packages/cli/src/venya_cli/at_rest_key.py` | `:87` |
+  | `executor_register` | `packages/cli/src/venya_cli/commands.py` | `:3115` |
+  | `executor_cert_renew` | `packages/cli/src/venya_cli/commands.py` | `:3511` |
+  | `CertificateManager.register` | `packages/executor/src/executor/daemon.py` | `:711` |
+  | `CertificateManager.rotate` | `packages/executor/src/executor/daemon.py` | `:891` |
+
+  Is unencrypted in-process/on-disk delivery of those keys an accepted posture, a defect to be
+  fixed in the #537/#538 legs, or in scope for this protected-buffer contract? This note does not
+  extend the contract to them.
+  **Pin refresh 1 (2026-10-09, AC4 of issue #547, re-derived at dev `262527d`).** Two changes since
+  the original enumeration: the `cmd_admin_init_admin_ca` no-passphrase branch is NO LONGER one of
+  these sites (it now refuses before any filesystem work, per the owner's ruling "match server. no
+  passphrase? then no key", landed as `2a35c14`), and RF-8b's `23fc19b` ADDED one at
+  `cmd_admin_cert_renew`. That refresh counted net-zero and restated the total as eight, which was
+  correct at `262527d`.
+  **Pin refresh 2 (2026-10-09, re-derived at dev `e3a82b8`) -- the count is now SIX, and here is
+  why it moved.** Part A of #547a (`5d810e6`, with `060caa5`) took out the two admin-leaf writers
+  that the eight still counted: `cmd_admin_generate_admin_cert` now serializes with
+  `BestAvailableEncryption(leaf_passphrase...)` at `commands.py:4688`, and `cmd_admin_cert_renew`
+  does the same at `commands.py:1994` -- the old plaintext line there survives only as a past-tense
+  comment at `commands.py:1993`, which a raw grep counts but which is NOT a site. Part A merged at
+  `154d48b`, one merge AFTER pin refresh 1's own base, so refresh 1 could not see the two absences
+  even while warning that line numbers rot. Eight minus those two is six.
+  **Resolved -- do not re-fix fixed code.** `cmd_admin_init_admin_ca` (no-passphrase branch, #547 /
+  `2a35c14`), `cmd_admin_cert_renew` and `cmd_admin_generate_admin_cert` (both #547a Part A /
+  `5d810e6`) are no longer `NoEncryption()` paths and are deliberately absent from the table above.
+  **The live record for these six is issue #565**, which filed exactly this set with the two Part A
+  paths marked already fixed; read the enumeration and any mechanism work there. This note neither
+  duplicates that ticket nor answers it: whether any of the six should move onto the
+  protected-buffer path remains the open question above and is the owner's to answer.
