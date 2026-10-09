@@ -128,9 +128,13 @@ and its exact output, start to finish — see
   completes server-side. Check the executor journal
   (`journalctl -u venya-executor`) and the target's state, then rerun —
   warm runs are seconds-scale.
-- `503` with `Not authenticated to Docker` / `global network policy has not
+- `503` with `You are not authenticated to Docker` / `global network policy has not
   been initialized` in the executor journal: executor sandbox setup
-  incomplete — see [installation.md](installation.md) troubleshooting.
+  incomplete — see [installation.md](installation.md) troubleshooting. The
+  failure string is the vendor's own wording
+  (https://docs.docker.com/ai/sandboxes/troubleshooting/, accessed
+  2026-10-09); the `503` is Venya's own mapping of an unauthenticated
+  executor, not a vendor status code.
 - `401` anywhere: access tokens live 5 minutes; re-run `venya login`
   (touch the key). Sessions hard-cap at 4 hours and idle out after 15
   minutes — an MCP session dies the same way; re-login and retry.

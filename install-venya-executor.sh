@@ -807,7 +807,10 @@ getent group kvm >/dev/null && usermod -aG kvm venya 2>/dev/null || true
 # --- Docker auth (sbx template pulls) + sandboxd daemon ---
 # sbx runs microVMs via KVM but pulls its agent template from Docker and
 # requires a per-user sandboxd daemon. Without auth the executor installs
-# fine but every sandbox create fails 503 ("Not authenticated to Docker").
+# fine but every sandbox create fails with the vendor's "You are not
+# authenticated to Docker" (docs.docker.com/ai/sandboxes/troubleshooting/,
+# accessed 2026-10-09). The 503 we hand back is Venya's own mapping of an
+# unauthenticated executor, not a vendor status code.
 # The API key travels stdin-only (never argv, never written by this script;
 # sbx stores it in its own credential store under /home/venya).
 if [ "${VENYA_SKIP_DOCKER_LOGIN:-}" = "yes" ]; then
