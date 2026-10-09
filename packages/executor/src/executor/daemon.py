@@ -934,12 +934,36 @@ class CertificateManager:
             NOT_REVOKED — the server ANSWERED and this credential is live (including
             a 304, which is an answer: the list is unchanged since a check that said
             live, and a revoked credential would already have stopped the loop).
-            UNREACHABLE — we could not ask: a transport-level failure. NOT an
-            assertion of liveness. The caller bounds how long that may persist.
+            UNREACHABLE — we could not ask: a transport-level failure, or (since
+            #551) an HTTP error status from the endpoint. NOT an assertion of
+            liveness. The caller bounds how long that may persist.
 
         The bool this replaces returned False for the last two cases alike, which
         is what made the daemon's consecutive-failure counter reset during an
         outage; see RevocationStatus.
+
+        Exception boundary (#551, AC3 — which classes are caught where):
+            * ``httpx2.RequestError`` (transport: connect/read/write/pool, and
+              ``TransportError``, which IS its subclass) — caught below: warning,
+              ``UNREACHABLE``.
+            * ``httpx2.HTTPStatusError`` (what ``raise_for_status`` raises on a
+              4xx/5xx) — caught below TOO: warning with the status code and the
+              URL, ``UNREACHABLE``. It needs its own arm because it is a SIBLING
+              of ``RequestError`` under ``HTTPError``, not a subclass — measured
+              MRO at this base is ``HTTPStatusError -> HTTPError -> Exception``.
+              Before that arm existed an HTTP 500 from this endpoint escaped both
+              handlers here and both caller arms in ``_main_loop`` (which catch
+              ``TimeoutError`` and ``RequestError`` only) and unwound into
+              ``start()``'s ``try/finally: self.stop()``, so the daemon stopped
+              instead of counting one failed check.
+            * Nothing else is caught here, and no blanket ``except Exception`` is
+              used: a 200 whose body will not parse stays its own defect (#552)
+              rather than being reported as "could not reach the server".
+
+        ``UNREACHABLE`` means the revocation state is UNKNOWN, never "confirmed
+        live"; ``_main_loop`` counts it toward ``max_revocation_failures`` and asks
+        again on the next tick — no retry happens in here, so a persistent status
+        error costs one request per tick.
         """
         if self.serial is None:
             # No credential loaded yet — nothing to look up. Kept as an ANSWER
@@ -1008,6 +1032,26 @@ class CertificateManager:
                 self.config.executor_id,
                 type(exc).__name__,
                 exc,
+            )
+            return RevocationStatus.UNREACHABLE
+        except httpx2.HTTPStatusError as exc:
+            # #551: an HTTP error status is also an unanswered question, and it
+            # used to escape. HTTPStatusError is NOT a RequestError in the
+            # installed httpx2 build (measured MRO at this base:
+            # HTTPStatusError -> HTTPError -> Exception), so the arm above never
+            # saw it; it left check_revocation, left both caller arms in
+            # _main_loop, and unwound start() into self.stop(). Same answer as a
+            # transport fault — UNREACHABLE, counted, retried on the next tick —
+            # but named with the status code and the URL, because a core that
+            # answers with an error is a different thing from a core that cannot
+            # be reached, and a silent skip here would be the same defect in new
+            # clothes. No retry inside this function: _main_loop re-enters on its
+            # own ~30 s wait, so a persistent 5xx costs one request per tick.
+            logger.warning(
+                "Revocation status UNKNOWN for executor %s — server answered HTTP %s from %s (will retry)",
+                self.config.executor_id,
+                exc.response.status_code,
+                exc.request.url,
             )
             return RevocationStatus.UNREACHABLE
 
