@@ -19,6 +19,7 @@ import contextlib
 import enum
 import errno
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -81,6 +82,11 @@ BOOTSTRAP_TOKEN_PATH = Path("/var/lib/venya/executor/bootstrap-token")
 # instance never emits — the forwarder drains spool lines that already carry their
 # real session ids — so a fixed boot tag states what it is, not a fake session.
 BOOT_FORWARDER_SESSION_ID = "boot-forwarder"
+
+# The endpoint the cooperative daemon polls for revoked credentials. Named once so
+# the request and the UNKNOWN log lines cannot drift apart (#551 named the URL from
+# the exception's request; #552 has no exception object to read it from).
+REVOCATION_LIST_PATH = "/api/v1/executors/certs/revocation-list"
 
 
 def _atomic_write(path: str | Path, payload: bytes, mode: int) -> None:
@@ -408,6 +414,65 @@ class RevocationStatus(enum.Enum):
     NOT_REVOKED = "not-revoked"
     REVOKED = "revoked"
     UNREACHABLE = "unreachable"
+
+
+class RevocationPayloadError(ValueError):
+    """The revocation endpoint answered 200 with a body this check cannot read (#552).
+
+    Raised only by :func:`parse_revocation_payload`, and never allowed to leave
+    ``CertificateManager.check_revocation``: a body whose shape is wrong says
+    nothing about whether this credential is live, so the answer it produces is
+    ``RevocationStatus.UNREACHABLE`` — a counted failed check, retried on the next
+    tick — exactly what a transport fault produces on this same path.
+
+    The class exists so the guard stays NAMED at both ends. Before it, a
+    non-JSON 200 raised ``json.JSONDecodeError`` and a 200 that decoded to a list
+    raised ``AttributeError`` out of the ``.get`` calls; neither class is an
+    ``httpx2.RequestError``, so both escaped ``check_revocation``, escaped the two
+    arms in ``_main_loop`` that name the classes it can handle, and unwound
+    ``start()`` into ``self.stop()``. One mis-shaped answer stopped the daemon.
+    A blanket ``except Exception`` is NOT used anywhere on this path: transport
+    faults (``httpx2.RequestError``) and HTTP error statuses
+    (``httpx2.HTTPStatusError``) keep their own arms in ``check_revocation``.
+    """
+
+
+def parse_revocation_payload(response: httpx2.Response) -> dict[str, Any]:
+    """Decode a revocation-list response and prove its shape before anything uses it.
+
+    The accepted shape is the endpoint's own contract — ``RevocationListResponse``
+    in the server's ``routes/executors.py``: a JSON object, optional
+    ``revoked_identities`` and ``revoked_serials`` fields, each a list. Anything
+    else is refused here, at the parse site, rather than being read downstream.
+
+    Returns:
+        The decoded mapping, ready for the two field lookups.
+
+    Raises:
+        RevocationPayloadError: the body did not decode as JSON (the two NAMED
+            decode classes are what is caught — ``json.JSONDecodeError`` for a body
+            that is not JSON, ``UnicodeDecodeError`` for bytes that are not text at
+            all; both measured live at this base against a real ``httpx2.Response``
+            200), the decoded value is not a mapping (a JSON list, string, number,
+            or ``null``), or a revocation field is present but is not a list.
+            Transport faults and HTTP error statuses are deliberately NOT handled
+            here — they are not this function's question, and swallowing them
+            would turn a real outage into a fake answer.
+    """
+    try:
+        data = response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RevocationPayloadError(f"revocation body is not JSON text ({type(exc).__name__}: {exc})") from exc
+
+    if not isinstance(data, dict):
+        raise RevocationPayloadError(f"revocation body is a {type(data).__name__}, not a JSON object")
+
+    for field in ("revoked_identities", "revoked_serials"):
+        value = data.get(field, [])
+        if not isinstance(value, list):
+            raise RevocationPayloadError(f"revocation field {field!r} is a {type(value).__name__}, not a list")
+
+    return data
 
 
 class CertificateManager:
@@ -956,9 +1021,22 @@ class CertificateManager:
               ``TimeoutError`` and ``RequestError`` only) and unwound into
               ``start()``'s ``try/finally: self.stop()``, so the daemon stopped
               instead of counting one failed check.
+            * ``RevocationPayloadError`` (#552) — what the payload-shape guard
+              (:func:`parse_revocation_payload`) raises when the request SUCCEEDED
+              with a 200 but the body is not a revocation list: it did not decode
+              as JSON text (the two named classes ``json.JSONDecodeError`` and
+              ``UnicodeDecodeError`` are what is caught there), or it decoded to a
+              non-mapping, or a revocation field is not a list. Same answer as a
+              transport fault — ``UNREACHABLE``, counted, retried next tick — and it
+              is raised by the guard, not caught from the wire: before it, a
+              non-JSON 200 escaped as ``json.JSONDecodeError`` and a 200 that
+              decoded to a list escaped as ``AttributeError`` from the ``.get``
+              calls. Neither class is a ``RequestError``, so both left this
+              function, left both ``_main_loop`` arms, and stopped the daemon.
             * Nothing else is caught here, and no blanket ``except Exception`` is
-              used: a 200 whose body will not parse stays its own defect (#552)
-              rather than being reported as "could not reach the server".
+              used: a body this check cannot read is reported as an UNKNOWN
+              answer, never as "not revoked", and never as "could not reach the
+              server" — the two launderings this class keeps closed.
 
         ``UNREACHABLE`` means the revocation state is UNKNOWN, never "confirmed
         live"; ``_main_loop`` counts it toward ``max_revocation_failures`` and asks
@@ -977,7 +1055,7 @@ class CertificateManager:
                 headers["If-None-Match"] = self._last_revocation_etag
 
             response = self.client.get(  # type: ignore[union-attr]
-                "/api/v1/executors/certs/revocation-list",
+                REVOCATION_LIST_PATH,
                 headers=headers,
                 timeout=self.config.network.request_timeout_seconds,
             )
@@ -987,9 +1065,16 @@ class CertificateManager:
                 return RevocationStatus.NOT_REVOKED
 
             response.raise_for_status()
-            self._last_revocation_etag = response.headers.get("etag")
 
-            data = response.json()
+            # #552: the body is parsed AND shape-checked before the ETag cache
+            # advances. Order matters here: caching the ETag of a payload this
+            # check could not read would let the next tick answer 304 (an
+            # ANSWER — NOT_REVOKED) about a body that was never read, which
+            # launders one failed check into a claim that the credential is
+            # live. A malformed 200 keeps the last GOOD etag instead, so the
+            # next poll re-asks for the whole list.
+            data = parse_revocation_payload(response)
+            self._last_revocation_etag = response.headers.get("etag")
             # Identity-level revocation FIRST (ticket executor-revocation-by-identity,
             # ruling 2): the server revoked the whole executor_id — terminal, matches
             # ANY serial. This is what catches a restarted daemon on a diverged
@@ -1052,6 +1137,21 @@ class CertificateManager:
                 self.config.executor_id,
                 exc.response.status_code,
                 exc.request.url,
+            )
+            return RevocationStatus.UNREACHABLE
+        except RevocationPayloadError as exc:
+            # #552: a 200 whose body is not a revocation list. The answer is the
+            # UNKNOWN one the tri-state already defines — NEVER NOT_REVOKED, which
+            # would read "the server told me this certificate is live" out of a
+            # body that told us nothing — and it is COUNTED, so a persistent
+            # mis-shaped endpoint reaches max_revocation_failures instead of
+            # silently resetting the counter every tick.
+            logger.warning(
+                "Revocation status UNKNOWN for executor %s — server answered 200 from %s with a "
+                "payload this check cannot read: %s (will retry)",
+                self.config.executor_id,
+                REVOCATION_LIST_PATH,
+                exc,
             )
             return RevocationStatus.UNREACHABLE
 
