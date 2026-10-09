@@ -61,6 +61,7 @@ and exits `1`.
   - [`venya admin reissue-recovery-code`](#venya-admin-reissue-recovery-code)
   - [`venya admin cert`](#venya-admin-cert) *(group)*
     - [`venya admin cert status`](#venya-admin-cert-status)
+    - [`venya admin cert renew`](#venya-admin-cert-renew)
 - [`venya role`](#venya-role) *(group)*
   - [`venya role create`](#venya-role-create)
   - [`venya role list`](#venya-role-list)
@@ -293,7 +294,7 @@ Subcommands:
 - [`venya admin generate-admin-cert`](#venya-admin-generate-admin-cert) — Sign an admin client certificate
 - [`venya admin revoke-admin-cert`](#venya-admin-revoke-admin-cert) — Revoke an admin certificate by serial number
 - [`venya admin reissue-recovery-code`](#venya-admin-reissue-recovery-code) — Reissue your own break-glass recovery code (session + elevation + admin mTLS)
-- [`venya admin cert`](#venya-admin-cert) — Admin certificate management (status)
+- [`venya admin cert`](#venya-admin-cert) — Admin certificate management (status, renew)
 
 ### `venya admin enroll`
 
@@ -859,7 +860,7 @@ venya admin reissue-recovery-code  # reissue your own break-glass code (session 
 
 ### `venya admin cert`
 
-Admin certificate management (status)
+Admin certificate management (status, renew)
 
 ```
 venya admin cert
@@ -868,6 +869,7 @@ venya admin cert
 Subcommands:
 
 - [`venya admin cert status`](#venya-admin-cert-status) — Show the admin certificate's remaining lifetime (read-local, no network)
+- [`venya admin cert renew`](#venya-admin-cert-renew) — Mint a fresh short-lived admin certificate (session + security-key ceremony)
 
 #### `venya admin cert status`
 
@@ -888,6 +890,29 @@ venya admin cert status [OPTIONS]
 venya admin cert status  # remaining lifetime of $VENYA_ADMIN_CERT (read-local; no request, no ceremony, no key read)
 venya admin cert status --within 15  # also advise renewing if it dies inside a 15-minute job window
 venya admin cert status --cert-path /opt/venya/admin/admin.crt  # explicit certificate path
+```
+
+#### `venya admin cert renew`
+
+Mint a fresh short-lived admin certificate (session + security-key ceremony)
+
+```
+venya admin cert renew [OPTIONS]
+```
+
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `--cert-path` | no | string | — | Where to write the new certificate (default: $VENYA_ADMIN_CERT). This is an OUTPUT path — `renew` writes it and never reads a certificate from it. |
+| `--key-path` | no | string | — | Where to write the new private key, mode 0600 (default: $VENYA_ADMIN_KEY). Unlike `admin cert status`, the key path is an OUTPUT: the keypair is generated on this workstation and the private key never leaves it. |
+| `--server-url` | no | string | — | Core server URL (default: from config or VENYA_SERVER_URL) |
+| `--user-id` | no | string | — | User ID to authenticate as for the login session (default: from config) |
+
+**Examples**
+
+```bash
+venya admin cert renew  # mint a fresh short-lived admin certificate at the configured pair (login session + security-key ceremony)
+venya admin cert renew --cert-path /opt/venya/admin/admin.crt --key-path /opt/venya/admin/admin.key  # name both output paths explicitly
+venya admin cert renew --server-url https://core.example.com --user-id jsmith  # dial a named core and authenticate as a named user for the session
 ```
 
 ## `venya role`
