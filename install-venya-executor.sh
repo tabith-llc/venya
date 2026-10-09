@@ -48,10 +48,13 @@ umask 077
 #                            numeric octets aborts the install (#490))
 #   VENYA_HOSTS_FILE       - The hosts file this installer reads and updates
 #                            (default: /etc/hosts). Test/packaging seam for the
-#                            #490 core-entry cells; the entry is matched on the
-#                            SECOND whitespace field (the name), and a file with
-#                            no trailing newline gains exactly one newline in
-#                            total on append — the row is never concatenated.
+#                            #490 core-entry cells; when SET it must name an
+#                            EXISTING writable regular file — a mistyped value
+#                            aborts the install rather than creating a file no
+#                            resolver reads. The entry is matched on the SECOND
+#                            whitespace field (the name), and a file with no
+#                            trailing newline gains exactly one newline in total
+#                            on append — the row is never concatenated.
 #   VENYA_VENYA_CA_FILE    - Path to pre-copied Venya CA cert (offline/air-gapped deployments)
 #   VENYA_EXECUTOR_ENROLLMENT_TOKEN - Bootstrap enrollment token for auto-registration
 #                                    (REQUIRED on a fresh install — no executor
@@ -373,6 +376,21 @@ HOSTS_FILE="${VENYA_HOSTS_FILE:-/etc/hosts}"
 if [[ "$CORE_HOSTNAME" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
     info "VENYA_SERVER_URL host is an IP — no ${HOSTS_FILE} entry needed"
 else
+    # #490 addendum: an EXPLICITLY supplied VENYA_HOSTS_FILE must name an
+    # existing, writable regular file. Without this the seam recreates the
+    # silent-wrong-target class the ticket just closed: a mistyped path plus a
+    # VALID VENYA_CORE_IP would create that file, append the row to it, and
+    # continue as a successful install — the mapping lands in a file no resolver
+    # reads, and the real failure surfaces much later as a relay dial error. No
+    # create-if-missing path is offered: that would make the typo permanent. The
+    # guard is conditional on the variable being set, so the /etc/hosts default
+    # (present on every real host) is untouched. Ordered BEFORE the validator
+    # gate and before any read or write.
+    if [ -n "${VENYA_HOSTS_FILE:-}" ] && { [ ! -f "$HOSTS_FILE" ] || [ ! -w "$HOSTS_FILE" ]; }; then
+        error "VENYA_HOSTS_FILE is set to '$HOSTS_FILE', which is not an existing, writable regular file."
+        error "Point VENYA_HOSTS_FILE at the real hosts file (the default is /etc/hosts), or unset it. Nothing was written."
+        exit 1
+    fi
     # #490: the validator is the whole gate. A string that passes strict IPv4
     # validation carries no space, newline, ';' or metacharacter, so
     # _venya_valid_ipv4 subsumes venya_guard_injection here (R3) — and an

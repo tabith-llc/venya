@@ -337,7 +337,7 @@ file.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VENYA_HOSTS_FILE` | `/etc/hosts` | The hosts file the installer reads and updates for the core entry. A test/packaging seam (it is what the #490 cells point at a fixture); leave it unset on a real host. |
+| `VENYA_HOSTS_FILE` | `/etc/hosts` | The hosts file the installer reads and updates for the core entry. A test/packaging seam (it is what the #490 cells point at a fixture); leave it unset on a real host. When set it must name an EXISTING writable regular file — a mistyped path aborts the install with "Nothing was written." rather than creating a file no resolver reads. |
 
 What it creates: `venya` service account; Rust toolchain + the compiled
 redaction filter (`venya_filter.*.so`); Python venv (executor+core+cli);

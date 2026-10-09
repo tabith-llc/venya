@@ -188,6 +188,47 @@ def _hosts(proc: subprocess.CompletedProcess) -> str:
     return proc.hosts_path.read_text(encoding="utf-8")  # type: ignore[attr-defined]
 
 
+def _run_with_seam(
+    tmp_path: Path,
+    seam: Path,
+    *,
+    core_hostname: str = "venya-core-1",
+    core_ip: str | None = CORE_IP,
+) -> subprocess.CompletedProcess:
+    """Run the extracted block with VENYA_HOSTS_FILE pointing at `seam` AS GIVEN.
+
+    Used by the seam-guard cells: the path is deliberately absent, a directory, or
+    a non-regular file. Nothing is created here — the whole question is whether
+    the installer creates it.
+    """
+    block_path = tmp_path / "core_hosts_block.sh"
+    block_path.write_text(_block_source(), encoding="utf-8")
+    harness = tmp_path / "harness.sh"
+    harness.write_text(
+        "set -euo pipefail\n"
+        f"source {str(COMMON)!r}\n"
+        "venya_print_colors\n"
+        'CORE_HOSTNAME="${CELL_CORE:?}"\n'
+        f". {str(block_path)!r}\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["CELL_CORE"] = core_hostname
+    if core_ip is None:
+        env.pop("VENYA_CORE_IP", None)
+    else:
+        env["VENYA_CORE_IP"] = core_ip
+    env["VENYA_HOSTS_FILE"] = str(seam)
+    return subprocess.run(
+        ["bash", str(harness)],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+
 class TestRuledShapePins:
     """Source tripwires for R2/R3/R4/R5 — the pairs for the behaviour cells below."""
 
@@ -232,6 +273,19 @@ class TestRuledShapePins:
             "and a check with no reachable fail path is ceremonial code"
         )
 
+    def test_seam_guard_precedes_every_read_and_write(self) -> None:
+        """The addendum: an explicitly-set seam path is checked BEFORE the first read
+        (`EXISTING_IP=`) and before any write, and the check is conditional on the
+        variable being SET — so the /etc/hosts default is never policed."""
+        block = _block_source()
+        guard = block.index('if [ -n "${VENYA_HOSTS_FILE:-}" ] && { [ ! -f "$HOSTS_FILE" ]')
+        assert guard < block.index("EXISTING_IP="), "the seam guard must precede the first read"
+        assert guard < block.index('>> "$HOSTS_FILE"'), "the seam guard must precede every write"
+        assert block.count('if [ -n "${VENYA_HOSTS_FILE:-}" ]') == 1, "seam guard duplicated"
+        assert "> /dev/null" not in _code_lines(block).replace(
+            '"$HOSTS_TMP"', ""
+        ), "no create-if-missing path may exist for the seam target"
+
     def test_refused_value_is_not_echoed_back(self, tmp_path: Path) -> None:
         """R5 names the knob; replaying the hostile value into the terminal the operator
         reads would re-inject it (that is the class this ticket closes)."""
@@ -239,6 +293,103 @@ class TestRuledShapePins:
         proc = _run_block(tmp_path, hosts_text=BASE_HOSTS, core_ip=f"1.2.3.4\n{marker}")
         assert proc.returncode != 0
         assert marker not in proc.stdout, f"the refused value was echoed: {proc.stdout!r}"
+
+
+class TestSeamGuard:
+    """The #490 addendum: ``VENYA_HOSTS_FILE`` is an operator-typed path, so a value
+    that is not an existing writable regular file must be refused BEFORE any write.
+    Without the guard the seam recreated the silent-wrong-target class the ticket
+    closes: a mistyped path plus a VALID IP created the file, appended the row, and
+    the install reported success."""
+
+    def test_absent_seam_path_refused_and_NOT_CREATED(self, tmp_path: Path) -> None:
+        """The proof is the non-creation, not the message: a run that printed the
+        refusal and then created the file anyway must fail this cell."""
+        seam = tmp_path / "hosts-typo"
+        assert not seam.exists()
+        proc = _run_with_seam(tmp_path, seam, core_ip=CORE_IP)
+        assert proc.returncode != 0, f"absent seam path was accepted: {proc.stdout}{proc.stderr}"
+        assert not seam.exists(), f"the installer CREATED the mistyped seam path: {seam.read_text()!r}"
+        # Nothing else in the directory appeared either (no temp-file litter).
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            "core_hosts_block.sh",
+            "harness.sh",
+        ], sorted(p.name for p in tmp_path.iterdir())
+
+    @pytest.mark.parametrize("bad_ip", ["1.2.3.4 5.6.7.8", "1.2.3.*"])
+    def test_absent_seam_path_refused_even_with_a_hostile_ip(self, tmp_path: Path, bad_ip: str) -> None:
+        """Ordering half: the seam guard fires first, so an invalid IP on a bad path
+        is still refused and still creates nothing."""
+        seam = tmp_path / "nested" / "hosts"
+        proc = _run_with_seam(tmp_path, seam, core_ip=bad_ip)
+        assert proc.returncode != 0
+        assert not seam.exists(), "the nested mistyped path was created"
+
+    def test_refusal_names_variable_path_and_no_write(self, tmp_path: Path) -> None:
+        """The refusal text is actionable: it names the knob, echoes the path the
+        operator typed, and states that nothing was written."""
+        seam = tmp_path / "hosts-typo"
+        proc = _run_with_seam(tmp_path, seam, core_ip=CORE_IP)
+        assert "VENYA_HOSTS_FILE" in proc.stdout, proc.stdout
+        assert str(seam) in proc.stdout, f"the refused path is not named: {proc.stdout!r}"
+        assert "Nothing was written." in proc.stdout, proc.stdout
+
+    def test_directory_as_seam_refused(self, tmp_path: Path) -> None:
+        """Edge: a directory exists and is writable but is not a regular file. Refused,
+        and nothing is created inside it."""
+        seam = tmp_path / "hosts-dir"
+        seam.mkdir()
+        proc = _run_with_seam(tmp_path, seam, core_ip=CORE_IP)
+        assert proc.returncode != 0, f"a directory seam was accepted: {proc.stdout}"
+        assert list(seam.iterdir()) == [], "the installer wrote INTO the directory seam"
+
+    def test_non_regular_seam_refused(self, tmp_path: Path) -> None:
+        """Edge: /dev/null — exists, is writable, is NOT a regular file, so a write
+        through it would silently discard the mapping. Chosen because it is present on
+        every install host and needs no fixture setup; the `-f` test rejects it (and
+        the fifos/sockets of the same shape) before any write is attempted."""
+        proc = _run_with_seam(tmp_path, Path("/dev/null"), core_ip=CORE_IP)
+        assert proc.returncode != 0, f"a /dev/null seam was accepted: {proc.stdout}"
+        assert "VENYA_HOSTS_FILE" in proc.stdout
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the file permission bits")
+    def test_unwritable_seam_refused(self, tmp_path: Path) -> None:
+        """Edge: an existing regular file the installer cannot write — refused, and the
+        incumbent bytes are untouched."""
+        seam = tmp_path / "hosts-readonly"
+        seam.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+        seam.chmod(0o000)
+        try:
+            proc = _run_with_seam(tmp_path, seam, core_ip=CORE_IP)
+            assert proc.returncode != 0, f"an unwritable seam was accepted: {proc.stdout}"
+            seam.chmod(0o600)
+            assert seam.read_text(encoding="utf-8") == "127.0.0.1 localhost\n"
+        finally:
+            seam.chmod(0o600)
+
+    def test_default_path_untouched_when_seam_not_set(self) -> None:
+        """Ruled shape of the guard: it fires only when the variable is SET. With the
+        variable absent the block keeps using /etc/hosts with no new existence test —
+        a real host always has that file, and polising the default would be the
+        ceremonial-check shape R3 rejects. Source pin: the guard is inside a
+        `-n "${VENYA_HOSTS_FILE:-}"` condition, never around the plain assignment."""
+        block = _block_source()
+        assign = 'HOSTS_FILE="${VENYA_HOSTS_FILE:-/etc/hosts}"'
+        assert assign in block
+        assert not block.startswith(assign), "the seam assignment is not the first use"
+        guard_block = block[block.index('if [ -n "${VENYA_HOSTS_FILE:-}" ]') :]
+        assert (
+            "exit 1" in guard_block[: guard_block.index("EXISTING_IP=")]
+        ), "the seam guard does not abort before the first read"
+
+    def test_positive_branch_still_works_with_an_existing_seam(self, tmp_path: Path) -> None:
+        """Paired positive: the same guard code path with a legitimate existing file
+        appends normally — the guard is not a blanket refusal of the seam."""
+        seam = tmp_path / "hosts"
+        seam.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+        proc = _run_with_seam(tmp_path, seam, core_ip=CORE_IP)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert seam.read_text(encoding="utf-8") == f"127.0.0.1 localhost\n{CORE_IP} venya-core-1\n"
 
 
 class TestPositiveCells:
