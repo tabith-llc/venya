@@ -6,11 +6,39 @@
 
 """Capability isolation checks for the venya-cli package.
 
-The CLI runs on untrusted workstations/jump hosts and must never use
-mlock (CAP_IPC_LOCK) or import core.engine.secure_memory. These checks
-moved here from packages/core/tests/test_capability_isolation.py when the
-CLI was carved out into venya-cli; they are equal-or-stronger: the source
-scan covers every module in the package, not just two named files.
+WHAT THESE CHECKS ENFORCE, stated to match the checks and not exceed them
+(#538, lead ruling 2026-10-09; prose correction only — every assertion in this
+file is unchanged, and the invariant below is the one they actually test):
+
+* the CLI must never IMPORT the core package's protected-memory module, and must
+  never NAME its symbols — `test_no_core_imports_in_source`,
+  `test_no_secure_memory_symbols_in_source`, `test_secure_memory_not_in_cli_module_exports`,
+  and the clean-interpreter import probe;
+* the CLI holds no standing resident key — the protected buffer is a scoped,
+  single-use holder that erases its own copy on release;
+* the CLI must never RELY on pinning. A short-lived pin is ATTEMPTED and
+  REPORTED, never depended on: `venya_cli/secret_holder.py` asks the kernel to
+  keep its one buffer resident and tolerates a refusal as the ordinary case,
+  because an operator workstation has no CAP_IPC_LOCK to ask with. Measured (the
+  #538 design note, reproduced in the implementation leg): `RLIMIT_MEMLOCK` 8 MiB
+  soft/hard, `CapEff` all zeros, and `mlock` on a 241-byte buffer — the product's
+  own SECP256R1 PEM size — fails errno 12 in 200 of 200 trials. That is why #538's claim is "erased on release,
+  not pinned", and why nothing here treats a pin attempt as a violation.
+
+Earlier prose in this docstring said the CLI "must never use mlock
+(CAP_IPC_LOCK)". That sentence out-ran these checks — no assertion here bans the
+`mlock` syscall itself, only the import and the naming of the core module — and
+under #538's ruling an ATTEMPTED, non-depended-on pin is sanctioned, so the
+sentence was false as written. Narrowing prose to match a check is the honest
+half of the pair; making a check match its prose is a separate defect and is
+filed as one (a guard whose comment claims more than it enforces lets a later
+lane pass while doing something the team believes is banned).
+
+These checks moved here from packages/core/tests/test_capability_isolation.py when
+the CLI was carved out into venya-cli; they are equal-or-stronger: the source
+scan covers every module in the package, not just two named files. The semantics
+of record for the protected-buffer contract on both planes are
+``docs/design-secure-memory-kek.md``.
 """
 
 import json
