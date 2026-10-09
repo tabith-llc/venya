@@ -16,6 +16,7 @@ Token model (per plan section 5.1):
     - Tokens stored in memory only (no disk persistence)
 """
 
+import hashlib
 import logging
 import os
 import re
@@ -184,6 +185,42 @@ def _warn_if_loose_admin_key(path: str) -> None:
         "stored outside your home directory.",
         file=sys.stderr,
     )
+
+
+def _admin_cert_fingerprint(cert_path: str) -> str:
+    """sha256 of the admin certificate FILE BYTES — the RF-8c rebuild trigger.
+
+    Content hash, deliberately, and not `mtime`, size, or any `stat` shortcut
+    (dossier §4.3): `cp`, `rsync` and a re-download of an identical file all move
+    `mtime` without moving material, and a restore that PRESERVES `mtime` would then
+    fail to rebuild — silently going on to present the old, soon-to-be-dead
+    certificate. Size is worse still: two certificates for one identity are the same
+    length by construction. The bytes are the only cheap signal that cannot lie in
+    both directions.
+
+    Reads the CERTIFICATE only — never the private key — which is the same boundary
+    `admin cert status` and the RF-8a dial guard keep.
+
+    Unreadable is a REFUSAL, never a rebuild-and-hope and never a fall-through to the
+    host trust store (dossier §4.5's spirit: never silently present a stale
+    credential). A certificate this workstation can no longer read is a certificate
+    it cannot confirm it is presenting.
+    """
+    try:
+        data = Path(cert_path).read_bytes()
+    except OSError as e:
+        raise APIClientError(
+            f"Error: the admin certificate at {cert_path!r} cannot be read ({e.__class__.__name__}: {e}) "
+            "— refusing to dial rather than present a credential whose material this workstation can no "
+            "longer confirm. Repair: point VENYA_ADMIN_CERT at a readable certificate, or run "
+            "`venya admin cert renew` to mint a new one. Nothing was sent."
+        ) from e
+    if not data:
+        raise APIClientError(
+            f"Error: the admin certificate at {cert_path!r} is empty — refusing to dial with a credential "
+            "that cannot be confirmed. Repair: run `venya admin cert renew`. Nothing was sent."
+        )
+    return hashlib.sha256(data).hexdigest()
 
 
 def _build_ssl_context(cafile: str | None, certfile: str | None, keyfile: str | None) -> ssl.SSLContext:
@@ -438,6 +475,12 @@ class APIClient:
         # construction must not itself construct one. Tests that inject a stub
         # into `_http` still bypass the real build (the setter stores it).
         self.__http: httpx2.Client | None = None
+        # RF-8c: the fingerprint OF THE MATERIAL the staged transport was built from,
+        # plus the path it was read from. None means "this transport presents no admin
+        # certificate, or was handed to me by a caller" — in both cases there is
+        # nothing here to re-confirm, so the choke point leaves it alone.
+        self._cert_fingerprint: str | None = None
+        self._cert_fingerprint_path: str | None = None
 
     def _resolve_tls_anchor(self) -> tuple[str | None, str]:
         """The Venya trust anchor for this workstation, or None + what was searched.
@@ -480,15 +523,28 @@ class APIClient:
         there is no re-mint, no ceremony, no retry loop (§4.6's testable boundary),
         and nothing is ever put on the wire. The read is of the certificate file
         only — the private key is never opened to answer a lifetime question.
+
+        RF-8c (dossier §4.3) adds the second half of this property: the branch below
+        builds and caches, and a cached transport is where a renewed certificate would
+        otherwise go unnoticed. `load_cert_chain` copies the chain into the OpenSSL
+        context at build time, so rewriting the file under a live process changes
+        nothing it will send — a long-running admin script would die at the 60-minute
+        mark even after a successful `venya admin cert renew`. So before handing out a
+        STAGED transport, the certificate it was built from is re-read and re-hashed,
+        and a difference closes the old client and re-enters THIS build branch (one
+        route, not a second builder). Byte-identical bytes rebuild NOTHING: no churn, no
+        connection storm. The cost when nothing changed is one read of a ~1 KB
+        certificate per request, which the dossier rules irrelevant next to the round
+        trip. A certificate that cannot be read is a refusal, never a rebuild-and-hope.
         """
         if self.__http is None:
             if not self._anchor:
                 raise _anchor_refusal(self._anchor_searched)
             base_url = self._http_kwargs.get("base_url", "")
             if not (isinstance(base_url, str) and base_url.startswith("https://")):
-                # Deferred import: commands.py imports this module at its top,
-                # so a module-level back-import would be a cycle. Same shape the
-                # landed #521 site 3 uses in fido2_client.py (`_https_refusal`).
+                # Deferred import: commands.py imports this module at its top, so a
+                # module-level back-import would be a cycle. Same shape the landed #521
+                # site 3 uses in fido2_client.py (`_https_refusal`).
                 from .commands import _https_refusal
 
                 raise APIClientError(
@@ -500,9 +556,10 @@ class APIClient:
                     )
                 )
             # What this dial actually presents. The RF-8b session-only seam clears the
-            # pair here and ONLY here, so the expiry guard below is keyed on the
-            # credential in play rather than on the credential configured — a request
-            # that presents no certificate has no certificate to refuse.
+            # pair here and ONLY here, so the expiry guard and the RF-8c fingerprint
+            # below are keyed on the credential IN PLAY rather than the credential
+            # configured — a request that presents no certificate has no certificate to
+            # refuse and no certificate to fingerprint.
             presented_certfile = None if self._session_only_dial else self._admin_certfile
             presented_keyfile = None if self._session_only_dial else self._admin_keyfile
             if presented_certfile:
@@ -519,18 +576,58 @@ class APIClient:
                 )
                 if refusal is not None:
                     raise APIClientError(refusal)
+                # RF-8c: record the fingerprint of the bytes about to be loaded, so a
+                # staged context is always described by the material it actually
+                # carries. The PATH is pinned here, from this client's construction: a
+                # later change to `VENYA_ADMIN_CERT` in the environment must not make a
+                # live process adopt a different file behind its back (the dossier's
+                # named negative case).
+                self._cert_fingerprint = _admin_cert_fingerprint(presented_certfile)
+                self._cert_fingerprint_path = presented_certfile
+            else:
+                self._cert_fingerprint = None
+                self._cert_fingerprint_path = None
             verify = _build_ssl_context(
                 cafile=self._anchor,
                 certfile=presented_certfile,
                 keyfile=presented_keyfile,
             )
             self.__http = httpx2.Client(**self._http_kwargs, verify=verify)
+            return self.__http
+
+        # Staged transport: re-confirm the material it was built from. No recorded
+        # fingerprint means there is nothing to confirm — either this dial presents no
+        # admin certificate (the RF-8b session-only shape) or a caller handed over a
+        # transport this code never built, so it cannot vouch for what is inside it.
+        if self._cert_fingerprint is not None and self._cert_fingerprint_path is not None:
+            present = _admin_cert_fingerprint(self._cert_fingerprint_path)
+            if present != self._cert_fingerprint:
+                stale = self.__http
+                self.__http = None
+                self._cert_fingerprint = None
+                self._cert_fingerprint_path = None
+                # Close FIRST: a rebuild that leaks the superseded client is a socket
+                # leak, and the next dial would then run on two contexts at once.
+                stale.close()
+                # Re-enter the SAME branch rather than calling a second builder: the
+                # anchor rule (#530), the https rule (#521) and the expiry rule (RF-8a)
+                # are properties of that branch, and a rebuild that skipped them would
+                # be a new dial site with a weaker check than the first one.
+                return self._http
         return self.__http
 
     @_http.setter
     def _http(self, value: httpx2.Client | None) -> None:
-        """Set the transport — test seams inject a stub here; None forces a rebuild."""
+        """Set the transport — test seams inject a stub here; None forces a rebuild.
+
+        The recorded fingerprint goes with it: this code did not build what it is being
+        handed, so it cannot claim to know which bytes are inside, and a stale hash
+        would either rebuild over the injected stub or vouch for material it never
+        read.
+        """
         self.__http = value
+        self._cert_fingerprint = None
+        self._cert_fingerprint_path = None
 
     def use_session_only_transport(self) -> None:
         """Dial this client with the LOGIN SESSION only — no admin client credential.
