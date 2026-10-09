@@ -105,6 +105,39 @@ provisioning. (Absolute reference counts deliberately do not live in this
 plan: they rot with every merge and nothing enforces their sync; the
 results-file lineage carries them.)
 
+**Executor-suite bed authority (ticket #466):** the executor suite runs on two
+beds and neither one is complete on its own. Record which bed produced every
+executor count in the run's results file.
+
+- **Workstation bed** — `$BUILD_HOST` / `$VENYA_SRC`, a monorepo checkout with
+  the full workspace venv, where the `server` package IS importable. The 16
+  cells in `packages/executor/tests/test_integration.py` (mTLS handshake,
+  certificate rotation, revocation detection, run against a real
+  `server.ca.CAManager` and an app built from `server.routes.executors`) RUN
+  here. `sbx` is NOT installed on this bed, so the sandbox-strategy cells raise
+  `RuntimeError: sbx CLI not found` (origin: `executor/strategies/sbx_strategy.py`
+  — grep the symbol, line numbers rot). That raise is the standing executor
+  FAILED/ERROR class a workstation gate carries, not a regression.
+  **This bed is authoritative for the server-coupled executor cells.**
+- **Executor VM bed** — `$EXEC_HOST`, a real executor install. Its venv is built
+  from `venya-executor-requirements.txt`, which carries `core`, `executor`,
+  `venya-cli`, and `venya-contract` and NO `server`; `sbx` and KVM ARE present.
+  With `server` absent, the guard in `packages/executor/tests/conftest.py` puts
+  `test_integration.py` in `collect_ignore` and prints the reason
+  `server package absent — executor-only install (#466)`, so the suite collects
+  and the sandbox cells run instead of the suite dying at exit code 4.
+  **This bed is authoritative for executor runtime behavior — sandbox strategy,
+  secret injection, and teardown cells.**
+- Run the suite from a **source checkout**, not an installed wheel tree. One
+  interlock cell (`packages/executor/tests/test_audit.py` →
+  `test_TF_server_cap_interlock`) reads
+  `packages/server/src/server/routes/audit.py` by filesystem path to compare the
+  server `INGEST_MAX_LINES` with the executor mirror constant, and that path
+  exists only in the monorepo layout (the executor tarball is a whole-tree
+  archive, so the layout holds on the VM).
+- Consequence: one bed's green is not the whole claim. A complete executor
+  verdict needs both beds, each named in the results file with its own counts.
+
 ---
 
 ## Operational constraints (what bites if ignored)
