@@ -241,22 +241,30 @@ class TestRateLimitRegistrationDep:
             "registration_attempts_per_minute": 2,  # tight: per-executor must bind
             "token_generation_per_minute": 10,
             "registration_global_per_minute": 100,  # generous: global backstop must not bind
-            "registration_first_attempt_per_minute": 3,  # default; existing tests run is_first=False
+            "registration_first_attempt_per_minute": 3,  # default; these cells run is_first=False (see _request)
         }
         base.update(overrides)
         return SimpleNamespace(executor_enrollment=SimpleNamespace(**base))
 
     @staticmethod
     def _request(executor_id, config, host="203.0.113.1", first=False):
+        """Build a registration request whose first-attempt probe is ANSWERED.
+
+        `first=True` → the lookup finds NO cert (a genuine first attempt);
+        `first=False` → the lookup FINDS a cert (a genuine returning executor).
+
+        #442 site 2 note: the old `first=False` arm passed backend=None so the
+        probe RAISED and the blanket swallow left is_first False — it reached the
+        returning-executor reading through the fail-open this ticket removes.
+        After the fix a fault selects the STRICTER side, so that arm would silently
+        convert every cell below into a first-attempt cell. The readings are now
+        earned from the probe, not from its absence. The fault case has its own
+        cells in test_fail_open_reg_firstprobe_442.py.
+        """
         req = SimpleNamespace()
-        if first:
-            # Backend mock whose cert probe returns None -> is_first is True.
-            backend = MagicMock()
-            backend.get_session.return_value.query.return_value.filter.return_value.first.return_value = None
-        else:
-            # backend=None makes the is_first DB probe raise and fall through
-            # (is_first stays False) without needing a real DB app.state.
-            backend = None
+        backend = MagicMock()
+        probe = backend.get_session.return_value.query.return_value.filter.return_value.first
+        probe.return_value = None if first else MagicMock()
         req.app = SimpleNamespace(state=SimpleNamespace(config=config, backend=backend))
         req.client = SimpleNamespace(host=host)
         req.state = SimpleNamespace()

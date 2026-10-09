@@ -16,6 +16,7 @@ Manages the persistent executor daemon lifecycle:
 """
 
 import contextlib
+import enum
 import errno
 import hashlib
 import logging
@@ -388,6 +389,25 @@ def _ghost_identity_error(reason: str) -> RuntimeError:
     )
     logger.error("%s", msg)
     return RuntimeError(msg)
+
+
+class RevocationStatus(enum.Enum):
+    """The three answers a revocation poll can give (#442 site 4, ruling R3).
+
+    The contract this replaces was a bool, and a bool cannot separate "the server
+    answered: this certificate is live" from "I could not reach the server to
+    ask". Both answered False, and the caller's reset-on-False then WIPED the
+    consecutive-failure count on every outage — so the bounded fail-closed the
+    threshold exists to provide never engaged while the core was down. That is
+    the fail-open this class closes.
+
+    Values are strings, never 0/1, deliberately: a caller has to name the case it
+    means, and no answer can land in a falsy branch by accident any more.
+    """
+
+    NOT_REVOKED = "not-revoked"
+    REVOKED = "revoked"
+    UNREACHABLE = "unreachable"
 
 
 class CertificateManager:
@@ -900,7 +920,7 @@ class CertificateManager:
         der = cert.public_bytes(serialization.Encoding.DER)
         return hashlib.sha256(der).hexdigest()
 
-    def check_revocation(self) -> bool:
+    def check_revocation(self) -> RevocationStatus:
         """Check if this executor's certificate has been revoked.
 
         Polls the server's revocation list endpoint and checks whether the
@@ -908,13 +928,24 @@ class CertificateManager:
         via ETag to avoid unnecessary network traffic when the list hasn't
         changed.
 
-        Returns:
-            True if the certificate is revoked. False if not revoked or if
-            the server is unreachable (graceful degradation — the daemon
-            will retry on the next loop iteration).
+        Returns (#442 site 4, ruling R3 — a tri-state, not a bool):
+            REVOKED — the server answered, and this credential (by identity or by
+            serial) is on the revocation list. Terminal.
+            NOT_REVOKED — the server ANSWERED and this credential is live (including
+            a 304, which is an answer: the list is unchanged since a check that said
+            live, and a revoked credential would already have stopped the loop).
+            UNREACHABLE — we could not ask: a transport-level failure. NOT an
+            assertion of liveness. The caller bounds how long that may persist.
+
+        The bool this replaces returned False for the last two cases alike, which
+        is what made the daemon's consecutive-failure counter reset during an
+        outage; see RevocationStatus.
         """
         if self.serial is None:
-            return False
+            # No credential loaded yet — nothing to look up. Kept as an ANSWER
+            # (not an uncertainty) so the pre-registration daemon behaves exactly
+            # as it did: the verdict is the same, only the name changed.
+            return RevocationStatus.NOT_REVOKED
 
         try:
             headers = {}
@@ -929,7 +960,7 @@ class CertificateManager:
 
             if response.status_code == 304:
                 logger.debug("Revocation list unchanged, skipping check")
-                return False
+                return RevocationStatus.NOT_REVOKED
 
             response.raise_for_status()
             self._last_revocation_etag = response.headers.get("etag")
@@ -950,7 +981,7 @@ class CertificateManager:
                     "executor_id. Shutting down.",
                     self.config.executor_id,
                 )
-                return True
+                return RevocationStatus.REVOKED
             revoked_serials = data.get("revoked_serials", [])
             # Case/padding-insensitive membership (ticket
             # cert-serial-canonicalization-mismatch #481): the list carries the
@@ -966,10 +997,19 @@ class CertificateManager:
             else:
                 logger.debug("Certificate not revoked (serial=%s)", self.serial)
 
-            return is_revoked
-        except httpx2.RequestError:
-            logger.debug("Failed to check revocation status (will retry)")
-            return False
+            return RevocationStatus.REVOKED if is_revoked else RevocationStatus.NOT_REVOKED
+        except httpx2.RequestError as exc:
+            # #442 site 4: this used to be `logger.debug(...); return False`, which
+            # reported "this certificate is live" at the moment nobody was asked.
+            # ABOVE debug per AC3, and the answer is now UNREACHABLE — the caller
+            # counts it toward max_revocation_failures instead of resetting on it.
+            logger.warning(
+                "Revocation status UNKNOWN for executor %s — server unreachable (will retry): %s: %s",
+                self.config.executor_id,
+                type(exc).__name__,
+                exc,
+            )
+            return RevocationStatus.UNREACHABLE
 
     def _load_metadata(self) -> None:
         """Load serial and expiry from the on-disk certificate."""
@@ -1816,10 +1856,18 @@ class ExecutorDaemon:
             # Check revocation status — run in thread pool
             revocation_future = self._http_executor.submit(self.cert_manager.check_revocation)
             try:
-                if revocation_future.result(timeout=self.config.network.request_timeout_seconds):
+                # #442 site 4: the three answers are named, not truth-tested. The
+                # UNREACHABLE case now ADVANCES the consecutive-failure counter; the
+                # `else: ... = 0` reset below used to fire on it, which is how an
+                # outage erased its own evidence. Threshold and its warning text are
+                # unchanged — what feeds them is what got fixed.
+                revocation = revocation_future.result(timeout=self.config.network.request_timeout_seconds)
+                if revocation is RevocationStatus.REVOKED:
                     logger.warning("Executor certificate revoked — shutting down")
                     self.state.revoked = True
                     break
+                elif revocation is RevocationStatus.UNREACHABLE:
+                    self.state._consecutive_revocation_failures += 1
                 else:
                     self.state._consecutive_revocation_failures = 0
             except TimeoutError:

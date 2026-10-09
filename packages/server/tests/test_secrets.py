@@ -471,9 +471,15 @@ class TestSecretsGet:
         )
         db.commit.assert_called()
 
-    def test_get_unmask_token_used_or_expired_masked(self):
-        """Paired negative: consumed/expired/foreign token (rowcount==0) →
-        masked value, never plaintext, no burn commit."""
+    def test_get_unmask_token_used_or_expired_refused(self):
+        """Paired negative, #442 site 1 (assertion cleared by ruling R2): a
+        consumed/expired/foreign token (rowcount==0) is REFUSED with 401.
+
+        This cell used to pin the loose behavior — 200 with a masked value — which
+        is exactly the fail-open #442 removes: a caller who FAILED elevation got a
+        successful-looking answer. Both guards the old cell carried are kept and
+        tightened here: no plaintext escapes (the route never reaches core.get at
+        all now), and no burn commit happens."""
         core = _make_mock_core()
         core.get.return_value = "\u2022" * 8
         backend = MagicMock()
@@ -487,17 +493,13 @@ class TestSecretsGet:
             params={"unmask": True},
             headers={"X-Elevation-Token": "stale-token"},  # header transport (#13)
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["value"] == "\u2022" * 8
-        assert data["masked"] is True
-        core.get.assert_called_once_with(
-            secret_key="db-password",
-            caller="human",
-            unmask=False,
-            user_id="test-user",
-            role_names=[],
-        )
+        assert resp.status_code == 401
+        assert resp.json()["detail"] == "Elevation token is invalid, expired, or already used"
+        # No plaintext AND no masked value: the refusal precedes any retrieval.
+        assert "value" not in resp.json()
+        core.get.assert_not_called()
+        # The burned/foreign token is not treated as consumed by this request.
+        db.commit.assert_not_called()
 
     def test_get_not_found(self):
         """GET /secrets/{key} should return 404 for missing secret."""

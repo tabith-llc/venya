@@ -29,6 +29,7 @@ from executor.config import CertificateRotationConfig, ExecutorConfig, MtlsConfi
 from executor.daemon import (
     CertificateManager,
     CertificateValidationError,
+    RevocationStatus,
     _create_csr,
     _extract_executor_id_from_cert,
     _generate_ecdsa_p256_keypair,
@@ -753,7 +754,7 @@ class TestCheckRevocation:
         mock_response.raise_for_status.return_value = None
 
         with patch.object(cert_manager.client, "get", return_value=mock_response):
-            assert cert_manager.check_revocation() is True
+            assert cert_manager.check_revocation() is RevocationStatus.REVOKED
 
     def test_check_revocation_identity_match(self, cert_manager: CertificateManager, caplog):
         """updated: executor-revocation-by-identity ruling 2 — own executor_id in
@@ -775,7 +776,7 @@ class TestCheckRevocation:
 
         with caplog.at_level(logging.WARNING):
             with patch.object(cert_manager.client, "get", return_value=mock_response):
-                assert cert_manager.check_revocation() is True
+                assert cert_manager.check_revocation() is RevocationStatus.REVOKED
         assert "IDENTITY revoked" in caplog.text
 
     def test_check_revocation_foreign_identity_ignored(self, cert_manager: CertificateManager):
@@ -792,7 +793,7 @@ class TestCheckRevocation:
         mock_response.raise_for_status.return_value = None
 
         with patch.object(cert_manager.client, "get", return_value=mock_response):
-            assert cert_manager.check_revocation() is False
+            assert cert_manager.check_revocation() is RevocationStatus.NOT_REVOKED
 
     def test_check_revocation_not_revoked(self, cert_manager: CertificateManager):
         """Returns False when serial is not in the revocation list."""
@@ -805,7 +806,7 @@ class TestCheckRevocation:
         mock_response.raise_for_status.return_value = None
 
         with patch.object(cert_manager.client, "get", return_value=mock_response):
-            assert cert_manager.check_revocation() is False
+            assert cert_manager.check_revocation() is RevocationStatus.NOT_REVOKED
 
     def test_check_revocation_empty_list(self, cert_manager: CertificateManager):
         """Returns False when revocation list is empty."""
@@ -818,24 +819,30 @@ class TestCheckRevocation:
         mock_response.raise_for_status.return_value = None
 
         with patch.object(cert_manager.client, "get", return_value=mock_response):
-            assert cert_manager.check_revocation() is False
+            assert cert_manager.check_revocation() is RevocationStatus.NOT_REVOKED
 
     def test_check_revocation_no_serial(self, cert_manager: CertificateManager):
         """Returns False when serial is not set."""
         cert_manager.serial = None
 
         with patch.object(cert_manager.client, "get") as mock_get:
-            assert cert_manager.check_revocation() is False
+            assert cert_manager.check_revocation() is RevocationStatus.NOT_REVOKED
             mock_get.assert_not_called()
 
     def test_check_revocation_server_unreachable(self, cert_manager: CertificateManager):
-        """Returns False (graceful degradation) when server is unreachable."""
+        """#442 site 4 (ruling R3, this cell cleared to change): an unreachable
+        server is UNREACHABLE, not an assertion of liveness.
+
+        This cell used to read "Returns False (graceful degradation) when server
+        is unreachable" — that False was the defect: it was indistinguishable from
+        the server having answered "live", and it reset the caller's
+        consecutive-failure count during an outage."""
         cert_manager.serial = "0000000000000001"
 
         with patch.object(
             cert_manager.client, "get", side_effect=httpx2.RequestError("Connection refused", request=MagicMock())
         ):
-            assert cert_manager.check_revocation() is False
+            assert cert_manager.check_revocation() is RevocationStatus.UNREACHABLE
 
 
 # --- Tests: helper functions ---

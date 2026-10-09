@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**68 suppression lines across 20 files.**
+**67 suppression lines across 20 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -79,7 +79,6 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/server/src/server/ca.py` | `self._key_passphrase_env = "VENYA_ADMIN_CA_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/middleware/auth.py` | `ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort JSON parse, None falls through  # noqa: S110` |
-| `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort DB query, None falls through  # noqa: S110` |
 | `packages/server/src/server/routes/auth_browser.py` | `except Exception:  # nosec B110 — rollback best-effort before raising HTTPException` |
 | `packages/server/src/server/routes/secrets.py` | `SECRET_KEY_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"  # nosec B105 — charset pattern, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/utils/disk_encryption.py` | `import subprocess  # nosec B404 — disk encryption check requires subprocess for system commands` |

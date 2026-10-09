@@ -835,7 +835,20 @@ async def register_executor(
         logger.info("Enrollment token verified for executor: %s", resolved_executor_id)
     else:
         server_config = getattr(request.app.state, "config", None)
-        if server_config and server_config.executor_enrollment.require_token:
+        # #442 site 3: this test used to read `server_config and
+        # server_config.executor_enrollment.require_token`, so an ABSENT or
+        # half-initialized config object satisfied the condition's first operand
+        # with False and landed in the else below — a missing config silently
+        # ACCEPTED a tokenless registration. The strictest reading is the default
+        # for every form of "we could not tell": no config, no
+        # executor_enrollment section, no require_token knob.
+        #
+        # The Phase 2 incumbent exemption inside this branch is deliberately
+        # untouched: a verified current-record credential is still accepted
+        # exactly as it is today for a config that requires the token, which is
+        # the behavior the rules asked to preserve rather than loosen.
+        require_token = getattr(getattr(server_config, "executor_enrollment", None), "require_token", True)
+        if require_token:
             # Phase 2 incumbent exemption (ruling 2(a)): tokenless rotate is
             # accepted ONLY from the verified current-record credential —
             # revocation state first, then serial match (see helper).
