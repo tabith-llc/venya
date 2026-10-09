@@ -15,6 +15,13 @@ from fastapi import Depends, FastAPI
 from server.dependencies import get_current_user, require_admin, require_role
 from starlette.testclient import TestClient
 
+# #449: the stated reason the role gate gives an executor-class caller. Cell-level
+# assertions pin the TEXT, not just the status — two different 403s exist on these
+# routes (the gate refusal and the route's own identity checks), and a status-only
+# assertion cannot tell them apart.
+EXECUTOR_GATE_REFUSAL = "Executor callers are not permitted on role-gated routes"
+NO_USER_ID_REFUSAL = "Caller identity carries no user to authorize"
+
 
 def _make_rm_mock(user_permissions):
     """Create a mock RoleManager.
@@ -187,23 +194,43 @@ class TestRequireRoleAuditor:
             resp = client.get("/protected")
         assert resp.status_code == 200
 
-    def test_executor_passes_auditor_gate_without_role_lookup(self):
-        """Executor mTLS bypass holds on the new tier (no user_id to look up)."""
+    def test_executor_refused_auditor_gate_without_role_lookup(self):
+        """#449: an executor is REFUSED on the auditor tier, never waved through.
+
+        The old cell pinned the opposite ("bypass holds on the new tier"), which was
+        the blanket pass this ticket removes. Refusal happens BEFORE any role lookup,
+        so the never-hits-RoleManager half of the old assertion still holds and is
+        kept; the 403 and its stated reason are what is new. A route body that never
+        ran is also asserted (no ``result`` key in the response), so this cell cannot
+        pass under the old code.
+        """
         rm = _make_rm_mock({})
         rm.get_user_permissions.side_effect = AssertionError("role lookup must not run for executors")
         with patch("server.dependencies.RoleManager", return_value=rm):
             app = _create_app({"caller": "executor", "executor_id": "exec-1"}, "auditor")
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/protected")
-        assert resp.status_code == 200
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == EXECUTOR_GATE_REFUSAL
+        assert "result" not in resp.json(), "route body ran — the gate did not refuse"
         rm.get_user_permissions.assert_not_called()
 
 
-class TestRequireRoleExecutorBypass:
-    """Executors (mTLS) bypass the role check (no user_id for a role lookup)."""
+class TestRequireRoleExecutorRefusal:
+    """#449: executor-class (mTLS) callers are refused by every TIERED role gate.
 
-    def test_executor_passes_without_role_lookup(self):
-        """Executor user_info (no user_id) passes and never hits RoleManager."""
+    Renamed from ``TestRequireRoleExecutorBypass``: a class named for a bypass that
+    no longer exists would be a lie in the test tree. The single source of executor
+    reachability is the middleware PATH MATCHER (``server/middleware/auth.py``), not
+    this gate — see the AC4 note in ``require_role._checker``.
+    """
+
+    def test_executor_refused_without_role_lookup(self):
+        """Executor user_info (no user_id) is refused 403 and never hits RoleManager.
+
+        The refusal must be a 403 with a stated reason, not the KeyError→500 the
+        role lookup would have produced for an identity carrying no ``user_id``.
+        """
         rm = _make_rm_mock({})
         rm.get_user_permissions.side_effect = AssertionError("role lookup must not run for executors")
         with patch("server.dependencies.RoleManager", return_value=rm):
@@ -213,7 +240,9 @@ class TestRequireRoleExecutorBypass:
             )
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/protected")
-        assert resp.status_code == 200
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == EXECUTOR_GATE_REFUSAL
+        assert resp.status_code != 500, "authorization failure surfaced as a server fault"
         rm.get_user_permissions.assert_not_called()
 
 
@@ -490,9 +519,16 @@ class TestRequireRoleAttachesRoleMap:
         # JSON coerces the int role-id keys to strings on the way out.
         assert resp.json()["map"] == {"1": "auditor"}
 
-    def test_executor_bypass_attaches_nothing(self):
-        """Executor (mTLS) returns before any role fetch — no map attached,
-        and no lookup runs (it has no user_id)."""
+    def test_executor_refused_attaches_no_map(self):
+        """#449: an executor is refused before any role fetch — so the body never
+        runs and no ``_role_permissions`` map can exist anywhere in the response.
+
+        The old cell asserted 200 + ``map is None`` (the pass, with nothing
+        attached). Under the refusal the route body is never entered, so the
+        response is the gate's 403 envelope: ``detail`` present, ``map`` absent.
+        Asserting the ABSENCE of the body's key is strictly stronger than the old
+        ``map is None``, which the pass produced trivially.
+        """
         rm = _make_rm_mock({})
         rm.get_user_permissions.side_effect = AssertionError("executor must not trigger lookup")
         app = FastAPI()
@@ -509,5 +545,6 @@ class TestRequireRoleAttachesRoleMap:
         with patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/echo")
-        assert resp.status_code == 200
-        assert resp.json()["map"] is None
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == EXECUTOR_GATE_REFUSAL
+        assert "map" not in resp.json(), "route body ran for an executor caller"

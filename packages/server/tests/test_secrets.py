@@ -20,6 +20,12 @@ from starlette.testclient import TestClient
 
 TEST_USER = {"user_id": "test-user", "roles": ["devops"], "caller": "human"}
 
+# #449: the role gate's stated refusal reason for an executor-class caller. Asserted
+# as TEXT, not just a status: these routes can answer 403 for several different
+# reasons (gate refusal, tier deny, the route's own identity checks) and a
+# status-only cell cannot tell them apart.
+EXECUTOR_GATE_REFUSAL = "Executor callers are not permitted on role-gated routes"
+
 
 @pytest.fixture(autouse=True)
 def _default_role_permissions():
@@ -409,16 +415,22 @@ class TestSecretsGet:
         assert "plaintext-secret" not in resp.text
         core.get.assert_not_called()
 
-    def test_get_executor_auth_context_never_yields_plaintext(self):
-        """DEAD-BRANCH PIN (user ruling 2026-09-20): the route carries NO
-        executor branch to forward. Even an auth context shaped EXACTLY like
-        the middleware's cert-verified executor grant ({"caller": "executor",
-        "executor_id": ...} — set only by `_validate_executor_mtls`,
-        middleware/auth.py; cross-branch interlock with
-        sec-executor-session-path-no-auth) cannot put caller=executor into
-        core.get. Production note: the middleware never grants that shape off
-        the session paths, and a real executor carries no user_id (core.get
-        would 404); this pin guards the route-side invariant itself."""
+    def test_get_executor_auth_context_refused_at_the_gate(self):
+        """#449 SUPERSEDES the #448-era reachability assumption this pin recorded.
+
+        Formerly a DEAD-BRANCH PIN (user ruling 2026-09-20) asserting that an
+        executor-shaped auth context still got a 200 MASKED answer, because the
+        route carried no executor branch to forward — its own docstring said
+        "Production note: the middleware never grants that shape off the session
+        paths". That reachability prose is now retired: an executor-class caller
+        is refused by the role gate BEFORE the body runs, so the invariant it
+        guarded ("no plaintext to an executor") holds one layer earlier and
+        strictly better — the route is never entered at all.
+
+        Stronger than the old cell: it pins the refusal's stated reason (not just
+        a 403), asserts ``core.get`` is NEVER called (the old cell asserted it WAS
+        called, with ``user_id=None``), and asserts no plaintext in the body.
+        """
         core = _make_mock_core()
         core.get.return_value = "\u2022" * 8
         app = _create_test_app(core=core)
@@ -427,19 +439,11 @@ class TestSecretsGet:
             "executor_id": "exec-1",
         }
         client = TestClient(app, raise_server_exceptions=False)
-
         resp = client.get("/api/v1/secrets/db-password")
-        assert resp.status_code == 200
-        assert resp.json()["masked"] is True
-        core.get.assert_called_once_with(
-            secret_key="db-password",
-            caller="human",
-            unmask=False,
-            # No user_id -> no role lookup (injection plane: executors consume
-            # via core.get_for_injection, never this route).
-            user_id=None,
-            role_names=None,
-        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == EXECUTOR_GATE_REFUSAL
+        core.get.assert_not_called()
+        assert "plaintext" not in resp.text and "db-password" not in resp.json()["detail"]
 
     def test_get_unmask_with_valid_token_returns_plaintext(self):
         """Positive: valid unconsumed elevation token (atomic UPDATE
@@ -746,8 +750,17 @@ class TestSecretsRoleEnforcement:
         assert resp.json()["detail"] == "Insufficient permissions"
         core.list.assert_not_called()
 
-    def test_executor_bypasses_role_check(self):
-        """Executor (mTLS) passes the role check without a RoleManager lookup."""
+    def test_executor_refused_by_role_check(self):
+        """#449: an executor-class caller is REFUSED on this role-gated route.
+
+        This cell used to pin the blanket pass by name ("Executor (mTLS) passes the
+        role check"). The pass is the defect: it waved an executor through EVERY
+        ``require_role`` route in the tree, including all five ``read-write`` ones.
+        Stronger than the old assertion, in three ways: the refusal is the GATE's 403
+        with its stated reason (not a role deny, not a 500), the route body never
+        runs, and ``core.list`` is never reached — so a whole-vault listing cannot
+        happen even if the visibility filter downstream were ever widened.
+        """
         core = _make_mock_core()
         rm = MagicMock()
         rm.get_user_permissions.side_effect = AssertionError("role lookup must not run for executors")
@@ -759,7 +772,9 @@ class TestSecretsRoleEnforcement:
         with patch("server.dependencies.RoleManager", return_value=rm):
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/secrets")
-        assert resp.status_code == 200
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == EXECUTOR_GATE_REFUSAL
+        core.list.assert_not_called()
         rm.get_user_permissions.assert_not_called()
 
 
@@ -2035,11 +2050,19 @@ class TestSecretsGetRoleNames:
         assert resp.json()["masked"] is True
         engine.dispose()
 
-    def test_n3_injection_plane_shape_skips_role_lookup(self):
-        """N3: executor-shaped auth context (no user_id — the injection
-        plane is served by core.get_for_injection in executors.py, never
-        this route): GET resolves NO roles, passes user_id=None and
-        role_names=None. RoleManager must not even be constructed."""
+    def test_n3_injection_plane_shape_is_refused_at_the_gate(self):
+        """#449 re-anchors the #448 N3 cell: the injection-plane shape is now
+        REFUSED, so the role-lookup skip it pinned happens at the gate instead of
+        inside the route.
+
+        The #448-era prose ("GET resolves NO roles, passes user_id=None and
+        role_names=None") described a request that REACHED the body — that only
+        happened because of the blanket pass this ticket removes. The reachability
+        claim is retired here rather than left as 2026-09 prose. What survives,
+        strengthened: RoleManager is still never constructed (now because the gate
+        refuses first), ``core.get`` is never called, and the refusal carries the
+        gate's stated reason instead of a silent 200.
+        """
         core = _make_mock_core()
         core.get.return_value = "\u2022" * 8
         app = _create_test_app(core=core)
@@ -2052,15 +2075,9 @@ class TestSecretsGetRoleNames:
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.get("/api/v1/secrets/db-password")
 
-        assert resp.status_code == 200
-        assert resp.json()["masked"] is True
-        core.get.assert_called_once_with(
-            secret_key="db-password",
-            caller="human",
-            unmask=False,
-            user_id=None,
-            role_names=None,
-        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == EXECUTOR_GATE_REFUSAL
+        core.get.assert_not_called()
         rm_cls.assert_not_called()
 
     def test_h1_visibility_404_on_unmask_does_not_burn_token(self, tmp_path):

@@ -19,7 +19,7 @@ from fastapi import Path as ApiPath
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from server.dependencies import get_db, require_role
+from server.dependencies import get_db, require_role, require_user_identity
 from server.rate_limit import lockout_http_exception
 
 router = APIRouter()
@@ -296,6 +296,12 @@ async def secrets_create(
     caller gets a plain insert (second row) — no existence leak, no
     cross-role clobber (ticket cli-store-force-field-ignored option-2).
     """
+    # #449 AC2 — UNREACHABLE-AT-TIP, guard retained as defense-in-depth: the
+    # require_role("read-write") gate above refuses executor-class callers and any
+    # identity with no user_id, so the user_id indexes in this body have no live
+    # path today. Guard kept in-body so the 403-not-500 contract does not depend
+    # on dependency ordering. Index sites: :339, :344.
+    require_user_identity(user_info)
     core = getattr(request.app.state, "core", None)
     if core is None:
         raise HTTPException(
@@ -401,6 +407,10 @@ async def secrets_get(
     ticket sec-executor-session-path-no-auth) and consume secrets via
     session injection (`core.get_for_injection`), never this endpoint.
     """
+    # #449 AC2 — UNREACHABLE-AT-TIP, guard retained as defense-in-depth (the
+    # require_role("read") gate refuses executor-class callers and user_id-less
+    # identities; sites here: :453, :477, :481, :516, :541).
+    require_user_identity(user_info)
     elevation_token = request.headers.get("X-Elevation-Token")
     core = getattr(request.app.state, "core", None)
     if core is None:
@@ -693,6 +703,9 @@ async def secrets_delete(
     is required to reach this endpoint, but deletion is gated by
     ownership in core.delete().
     """
+    # #449 AC2 — UNREACHABLE-AT-TIP, guard retained as defense-in-depth
+    # (require_role("read-write") gate; site here: :705).
+    require_user_identity(user_info)
     core = getattr(request.app.state, "core", None)
     if core is None:
         raise HTTPException(
@@ -730,6 +743,9 @@ async def update_secret_metadata(
 
     Merge semantics: existing fields are preserved, new fields overwrite/add.
     """
+    # #449 AC2 — UNREACHABLE-AT-TIP, guard retained as defense-in-depth
+    # (require_role("read-write") gate; sites here: :767, :773, :796).
+    require_user_identity(user_info)
     if not req.metadata:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
