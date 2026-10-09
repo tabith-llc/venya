@@ -39,6 +39,17 @@ logger = logging.getLogger("venya.executor.strategies.sbx")
 # tmpfs base on host — secrets never touch disk
 SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec
 
+# Directory prefixes created under SECRET_TMPFS_BASE. Single source of truth: the
+# writer here and the daemon's orphan reaper (``daemon.ReaperLoop._check_orphaned``,
+# which imports both names) must agree, or a created directory is reaped by nobody
+# (ticket #469: ``env_*`` was created here and matched no sweep).
+#   SESSION_DIR_PREFIX — prepare()'s per-run secrets dir; the name embeds the
+#     execution-session id, so the reaper can attribute a revoke to it.
+#   ENV_DIR_PREFIX — the env-file fallback dir; it carries NO session id, so the
+#     reaper deletes it and never attributes anything.
+SESSION_DIR_PREFIX = "session_"
+ENV_DIR_PREFIX = "env_"
+
 # Disk-backed base for per-run sandboxes' host workspace. Must NOT be tmpfs
 # (/dev/shm): sbx bind-mounts the workspace into the microVM via virtio-fs,
 # which cannot share a tmpfs path ("workspace ... was not mounted into the
@@ -365,6 +376,9 @@ class SbxStrategy(InjectionStrategy):
         self.dns_resolver = dns_resolver
         self.egress_allowlist_path = egress_allowlist_path
         self._session_dir: str | None = None
+        # #469: the env-file fallback dir, when THIS instance created it. Owns
+        # the removal in _release_fallback_dir() — never a prepare() session dir.
+        self._fallback_env_dir: str | None = None
         self._sandbox_name: str | None = None
         self._workspace_dir: str | None = None
 
@@ -410,7 +424,7 @@ class SbxStrategy(InjectionStrategy):
         # Create unique session directory on tmpfs (base is self-provisioned —
         # a fresh install has no /dev/shm/venya-secrets)
         os.makedirs(SECRET_TMPFS_BASE, mode=0o700, exist_ok=True)
-        self._session_dir = tempfile.mkdtemp(prefix=f"session_{session_id}_", dir=SECRET_TMPFS_BASE)
+        self._session_dir = tempfile.mkdtemp(prefix=f"{SESSION_DIR_PREFIX}{session_id}_", dir=SECRET_TMPFS_BASE)
 
         # From the moment the directory exists, it is owned (refs #446).
         # Register the cleanup callable IMMEDIATELY — before any secret is
@@ -741,21 +755,45 @@ class SbxStrategy(InjectionStrategy):
         command's duration. The format is line-based: CR/LF/NUL in a value is
         rejected here as the last line of defense against forging extra
         env-file lines (callers validate too).
+
+        #469 — the fallback branch (no ``prepare()`` ran, so no session dir).
+        The dir it creates is named ``env_<rand>``, carries NO execution-session
+        id, and used to be reaped by nothing: the daemon sweep matched only
+        ``session_*`` and the boot sweep walks a different base and matches
+        ``ws_*``. Two owners now cover it — this class removes the dir it made
+        (``_release_fallback_dir``, AC4) and the daemon reaper collects what an
+        abort leaves behind (``daemon.ReaperLoop._check_orphaned``, AC1).
         """
         if self._session_dir is None:
             os.makedirs(SECRET_TMPFS_BASE, mode=0o700, exist_ok=True)
-            self._session_dir = tempfile.mkdtemp(prefix="env_", dir=SECRET_TMPFS_BASE)
-        lines: list[str] = []
-        for name, value in env.items():
-            if not self._ENV_NAME_RE.match(name):
-                raise ValueError(f"invalid env var name: {name!r}")
-            if "\n" in value or "\r" in value or "\x00" in value:
-                raise ValueError(f"env var {name}: multi-line or NUL values cannot ride the env-file format")
-            lines.append(f"{name}={value}\n")
-        path = os.path.join(self._session_dir, "venya-env")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write("".join(lines))
+            self._session_dir = tempfile.mkdtemp(prefix=ENV_DIR_PREFIX, dir=SECRET_TMPFS_BASE)
+            # #469: this directory is ours — record it so the exec's finally can
+            # remove it once the env file is destroyed. Without that bookkeeping
+            # the dir survived for the host's uptime, and no reaper matched it.
+            self._fallback_env_dir = self._session_dir
+
+        session_dir = self._session_dir
+        try:
+            lines: list[str] = []
+            for name, value in env.items():
+                if not self._ENV_NAME_RE.match(name):
+                    raise ValueError(f"invalid env var name: {name!r}")
+                if "\n" in value or "\r" in value or "\x00" in value:
+                    raise ValueError(f"env var {name}: multi-line or NUL values cannot ride the env-file format")
+                lines.append(f"{name}={value}\n")
+            path = os.path.join(session_dir, "venya-env")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write("".join(lines))
+        except BaseException:
+            # A name/value rejection fires before any file exists, so the dir
+            # this branch just made is empty — take it back now rather than
+            # park it on tmpfs for the reaper to find later. A write failure
+            # leaves the file behind; rmdir refuses the non-empty dir and the
+            # reaper stays the backstop. Either way the raise is re-raised
+            # unchanged: this cleanup cannot turn a rejection into a success.
+            self._release_fallback_dir()
+            raise
         return path
 
     @staticmethod
@@ -770,6 +808,41 @@ class SbxStrategy(InjectionStrategy):
             os.unlink(path)
         except OSError:
             logger.warning("Failed to destroy env file %s", path)
+
+    def _release_fallback_dir(self) -> None:
+        """Remove the env-file fallback dir this strategy created (#469 AC4).
+
+        Scoped three ways on purpose:
+
+        * only the directory THIS instance created in the fallback branch is
+          ever touched — a ``prepare()`` session dir belongs to the cleanup
+          callable that ``prepare()`` registered, and is never removed here;
+        * ``os.rmdir`` refuses a non-empty directory, so this can never delete
+          collateral (a file the destroy failed to unlink stays, with its dir,
+          for the reaper);
+        * the reaper's ``env_*`` pass is the backstop for an abort between
+          ``os.open`` and this call (a kill mid-execution), which is exactly
+          the window the ticket filed.
+
+        Clearing ``_session_dir`` on success is what makes the NEXT command in
+        the same run build a fresh dir instead of opening a file inside a
+        directory that no longer exists.
+        """
+        path = self._fallback_env_dir
+        if path is None:
+            return
+        try:
+            os.rmdir(path)
+            removed = True
+        except FileNotFoundError:
+            removed = True  # already gone — same end state, ownership is released
+        except OSError:
+            logger.warning("Env fallback dir %s still holds a file; leaving it to the reaper", path)
+            removed = False
+        if removed:
+            self._fallback_env_dir = None
+            if self._session_dir == path:
+                self._session_dir = None
 
     def apply_network_policy(self, sandbox_name: str) -> None:
         """Apply egress allowlist to sandbox.
@@ -910,6 +983,7 @@ class SbxStrategy(InjectionStrategy):
         finally:
             if env_file:
                 self._destroy_env_file(env_file)
+                self._release_fallback_dir()
         return result
 
     def remove_sandbox(self) -> int:

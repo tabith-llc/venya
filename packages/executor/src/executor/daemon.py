@@ -59,7 +59,9 @@ from .config import ExecutorConfig
 from .executor import Executor
 from .relay_listener import RelayListener
 from .strategies.sbx_strategy import (
+    ENV_DIR_PREFIX,
     SECRET_TMPFS_BASE,
+    SESSION_DIR_PREFIX,
     SbxStrategy,
     SbxVersionError,
     reap_orphan_sandboxes,
@@ -1456,13 +1458,21 @@ class ReaperLoop:
         """Delete orphaned per-run secret dirs and revoke their session secrets.
 
         Scans tmpfs_dir (default: the sbx strategy's SECRET_TMPFS_BASE) for
-        `session_<server-session-id>_<rand>` directories older than
-        secret_ttl_seconds. Live runs clean up their own dir; an aged dir
-        belongs to a dead run (daemon killed mid-execution). The dir name
-        carries the real execution-session id, so revokes are attributed per
-        session. The old flat `venya_*.secret` file scan matched nothing under
-        the sbx dir layout, and the phantom "default" session id never matched
-        a real session (ticket daemon-reaper-phantom-session).
+        directories older than secret_ttl_seconds under either of the two
+        prefixes the strategy writes there (#469):
+
+        * ``session_<server-session-id>_<rand>`` — prepare()'s per-run secrets
+          dir. The name carries the real execution-session id, so an aged dir
+          is deleted AND its children attributed to that session's revoke.
+        * ``env_<rand>`` — the env-file fallback dir (#469). It carries NO
+          session id, so it is deleted WITHOUT any revoke attribution; see the
+          prefix gate below for why its name must never reach the parser.
+
+        Live runs clean up their own dir; an aged dir belongs to a dead run
+        (daemon killed mid-execution). The old flat ``venya_*.secret`` file
+        scan matched nothing under the sbx dir layout, and the phantom
+        "default" session id never matched a real session (ticket
+        daemon-reaper-phantom-session).
         """
         import time
 
@@ -1478,7 +1488,11 @@ class ReaperLoop:
             return
 
         for dirname in entries:
-            if not dirname.startswith("session_"):
+            # #469: BOTH prefixes the strategy writes are in scope. `env_*`
+            # matched nothing before this and so survived the host's uptime
+            # with a 0600 plaintext env file inside.
+            is_session_dir = dirname.startswith(SESSION_DIR_PREFIX)
+            if not (is_session_dir or dirname.startswith(ENV_DIR_PREFIX)):
                 continue
             dirpath = os.path.join(self.tmpfs_dir, dirname)
             if not os.path.isdir(dirpath):
@@ -1495,8 +1509,21 @@ class ReaperLoop:
             # random suffix CAN contain underscores ([a-z0-9_] charset), so
             # parse from the left and ignore the tail. Unparseable → delete
             # without revoke (never a phantom-session revoke).
-            parts = dirname.split("_")
-            session_id = parts[1] if len(parts) >= 3 else None
+            #
+            # The PARSE ITSELF is gated on the prefix, not just its outcome
+            # (#469 AC, the §3 mis-parse check): an `env_<rand>` name is made
+            # of the same underscore-bearing charset, so `env_a1b_2c` would
+            # split to ['env','a1b','2c'] — three parts, and the left-pick
+            # would hand the revoke path "a1b" as a session id. That is a
+            # phantom-session revoke wearing a real call: the server skips
+            # non-numeric ids for the DELETE, but still writes a
+            # credential_revoked audit row for every child name it is given.
+            # So `session_id` is only ever derived from a session_* name.
+            session_id: str | None = None
+            if is_session_dir:
+                parts = dirname.split("_")
+                if len(parts) >= 3:
+                    session_id = parts[1]
             try:
                 secret_ids = sorted(os.listdir(dirpath))
             except OSError:
@@ -1505,12 +1532,13 @@ class ReaperLoop:
             try:
                 shutil.rmtree(dirpath)
                 logger.info(
-                    "Deleted orphaned session secret dir: %s (%d secret file(s))",
+                    "Deleted orphaned %s dir: %s (%d file(s) inside)",
+                    "session secret" if is_session_dir else "env-file",
                     dirname,
                     len(secret_ids),
                 )
             except OSError:
-                logger.exception("Failed to delete orphaned session dir: %s", dirpath)
+                logger.exception("Failed to delete orphaned secret dir: %s", dirpath)
                 continue
 
             if session_id and secret_ids and self.http_client:
