@@ -327,6 +327,18 @@ the installer **fails closed** and tells you to set `VENYA_CORE_IP=<ip>` —
 it never guesses an IP (a wrong guess silently misroutes mTLS). An explicit
 `VENYA_CORE_IP` always wins over an existing hosts entry.
 
+Core hosts entries are matched by FIELD, not by pattern (`#490`): the installer
+reads and updates the entry whose **second whitespace field is exactly the core
+hostname**, and it leaves every other line of the file byte-for-byte as it found
+it. An explicit `VENYA_CORE_IP` must be a bare IPv4 address (four dot-separated
+numeric octets) — anything else aborts the install with a named error before a
+single line is written, so no value can smuggle extra host mappings into the
+file.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VENYA_HOSTS_FILE` | `/etc/hosts` | The hosts file the installer reads and updates for the core entry. A test/packaging seam (it is what the #490 cells point at a fixture); leave it unset on a real host. |
+
 What it creates: `venya` service account; Rust toolchain + the compiled
 redaction filter (`venya_filter.*.so`); Python venv (executor+core+cli);
 sbx (Docker Sandboxes) CLI; mTLS certificate registration with the core at
