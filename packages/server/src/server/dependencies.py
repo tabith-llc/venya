@@ -327,6 +327,39 @@ def require_role(permission: str):
     return _checker
 
 
+# --- #449 AC2: the route-side identity guard ---------------------------------
+#
+# Every user_id INDEX in the secret and executor routes sits in a body behind
+# require_role, and this module now refuses (a) any executor-class caller and
+# (b) any identity carrying no user_id. That makes those index sites
+# UNREACHABLE-AT-TIP. The guard is still written and kept, because AC2 is
+# behavioral -- "an identity without user_id reaches a clean refusal, never a
+# traceback-driven 500" -- and a route body must not depend on a dependency's
+# ordering for that guarantee. If a future caller class arrives without a
+# user_id, or a route loses its gate, this is what keeps the answer a 403.
+UNREACHABLE_AT_TIP = "UNREACHABLE-AT-TIP, guard retained as defense-in-depth"
+
+
+def require_user_identity(user_info: dict) -> dict:
+    """Return ``user_info`` when it names a person the role table can answer for.
+
+    #449 AC2: an identity with no ``user_id`` must be refused cleanly and must
+    never reach a ``user_info["user_id"]`` index (a KeyError there is a 500
+    traceback for what is an authorization decision). Route bodies call this as
+    their first statement so the guarantee lives in the body, not in gate
+    ordering.
+
+    Raises:
+        HTTPException 403: the caller carries no user identity.
+    """
+    if user_info.get("user_id") is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Caller identity carries no user to authorize",
+        )
+    return user_info
+
+
 def auditor_only_permissions(permissions: dict[int, str]) -> bool:
     """True iff the caller holds memberships and EVERY one is auditor-tier.
 

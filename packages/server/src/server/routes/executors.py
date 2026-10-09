@@ -38,7 +38,7 @@ from venya_contract import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, Relay
 
 from .. import metrics
 from ..ca import CAManager, accepted_csr_curve_names, csr_curve_hint
-from ..dependencies import get_db, require_role
+from ..dependencies import get_db, require_role, require_user_identity
 from ..middleware.auth import (
     _executor_ca_certs,
     _extract_identity_from_cert,
@@ -1385,6 +1385,12 @@ async def create_execution_session(
     key, decrypts, and sentinel-wraps the value server-side; clients never
     send or receive wrapped values.
     """
+    # #449 AC2 — UNREACHABLE-AT-TIP, guard retained as defense-in-depth: the
+    # require_role("read-write") gate above refuses executor-class callers and any
+    # identity carrying no user_id, so the auth_user indexes in this body have no
+    # live path today (:1417, :1437, :1442, :1465, :1479). Kept in-body so the
+    # 403-not-500 contract does not depend on dependency ordering.
+    require_user_identity(auth_user)
     from core.iam.models import ExecutionSession, Executor, SessionSecret
 
     core = getattr(request.app.state, "core", None)
@@ -1518,6 +1524,10 @@ async def execute_command_on_executor(
     4. POST to executor's /execute endpoint (mTLS)
     5. Buffer response, mask output, return
     """
+    # #449 AC2 — UNREACHABLE-AT-TIP, guard retained as defense-in-depth
+    # (require_role("read-write") gate; sites here: :1533, :1572, :1723, :1752,
+    # :1773).
+    require_user_identity(auth_user)
     from core.iam.models import ExecutionSession, Executor, SessionSecret
 
     # Lookup session

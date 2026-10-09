@@ -39,11 +39,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import Depends, FastAPI
 from server.dependencies import get_current_user, require_role
+from server.routes import executors as executors_routes
+from server.routes import secrets as secrets_routes
 from starlette.testclient import TestClient
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEPS = REPO_ROOT / "packages" / "server" / "src" / "server" / "dependencies.py"
 AUTH_MW = REPO_ROOT / "packages" / "server" / "src" / "server" / "middleware" / "auth.py"
+SERVER = REPO_ROOT / "packages" / "server" / "src" / "server"
 
 # The refusal text, asserted rather than inferred: three distinct 403s live on these
 # routes (the gate's executor refusal, "Read-write permission required", the tier
@@ -323,3 +326,103 @@ def test_matcher_regex_still_the_only_granter():
     grant = mw[mw.index('request.state.auth_user = {\n                "caller": "executor",') :]
     grant_block = grant[:600]
     assert "user_id" not in grant_block, "the executor grant gained a user_id — premise changed"
+
+
+# --- AC2 route guards: proven LIVE, not decoration ---------------------------
+
+
+# The tiered gate refuses an executor first, so a route body's OWN guard can only
+# be reached by calling the handler with the identity the gate would never pass —
+# which is exactly the failure mode AC2 guards against (a route that drops its
+# dependency, or a future caller class with no user_id). Driving the handler
+# directly is what proves the guard is live code rather than decoration.
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(
+            lambda: secrets_routes.secrets_create(
+                req=MagicMock(), request=MagicMock(), user_info={"caller": "no_user"}, db=MagicMock()
+            ),
+            id="secrets-create",
+        ),
+        pytest.param(
+            lambda: secrets_routes.secrets_get(
+                key="k1",
+                request=MagicMock(),
+                unmask=False,
+                user_info={"caller": "no_user"},
+                db=MagicMock(),
+            ),
+            id="secrets-get",
+        ),
+        pytest.param(
+            lambda: secrets_routes.secrets_delete(key="k1", request=MagicMock(), user_info={"caller": "no_user"}),
+            id="secrets-delete",
+        ),
+        pytest.param(
+            lambda: secrets_routes.update_secret_metadata(
+                key="k1", req=MagicMock(), request=MagicMock(), user_info={"caller": "no_user"}
+            ),
+            id="secrets-metadata",
+        ),
+        pytest.param(
+            lambda: executors_routes.create_execution_session(
+                req=MagicMock(), request=MagicMock(), db=MagicMock(), auth_user={"caller": "no_user"}
+            ),
+            id="executors-session",
+        ),
+        pytest.param(
+            lambda: executors_routes.execute_command_on_executor(
+                id="exec-a",
+                req=MagicMock(),
+                request=MagicMock(),
+                db=MagicMock(),
+                auth_user={"caller": "no_user"},
+            ),
+            id="executors-execute",
+        ),
+    ],
+)
+def test_route_guard_refuses_a_user_id_less_identity(call):
+    """AC2 in-body guards answer 403 with the stated reason, never a KeyError 500."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(call())
+    assert excinfo.value.status_code == 403, excinfo.value.detail
+    assert excinfo.value.detail == NO_USER_ID_REFUSAL
+
+
+def test_guard_helper_is_the_single_in_body_refusal():
+    """The guards all route through one helper, so the reason text cannot drift
+    site by site — and the AC2 contract is one decision, not six copies of it."""
+    from server.dependencies import UNREACHABLE_AT_TIP, require_user_identity
+
+    assert UNREACHABLE_AT_TIP == "UNREACHABLE-AT-TIP, guard retained as defense-in-depth"
+    for payload in ({}, {"caller": "executor"}, {"user_id": None}):
+        with pytest.raises(Exception) as excinfo:
+            require_user_identity(payload)
+        assert excinfo.value.status_code == 403
+        assert excinfo.value.detail == NO_USER_ID_REFUSAL
+    named = {"user_id": "u1"}
+    assert require_user_identity(named) is named
+
+
+def test_every_ac2_branch_carries_the_guard_and_the_sentence():
+    """Cites each branch AC2 touched, and pins that each carries BOTH the call and
+    the UNREACHABLE-AT-TIP sentence — the sentence is the deliverable, so it must
+    survive at every site, not just once."""
+    sites = {
+        "routes/secrets.py": [339, 344, 453, 477, 481, 516, 541, 705, 767, 773, 796],
+        "routes/executors.py": [1417, 1437, 1442, 1465, 1479, 1533, 1572, 1723, 1752, 1773],
+    }
+    for rel, indexes in sites.items():
+        text = (SERVER / rel).read_text()
+        assert "require_user_identity(" in text, f"{rel}: no in-body guard"
+        assert text.count("UNREACHABLE-AT-TIP, guard retained as defense-in-depth") >= 1, rel
+        # The site list is the citation of record; line numbers shift, so assert
+        # the count of index sites is unchanged rather than the numbers themselves.
+        n = len(re.findall(r'(?:user_info|auth_user)\["user_id"\]', text))
+        assert n == len(indexes), f"{rel}: {n} index sites, cited list has {len(indexes)}"
