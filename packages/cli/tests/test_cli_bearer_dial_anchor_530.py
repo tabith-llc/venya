@@ -234,19 +234,47 @@ class TestHostStoreSymbolGone:
         src = Path(mod.__file__).read_text()
         assert not re.search(r"\.load_default_certs\(", src), "a load_default_certs() call site survived (#530)"
 
-    def test_register_executor_host_store_shape_pinned_for_the_sweep(self):
-        """AC4 sweep fact, pinned statically (no socket is dialed by this cell).
+    def test_register_executor_anchor_or_refuse_shape_pinned_after_536(self):
+        """The #530 sweep trip-wire, fired and re-set by #536.
 
-        ``register_executor()`` builds its OWN httpx2.Client and, when no
-        ``--ca-bundle`` was handed it, passes the bare bool ``verify=True`` —
-        which is httpx asking OpenSSL for the HOST store. Same class as #530, on
-        the registration POST. AC4 says sweep and report, do not silently fix, so
-        this cell pins today's shape; a change becomes visible instead of quiet.
+        This cell existed to pin ``register_executor()``'s host-store shape — the
+        bare ``verify_param = True`` that handed the registration POST (CSR and
+        enrollment token aboard) to the workstation OS store — because #530's AC4
+        said sweep and report, do not silently fix: "a change becomes visible
+        instead of quiet." #536 IS that change, so the pin now guards the OPPOSITE
+        regression and its two asserts are flipped to the new contract, with the
+        same static/``inspect`` mechanism:
+
+          * the anchored path is what fills ``verify_param`` — the shared resolver,
+            the house TLS builder, and the shared refusal text;
+          * no statement in the call assigns a literal ``True`` to the knob.
+
+        The negative half is an AST walk rather than a substring scan on purpose:
+        the branch's own comment quotes the old ``verify=True`` wording, so prose
+        would defeat a text check (the same reason #530 matches call sites, not
+        words, for ``load_default_certs``).
         """
+        import ast
         import inspect
+        import textwrap
 
         import venya_cli.api_client as mod
 
         body = inspect.getsource(mod.APIClient.register_executor)
-        assert "verify_param = True" in body
         assert "verify=verify_param" in body
+        assert "_resolve_tls_anchor()" in body, "the registration dial stopped resolving the Venya anchor (#536)"
+        assert "_build_ssl_context(" in body, "the registration dial stopped using the house TLS builder (#536)"
+        assert "_anchor_refusal_text(" in body, "the registration dial stopped sharing the refusal wording (#536)"
+
+        tree = ast.parse(textwrap.dedent(body))
+        host_store_assigns = [
+            node.targets[0].id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and node.value.value is True
+        ]
+        assert (
+            "verify_param" not in host_store_assigns
+        ), "a bare verify_param = True host-store path returned to the registration dial (#536)"

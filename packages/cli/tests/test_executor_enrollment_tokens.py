@@ -12,6 +12,7 @@ Tests cover:
 - Token format validation
 """
 
+import ssl
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -19,6 +20,14 @@ from unittest.mock import MagicMock, patch
 import httpx2
 import pytest
 from venya_cli.api_client import APIClient, APIClientError
+
+# #536: the registration dial now anchors OR refuses, so every cell in this file
+# needs a Venya trust anchor present to let the POST go out at all. The anchor
+# comes from ``conftest.venya_tls_anchor_536`` (``monkeypatch.setenv``, scoped per
+# cell, OVERWRITING any ambient ``SSL_CERT_FILE``) — never from this machine's
+# shell or its ``/tmp``. Fixture-only: no assertion here changed to get it; the
+# two #536 re-pins below change the SHAPE they assert and keep their own subject.
+pytestmark = pytest.mark.usefixtures("venya_tls_anchor_536")
 
 
 class TestAPIClientRegisterExecutor:
@@ -30,8 +39,16 @@ class TestAPIClientRegisterExecutor:
         config_file.write_text('{"server_url": "https://core.example.com"}')
         return APIClient(config_file=config_file), config_file
 
-    def test_register_success(self):
-        """Successful registration returns cert data via throwaway client."""
+    def test_register_success(self, venya_tls_anchor_536):
+        """Successful registration returns cert data via throwaway client.
+
+        #536 re-pin: this cell asserted ``verify=True``, which is httpx asking
+        OpenSSL for the HOST system store — the behavior the owner ruled away
+        (pinned-CA-only, no exceptions). It now pins the anchored contract in BOTH
+        directions, so a reintroduced host-store path turns it red: the transport
+        gets an ``ssl.SSLContext`` carrying ONLY the Venya anchor, and the same
+        call on a host with no anchor at all refuses before any client exists.
+        """
         client, config_file = self._make_client()
 
         mock_response = MagicMock()
@@ -53,10 +70,24 @@ class TestAPIClientRegisterExecutor:
             try:
                 result = client.register_executor("test-1", "CSR_PEM")
                 assert result["executor_id"] == "test-1"
-                MockClient.assert_called_once_with(verify=True, timeout=30.0)
+                MockClient.assert_called_once()
+                verify = MockClient.call_args.kwargs["verify"]
+                assert isinstance(verify, ssl.SSLContext), "a bare bool verify= is the host store (#536)"
+                assert verify.verify_mode == ssl.CERT_REQUIRED
+                assert verify.check_hostname is True
+                # ONLY the Venya anchor is trusted on this POST — a host-store
+                # load would put the OS bundle's names in this set.
+                assert venya_tls_anchor_536.cns(verify) == {venya_tls_anchor_536.cn}
+                assert MockClient.call_args.kwargs["timeout"] == 30.0
             finally:
                 client.close()
         config_file.unlink()
+
+        refused = venya_tls_anchor_536.without_anchor()
+        with patch("venya_cli.api_client.httpx2.Client") as NoClient:
+            with pytest.raises(APIClientError, match="no Venya TLS trust anchor"):
+                refused.register_executor("test-1", "CSR_PEM")
+            NoClient.assert_not_called()
 
     def test_register_with_enrollment_token(self):
         """Registration includes enrollment_token in payload."""
@@ -114,8 +145,13 @@ class TestAPIClientRegisterExecutor:
                 client.close()
         config_file.unlink()
 
-    def test_register_network_error_re_raises(self):
-        """On network error, re-raises as APIClientError without fallback."""
+    def test_register_network_error_re_raises(self, venya_tls_anchor_536):
+        """On network error, re-raises as APIClientError without fallback.
+
+        #536 re-pin: the ``verify=True`` assert here pinned the host-store dial.
+        The wrap-the-error subject is unchanged; the trust shape is now the
+        anchored context, plus the paired refusal on an anchor-less host.
+        """
         client, config_file = self._make_client()
 
         network_error = httpx2.ConnectError("Connection refused")
@@ -127,10 +163,19 @@ class TestAPIClientRegisterExecutor:
             try:
                 with pytest.raises(APIClientError, match="Connection failed"):
                     client.register_executor("test-1", "CSR_PEM")
-                MockClient.assert_called_once_with(verify=True, timeout=30.0)
+                MockClient.assert_called_once()
+                verify = MockClient.call_args.kwargs["verify"]
+                assert isinstance(verify, ssl.SSLContext), "a bare bool verify= is the host store (#536)"
+                assert venya_tls_anchor_536.cns(verify) == {venya_tls_anchor_536.cn}
             finally:
                 client.close()
         config_file.unlink()
+
+        refused = venya_tls_anchor_536.without_anchor()
+        with patch("venya_cli.api_client.httpx2.Client") as NoClient:
+            with pytest.raises(APIClientError, match="no Venya TLS trust anchor"):
+                refused.register_executor("test-1", "CSR_PEM")
+            NoClient.assert_not_called()
 
     def test_register_http_status_error(self):
         """HTTP error responses are wrapped in APIClientError."""

@@ -779,8 +779,12 @@ class APIClient:
         Always uses full TLS verification. To disable verification in
         development, set VENYA_TLS_VERIFY=false before running.
 
-        This method is scoped to registration only. _request() and _post_raw()
-        never fall back — prevents silent TLS bypass on authenticated calls.
+        This method is scoped to registration only. ``_request()`` and
+        ``_post_raw()`` never fall back, and since #536 neither does this dial:
+        ``register_executor()`` builds its own ``httpx2.Client`` on the shared
+        anchor-or-refuse path (#530/#533), so a verification-enabled registration
+        POST with no Venya trust anchor REFUSES instead of handing the CSR and
+        the enrollment token to the host system trust store.
 
         Args:
             executor_id: Executor identifier.
@@ -848,9 +852,32 @@ class APIClient:
             # for `venya run` (ticket cli-execution-timeout-cold-start-default).
             timeout = 30
             if tls_verify and ca_bundle:
-                verify_param: str | bool = str(ca_bundle)
+                # An explicit bundle is already an anchor — unchanged (#395).
+                verify_param: str | bool | ssl.SSLContext = str(ca_bundle)
             elif tls_verify:
-                verify_param = True
+                # #536: no bundle was handed to this call, so resolve this
+                # workstation's Venya anchor through the SAME resolver the bearer
+                # dial (#530) and the FIDO2 ceremony dial (#533) use, and refuse
+                # loudly if none resolves. The branch this replaces passed the
+                # bare bool ``verify=True``, which is httpx asking OpenSSL for
+                # the HOST system store: on the POST that carries the CSR and
+                # the enrollment token, any publicly-issued certificate for a
+                # name-confused core would have been accepted. Same trust-set
+                # defect #501 closed on the server relay and #530 closed on the
+                # bearer dial, on the registration path. The refusal is raised
+                # BEFORE the ``with httpx2.Client(...)`` below, so no transport
+                # is ever constructed on an unanchored host; ``venya setup``
+                # stays the repair because nothing here raises at import or at
+                # APIClient construction.
+                anchor, searched = self._resolve_tls_anchor()
+                if not anchor:
+                    # One wording for every anchor-less dial — the shared builder
+                    # takes a transport name so this says what it is, the way
+                    # #533 names the WebAuthn ceremony.
+                    raise APIClientError(_anchor_refusal_text(searched, transport="registration POST")) from None
+                # House builder, not a hand-rolled context: CERT_REQUIRED and
+                # check_hostname stay on and the anchor is the ONLY trust file.
+                verify_param = _build_ssl_context(cafile=anchor, certfile=None, keyfile=None)
             else:
                 verify_param = tls_verify
             with httpx2.Client(verify=verify_param, timeout=timeout) as client:

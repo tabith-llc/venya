@@ -2646,7 +2646,7 @@ def executor_register(client: APIClient, args: Any) -> int:
     Flow:
         1. Generate ECDSA P-256 keypair locally
         2. Create CSR with CN=executor_id
-        3. Submit CSR via client.register_executor() (with TLS fallback)
+        3. Submit CSR via client.register_executor() (anchored or refused, #536)
         4. Save signed cert + key to output-dir
         5. Verify auth with GET /api/v1/executors/certs/revocation-list
         6. Print success/failure
@@ -2779,7 +2779,7 @@ def executor_register(client: APIClient, args: Any) -> int:
         print(f"CSR creation failed: {e}", file=sys.stderr)
         return 1
 
-    # Step 3: Submit CSR via register_executor() with TLS fallback
+    # Step 3: Submit CSR via register_executor() — anchored or refused (#536)
     try:
         print(f"Submitting CSR to {server_url}/api/v1/executors/register...")
         result = client.register_executor(

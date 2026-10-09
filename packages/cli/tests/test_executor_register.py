@@ -17,6 +17,7 @@ Tests cover:
 
 import json
 import os
+import ssl
 import stat
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -24,11 +25,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from venya_cli.api_client import APIClient, APIClientError
+
+# #536: the registration POST is now anchored-or-refused instead of falling through
+# to the workstation host store, so every cell here that expects the CSR to reach
+# the core needs a Venya trust anchor present. It comes per cell from
+# ``conftest.venya_tls_anchor_536`` (``monkeypatch.setenv`` — an operator's own
+# ``SSL_CERT_FILE`` can never be what makes a cell pass, and a missing one cannot
+# make it fail). Fixture-only: the 10 register-path cells in this file are
+# untouched; only ``test_register_uses_config_server_url`` is re-pinned, and it
+# keeps its own subject.
+pytestmark = pytest.mark.usefixtures("venya_tls_anchor_536")
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -547,8 +559,18 @@ class TestExecutorRegister:
                 client.close()
         config_file.unlink()
 
-    def test_register_uses_config_server_url(self, tmp_path):
-        """Registration uses server_url from config when --core-url is not provided."""
+    def test_register_uses_config_server_url(self, tmp_path, venya_tls_anchor_536):
+        """Registration uses server_url from config when --core-url is not provided.
+
+        #536 re-pin: the transport assert here read
+        ``assert_called_once_with(verify=True, timeout=30.0)`` — the bare bool that
+        meant "ask OpenSSL for the host store" on the POST carrying the CSR and the
+        enrollment token. The cell's SUBJECT is which URL the dial used, so it now
+        says so out loud (the POST target) and pins the trust shape as anchored:
+        one transport, the fixed 30 s, and a context whose only trust material is
+        the Venya anchor. With no anchor at all the same call refuses without ever
+        constructing a transport, so a reintroduced host-store path fails here.
+        """
         from venya_cli.commands import executor_register
 
         private_key = _generate_test_keypair()
@@ -587,11 +609,25 @@ class TestExecutorRegister:
             try:
                 result = executor_register(client, args)
                 assert result == 0
-                # Verify throwaway client was created with verify=True
-                MockClient.assert_called_once_with(verify=True, timeout=30.0)
+                # The subject of this cell: the config server_url is the dial target.
+                posted_url = MockClient.return_value.post.call_args.args[0]
+                assert posted_url == "https://config-url.example.com/api/v1/executors/register"
+                MockClient.assert_called_once()
+                verify = MockClient.call_args.kwargs["verify"]
+                assert isinstance(verify, ssl.SSLContext), "a bare bool verify= is the host store (#536)"
+                assert venya_tls_anchor_536.cns(verify) == {venya_tls_anchor_536.cn}
+                assert MockClient.call_args.kwargs["timeout"] == 30.0
             finally:
                 client.close()
         config_file.unlink()
+
+        # Paired negative, in the same cell: no anchor -> refuse, construct nothing.
+        refused = venya_tls_anchor_536.without_anchor(server_url="https://config-url.example.com")
+        with patch("venya_cli.api_client.httpx2.Client", MagicMock()) as NoClient:
+            with pytest.raises(APIClientError, match="no Venya TLS trust anchor"):
+                refused.register_executor("venya-exec", "CSR_PEM")
+            NoClient.assert_not_called()
+        refused.close()
 
 
 # ---------------------------------------------------------------------------
