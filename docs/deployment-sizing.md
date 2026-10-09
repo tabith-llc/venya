@@ -103,9 +103,12 @@ executor guest and ran that guest out of memory, which ended the sandbox daemon;
 the same three- and four-sandbox runs completed cleanly on a larger test guest.
 That guest is a probe condition above every shape this product ships, not a
 deployment recommendation, and a clean pass on it says nothing about the 5 GB row
-above. So this guide publishes **no** concurrency capacity: a published number
-belongs to the benchmark that measures it — #186 (its duplicate #124) — and
-capacity publication stays with RF-5.
+above. So this guide publishes **no** concurrency capacity. The carrier that
+owns that number is RF-5 — the capacity benchmark and the publishable sizing
+table — and RF-5 is blocked on RF-4, so no concurrency figure exists yet and
+none is scheduled to be published before that gate clears. The earlier benchmark
+rows — #186 and its duplicate #124 — are closed, and what they measured was the
+serial path; they are named here as history, not as open work.
 
 ## Reference deployment
 
