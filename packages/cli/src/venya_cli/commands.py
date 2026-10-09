@@ -21,6 +21,7 @@ from urllib.parse import quote
 import httpx2
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.serialization import BestAvailableEncryption
 
 from .api_client import (
     DEFAULT_CONFIG_FILE,
@@ -1833,7 +1834,12 @@ def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
        certificate check falls.
 
     Output discipline is RF-8a's: the readout on stdout ending `STATUS: OK`, every
-    refusal on stderr with a non-zero code, and no private key material in either.
+    refusal on stderr with a non-zero code, and no private key material in either. The
+    key is written ENCRYPTED with `VENYA_ADMIN_CA_KEY_PASSPHRASE` (#547a — the owner
+    ruled the passphrase requirement extends to the admin's private key), and both the
+    refusal and the success readout say plainly that the CLI cannot yet load an
+    encrypted admin key for mTLS, so the pair is not usable until that read-side work
+    lands.
     """
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -1862,6 +1868,18 @@ def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
             "re-run this command.",
             file=sys.stderr,
         )
+        return 1
+
+    # #547a: the key this command writes IS an admin private key, so it carries the
+    # requirement #547 put on the CA key. It is checked HERE, ahead of the elevation
+    # ceremony and the mint: burning a key touch to obtain a certificate this
+    # workstation is not allowed to store would be the worse outcome, and nothing
+    # below this line runs without the passphrase. (Stated precisely: the session
+    # ceremony `run_command` may already have walked is RF-8b's shape, unchanged; the
+    # elevation ceremony, the mint and every write are what this guard withholds.)
+    leaf_passphrase = _admin_leaf_key_passphrase_or_none()
+    if leaf_passphrase is None:
+        print(_admin_leaf_key_no_passphrase_refusal("venya admin cert renew"), file=sys.stderr)
         return 1
 
     private_key: Any = None
@@ -1970,7 +1988,10 @@ def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
         key_pem = private_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
+            # #547a: encrypted at rest — PKCS8 + BestAvailableEncryption, the exact
+            # scheme `admin init-admin-ca` ships. Before this the renew path wrote
+            # NoEncryption(): an admin private key in the clear on the workstation.
+            encryption_algorithm=BestAvailableEncryption(leaf_passphrase.encode("utf-8")),
         )
         with tempfile.NamedTemporaryFile(dir=key_dir, prefix=".venya-key-", delete=False) as fd:
             key_tmp = fd.name
@@ -2029,6 +2050,7 @@ def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
     print(f"  Minutes remaining: {info['minutes_remaining']}")
     print("  Clock:            local — computed on this workstation's clock, not the core's")
     print("  Note:             renew is not a revoke — the previous certificate was not revoked.")
+    print(_admin_leaf_key_encrypted_notice(Path(key_path)))
     print("  STATUS: OK")
     return 0
 
@@ -4465,11 +4487,84 @@ def _identity_forgery_error(identity: str) -> str | None:
     return None
 
 
+# --- #547a: the admin LEAF key gets the same passphrase requirement as the admin CA ---
+#
+# Owner ruling (2026-10-09 14:54): "passphrase shall extend to the admin's private key".
+# Both writers of an admin private key — `admin generate-admin-cert` (the local CA mint)
+# and `admin cert renew` (the RF-8b core mint) — therefore refuse before writing when
+# `VENYA_ADMIN_CA_KEY_PASSPHRASE` is unset, empty, or whitespace-only, and write the key
+# encrypted with it when it is set. Same ordering rule #547 shipped for the CA key: the
+# refusal lands before ANY filesystem work, because a directory created and a key left
+# plaintext on disk is not a refusal an operator can walk away from.
+#
+# The whitespace half is ruled; a MINIMUM LENGTH is NOT — the owner asked whether an N
+# should be explored and that research is open, so nothing here measures the passphrase.
+ADMIN_CA_SETUP_FRAGMENT = "Set VENYA_ADMIN_CA_KEY_PASSPHRASE, then run: venya admin init-admin-ca"
+
+
+def _admin_leaf_key_passphrase_or_none() -> str | None:
+    """The passphrase an admin leaf key must be written with, or None if there is none.
+
+    Empty and whitespace-only both count as unset — the same treatment #547 gave the
+    empty value (`passphrase.encode() if passphrase else None`), extended to the blank
+    string that `if not passphrase` alone would wave through.
+    """
+    passphrase = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
+    if passphrase is None or not passphrase.strip():
+        return None
+    return passphrase
+
+
+def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
+    """The ONE refusal for writing an admin private key without a passphrase (#547a).
+
+    Says what to set, then what to run, then what was NOT done — and states the
+    consequence the read side has not caught up with yet, as plain fact (§3.3: an
+    operator silently handed an encrypted key will file the next mTLS failure as a
+    crash, and they would be right). No severity language, no invented deadline: the
+    CLI has no path today to load a passphrase-protected admin key for admin mTLS, and
+    that is exactly what the text says.
+    """
+    return (
+        f"REFUSED: the admin private key written by {site} must never be stored unencrypted.\n"
+        "Nothing was written.\n"
+        # The fragment is the shipped #547 sentence, character-for-character, on its own
+        # line — interpolated mid-sentence it reads "To fix it: Set VENYA_...", and
+        # lowering its first letter would break the cross-package identity that #547's
+        # cells hold. Layout carries the tone; the bytes stay theirs.
+        "To fix it:\n"
+        f"  {ADMIN_CA_SETUP_FRAGMENT}\n"
+        "Note: the key is written encrypted at rest with that passphrase. The venya CLI\n"
+        "cannot yet load an encrypted admin key for admin mTLS — it hands the certificate\n"
+        "and key paths straight to the TLS layer, which is never given a passphrase — so an\n"
+        "admin pair written by this command is not usable for mTLS until that read-side\n"
+        "work lands. To read the key back by hand, supply the same passphrase:\n"
+        "  openssl pkey -in <key-file> -passin env:VENYA_ADMIN_CA_KEY_PASSPHRASE\n"
+        "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md (CA file locations and rotation)."
+    )
+
+
+def _admin_leaf_key_encrypted_notice(key_path: Path) -> str:
+    """The success-side statement of the same fact — one wording, both writers.
+
+    The operator learns this from the command that succeeded, not from the next command
+    that fails.
+    """
+    return (
+        f"  Key encryption:  encrypted at rest with VENYA_ADMIN_CA_KEY_PASSPHRASE ({key_path})\n"
+        "  Not yet usable for admin mTLS: the venya CLI cannot load an encrypted admin\n"
+        "  key for the TLS layer today, so this pair waits on that read-side work."
+    )
+
+
 def cmd_admin_generate_admin_cert(args: Any) -> int:
     """Sign an admin client certificate using the admin CA.
 
-    Generates a new ECDSA P-256 keypair, signs it with the admin CA,
-    and writes the cert and key to the output directory.
+    Generates a new ECDSA P-256 keypair, signs it with the admin CA, and writes the
+    cert and the key to the output directory. The key is written encrypted with
+    ``VENYA_ADMIN_CA_KEY_PASSPHRASE`` (#547a — the owner ruled that the passphrase
+    requirement extends to the admin's own private key); with that variable unset,
+    empty, or whitespace-only the command refuses before touching the filesystem.
     """
     import os
     from datetime import datetime, timedelta
@@ -4487,6 +4582,13 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         return 1
     output_dir = Path(args.output_dir)
 
+    # #547a: refuse BEFORE any filesystem work — including the CA reads below. An
+    # unencrypted admin key is not written and not even attempted.
+    leaf_passphrase = _admin_leaf_key_passphrase_or_none()
+    if leaf_passphrase is None:
+        print(_admin_leaf_key_no_passphrase_refusal("venya admin generate-admin-cert"), file=sys.stderr)
+        return 1
+
     # Resolve admin CA directory
     ca_dir_str = getattr(args, "ca_dir", None) or os.environ.get("VENYA_ADMIN_CA_DIR", "/var/lib/venya/ca/admin-ca")
     ca_dir = Path(ca_dir_str)
@@ -4496,12 +4598,12 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
 
     if not ca_key_path.exists():
         print(f"Error: admin CA key not found at {ca_key_path}", file=sys.stderr)
-        print("Run 'venya admin init-admin-ca' first.", file=sys.stderr)
+        print(ADMIN_CA_SETUP_FRAGMENT, file=sys.stderr)
         return 1
 
     if not ca_cert_path.exists():
         print(f"Error: admin CA cert not found at {ca_cert_path}", file=sys.stderr)
-        print("Run 'venya admin init-admin-ca' first.", file=sys.stderr)
+        print(ADMIN_CA_SETUP_FRAGMENT, file=sys.stderr)
         return 1
 
     try:
@@ -4573,11 +4675,17 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         ensure_secret_dir(output_dir)
 
-        # Write key (unencrypted — operator manages security)
+        # Write the key ENCRYPTED (#547a). This replaced the shipped line
+        # `# Write key (unencrypted — operator manages security)`, which stated the old
+        # posture: the key went to disk in the clear and the operator was trusted to
+        # guard it. The owner ruled that the passphrase requirement extends to the
+        # admin's private key, so the CLI applies it rather than deferring to operator
+        # habit — and it says plainly, below, that the resulting pair is not yet
+        # mTLS-loadable by this CLI.
         key_pem = admin_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
+            encryption_algorithm=BestAvailableEncryption(leaf_passphrase.encode("utf-8")),
         )
         key_path = output_dir / "admin.key"
         key_tmp: str | None = None
@@ -4616,6 +4724,7 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         print(f"  Expires:  {not_after.isoformat()}")
         print(f"  Key:      {key_path} (permissions: 600)")
         print(f"  Cert:     {cert_path} (permissions: 644)")
+        print(_admin_leaf_key_encrypted_notice(key_path))
         return 0
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)

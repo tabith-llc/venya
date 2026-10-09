@@ -46,6 +46,8 @@ from cryptography.x509.oid import NameOID
 from venya_cli.api_client import APIClient, APIClientError
 
 UTC = datetime.UTC
+# dev-only test passphrase (#547a); value is not secret and not used anywhere live
+LEAF_PASSPHRASE = "test_passphrase"
 ISSUER = x509.Name(
     [
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
@@ -143,6 +145,12 @@ def _client(tmp_path: Path, cert_path: Path, key_path: Path) -> APIClient:
 def _clean_env(monkeypatch):
     for var in ("VENYA_ADMIN_CERT", "VENYA_ADMIN_KEY", "VENYA_CONFIG", "SSL_CERT_FILE", "VENYA_SERVER_URL"):
         monkeypatch.delenv(var, raising=False)
+    # #547a: an admin private key is now only written encrypted, so every cell here that
+    # exercises the write path supplies the passphrase. Converted by ADDING the variable
+    # — no assertion in this file was deleted or relaxed. (The refusal halves, including
+    # the proof that the written key is not mTLS-loadable yet, live in
+    # tests/test_cli_admin_leaf_key_passphrase_547a.py.)
+    monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", LEAF_PASSPHRASE)
     yield
 
 
@@ -272,8 +280,12 @@ class TestRebuildPresentsTheNewMaterial:
 
         A live admin client stages its context from the old certificate. RF-8b's renew
         then writes a fresh certificate at that same path (renew itself dials
-        session-only — see N4 — so it is done on its own client). The NEXT request on
-        the original live client must run on the new material with no restart.
+        session-only — see N4 — so it is done on its own client). The NEXT dial on the
+        original live client must notice the changed material: the fingerprint fires,
+        the superseded client is closed, and the rebuild runs. Since #547a the rebuilt
+        pair carries an ENCRYPTED key and the current TLS path cannot load one, so the
+        rebuild refuses loudly instead of presenting anything — the pickup mechanism is
+        proven here, and the read-side gap with it (see §4 N4 for the byte-level half).
         """
         from venya_cli.commands import cmd_admin_cert_renew
 
@@ -309,11 +321,20 @@ class TestRebuildPresentsTheNewMaterial:
             # what the handler wrote is a different certificate at the SAME path — the
             # identity the readout printed is the mint's, not the fixture's
             assert x509.load_pem_x509_certificate(cert.read_bytes()).serial_number == 0x5000_0000 + 11
-
-            # and the live process sees it, without a restart
-            assert live._http is not None
-            assert len(registry) == 2, "the renewed certificate was not picked up in-process"
-            assert live._cert_fingerprint != old_fp
+            # #547a changed this cell's honest ending, and the change is recorded here
+            # rather than papered over: the renew now writes the key ENCRYPTED, and the
+            # CLI has no path that loads an encrypted admin key for mTLS (Part B). So
+            # the fingerprint DOES fire — the pickup half of RF-8c still works, and the
+            # superseded client is still closed — but the rebuild refuses instead of
+            # staging a transport. This is the same fact §4 N4 asserts on the written
+            # bytes; here it is shown at the choke point, which is where an operator
+            # would meet it.
+            with pytest.raises(APIClientError) as refused:
+                assert live._http is not None
+            assert "Failed to load the admin mTLS client cert/key pair" in str(refused.value)
+            assert len(registry) == 1, "the refusal must not stage a transport either"
+            assert registry[0].closed is True, "the superseded client was still closed"
+            assert live._cert_fingerprint != old_fp, "the renewed certificate was not picked up"
         live.close()
         renew_client.close()
 
