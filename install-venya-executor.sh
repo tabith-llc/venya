@@ -705,8 +705,70 @@ chown venya:venya /etc/venya/executor.toml
 chmod 600 /etc/venya/executor.toml
 chown -R venya:venya /etc/venya/executor
 chmod 700 /etc/venya/executor
-find /etc/venya/executor -name '*.key' -exec   chmod 600 {} \; 2>/dev/null || true
-find /etc/venya/executor -name '*.crt' -exec   chmod 644 {} \; 2>/dev/null || true
+# --- #457: the mode pin is not believed until stat() says so -----------------
+# The old shape was `find ... -exec chmod 600 {} \; 2>/dev/null || true`: it
+# discarded chmod's stderr AND its exit status, so a pin that never landed was
+# indistinguishable from one that did, and the install still printed
+# "credentials hardened". That is the exact :600 -> :602 exposure window this
+# script documents for this file class (bootstrap-token block above).
+# Now: (a) the chmod pass keeps its diagnostics and its exit code is captured
+# with `|| RC=$?` -- the same pattern the REG_EXIT site above uses, so set -e
+# cannot swallow it -- and (b) every mode is re-read with stat(1). A key file
+# not at 600, or a certificate not at 644, names the path and the mode found and
+# fails the install (exit 1) instead of claiming success (venya_verify_install
+# ERRORS-counter idiom, venya-common.sh).
+# The `-exec ... +` batch form is part of the fix, not cosmetics: measured at
+# this tip, `find ... -exec chmod 600 {} \;` exits 0 even when chmod exits 1
+# (a false per-file predicate does not set find's status), so dropping `|| true`
+# alone would STILL have swallowed a failed chmod. The batch form propagates it.
+# The stat() pass above it stays the authority either way -- it also catches a
+# chmod that exits 0 having changed nothing.
+# Scope notes: MODE ONLY -- ownership stays venya:venya from the chown -R above,
+# because venya-executor.service runs User=venya with ReadOnlyPaths=/etc/venya
+# and must READ these files. The globs are extension-specific (*.key / *.crt),
+# so no .pub, no other file class and no directory is inspected here. A host
+# with no key material yet (registration deferred -- the CA/token guard above)
+# has nothing to verify and still completes: this pass refuses a bad mode,
+# never an absent file.
+CRED_ERRORS=0
+KEY_PIN_RC=0
+find /etc/venya/executor -name '*.key' -exec chmod 600 {} + || KEY_PIN_RC=$?
+if [ "$KEY_PIN_RC" -ne 0 ]; then
+    error "chmod 600 pass over /etc/venya/executor key material failed (exit $KEY_PIN_RC)"
+    CRED_ERRORS=$((CRED_ERRORS + 1))
+fi
+CRT_PIN_RC=0
+find /etc/venya/executor -name '*.crt' -exec chmod 644 {} + || CRT_PIN_RC=$?
+if [ "$CRT_PIN_RC" -ne 0 ]; then
+    error "chmod 644 pass over /etc/venya/executor certificates failed (exit $CRT_PIN_RC)"
+    CRED_ERRORS=$((CRED_ERRORS + 1))
+fi
+while IFS= read -r -d '' KEY_FILE; do
+    if ! KEY_MODE="$(stat -c '%a' "$KEY_FILE")"; then
+        error "Cannot read the mode of $KEY_FILE -- cannot confirm it is pinned 600"
+        CRED_ERRORS=$((CRED_ERRORS + 1))
+        continue
+    fi
+    if [ "$KEY_MODE" != "600" ]; then
+        error "Executor key material is not mode 600: $KEY_FILE is mode $KEY_MODE"
+        CRED_ERRORS=$((CRED_ERRORS + 1))
+    fi
+done < <(find /etc/venya/executor -type f -name '*.key' -print0)
+while IFS= read -r -d '' CRT_FILE; do
+    if ! CRT_MODE="$(stat -c '%a' "$CRT_FILE")"; then
+        error "Cannot read the mode of $CRT_FILE -- cannot confirm it is pinned 644"
+        CRED_ERRORS=$((CRED_ERRORS + 1))
+        continue
+    fi
+    if [ "$CRT_MODE" != "644" ]; then
+        error "Executor certificate is not mode 644: $CRT_FILE is mode $CRT_MODE"
+        CRED_ERRORS=$((CRED_ERRORS + 1))
+    fi
+done < <(find /etc/venya/executor -type f -name '*.crt' -print0)
+if [ "$CRED_ERRORS" -gt 0 ]; then
+    error "Executor credential hardening FAILED with $CRED_ERRORS error(s) -- not reporting a hardened install"
+    exit 1
+fi
 info "Executor credentials hardened (venya:venya, dir 700, key 600, cert 644)"
 
 # --- #384: UNCONDITIONAL kvm group re-assert for the daemon user ----------------
