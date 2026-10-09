@@ -89,12 +89,23 @@ new enrollment token. No code changes required.
 | Role | CPU / RAM | Disk | Notes |
 |------|-----------|------|-------|
 | Core server | 2 vCPU / 4–8 GB | 10 GB class | nginx + PostgreSQL + core service |
-| Executor | 2 vCPU / 5 GB | 60 GB provisioned; ~7 GB used post-install (warm template ~3.7 GB) | needs `/dev/kvm`; ~1.2 GB RAM floor on the serial path, 5 GB gives headroom |
+| Executor | 2 vCPU / 5 GB | 60 GB provisioned; ~7 GB used post-install (warm template ~3.7 GB) | needs `/dev/kvm`; ~1.2 GB RAM floor measured on the serial path (one active sandbox); concurrent-sandbox RAM on this shape is **unmeasured beyond 2** |
 
 Both: Ubuntu 24.04 LTS. The "5–8 GB RAM" sizing figure is **headroom**, not a
 floor — the measured serial floor is ~1.2 GB per executor (OS + services + one
-~527 MB sandbox); the extra room covers OS overhead, concurrent-session growth,
-and safety margin.
+~527 MB sandbox); the extra room covers OS overhead and safety margin.
+
+Every figure above is a **serial** measurement — one active sandbox per executor
+at a time — and each carries that method basis where it appears. Concurrency on
+the shipped 5 GB executor shape is **unmeasured beyond 2**. The one spike that
+probed it (RF-1, 2026-10-09, #567) ran three concurrent sandboxes on a 5 GB
+executor guest and ran that guest out of memory, which ended the sandbox daemon;
+the same three- and four-sandbox runs completed cleanly on a larger test guest.
+That guest is a probe condition above every shape this product ships, not a
+deployment recommendation, and a clean pass on it says nothing about the 5 GB row
+above. So this guide publishes **no** concurrency capacity: a published number
+belongs to the benchmark that measures it — #186 (its duplicate #124) — and
+capacity publication stays with RF-5.
 
 ## Reference deployment
 
