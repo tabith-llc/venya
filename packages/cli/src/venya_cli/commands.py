@@ -41,6 +41,7 @@ from .at_rest_key import (
     server_passphrase_env_for,
     unwrap_at_rest,
 )
+from .secret_holder import SecretHolder
 
 # --- Version-mismatch advisory (ticket cli-version-mismatch-upgrade-nudge) ---
 # Ruled design (#324 D1-D4): nudge only, never a gate; one /health fetch per
@@ -4007,7 +4008,10 @@ def cmd_admin_export_ca_key(args: Any) -> int:
     VENYACA1 envelope (AES-256-GCM, authenticated — finding-5 ruling), and
     writes the blob to the specified output file.
 
-    The plaintext key is never written to disk or stdout.
+    The plaintext key is never written to disk or stdout. In memory it is held
+    by one :class:`SecretHolder` (#538) that erases its own copy on release; the
+    holder does not pin, and it does not remove copies made by other code — see
+    ``secret_holder.py`` for what this covers and what it cannot.
     """
     from pathlib import Path
 
@@ -4038,52 +4042,66 @@ def cmd_admin_export_ca_key(args: Any) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    # Prompt for passphrase (twice for confirmation)
-    passphrase1 = None
-    while passphrase1 is None:
-        passphrase1 = getpass.getpass("Enter passphrase for encrypted key: ")
-        passphrase2 = getpass.getpass("Confirm passphrase: ")
-        if passphrase1 != passphrase2:
-            print("Passphrases do not match. Try again.")
-            passphrase1 = None
+    # #538: from here the root key lives in the one buffer this command owns, and
+    # it is erased on every exit path — including the empty-passphrase refusal and
+    # a write failure. The two local names are dropped right after the hand-off so
+    # this frame keeps no reference to the producer's copy; dropping a name is not
+    # erasing memory (see secret_holder.py for exactly what is and is not covered),
+    # which is why the holder's claim is about its OWN copy.
+    with SecretHolder(plaintext_key) as holder:
+        del plaintext_key, raw_at_rest
 
-    if not passphrase1:
-        print("Error: passphrase cannot be empty", file=sys.stderr)
-        return 1
+        # Prompt for passphrase (twice for confirmation). The window spans both
+        # prompts: the operator's typing time is part of how long the key sits
+        # here, and it has no upper bound in the code.
+        passphrase1 = None
+        while passphrase1 is None:
+            passphrase1 = getpass.getpass("Enter passphrase for encrypted key: ")
+            passphrase2 = getpass.getpass("Confirm passphrase: ")
+            if passphrase1 != passphrase2:
+                print("Passphrases do not match. Try again.")
+                passphrase1 = None
 
-    # Derive encryption key from passphrase using PBKDF2
-    salt = os.urandom(16)
-    key = _derive_ca_backup_key(salt, passphrase1)
+        if not passphrase1:
+            print("Error: passphrase cannot be empty", file=sys.stderr)
+            return 1
 
-    # Encrypt with AES-256-GCM — canonical VENYACA1 envelope (finding-5
-    # ruling): authenticated encryption, so tampering and wrong passphrases
-    # fail LOUDLY at restore. The old CBC envelope validated only the last
-    # padding byte and could restore silently-corrupted key material.
-    nonce = os.urandom(12)
-    encrypted = AESGCM(key).encrypt(nonce, plaintext_key, None)
+        # Derive encryption key from passphrase using PBKDF2
+        salt = os.urandom(16)
+        key = _derive_ca_backup_key(salt, passphrase1)
 
-    # Write: MAGIC(8) + salt(16) + nonce(12) + ciphertext+tag
-    output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    ensure_secret_dir(output_path.parent)
-    blob_tmp: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=output_path.parent, prefix=".venya-cabackup-", delete=False) as fd:
-            blob_tmp = fd.name
-            fd.write(_CA_BLOB_MAGIC + salt + nonce + encrypted)
-            fd.flush()
-            os.fchmod(fd.fileno(), 0o600)
-        os.replace(blob_tmp, output_path)
-    except BaseException:
-        if blob_tmp is not None:
-            try:
-                os.unlink(blob_tmp)
-            except OSError:
-                pass
-        raise
+        # Encrypt with AES-256-GCM — canonical VENYACA1 envelope (finding-5
+        # ruling): authenticated encryption, so tampering and wrong passphrases
+        # fail LOUDLY at restore. The old CBC envelope validated only the last
+        # padding byte and could restore silently-corrupted key material.
+        # The scoped read-only view is what AESGCM is fed — no bytes copy leaves
+        # the holder (the envelope bytes are the library's own output).
+        nonce = os.urandom(12)
+        with holder.view() as key_material:
+            encrypted = AESGCM(key).encrypt(nonce, key_material, None)
 
-    print(f"CA key encrypted (AES-256-GCM) and exported to {output_path}")
-    print("Store this file securely. It requires the passphrase to decrypt.")
-    return 0
+        # Write: MAGIC(8) + salt(16) + nonce(12) + ciphertext+tag
+        output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ensure_secret_dir(output_path.parent)
+        blob_tmp: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=output_path.parent, prefix=".venya-cabackup-", delete=False) as fd:
+                blob_tmp = fd.name
+                fd.write(_CA_BLOB_MAGIC + salt + nonce + encrypted)
+                fd.flush()
+                os.fchmod(fd.fileno(), 0o600)
+            os.replace(blob_tmp, output_path)
+        except BaseException:
+            if blob_tmp is not None:
+                try:
+                    os.unlink(blob_tmp)
+                except OSError:
+                    pass
+            raise
+
+        print(f"CA key encrypted (AES-256-GCM) and exported to {output_path}")
+        print("Store this file securely. It requires the passphrase to decrypt.")
+        return 0
 
 
 def cmd_admin_split_ca_key(args: Any) -> int:
