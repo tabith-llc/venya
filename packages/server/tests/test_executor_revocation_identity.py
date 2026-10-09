@@ -66,6 +66,11 @@ from sqlalchemy.orm import sessionmaker
 PEPPER = "test-pepper-12345"
 TEST_USER = {"user_id": "test-user"}
 
+# #449: the role gate's stated refusal for an executor-class caller. Cells that
+# target an IN-BODY check assert their reason is NOT this string — several distinct
+# 403s live on these routes and status alone cannot separate them.
+EXECUTOR_GATE_REFUSAL = "Executor callers are not permitted on role-gated routes"
+
 
 def _generate_test_csr(cn="test-exec"):
     private_key = ec.generate_private_key(ec.SECP256R1())
@@ -703,8 +708,22 @@ class TestDialGates:
 
         Mock-db cell by necessity: sqlite hands back naive datetimes for the
         route's aware expiry comparison (storage-engine artifact, production is
-        timestamptz) — this cell targets the GATE, so the session/executor rows
-        are mocks with aware timestamps."""
+        timestamptz) — this cell targets the in-BODY revoked-executor gate (#449
+        re-pin), so the session/executor rows are mocks with aware timestamps.
+
+        #449 changed the CALLER, not the control. The old double was
+        ``{"user_id": "test-user", "caller": "executor"}`` — a hybrid the
+        middleware can never emit (``middleware/auth.py:834`` writes
+        ``caller/executor_id/presented_serial/revoked`` and NO ``user_id``), and
+        the only thing that carried it into the body was the blanket executor pass
+        this ticket removes. It is now a production-realistic HUMAN bearer holding a
+        read-write role, which passes ``require_role("read-write")`` honestly.
+
+        The assertion pins the REASON TEXT, not just the status: three different 403s
+        exist on this route (the gate's executor refusal, "Read-write permission
+        required", and this revoked-Executor deny), and a status-only assert cannot
+        tell them apart.
+        """
         app = FastAPI()
         db = MagicMock()
         backend = MagicMock()
@@ -714,7 +733,11 @@ class TestDialGates:
         app.state.ca_manager = _make_mock_ca()
         app.state.core = MagicMock()
         app.dependency_overrides[get_backend] = lambda: backend
-        app.dependency_overrides[get_current_user] = lambda: {"user_id": "test-user", "caller": "executor"}
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "test-user",
+            "caller": "human",
+            "session_id": "sess-bearer-1",
+        }
         app.include_router(executors_routes.router, prefix="/api/v1")
 
         session_row = MagicMock()
@@ -737,9 +760,45 @@ class TestDialGates:
 
         db.query.side_effect = _q
 
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.post("/api/v1/executors/exec-a/execute", json={"session_id": "sess-1", "command": ["id"]})
-        assert resp.status_code == 403 and "revoked" in resp.json()["detail"].lower()
+        # The human double holds a read-write role, so require_role passes on its
+        # own merits and the request reaches the body — that is the point: this cell
+        # must exercise the route's revoked-executor check, not some gate on the way.
+        rm = MagicMock()
+        rm.get_user_permissions.side_effect = lambda uid: {1: "read-write"}
+        with patch("server.dependencies.RoleManager", return_value=rm):
+            client = TestClient(app, raise_server_exceptions=False)
+            resp = client.post("/api/v1/executors/exec-a/execute", json={"session_id": "sess-1", "command": ["id"]})
+            # PAIRED HALF (this is what makes the re-pin stronger than the old cell,
+            # not merely re-worded): the OLD fixture shape — the production-impossible
+            # ``user_id`` + ``caller=executor`` hybrid — must now be refused BY THE
+            # GATE and must never reach this body. Under the blanket pass this request
+            # answered the revoked-executor detail below, which is exactly how the old
+            # cell rode the pass into the route body.
+            app.dependency_overrides[get_current_user] = lambda: {
+                "user_id": "test-user",
+                "caller": "executor",
+            }
+            hybrid = client.post("/api/v1/executors/exec-a/execute", json={"session_id": "sess-1", "command": ["id"]})
+            # The human request above performed exactly one lookup; the executor
+            # request must have added none (call COUNT, not .called — the human
+            # double legitimately hit the role table first).
+            lookups_after_hybrid = rm.get_user_permissions.call_count
+
+        assert resp.status_code == 403, resp.text
+        detail = resp.json()["detail"]
+        # The gate's executor refusal and the tier deny must NOT be what answered.
+        assert detail != EXECUTOR_GATE_REFUSAL, "refused by the role gate — the body never ran"
+        assert detail != "Read-write permission required"
+        # The in-body revoked-executor deny (routes/executors.py, dial gate #2).
+        assert "revoked" in detail.lower(), detail
+        assert "Executor 'exec-a' is revoked" in detail, detail
+        assert "refusing to route execution" in detail, detail
+
+        # Paired half verdict: refused at the gate with the gate's own reason, and no
+        # role lookup was attempted for an identity that carries no role.
+        assert hybrid.status_code == 403, hybrid.text
+        assert hybrid.json()["detail"] == EXECUTOR_GATE_REFUSAL, hybrid.json()
+        assert lookups_after_hybrid == 1, f"executor request performed {lookups_after_hybrid - 1} extra role lookup(s)"
 
 
 # --- Phase 2: incumbent serial-match exemption (executor-rotation-require-token-400 ruling 2(a)) ---

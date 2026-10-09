@@ -205,8 +205,11 @@ def require_role(permission: str):
             (audit-visibility tier, ticket auditor-role — read-write exceeds
             it so admins, seeded read-write, keep audit-log access; plain
             "read" memberships are DENIED: audit access is auditor-scoped);
-            "read-write" requires at least one read-write role. Executors
-            (mTLS) always pass.
+            "read-write" requires at least one read-write role. EXECUTOR-class
+            callers (mTLS) are REFUSED on every tiered gate (#449) — the only
+            thing that lets an executor certificate reach a route is the
+            middleware PATH MATCHER (server/middleware/auth.py), never this
+            factory; see the single-source note in ``_checker``.
 
     Returns:
         Dependency that allows the request only when the authenticated
@@ -225,20 +228,50 @@ def require_role(permission: str):
         user_info: dict = Depends(get_current_user),
         backend: Backend = Depends(get_backend),
     ) -> dict:
-        # Executor (mTLS) has full access.
-        # Their user_info carries no user_id, so a role lookup is impossible.
-        if user_info.get("caller") == "executor":
-            return user_info
-
         # "none" — any authenticated caller passes without role checks.
         # Used temporarily for heartbeat endpoint (hardened to mTLS identity in Phase 3).
         if permission == "none":
             return user_info
 
+        # --- #449: executor-class callers are REFUSED here, not waved through.
+        #
+        # SINGLE SOURCE (AC4): the middleware PATH MATCHER decides what an
+        # executor certificate may reach — server/middleware/auth.py
+        # (_is_executor_session_path + the /api/v1/heartbeat and
+        # /api/v1/audit/ingest grants in dispatch). This gate is the second
+        # half of that control and it grants NOTHING: an executor identity
+        # carries no user_id, so there is no role to check and nothing this
+        # tier can honestly pass. Adding an executor-reachable route is NOT
+        # this gate's job — it is a matcher change, and it must arrive with
+        # the route's own in-body identity re-check (the #440 binding shape),
+        # never by re-widening this refusal.
+        #
+        # require_admin (further down this module) already denies executors
+        # outright; the blanket pass here was the odd one out. Deny BEFORE any
+        # role lookup: indexing user_info["user_id"] here would raise KeyError
+        # and surface as a 500 instead of this 403.
+        if user_info.get("caller") == "executor":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Executor callers are not permitted on role-gated routes",
+            )
+
         db = backend.get_session()
         try:
             rm = RoleManager(db)
-            permissions = rm.get_user_permissions(user_info["user_id"])
+            # AC2 (#449): a tiered gate needs an identity the role table can
+            # answer for. An executor is refused above; any OTHER identity
+            # without a user_id used to reach `user_info["user_id"]` here and
+            # raise KeyError, which FastAPI surfaces as a 500 — an
+            # authorization failure dressed as a server fault (and a stack
+            # trace to a caller that should simply be refused). Clean 403.
+            caller_user_id = user_info.get("user_id")
+            if caller_user_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Caller identity carries no user to authorize",
+                )
+            permissions = rm.get_user_permissions(caller_user_id)
 
             if permission == "read":
                 # MEMBERSHIP test, not a tier comparison (documentation-only note
