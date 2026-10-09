@@ -4510,7 +4510,12 @@ def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
     return (
         f"REFUSED: the admin private key written by {site} must never be stored unencrypted.\n"
         "Nothing was written.\n"
-        f"To fix it: {ADMIN_CA_SETUP_FRAGMENT}.\n"
+        # The fragment is the shipped #547 sentence, character-for-character, on its own
+        # line — interpolated mid-sentence it reads "To fix it: Set VENYA_...", and
+        # lowering its first letter would break the cross-package identity that #547's
+        # cells hold. Layout carries the tone; the bytes stay theirs.
+        "To fix it:\n"
+        f"  {ADMIN_CA_SETUP_FRAGMENT}\n"
         "Note: the key is written encrypted at rest with that passphrase. The venya CLI\n"
         "cannot yet load an encrypted admin key for admin mTLS — it hands the certificate\n"
         "and key paths straight to the TLS layer, which is never given a passphrase — so an\n"
