@@ -519,9 +519,12 @@ only, not a security boundary.
   `sbx create` + `sbx rm --force` pair. Whenever a run looks like it failed,
   check the executor journal (`journalctl -u venya-executor`) and the
   target's actual state before retrying.
-- `503` with `Not authenticated to Docker` in the executor journal: sbx
-  login missing/expired — rerun the installer with Docker credentials or
-  `sudo -H -u venya sbx login` on the executor.
+- `503` with `You are not authenticated to Docker` in the executor journal:
+  sbx login missing/expired — rerun the installer with Docker credentials or
+  `sudo -H -u venya sbx login` on the executor. That failure string is the
+  vendor's own wording (https://docs.docker.com/ai/sandboxes/troubleshooting/,
+  accessed 2026-10-09). The `503` itself is Venya's own mapping of an
+  unauthenticated executor — it is not a status code the vendor returns.
 - `503` with `global network policy has not been initialized`: run
   `sudo -H -u venya sbx policy init deny-all` on the executor (the
   installer does this automatically since the 2026-09 fix).

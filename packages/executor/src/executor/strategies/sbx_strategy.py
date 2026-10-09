@@ -875,7 +875,9 @@ class SbxStrategy(InjectionStrategy):
 
         # Run as the daemon user, never via sudo: the sbx daemon and
         # `sbx login` credentials live under the daemon user, and the
-        # root context is unauthenticated ("Not authenticated to Docker").
+        # root context is unauthenticated — the vendor's own wording is
+        # "You are not authenticated to Docker"
+        # (docs.docker.com/ai/sandboxes/troubleshooting/, accessed 2026-10-09).
         # --sandbox (not --name) scopes the rule to this sandbox.
         # ponytail: one scoped rule per run is never explicitly removed;
         # if the daemon does not GC rules for dead sandboxes, sweep with
