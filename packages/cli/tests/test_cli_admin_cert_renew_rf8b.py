@@ -393,7 +393,7 @@ class TestSessionOnlyTransport:
         seen = self._spy(monkeypatch)
         client.use_session_only_transport()
         client._http = None
-        client._http  # building it IS the assertion target  # noqa: B018
+        assert client._http is not None  # building it IS the assertion target
         assert seen[-1] == (None, None), seen
         client.close()
 
@@ -403,7 +403,7 @@ class TestSessionOnlyTransport:
         client = _client(tmp_path, crt, key)
         seen = self._spy(monkeypatch)
         client._http = None
-        client._http  # noqa: B018
+        assert client._http is not None
         assert seen[-1] == (str(crt), str(key)), seen
         client.close()
 
@@ -422,9 +422,9 @@ class TestSessionOnlyTransport:
             or real(cafile, certfile, keyfile),
         )
         with monkeypatch_pair:
-            client._http  # an earlier request built it WITH the pair  # noqa: B018
+            assert client._http is not None  # an earlier request built it WITH the pair
             client.use_session_only_transport()
-            client._http  # and the mint rebuilds without it  # noqa: B018
+            assert client._http is not None  # and the mint rebuilds without it
         assert seen == [(str(crt), str(key)), (None, None)], seen
         client.close()
 
