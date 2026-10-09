@@ -30,7 +30,7 @@ Two ground rules make the rest simple:
 | Command policy (admin) | admin API `POST /api/v1/admin/command-policy`; CLI `venya admin set-command-policy <preset>` / `add-allowed-command <path>` | executors apply the change on their next heartbeat (about 30 seconds); the change itself is audit-logged (`command_policy_changed`) |
 | Command policy (per executor, at boot) | `/etc/venya/executor.toml` `[command_validator]` | executor restart; the server row takes over from the first heartbeat after that |
 | Sandbox egress | `/etc/venya/egress-allowlist.txt` on each executor | the next command run — the file is read fresh at every sandbox creation, no restart needed |
-| Core server settings | `/opt/venya/.env` (`VENYA_...` keys) | core service restart (`systemctl restart venya-core`) |
+| Core server settings | `/opt/venya/.env` (`VENYA_...` keys) — the file is `$VENYA_ENV_DIR/.env` when `VENYA_ENV_DIR` is set | core service restart (`systemctl restart venya-core`) |
 | Executor settings | `/etc/venya/executor.toml` or `VENYA_EXECUTOR_*` environment | executor service restart |
 
 ## The worked example: "allow scp"
@@ -195,8 +195,12 @@ Keep it true; everything hostname-based depends on it.)
 | `VENYA_SESSION__SESSION_TIMEOUT` | longer idle window before re-auth | window an unattended live session stays usable | `/opt/venya/.env` | 900 s (15 min) |
 | `VENYA_SESSION__ACCESS_TOKEN_TTL` | fewer token refreshes | lifetime a captured bearer token stays usable | `/opt/venya/.env` | 300 s (5 min) |
 | `VENYA_SESSION__MAX_SESSION_DURATION` | longer authorized working blocks | the session hard cap — the backstop under every other timeout | `/opt/venya/.env` | 14400 s (4 h) |
-| `VENYA_RATE_LIMIT__ENFORCE=false` | no throttling or lockouts at all | the entire brute-force defense tier | `/opt/venya/.env` | enforced |
-| Rate-limit counts (`MAX_ATTEMPTS`, `LOCKOUT_REINSTATE_MINUTES`, `AUTH_REQUESTS_PER_MINUTE`, …) | fewer accidental lockouts for real users | proportionally, the tightness of guessing defenses | `/opt/venya/.env` | 5 attempts / 15 min / 20 per min |
+| `VENYA_RATE_LIMIT__ENFORCE=false` | no request tiering at all: the auth tier, the per-IP tier, the break-glass tier and its failure backoff, and the admin-certificate mint tier are all skipped | every HTTP request tier in one switch — including the cap on admin-credential minting (`POST /api/v1/admin/certs/issue`) and on break-glass recovery (`/api/v1/recovery`). It does not reach the account lockout inside the core engine, which keeps its own limits | `/opt/venya/.env` | enforced |
+| `VENYA_RATE_LIMIT__IP_RATE_LIMIT` | more requests per client IP before a 429 | the generic per-IP ceiling — any path this middleware does not classify falls to this tier, so raising it loosens the limit on everything unclassified | `/opt/venya/.env` | 1000 per minute |
+| `VENYA_RATE_LIMIT__AUTH_REQUESTS_PER_MINUTE` | more headroom for login and enrollment traffic | the tight tier on `/api/v1/auth/*` and `/api/v1/enrollment/*` — the tier that exists because password guessing is the cheap attack | `/opt/venya/.env` | 20 per minute |
+| `VENYA_RATE_LIMIT__BREAK_GLASS_REQUESTS_PER_HOUR` | more recovery attempts per hour | the cap on `/api/v1/recovery`, and with it the bound on repeated failed recoveries | `/opt/venya/.env` | 5 per hour |
+| `VENYA_RATE_LIMIT__CERT_ISSUANCE_REQUESTS_PER_HOUR` | more admin-certificate mints per hour | the cap on `POST /api/v1/admin/certs/issue`, counted per account rather than per IP — one mint costs one security-key touch, so the number is small on purpose | `/opt/venya/.env` | 5 per hour |
+| `VENYA_RATE_LIMIT__MAX_ATTEMPTS`, `VENYA_RATE_LIMIT__WINDOW_SECONDS`, `VENYA_RATE_LIMIT__LOCKOUT_REINSTATE_MINUTES` | nothing today — these three keys are read into the server configuration and no shipped code path uses them | no cost, because no effect: the account lockout runs on the core engine's own limits (5 failed attempts, a 300-second window, a 15-minute lockout) and does not read these values | `/opt/venya/.env` | 5 / 300 s / 15 min (inert as overrides) |
 | `VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN=false` | executors can register without a minted token | the gate that stops any host reaching the core from claiming executor identity | `/opt/venya/.env` | token required |
 | `VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS` | a relaxed enrollment window for batches | time a lost/stolen enrollment token stays usable | `/opt/venya/.env` | 1800 s |
 | `VENYA_FIDO2__ENROLLMENT_TOKEN_TTL` | enroll without racing the timer | same trade, for user-enrollment tokens | `/opt/venya/.env` | 15 minutes |
