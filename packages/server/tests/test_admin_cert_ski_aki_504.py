@@ -182,9 +182,9 @@ class TestAdminCertSkiAki504:
         leaves that now carry SKI + a correct AKI digest."""
         # Incumbent keys are plaintext (they predate #537), so this cell runs
         # with the passphrase envs UNSET. A plaintext key at rest read while a
-        # passphrase is set is the #537 read-side finding: load_ca() logs
-        # "ignoring passphrase" and still hands it to the loader, which raises
-        # TypeError. That behaviour is deliberately unchanged here.
+        # passphrase is set is #541: load_ca() now REFUSES with the approved
+        # #537 wording instead of logging "ignoring passphrase" and letting the
+        # loader raise TypeError. The envs stay deleted here for that reason.
         monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
         monkeypatch.delenv("VENYA_CA_KEY_PASSPHRASE", raising=False)
         # Pre-#504 incumbent: mint a CA pair without the identifiers.
