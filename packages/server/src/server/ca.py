@@ -309,7 +309,11 @@ class CAManager:
             Tuple of (certificate, private_key).
 
         Raises:
-            RuntimeError: If the key cannot be decrypted.
+            RuntimeError: If the key cannot be decrypted, if the key is encrypted
+                and no passphrase is set, or — #541 — if the key on disk is
+                plaintext while a passphrase is configured. That last case refuses
+                with the approved #537 text instead of loading; the key is never
+                re-wrapped or migrated.
         """
         passphrase = _load_passphrase(self._key_passphrase_env)
         try:
@@ -327,7 +331,13 @@ class CAManager:
             )
 
         if not is_encrypted and passphrase:
-            logger.warning("CA key is unencrypted but passphrase is set — ignoring passphrase")
+            # A passphrase is configured but the key on disk is plaintext: refuse loudly (#541).
+            # Handing it to the loader anyway raises TypeError ("Password was given but private
+            # key is not encrypted"), which escapes the manager, the boot path and the health
+            # check. The owner ruled this case REFUSE LOUDLY, NO REWRAP — nothing is loaded,
+            # nothing is re-encrypted, nothing is migrated. The wording is #537's approved
+            # refusal, shared, naming the variable this manager actually reads.
+            raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
 
         private_key = _deserialize_key(key_data, passphrase)
         try:
@@ -820,7 +830,10 @@ class AdminCAManager:
             ECDSA private key instance.
 
         Raises:
-            RuntimeError: If the key cannot be decrypted or passphrase not set.
+            RuntimeError: If the key cannot be decrypted or passphrase not set, or
+                — #541 — if the key on disk is plaintext while a passphrase is
+                configured. That last case refuses with the approved #537 text
+                instead of loading; the key is never re-wrapped or migrated.
         """
         passphrase = _load_passphrase(self._key_passphrase_env)
         key_data = self.ca_key_path.read_bytes()
@@ -834,7 +847,11 @@ class AdminCAManager:
             )
 
         if not is_encrypted and passphrase:
-            logger.warning("Admin CA key is unencrypted but passphrase is set — ignoring passphrase")
+            # Twin of CAManager.load_ca (#541): a configured passphrase against a plaintext key
+            # on disk refuses loudly instead of logging and handing the passphrase to the loader,
+            # which raised TypeError. Owner ruling: REFUSE LOUDLY, NO REWRAP — nothing is loaded,
+            # re-encrypted or migrated. Shares #537's approved wording, naming the admin variable.
+            raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
 
         return _deserialize_key(key_data, passphrase)
 

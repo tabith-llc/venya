@@ -113,10 +113,10 @@ class TestRootCaSkiAki522:
         app.py / routes/init.py guard on has_ca and skip the mint entirely)."""
         # The incumbent key is plaintext (it predates #537), so this cell runs
         # with the passphrase env UNSET — the combination the autouse fixture
-        # would otherwise create (plaintext key at rest + passphrase set) is the
-        # #537 read-side finding: load_ca() logs "ignoring passphrase" but still
-        # passes it to the loader, which raises TypeError. That behaviour is
-        # unchanged here on purpose; the incumbent half of this cell is the
+        # would otherwise create (plaintext key at rest + passphrase set) is
+        # #541: load_ca() now REFUSES with the approved #537 wording instead of
+        # logging "ignoring passphrase" and passing it to the loader, which
+        # raised TypeError. The incumbent half of this cell stays the
         # deployment-continuity case the ticket keeps working.
         monkeypatch.delenv("VENYA_CA_KEY_PASSPHRASE", raising=False)
         ca_dir = tmp_path / "ca"
