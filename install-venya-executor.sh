@@ -111,7 +111,22 @@ else
     fi
     echo "venya-common.sh verified (sha256 $ACTUAL_COMMON_SHA)" >&2
     source "$FETCH_DIR/venya-common.sh"
+    # #475: sourcing the library installs the temp registry, and the single
+    # EXIT trap set after this block REPLACES the FETCH_DIR trap set above
+    # (bash holds one EXIT trap per shell). Hand the directory to the list
+    # here, so the pre-source trap covers the fetch and the list covers it
+    # from here on.
+    register_install_temp "$FETCH_DIR"
 fi
+
+# --- One EXIT trap for every temp this installer creates (#475) ---
+# `set -euo pipefail` ends this script wherever it stands, so temp cleanup
+# cannot live only in the inline `rm` calls the success paths reach. There is
+# ONE trap, and it drains the list that venya-common.sh defines and the sites
+# below fill — per-file traps would replace each other, not add up. The
+# inline removals stay (they release the files as soon as they are spent);
+# this trap is what makes an abort leave nothing behind.
+trap 'cleanup_install_temps' EXIT
 
 venya_print_colors
 venya_check_root
@@ -287,8 +302,13 @@ chown venya:adm /var/log/venya 2>/dev/null || chown venya:venya /var/log/venya
 # --- Install Docker Sandboxes (sbx) CLI (executor-specific) ---
 info "Installing Docker Sandboxes (sbx) CLI..."
 if ! command -v sbx &>/dev/null; then
+    # #475: both files sit between creation and the rm below, and a curl or
+    # repo-setup failure used to leave them behind — registered here, and the
+    # inline removals stay as the prompt-release path.
     SBX_SCRIPT=$(mktemp /tmp/docker-sbx-install-XXXXXX.sh)
+    register_install_temp "$SBX_SCRIPT"
     SBX_LOG=$(mktemp /tmp/venya-sbx-repo-XXXXXX.log)   # #317: static name = root symlink-clobber
+    register_install_temp "$SBX_LOG"
     curl -fsSL https://get.docker.com -o "$SBX_SCRIPT"
     if ! REPO_ONLY=1 sh "$SBX_SCRIPT" > "$SBX_LOG" 2>&1; then
         error "Docker sbx apt-repo setup failed; last 25 lines:"
@@ -416,6 +436,7 @@ else
             # comment test is the KEEP half here: a comment is kept by definition,
             # only a non-comment line whose field 2 is the name is dropped.
             HOSTS_TMP=$(mktemp)
+            register_install_temp "$HOSTS_TMP"   # #475: backstop if the rewrite aborts
             awk -v host="$CORE_HOSTNAME" 'substr($1, 1, 1) == "#" || $2 != host' "$HOSTS_FILE" > "$HOSTS_TMP" 2>/dev/null
             cat "$HOSTS_TMP" > "$HOSTS_FILE"
             rm -f "$HOSTS_TMP"
@@ -891,6 +912,11 @@ else
     WARM_SANDBOX="venya-install-warm"
     sudo -H -u venya mkdir -p /home/venya/.venya-workspaces 2>/dev/null || true
     WARM_WS="$(sudo -H -u venya mktemp -d /home/venya/.venya-workspaces/warm.XXXXXX 2>/dev/null || true)"
+    # #475: deliberately NOT registered with the EXIT-cleanup list. It is not
+    # an installer temp — the venya user creates it inside its own home, and
+    # the throwaway retire below is a non-fatal rmdir on purpose (an
+    # in-progress sandbox dir is the service user's to keep, and a root
+    # `rm -rf` at script exit would be a new capability, not a leak fix).
     # Clear a stale warm sandbox from a previous failed run (create would refuse the name).
     sudo -H -u venya sbx rm --force "$WARM_SANDBOX" < /dev/null > /dev/null 2>&1 || true
     if [ -n "$WARM_WS" ] && timeout 1800 sudo -H -u venya sbx create --name "$WARM_SANDBOX" shell "$WARM_WS" < /dev/null > /dev/null 2>&1; then

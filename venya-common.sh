@@ -33,7 +33,75 @@
 #   venya_create_directories    # Create runtime directories
 #   venya_service_retry         # Retry loop for systemctl start
 #   venya_verify_install        # Verify installation (file checks)
+#   register_install_temp       # Add one installer temp to the single EXIT-cleanup list (#475)
 ###############################################################################
+
+# --- 0. Installer temp registry (#475) ---
+# WHY A LIST, AND WHY ONE TRAP: bash keeps a single EXIT trap per shell — a
+# second `trap ... EXIT` REPLACES the first, so per-file traps are not a
+# mechanism. The installers already had the right shape for FETCH_DIR
+# (`trap 'rm -rf "$FETCH_DIR"' EXIT`) and nothing after it, which left every
+# later temp to be cleaned inline on success paths only; under
+# `set -euo pipefail` an abort between creation and that inline cleanup left
+# the file behind (#317's CSRs, and a tarball on the order of 100 MB).
+# The mechanism is therefore: a temp is REGISTERED here, and each installer
+# sets exactly ONE exit trap — `trap 'cleanup_install_temps' EXIT`, placed
+# right after this library is sourced — which drains this list. Inline `rm`
+# calls stay where they are (they release the big files mid-install instead of
+# waiting for exit); the trap is the backstop for the paths that never reach
+# them.
+#
+# WHAT MUST NOT BE REGISTERED: a file the system still needs after the script
+# exits, or one the operator is told to open after a failure. Reaping those is
+# a worse bug than the leak. Known deliberate non-registrations: venya_apt's
+# log (its failure branch prints "Full apt log: <path>" — the trap would
+# delete the file it just named) and the executor's warm-sandbox workspace
+# (created as the venya user inside its own home, retired by its own
+# non-fatal rmdir).
+#
+# An installer that sources this library but never sets the trap
+# (install-venya-cli.sh today) is unaffected: registrations simply collect in
+# the list, which nothing drains, so its behaviour does not change.
+INSTALL_CLEANUP_TEMPS=()
+
+register_install_temp() {
+    # usage: register_install_temp <path>
+    # Adds one installer temp to the list the single EXIT trap drains.
+    # Empty and duplicate values are ignored, and this never returns non-zero:
+    # under `set -e` a registration must never be able to abort an install.
+    local path="${1:-}"
+    local seen
+    if [ -z "$path" ]; then
+        return 0
+    fi
+    # ${arr[@]+"${arr[@]}"} — the empty-array form that stays safe under
+    # `set -u` on every bash the installer can meet, not only 4.4+.
+    for seen in ${INSTALL_CLEANUP_TEMPS[@]+"${INSTALL_CLEANUP_TEMPS[@]}"}; do
+        if [ "$seen" = "$path" ]; then
+            return 0
+        fi
+    done
+    INSTALL_CLEANUP_TEMPS+=("$path")
+    return 0
+}
+
+cleanup_install_temps() {
+    # This is the body of the installers' ONE EXIT trap.
+    # The status the operator must see is the script's own: it is captured
+    # first and restored on return, and no `exit` appears anywhere in here
+    # (an `exit` inside an EXIT trap is what overwrites the real one). Every
+    # removal is existence-guarded and best-effort, so a temp already cleaned
+    # inline cannot turn a finished install into a failed one.
+    local rc=$?
+    local path
+    for path in ${INSTALL_CLEANUP_TEMPS[@]+"${INSTALL_CLEANUP_TEMPS[@]}"}; do
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            rm -rf -- "$path" 2>/dev/null || true
+        fi
+    done
+    INSTALL_CLEANUP_TEMPS=()
+    return "$rc"
+}
 
 # --- 1. Colors and logging ---
 
@@ -238,6 +306,10 @@ venya_create_user() {
 venya_apt() {
     local log rc=0
     log=$(mktemp /tmp/venya-apt-XXXXXX.log)
+    # #475: deliberately NOT registered with INSTALL_CLEANUP_TEMPS. The failure
+    # branch below prints "Full apt log: $log" for the operator to open, and the
+    # single EXIT trap would delete the file it just named — cleaning that up
+    # would trade a small leak for a lost diagnostic. Success removes it inline.
     apt-get -o DPkg::Lock::Timeout="${VENYA_APT_LOCK_TIMEOUT:-120}" "$@" > "$log" 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then
         error "apt-get $* failed (exit $rc). Last 25 lines:"
@@ -349,7 +421,20 @@ venya_download_tarball() {
     fi
 
     info "Downloading tarball from $TARBALL_URL..."
+    # #475: the tarball is the largest temp in the install, so it is registered
+    # with the single EXIT trap right here — an abort between the fetch and the
+    # inline cleanup below used to leave ~100 MB behind. The call is GUARDED on
+    # purpose: interlock harnesses
+    # (packages/server/tests/test_installer_origin_pin_posture.py) exec THIS
+    # function body standalone with only curl/info/error stubbed, so a helper
+    # the library owns must stay optional here — the registration is a backstop,
+    # never a precondition of the download. An installer that sources this
+    # library has the registry loaded long before this runs (both installers set
+    # the trap immediately after the source).
     TARBALL_FILE=$(mktemp /tmp/venya-install-XXXXXX.tar.gz)
+    if command -v register_install_temp > /dev/null 2>&1; then
+        register_install_temp "$TARBALL_FILE"
+    fi
 
     if [[ "$TARBALL_URL" == file://* ]]; then
         cp "${TARBALL_URL#file://}" "$TARBALL_FILE"
@@ -378,6 +463,9 @@ venya_download_tarball() {
     if [ -z "$EXPECTED_SHA256" ]; then
         info "VENYA_TARBALL_SHA256 not set — fetching checksum sidecar from origin..."
         SIDECAR_FILE=$(mktemp /tmp/venya-sidecar-XXXXXX.sha256)
+        if command -v register_install_temp > /dev/null 2>&1; then   # #475 (same guard as TARBALL_FILE above)
+            register_install_temp "$SIDECAR_FILE"
+        fi
         if ! curl -fsSL "${TARBALL_URL}.sha256" -o "$SIDECAR_FILE"; then
             error "Cannot fetch checksum sidecar: ${TARBALL_URL}.sha256"
             error "Aborting — refusing to install without integrity verification."

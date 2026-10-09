@@ -99,7 +99,22 @@ else
     fi
     echo "venya-common.sh verified (sha256 $ACTUAL_COMMON_SHA)" >&2
     source "$FETCH_DIR/venya-common.sh"
+    # #475: sourcing the library installs the registry below, and the single
+    # EXIT trap set after this block REPLACES the FETCH_DIR trap set above
+    # (bash holds one EXIT trap per shell). Hand the directory to the list
+    # here, so the pre-source trap covers the fetch and the list covers it
+    # from here on.
+    register_install_temp "$FETCH_DIR"
 fi
+
+# --- One EXIT trap for every temp this installer creates (#475) ---
+# `set -euo pipefail` ends this script wherever it stands, so temp cleanup
+# cannot live only in the inline `rm` calls the success paths reach. There is
+# ONE trap, and it drains the list that venya-common.sh defines and the sites
+# below fill — per-file traps would replace each other, not add up. The
+# inline removals stay (they free the large files mid-install); this trap is
+# what makes an abort leave nothing behind.
+trap 'cleanup_install_temps' EXIT
 
 venya_print_colors
 venya_check_root
@@ -815,6 +830,7 @@ chown venya:venya /etc/venya/tls/server.key
 chmod 600 /etc/venya/tls/server.key
 
 SERVER_CSR=$(mktemp /tmp/venya-server-XXXXXX.csr)   # #317: static /tmp name = symlink-clobber hazard
+register_install_temp "$SERVER_CSR"   # #475: backstop if a sign step aborts before the rm below
 openssl req -new -key /etc/venya/tls/server.key -out "$SERVER_CSR" \
     -subj "/O=Venya/CN=$CORE_HOSTNAME"
 
@@ -854,6 +870,7 @@ chown venya:venya "$RELAY_DIR/relay-client.key"
 chmod 600 "$RELAY_DIR/relay-client.key"
 
 RELAY_CSR=$(mktemp /tmp/venya-relay-XXXXXX.csr)   # #317: static /tmp name = symlink-clobber hazard
+register_install_temp "$RELAY_CSR"   # #475: backstop if a sign/purpose check exits before the rm below
 openssl req -new -key "$RELAY_DIR/relay-client.key" \
     -out "$RELAY_CSR" \
     -subj "/O=Venya/CN=${CORE_HOSTNAME}-relay"
@@ -911,6 +928,7 @@ chown venya:venya "$INNER_DIR/inner.key"
 chmod 600 "$INNER_DIR/inner.key"
 
 INNER_CSR=$(mktemp /tmp/venya-inner-XXXXXX.csr)   # #317: static /tmp name = symlink-clobber hazard
+register_install_temp "$INNER_CSR"   # #475: backstop if a sign/purpose check exits before the rm below
 openssl req -new -key "$INNER_DIR/inner.key" \
     -out "$INNER_CSR" \
     -subj "/O=Venya/CN=${CORE_HOSTNAME}-inner"
