@@ -311,7 +311,15 @@ class TestSecretFileCreationModes:
             os.umask(old)
         data = key.read_bytes()
         assert b"GARBAGE" not in data  # replaced whole, not merged
-        assert serialization.load_pem_private_key(data, password=None) is not None
+        # #547a: the admin LEAF key is now written encrypted, so it loads with the
+        # passphrase and NOT without one. Both halves asserted — the old
+        # `password=None` line was this cell's way of proving the key parsed, and
+        # proving it parses is still the point; what changed is that a passphrase is
+        # now part of reading it back.
+        assert b"ENCRYPTED PRIVATE KEY" in data
+        with pytest.raises(TypeError):
+            serialization.load_pem_private_key(data, password=None)
+        assert serialization.load_pem_private_key(data, password=ADMIN_CA_PASSPHRASE.encode()) is not None
         assert stat.S_IMODE(key.stat().st_mode) == 0o600  # temp mode wins over 0644
 
     def test_init_admin_ca_tightens_preexisting_0755_dir(self, tmp_path, monkeypatch):

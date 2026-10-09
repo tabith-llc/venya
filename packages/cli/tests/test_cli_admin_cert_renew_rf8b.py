@@ -54,6 +54,8 @@ from venya_cli.commands import (
 )
 
 UTC = datetime.UTC
+# dev-only test passphrase (#547a); value is not secret and not used anywhere live
+LEAF_PASSPHRASE = "test_passphrase"
 ISSUER = x509.Name(
     [
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Venya"),
@@ -206,6 +208,12 @@ def _args(cert_path: object, key_path: object, **overrides: object) -> SimpleNam
 def _clean_env(monkeypatch):
     for var in ("VENYA_ADMIN_CERT", "VENYA_ADMIN_KEY", "VENYA_CONFIG", "SSL_CERT_FILE", "VENYA_SERVER_URL"):
         monkeypatch.delenv(var, raising=False)
+    # #547a: an admin private key is now only written encrypted, so every cell here that
+    # exercises the write path supplies the passphrase. Converted by ADDING the variable
+    # — no assertion in this file was deleted or relaxed. (The refusal halves, including
+    # the proof that the written key is not mTLS-loadable yet, live in
+    # tests/test_cli_admin_leaf_key_passphrase_547a.py.)
+    monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", LEAF_PASSPHRASE)
     yield
 
 
