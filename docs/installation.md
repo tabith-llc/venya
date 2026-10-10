@@ -124,7 +124,8 @@ store it securely; it is the only way back if the key is lost. Migrations
 already ran at install time; `venya init` never migrates.
 
 Copy the admin mTLS certificate pair to the workstation (needed for
-`venya admin ...` commands):
+`venya admin ...` commands — the key at this path is the unencrypted-by-design
+site-1 shape described under §3, which is what makes these commands read it):
 
 ```bash
 ssh <core-vm> "sudo cat /etc/venya/admin/admin.crt" > admin-cert/admin.crt
@@ -133,7 +134,15 @@ chmod 600 admin-cert/admin.key
 ```
 
 Keep both files **outside your home directory** (for example `/etc/venya/admin/`),
-at mode `0600` on the key. Sync, backup, and desktop-index agents read home
+at mode `0600` on the key. **[Currency, #565 AC5, ruling `cdcde4e`: an s84 doc audit
+booked this handoff as a pattern "the CLI cannot read". It is not — measured against the shipped
+read path, the site-1 key this step copies loads fine, and the accusation expired because R7-Q1
+makes that plaintext-at-rest shape the design. What that ruling did NOT do is release the handoff itself:
+carrying the key to a workstation unencrypted "remains a defect and stays in the fix set" (role-dir
+destination, enforced modes, a stated backup-exclusion requirement), owned by RF-10, not by this
+file. So the guidance below stays, and it is a placement instruction only — it makes no claim about
+what guards the key once it is on the workstation.]**
+Sync, backup, and desktop-index agents read home
 directories by default, and the admin **key** authorizes admin operations
 *without a security-key touch* — a group- or other-readable key is a credential
 anyone on the machine can borrow. On POSIX systems the CLI prints one `warning:`
@@ -150,7 +159,24 @@ mTLS enabled (the default), the admin client cert alone authorizes these
 operations **server-side** — from any workstation holding the cert
 (`VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`). Both headless paths below work on a
 core with no browser (CLI gate fix `d59a068` + `VENYA_SERVER_URL` resolution
-fix `3f3ed1b`, dev/unreleased; physically verified 2026-09-20):
+fix `3f3ed1b`, dev/unreleased; physically verified 2026-09-20).
+
+Which key they work with, stated because the two admin key shapes are not
+interchangeable here: the pair under `/etc/venya/admin/` that the core installer
+mints is written **unencrypted at rest** (`AdminCAManager.sign_admin_cert`,
+`server/ca.py`), and that is the accepted posture by ruling — #565 R7-Q1, ledger
+`cdcde4e`: site 1 is exempt by design, the `0600` root-owned mode is the control,
+and the exemption is retired only by the CSR or TPM-sealing changeset, never
+inherited elsewhere. The CLI's admin mTLS read path
+(`api_client.py::_build_ssl_context`) supplies no passphrase, so a key of that
+shape loads and a renewed one does not: `venya admin cert renew` and
+`venya admin generate-admin-cert` write their leaf key **encrypted** (#547a), and
+until the read-side work lands (#565 Part B) that pair cannot serve these
+commands. Measured on the shipped code at this file's base: the installer-minted
+key loads; the renewed shape raises `APIClientError` at the context build. The
+renewal-side limit is written up once in
+[cert-rotation-runbook.md](cert-rotation-runbook.md) §0; this section points at it
+rather than restating it.
 
 - The **CLI** (installer-banner shape) — note `VENYA_SERVER_URL` is required
   unless a stored config names the server:
@@ -407,6 +433,9 @@ venya login <user-id>
 
 ## 5. Enroll regular users
 
+Uses the pair from §2 (that site-1 shape; see §3 for what the CLI can and cannot
+load):
+
 ```bash
 VENYA_ADMIN_CERT=admin-cert/admin.crt VENYA_ADMIN_KEY=admin-cert/admin.key \
 venya admin create-user <user-id> --roles user
@@ -551,6 +580,19 @@ only, not a security boundary.
   leaf cert).
 - Admin endpoints return 403: admin mTLS is enforced — pass
   `VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY` from the current core install.
+  Distinguish that from the load failure, which is the other thing that can go
+  wrong here: if the pair was refreshed by `venya admin cert renew` or
+  `venya admin generate-admin-cert`, its key is encrypted at rest and this CLI
+  has no passphrase path for it yet (#565 Part B), and the command exits 1
+  before any request is sent with
+  `Failed to load the admin mTLS client cert/key pair (…)`, carried behind the
+  command's own prefix (`Create user failed: …`). No server answered that one —
+  §3 names the key shape that does load.
+  **[Correction, #565 AC5: this bullet used to stop at the sentence above it, and
+  the reading it invited — that an unreadable renewed pair shows up as a 403 — is
+  not what the shipped code does. The pair never reaches the server, so the server
+  never gets to say 403. Recorded with the ruling cite `cdcde4e` and the Part B
+  reference rather than deleted, so the earlier wording stays visible.]**
 - Executor relay rejects the core (403 at handshake): the core's relay
   client-cert CN must be `<core-hostname>-relay` and listed in the
   executor's `relay_client_ids` — both are derived from the same hostname;
