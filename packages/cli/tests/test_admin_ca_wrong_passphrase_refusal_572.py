@@ -136,6 +136,18 @@ def test_wrong_passphrase_answers_in_the_owners_words(tmp_path, monkeypatch, cap
     out_dir = tmp_path / "admin-out"
     monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", WRONG_PASSPHRASE)
 
+    # Drain BEFORE the call under test, so `captured` below holds only what this refusal printed.
+    # capsys has been accumulating the FIXTURE's stdout too (cmd_admin_init_admin_ca prints its
+    # readout at commands.py:4488); draining after the call would fold the refusal's own output into
+    # the pre-call buffer and make the stdout assertion empty no matter what the product did —
+    # a vacuous green. The precondition assert below keeps the drain honest: if the setup readout is
+    # not what we are clearing, the fixture moved and the cell must say so.
+    pre_call = capsys.readouterr()
+    assert pre_call.out.startswith("Admin CA initialized at"), (
+        f"fixture precondition: the setup readout is what should be in the buffer before the call, "
+        f"got {pre_call.out!r}"
+    )
+
     result = cmd_admin_generate_admin_cert(_gen_args(ca_dir, out_dir))
     captured = capsys.readouterr()
 
@@ -143,6 +155,19 @@ def test_wrong_passphrase_answers_in_the_owners_words(tmp_path, monkeypatch, cap
     assert captured.err.strip().splitlines() == _expected_refusal_lines(), (
         f"the refusal is not exactly the approved line then the reference line — the operator is "
         f"reading something else: {captured.err!r}"
+    )
+    # AC2's stdout half, the one this file never tested (grep -cE 'captured\.out' was 0 at base).
+    # Asserted STRUCTURALLY, on stdout's emptiness, because this file's own rule forbids typing a
+    # library sentence even to assert its absence (see the comment above BACKSTOP_PREFIX): an empty
+    # stdout cannot carry any sentence, ours or the loader's. So this cell proves BOTH readings of
+    # AC2 — the library substring is absent from stdout (nothing is there), and stdout carries
+    # nothing the operator should be reading. Every refusal print in this path names file=sys.stderr
+    # (commands.py:4775, :4792, :4906), which is what makes emptiness the right assertion rather than
+    # a lucky artifact. Scoped by the drain above, so this is the refusal's own stdout, not the
+    # fixture's.
+    assert captured.out == "", (
+        f"stdout is not empty on a refused passphrase — an operator reading the command's normal "
+        f"output is being handed text from the failure path: {captured.out!r}"
     )
     first_line = captured.err.splitlines()[0]
     assert first_line == ADMIN_CA_DECRYPT_REFUSAL, (
