@@ -30,6 +30,7 @@ evidence.
 from __future__ import annotations
 
 import base64
+import re
 from pathlib import Path
 from typing import Any
 
@@ -342,4 +343,46 @@ def test_the_approved_sentence_has_exactly_one_hand_written_home() -> None:
     assert len(typed) == 1, (
         f"the approved sentence appears on {len(typed)} lines of commands.py — exactly the constant "
         f"definition is allowed, a second hand-written copy is how #553 hid: {typed}"
+    )
+
+
+def test_both_reference_pickers_hold_in_the_composed_tree() -> None:
+    """The interlock neither branch could test alone: two pickers, one shared block, both exactly-one.
+
+    #569 picks its reference line by the prefix ``"Reference:"`` and #572 picks by
+    ``REFERENCE_LINE_PREFIX``; both scan the shipped #547 block's OWN ``splitlines()``. Across the
+    FILE the longer string occurs more than once (the leaf-key refusal carries its own copy, and the
+    prefix constant is a line of its own), so scoping — not luck — is what keeps each count at one.
+    Both pickers raise rather than guess, so this cell measures the two sides together: if either
+    ever loosens its count or drops the block scoping, this goes red on the composition, not on one
+    branch.
+
+    The #569 prefix is READ out of that function's source rather than re-typed here, so a future edit
+    to either picker is seen as what it is: a change to a shared locator.
+    """
+    src = Path(commands.__file__).read_text(encoding="utf-8")
+    matcher = re.search(r'prefix = "(Reference:[^"]*)"', src)
+    assert matcher, "the #569 picker's prefix literal is no longer readable in commands.py — re-check the picker"
+    prefix_569 = matcher.group(1)
+
+    block = commands._admin_ca_no_passphrase_refusal().splitlines()
+    hits_569 = [line for line in block if line.startswith(prefix_569)]
+    hits_572 = [line for line in block if line.strip().startswith(commands.REFERENCE_LINE_PREFIX)]
+    assert (
+        len(hits_569) == 1
+    ), f"the #569 picker found {len(hits_569)} {prefix_569!r} lines inside the #547 block, expected 1"
+    assert len(hits_572) == 1, f"the #572 picker found {len(hits_572)} lines, expected 1"
+
+    # Both refusals render, and they agree on the reference line they print.
+    refusal_569 = _admin_ca_plaintext_key_refusal()
+    refusal_572 = _admin_ca_wrong_passphrase_refusal()
+    assert refusal_569.splitlines()[1] == refusal_572.splitlines()[1], (
+        "the two postures stopped sharing one shipped reference line: "
+        f"{refusal_569.splitlines()[1]!r} vs {refusal_572.splitlines()[1]!r}"
+    )
+    # The file-wide count is higher: proof the block scoping is load-bearing, not incidental.
+    file_wide = [line for line in src.splitlines() if "Reference: docs/cert-rotation-runbook.md" in line]
+    assert len(file_wide) > 1, (
+        f"only {len(file_wide)} reference line(s) in the whole file — if that ever drops to one, the "
+        "block-scoping this cell guards is no longer the thing keeping the counts at one; re-read it"
     )
