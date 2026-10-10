@@ -1006,7 +1006,7 @@ class TestAdminCAWiring:
         from server.app import _admin_ca_security
         from server.ca import AdminCAManager
 
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "admin_pp"
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "admin-passphrase-573"
         # executor var deliberately UNSET (autouse fixture cleared it)
 
         config = ServerConfig(

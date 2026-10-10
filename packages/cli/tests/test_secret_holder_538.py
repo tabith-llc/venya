@@ -225,7 +225,7 @@ class TestP3PinNeverFatal:
 
         with (
             patch("builtins.input", lambda *a, **k: pytest.fail("echoed input() in a secret prompt")),
-            patch("venya_cli.commands.getpass.getpass", side_effect=["pw", "pw"]),
+            patch("venya_cli.commands.getpass.getpass", side_effect=["holder-path-pw-538", "holder-path-pw-538"]),
             patch.object(holder_mod, "_pin", _refuse),
         ):
             rc = commands_mod.cmd_admin_export_ca_key(args)
@@ -354,7 +354,7 @@ class TestP5RealPath:
         args = SimpleNamespace(output=str(out), ca_dir=str(ca_dir))
         with (
             patch("builtins.input", lambda *a, **k: pytest.fail("echoed input() in a secret prompt")),
-            patch("venya_cli.commands.getpass.getpass", side_effect=["pw", "pw"]),
+            patch("venya_cli.commands.getpass.getpass", side_effect=["holder-path-pw-538", "holder-path-pw-538"]),
         ):
             rc = commands_mod.cmd_admin_export_ca_key(args)
         return rc, out
@@ -411,7 +411,7 @@ class TestP5RealPath:
         (tmp_path / "ca" / "ca.key").unlink()
         with (
             patch("builtins.input", lambda *a, **k: pytest.fail("echoed input() in a secret prompt")),
-            patch("venya_cli.commands.getpass.getpass", side_effect=["pw"]),
+            patch("venya_cli.commands.getpass.getpass", side_effect=["holder-path-pw-538"]),
         ):
             rc2 = commands_mod.cmd_admin_restore_ca_key(
                 SimpleNamespace(mode="backup", backup_file=str(backup), shares=None, ca_dir=str(tmp_path / "ca"))
@@ -425,7 +425,7 @@ class TestP5RealPath:
         (tmp_path / "ca" / "ca.key").unlink()
         with (
             patch("builtins.input", lambda *a, **k: pytest.fail("echoed input() in a secret prompt")),
-            patch("venya_cli.commands.getpass.getpass", side_effect=["wrong-pw"]),
+            patch("venya_cli.commands.getpass.getpass", side_effect=["wrong-holder-path-pw-538"]),
         ):
             rc = commands_mod.cmd_admin_restore_ca_key(
                 SimpleNamespace(mode="backup", backup_file=str(backup), shares=None, ca_dir=str(tmp_path / "ca"))
@@ -548,7 +548,7 @@ class TestN4BehaviourUnchanged:
 
     def test_n4_magic_and_layout_unchanged(self, tmp_path):
         key = _real_key_pem()
-        rc, out = self._export(tmp_path, key, ["pw", "pw"])
+        rc, out = self._export(tmp_path, key, ["holder-path-pw-538", "holder-path-pw-538"])
         assert rc == 0
         blob = out.read_bytes()
         assert blob[:8] == b"VENYACA1"
@@ -558,15 +558,15 @@ class TestN4BehaviourUnchanged:
     def test_n4_kdf_parameters_untouched(self, tmp_path):
         assert commands_mod._CA_KDF_ITERATIONS == 600_000
         key = _real_key_pem()
-        rc, out = self._export(tmp_path, key, ["pw", "pw"])
+        rc, out = self._export(tmp_path, key, ["holder-path-pw-538", "holder-path-pw-538"])
         assert rc == 0
         salt = out.read_bytes()[8:24]
-        derived = commands_mod._derive_ca_backup_key(salt, "pw")
+        derived = commands_mod._derive_ca_backup_key(salt, "holder-path-pw-538")
         assert len(derived) == 32
 
     def test_n4_mismatch_reprompts_then_succeeds(self, tmp_path):
         key = _real_key_pem()
-        rc, _out = self._export(tmp_path, key, ["a", "b", "pw", "pw"])
+        rc, _out = self._export(tmp_path, key, ["a", "b", "holder-path-pw-538", "holder-path-pw-538"])
         assert rc == 0
 
     def test_n4_empty_passphrase_refused_and_no_file_written(self, tmp_path):
@@ -578,7 +578,7 @@ class TestN4BehaviourUnchanged:
 
     def test_n4_permissions_0600_file_0700_dir(self, tmp_path):
         key = _real_key_pem()
-        rc, out = self._export(tmp_path, key, ["pw", "pw"])
+        rc, out = self._export(tmp_path, key, ["holder-path-pw-538", "holder-path-pw-538"])
         assert rc == 0
         assert out.stat().st_mode & 0o777 == 0o600
         assert out.parent.stat().st_mode & 0o777 == 0o700
@@ -598,7 +598,7 @@ class TestN4BehaviourUnchanged:
 
         with (
             patch("builtins.input", lambda *a, **k: pytest.fail("echoed input() in a secret prompt")),
-            patch("venya_cli.commands.getpass.getpass", side_effect=["pw", "pw"]),
+            patch("venya_cli.commands.getpass.getpass", side_effect=["holder-path-pw-538", "holder-path-pw-538"]),
             patch("os.replace", _fail_replace),
         ):
             with pytest.raises(OSError):

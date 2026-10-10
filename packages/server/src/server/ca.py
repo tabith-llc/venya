@@ -82,6 +82,42 @@ def csr_curve_hint() -> str:
     return f"Use ECDSA {joined}."
 
 
+# --- #573: the passphrase LENGTH floor, CA plane (carrier features/passphrase-length-floor-n15.md) ---
+#
+# Owner ruling (s85 batch, verbatim): "Deny whitespace-only passphrases and enforce a
+# proper length passcode." The whitespace half shipped in #554; this is the length half,
+# ruled from the research in wave14-specs-20261009/passphrase-length-flash3-s84.md and
+# counted in Unicode CODE POINTS on the decoded string before any encode (NIST SP
+# 800-63B-4 counts each code point as one character, so an accented phrase is never
+# measured by its UTF-8 byte length).
+#
+# The FLOOR is enforced; the CEILING is only STATED. Research clause C2 requires verifiers
+# to PERMIT at least 64 characters, and the owner's correction to the blessed wording asks
+# for a plain statement of the 64-character supported maximum — no code path here refuses
+# a longer passphrase, so MAX_PASSPHRASE_CODE_POINTS exists to interpolate that sentence
+# and for no other reason.
+MIN_PASSPHRASE_CODE_POINTS = 15  # inclusive: 15 passes, 14 refuses
+MAX_PASSPHRASE_CODE_POINTS = 64  # stated in the refusal text; never a refusal door
+
+
+def _configured_passphrase(env_var: str) -> str | None:
+    """The configured CA passphrase as a DECODED string, or None when there is no real one.
+
+    #554's decision, unchanged: unset, empty and whitespace-only all read as "no
+    passphrase", and the value is returned exactly as set — DENY, never TRIM. This is the
+    one place that makes that call, which is why no call site strips.
+
+    It lives apart from ``_load_passphrase()`` because the length floor below counts
+    Unicode code points, and a code point is a property of the decoded string: once the
+    value is encoded, ``len()`` reports bytes and an accented passphrase would be measured
+    against a number nobody typed. Encoding stays on the way out.
+    """
+    passphrase = os.environ.get(env_var)
+    if passphrase and passphrase.strip():
+        return passphrase
+    return None
+
+
 def _load_passphrase(env_var: str) -> bytes | None:
     """Load the configured CA passphrase from its environment variable.
 
@@ -108,10 +144,65 @@ def _load_passphrase(env_var: str) -> bytes | None:
     Returns:
         Passphrase as bytes, or None if unset, empty, or whitespace-only.
     """
-    passphrase = os.environ.get(env_var)
-    if passphrase and passphrase.strip():
-        return passphrase.encode("utf-8")
-    return None
+    passphrase = _configured_passphrase(env_var)
+    if passphrase is None:
+        return None
+    return passphrase.encode("utf-8")
+
+
+def _passphrase_is_below_floor(passphrase: str | None) -> bool:
+    """True when a SUPPLIED passphrase carries material but is shorter than the floor (#573).
+
+    The blank shapes are not this question: an unset, empty or whitespace-only value is
+    "no passphrase" (the #554 answer, still given by ``_configured_passphrase``) and the
+    floor runs AFTER that shape, never replaces it. Counted in code points, never bytes.
+    """
+    return passphrase is not None and len(passphrase) < MIN_PASSPHRASE_CODE_POINTS
+
+
+def _short_passphrase_refusal(passphrase_env: str, *, read_path: bool = False) -> str:
+    """Owner-blessed refusal text for a passphrase under the length floor (ticket #573).
+
+    The wording is the blessed block (flash1's §6, ruled in as R5(a) of the s87 owner
+    ruling set) with only the two authorized corrections applied: the supported maximum
+    stated plainly instead of "no maximum below 64 characters", and the floor number
+    interpolated from ``MIN_PASSPHRASE_CODE_POINTS`` — the same constant the check uses,
+    so the sentence and the door cannot disagree.
+
+    One builder for both doors, interpolating only the env-var NAME (never the value,
+    never its length). The read door takes the same block with exactly one clause
+    deleted — ``Nothing was written.`` — because that door is not writing anything; no
+    other sentence is added or removed on either side.
+    """
+    written_clause = "" if read_path else " Nothing was written."
+    return (
+        f"REFUSED: {passphrase_env} is set to a passphrase shorter than Venya's minimum.{written_clause}\n"
+        "Why it matters: this passphrase is the only thing between a copied key file and the root\n"
+        "of trust for this deployment, and short passphrases are what an attacker tries first.\n"
+        "To fix it:\n"
+        f"  1. Replace the value of {passphrase_env} with a passphrase of at least "
+        f"{MIN_PASSPHRASE_CODE_POINTS} characters. Characters are\n"
+        "     counted as you type them, not as bytes, so a passphrase in any alphabet counts the same.\n"
+        "     Spaces count as characters, but a passphrase made only of spaces counts as no passphrase.\n"
+        f"  2. There is no rule about which characters appear — length is the only requirement, and\n"
+        f"     Venya supports passphrases up to {MAX_PASSPHRASE_CODE_POINTS} characters.\n"
+        "  3. Provide the passphrase through the environment, never as a command-line argument\n"
+        "     (command-line values are visible to other processes on the machine).\n"
+        "Your existing CA was not modified by this refusal.\n"
+        "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md (CA file locations and rotation)."
+    )
+
+
+def _refuse_if_below_floor(passphrase_env: str, *, read_path: bool = False) -> None:
+    """Refuse a supplied passphrase under the floor, naming the variable this caller reads.
+
+    Raises: RuntimeError with the blessed floor text — never the #537 "stored
+    unencrypted" sentence, which is false for a passphrase that IS set but is short, and
+    whose repair step would send the operator to set the same weak value again.
+    """
+    passphrase = _configured_passphrase(passphrase_env)
+    if _passphrase_is_below_floor(passphrase):
+        raise RuntimeError(_short_passphrase_refusal(passphrase_env, read_path=read_path))
 
 
 def _unencrypted_key_refusal(passphrase_env: str) -> str:
@@ -241,6 +332,10 @@ class CAManager:
         # one; both are decided in _load_passphrase(), not here.
         if not _load_passphrase(self._key_passphrase_env):
             raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
+        # #573: a passphrase that IS set but is under the length floor is a different
+        # refusal, and it lands here — before the mkdir below — so "Nothing was written."
+        # is true of this door rather than merely inherited from the write-side sentence.
+        _refuse_if_below_floor(self._key_passphrase_env)
 
         self.ca_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(str(self.ca_dir), 0o700)
@@ -337,6 +432,10 @@ class CAManager:
                 re-wrapped or migrated.
         """
         passphrase = _load_passphrase(self._key_passphrase_env)
+        # #573 read door: the floor asks the same question the write door asks, in the
+        # read wording (the `Nothing was written.` clause dropped — this door is not
+        # writing). Refusing here loads nothing, re-wraps nothing and changes no state.
+        _refuse_if_below_floor(self._key_passphrase_env, read_path=True)
         try:
             key_data = self.ca_key_path.read_bytes()
         except FileNotFoundError:
@@ -768,6 +867,8 @@ class AdminCAManager:
         # #537: refuse before ANY filesystem work — see CAManager.initialize.
         if not _load_passphrase(self._key_passphrase_env):
             raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
+        # #573: floor refusal before any filesystem work — see CAManager.initialize.
+        _refuse_if_below_floor(self._key_passphrase_env)
 
         self.ca_path.mkdir(parents=True, exist_ok=True)
         os.chmod(str(self.ca_path), 0o700)
@@ -857,6 +958,8 @@ class AdminCAManager:
                 instead of loading; the key is never re-wrapped or migrated.
         """
         passphrase = _load_passphrase(self._key_passphrase_env)
+        # #573 read door, admin twin: same floor, same read wording, nothing loaded.
+        _refuse_if_below_floor(self._key_passphrase_env, read_path=True)
         key_data = self.ca_key_path.read_bytes()
 
         is_encrypted = b"ENCRYPTED" in key_data

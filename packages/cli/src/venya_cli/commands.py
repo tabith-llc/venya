@@ -1881,6 +1881,12 @@ def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
     if leaf_passphrase is None:
         print(_admin_leaf_key_no_passphrase_refusal("venya admin cert renew"), file=sys.stderr)
         return 1
+    # #573: same floor on the same variable, asked before the elevation ceremony and
+    # before the mint writes anything — nothing has been written at this point, so the
+    # write-side sentence is true here too.
+    if _passphrase_is_below_floor(leaf_passphrase):
+        print(_short_passphrase_refusal("VENYA_ADMIN_CA_KEY_PASSPHRASE"), file=sys.stderr)
+        return 1
 
     private_key: Any = None
     try:
@@ -4034,6 +4040,10 @@ def cmd_admin_export_ca_key(args: Any) -> int:
     by one :class:`SecretHolder` (#538) that erases its own copy on release; the
     holder does not pin, and it does not remove copies made by other code — see
     ``secret_holder.py`` for what this covers and what it cannot.
+
+    The passphrase the operator types here seals the exported key, so #573's length
+    floor applies to it too: a value under the floor is refused before any blob is
+    written, and the refusal carries the write-side sentence.
     """
     from pathlib import Path
 
@@ -4090,6 +4100,15 @@ def cmd_admin_export_ca_key(args: Any) -> int:
         # exactly what the operator typed.
         if not _passphrase_has_material(passphrase1):
             print("Error: passphrase cannot be empty", file=sys.stderr)
+            return 1
+
+        # #573: the VENYACA1 WRITE door. The blob is written below this line
+        # (`output_path.parent.mkdir` + the temp-file replace), and the only earlier I/O
+        # is reading the CA key, so at this refusal nothing has been written — the
+        # write-side clause is earned by the flow, not by habit. §6 names this path's
+        # subject "the passphrase you enter at this prompt": there is no env var here.
+        if _passphrase_is_below_floor(passphrase1):
+            print(_short_passphrase_refusal(_TYPED_PROMPT_SUBJECT), file=sys.stderr)
             return 1
 
         # Derive encryption key from passphrase using PBKDF2
@@ -4214,6 +4233,11 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
       reader: canonical VENYACA1 GCM primary + legacy alpha.11 CBC read-only
       with FULL PKCS7 validation (finding-5 ruling; no exported key material
       is stranded)
+
+    The passphrase this mode asks for is the one that sealed the blob, so #573's length
+    floor is measured here too — in the READ wording, because this door unseals material
+    that already exists rather than writing new key material: a value under the floor
+    loads nothing and leaves the incumbent at-rest key untouched.
     """
     from pathlib import Path
 
@@ -4278,6 +4302,14 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
 
         encrypted_data = backup_path.read_bytes()
         passphrase = getpass.getpass("Enter passphrase to decrypt backup: ")
+        # #573: the VENYACA1 READ door. The passphrase's job here is to UNSEAL a blob that
+        # already exists, and the restore's own write (`atomic_write_key`) is below this
+        # block, so this door speaks the read wording: the blessed block with the
+        # `Nothing was written.` clause dropped. Nothing is decrypted, nothing is loaded,
+        # and the incumbent at-rest key keeps its bytes.
+        if _passphrase_is_below_floor(passphrase):
+            print(_short_passphrase_refusal(_TYPED_PROMPT_SUBJECT, read_path=True), file=sys.stderr)
+            return 1
         try:
             reconstructed = _decrypt_ca_backup(encrypted_data, passphrase)
         except ValueError as e:
@@ -4338,6 +4370,76 @@ def _passphrase_has_material(passphrase: str) -> bool:
     return bool(passphrase.strip())
 
 
+# --- #573: the passphrase LENGTH floor on the CA plane (carrier n15) ---
+#
+# Owner ruling (s85 batch, verbatim): "Deny whitespace-only passphrases and enforce a
+# proper length passcode." The whitespace half shipped in #554; this is the length half,
+# ruled from `wave14-specs-20261009/passphrase-length-flash3-s84.md` and counted in
+# Unicode CODE POINTS on the decoded string BEFORE any encode (NIST SP 800-63B-4 counts
+# each code point as one character, so an accented passphrase is never charged its UTF-8
+# byte length — the number an operator typed is the number the door measures).
+#
+# The FLOOR is enforced; the CEILING is only STATED. Research clause C2 requires verifiers
+# to PERMIT at least 64 characters, so no door here refuses above it:
+# MAX_PASSPHRASE_CODE_POINTS exists to interpolate the stated limit and for nothing else.
+#
+# The CLI has no core/server dependency (same rule as the VENYACA1 codec above), so this
+# is an ALIGNED COPY of the server's `ca.py` floor — same numbers, same blessed sentence,
+# each plane carrying its own named constant. The server half is `server/ca.py`.
+MIN_PASSPHRASE_CODE_POINTS = 15  # inclusive: a 15-code-point passphrase passes, 14 refuses
+MAX_PASSPHRASE_CODE_POINTS = 64  # stated in the refusal text; never a refusal door
+
+#: The passphrase an interactive prompt asked for has no variable name to point at, so the
+#: blessed block's {VAR} slot carries this phrase instead (§6: "the command named in place
+#: of `{VAR}`" because "that path has no env var until the operator types it").
+_TYPED_PROMPT_SUBJECT = "the passphrase you enter at this prompt"
+
+
+def _passphrase_is_below_floor(passphrase: str | None) -> bool:
+    """True when a SUPPLIED passphrase carries material but is shorter than the floor (#573).
+
+    The blank shapes are not this question: unset, empty and whitespace-only stay "no
+    passphrase" (#554, shipped), which is what ``_admin_ca_passphrase_or_none()`` and
+    ``_passphrase_has_material()`` answer. The floor runs AFTER that shape and never
+    replaces it, and `None` here is that already-answered case — never "too short".
+    Measured in code points on the decoded string, never on encoded bytes.
+    """
+    return passphrase is not None and len(passphrase) < MIN_PASSPHRASE_CODE_POINTS
+
+
+def _short_passphrase_refusal(subject: str, *, read_path: bool = False) -> str:
+    """Owner-blessed refusal text for a passphrase under the length floor (#573).
+
+    The wording is the blessed block (flash1's §6, ruled in as R5(a) of the s87 owner
+    ruling set) with only the two authorized corrections applied: the supported maximum
+    stated plainly instead of "there is no maximum below 64 characters", and the floor
+    number interpolated from ``MIN_PASSPHRASE_CODE_POINTS`` — the same constant the door
+    measures with, so the sentence and the check cannot disagree.
+
+    One builder, both doors, interpolating only the SUBJECT (an env-var NAME, or the
+    blessed prompt phrase) — never the value, never its length. The read door takes the
+    same block with exactly one clause deleted, ``Nothing was written.``; no other
+    sentence is added or dropped on either side.
+    """
+    written_clause = "" if read_path else " Nothing was written."
+    return (
+        f"REFUSED: {subject} is set to a passphrase shorter than Venya's minimum.{written_clause}\n"
+        "Why it matters: this passphrase is the only thing between a copied key file and the root\n"
+        "of trust for this deployment, and short passphrases are what an attacker tries first.\n"
+        "To fix it:\n"
+        f"  1. Replace the value of {subject} with a passphrase of at least "
+        f"{MIN_PASSPHRASE_CODE_POINTS} characters. Characters are\n"
+        "     counted as you type them, not as bytes, so a passphrase in any alphabet counts the same.\n"
+        "     Spaces count as characters, but a passphrase made only of spaces counts as no passphrase.\n"
+        f"  2. There is no rule about which characters appear — length is the only requirement, and\n"
+        f"     Venya supports passphrases up to {MAX_PASSPHRASE_CODE_POINTS} characters.\n"
+        "  3. Provide the passphrase through the environment, never as a command-line argument\n"
+        "     (command-line values are visible to other processes on the machine).\n"
+        "Your existing CA was not modified by this refusal.\n"
+        "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md (CA file locations and rotation)."
+    )
+
+
 def _admin_ca_no_passphrase_refusal() -> str:
     """#547: refusal text for a passphrase-less ``venya admin init-admin-ca``.
 
@@ -4373,7 +4475,8 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
     If that variable is unset, empty, or made only of whitespace, the command refuses
     before touching the filesystem — no directory, no key, no certificate — and exits
     non-zero (#547, matching the server rule in ``server/ca.py``, #537; the whitespace
-    half of that rule is #554).
+    half of that rule is #554). A value that carries material but is shorter than the
+    ruled 15-code-point floor refuses the same way, with its own sentence (#573).
     """
     import os
     from datetime import datetime, timedelta
@@ -4398,6 +4501,13 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
     passphrase = _admin_ca_passphrase_or_none()
     if passphrase is None:
         print(_admin_ca_no_passphrase_refusal(), file=sys.stderr)
+        return 1
+    # #573: the length floor, asked AFTER the blank question and never instead of it. A
+    # value with material but under 15 code points is refused here, before `output_dir`
+    # is created — so the blessed sentence's `Nothing was written.` half is a fact about
+    # this door, not a borrowed phrase.
+    if _passphrase_is_below_floor(passphrase):
+        print(_short_passphrase_refusal("VENYA_ADMIN_CA_KEY_PASSPHRASE"), file=sys.stderr)
         return 1
 
     output_dir = Path(args.output_dir)
@@ -4531,10 +4641,12 @@ def _identity_forgery_error(identity: str) -> str | None:
 # `VENYA_ADMIN_CA_KEY_PASSPHRASE` is unset, empty, or whitespace-only, and write the key
 # encrypted with it when it is set. Same ordering rule #547 shipped for the CA key: the
 # refusal lands before ANY filesystem work, because a directory created and a key left
-# plaintext on disk is not a refusal an operator can walk away from.
+# plaintext on disk is not a refusal an operator can walk away from. #573 added the LENGTH
+# floor to the same reading of that variable, asked immediately after the blank question.
 #
-# The whitespace half is ruled; a MINIMUM LENGTH is NOT — the owner asked whether an N
-# should be explored and that research is open, so nothing here measures the passphrase.
+# The whitespace half shipped in #554; the LENGTH half shipped right below this block
+# (#573, carrier n15): both are ruled now, and both are measured here — a value with
+# material but under the 15-code-point floor is refused by the same doors.
 ADMIN_CA_SETUP_FRAGMENT = "Set VENYA_ADMIN_CA_KEY_PASSPHRASE, then run: venya admin init-admin-ca"
 
 
@@ -4685,7 +4797,8 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
     cert and the key to the output directory. The key is written encrypted with
     ``VENYA_ADMIN_CA_KEY_PASSPHRASE`` (#547a — the owner ruled that the passphrase
     requirement extends to the admin's own private key); with that variable unset,
-    empty, or whitespace-only the command refuses before touching the filesystem.
+    empty, or whitespace-only — or set but shorter than the #573 floor — the command
+    refuses before touching the filesystem.
     """
     import os
     from datetime import datetime, timedelta
@@ -4708,6 +4821,10 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
     leaf_passphrase = _admin_leaf_key_passphrase_or_none()
     if leaf_passphrase is None:
         print(_admin_leaf_key_no_passphrase_refusal("venya admin generate-admin-cert"), file=sys.stderr)
+        return 1
+    # #573: the floor on the write door, ahead of the CA reads below and of any write.
+    if _passphrase_is_below_floor(leaf_passphrase):
+        print(_short_passphrase_refusal("VENYA_ADMIN_CA_KEY_PASSPHRASE"), file=sys.stderr)
         return 1
 
     # Resolve admin CA directory
@@ -4745,6 +4862,14 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         # Nothing is trimmed: a passphrase whose spaces are content is delivered
         # byte-for-byte and still decrypts the CA key it sealed.
         passphrase = _admin_ca_passphrase_or_none()
+        # #573 read gate: the floor asks this door the same question it asks the write
+        # doors, in the READ wording (the `Nothing was written.` clause dropped — this
+        # gate only unseals a key that already exists). Defense in depth, the same
+        # posture #554 documented at this line: the leaf-key guard above reads the same
+        # variable and refuses a short value before the flow ever reaches here.
+        if _passphrase_is_below_floor(passphrase):
+            print(_short_passphrase_refusal("VENYA_ADMIN_CA_KEY_PASSPHRASE", read_path=True), file=sys.stderr)
+            return 1
         key_data = ca_key_path.read_bytes()
         is_encrypted = b"ENCRYPTED" in key_data
 
