@@ -28,10 +28,19 @@ path is unused:
   * the systemd/runtime capability cells and their helpers, which can now see a
     real install and can actually FAIL (#542 shape, kept as written).
 
-The executor (Phase 4) must NEVER have CAP_IPC_LOCK — the jump host
-is assumed compromised.
+The executor (Phase 4) is designed never to hold CAP_IPC_LOCK — the jump host
+is assumed compromised. That sentence is PROSE UNTIL VERIFIED, not a result.
+The five cells that could confirm it (`TestRuntimeCapabilityIsolation`, e.g.
+`test_systemd_unit_has_cap_ipc_lock`) `pytest.skip` when the unit file or the
+running process is absent, which is every ordinary CI run on a dev box, so
+nothing in that class has ever looked at a served host. Reading a deployed
+machine's capabilities is a physical check: it belongs to the R11
+owner-present window alongside the rest of the served-host cells, and until
+that window runs this paragraph records a design intent instead of claiming
+it as tested. The CLI copy of this guard narrowed the same sentence in
+`050809c`; this is the core copy catching up to it. No assertion changed
+with this part.
 """
-
 
 import ast
 import os
