@@ -4628,6 +4628,56 @@ def _admin_ca_plaintext_key_refusal() -> str:
     return "\n".join([lines[0], references[0]])
 
 
+#: #572 — the owner-approved refusal for a wrong passphrase on the admin CA key, recorded verbatim
+#: in the ruling (room wren-37 / the dispatch's §2, single-quoted there for exactness). This is the
+#: ONE hand-written home of those bytes in the product tree — the refusal below and the test cells
+#: read this constant, so a future edit changes the voice in a single place instead of chasing
+#: copies (#568's single-home shape; the sibling cell pins that exactly one line types it).
+ADMIN_CA_DECRYPT_REFUSAL = "failed to decrypt the admin CA key with the provided passphrase. Nothing was written."
+
+#: Locator prefix for the doc-reference line that closes the refusal above (#572). The line is READ
+#: out of the shipped #547 refusal instead of typed a second time here, and exactly one line may
+#: match or the builder raises — a re-typed copy is the drift #553 was filed for.
+REFERENCE_LINE_PREFIX = "Reference: docs/cert-rotation-runbook.md"
+
+
+def _encrypted_key_is_parseable(serialization: Any, key_data: bytes) -> bool:
+    """Shape C's probe: is this a structurally parseable ENCRYPTED key, or a damaged file?
+
+    Measured at base (cryptography 50.0.0), asking with NO password: an intact encrypted key raises
+    ``TypeError`` — the parser got far enough to know it needs one. Every damaged shape raises
+    ``ValueError`` first: a truncated key, armor kept over a swapped body, armor kept over a
+    non-base64 body. An unencrypted key or plain garbage raises nothing the probe can call encrypted.
+
+    The branch is on the exception CLASS, which is documented API. Nothing here reads a message —
+    coupling to the library's sentence is precisely the thing #572 removes from the operator's view.
+    """
+    try:
+        serialization.load_pem_private_key(key_data, password=None)
+    except TypeError:
+        return True
+    except ValueError:
+        return False
+    return False
+
+
+def _admin_ca_wrong_passphrase_refusal() -> str:
+    """#572 — the approved sentence, then the shipped doc-reference line. Two lines, no library voice.
+
+    The first line comes from ``ADMIN_CA_DECRYPT_REFUSAL`` byte-for-byte; the second is
+    located by ``REFERENCE_LINE_PREFIX`` inside the #547 refusal's own text. Zero writes have
+    happened when this prints, which is what "Nothing was written." states.
+    """
+    matches = [
+        line.strip()
+        for line in _admin_ca_no_passphrase_refusal().splitlines()
+        if line.strip().startswith(REFERENCE_LINE_PREFIX)
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(f"expected exactly one doc-reference line in the shipped #547 refusal, found {len(matches)}")
+    return f"{ADMIN_CA_DECRYPT_REFUSAL}\n{matches[0]}"
+
+
 def cmd_admin_generate_admin_cert(args: Any) -> int:
     """Sign an admin client certificate using the admin CA.
 
@@ -4725,7 +4775,24 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
             print(_admin_ca_plaintext_key_refusal(), file=sys.stderr)
             return 1
 
-        ca_key = serialization.load_pem_private_key(key_data, password=passphrase.encode() if passphrase else None)
+        # #572 — a wrong passphrase used to fall through to the backstop below and answer in
+        # cryptography's own sentence. Scope, per the lead's
+        # ruling (room wren-37): the approved sentence fires ONLY when a passphrase was supplied,
+        # the file carries the encrypted marker, AND the probe says the file is a structurally
+        # parseable encrypted key. The probe is the load-bearing part: the marker alone is True for
+        # a TRUNCATED key and for armor kept over a body that no longer decodes, and telling an
+        # operator their passphrase is wrong when the file is damaged sends them re-typing a correct
+        # passphrase forever. Every shape outside that scope — a damaged file the probe will not
+        # vouch for, and markerless garbage — still falls through to the untouched backstop; the
+        # plaintext-key-plus-passphrase pairing is refused one guard earlier, by #569.
+        if is_encrypted and passphrase and _encrypted_key_is_parseable(serialization, key_data):
+            try:
+                ca_key = serialization.load_pem_private_key(key_data, password=passphrase.encode())
+            except ValueError:
+                print(_admin_ca_wrong_passphrase_refusal(), file=sys.stderr)
+                return 1
+        else:
+            ca_key = serialization.load_pem_private_key(key_data, password=passphrase.encode() if passphrase else None)
         ca_cert = x509.load_pem_x509_certificate(ca_cert_path.read_bytes())
 
         # Generate new keypair for admin cert
