@@ -10,10 +10,16 @@ The protected-memory story (#472, design note section 6). The KEK now lives on
 the protected path, so these cells assert WHERE it may live rather than that the
 path is unused:
 
-  * one explicit allowlist of the two files allowed to name a protected-memory
+  * one explicit allowlist of the two files allowed to USE a protected-memory
     primitive — `secure_memory.py` (the primitives) and `backend.py` (the cache
     owner). The count is asserted, so a third protected buffer is a deliberate
     edit to this file, never drift;
+  * the detection is by CALL SHAPE, not by identifier text (#555): a direct
+    `libc.mlock(...)` through `ctypes` names no Python symbol at all, and a scan
+    that looks for the five names below passes it while the promise it guards is
+    broken. The shipped scan and the harness cells that plant a synthetic file
+    run the same finder, so the proof that it fires is a proof about the check
+    that ships;
   * the nine per-module cells still ban a direct primitive call in every other
     module, and the ban is proven failable;
   * the KEK positive cell (after `bootstrap_kek()` the cache is populated, the
@@ -22,10 +28,21 @@ path is unused:
   * the systemd/runtime capability cells and their helpers, which can now see a
     real install and can actually FAIL (#542 shape, kept as written).
 
-The executor (Phase 4) must NEVER have CAP_IPC_LOCK — the jump host
-is assumed compromised.
+The executor (Phase 4) is designed never to hold CAP_IPC_LOCK — the jump host
+is assumed compromised. That sentence is PROSE UNTIL VERIFIED, not a result.
+The five cells that could confirm it (`TestRuntimeCapabilityIsolation`, e.g.
+`test_systemd_unit_has_cap_ipc_lock`) `pytest.skip` when the unit file or the
+running process is absent, which is every ordinary CI run on a dev box, so
+nothing in that class has ever looked at a served host. Reading a deployed
+machine's capabilities is a physical check: it belongs to the R11
+owner-present window alongside the rest of the served-host cells, and until
+that window runs this paragraph records a design intent instead of claiming
+it as tested. The CLI copy of this guard narrowed the same sentence in
+`050809c`; this is the core copy catching up to it. No assertion changed
+with this part.
 """
 
+import ast
 import os
 import subprocess
 from pathlib import Path
@@ -45,8 +62,52 @@ PROTECTED_MEMORY_SYMBOLS: Final[frozenset[str]] = frozenset(
 PROTECTED_MEMORY_ALLOWLIST: Final[frozenset[str]] = frozenset({"secure_memory.py", "backend.py"})
 
 
-def _find_protected_symbol_names(directory: Path, allowlist: frozenset[str]) -> list[tuple[str, str]]:
-    """Every (file, symbol) pair in *.py under ``directory`` outside ``allowlist``.
+#: The syscalls that mean "this file pins memory itself", tracked by CALL SHAPE.
+#: Deliberately NOT folded into ``PROTECTED_MEMORY_SYMBOLS`` above: the CLI
+#: interlock in ``packages/cli/tests/test_secret_holder_538.py`` reads that set
+#: and bans its names as substrings across every CLI source file, and
+#: ``secret_holder.py`` legally contains ``mlock`` — the #538 pin-with-fallback
+#: contract the owner ruled. Merging the two sets would red-gate the ruled code
+#: (#555, ruling R13).
+PROTECTED_MEMORY_SYSCALLS: Final[frozenset[str]] = frozenset({"mlock", "munlock"})
+
+#: Reported instead of cleared when a module cannot be parsed — a file the
+#: finder cannot read is a file the finder must not pass.
+UNPARSEABLE_MODULE: Final[str] = "<unparseable>"
+
+
+def _protected_memory_shapes(source: str) -> list[str]:
+    """Every protected-memory shape used in one module's source, as CODE.
+
+    A shape is a call (``secure_mlock(buf)``, ``libc.mlock(buf)``), a reference
+    (``sm.SecureBuffer``, ``PIN = mlock``), an import of one
+    (``from .secure_memory import SecureBuffer``), or a string that names one to
+    a dynamic lookup (``getattr(libc, "mlock")``). A name that appears only in a
+    comment, a docstring, or inside a longer identifier is NOT a shape: the
+    promise is about what can pin memory, so the check follows the call. This is
+    what #555 was filed for — the old ``symbol in source`` substring test could
+    not see a direct ``ctypes`` call, and could not tell documentation from code.
+    """
+    tracked = PROTECTED_MEMORY_SYMBOLS | PROTECTED_MEMORY_SYSCALLS
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return [UNPARSEABLE_MODULE]
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in tracked:
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in tracked:
+            found.add(node.attr)
+        elif isinstance(node, ast.alias) and node.name in tracked:
+            found.add(node.name)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in tracked:
+            found.add(node.value)
+    return sorted(found)
+
+
+def _find_protected_memory_shapes(directory: Path, allowlist: frozenset[str]) -> list[tuple[str, str]]:
+    """Every (file, shape) pair in *.py under ``directory`` outside ``allowlist``.
 
     Shared by the shipped scan and by the harness cells that plant a synthetic
     third buffer, so the teeth are the same teeth the real check runs.
@@ -55,10 +116,8 @@ def _find_protected_symbol_names(directory: Path, allowlist: frozenset[str]) -> 
     for path in sorted(directory.glob("*.py")):
         if path.name.startswith("_") or path.name in allowlist:
             continue
-        source = path.read_text(encoding="utf-8")
-        for symbol in sorted(PROTECTED_MEMORY_SYMBOLS):
-            if symbol in source:
-                offenders.append((path.name, symbol))
+        for shape in _protected_memory_shapes(path.read_text(encoding="utf-8")):
+            offenders.append((path.name, shape))
     return offenders
 
 
@@ -78,8 +137,13 @@ def _assert_off_the_protected_path(source: str, label: str) -> None:
 
 
 def _find_primitive_calls(source: str) -> list[str]:
-    """The protected-memory symbols named in one module's source text."""
-    return [symbol for symbol in sorted(PROTECTED_MEMORY_SYMBOLS) if symbol in source]
+    """The protected-memory shapes used in one module — primitives and syscalls.
+
+    Shape-based since #555: the per-module ban has to fire on ``libc.mlock(buf)``
+    as much as on ``secure_mlock(buf)``, because the first of those names no
+    Python symbol the old scan could look for.
+    """
+    return _protected_memory_shapes(source)
 
 
 def _check_allowlist_shape(allowlist: frozenset[str]) -> None:
@@ -206,15 +270,15 @@ class TestSecureMemoryIsolation:
         """The module-wide scan, now run against the explicit allowlist.
 
         Every `core.engine` module outside the two allowlisted files must be
-        clean of the primitive names. The verdict is collected first so the
-        failure message lists all offenders, not just the first.
+        clean of the primitive and syscall shapes. The verdict is collected
+        first so the failure message lists all offenders, not just the first.
         """
         import core.engine
 
         engine_dir = Path(core.engine.__file__).resolve().parent
-        offenders = _find_protected_symbol_names(engine_dir, PROTECTED_MEMORY_ALLOWLIST)
+        offenders = _find_protected_memory_shapes(engine_dir, PROTECTED_MEMORY_ALLOWLIST)
         assert not offenders, (
-            "protected-memory symbols named outside the allowlist "
+            "protected-memory shapes used outside the allowlist "
             f"{sorted(PROTECTED_MEMORY_ALLOWLIST)}: {offenders} — add a file to "
             "PROTECTED_MEMORY_ALLOWLIST only as a reviewed #472 change"
         )
@@ -229,21 +293,99 @@ class TestSecureMemoryIsolation:
         content = "from .secure_memory import SecureBuffer\n\nBUF = SecureBuffer(32)\n"
         planted = tmp_path / "extra_buffer.py"
         planted.write_text(content, encoding="utf-8")
-        assert _find_protected_symbol_names(tmp_path, PROTECTED_MEMORY_ALLOWLIST) == [
+        assert _find_protected_memory_shapes(tmp_path, PROTECTED_MEMORY_ALLOWLIST) == [
             ("extra_buffer.py", "SecureBuffer")
         ]
 
         # The same content under an allowlisted name is not an offender.
         os.unlink(planted)
         (tmp_path / "backend.py").write_text(content, encoding="utf-8")
-        assert _find_protected_symbol_names(tmp_path, PROTECTED_MEMORY_ALLOWLIST) == []
+        assert _find_protected_memory_shapes(tmp_path, PROTECTED_MEMORY_ALLOWLIST) == []
 
         # And it is not simply that the file is unreadable: renaming it back is
         # caught again.
         (tmp_path / "backend.py").rename(tmp_path / "extra_buffer.py")
-        assert _find_protected_symbol_names(tmp_path, PROTECTED_MEMORY_ALLOWLIST) == [
+        assert _find_protected_memory_shapes(tmp_path, PROTECTED_MEMORY_ALLOWLIST) == [
             ("extra_buffer.py", "SecureBuffer")
         ]
+
+    #: A pin taken straight through `ctypes`, naming none of the Python
+    #: primitives — the exact shape #555 was filed for. Class-level so both cells
+    #: below and the shipped finder speak about one same planted file.
+    _DIRECT_CTYPES_PIN: ClassVar[str] = (
+        "import ctypes\n"
+        "\n"
+        '_LIB = ctypes.CDLL("libc.so.6")\n'
+        "\n"
+        "\n"
+        "def pin(buf, size):\n"
+        "    return _LIB.mlock(ctypes.addressof(buf), size)\n"
+    )
+
+    def test_scan_flags_a_direct_ctypes_pin_that_names_no_symbol(self, tmp_path):
+        """The #555 regression, both halves in one cell.
+
+        First the premise: the planted file names none of
+        ``PROTECTED_MEMORY_SYMBOLS``, so the old substring scan had nothing to
+        look for and passed it. Then the verdict: the shipped scan run through
+        the same finder reports the ``mlock`` call shape.
+        """
+        assert not any(
+            symbol in self._DIRECT_CTYPES_PIN for symbol in PROTECTED_MEMORY_SYMBOLS
+        ), "the planted file names a guarded symbol — it no longer reproduces #555"
+
+        (tmp_path / "direct_pin.py").write_text(self._DIRECT_CTYPES_PIN, encoding="utf-8")
+        assert _find_protected_memory_shapes(tmp_path, PROTECTED_MEMORY_ALLOWLIST) == [("direct_pin.py", "mlock")]
+
+    def test_scan_flags_a_dynamic_lookup_of_the_pin_syscall(self, tmp_path):
+        """Indirection is still a call: `getattr(libc, "mlock")` is reported.
+
+        A file that resolves the syscall by string would walk past a scan that
+        only looks at callees, so the string form is a shape too.
+        """
+        (tmp_path / "indirect_pin.py").write_text(
+            'import ctypes\nPIN = getattr(ctypes.CDLL("libc.so.6"), "mlock")\n', encoding="utf-8"
+        )
+        assert _find_protected_memory_shapes(tmp_path, PROTECTED_MEMORY_ALLOWLIST) == [("indirect_pin.py", "mlock")]
+
+    def test_documentation_of_a_shape_is_not_a_use_of_it(self, tmp_path):
+        """The precision half of the conversion: prose cannot pin memory.
+
+        A module that only talks about `mlock` and `SecureBuffer` in its
+        docstring must not be reported. Without this the guard would be a text
+        search wearing a shape check's clothes — which is the other way #555
+        describes the same defect.
+        """
+        (tmp_path / "notes.py").write_text(
+            '"""Explains mlock and SecureBuffer to the reader."""\n\nVALUE = 1\n', encoding="utf-8"
+        )
+        assert _find_protected_memory_shapes(tmp_path, PROTECTED_MEMORY_ALLOWLIST) == []
+
+    def test_a_module_that_does_not_parse_is_not_cleared(self, tmp_path):
+        """A file the finder cannot read is a file the finder must not pass.
+
+        The old substring scan had no parse step, so this branch is new: it
+        exists because shape detection needs to parse, and silently skipping an
+        unparsable module would make the guard weaker than the one it replaced.
+        """
+        (tmp_path / "broken.py").write_text("def (:\n", encoding="utf-8")
+        assert _find_protected_memory_shapes(tmp_path, PROTECTED_MEMORY_ALLOWLIST) == [
+            ("broken.py", UNPARSEABLE_MODULE)
+        ]
+
+    def test_the_allowlisted_home_really_does_hold_the_shapes(self):
+        """Non-vacuity on the sanctioned side: the allowlist exempts a real user.
+
+        If `secure_memory.py` named none of these shapes, the shipped scan would
+        be green because nothing anywhere pins memory — not because the two
+        allowlisted files are the only ones that do. So assert the pin itself is
+        where the guard says it is.
+        """
+        import core.engine.secure_memory
+
+        shapes = _find_primitive_calls(Path(core.engine.secure_memory.__file__).read_text(encoding="utf-8"))
+        assert "mlock" in shapes and "munlock" in shapes, shapes
+        assert "secure_mlock" in shapes and "SecureBuffer" in shapes, shapes
 
     def test_direct_call_ban_is_failable(self):
         """The per-module ban below is proven live, not a loop that always agrees.
