@@ -83,13 +83,33 @@ def csr_curve_hint() -> str:
 
 
 def _load_passphrase(env_var: str) -> bytes | None:
-    """Load passphrase from environment variable.
+    """Load the configured CA passphrase from its environment variable.
+
+    #554 (owner ruling 2026-10-09, verbatim: "whitespace-only passphrase should not
+    be acceptable"): a value that is empty or made only of whitespace is read as
+    UNSET here, exactly like no value at all. A key must not be "protected" by a
+    secret that carries no material — one space opened every set-passphrase test in
+    this module while protecting nothing.
+
+    This is the ONE place that decides it, which is why no call site strips. Every
+    CA decision in this module already routes through this function —
+    ``CAManager.initialize``/``AdminCAManager.initialize`` (write), ``CAManager.load_ca``
+    and ``AdminCAManager._load_ca_key`` (read), and ``_serialize_key_encrypted`` via the
+    value returned here — so normalising once here makes all of them agree. Stripping
+    at each ``if passphrase:`` instead would leave the same question answered four times
+    and invite the next caller to forget one.
+
+    The ruled shape is DENY, not TRIM: the operator's value is never rewritten. A
+    passphrase that merely begins or ends with a space is delivered to the crypto
+    layer byte-for-byte, so a key written before this change still opens with the
+    same characters. Only an all-whitespace value changes meaning, and it changes to
+    "no passphrase" — which the #537 write-side refusal already covers, word for word.
 
     Returns:
-        Passphrase as bytes, or None if not set.
+        Passphrase as bytes, or None if unset, empty, or whitespace-only.
     """
     passphrase = os.environ.get(env_var)
-    if passphrase:
+    if passphrase and passphrase.strip():
         return passphrase.encode("utf-8")
     return None
 
@@ -217,7 +237,8 @@ class CAManager:
         # #537: refuse before ANY filesystem work. The serializer below is the
         # backstop for the bytes, but a key it never produced still leaves the
         # 0700 CA directory behind, which would make "Nothing was written." untrue.
-        # An empty value counts as unset — _load_passphrase() already treats it so.
+        # An empty value counts as unset — and since #554 so does a whitespace-only
+        # one; both are decided in _load_passphrase(), not here.
         if not _load_passphrase(self._key_passphrase_env):
             raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
 
