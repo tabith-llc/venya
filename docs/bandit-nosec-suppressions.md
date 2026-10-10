@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**67 suppression lines across 20 files.**
+**60 suppression lines across 19 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -38,13 +38,6 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/executor/src/executor/executor.py` | `import subprocess  # nosec B404 — executor requires subprocess to run commands` |
 | `packages/executor/src/executor/executor.py` | `os.killpg(os.getpgid(process.pid), 9)  # nosec B606 — no shell string; a pid we own` |
 | `packages/executor/src/executor/executor.py` | `shell=False,  # nosec B603 — shell explicitly disabled for security` |
-| `packages/executor/src/executor/injector.py` | `tmpfs_dir: str = "/tmp/venya_secrets",  # nosec B108 — tmpfs, not persistent disk` | <!-- pragma: allowlist secret -->
-| `packages/executor/src/executor/injector.py` | `secret_id="",  # nosec B106 — placeholder set by caller` | <!-- pragma: allowlist secret -->
-| `packages/executor/src/executor/injector.py` | `sentinel_hash="",  # nosec B106 — placeholder set by caller` |
-| `packages/executor/src/executor/injector.py` | `secret_id="",  # nosec B106 — placeholder set by caller` | <!-- pragma: allowlist secret -->
-| `packages/executor/src/executor/injector.py` | `sentinel_hash="",  # nosec B106 — placeholder set by caller` |
-| `packages/executor/src/executor/injector.py` | `secret_id="",  # nosec B106 — placeholder set by caller` | <!-- pragma: allowlist secret -->
-| `packages/executor/src/executor/injector.py` | `sentinel_hash="",  # nosec B106 — placeholder set by caller` |
 | `packages/executor/src/executor/relay_listener.py` | `host: str = "0.0.0.0",  # nosec B104 — private relay net; mTLS CERT_REQUIRED + CN allowlist is the access control` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx commands` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec` | <!-- pragma: allowlist secret -->

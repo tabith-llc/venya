@@ -9,7 +9,7 @@
 Orchestrates the full execution pipeline:
   1. Validate command against policy
   2. Retrieve secrets from server
-  3. Inject credentials (memfd FDs or tmpfs mounts for sandbox)
+  3. Stage credentials (SbxStrategy: host tmpfs, copied into the sandbox)
   4. Execute command (direct subprocess OR sandbox)
   5. Capture and filter output (Stage 1 + Stage 2)
   6. Clean up (delete secrets, revoke tokens)
@@ -97,7 +97,7 @@ def _cap_with_truncation_marker(data: bytes, total_size: int) -> bytes:
 # How long to wait for sandbox commands
 SBX_TIMEOUT = 3600  # 1 hour max
 
-# Cap for the LEGACY direct (memfd) path — output capture AND the wait that
+# Cap for the LEGACY direct (subprocess.Popen) path — output capture AND the wait that
 # follows it. Ticket direct-path-capture-timeout-untimed-wait #470: the capture
 # loop below bounded itself with SBX_TIMEOUT, logged a timeout, and then called
 # ``process.wait()`` with NO bound at all, so a child that stopped writing but
@@ -521,7 +521,7 @@ class Executor:
         # EXECUTION POSTURE (ticket #322 ruling Q3=C3, owner 2026-10-02; fleet
         # C5 probe grounded): the common case runs the VALIDATED ARGV LIST
         # DIRECT in the sandbox (no shell — boundaries are the list's, nothing
-        # re-parses them, mirroring the memfd path's shell=False posture). The
+        # re-parses them, mirroring the direct path's shell=False posture). The
         # ONE exception is a command carrying the ruled session-bound redirect
         # pair: the guest shell must perform the redirect, so that case keeps
         # the rendered string through `sh -c`. render_command quotes every
@@ -654,7 +654,7 @@ class Executor:
         return self._bundles
 
     # ================================================================
-    # DIRECT EXECUTION (existing memfd path — unchanged)
+    # DIRECT EXECUTION (legacy direct path: argv straight to Popen)
     # ================================================================
 
     def _run_command_direct(
@@ -664,9 +664,12 @@ class Executor:
         env_override: dict[str, str] | None,
         cwd: str | None,
     ) -> CommandResult:
-        """Run command directly via subprocess.Popen (memfd strategy).
+        """Run command directly via subprocess.Popen — the legacy direct path.
 
-        This is the existing execution path. Kept for backwards compat.
+        Reached only by direct calls (tests): the product pipeline goes through
+        _run_command_sbx (factory.py ships SbxStrategy as the sole strategy, and
+        since #471 nothing here stages a secret through a file descriptor). Kept
+        for backwards compat.
         Takes the argv list and runs it shell=False (ticket #322: the engine
         boundary is argv-structured end to end; this path was already
         argv-exact after shlex.split — the split moved to the wire).
@@ -683,8 +686,11 @@ class Executor:
 
         # Validate command structure (rejects shell metacharacters).
         # REDUNDANT with execute() step 1a's gate — kept deliberately:
-        # refactor-5 guardrails lock memfd/sbx coexistence and this path must
-        # not diverge if reached directly (ruled 2026-09-16). ALIGNED to the
+        # the refactor-5 guardrail that locked the two paths apart is OVERTURNED
+        # (owner ruling 2026-10-10 via courier ultra-9-0b3405, #471: the dead
+        # inject_via_* set was deleted under that grant), and this path is not
+        # the product path — so the guard stays because divergence is still the
+        # thing #374 ruled out, not because a lock is left standing. ALIGNED to the
         # ruled posture per ticket direct-path-inner-guard-drift-trap #374
         # (ruling ALIGN): the allowed set comes from this path's own
         # injections through the SAME helper execute() uses, so a bound-pair

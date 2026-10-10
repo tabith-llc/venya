@@ -4,20 +4,25 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Credential injection via file descriptors.
+"""Credential injection helpers: sentinel wrap/strip, registry, FD hygiene.
 
-Handles sentinel stripping, FD injection (memfd/shm/fifo),
-and sentinel registry management.
+What actually runs here: the sentinel envelope (``wrap_with_sentinel`` /
+``strip_sentinel``) that the relay hands to the engine, the per-session
+``SentinelRegistry`` the executor audits with, and the descriptor-hygiene helpers
+(``verify_fd_whitelist``, ``scan_open_fds``, ``set_cloexec``).
+
+The FD-injection trio (``inject_via_file`` / ``inject_via_memfd`` /
+``inject_via_fifo``) and ``parse_sentinels`` shipped here until #471 deleted them
+with no product caller left; secret staging is ``SbxStrategy``'s job (host tmpfs,
+copied into the sandbox), so no descriptor-injection path and no ``memfd`` call is
+left in this module.
 """
 
 import base64
-import errno
 import hashlib
 import logging
 import os
 import re
-import tempfile
-import time
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -28,7 +33,7 @@ class SecretInjection(NamedTuple):
     """Represents a secret injected into a target process."""
 
     secret_id: str
-    injection_path: str  # path to tmpfs file or memfd name
+    injection_path: str  # staging path the caller hands to the child (tmpfs today)
     sentinel_hash: str  # 8-char hex hash for audit trail
 
 
@@ -147,168 +152,6 @@ def strip_sentinel(wrapped: bytes) -> bytes:
         logger.debug("Stripped sentinel %s", hash_prefix)
         return base64.b64decode(encoded_data)
     return wrapped
-
-
-def parse_sentinels(data: bytes) -> list[tuple[str, bytes]]:
-    """Parse all sentinels from data.
-
-    Args:
-        data: Potentially sentinel-wrapped bytes.
-
-    Returns:
-        List of (sentinel_hash, decoded_secret_value) tuples.
-    """
-    results = []
-    for match in SENTINEL_PATTERN.finditer(data):
-        hash_prefix = match.group(1).decode()
-        encoded_data = match.group(2) + match.group(3)
-        secret_value = base64.b64decode(encoded_data)
-        results.append((hash_prefix, secret_value))
-    return results
-
-
-def inject_via_file(
-    secret_value: bytes,
-    tmpfs_dir: str = "/tmp/venya_secrets",  # nosec B108 — tmpfs, not persistent disk
-) -> SecretInjection:
-    """Inject a secret via a tmpfs file.
-
-    Creates a file on tmpfs with restrictive permissions (0400).
-    The file is owned by the current user.
-
-    Args:
-        secret_value: The raw secret bytes.
-        tmpfs_dir: Directory for secret files (must be on tmpfs).
-
-    Returns:
-        SecretInjection with the file path.
-    """
-    os.makedirs(tmpfs_dir, exist_ok=True)
-
-    fd, path = tempfile.mkstemp(
-        prefix="venya_",
-        suffix=".secret",
-        dir=tmpfs_dir,
-    )
-    try:
-        os.write(fd, secret_value)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-    os.chmod(path, 0o400)
-    logger.info("Injected secret via file: %s (mode 0400)", path)
-
-    return SecretInjection(
-        secret_id="",  # nosec B106 — placeholder set by caller
-        injection_path=path,
-        sentinel_hash="",  # nosec B106 — placeholder set by caller
-    )
-
-
-def inject_via_memfd(secret_value: bytes) -> tuple[int, SecretInjection]:
-    """Inject a secret via memfd_create.
-
-    Creates an anonymous file descriptor backed by memory.
-    No disk residency. Returns the FD number.
-
-    Args:
-        secret_value: The raw secret bytes.
-
-    Returns:
-        Tuple of (fd, SecretInjection). FD must be closed by caller.
-    """
-    try:
-        import ctypes
-        import ctypes.util
-
-        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-
-        # MFD_CLOEXEC (defined in linux/memfd.h)
-        MFD_CLOEXEC = 0x0001
-        MFD_ALLOW_SEALING = 0x0002
-
-        fd = libc.memfd_create(b"venya_secret\x00", MFD_CLOEXEC | MFD_ALLOW_SEALING)
-        if fd < 0:
-            errno = ctypes.get_errno()
-            raise OSError(errno, f"memfd_create failed: {os.strerror(errno)}")
-
-        os.write(fd, secret_value)
-
-        # Seal the memfd to prevent any further writes
-        import fcntl
-
-        F_ADD_SEALS = 1033
-        F_SEAL_WRITE = 0x2
-        fcntl.fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE)
-
-        logger.info("Injected secret via memfd: fd=%d", fd)
-
-        injection = SecretInjection(
-            secret_id="",  # nosec B106 — placeholder set by caller
-            injection_path=f"memfd:{fd}",
-            sentinel_hash="",  # nosec B106 — placeholder set by caller
-        )
-        return fd, injection
-
-    except ImportError:
-        raise NotImplementedError("memfd_create not available on this platform")
-
-
-def inject_via_fifo(path: str, secret_value: bytes) -> SecretInjection:
-    """Inject a secret via a named pipe (FIFO).
-
-    Args:
-        path: Path for the FIFO (must be on tmpfs).
-        secret_value: The raw secret bytes.
-
-    Returns:
-        SecretInjection with the FIFO path.
-    """
-    if os.path.exists(path):
-        os.unlink(path)
-
-    os.mkfifo(path, 0o600)
-
-    # Write secret to FIFO in a background thread to avoid blocking
-    import threading
-
-    FIFO_WRITE_TIMEOUT = 30.0
-
-    def write_secret():
-        deadline = time.time() + FIFO_WRITE_TIMEOUT
-        try:
-            while True:
-                try:
-                    fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
-                except OSError as e:
-                    if e.errno != errno.ENXIO:
-                        raise
-                    if time.time() >= deadline:
-                        logger.error(
-                            "FIFO write gave up after %.0fs: no reader ever opened %s" " — secret not delivered",
-                            FIFO_WRITE_TIMEOUT,
-                            path,
-                        )
-                        raise
-                    time.sleep(0.1)
-                    continue
-                break
-            with os.fdopen(fd, "wb") as f:
-                f.write(secret_value)
-        except Exception:
-            logger.exception("Failed to write secret to FIFO")
-
-    t = threading.Thread(target=write_secret, daemon=True)
-    t.start()
-
-    logger.info("Injected secret via FIFO: %s", path)
-
-    return SecretInjection(
-        secret_id="",  # nosec B106 — placeholder set by caller
-        injection_path=path,
-        sentinel_hash="",  # nosec B106 — placeholder set by caller
-    )
 
 
 def verify_fd_whitelist(open_fds: set[int], allowed_fds: set[int] | None = None) -> list[int]:

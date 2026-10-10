@@ -71,8 +71,11 @@ class InjectionResult:
 
     Attributes:
         extra_fds: File descriptors to pass to the subprocess via pass_fds.
-        secret_mounts: Filesystem mounts for sandbox-based execution
-                       (used by SbxStrategy, ignored by MemfdStrategy).
+        secret_mounts: Filesystem mounts for sandbox-based execution.
+                       SbxStrategy is the only strategy that ships (factory.py), so
+                       there is no second consumer to ignore them; the MemfdStrategy
+                       this line used to name was never a class in the tree — the
+                       memfd injector behind it went away in #471.
         cleanup_funcs: Functions to call on cleanup. Each takes no arguments.
         cleanup_failures: Destroy steps that raised, recorded by the most
                        recent ``cleanup()`` call. Empty means every step
