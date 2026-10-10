@@ -259,24 +259,68 @@ def _serialize_key_encrypted(
         raise RuntimeError(_unencrypted_key_refusal(passphrase_env))
 
 
-def _deserialize_key(data: bytes, passphrase: bytes | None) -> ec.EllipticCurvePrivateKey:
+def _ca_key_decrypt_refusal(key_path: str | Path | None) -> str:
+    """#574 — the wrong-passphrase-on-a-CA-key refusal, in our words, at one home.
+
+    The shape is the owner's ruling (R8-ADDENDUM, decisions.md commit dd1de4c): our own words, no
+    mechanism named, the key path substituted, plus a next-step pointer (#569). Exact bytes are the
+    implementing lane's draft and the review's accept — "the rule is the shape, not this string".
+
+    Two things the pointer must not do, both ruled:
+      * it must not imply a backup always exists — backup enrollment is OPTIONAL (Q4-AMENDMENT), so
+        the restore verbs are offered "when either was made for this key", with the always-true
+        alternative (re-run the CA setup) stated next;
+      * it must name machinery that exists. Both verbs are shipped at this tip — `admin split-ca-key`
+        (cli.py:379) and `admin restore-ca-key` (cli.py:406, "Restore CA key from shares or encrypted
+        backup"), the latter resolving ca.key / admin-ca.key inside --ca-dir (at_rest_key.py:39).
+
+    The library's own sentence is NOT interpolated here; it stays on the chained cause, which the
+    caller raises with ``from e``. Support still reads the mechanism in the traceback — it just no
+    longer lands on the operator's screen behind our colon (#541's blanket rule).
+
+    Args:
+        key_path: The key file the caller tried to open, when the caller has one. None is the shape
+            ``_deserialize_key`` takes when called without a path, so the fallback headline names the
+            key without a path rather than printing ``None``.
+
+    Returns:
+        The refusal text: headline (path substituted or omitted) plus the conditional remedy pointer.
+    """
+    if key_path:
+        headline = f"The CA key at {key_path} could not be decrypted — the passphrase did not match."
+    else:
+        headline = "The CA key could not be decrypted — the passphrase did not match."
+    return (
+        f"{headline} Retry with the correct passphrase; if the passphrase is lost, this key can be "
+        "restored with `venya admin restore-ca-key` from Shamir shares or from an encrypted backup, "
+        "when either was made for this key (`venya admin split-ca-key` creates the shares); "
+        "otherwise re-run the CA setup."
+    )
+
+
+def _deserialize_key(
+    data: bytes,
+    passphrase: bytes | None,
+    key_path: str | Path | None = None,
+) -> ec.EllipticCurvePrivateKey:
     """Deserialize a private key from PEM, optionally decrypting.
 
     Args:
         data: PEM-encoded key data.
         passphrase: Optional passphrase for decryption.
-
-    Returns:
-        ECDSA private key instance.
+        key_path: Optional path of the key file being opened, used only to make the
+            wrong-passphrase refusal name the real file (#574). Defaulted, so callers
+            that do not have a path — including the #541 suite — keep working unchanged.
 
     Raises:
-        RuntimeError: If decryption fails or key cannot be loaded.
+        RuntimeError: If decryption fails or key cannot be loaded. The library's sentence is
+            carried as the chained cause (``from e``), never in the operator-facing text.
     """
     try:
         return serialization.load_pem_private_key(data, password=passphrase)
     except ValueError as e:
         if passphrase:
-            raise RuntimeError(f"Failed to decrypt CA key with provided passphrase: {e}") from e
+            raise RuntimeError(_ca_key_decrypt_refusal(key_path)) from e
         else:
             raise RuntimeError(
                 "Failed to load CA key (may be encrypted but no passphrase provided). "
@@ -459,7 +503,7 @@ class CAManager:
             # refusal, shared, naming the variable this manager actually reads.
             raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
 
-        private_key = _deserialize_key(key_data, passphrase)
+        private_key = _deserialize_key(key_data, passphrase, self.ca_key_path)
         try:
             cert_pem = self.ca_cert_path.read_bytes()
         except FileNotFoundError:
@@ -977,7 +1021,7 @@ class AdminCAManager:
             # re-encrypted or migrated. Shares #537's approved wording, naming the admin variable.
             raise RuntimeError(_unencrypted_key_refusal(self._key_passphrase_env))
 
-        return _deserialize_key(key_data, passphrase)
+        return _deserialize_key(key_data, passphrase, self.ca_key_path)
 
     def sign_admin_cert(self, admin_identity: str) -> tuple[x509.Certificate, bytes, bytes]:
         """Mint the bootstrap/machine-plane admin certificate (RF-6 §6.3, refs RF-7).
