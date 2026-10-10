@@ -125,7 +125,13 @@ executor count in the run's results file.
   With `server` absent, the guard in `packages/executor/tests/conftest.py` puts
   `test_integration.py` in `collect_ignore` and prints the reason
   `server package absent — executor-only install (#466)`, so the suite collects
-  and the sandbox cells run instead of the suite dying at exit code 4.
+  and the sandbox cells run (exit code 0, 1203 items) instead of dying at conftest
+  import (exit code 4).
+  Name a file directly and the picture changes: on that bed
+  `pytest packages/executor/tests/test_integration.py` reports a collection error
+  (exit code 2, `INTERRUPTED`) **even with the guard working**, because
+  `collect_ignore` is not consulted for an explicitly-named file — always run the
+  suite suite-wide on the executor bed and read the header, not a single path.
   **This bed is authoritative for executor runtime behavior — sandbox strategy,
   secret injection, and teardown cells.**
 - Run the suite from a **source checkout**, not an installed wheel tree. One
