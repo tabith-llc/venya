@@ -17,8 +17,22 @@
 | Server TLS leaf | core: `/etc/venya/tls/server.crt|.key` | 365 days; re-signed on every installer run (`install-venya-core.sh`, the `Server TLS certificate signed with Venya CA` block) | CN + SAN DNS = `CORE_HOSTNAME` |
 | Relay client cert | core: `/etc/venya/relay/relay-client.crt|.key` | regenerated on installer run (the `Relay client certificate signed and verified` block) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids` |
 | Executor client cert | executor: `/etc/venya/executor/executor.crt|.key` (ca.crt alongside) | 30 days (`EXECUTOR_VALIDITY_DAYS = 30`, server `ca.py`); auto-rotation attempted 3 days before expiry (`rotate_before_days`, executor `config.py`) | Auto-rotation persistence FIXED 2026-09-19 (ticket `executor-cert-rotation-erofs`, §1); pre-fix hosts need the unit refresh; manual path: §2 |
-| Admin client certs | workstations / core: `/etc/venya/admin/admin.crt|.key` | manual (§7) | re-issued on every core installer run |
+| Admin client certs | workstations / core: `/etc/venya/admin/admin.crt|.key` | manual (§7); routine expiry is minted from the workstation (note below) | re-issued on every core installer run |
 | Secret-encryption KEK + key versions | core: database + server config | `venya admin rotate-key` (§6) | independent of the TLS CA hierarchy |
+
+**Admin client certificates also have a renewal path of their own.** The row
+above covers the installer-driven re-issue; routine expiry is minted on the
+workstation with `venya admin cert renew`, which generates a fresh keypair
+locally and writes the new certificate and its private key to the configured
+pair. The mint rides a login session plus one security-key ceremony and never
+presents the old certificate, so an expired leaf does not block the request.
+One limit is stated here because operator text should carry it rather than hide
+it: the private key is written encrypted at rest, and the CLI cannot yet load an
+encrypted admin key for admin mTLS, so the renewed pair does not serve
+certificate-authenticated admin commands until that read-side work lands
+(#565, Part B). Exact flags: `cli-reference.md` (generated). What an interactive
+desktop ceremony requires, including on Windows, is covered in `faq.md` and
+`installation.md` and is deliberately not restated here.
 
 nginx terminates TLS on :443 and proxies to the backend over the inner-mTLS
 channel: uvicorn serves TLS on the loopback bind only and nginx presents the

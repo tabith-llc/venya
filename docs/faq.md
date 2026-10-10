@@ -79,6 +79,15 @@ Because an LLM client holds the session token. Short idle windows and a hard
 4-hour cap bound what a compromised or runaway client can do; re-authorization
 always means a human touching a physical key.
 
+**My admin credential expired mid-session — what do I do?**
+The refusal names the command: `venya admin cert renew`. It mints a fresh
+admin certificate on a login session plus one security-key ceremony, never the
+expired credential. Whether your session counts as an interactive desktop for
+that ceremony is answered under "What platforms are supported?" below; what the
+renewed pair can serve today is stated once in the
+[rotation runbook](cert-rotation-runbook.md). Flags:
+[cli-reference.md](cli-reference.md).
+
 ## Deployment
 
 **What platforms are supported?**
