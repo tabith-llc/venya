@@ -93,23 +93,33 @@ ANCHORED_ONLY_REFUSAL = (
 )
 
 
+#: R9 (owner ruling 2026-10-10, booked in decisions.md at 135337e): the refusal names NO
+#: mechanism. "a trust store that is not the Venya CA" is true for both refused shapes at this seam —
+#: ``verify=True`` lands on the machine's own store, an omitted ``verify`` lands on the transport's
+#: built-in default bundle — and a reader cannot reproduce a mechanism they were never shown, so the
+#: sentence states what is wrong (wrong CA) and leaves the detail to developer prose below. One
+#: sentence for both shapes BY RULING: not split per shape. The repair pointer that follows it is the
+#: shipped ``ANCHORED_ONLY_REFUSAL`` text, quoted once, not restated.
+UNANCHORED_REFUSAL = "names a trust store that is not the Venya CA"
+
+
 def _require_anchored_verify(verify: object) -> str | bool:
     """The constructor seam's anchored-or-refuse check (#571), BEFORE any transport exists.
 
     Same posture the CLI bearer dial and the FIDO2 ceremony dial landed in #530/#533/#536: a
     value that is not the Venya CA bundle — or the ruled alpha debug escape, exactly ``False`` —
-    is refused, never defaulted. ``True`` is the one that matters, because httpx2 sends it to the
-    host OS trust store: ``_config.py`` ``create_ssl_context`` builds
-    ``truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)`` when ``verify is True``, which is the
-    machine's CA set, not ours.
+    is refused, never defaulted. What the refusal no longer says is *which* store a bad value
+    lands on: per R9 the operator-facing sentence names no mechanism (see
+    ``UNANCHORED_REFUSAL``); the mechanism detail stays here, in developer prose — ``True``
+    reaches httpx2's ``truststore.SSLContext`` (``_config.py`` ``create_ssl_context``, measured
+    at this venue on httpx2 2.12.0) and an omitted value reaches its built-in default bundle.
 
     The refusal lands before ``httpx2.AsyncClient`` is constructed, so a refused call never dials.
     """
     if verify is True or verify is None:
         raise RuntimeError(
-            f"VenyaClient was built with verify={verify!r}, which is the host's OS trust store, "
-            f"not the Venya CA. Pass the CA bundle path (or False for the alpha debug escape). "
-            f"{ANCHORED_ONLY_REFUSAL}"
+            f"VenyaClient was built with verify={verify!r}, which {UNANCHORED_REFUSAL}. "
+            f"{ANCHORED_ONLY_REFUSAL} Pass False only for the ruled alpha debug escape."
         )
     if isinstance(verify, str) and verify:
         return verify
@@ -142,7 +152,8 @@ class VenyaClient:
     TLS: verified against VENYA_CA_CERT at startup. No silent downgrade. The constructor takes no
     trust default (#571): ``verify`` must name the Venya CA bundle, or be exactly ``False`` for
     the ruled alpha debug escape. ``True`` — or nothing at all — is refused before a transport
-    exists, because httpx2 reads ``True`` as the host OS trust store.
+    exists, in words that name no mechanism (R9): either shape ends up trusting something that is
+    not the Venya CA.
     """
 
     def __init__(

@@ -32,6 +32,14 @@ exists.
 #540's ruled alpha debug escape (``VENYA_TLS_VERIFY=false`` → ``False``, with its warning) is a
 DIFFERENT posture and stays exactly as it ships: this file asserts that ``False`` still passes
 through unchanged, it does not touch the escape.
+
+R9 RE-PASS (owner ruling 2026-10-10, decisions.md 135337e): the mechanism quoted above is
+DEVELOPER evidence, not operator wording. The refusal sentence itself now names no mechanism —
+``UNANCHORED_REFUSAL``, "names a trust store that is not the Venya CA" — because that claim is
+true for both refused shapes (``True`` lands on the machine's store, an omitted value lands on the
+transport's built-in default bundle), while naming one of them is a detail the operator cannot
+reproduce. ``test_refusal_names_the_ruled_claim_and_no_mechanism`` pins the ruled bytes and the
+absence; a re-narrowing of the sentence turns it red.
 """
 
 from __future__ import annotations
@@ -47,6 +55,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from venya_mcp.client import (
     ANCHORED_ONLY_REFUSAL,
+    UNANCHORED_REFUSAL,
     VenyaClient,
     _bootstrap_tls_verify,
 )
@@ -196,6 +205,35 @@ def test_a_hand_built_ssl_context_is_refused_too(tmp_path: Path) -> None:
 
     assert spy.call_count == 0, "a refused value still built a transport"
     assert "VENYA_CA_CERT" in str(excinfo.value), f"refusal must name the CA var: {excinfo.value}"
+
+
+def test_refusal_names_the_ruled_claim_and_no_mechanism(tmp_path: Path) -> None:
+    """R9 pin: the ruled sentence, byte-equal from its one home, and no mechanism named.
+
+    Both refused shapes carry the same claim, so the cell walks them together (the owner ruled ONE
+    sentence, not a per-shape split). The negative half bans the mechanism words the ruling removed
+    — a future edit that re-narrows the sentence to one store fails here instead of shipping a claim
+    an operator cannot reproduce.
+    """
+    banned = ("host's OS", "OS trust store", "truststore", "certifi", "machine's CA", "system trust")
+
+    for label, build in (
+        ("verify=True", lambda: VenyaClient(_config(tmp_path), verify=True)),
+        ("verify omitted", lambda: VenyaClient(_config(tmp_path))),
+    ):
+        with pytest.raises(RuntimeError) as excinfo:
+            build()
+        message = str(excinfo.value)
+
+        assert f"which {UNANCHORED_REFUSAL}" in message, (
+            f"{label}: the refusal no longer carries the ruled R9 sentence byte-for-byte "
+            f"({UNANCHORED_REFUSAL!r}): {message}"
+        )
+        named = [word for word in banned if word in message]
+        assert not named, (
+            f"{label}: the refusal names a mechanism {named} — R9 ruled the operator-facing "
+            f"sentence stay mechanism-free: {message}"
+        )
 
 
 def test_refusal_wording_is_the_anchored_only_one_the_tree_already_ships(tmp_path: Path) -> None:
