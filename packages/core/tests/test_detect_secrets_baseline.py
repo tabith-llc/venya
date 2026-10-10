@@ -53,6 +53,7 @@ tool that prints each number with its method; the cells below keep it honest.
 
 import importlib.util
 import json
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -63,6 +64,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 BASELINE = REPO_ROOT / ".detect-secrets-baseline"
 CONFIG = REPO_ROOT / ".pre-commit-config.yaml"
 _GUARD_SCRIPT = REPO_ROOT / "scripts" / "detect_secrets_baseline_guard.py"
+
+# Named so the #553 stale-copy scan below can look for a hand-written remedy without matching its own
+# source: no single line here carries both tokens.
+RESYNC_PREFIX = "resync: "
+EXCLUDE_FLAG = "--exclude-files"
 
 _spec = importlib.util.spec_from_file_location("detect_secrets_baseline_guard", _GUARD_SCRIPT)
 guard = importlib.util.module_from_spec(_spec)
@@ -103,6 +109,32 @@ def _full_tree_scan(tmp_path: Path) -> dict:
     return json.loads(copy.read_text(encoding="utf-8"))
 
 
+def _resync_remedy() -> str:
+    """The resync command an operator is told to run when the baseline falls behind the tree.
+
+    Rendered from ``guard.EXCLUDE_FILE_PATTERNS`` — the canonical exclusion set every scan path in
+    this repo shares — so this text cannot name fewer exclusions than the shipped hook carries. It
+    used to print exactly one while the hook carries two, and obeying it re-scanned the baseline into
+    itself (#553); ``test_resync_remedy_names_every_configured_exclusion`` is the interlock that keeps
+    the two halves from drifting apart again.
+    """
+    excludes = " ".join(f"{EXCLUDE_FLAG} '{pattern}'" for pattern in guard.EXCLUDE_FILE_PATTERNS)
+    return f"detect-secrets scan --baseline {BASELINE.name} {excludes}"
+
+
+def _unbaselined_message(added: set) -> str:
+    """The whole failure text for a baseline that fell behind the tree.
+
+    Composed in one place so the interlock cell reads the same words an operator reads, instead of
+    trusting a second copy of them.
+    """
+    return (
+        "unbaselined findings — the committed baseline does not cover the full tree; "
+        f"{RESYNC_PREFIX}{_resync_remedy()}\n"
+        + "\n".join(f"  + {filename} | {secret_type} | {hashed}" for filename, secret_type, hashed in sorted(added))
+    )
+
+
 def test_scanner_version_matches_baseline_version():
     """The dev-group pin and the hook rev must agree (tool-drift half)."""
     committed = json.loads(BASELINE.read_text(encoding="utf-8"))
@@ -120,11 +152,7 @@ def test_full_tree_scan_equals_committed_baseline(tmp_path):
     fresh = _full_tree_scan(tmp_path)
     added = _findings(fresh) - _findings(committed)
     stale = _findings(committed) - _findings(fresh)
-    assert not added, (
-        "unbaselined findings — the committed baseline does not cover the full tree; "
-        "resync: detect-secrets scan --baseline .detect-secrets-baseline --exclude-files 'target/'\n"
-        + "\n".join(f"  + {f} | {t} | {h}" for f, t, h in sorted(added))
-    )
+    assert not added, _unbaselined_message(added)
     assert not stale, "stale baseline entries — recorded secrets no longer scan in the tree\n" + "\n".join(
         f"  - {f} | {t} | {h}" for f, t, h in sorted(stale)
     )
@@ -318,6 +346,50 @@ def test_hook_args_and_interlock_scan_agree(tmp_path):
     assert scanned == committed, (
         f"the config-driven scan path and the committed baseline disagree: "
         f"+{sorted(scanned - committed)} -{sorted(committed - scanned)}"
+    )
+
+
+def test_resync_remedy_names_every_configured_exclusion():
+    """Paired interlock (#553): the resync remedy an operator reads carries exactly the exclusions
+    the shipped hook carries.
+
+    Both sides are DERIVED, never compared to a list spelled out a second time: the config is read
+    through ``guard.config_hook_args`` and the command is read back out of its own text with
+    ``shlex``. Positive half: they agree, and the failure text offers that rendered command. Negative
+    halves, each red on its own: a remedy narrowed to one pattern, a config narrowed to one pattern,
+    and a hand-written command at the assert site instead of the rendered one — that hand-written
+    copy is the shape the defect had.
+    """
+    config_args = guard.config_hook_args(CONFIG)
+    config_patterns = tuple(config_args[i + 1] for i, a in enumerate(config_args) if a == EXCLUDE_FLAG)
+
+    remedy = _resync_remedy()
+    tokens = shlex.split(remedy)
+    remedy_patterns = tuple(tokens[i + 1] for i, a in enumerate(tokens) if a == EXCLUDE_FLAG)
+
+    assert remedy_patterns == config_patterns, (
+        f"the resync remedy prints {list(remedy_patterns)} but the shipped hook excludes "
+        f"{list(config_patterns)} — obeying the remedy re-scans what the hook skips: {remedy}"
+    )
+    assert remedy.count(EXCLUDE_FLAG) == len(config_patterns), (
+        f"the remedy carries {remedy.count(EXCLUDE_FLAG)} exclusion args and the config carries "
+        f"{len(config_patterns)}; one side was narrowed: {remedy}"
+    )
+
+    message = _unbaselined_message({("path/to/file.py", "Secret Type", "deadbeef")})
+    assert f"{RESYNC_PREFIX}{remedy}\n" in message, (
+        "the failure text no longer hands the operator the rendered command — a second copy of the "
+        f"remedy was written here instead:\n{message}"
+    )
+
+    stale_copies = [
+        line.strip()
+        for line in Path(__file__).read_text(encoding="utf-8").splitlines()
+        if RESYNC_PREFIX in line and EXCLUDE_FLAG in line
+    ]
+    assert not stale_copies, (
+        "the remedy must be rendered from the shared exclusion set, not spelled out in this file — "
+        f"a local copy is the shape #553 shipped in: {stale_copies}"
     )
 
 
