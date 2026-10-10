@@ -13,6 +13,15 @@ nothing. This file is the two-sided half: the refusal cells (N1/N2) plus the
 positive cells that prove the encrypted path and the pre-existing-CA guard still
 behave (P1-P4).
 
+#554 moved one of those positive cells, and it is worth saying which and why: P4
+used to pin a whitespace-only value as an ACCEPTED passphrase ("STATE OF THE CODE,
+asserted exactly"), which is the truthiness hole the owner ruled away with the
+deny-whitespace batch. P4 is now a refusal cell with the same filesystem proof as
+N1/N2, and P4B keeps the positive half — spaces that are CONTENT are still a real
+passphrase, and the value is never trimmed. The refusal text is #547's, imported
+and compared byte-for-byte, because "no material" and "not set" are the same
+answer to this command.
+
 The load-bearing assertion in the refusal cells is on the FILESYSTEM, not the
 message: no directory, no key, no certificate, no temp file. The refusal must
 fire before ``output_dir.mkdir()`` (see ``server/ca.py`` "refuse before ANY
@@ -25,7 +34,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from venya_cli.commands import cmd_admin_init_admin_ca
+from venya_cli.commands import _admin_ca_no_passphrase_refusal, cmd_admin_init_admin_ca
 
 PASSPHRASE = "test_passphrase_547"
 
@@ -141,15 +150,48 @@ class TestEncryptedPathStillWorks:
         assert stat.S_IMODE((out / "admin-ca.key").stat().st_mode) == before_mode
         assert sorted(p.name for p in out.iterdir()) == ["admin-ca.crt", "admin-ca.key"]
 
-    def test_p4_whitespace_only_passphrase_is_accepted_as_a_passphrase(self, tmp_path, monkeypatch):
-        """STATE OF THE CODE, asserted exactly: a whitespace-only value is truthy, so
-        the guard treats it as SET and the key is encrypted with it — identical to the
-        server rule (``ca.py`` ``_load_passphrase`` uses the same truthiness test).
-        #547 adds NO strength policy; a strength rule would be a separate ruling."""
-        monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", "   ")
+    @pytest.mark.parametrize("blank", [" ", "   ", "\t", "\n"], ids=["space1", "space3", "tab", "nl"])
+    def test_p4_whitespace_only_passphrase_refuses_and_writes_nothing(self, tmp_path, monkeypatch, capsys, blank):
+        """#554 REPLACES the cell that pinned acceptance as "STATE OF THE CODE".
+
+        This cell used to assert the opposite: a whitespace-only value is truthy, so the
+        guard treated it as SET and encrypted the admin CA key with three spaces. That
+        acceptance is the defect the owner ruled away in the deny-whitespace batch
+        (s85, verbatim: "whitespace-only passphrase should not be acceptable"), and the
+        server closed its half of it in #554. The two paths must not answer "is a
+        passphrase set?" differently — that divergence is exactly what #547 was filed to
+        end — so the state of the code moved and this assertion moved with it, same shape
+        as N1/N2: the refusal plus the filesystem proof. The lead blessed the
+        replacement (wren-9-0ce003). A minimum LENGTH is still not ruled and is not
+        asserted here.
+        """
+        monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", blank)
+        out = tmp_path / "admin-ca"
+
+        assert cmd_admin_init_admin_ca(_args(out)) == 1, f"a {blank!r} passphrase still wrote a key"
+        assert not out.exists(), f"a {blank!r} passphrase still created {out}"
+        assert _dir_listing(tmp_path) == [], "the refusal wrote something next to the target dir"
+        err = capsys.readouterr().err
+        # Zero new wording: #547's own sentence, byte-for-byte, because "no material" and
+        # "not set" are the same answer to this command.
+        assert err == _admin_ca_no_passphrase_refusal() + "\n", "the refusal must be #547's verbatim"
+        assert "VENYA_ADMIN_CA_KEY_PASSPHRASE" in err
+
+    def test_p4b_whitespace_as_content_is_still_a_real_passphrase(self, tmp_path, monkeypatch):
+        """The paired positive, and the sharp edge against a TRIM reading.
+
+        Spaces that are CONTENT are not blankness: the value is DENIED only when nothing
+        but whitespace was supplied. The operator's bytes are used as typed, so the key
+        opens with the untrimmed phrase and NOT with a stripped one — a trim would have
+        silently changed the secret and locked the operator out of their own CA.
+        """
+        padded = " test ca phrase 547 with spaces "  # dev-only synthetic value
+        monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", padded)
         out = tmp_path / "admin-ca"
 
         assert cmd_admin_init_admin_ca(_args(out)) == 0
         key_bytes = (out / "admin-ca.key").read_bytes()
         assert b"ENCRYPTED" in key_bytes
-        assert serialization.load_pem_private_key(key_bytes, password=b"   ") is not None
+        assert serialization.load_pem_private_key(key_bytes, password=padded.encode()) is not None
+        with pytest.raises(ValueError):
+            serialization.load_pem_private_key(key_bytes, password=padded.strip().encode())

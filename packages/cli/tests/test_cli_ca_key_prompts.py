@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from venya_cli.commands import cmd_admin_export_ca_key, cmd_admin_restore_ca_key
 
 
@@ -75,6 +76,59 @@ class TestCaKeyPromptsHidden:
             rc = cmd_admin_export_ca_key(args)
         assert rc == 1
         assert not out.exists()
+
+    @pytest.mark.parametrize("blank", [" ", "   ", "\t"], ids=["space1", "space3", "tab"])
+    def test_export_whitespace_only_passphrase_rejected(self, tmp_path, capsys, blank):
+        """#554 (owner deny-whitespace batch): a typed value of only spaces is as empty
+        as no value. The exported envelope is PBKDF2 over the passphrase, so a blank one
+        is a file anyone can open — the same reason the prompt refuses "" today.
+
+        The shipped sentence is asserted byte-for-byte (no new wording) and the
+        filesystem half is the load-bearing one: nothing was written.
+        """
+        ca_dir = tmp_path / "ca"
+        ca_dir.mkdir()
+        (ca_dir / "ca.key").write_bytes(_real_key_pem())
+        out = tmp_path / "o.enc"
+        args = SimpleNamespace(output=str(out), ca_dir=str(ca_dir))
+        with patch("builtins.input", _boom), patch(
+            "venya_cli.commands.getpass.getpass", side_effect=[blank, blank]
+        ) as gp:
+            rc = cmd_admin_export_ca_key(args)
+        assert rc == 1, f"a {blank!r} passphrase still exported a CA key"
+        assert gp.call_count == 2, "both prompts are the hidden pair, as shipped"
+        assert not out.exists(), f"a {blank!r} passphrase still wrote {out}"
+        assert "Error: passphrase cannot be empty" in capsys.readouterr().err
+
+    def test_export_whitespace_as_content_still_encrypts(self, tmp_path):
+        """The paired positive, and the guard against a TRIM reading: a phrase whose
+        spaces are CONTENT is a real passphrase, exported with the bytes exactly as
+        typed — the stripped form must not open the envelope it sealed."""
+        typed = " padded export phrase 554 "  # dev-only synthetic value
+        ca_dir = tmp_path / "ca"
+        ca_dir.mkdir()
+        key = _real_key_pem()
+        (ca_dir / "ca.key").write_bytes(key)
+        out = tmp_path / "o.enc"
+        args = SimpleNamespace(output=str(out), ca_dir=str(ca_dir))
+        with patch("builtins.input", _boom), patch("venya_cli.commands.getpass.getpass", side_effect=[typed, typed]):
+            assert cmd_admin_export_ca_key(args) == 0
+        assert out.exists() and out.read_bytes() != key, "the export must not be the plaintext key"
+        (ca_dir / "ca.key").unlink()
+        with patch("builtins.input", _boom), patch("venya_cli.commands.getpass.getpass", side_effect=[typed]):
+            rc = cmd_admin_restore_ca_key(
+                SimpleNamespace(mode="backup", backup_file=str(out), shares=None, ca_dir=str(ca_dir))
+            )
+        assert rc == 0, "the untrimmed phrase must open the envelope it sealed"
+        assert (ca_dir / "ca.key").read_bytes() == key
+        # The sharp half: the stripped phrase is a DIFFERENT secret and must fail.
+        (ca_dir / "ca.key").unlink()
+        with patch("builtins.input", _boom), patch("venya_cli.commands.getpass.getpass", side_effect=[typed.strip()]):
+            rc = cmd_admin_restore_ca_key(
+                SimpleNamespace(mode="backup", backup_file=str(out), shares=None, ca_dir=str(ca_dir))
+            )
+        assert rc == 1, "a trimmed passphrase must NOT open what the untrimmed one sealed"
+        assert not (ca_dir / "ca.key").exists(), "the failed restore wrote nothing"
 
     def test_restore_backup_roundtrip_uses_getpass(self, tmp_path):
         from cryptography.hazmat.primitives import serialization
