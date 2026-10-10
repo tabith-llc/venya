@@ -20,9 +20,16 @@ The behavior was already fail-closed and correct — ``rc 1``, nothing written. 
 is the VOICE. #541 ruled this posture "refuses loudly in OUR words", and until now this
 command answered in OpenSSL's. The fix refuses on the ``is_encrypted`` fact that the
 read path already computes, so the loader is never reached with the mismatched shape, and
-the sentence the operator reads is the shipped #547 refusal — byte-identical, reused, not
+the lines the operator reads are picked out of the shipped #547 refusal — located, not
 re-typed and not rewritten (the WORDING is the owner's call per #569, so this leg authors
 no new sentence).
+
+Which lines, and why those: the shipped block is 13 lines, and its middle is the
+passphrase-NOT-SET repair steps, which would tell this operator to set a variable they
+already set. Its headline line and its ``Reference:`` line are both true of THIS posture,
+so the picker returns exactly those two and raises if it cannot locate the
+``Reference:`` line by prefix — #569's fourth demand is "what to do", and that lives in
+shipped bytes (the runbook + BACKUPS pointer), so nothing had to be authored to carry it.
 
 Both halves of the truth table are asserted in the same cell: our sentence appears, and
 ``"not encrypted"`` — the library's fingerprint — does not surface anywhere. A positive
@@ -38,6 +45,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from venya_cli.commands import (
     _admin_ca_no_passphrase_refusal,
+    _admin_ca_plaintext_key_refusal,
     _admin_leaf_key_no_passphrase_refusal,
     cmd_admin_generate_admin_cert,
     cmd_admin_init_admin_ca,
@@ -94,13 +102,20 @@ def _clean_env(monkeypatch):
 
 
 class TestRefusesBeforeTheLoader:
-    """N1 + N2 + N3 — the plaintext-plus-real-passphrase pairing, refused in our words."""
+    """N1 + N2 + N3 + N4 + N5 — the plaintext-plus-real-passphrase pairing, refused in
+    our words: all four things #569 demands, before the loader, writing nothing, and
+    with the wording LOCATED in the shipped block rather than copied out of it."""
 
     def test_n1_refuses_with_our_sentence_and_the_library_stays_silent(self, tmp_path, capsys):
         """The paired cell: OUR refusal appears AND the library sentence does not.
 
         Splitting these into two cells would let a half-fix pass — a refusal that prints
         our line and still falls through to the loader would satisfy the positive half.
+
+        #569's Problem asks FOUR things of a refusal, so the cell now demands all four:
+        which key, which posture, that nothing was written, AND what to do (the shipped
+        ``Reference:`` line, naming both doc paths). The fourth is this leg's addendum —
+        the checker measured that dropping the block's tail threw away posture-TRUE bytes.
         """
         ca = _admin_ca(tmp_path)
         _flatten_to_plaintext(ca)
@@ -109,8 +124,15 @@ class TestRefusesBeforeTheLoader:
 
         assert cmd_admin_generate_admin_cert(_args(ca, out)) == 1
         captured = capsys.readouterr()
-        assert captured.err.startswith(_admin_ca_no_passphrase_refusal().split("\n", 1)[0]), captured.err
+        assert captured.err.startswith(_admin_ca_no_passphrase_refusal().splitlines()[0]), captured.err
         assert "REFUSED" in captured.err
+        # the four demands, each one named in the operator's own output
+        assert "admin CA key" in captured.err, "demand 1 - which key"
+        assert "never be stored unencrypted" in captured.err, "demand 2 - which posture"
+        assert "Nothing was written" in captured.err, "demand 3 - that nothing was written"
+        assert (
+            "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md" in captured.err
+        ), "demand 4 - what to do, in the shipped reference line"
         # the negative half — OpenSSL's fingerprint must not reach the operator, on either
         # stream, and neither must the blanket handler's own prefix.
         assert LIBRARY_FINGERPRINT not in captured.err, captured.err
@@ -118,12 +140,13 @@ class TestRefusesBeforeTheLoader:
         assert "Failed to sign admin certificate" not in captured.err, captured.err
 
     def test_n2_the_byte_identity_is_asserted_not_claimed(self, tmp_path, capsys):
-        """#569's wording law: the shipped sentence, character-for-character.
+        """#569's wording law: the shipped lines, character-for-character.
 
-        Compared against ``_admin_ca_no_passphrase_refusal()`` itself rather than a copy
-        typed into this file, so a future edit to #547's wording moves BOTH sides at once
-        instead of silently red-gating a stale literal (the #554 precedent: reused, with
-        the equality proven here rather than asserted in a comment).
+        Both printed lines are compared against ``_admin_ca_no_passphrase_refusal()``
+        ITSELF rather than against copies typed into this file, so a future edit to #547's
+        wording moves BOTH sides at once instead of silently red-gating a stale literal
+        (the #554 precedent: reused, with the equality proven here rather than asserted in
+        a comment).
         """
         ca = _admin_ca(tmp_path)
         _flatten_to_plaintext(ca)
@@ -131,10 +154,19 @@ class TestRefusesBeforeTheLoader:
 
         assert cmd_admin_generate_admin_cert(_args(ca, tmp_path / "leaf")) == 1
         err = capsys.readouterr().err
-        shipped_first_line = _admin_ca_no_passphrase_refusal().split("\n", 1)[0]
-        assert err == shipped_first_line + "\n", repr(err)
-        # and the sentence states this posture, not the blank-passphrase one it shares a
-        # renderer with: the CA key is the object, and nothing was written.
+        assert err == _admin_ca_plaintext_key_refusal() + "\n", repr(err)
+        # the picker's two lines ARE the renderer's headline and Reference lines — so the
+        # bytes the operator reads are shipped, and each is located, not copied
+        shipped = _admin_ca_no_passphrase_refusal().splitlines()
+        reference = next(line for line in shipped if line.startswith("Reference:"))
+        assert err == f"{shipped[0]}\n{reference}\n", repr(err)
+        # exactly two lines: the off-posture repair steps stay out of the operator's view,
+        # and the count pins that no third line crept in
+        assert len(err.rstrip("\n").split("\n")) == 2, repr(err)
+        assert "To fix it:" not in err
+        assert "1. Set VENYA_ADMIN_CA_KEY_PASSPHRASE" not in err
+        # and it states this posture, not the blank-passphrase one it shares a renderer
+        # with: the CA key is the object, and nothing was written.
         assert "admin CA key must never be stored unencrypted" in err
         assert "Nothing was written" in err
 
@@ -171,6 +203,83 @@ class TestRefusesBeforeTheLoader:
         assert not out.exists(), f"the refusal created {out}"
         assert (ca / "admin-ca.key").read_bytes() == plain, "the refusal rewrote the CA key"
         assert sorted(p.name for p in ca.iterdir()) == ["admin-ca.crt", "admin-ca.key"]
+
+    def test_n5_the_locator_is_a_locator_not_a_lucky_count(self, tmp_path, monkeypatch, capsys):
+        """The addendum's own proof cell: the Reference line is found BY PREFIX, and a
+        failed lookup REDS rather than quietly printing a shorter refusal.
+
+        Three in-memory mutations of the shipped renderer, each the opposite of a silent
+        fallback, plus the command-level consequence:
+
+        * REMOVED  -> the picker raises; it does not fall back to the headline alone.
+        * DOUBLED  -> ambiguous, so it raises rather than picking the first match.
+        * MOVED to line 0 -> the headline line and the picked tail are BOTH the Reference
+          line now, and each pick still follows the rule (headline is the renderer's line
+          0; the tail is the unique Reference-prefixed line). An index-pinned picker would
+          have walked off the end of the block here instead of picking by rule.
+
+        Nothing is retyped and no shipped file is edited: the mutations are monkeypatches
+        on the module attribute, and the renderer is the real one again after each cell.
+        """
+        import venya_cli.commands as commands_mod
+
+        shipped = _admin_ca_no_passphrase_refusal().splitlines()
+        matches = [line for line in shipped if line.startswith("Reference:")]
+        assert len(matches) == 1, f"the fixture premise moved: {matches}"
+        reference = matches[0]
+
+        # 1. removed -> loud
+        monkeypatch.setattr(
+            commands_mod,
+            "_admin_ca_no_passphrase_refusal",
+            lambda: "\n".join(line for line in shipped if line != reference),
+        )
+        with pytest.raises(AssertionError, match="expected exactly 1"):
+            _admin_ca_plaintext_key_refusal()
+
+        # 2. doubled -> loud, never "first match wins"
+        monkeypatch.setattr(
+            commands_mod,
+            "_admin_ca_no_passphrase_refusal",
+            lambda: "\n".join([*shipped, reference]),
+        )
+        with pytest.raises(AssertionError, match="located 2 "):
+            _admin_ca_plaintext_key_refusal()
+
+        # 3. moved to the head -> the picker still selects by rule: index 0 for the
+        # headline, and the (now sole) Reference-prefixed line for the tail
+        head_moved = [reference, *(line for line in shipped if line != reference)]
+        monkeypatch.setattr(
+            commands_mod,
+            "_admin_ca_no_passphrase_refusal",
+            lambda: "\n".join(head_moved),
+        )
+        picked = _admin_ca_plaintext_key_refusal().splitlines()
+        assert picked == [reference, reference], picked
+
+        monkeypatch.undo()
+        assert _admin_ca_plaintext_key_refusal() == f"{shipped[0]}\n{reference}"
+
+        # and the loud path is still fail-closed at the command: a broken picker cannot
+        # let the loader run or a file appear — it lands in the backstop handler instead.
+        monkeypatch.setattr(
+            commands_mod,
+            "_admin_ca_no_passphrase_refusal",
+            lambda: "\n".join(line for line in shipped if line != reference),
+        )
+        ca = _admin_ca(tmp_path)
+        _flatten_to_plaintext(ca)
+        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = PASSPHRASE
+        out = tmp_path / "leaf"
+        assert cmd_admin_generate_admin_cert(_args(ca, out)) == 1
+        assert not out.exists(), "the loud path signed a certificate anyway"
+        err = capsys.readouterr().err
+        assert LIBRARY_FINGERPRINT not in err, err
+        # Stated plainly, because it is the reason the picker must be loud: with the
+        # Reference line gone, the operator gets the backstop handler's prefix around OUR
+        # AssertionError text. That is a bug-report shape, not a silent shortening of a
+        # ruled refusal — and it is unreachable while the shipped block carries its line.
+        assert "refusing to print a shorter refusal" in err, err
 
 
 class TestTheOtherShapesAreUntouched:
@@ -223,7 +332,7 @@ class TestTheOtherShapesAreUntouched:
 
 
 class TestTheBackstopSurvives:
-    """B1 + B2 — the blanket handler stays, and the new gate is where the spec put it."""
+    """B1 + B2 — the blanket handler stays, and the gate/picker are shaped as ruled."""
 
     def test_b1_the_blanket_handler_is_still_there(self):
         """#569 does not delete the backstop for genuinely unknown failures; this leg only
@@ -236,13 +345,26 @@ class TestTheBackstopSurvives:
         assert "except RuntimeError as e:" in source
 
     def test_b2_the_new_gate_sits_on_the_is_encrypted_fact_before_the_load(self):
-        """Shape pin: the refusal reads the fact the path already computed, uses the
-        shipped renderer, and lands ahead of ``load_pem_private_key``."""
+        """Shape pin, re-aimed by the addendum with the same intent.
+
+        This cell used to look for an inline ``.split`` on the renderer at the call site.
+        The wording now lives in one picker, so the drift classes are (a) a shipped line
+        retyped anywhere and (b) a Reference line picked by index. Both are checked here,
+        on the call site AND on the picker.
+        """
         source = inspect.getsource(cmd_admin_generate_admin_cert)
         gate = source.index("if not is_encrypted and passphrase:")
         assert gate < source.index("ca_key = serialization.load_pem_private_key")
         assert (
-            "_admin_ca_no_passphrase_refusal()" in source[gate : gate + 300]
-        ), "the refusal must reuse the shipped renderer, not a retyped literal"
-        # no new operator-facing sentence on this leg: the refusal print is one call
-        assert source.count("_admin_ca_no_passphrase_refusal().split") == 1
+            source.count("print(_admin_ca_plaintext_key_refusal(), file=sys.stderr)") == 1
+        ), "the refusal print must be the one picker call"
+        assert "REFUSED:" not in source, "no shipped wording may be retyped at the call site"
+
+        picker = inspect.getsource(_admin_ca_plaintext_key_refusal)
+        assert "_admin_ca_no_passphrase_refusal()" in picker, "the picker must derive from the renderer"
+        assert ".startswith(" in picker, "the Reference line must be located by PREFIX"
+        assert '"Reference:"' in picker, "the picker must name the prefix it looks for"
+        assert "Reference: docs" not in picker, "the Reference LINE may not be retyped either"
+        assert "cert-rotation-runbook" not in picker, "nor may the doc paths be copied"
+        assert "lines[12]" not in picker and ".index(" not in picker, "not a count from the top"
+        assert "print(" not in picker, "the picker returns text; it does not print it"
