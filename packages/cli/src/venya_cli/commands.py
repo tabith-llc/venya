@@ -4084,7 +4084,11 @@ def cmd_admin_export_ca_key(args: Any) -> int:
                 print("Passphrases do not match. Try again.")
                 passphrase1 = None
 
-        if not passphrase1:
+        # #554: an all-whitespace entry is as empty as no entry at all — the ruled shape
+        # is deny-blank, and the sentence below is the shipped one, unchanged. The value
+        # is never trimmed, so a passphrase whose spaces are content still encrypts with
+        # exactly what the operator typed.
+        if not _passphrase_has_material(passphrase1):
             print("Error: passphrase cannot be empty", file=sys.stderr)
             return 1
 
@@ -4306,6 +4310,34 @@ def cmd_admin_restore_ca_key(args: Any) -> int:
 # --- Admin CA Management Commands ---
 
 
+def _admin_ca_passphrase_or_none() -> str | None:
+    """The configured admin CA/leaf passphrase, or None when there is no real one (#554).
+
+    Unset, empty and whitespace-only all count as "no passphrase": a value made only of
+    spaces carries no material, so encrypting a CA key with it is decoration, and the
+    #547 refusal it used to slip past is exactly the check it defeats. The owner ruled
+    this batch as *deny whitespace* ("whitespace-only passphrase should not be
+    acceptable"), the same shape the server's ``ca.py`` ``_load_passphrase()`` now uses.
+
+    DENY, never TRIM: an acceptable value is returned byte-for-byte, so a passphrase
+    whose spaces are content still opens the key it wrote.
+    """
+    passphrase = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
+    if passphrase is None or not passphrase.strip():
+        return None
+    return passphrase
+
+
+def _passphrase_has_material(passphrase: str) -> bool:
+    """True when a typed value carries material beyond whitespace (#554).
+
+    The same blank-is-no-passphrase rule as ``_admin_ca_passphrase_or_none()``, shaped
+    for a value the operator types at a prompt instead of an environment variable.
+    Nothing is trimmed here — the caller keeps using the value exactly as typed.
+    """
+    return bool(passphrase.strip())
+
+
 def _admin_ca_no_passphrase_refusal() -> str:
     """#547: refusal text for a passphrase-less ``venya admin init-admin-ca``.
 
@@ -4338,9 +4370,10 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
 
     Creates a new ECDSA P-256 keypair and self-signed admin CA certificate. The key
     is always written encrypted with the passphrase from VENYA_ADMIN_CA_KEY_PASSPHRASE.
-    If that variable is unset or empty, the command refuses before touching the
-    filesystem — no directory, no key, no certificate — and exits non-zero (#547,
-    matching the server rule in ``server/ca.py``, #537).
+    If that variable is unset, empty, or made only of whitespace, the command refuses
+    before touching the filesystem — no directory, no key, no certificate — and exits
+    non-zero (#547, matching the server rule in ``server/ca.py``, #537; the whitespace
+    half of that rule is #554).
     """
     import os
     from datetime import datetime, timedelta
@@ -4358,9 +4391,12 @@ def cmd_admin_init_admin_ca(args: Any) -> int:
     # #547: refuse before ANY filesystem work — the server rule does exactly this
     # (``server/ca.py`` ``initialize()``, "#537: refuse before ANY filesystem work").
     # An empty value counts as unset, the same treatment the old encryption branch gave
-    # it (`passphrase.encode() if passphrase else None`).
-    passphrase = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
-    if not passphrase:
+    # it (`passphrase.encode() if passphrase else None`). #554 extends that to a
+    # whitespace-only value, which is truthy and so sailed past the test above while
+    # protecting nothing — the ruling is deny-blank, and the refusal stays #547's own
+    # words because "no material" and "not set" are the same answer to this command.
+    passphrase = _admin_ca_passphrase_or_none()
+    if passphrase is None:
         print(_admin_ca_no_passphrase_refusal(), file=sys.stderr)
         return 1
 
@@ -4508,11 +4544,14 @@ def _admin_leaf_key_passphrase_or_none() -> str | None:
     Empty and whitespace-only both count as unset — the same treatment #547 gave the
     empty value (`passphrase.encode() if passphrase else None`), extended to the blank
     string that `if not passphrase` alone would wave through.
+
+    #554: this is now one answer, not two hand-written ones. The leaf-key path and
+    ``cmd_admin_init_admin_ca`` read the same variable, so both call
+    ``_admin_ca_passphrase_or_none()`` — the ticket's "one shared predicate" law, and
+    the reason a change to blankness cannot land on one path and miss the other.
+    Behavior for this caller is unchanged.
     """
-    passphrase = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
-    if passphrase is None or not passphrase.strip():
-        return None
-    return passphrase
+    return _admin_ca_passphrase_or_none()
 
 
 def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
@@ -4607,8 +4646,23 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         return 1
 
     try:
-        # Load admin CA key
-        passphrase = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
+        # Load admin CA key. #554: this read gate now asks the same question the write
+        # path asks, through ``_admin_ca_passphrase_or_none()`` — unset, empty and
+        # whitespace-only are one answer, "no passphrase".
+        #
+        # Measured, and said plainly: on THIS command the blank case was already refused
+        # one guard earlier (the #547a leaf-key guard above reads the same variable and
+        # denies blank), so the probe showed no operator-visible change here — a blank
+        # value answers with the #547a refusal either way. What this edit fixes is the
+        # gate itself: as written it treated a value of spaces as a passphrase and was
+        # about to hand `b"   "` to the loader, which is the exact truthiness shape #554
+        # was filed for. Routing it through the shared predicate means the next caller
+        # that reaches this line — or any reordering of the guard above — cannot inherit
+        # the hole. Defense in depth, not a new behavior for today's operator.
+        #
+        # Nothing is trimmed: a passphrase whose spaces are content is delivered
+        # byte-for-byte and still decrypts the CA key it sealed.
+        passphrase = _admin_ca_passphrase_or_none()
         key_data = ca_key_path.read_bytes()
         is_encrypted = b"ENCRYPTED" in key_data
 
