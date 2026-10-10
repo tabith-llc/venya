@@ -148,14 +148,43 @@ fi
 # encrypted row — so precedence is: stored value from .env wins on re-run (an
 # explicit env that DISAGREES aborts loudly with state intact) > explicit env
 # > TTY prompt > error when unattended. Runs before any system mutation.
+#
+# #570 blank-is-unset, DENY and never TRIM. A value made only of whitespace
+# carries no material, so it answers the "was a passphrase supplied?" question
+# exactly as unset does — prompt on a TTY, the existing error when unattended,
+# no new sentence for either half. The test reads a whitespace-stripped COPY
+# (`${DB_PASSPHRASE//[[:space:]]/}`); DB_PASSPHRASE itself is never rewritten, so
+# a passphrase whose spaces are content stays byte-for-byte on the way to the env
+# file and still opens the database it sealed. That distinction is the #554 lesson:
+# trimming here would silently change what a legitimate passphrase is.
+#
+# Stored-blank on a re-run, stated rather than left to inference (AC4): a blank
+# line already in .env is still recognised as a stored value and is PRESERVED, not
+# silently replaced — replacing it would rotate the KEK and orphan every envelope
+# wrapped under it, which is the very failure this ladder exists to prevent. Such an
+# install is caught fail-closed one step later instead: the boot gate
+# (`core/engine/backend.py` `BackendConfig`) now refuses a whitespace-only
+# passphrase as not-supplied, so the core will not serve on a space-derived KEK.
+# Repairing the stored blank is then a deliberate, operator-present act, not a
+# side effect of re-running the installer.
 DB_PASSPHRASE="${VENYA_DB_PASSPHRASE:-}"
+DB_PASSPHRASE_SUPPLIED="${DB_PASSPHRASE//[[:space:]]/}"
 STORED_ENV_FILE="$INSTALL_DIR/.env"
 STORED_DB_PASSPHRASE=""
 if [ -f "$STORED_ENV_FILE" ]; then
     STORED_DB_PASSPHRASE=$(sed -n 's/^VENYA_DB__PASSPHRASE=//p' "$STORED_ENV_FILE" | head -n1)
 fi
 if [ -n "$STORED_DB_PASSPHRASE" ]; then
-    if [ -n "$DB_PASSPHRASE" ] && [ "$DB_PASSPHRASE" != "$STORED_DB_PASSPHRASE" ]; then
+    # #570: the LEFT half of this test asks the SUPPLIED copy, because the ruling is that a
+    # whitespace-only VENYA_DB_PASSPHRASE takes the SAME path as unset. As shipped it did
+    # not: one space over a stored real passphrase tripped the rotation abort and told the
+    # operator their re-run would orphan encrypted rows, when nothing was being rotated —
+    # the stored value is taken verbatim three lines below. The RIGHT half stays a
+    # byte-for-byte comparison on both sides: this is the supplied? decision, never a
+    # normalization, and a stored value whose spaces are content is still the secret that
+    # opens the database. A blank line already in .env stays handled as the header above
+    # describes: preserved, not replaced.
+    if [ -n "$DB_PASSPHRASE_SUPPLIED" ] && [ "$DB_PASSPHRASE" != "$STORED_DB_PASSPHRASE" ]; then
         error "VENYA_DB_PASSPHRASE does not match the stored value in $STORED_ENV_FILE."
         error "Rotating it would make existing encrypted DB secrets undecryptable."
         error "Aborting — no changes made."
@@ -163,7 +192,7 @@ if [ -n "$STORED_DB_PASSPHRASE" ]; then
     fi
     DB_PASSPHRASE="$STORED_DB_PASSPHRASE"
     info "Existing install: reusing stored server passphrase from $STORED_ENV_FILE."
-elif [ -z "$DB_PASSPHRASE" ]; then
+elif [ -z "$DB_PASSPHRASE_SUPPLIED" ]; then
     if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
             venya_read_secret_confirm "Enter server encryption passphrase" DB_PASSPHRASE
     else
@@ -344,10 +373,14 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     info "Configuring admin mTLS..."
 
     # Passphrase acquisition: prompt when interactive, strong random when
-    # piped/unattended. Either way validated non-empty — an empty passphrase
-    # would silently yield an UNENCRYPTED admin CA key. Nobody needs to
-    # memorize a CA key passphrase, so unattended keeps the strong random
-    # default; typing is for delivery hygiene, not for replacing randomness.
+    # piped/unattended. Either way the gate below tests EMPTINESS (`-z`), not
+    # materiality — an all-whitespace value is truthy to `-z` and would be accepted
+    # here. #570 states this plainly because the word that used to sit in this comment,
+    # "validated", reads like a coverage claim about the whole tree and is not one: the
+    # admin CA plane is issue 554's row (server/ca.py, cli), and the DB plane is the
+    # ladder above. Nobody needs to memorize a CA key passphrase, so unattended keeps
+    # the strong random default; typing is for delivery hygiene, not for replacing
+    # randomness.
     #
     # Re-run idempotency (ticket installer-rerun-admin-ca-passphrase-mismatch):
     # an existing install PRESERVES the encrypted admin CA key (has_ca guard

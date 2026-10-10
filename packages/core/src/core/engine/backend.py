@@ -166,6 +166,20 @@ class BackendConfig:
         wal_mode: bool = True,
         audit_enabled: bool = True,
     ) -> None:
+        # #570: a passphrase made only of whitespace carries no material, so it answers
+        # the same question unset answers — "not provided". This is the predicate shape
+        # the tree already ships for the CA plane (``server/ca.py`` ``_load_passphrase()``
+        # and the CLI's ``_admin_ca_passphrase_or_none()``, both #554/#547), applied to the
+        # DB KEK plane, where the stakes are the ones ``KekPassphraseMismatchError``
+        # states: a value of one space derives a WORKING KEK for new wrappings and can
+        # never unwrap what is already stored. The refusal reuses the sentence already on
+        # the line below — no new wording, same message as unset.
+        #
+        # DENY, never TRIM: only the SUPPLIED? decision looks at the stripped form. A
+        # passphrase whose spaces are content is stored byte-for-byte and still derives
+        # the key it always derived, so an existing encrypted database keeps opening.
+        if passphrase is not None and not passphrase.strip():
+            passphrase = None
         if passphrase is None and kek is None:
             raise BackendConfigurationError("Either passphrase or kek must be provided")
         if kek is not None and len(kek) != KEK_SIZE:
