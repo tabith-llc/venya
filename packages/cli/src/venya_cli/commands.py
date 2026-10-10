@@ -4673,6 +4673,27 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
             )
             return 1
 
+        # #569: the complementary shape, which the gate above does not cover — the admin
+        # CA key at rest is PLAINTEXT while a real passphrase IS configured. As shipped,
+        # that pairing walked straight into the loader below and OpenSSL answered the
+        # operator in its own words through the backstop handler at the foot of this
+        # function ("Failed to sign admin certificate: Password was given but private key
+        # is not encrypted."). The refusal was already correct in shape — rc 1, nothing
+        # written — but #541 ruled this posture refuses loudly in OUR words, so the
+        # `is_encrypted` fact that is computed one line above now decides it here, before
+        # the loader is reached at all.
+        #
+        # The words are the shipped #547 sentence, byte-for-byte, and they are TAKEN FROM
+        # `_admin_ca_no_passphrase_refusal()` rather than retyped here so the two cannot
+        # drift; no new operator-facing wording is authored by this leg. The first line is
+        # the whole refusal: it says REFUSED, says the CA key must never be stored this
+        # way, and says nothing was written — all three are exactly true of this posture.
+        # The rest of that shipped block is the passphrase-not-set repair steps, which
+        # would point at a variable this operator already set.
+        if not is_encrypted and passphrase:
+            print(_admin_ca_no_passphrase_refusal().split("\n", 1)[0], file=sys.stderr)
+            return 1
+
         ca_key = serialization.load_pem_private_key(key_data, password=passphrase.encode() if passphrase else None)
         ca_cert = x509.load_pem_x509_certificate(ca_cert_path.read_bytes())
 
