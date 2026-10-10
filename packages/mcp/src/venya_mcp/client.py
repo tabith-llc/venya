@@ -81,6 +81,46 @@ def _resolve_ca_cert() -> str | None:
     return None
 
 
+#: The anchored-only posture in the shipped words of ``_bootstrap_tls_verify`` below (#571). The
+#: repair sentence and the posture sentence are quoted VERBATIM from that function so the
+#: constructor seam and the startup resolver read the same; ``_bootstrap_tls_verify`` itself is
+#: left exactly as it ships (#540's ruled False-escape path is hands-off), which is why this is a
+#: quoted constant rather than a shared helper.
+ANCHORED_ONLY_REFUSAL = (
+    "Set the VENYA_CA_CERT environment variable to the path of the "
+    "Venya CA bundle (e.g. /etc/venya/ca/ca-bundle.crt). "
+    "TLS verification cannot be silently disabled."
+)
+
+
+def _require_anchored_verify(verify: object) -> str | bool:
+    """The constructor seam's anchored-or-refuse check (#571), BEFORE any transport exists.
+
+    Same posture the CLI bearer dial and the FIDO2 ceremony dial landed in #530/#533/#536: a
+    value that is not the Venya CA bundle — or the ruled alpha debug escape, exactly ``False`` —
+    is refused, never defaulted. ``True`` is the one that matters, because httpx2 sends it to the
+    host OS trust store: ``_config.py`` ``create_ssl_context`` builds
+    ``truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)`` when ``verify is True``, which is the
+    machine's CA set, not ours.
+
+    The refusal lands before ``httpx2.AsyncClient`` is constructed, so a refused call never dials.
+    """
+    if verify is True or verify is None:
+        raise RuntimeError(
+            f"VenyaClient was built with verify={verify!r}, which is the host's OS trust store, "
+            f"not the Venya CA. Pass the CA bundle path (or False for the alpha debug escape). "
+            f"{ANCHORED_ONLY_REFUSAL}"
+        )
+    if isinstance(verify, str) and verify:
+        return verify
+    if verify is False:
+        return False
+    raise RuntimeError(
+        f"VenyaClient was built with verify={verify!r}, which is neither the Venya CA bundle path "
+        f"nor the alpha debug escape (False). {ANCHORED_ONLY_REFUSAL}"
+    )
+
+
 # Last-fuse read timeout for the long-running execute call: server→executor
 # relay 300s < nginx proxy_read_timeout 330s < 340s here, so a clean upstream
 # error always reaches the agent before this client gives up. The former 30s
@@ -99,17 +139,25 @@ class VenyaClient:
     3. Update config file in-place with new token (atomic write)
     4. If refresh also fails → SessionExpiredError (human must re-auth)
 
-    TLS: verified against VENYA_CA_CERT at startup. No silent downgrade.
+    TLS: verified against VENYA_CA_CERT at startup. No silent downgrade. The constructor takes no
+    trust default (#571): ``verify`` must name the Venya CA bundle, or be exactly ``False`` for
+    the ruled alpha debug escape. ``True`` — or nothing at all — is refused before a transport
+    exists, because httpx2 reads ``True`` as the host OS trust store.
     """
 
     def __init__(
         self,
         config: MCPConfig,
-        verify: bool | str = True,
+        verify: str | bool | None = None,
     ) -> None:
+        # #571: no default trust. ``None`` is the OMITTED case, not "take what the library
+        # defaults to" — it refuses with the same CA-naming words a ``True`` would. The annotation
+        # stays permissive (``_bootstrap_tls_verify`` returns ``bool | str`` and server.py is not
+        # this leg's file); the enforcement is the guard, which runs before any transport exists.
+        anchored = _require_anchored_verify(verify)
         self.config = config
         self._http = httpx2.AsyncClient(
-            verify=verify,
+            verify=anchored,
             timeout=httpx2.Timeout(30.0, connect=10.0),
         )
         self._access_token: str | None = config.access_token
