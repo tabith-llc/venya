@@ -28,15 +28,33 @@ fire before ``output_dir.mkdir()`` (see ``server/ca.py`` "refuse before ANY
 filesystem work").
 """
 
+import inspect
+import os
 import stat
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from venya_cli.commands import _admin_ca_no_passphrase_refusal, cmd_admin_init_admin_ca
+from venya_cli.commands import (
+    _admin_ca_no_passphrase_refusal,
+    cmd_admin_generate_admin_cert,
+    cmd_admin_init_admin_ca,
+)
 
 PASSPHRASE = "test_passphrase_547"
+
+
+def _admin_ca(tmp_path: Path, phrase: str) -> Path:
+    """A real admin CA on disk, minted through the shipped #547 path with `phrase`."""
+    os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = phrase
+    ca_dir = tmp_path / "admin-ca"
+    assert cmd_admin_init_admin_ca(_args(ca_dir)) == 0, "admin CA mint failed"
+    return ca_dir
+
+
+def _gen_args(ca_dir: Path, out: Path) -> object:
+    return type("Args", (), {"identity": "admin@example.com", "ca_dir": str(ca_dir), "output_dir": str(out)})()
 
 
 def _args(output_dir) -> object:
@@ -195,3 +213,86 @@ class TestEncryptedPathStillWorks:
         assert serialization.load_pem_private_key(key_bytes, password=padded.encode()) is not None
         with pytest.raises(ValueError):
             serialization.load_pem_private_key(key_bytes, password=padded.strip().encode())
+
+
+class TestAdminCACertReadGate554:
+    """#554 addendum: `cmd_admin_generate_admin_cert`'s CA-key read gate denies blank too.
+
+    MEASURED FIRST, and said plainly because it changes what these cells can prove: on
+    this command the blank case was already refused ONE GUARD EARLIER — the #547a
+    leaf-key guard at the top of the function reads the same variable and denies unset,
+    empty and whitespace-only. Probed against the base `commands.py` and against this
+    branch, a `"   "` run answers with the #547a refusal and writes nothing, both times.
+    So the edit has no operator-visible effect here today; what it fixes is the gate
+    itself, which as shipped treated a value of spaces as a passphrase and was one
+    reordering away from handing `b"   "` to the loader — the exact truthiness shape
+    #554 was filed for. `N3` pins the gate's shape so a future edit cannot quietly put
+    the raw truthiness test back (the same `inspect.getsource` technique #541's suite
+    uses to keep a deleted warning from coming back).
+    """
+
+    def test_n1_blank_passphrase_refuses_and_writes_nothing(self, tmp_path, monkeypatch, capsys):
+        """Reachable half: a blank value gets the refusal, and no certificate is minted."""
+        ca = _admin_ca(tmp_path, " test ca phrase 547 with spaces ")
+        out = tmp_path / "leaf"
+        monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", "   ")
+
+        assert cmd_admin_generate_admin_cert(_gen_args(ca, out)) == 1
+        assert not out.exists(), f"a blank passphrase still produced {out}"
+        err = capsys.readouterr().err
+        assert "REFUSED" in err and "VENYA_ADMIN_CA_KEY_PASSPHRASE" in err
+
+    def test_n2_real_passphrase_still_decrypts_the_ca_key(self, tmp_path, monkeypatch):
+        """Positive half: the gate must not break a correctly-configured CA read."""
+        phrase = " test ca phrase 547 with spaces "
+        ca = _admin_ca(tmp_path, phrase)
+        out = tmp_path / "leaf"
+        monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", phrase)
+
+        assert cmd_admin_generate_admin_cert(_gen_args(ca, out)) == 0
+        assert (out / "admin.crt").exists() and (out / "admin.key").exists()
+        # Spaces are content, not blankness: the untrimmed phrase is the secret on both
+        # halves of this run, and the stripped form is a different secret.
+        leaf = serialization.load_pem_private_key((out / "admin.key").read_bytes(), password=phrase.encode("utf-8"))
+        assert leaf is not None
+        with pytest.raises(ValueError):
+            serialization.load_pem_private_key((out / "admin.key").read_bytes(), password=phrase.strip().encode())
+
+    def test_n3_the_read_gate_uses_the_shared_predicate_not_raw_truthiness(self):
+        """The gate-shape cell, and this branch's non-vacuity proof for the addendum.
+
+        RED at the base `commands.py`: the read gate read the variable directly with
+        `if is_encrypted and not passphrase`, so a value of spaces counted as a
+        passphrase there. GREEN now: it asks the same helper the write path asks.
+        """
+        source = inspect.getsource(cmd_admin_generate_admin_cert)
+        assert "_admin_ca_passphrase_or_none()" in source, "the CA read gate must use the shared predicate"
+        assert (
+            'os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")' not in source
+        ), "the read gate may not re-read the variable raw — that is the #554 shape"
+
+    def test_n4_plaintext_ca_key_plus_blank_refuses_earlier_not_loads(self, tmp_path, monkeypatch):
+        """The observable the addendum asked to state, measured rather than assumed.
+
+        The server half (#554 F3) had a plaintext key at rest LOAD as unset once blank
+        stopped counting as a passphrase. That consequence does NOT reach this command:
+        the #547a guard refuses blank before the CA file is read, so a plaintext admin
+        CA key at rest is never opened by a spaces-only value here. Pinned so the two
+        halves are not mistaken for each other if the guard order ever changes.
+        """
+        phrase = " test ca phrase 547 with spaces "
+        ca = _admin_ca(tmp_path, phrase)
+        key = serialization.load_pem_private_key((ca / "admin-ca.key").read_bytes(), password=phrase.encode())
+        (ca / "admin-ca.key").write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        out = tmp_path / "leaf"
+        monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", "   ")
+
+        assert cmd_admin_generate_admin_cert(_gen_args(ca, out)) == 1
+        assert not out.exists()
+        assert b"ENCRYPTED" not in (ca / "admin-ca.key").read_bytes(), "the refusal rewrote the CA key"

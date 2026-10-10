@@ -4646,8 +4646,23 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
         return 1
 
     try:
-        # Load admin CA key
-        passphrase = os.environ.get("VENYA_ADMIN_CA_KEY_PASSPHRASE")
+        # Load admin CA key. #554: this read gate now asks the same question the write
+        # path asks, through ``_admin_ca_passphrase_or_none()`` — unset, empty and
+        # whitespace-only are one answer, "no passphrase".
+        #
+        # Measured, and said plainly: on THIS command the blank case was already refused
+        # one guard earlier (the #547a leaf-key guard above reads the same variable and
+        # denies blank), so the probe showed no operator-visible change here — a blank
+        # value answers with the #547a refusal either way. What this edit fixes is the
+        # gate itself: as written it treated a value of spaces as a passphrase and was
+        # about to hand `b"   "` to the loader, which is the exact truthiness shape #554
+        # was filed for. Routing it through the shared predicate means the next caller
+        # that reaches this line — or any reordering of the guard above — cannot inherit
+        # the hole. Defense in depth, not a new behavior for today's operator.
+        #
+        # Nothing is trimmed: a passphrase whose spaces are content is delivered
+        # byte-for-byte and still decrypts the CA key it sealed.
+        passphrase = _admin_ca_passphrase_or_none()
         key_data = ca_key_path.read_bytes()
         is_encrypted = b"ENCRYPTED" in key_data
 
