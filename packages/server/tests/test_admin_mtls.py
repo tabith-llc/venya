@@ -184,7 +184,9 @@ class TestAdminCALoad:
         # Set wrong passphrase
         os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = "wrong_passphrase"
 
-        with pytest.raises(RuntimeError, match="Failed to decrypt"):
+        # #574: this match pinned the OLD wording ("Failed to decrypt"); the refuse still fires, the
+        # sentence is now the owner's ruled class shape. Same assertion class, new bytes.
+        with pytest.raises(RuntimeError, match="could not be decrypted"):
             manager._load_ca_key()
 
 
