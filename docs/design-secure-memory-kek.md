@@ -187,67 +187,114 @@ proves otherwise.**
 
 ## 6. The isolation-test rewrite (a rewrite, not a deletion)
 
-`packages/core/tests/test_capability_isolation.py` today asserts the module is NOT used --
-`test_only_secure_memory_uses_mlock` (`:101`) scans every `core.engine` submodule for the symbol
-set `{secure_mlock, secure_munlock, secure_zero, SecureBuffer, _load_system_lib}` (`:105`), plus
-per-module cells: `test_core_class_does_not_use_secure_memory` (`:121`),
-`test_backend_does_not_use_secure_memory` (`:132`), `test_encryption_does_not_use_secure_memory`
-(`:143`), `test_rate_limiter_does_not_use_secure_memory` (`:154`),
-`test_factory_does_not_use_secure_memory` (`:165`), and the three IAM cells (`:176`, `:187`,
-`:209`). Two more stay as they are: `test_cli_does_not_import_secure_memory` (`:81`) and the
-module-export cells (`:291`, `:299`).
+`packages/core/tests/test_capability_isolation.py` now carries the allowlist-with-teeth family
+this section describes -- it is no longer a pure "the module is NOT used" note. Measured at
+`5cb9f8d`, by symbol (the file's cells live in classes, so cite the def name, not a line):
 
-After the change the assertions become:
+- The primitives and the cache owner, and nothing else, may name a protected-memory shape:
+  `test_protected_memory_allowlist_is_exactly_two_files`, `test_allowlist_count_check_is_failable`,
+  `test_only_allowlisted_files_use_mlock`, `test_the_allowlisted_home_really_does_hold_the_shapes`.
+- The scan itself has teeth, with a proven-negative half per shape:
+  `test_scan_flags_a_planted_third_buffer`,
+  `test_scan_flags_a_direct_ctypes_pin_that_names_no_symbol`,
+  `test_scan_flags_a_dynamic_lookup_of_the_pin_syscall`,
+  `test_documentation_of_a_shape_is_not_a_use_of_it`,
+  `test_a_module_that_does_not_parse_is_not_cleared`.
+- The per-module ban stays as nine cells: `test_core_class_does_not_use_secure_memory`,
+  `test_backend_uses_the_cache_but_not_the_primitives`,
+  `test_encryption_does_not_use_secure_memory`,
+  `test_rate_limiter_does_not_use_secure_memory`, `test_factory_does_not_use_secure_memory`, and
+  the four IAM cells `test_iam_models_do_not_use_secure_memory`,
+  `test_iam_role_manager_does_not_use_secure_memory`,
+  `test_iam_session_manager_does_not_use_secure_memory`,
+  `test_iam_enrollment_manager_does_not_use_secure_memory` -- plus `test_direct_call_ban_is_failable`
+  as the negative half of the ban, and `test_core_factory_does_not_enable_mlock_by_default` /
+  `test_core_does_not_mlock_by_default` for the default-off posture.
+- Two cells that an earlier draft of this note named in present tense no longer exist under those
+  names, and what answers their posture today is named above: the module-wide scan is
+  `test_only_allowlisted_files_use_mlock` (it replaced `test_only_secure_memory_uses_mlock`), and the
+  backend is the cache OWNER, so its cell is `test_backend_uses_the_cache_but_not_the_primitives`
+  (it replaced `test_backend_does_not_use_secure_memory` -- the backend is now expected to use the
+  cache and forbidden only the primitives, so a "does not use secure memory" cell would be wrong).
+- Unchanged in intent, still present: `test_secure_memory_requires_linux`,
+  `test_secure_memory_fails_without_cap`, `test_secure_buffer_auto_unlock_on_error`,
+  `test_cli_does_not_import_secure_memory`, and the two module-export cells
+  `test_secure_memory_not_in_core_module_exports` and
+  `test_secure_memory_not_in_iam_module_exports`.
+
+*Currency note (2026-10-10): every line pin this section carried was stale -- the cells moved when the
+rewrite landed -- so the whole section was re-derived by symbol grep against `5cb9f8d`. The section
+cites symbols from here on for that reason.*
+
+The rewrite ships these assertions:
 
 1. **Allowlist with teeth.** The module-wide scan keeps running, but against an explicit
    allowlist of exactly two files: `secure_memory.py` (the primitives) and the cache owner.
    Anything else in `core.engine` naming `SecureBuffer`, `secure_mlock`, `secure_munlock` or
    `secure_zero` fails. The count of allowlisted files is asserted, so adding a third protected
-   buffer is a deliberate edit to a test, not an accident.
+   buffer is a deliberate edit to a test, not an accident -- and `test_allowlist_count_check_is_failable`
+   is the cell that proves that assertion can actually fail.
 2. **Direct-call ban stays.** `backend.py`, `core.py`, `encryption.py`, `factory.py`, the rate
    limiter and the IAM modules must still not call `secure_mlock`/`secure_zero` directly -- they
    go through the cache. The nine per-module cells are kept in this form (they do not become
-   vacuous).
+   vacuous), and `test_direct_call_ban_is_failable` is their paired negative.
 3. **Positive cell.** The protected path IS used for the KEK: after `bootstrap_kek()`, the cache
    reports a populated buffer, `config.kek` intake is `None`, and a reader gets a read-only
-   memoryview. Paired with decision 1, this is the cell acceptance criterion 2 asks for.
+   memoryview. Those are `test_bootstrap_kek_fills_the_cache_and_clears_the_intake` and
+   `test_intake_kek_is_moved_into_the_cache_at_construction`. Paired with decision 1, this is the
+   cell acceptance criterion 2 asks for.
 4. **Paired negatives (the truth-table rule).** Release then view raises
-   `SecureBufferReleasedError`; an unpinned cache (mlock mocked to fail with `EPERM`) still
-   serves and still zeroizes; a wrong-key cache fails the sentinel at boot rather than serving;
-   `secure_zero(memoryview)` raises instead of returning; a different-length `write` raises.
-   Plus the existing "mlock failure stays graceful in the context manager" shape (`:63-80`).
-5. **Capability cells stay, and get fixed.** `test_systemd_unit_has_cap_ipc_lock` (`:397`),
-   `test_systemd_unit_no_cap_ipc_lock` (`:412`), `test_executor_no_bounding_caps` (`:426`) remain.
-   All three of these, plus the two runtime cells (`test_core_running_has_cap_ipc_lock` `:437`,
-   `test_executor_running_no_cap_ipc_lock` `:449`), are dead as written on every host:
-   - the path finder (`:347-355`) walks a list with `/etc/systemd/system/...` first and
-     `/lib/systemd/system/...` last, and OVERWRITES on each match without an existence check, so
-     the `/lib` path always wins; the installer writes `/etc` (`install-venya-core.sh:1076`), and
-     `_parse_unit_file` (`:328-345`) returns an empty dict for a missing file
-     (`FileNotFoundError: pass`). Net effect on a correctly installed core: the positive cell
-     (`:397`) reads a file that does not exist, sees no directives, and SKIPS -- it can never
-     pass; and both executor negatives (`:412`, `:426`) read the same missing file, get an empty
-     dict, and PASS VACUOUSLY. A grant added to `/etc/systemd/system/venya-executor.service`
-     tomorrow would not be caught by either of them. That is the truth-table failure mode: the
-     negative half checks nothing. (The served-VM outcome above is DERIVED from this code path --
-     `/etc` is the install target (`install-venya-core.sh:1072` defines
-     `SYSTEMD_DIR="/etc/systemd/system"`) and `/lib` is never written by the installer -- not
-     observed on a VM in this leg.)
-   - the runtime helper (`:358-376`) runs `pgrep -u <user> -x venya-core`, passing the SERVICE
-     name as the USERNAME, while the unit uses `User=venya` and the process is `venya-server`
-     (`systemd/venya-core.service:7,9`); `pgrep` on a non-existent user exits 2 (measurement [K]),
-     so the pid lookup never succeeds and the cell skips.
-   Observed in this venue: `pytest packages/core/tests/test_capability_isolation.py -rs` gives
-   20 passed, 3 skipped, and the skip reasons are exactly these paths (`:407` "has no
-   AmbientCapabilities", `:441`/`:453` "service is not running"). This matters for ruling item 5
-   ("no pinning claim until physically proven"): the suite has never proven it, and no green run
-   of this file can be read as proof. The code leg fixes the finder (prefer the path that
-   EXISTS, `/etc` ahead of `/lib`, and FAIL rather than skip when the unit is installed but
-   unreadable) and the helper (`pgrep -u venya -x venya-server`) so the cells can pass or
-   FAIL for the right reason.
-6. **The CLI half is unchanged.** `packages/cli/tests/test_capability_isolation.py` keeps
-   forbidding `core.*` imports outright (`:25-36`) and secure-memory symbols in `venya_cli`
-   sources (`:38-45`). The CLI must not import this module to get the contract (section 8).
+   `SecureBufferReleasedError` (`test_view_after_release_raises`); an unpinned cache (mlock mocked
+   to fail with `EPERM`) still serves and still zeroizes
+   (`test_unpinned_cache_still_serves_and_still_zeroizes`); a wrong-key cache fails the sentinel at
+   boot rather than serving (`test_wrong_key_cache_fails_the_sentinel_rather_than_serving`);
+   `secure_zero(memoryview)` raises instead of returning
+   (`test_secure_zero_on_a_reader_view_raises_instead_of_returning`); a different-length `write`
+   raises (`test_different_length_write_on_the_resident_kek_raises`). Plus the existing "mlock
+   failure stays graceful" shape: `test_secure_memory_fails_without_cap` and
+   `TestGracefulMlockFailureShape.test_unpinned_cache_construction_never_raises`.
+5. **Capability cells stay, and their finders got fixed.** The five cells remain:
+   `test_systemd_unit_has_cap_ipc_lock`, `test_systemd_unit_no_cap_ipc_lock`,
+   `test_executor_no_bounding_caps`, `test_core_running_has_cap_ipc_lock`,
+   `test_executor_running_no_cap_ipc_lock`. All five were dead as originally written -- the path
+   finder walked its candidate list overwriting on every match, so `/lib` always won while the
+   installer writes `/etc` (`install-venya-core.sh` defines `SYSTEMD_DIR="/etc/systemd/system"` and
+   renders the core unit to `$SYSTEMD_DIR/venya-core.service`); `_parse_unit_file` folded an absent
+   file into `{}`, so the positive cell skipped and both executor negatives passed vacuously; and the
+   runtime helper passed the SERVICE name as the pgrep USERNAME, so `pgrep` exited 2 and the runtime
+   cells skipped unconditionally. That is the truth-table failure mode: the negative half checked
+   nothing. Those three handlers are fixed, and the fixes are pinned by their own cells rather than
+   by a prose claim:
+   - `_find_unit_file` now takes the first candidate that EXISTS, `/etc` ahead of `/lib`, and returns
+     `None` only when no candidate exists -- `test_find_unit_prefers_existing_etc_over_lib`,
+     `test_find_unit_falls_back_to_lib_when_etc_absent`,
+     `test_find_unit_none_when_no_candidate_exists`.
+   - `_parse_unit_file` answers `None` for an absent file and `{}` for a file that exists but carries
+     no such directive -- "not installed here" and "installed with no such directive" are different
+     verdicts -- `test_parse_unit_absent_vs_present_empty`,
+     `test_positive_cell_passes_on_correct_etc_install`,
+     `test_poisoned_executor_unit_fails_the_negative_cell`,
+     `test_poisoned_executor_bounding_caps_fails_the_cell`.
+   - `_get_running_pid` runs `pgrep -u <user> -x <process>` with the names derived from the shipped
+     units (both use `User=venya`; core `ExecStart` is `venya-server`, executor's is
+     `venya-executor`) instead of the service name -- `test_get_running_pid_wiring_exit0`,
+     `test_get_running_pid_wiring_exit1`, `test_get_running_pid_wiring_exit2`,
+     `test_running_cells_read_proc_status_for_resolved_pid`.
+   Observed in this venue at `5cb9f8d`: `pytest tests/test_capability_isolation.py -q -rs` gives
+   **47 passed, 7 skipped**, and every skip now names its missing prerequisite rather than a broken
+   finder ("no venya-core.service unit exists on this host (/etc and /lib checked)", "no
+   'venya-server' process running as 'venya' on this host", "no served venya-server on this host --
+   physically UNVERIFIED (fleet window)"). This still matters for ruling item 5 ("no pinning claim
+   until physically proven"): the two `TestServedCorePinningProof` cells
+   (`test_served_core_limits_report_a_locked_memory_budget`,
+   `test_served_core_reports_a_locked_page_in_smaps_rollup`) skip on a non-fleet host, so no green
+   run of this file on a dev machine is proof of a physical pin. The fix is to the harness, not to
+   that ceiling.
+6. **The CLI half is unchanged in intent.** `packages/cli/tests/test_capability_isolation.py` keeps
+   forbidding `core.*` imports outright (`test_no_core_imports_in_source`) and secure-memory symbols
+   in `venya_cli` sources (`test_no_secure_memory_symbols_in_source`, with the import-probe
+   `test_importing_cli_does_not_pull_secure_memory`). The CLI must not import this module to get the
+   contract (section 8).
 
 ## 7. The ladder beyond this rung (recorded design items -- NOT this leg)
 
