@@ -383,6 +383,13 @@ users are supported for ceremonies. macOS is handled by the same `.sh`
 installer (IOKit HID — no
 udev rules needed).
 
+Renewal follows the same rule: `venya admin cert renew` mints a fresh admin
+certificate on a login session plus one security-key ceremony, so on Windows it
+is a console action like the one above. What that renewed pair can and cannot
+serve today is stated once, in the opening note of
+[cert-rotation-runbook.md](cert-rotation-runbook.md); flag table:
+[cli-reference.md](cli-reference.md).
+
 **macOS workstation + core in a lima VM:** the server certificate is issued
 for `CORE_HOSTNAME` (default: the VM's `$(hostname)`, e.g. `lima-venya-ubuntu`),
 while lima forwards the VM's :443 to the mac's localhost — so TLS hostname
