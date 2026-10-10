@@ -4596,6 +4596,38 @@ def _admin_leaf_key_encrypted_notice(key_path: Path) -> str:
     )
 
 
+def _admin_ca_plaintext_key_refusal() -> str:
+    """#569 addendum: the two shipped #547 lines that are TRUE of the plaintext-key posture.
+
+    ``venya admin generate-admin-cert`` meets this posture when the admin CA key sits
+    unencrypted at rest while ``VENYA_ADMIN_CA_KEY_PASSPHRASE`` carries a real value, so
+    the shipped block cannot be printed whole — its numbered repair steps tell the
+    operator to set a variable they already set. Two lines of that block do state this
+    posture and they are what the operator can act on: the headline refusal (which key,
+    which posture, that nothing was written) and the shipped ``Reference:`` line (where
+    the repair lives). Both are TAKEN FROM ``_admin_ca_no_passphrase_refusal()`` and are
+    never retyped here, so no byte of approved wording can drift (the #554 precedent,
+    and the same class this leg's B2 cell guards).
+
+    The ``Reference:`` line is located BY PREFIX, never by index: a future edit that adds
+    or moves block lines must not silently mis-aim the picker. If the prefix locates
+    anything other than exactly one line — removed, or duplicated so the choice is
+    ambiguous — this raises instead of quietly printing a shorter refusal. Fail-closed
+    holds in that case too: the caller writes nothing and still exits non-zero.
+    """
+    prefix = "Reference:"
+    lines = _admin_ca_no_passphrase_refusal().splitlines()
+    references = [line for line in lines if line.startswith(prefix)]
+    if len(references) != 1:
+        raise AssertionError(
+            f"the shipped admin CA refusal block located {len(references)} "
+            f"{prefix!r} lines, expected exactly 1 — refusing to print a shorter "
+            "refusal than the shipped block supports (fix the picker or the block, "
+            "never both silently)"
+        )
+    return "\n".join([lines[0], references[0]])
+
+
 def cmd_admin_generate_admin_cert(args: Any) -> int:
     """Sign an admin client certificate using the admin CA.
 
@@ -4671,6 +4703,26 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
                 "Error: CA key is encrypted but VENYA_ADMIN_CA_KEY_PASSPHRASE is not set",
                 file=sys.stderr,
             )
+            return 1
+
+        # #569: the complementary shape, which the gate above does not cover — the admin
+        # CA key at rest is PLAINTEXT while a real passphrase IS configured. As shipped,
+        # that pairing walked straight into the loader below and OpenSSL answered the
+        # operator in its own words through the backstop handler at the foot of this
+        # function ("Failed to sign admin certificate: Password was given but private key
+        # is not encrypted."). The refusal was already correct in shape — rc 1, nothing
+        # written — but #541 ruled this posture refuses loudly in OUR words, so the
+        # `is_encrypted` fact that is computed one line above now decides it here, before
+        # the loader is reached at all.
+        #
+        # The words are shipped, not authored: `_admin_ca_plaintext_key_refusal()` picks
+        # the headline line and the `Reference:` line out of `_admin_ca_no_passphrase_refusal()`
+        # by prefix, so the operator gets which key, which posture, that nothing was
+        # written, AND where the repair is documented — the four things #569's Problem
+        # asks of a refusal. The off-posture middle of that block (the passphrase-not-set
+        # repair steps) is what the picker leaves out, not the whole tail.
+        if not is_encrypted and passphrase:
+            print(_admin_ca_plaintext_key_refusal(), file=sys.stderr)
             return 1
 
         ca_key = serialization.load_pem_private_key(key_data, password=passphrase.encode() if passphrase else None)
