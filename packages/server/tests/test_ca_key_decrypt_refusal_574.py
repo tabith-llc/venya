@@ -30,6 +30,7 @@ Everything measured at base 5cb9f8d8eccde773127e5900259f4c8a15c41f2b; the librar
 absent were read off a live probe of cryptography 50.0.0 at that base, not from memory.
 """
 
+import logging
 import re
 from pathlib import Path
 
@@ -174,6 +175,79 @@ class TestNoPathFallback574:
     def test_none_and_empty_path_take_the_same_fallback_headline(self) -> None:
         assert _ca_key_decrypt_refusal(None) == _ca_key_decrypt_refusal("")
         assert _ca_key_decrypt_refusal(None).startswith("The CA key could not be decrypted ")
+
+
+class TestSurfacesCarryNoLibraryVoice574:
+    """AC2's other half — the three surfaces the AC names, all in ONE cell.
+
+    The AC reads: "the Venya sentence appears AND no library substring surfaces — stderr, stdout, or
+    log. A positive-only cell does not close this AC." The cells above assert the first clause (and,
+    at :118-119, that the library sentence still rides the chained cause for support). This cell owns
+    the second clause across all three surfaces at once.
+
+    What is true at this base, said plainly so the cell is not mistaken for a bug report: there is NO
+    live leak. ``_deserialize_key`` raises and prints nothing, and nothing at that seam logs the
+    exception with its cause. So the refusal's own stderr/stdout are empty and the log carries no
+    library voice — and that holds BY FACT, not by check, until this cell exists. The regression this
+    guards is the next seat adding one line, ``logger.exception("CA key decrypt failed")`` at the raise
+    being the obvious candidate: ``logging`` renders a chained cause in full, so that one line would
+    put cryptography's sentence into the log record while our own sentence stayed perfect on screen.
+    Both red controls in the report for this leg show exactly that happening and going red here.
+
+    Two honesty notes about shape, because a vacuous absence assertion is the failure mode:
+      * the log capture is proven LIVE inside the cell (a probe record is asserted PRESENT in
+        ``caplog.text`` before anything is asserted absent from it), so "absent from the log" is an
+        assertion about a captured stream, not about an empty one;
+      * the probe logger is this test's own ``venya.test574.capture_probe``, not a product logger, so
+        the cell proves the harness works without inventing product behavior it then depends on.
+    """
+
+    def test_all_three_surfaces_carry_our_words_and_no_library_voice(
+        self, root_manager: CAManager, monkeypatch, capsys, caplog
+    ) -> None:
+        monkeypatch.setenv(_ROOT_ENV, _WRONG)
+        # Capture at DEBUG on the product logger, so an added logger.info() would be seen too.
+        caplog.set_level(logging.DEBUG, logger="venya.ca")
+        probe = logging.getLogger("venya.test574.capture_probe")
+
+        with pytest.raises(RuntimeError) as excinfo:
+            root_manager.load_ca()
+
+        captured = capsys.readouterr()
+        probe.warning("capture-probe-574-live")
+
+        message = str(excinfo.value)
+        # First clause of AC2, restated here so the cell is a genuine paired negative in one place.
+        _assert_class_shape(message, expect_path=str(root_manager.ca_key_path))
+
+        # Liveness before absence: if the probe record is not in the captured stream, the stream is
+        # not being read and the absence assertions below would be vacuous. Fail loudly instead.
+        assert "capture-probe-574-live" in caplog.text, (
+            "the log surface is not being captured in this cell — the absence assertions below " "would prove nothing"
+        )
+
+        # Surface 1 and 2: this seam raises and never prints, so the refusal's own streams are empty.
+        # Emptiness is asserted first, then absence-by-containment, so a future print() shows up in
+        # the diff as a broken emptiness claim and not just a missing substring.
+        assert captured.out == "", f"stdout is not empty on the refusal: {captured.out!r}"
+        assert captured.err == "", f"stderr is not empty on the refusal: {captured.err!r}"
+
+        # Surface 3, and the belt-and-braces half of 1 and 2: no library voice anywhere, per surface.
+        for voice in _LIBRARY_VOICES:
+            assert voice not in captured.out, f"library voice on stdout: {voice!r}"
+            assert voice not in captured.err, f"library voice on stderr: {voice!r}"
+            assert voice not in caplog.text, (
+                f"library voice in the captured log: {voice!r} — a chained cause is being rendered "
+                f"to the log record, which is what #541's blanket rule forbids"
+            )
+
+        # The mechanism is still preserved internally (this is NOT a traceback-integrity check —
+        # :118-119 own that; this line says the surfaces are clean WHILE the cause is intact).
+        assert isinstance(excinfo.value.__cause__, ValueError)
+        assert "Incorrect password" in str(excinfo.value.__cause__), (
+            "precondition: the library sentence really exists in this process — if it does not, the "
+            "absence assertions above are vacuous because nothing was there to leak"
+        )
 
 
 class TestDoNotMovePins574:
