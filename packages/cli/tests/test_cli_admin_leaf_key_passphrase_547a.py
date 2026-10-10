@@ -25,10 +25,11 @@ bytes say ENCRYPTED" would let the next reader assume the credential works.
 The wording is part of the deliverable: both the refusal and the success readout state
 the fact, so an operator is never surprised twice.
 
-NOT ruled, and deliberately absent here: any minimum LENGTH for the passphrase. The
-owner asked whether an N should be explored and that research is open, so these cells
-assert the whitespace-only refusal and nothing about length — `test_no_length_rule_is_applied`
-holds that line from both directions.
+RULING SINCE THIS FILE WAS WRITTEN (#573, carrier n15): the length floor the owner ruled
+(15 Unicode code points, inclusive) now applies on these doors, so the placeholder that
+used to hold "no length rule" from both directions has been REPLACED by the real behavior
+(`test_below_floor_passphrase_now_refuses`). The whitespace-only cells above are untouched
+and still hold their own line: a blank value is "no passphrase", not "too short".
 """
 
 import datetime
@@ -294,14 +295,28 @@ class TestRefusalOrdering:
         err = capsys.readouterr().err
         assert "REFUSED" in err and "VENYA_ADMIN_CA_KEY_PASSPHRASE" in err
 
-    def test_no_length_rule_is_applied(self, monkeypatch):
-        """The boundary the owner has NOT ruled: a minimum length. A one-character
-        passphrase is accepted by this code because the ruled check is presence, not
-        strength — and a cell that asserted a length floor would be shipping an
-        un-defended number. If a length rule is ever ruled, THIS cell is the one that
-        gets replaced by the real behavior, not deleted."""
+    def test_below_floor_passphrase_now_refuses(self, tmp_path, capsys, monkeypatch):
+        """THE blessed flip (#573): this was the placeholder for an unruled length floor.
+
+        It shipped as `test_no_length_rule_is_applied`, asserting `== "x"` and carrying
+        its own instruction: "If a length rule is ever ruled, THIS cell is the one that
+        gets replaced by the real behavior, not deleted." The owner ruled it (s85:
+        "enforce a proper length passcode", floor N = 15 code points inclusive), so the
+        cell is REPLACED by the real behavior in this same name-slot — a one-character
+        value is now a refusal that writes nothing. No shipped check is softened: the
+        material-not-length posture this cell pinned still lives in #554's suite, and the
+        at-floor positive is `test_at_floor_passphrase_is_accepted_inclusive`.
+        """
+        ca_dir = _admin_ca(tmp_path)
         monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", "x")
-        assert _admin_leaf_key_passphrase_or_none() == "x"
+        out = tmp_path / "leaf"
+        assert cmd_admin_generate_admin_cert(_generate_args(ca_dir, out)) == 1
+        assert not out.exists(), "a below-floor passphrase still wrote a leaf key"
+        err = capsys.readouterr().err
+        assert "REFUSED" in err and "shorter than Venya's minimum" in err
+        assert "VENYA_ADMIN_CA_KEY_PASSPHRASE is set to a passphrase" in err
+        # Never the value, never its length (§6 law): the typed "x" must not appear.
+        assert "' x" not in err and "1 character" not in err
 
     def test_refusal_names_the_variable_and_the_fixing_command(self, tmp_path, capsys):
         ca_dir = _admin_ca(tmp_path)

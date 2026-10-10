@@ -104,17 +104,20 @@ def _real_key_pem() -> bytes:
 KEY = _real_key_pem()  # pragma: allowlist secret
 
 
-# Deterministic valid-PKCS7-tail negative constants (found offline 2026-09-30,
-# ~327 iterations): for SALT + WRONG passphrase "wrong-pw", the final CBC
-# plaintext block D_k(c_last) XOR c_prev ends in a strict pad-1 tail (0x01).
-# IV only steers block 0, so this blob's wrong-key decrypt has a VALID PKCS7
-# tail every run — pre-fix it restored 31 bytes of garbage behind the banner.
-# These are offline-found TEST VECTORS (salt/iv/ciphertext), NOT secrets; the
+# Deterministic valid-PKCS7-tail negative constants. #573 lengthened the passphrase this
+# vector is keyed to ("wrong-pw" is under the new 15-code-point floor), so the four blocks
+# were RE-DERIVED for the current passphrase — constructively rather than by search: fix
+# SALT/IV/C_LAST and a pad-1 tail P_last, then set C_PREV := D_k(C_LAST) XOR P_last, which
+# forces the final CBC plaintext block to end in 0x01 for THIS passphrase's derived key.
+# Same property as the 2026-09-30 offline find (a wrong-key decrypt with a VALID PKCS7
+# tail every run — pre-fix it restored 31 bytes of garbage behind the banner); only the
+# bytes moved, the assertion below is untouched.
+# These are constructed TEST VECTORS (salt/iv/ciphertext), NOT secrets; the
 # Hex High Entropy scanner cannot tell, so each line carries the allowlist pragma.
-_DET_SALT = "71efcb8039eb8ce11beeb1b431223e64"  # pragma: allowlist secret
-_DET_IV = "6c42f5dd6b8cd6eb2e3a9f6693c49824"  # pragma: allowlist secret
-_DET_CPREV = "fe1bfbf37902810395f58de23c7cf2bd"  # pragma: allowlist secret
-_DET_CLAST = "bb365c29e1ef38f0468696f15f4e0169"  # pragma: allowlist secret
+_DET_SALT = "fc47d85811dd9900a702bfb490f3aa6c"  # pragma: allowlist secret
+_DET_IV = "3a6a2b7ee5f16f0bfcd38c5a3b8e4f21"  # pragma: allowlist secret
+_DET_CPREV = "7120f0d327a5e26cd71a606c603fb71e"  # pragma: allowlist secret
+_DET_CLAST = "1c4e7f93b5a2d8e6f0c3a5b7d9e1f2a4"  # pragma: allowlist secret
 
 
 def _ca_dir(tmp_path, key: bytes = KEY):
@@ -124,7 +127,7 @@ def _ca_dir(tmp_path, key: bytes = KEY):
     return d
 
 
-def _export(tmp_path, pw="pw1", key: bytes = KEY):
+def _export(tmp_path, pw="pw1-format-roundtrip", key: bytes = KEY):
     ca = _ca_dir(tmp_path, key)
     out = tmp_path / "b.enc"
     with patch("venya_cli.commands.getpass.getpass", side_effect=[pw, pw]):
@@ -152,7 +155,7 @@ class TestCanonicalEnvelope:
         key = _real_key_pem()
         ca, out = _export(tmp_path, key=key)
         (ca / "ca.key").unlink()
-        assert _restore(ca, out, "pw1") == 0
+        assert _restore(ca, out, "pw1-format-roundtrip") == 0
         assert (ca / "ca.key").read_bytes() == key
 
     def test_restore_minted_canonical_blob(self, tmp_path):
@@ -162,8 +165,8 @@ class TestCanonicalEnvelope:
         ca = _ca_dir(tmp_path)
         (ca / "ca.key").unlink()
         blob = tmp_path / "ref.enc"
-        blob.write_bytes(_mint_canonical_gcm(key, "refpw"))
-        assert _restore(ca, blob, "refpw") == 0
+        blob.write_bytes(_mint_canonical_gcm(key, "refpw-contract-vector"))
+        assert _restore(ca, blob, "refpw-contract-vector") == 0
         assert (ca / "ca.key").read_bytes() == key
 
 
@@ -174,8 +177,8 @@ class TestLegacyCbcReader:
         ca = _ca_dir(tmp_path)
         (ca / "ca.key").unlink()
         blob = tmp_path / "legacy.enc"
-        blob.write_bytes(_mint_legacy_cbc(key, "oldpw"))
-        assert _restore(ca, blob, "oldpw") == 0
+        blob.write_bytes(_mint_legacy_cbc(key, "oldpw-legacy-vector"))
+        assert _restore(ca, blob, "oldpw-legacy-vector") == 0
         assert (ca / "ca.key").read_bytes() == key
 
     def test_legacy_cbc_bogus_pkcs7_rejected(self, tmp_path):
@@ -190,8 +193,8 @@ class TestLegacyCbcReader:
         # Raw 16-byte block ending [0x0a, 0x03, 0x03, 0x04]: last byte 4 is
         # in 1..16 (pre-fix accepted, stripped 4 bytes, restored corrupt
         # material); full PKCS7 demands the last 4 bytes ALL equal 4 → reject.
-        blob.write_bytes(_mint_legacy_cbc_raw(b"ORIGINAL-KEY\n" + bytes([3, 3, 4]), "pw"))
-        rc = _restore(ca, blob, "pw")
+        blob.write_bytes(_mint_legacy_cbc_raw(b"ORIGINAL-KEY\n" + bytes([3, 3, 4]), "pw-weak-validation-vector"))
+        rc = _restore(ca, blob, "pw-weak-validation-vector")
         assert rc == 1
         assert not (ca / "ca.key").exists()
 
@@ -199,8 +202,8 @@ class TestLegacyCbcReader:
         ca = _ca_dir(tmp_path)
         (ca / "ca.key").unlink()
         blob = tmp_path / "legacy.enc"
-        blob.write_bytes(_mint_legacy_cbc(KEY, "right-pw"))
-        assert _restore(ca, blob, "wrong-pw") == 1
+        blob.write_bytes(_mint_legacy_cbc(KEY, "right-pw-legacy-vector"))
+        assert _restore(ca, blob, "wrong-pw-legacy-vector") == 1
 
     def test_legacy_cbc_valid_padding_garbage_rejected_deterministic(self, tmp_path, capsys):
         """FIXED-bytes negative (ticket legacy-ca-restore-padding-only-validation):
@@ -216,7 +219,7 @@ class TestLegacyCbcReader:
         # salt(16) + iv(16) + c_prev(16) + c_last(16); IV only steers block 0, so the
         # baked (salt, c_prev, c_last) makes the wrong-key tail valid-PKCS7 every run.
         blob.write_bytes(bytes.fromhex(_DET_SALT + _DET_IV + _DET_CPREV + _DET_CLAST))
-        rc = _restore(ca, blob, "wrong-pw")
+        rc = _restore(ca, blob, "wrong-pw-legacy-vector")
         assert rc == 1
         assert not (ca / "ca.key").exists()
         assert "not a valid PEM private key" in capsys.readouterr().err
@@ -228,24 +231,24 @@ class TestCanonicalNegatives:
         ca = _ca_dir(tmp_path)
         (ca / "ca.key").unlink()
         blob = tmp_path / "t.enc"
-        data = bytearray(_mint_canonical_gcm(KEY, "pw1"))
+        data = bytearray(_mint_canonical_gcm(KEY, "pw1-format-roundtrip"))
         data[-1] ^= 0xFF
         blob.write_bytes(bytes(data))
-        assert _restore(ca, blob, "pw1") == 1
+        assert _restore(ca, blob, "pw1-format-roundtrip") == 1
 
     def test_truncated_blob_rejected(self, tmp_path):
         ca = _ca_dir(tmp_path)
         (ca / "ca.key").unlink()
         blob = tmp_path / "tr.enc"
-        blob.write_bytes(_mint_canonical_gcm(KEY, "pw1")[:40])  # < magic+salt+nonce+tag
-        assert _restore(ca, blob, "pw1") == 1
+        blob.write_bytes(_mint_canonical_gcm(KEY, "pw1-format-roundtrip")[:40])  # < magic+salt+nonce+tag
+        assert _restore(ca, blob, "pw1-format-roundtrip") == 1
 
     def test_wrong_passphrase_rejected(self, tmp_path):
         ca = _ca_dir(tmp_path)
         (ca / "ca.key").unlink()
         blob = tmp_path / "wp.enc"
-        blob.write_bytes(_mint_canonical_gcm(KEY, "right-pw"))
-        assert _restore(ca, blob, "wrong-pw") == 1
+        blob.write_bytes(_mint_canonical_gcm(KEY, "right-pw-canonical-vector"))
+        assert _restore(ca, blob, "wrong-pw-legacy-vector") == 1
 
 
 class TestCrossCompatContract:
@@ -267,13 +270,13 @@ class TestCrossCompatContract:
         from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
         key = _real_key_pem()
-        ca, out = _export(tmp_path, pw="xpw", key=key)
+        ca, out = _export(tmp_path, pw="xpw-independent-decoder", key=key)
         blob = out.read_bytes()
         assert blob.startswith(MAGIC)
         body = blob[len(MAGIC) :]
         salt, nonce, ciphertext = body[:16], body[16:28], body[28:]
         kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600_000)
-        inner = AESGCM(kdf.derive(b"xpw")).decrypt(nonce, ciphertext, None)
+        inner = AESGCM(kdf.derive(b"xpw-independent-decoder")).decrypt(nonce, ciphertext, None)
         assert inner == key
         assert inner == (ca / "ca.key").read_bytes()
 
@@ -285,8 +288,8 @@ class TestCrossCompatContract:
         cli_dir = _ca_dir(tmp_path / "cli", key=key)
         (cli_dir / "ca.key").unlink()
         blob_path = tmp_path / "srv.enc"
-        blob_path.write_bytes(_mint_canonical_gcm(key, "xpw"))
-        assert _restore(cli_dir, blob_path, "xpw") == 0
+        blob_path.write_bytes(_mint_canonical_gcm(key, "xpw-independent-decoder"))
+        assert _restore(cli_dir, blob_path, "xpw-independent-decoder") == 0
         assert (cli_dir / "ca.key").read_bytes() == key
 
 

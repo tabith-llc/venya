@@ -36,7 +36,7 @@ from venya_cli.commands import (
 
 SERVER_PW = "srv-pw-297"  # pragma: allowlist secret — TEST passphrase, never real
 ADMIN_PW = "adm-pw-297"  # pragma: allowlist secret
-OP_PW = "op-pw-297"  # pragma: allowlist secret
+OP_PW = "op-pw-297-operator"  # pragma: allowlist secret
 
 
 def _boom(*_a, **_k):

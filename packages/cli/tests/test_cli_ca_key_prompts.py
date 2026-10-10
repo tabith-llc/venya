@@ -44,7 +44,7 @@ class TestCaKeyPromptsHidden:
         out = tmp_path / "export" / "ca.key.enc"
         args = SimpleNamespace(output=str(out), ca_dir=str(ca_dir))
         with patch("builtins.input", _boom), patch(
-            "venya_cli.commands.getpass.getpass", side_effect=["s3cret-pw", "s3cret-pw"]
+            "venya_cli.commands.getpass.getpass", side_effect=["s3cret-prompt-passphrase", "s3cret-prompt-passphrase"]
         ) as gp:
             rc = cmd_admin_export_ca_key(args)
         assert rc == 0
@@ -59,7 +59,7 @@ class TestCaKeyPromptsHidden:
         (ca_dir / "ca.key").write_bytes(_real_key_pem())
         args = SimpleNamespace(output=str(tmp_path / "o.enc"), ca_dir=str(ca_dir))
         with patch("builtins.input", _boom), patch(
-            "venya_cli.commands.getpass.getpass", side_effect=["a", "b", "pw", "pw"]
+            "venya_cli.commands.getpass.getpass", side_effect=["a", "b", "prompt-round-trip-pw", "prompt-round-trip-pw"]
         ) as gp:
             rc = cmd_admin_export_ca_key(args)
         assert rc == 0
@@ -143,10 +143,14 @@ class TestCaKeyPromptsHidden:
         ca_dir.mkdir()
         (ca_dir / "ca.key").write_bytes(key)
         backup = tmp_path / "b.enc"
-        with patch("builtins.input", _boom), patch("venya_cli.commands.getpass.getpass", side_effect=["pw", "pw"]):
+        with patch("builtins.input", _boom), patch(
+            "venya_cli.commands.getpass.getpass", side_effect=["prompt-export-passphrase", "prompt-export-passphrase"]
+        ):
             assert cmd_admin_export_ca_key(SimpleNamespace(output=str(backup), ca_dir=str(ca_dir))) == 0
         (ca_dir / "ca.key").unlink()
-        with patch("builtins.input", _boom), patch("venya_cli.commands.getpass.getpass", side_effect=["pw"]):
+        with patch("builtins.input", _boom), patch(
+            "venya_cli.commands.getpass.getpass", side_effect=["prompt-export-passphrase"]
+        ):
             rc = cmd_admin_restore_ca_key(
                 SimpleNamespace(mode="backup", backup_file=str(backup), shares=None, ca_dir=str(ca_dir))
             )
