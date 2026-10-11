@@ -75,6 +75,84 @@ class TestCertificateRotationConfig:
         assert not hasattr(cfg.cert_rotation, "rotation_days")
 
 
+class TestConcurrencyKnob:
+    """RF-3 admission knob: `[executor] max_concurrent_commands` / env
+    `VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS` — both spellings the owner pinned,
+    one truth, shipped default 1.
+
+    These cells are the pin for the resolver behaviour measured on the shipped
+    interpreter (3.14.6) before writing the field: the double-underscore env
+    form only lands because `ExecutorConfig.executor` carries
+    `AliasChoices("executor", "VENYA_EXECUTOR")`, and the `[executor]` table only
+    lands because the FIELD is named `executor` (save_file dumps field names).
+    Renaming either spelling's hook silently drops the value back to 1 — which is
+    the failure class these cells exist to catch, so several of them are negative
+    on purpose.
+    """
+
+    ENV_PINNED = "VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS"
+
+    def test_default_is_one(self, monkeypatch):
+        """Unset means today's posture: one command at a time."""
+        monkeypatch.delenv(self.ENV_PINNED, raising=False)
+        assert ExecutorConfig().executor.max_concurrent_commands == 1
+
+    def test_env_spelling_resolves(self, monkeypatch):
+        monkeypatch.setenv(self.ENV_PINNED, "7")
+        assert ExecutorConfig().executor.max_concurrent_commands == 7
+
+    def test_toml_section_spelling_resolves(self, tmp_path):
+        """`[executor] max_concurrent_commands` — the other pinned literal —
+        lands through the same field."""
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text("[executor]\nmax_concurrent_commands = 12\n")
+        assert ExecutorConfig.from_file(toml_path).executor.max_concurrent_commands == 12
+
+    def test_file_beats_env_and_that_is_the_house_precedence(self, tmp_path, monkeypatch):
+        """One stated precedence, inherited not invented: from_file passes the
+        TOML dict as init kwargs, and init beats env for every field on this
+        model. Env still beats the default (test_env_spelling_resolves)."""
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text("[executor]\nmax_concurrent_commands = 12\n")
+        monkeypatch.setenv(self.ENV_PINNED, "7")
+        assert ExecutorConfig.from_file(toml_path).executor.max_concurrent_commands == 12
+
+    def test_save_round_trip_keeps_the_section_name(self, tmp_path):
+        """The knob must survive a write-back under the SAME header the owner
+        pinned — this is why the field is named `executor`."""
+        saved = tmp_path / "executor.toml"
+        cfg = ExecutorConfig()
+        cfg.executor.max_concurrent_commands = 5
+        cfg.save_file(saved)
+        text = saved.read_text()
+        assert "[executor]" in text
+        assert "max_concurrent_commands = 5" in text
+        assert ExecutorConfig.from_file(saved).executor.max_concurrent_commands == 5
+
+    def test_no_third_env_spelling_resolves(self, monkeypatch):
+        """NEGATIVE half of "one knob, one truth": the two spellings the house
+        convention would have produced are ignored, so no lane can configure the
+        knob by accident through a form the owner did not pin."""
+        monkeypatch.setenv("VENYA_EXECUTOR_MAX_CONCURRENT_COMMANDS", "8")
+        assert ExecutorConfig().executor.max_concurrent_commands == 1
+        monkeypatch.setenv("VENYA_EXECUTOR_EXECUTOR__MAX_CONCURRENT_COMMANDS", "8")
+        assert ExecutorConfig().executor.max_concurrent_commands == 1
+
+    def test_unrelated_section_header_is_ignored_not_read(self, tmp_path):
+        """NEGATIVE half of the field-name coupling: a table named after any other
+        field must not be picked up. Guards against "any nested table wins"."""
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text("[concurrency]\nmax_concurrent_commands = 9\n")
+        assert ExecutorConfig.from_file(toml_path).executor.max_concurrent_commands == 1
+
+    def test_cap_below_one_refuses_at_load(self):
+        """A cap of 0 admits nothing, which is a config error, not a paused
+        executor. No upper bound is asserted here: the ceiling is the RAM-derived
+        RF-3 measurement, never a constant in this file."""
+        with pytest.raises(ValidationError, match="at least 1"):
+            ExecutorConfig(executor={"max_concurrent_commands": 0})
+
+
 class TestSessionConfig:
     """Tests for SessionConfig defaults."""
 

@@ -13,7 +13,7 @@ Environment variables are prefixed with VENYA_EXECUTOR_.
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # #578: `sbx create` must carry an explicit --memory. The vendor's own default
@@ -224,6 +224,44 @@ class AuditForwarderConfig(BaseModel):
         return self
 
 
+class ConcurrencyConfig(BaseModel):
+    """Relay-command admission (RF-3).
+
+    One knob, two spellings, as pinned by the owner 2026-10-11: env
+    `VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS` and TOML
+    `[executor] max_concurrent_commands`. It lands here through the parent
+    alias pair on `ExecutorConfig.executor` — measured on the shipped
+    interpreter (3.14.6) against this exact prefix/delimiter configuration.
+
+    The shipped default is 1, which is today's sequential posture. The maximum
+    is RAM-derived from the measured per-sandbox footprint (RF-3 bench), never
+    a fixed integer, so this class deliberately carries no ceiling.
+    """
+
+    max_concurrent_commands: int = Field(
+        default=1,
+        description=(
+            "Relayed commands the executor may run at once. 1 (the default) is "
+            "today's behaviour: one command at a time. Any value above 1 requires "
+            "the RF-3 acceptance cells (cross-command leak, pool-before-listener) "
+            "to have passed on the bench VM"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _at_least_one_slot(self) -> ConcurrencyConfig:
+        """A cap below 1 admits nothing, so it is a config error rather than a
+        stopped executor: refuse at load with the knob named. (No upper bound is
+        checked here — the ceiling is the RAM-derived RF-3 measurement, not a
+        constant this file could know.)"""
+        if self.max_concurrent_commands < 1:
+            raise ValueError(
+                f"executor.max_concurrent_commands must be at least 1, got "
+                f"{self.max_concurrent_commands} — a cap of 0 would admit no command at all"
+            )
+        return self
+
+
 class NetworkConfig(BaseModel):
     """Network timeout configuration."""
 
@@ -361,6 +399,20 @@ class ExecutorConfig(BaseSettings):
             "DNS resolver IP always allowed for sandbox egress. REQUIRED — no default: "
             "unset, the executor refuses to start (Venya never guesses your network)"
         ),
+    )
+
+    # RF-3 admission knob — see ConcurrencyConfig. Named `executor` because that
+    # is the TOML table it round-trips to: save_file dumps the FIELD name, so a
+    # differently named field would write a table the loader then ignores
+    # (measured: dumping it as `concurrency` and reloading leaves the knob at 1).
+    # The alias pair is what makes the owner's two spellings ONE truth: the env
+    # source resolves the nested group as VENYA_EXECUTOR + "VENYA_EXECUTOR" +
+    # "__" + key, which is exactly VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS, and
+    # the dict source keys off "executor", which is [executor].
+    executor: ConcurrencyConfig = Field(
+        default_factory=ConcurrencyConfig,
+        validation_alias=AliasChoices("executor", "VENYA_EXECUTOR"),
+        description="Relay-command admission (RF-3): env VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS, TOML [executor] max_concurrent_commands",
     )
 
     # Per-sandbox memory cap, passed to `sbx create --memory` (#578).
