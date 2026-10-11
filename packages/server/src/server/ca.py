@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.serialization import (
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from .config import CASecurityConfig
+from .utils.ca_key_probe import encrypted_key_is_parseable
 
 logger = logging.getLogger("venya.ca")
 
@@ -298,6 +299,44 @@ def _ca_key_decrypt_refusal(key_path: str | Path | None) -> str:
     )
 
 
+def _ca_key_damaged_refusal(key_path: str | Path | None) -> str:
+    """#577 — the damaged-CA-key-file refusal, in our words, at one home.
+
+    Fire this INSTEAD of the wrong-passphrase refusal above when the probe says the bytes are not a
+    parseable encrypted key at all. The defect #577 filed is a blame error, not a wording error: the
+    branch chose its sentence by whether a passphrase was SUPPLIED, so a truncated key file, or armor
+    kept over a body that no longer decodes, was answered with "the passphrase did not match" — and an
+    operator who re-types a correct passphrase forever is the outcome the refusal family exists to
+    prevent. The subject of this sentence is the FILE.
+
+    Same ruled class shape as #574 (R8-ADDENDUM, decisions.md commit dd1de4c): our own words, no
+    mechanism named, the key path substituted, plus a next-step pointer (#569) that stays conditional
+    under the AMENDED Q4 custody ladder (backup enrollment is OPTIONAL, so the restore verbs are
+    offered "when either was made for this key") and names only machinery that ships —
+    `admin split-ca-key` and `admin restore-ca-key`. The repair is deliberately different from the
+    decrypt repair: nothing about a passphrase opens a damaged file, so the pointer says where an
+    intact copy comes from instead of telling the operator to retry a password.
+
+    Args:
+        key_path: The key file the caller tried to open, when the caller has one. None is the shape
+            ``_deserialize_key`` takes when called without a path, so the fallback headline names the
+            key without a path rather than printing ``None``.
+
+    Returns:
+        The refusal text: headline (path substituted or omitted) plus the conditional repair pointer.
+    """
+    if key_path:
+        headline = f"The CA key at {key_path} could not be read — the file is damaged."
+    else:
+        headline = "The CA key could not be read — the file is damaged."
+    return (
+        f"{headline} No passphrase can open it, so re-typing the passphrase will not help; the file is "
+        "the problem, not the password. Replace the file with an intact copy, or restore this key with "
+        "`venya admin restore-ca-key` from Shamir shares or from an encrypted backup, when either was "
+        "made for this key (`venya admin split-ca-key` creates the shares); otherwise re-run the CA setup."
+    )
+
+
 def _deserialize_key(
     data: bytes,
     passphrase: bytes | None,
@@ -315,11 +354,22 @@ def _deserialize_key(
     Raises:
         RuntimeError: If decryption fails or key cannot be loaded. The library's sentence is
             carried as the chained cause (``from e``), never in the operator-facing text.
+            A failure is blamed on the FILE when the probe says the bytes are not a parseable
+            encrypted key (#577), and on the passphrase only when the file is intact and the
+            passphrase did not open it (#574). The no-passphrase arm is #541's shipped text,
+            untouched by this row.
     """
     try:
         return serialization.load_pem_private_key(data, password=passphrase)
     except ValueError as e:
         if passphrase:
+            # #577 — the blame is chosen by whether the BYTES PARSE, not by whether an input was
+            # supplied. The probe re-reads the same bytes with no password: a TypeError means the
+            # structure is intact and only the secret is in question (the #574 arm below); a
+            # ValueError means the file itself is broken and the passphrase sentence would send the
+            # operator down the wrong repair path. Branch is on the exception CLASS, never a message.
+            if not encrypted_key_is_parseable(data):
+                raise RuntimeError(_ca_key_damaged_refusal(key_path)) from e
             raise RuntimeError(_ca_key_decrypt_refusal(key_path)) from e
         else:
             raise RuntimeError(
