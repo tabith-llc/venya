@@ -4745,7 +4745,22 @@ def _admin_ca_plaintext_key_refusal() -> str:
 #: ONE hand-written home of those bytes in the product tree — the refusal below and the test cells
 #: read this constant, so a future edit changes the voice in a single place instead of chasing
 #: copies (#568's single-home shape; the sibling cell pins that exactly one line types it).
-ADMIN_CA_DECRYPT_REFUSAL = "failed to decrypt the admin CA key with the provided passphrase. Nothing was written."
+#: #576 retrofits the fourth element of the ruled class (R8-ADDENDUM, decisions.md commit dd1de4c):
+#: the sentence is now a TEMPLATE and carries the key path substituted — "our own words, no mechanism
+#: named, the key path substituted, and a next-step pointer". The bytes around the path slot are the
+#: #572-approved words unchanged; ``{key_path}`` is filled by the caller, never left literal.
+ADMIN_CA_DECRYPT_REFUSAL = (
+    "failed to decrypt the admin CA key at {key_path} with the provided passphrase. Nothing was written."
+)
+
+#: #576 — the fallback for the ONE case the caller has no key path to name. It keeps three of the
+#: four ruled elements and stays honest: it names the key and says nothing was written, and it never
+#: prints ``None`` into the operator's sentence. Server's twin (#574, ``_ca_key_decrypt_refusal``)
+#: takes exactly this shape — path substituted when it exists, path clause dropped when it does not.
+#: The pairing cell below pins that the two sentences differ ONLY by that clause.
+ADMIN_CA_DECRYPT_REFUSAL_NO_PATH = (
+    "failed to decrypt the admin CA key with the provided passphrase. Nothing was written."
+)
 
 #: Locator prefix for the doc-reference line that closes the refusal above (#572). The line is READ
 #: out of the shipped #547 refusal instead of typed a second time here, and exactly one line may
@@ -4773,12 +4788,23 @@ def _encrypted_key_is_parseable(serialization: Any, key_data: bytes) -> bool:
     return False
 
 
-def _admin_ca_wrong_passphrase_refusal() -> str:
+def _admin_ca_wrong_passphrase_refusal(key_path: str | Path | None = None) -> str:
     """#572 — the approved sentence, then the shipped doc-reference line. Two lines, no library voice.
 
-    The first line comes from ``ADMIN_CA_DECRYPT_REFUSAL`` byte-for-byte; the second is
-    located by ``REFERENCE_LINE_PREFIX`` inside the #547 refusal's own text. Zero writes have
-    happened when this prints, which is what "Nothing was written." states.
+    The first line comes from ``ADMIN_CA_DECRYPT_REFUSAL`` with the key path substituted (#576 — the
+    ruled class names WHICH key file failed, so an operator with more than one CA on a workstation is
+    not told the right thing about the wrong file); the second is located by ``REFERENCE_LINE_PREFIX``
+    inside the #547 refusal's own text. Zero writes have happened when this prints, which is what
+    "Nothing was written." states, and that line plus the reference line are the next-step pointer.
+
+    Args:
+        key_path: The admin CA key file the command tried to unseal, when the caller has one. Every
+            product call-site has one; ``None`` is the defensive shape, and it drops the path clause
+            to ``ADMIN_CA_DECRYPT_REFUSAL_NO_PATH`` rather than formatting the template with ``None``.
+
+    Returns:
+        The refusal text: headline (path substituted, or the pinned pathless fallback) then the
+        shipped reference line.
     """
     matches = [
         line.strip()
@@ -4787,7 +4813,8 @@ def _admin_ca_wrong_passphrase_refusal() -> str:
     ]
     if len(matches) != 1:
         raise RuntimeError(f"expected exactly one doc-reference line in the shipped #547 refusal, found {len(matches)}")
-    return f"{ADMIN_CA_DECRYPT_REFUSAL}\n{matches[0]}"
+    headline = ADMIN_CA_DECRYPT_REFUSAL.format(key_path=key_path) if key_path else ADMIN_CA_DECRYPT_REFUSAL_NO_PATH
+    return f"{headline}\n{matches[0]}"
 
 
 def cmd_admin_generate_admin_cert(args: Any) -> int:
@@ -4914,7 +4941,7 @@ def cmd_admin_generate_admin_cert(args: Any) -> int:
             try:
                 ca_key = serialization.load_pem_private_key(key_data, password=passphrase.encode())
             except ValueError:
-                print(_admin_ca_wrong_passphrase_refusal(), file=sys.stderr)
+                print(_admin_ca_wrong_passphrase_refusal(ca_key_path), file=sys.stderr)
                 return 1
         else:
             ca_key = serialization.load_pem_private_key(key_data, password=passphrase.encode() if passphrase else None)

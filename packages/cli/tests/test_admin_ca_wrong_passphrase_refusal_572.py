@@ -38,6 +38,7 @@ import pytest
 from venya_cli import commands
 from venya_cli.commands import (
     ADMIN_CA_DECRYPT_REFUSAL,
+    ADMIN_CA_DECRYPT_REFUSAL_NO_PATH,
     _admin_ca_plaintext_key_refusal,
     _admin_ca_wrong_passphrase_refusal,
     cmd_admin_generate_admin_cert,
@@ -122,9 +123,23 @@ def _probe(data: bytes) -> bool:
     return commands._encrypted_key_is_parseable(serialization, data)
 
 
-def _expected_refusal_lines() -> list[str]:
+def _expected_refusal_lines(key_path: Path | None = None) -> list[str]:
     """The two lines the operator must see, derived (never re-typed) from the shipped homes."""
-    return _admin_ca_wrong_passphrase_refusal().splitlines()
+    return _admin_ca_wrong_passphrase_refusal(key_path).splitlines()
+
+
+def _ca_key(ca_dir: Path) -> Path:
+    """The admin CA key path this command resolves for a given --ca-dir, so cells can name it."""
+    return ca_dir / "admin-ca.key"
+
+
+def _pathed_headline(ca_dir: Path) -> str:
+    """The #576 headline as the operator reads it: the template with this CA's real path filled in.
+
+    Derived from the constant, never re-typed, so a wording edit shows up as a red cell instead of a
+    silent pass.
+    """
+    return ADMIN_CA_DECRYPT_REFUSAL.format(key_path=_ca_key(ca_dir))
 
 
 # --- positive half: intact encrypted key + a wrong passphrase ---
@@ -152,9 +167,10 @@ def test_wrong_passphrase_answers_in_the_owners_words(tmp_path, monkeypatch, cap
     captured = capsys.readouterr()
 
     assert result == 1, f"a wrong passphrase must not succeed, got rc={result}"
-    assert captured.err.strip().splitlines() == _expected_refusal_lines(), (
-        f"the refusal is not exactly the approved line then the reference line — the operator is "
-        f"reading something else: {captured.err!r}"
+    # #576: the operator's refusal names the key file, so the expected pair is the PATHED rendering.
+    assert captured.err.strip().splitlines() == _expected_refusal_lines(_ca_key(ca_dir)), (
+        f"the refusal is not exactly the path-substituted line then the reference line — the operator "
+        f"is reading something else: {captured.err!r}"
     )
     # AC2's stdout half, the one this file never tested (grep -cE 'captured\.out' was 0 at base).
     # Asserted STRUCTURALLY, on stdout's emptiness, because this file's own rule forbids typing a
@@ -170,12 +186,57 @@ def test_wrong_passphrase_answers_in_the_owners_words(tmp_path, monkeypatch, cap
         f"output is being handed text from the failure path: {captured.out!r}"
     )
     first_line = captured.err.splitlines()[0]
-    assert first_line == ADMIN_CA_DECRYPT_REFUSAL, (
-        f"the refusal opens with {first_line!r}, not the named home "
-        f"{ADMIN_CA_DECRYPT_REFUSAL!r} — the owner approved THOSE bytes"
+    assert first_line == _pathed_headline(ca_dir), (
+        f"the refusal opens with {first_line!r}, not the named home rendered with the key path "
+        f"{_pathed_headline(ca_dir)!r} — the owner approved THOSE bytes plus the #576 path element"
     )
     written = list(out_dir.iterdir()) if out_dir.exists() else []
     assert not written, f"a refused passphrase wrote {written} while saying 'Nothing was written.'"
+
+
+def test_refusal_names_the_key_path_the_command_read(tmp_path, monkeypatch, capsys) -> None:
+    """#576 positive half: the operator sees the ACTUAL path — not a placeholder, not a literal None.
+
+    The harm #576 files is a workstation carrying more than one CA key: a pathless sentence tells the
+    operator the right thing about the wrong file. So this cell does not compare two constants — it
+    reads the printed line and asks for the path the invocation really resolved, with the negatives
+    that make the substitution real.
+    """
+    ca_dir = _init_ca(tmp_path, monkeypatch)
+    out_dir = tmp_path / "admin-out"
+    monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", WRONG_PASSPHRASE)
+    capsys.readouterr()
+
+    assert cmd_admin_generate_admin_cert(_gen_args(ca_dir, out_dir)) == 1
+    headline = capsys.readouterr().err.splitlines()[0]
+
+    assert str(_ca_key(ca_dir)) in headline, f"the refusal does not name the key it failed on: {headline!r}"
+    assert "{key_path}" not in headline, f"the template went out unsubstituted: {headline!r}"
+    assert "None" not in headline, f"the path slot fell back to a literal None: {headline!r}"
+
+
+def test_two_ca_directories_are_told_apart_by_the_refusal(tmp_path, monkeypatch, capsys) -> None:
+    """#576's harm, tested as the harm: two CA dirs on one workstation get two DIFFERENT headlines.
+
+    Each names the key it was actually handed. A pathless sentence cannot tell them apart, which is
+    exactly the row's stated defect, so this cell asserts the two printed headlines differ.
+    """
+    (tmp_path / "ca-a").mkdir()
+    (tmp_path / "ca-b").mkdir()
+    ca_a = _init_ca(tmp_path / "ca-a", monkeypatch)
+    ca_b = _init_ca(tmp_path / "ca-b", monkeypatch)
+    monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", WRONG_PASSPHRASE)
+
+    heads: list[str] = []
+    for label, ca_dir in (("a", ca_a), ("b", ca_b)):
+        out_dir = tmp_path / f"out-{label}"
+        capsys.readouterr()
+        assert cmd_admin_generate_admin_cert(_gen_args(ca_dir, out_dir)) == 1
+        heads.append(capsys.readouterr().err.splitlines()[0])
+
+    for ca_dir, head in ((ca_a, heads[0]), (ca_b, heads[1])):
+        assert str(_ca_key(ca_dir)) in head, f"that refusal lost its own key path: {head!r}"
+    assert heads[0] != heads[1], "two different keys produced one identical refusal — the path is not landing"
 
 
 def test_correct_passphrase_still_signs(tmp_path, monkeypatch, capsys) -> None:
@@ -188,7 +249,13 @@ def test_correct_passphrase_still_signs(tmp_path, monkeypatch, capsys) -> None:
 
     assert result == 0, f"a correct passphrase must still sign, got rc={result}: {capsys.readouterr().err}"
     assert (out_dir / "admin.key").exists() and (out_dir / "admin.crt").exists()
-    assert ADMIN_CA_DECRYPT_REFUSAL not in capsys.readouterr().err
+    # Both homes are checked. #576 turned the approved bytes into a template whose literal text
+    # carries a `{key_path}` token no operator ever sees, so pinning only the template would pass
+    # vacuously — the pathed rendering (what this command would print) and the pathless fallback are
+    # the two sentences that must stay absent on a success.
+    err = capsys.readouterr().err
+    assert _pathed_headline(ca_dir) not in err
+    assert ADMIN_CA_DECRYPT_REFUSAL_NO_PATH not in err
 
 
 # --- paired negatives: files that still claim to be encrypted but are damaged ---
@@ -220,9 +287,15 @@ def test_damaged_encrypted_files_are_not_passphrase_failures(tmp_path, monkeypat
     captured = capsys.readouterr()
 
     assert result == 1, f"{shape}: a damaged key must still fail closed, got rc={result}"
+    # #576 turned the approved bytes into a template, so a bare "the constant is absent" check would
+    # be vacuously true — nobody prints `{key_path}`. These cells stay load-bearing by pinning both
+    # sentences an operator could actually be handed: the pathed rendering and the pathless fallback.
     assert (
-        ADMIN_CA_DECRYPT_REFUSAL not in captured.err
+        _pathed_headline(ca_dir) not in captured.err
     ), f"{shape}: a damaged key was told its passphrase is wrong — {captured.err!r}"
+    assert (
+        ADMIN_CA_DECRYPT_REFUSAL_NO_PATH not in captured.err
+    ), f"{shape}: the pathless passphrase fallback fired for a damaged key — {captured.err!r}"
     assert (
         BACKSTOP_PREFIX in captured.err
     ), f"{shape}: the damaged shape stopped reaching the untouched backstop: {captured.err!r}"
@@ -247,7 +320,7 @@ def test_markerless_garbage_is_refused_upstream_of_this_leg(tmp_path, monkeypatc
 
     assert result == 1
     assert (
-        ADMIN_CA_DECRYPT_REFUSAL not in captured.err
+        _pathed_headline(ca_dir) not in captured.err and ADMIN_CA_DECRYPT_REFUSAL_NO_PATH not in captured.err
     ), f"garbage with no marker was called a passphrase failure: {captured.err!r}"
     assert (
         _PLAINTEXT_REFUSAL_HEAD in captured.err
@@ -272,7 +345,7 @@ def test_unencrypted_key_with_a_passphrase_is_answered_by_569(tmp_path, monkeypa
     captured = capsys.readouterr()
 
     assert result == 1
-    assert ADMIN_CA_DECRYPT_REFUSAL not in captured.err, (
+    assert _pathed_headline(ca_dir) not in captured.err and ADMIN_CA_DECRYPT_REFUSAL_NO_PATH not in captured.err, (
         f"the plaintext posture was routed through the passphrase refusal — #569 owns it: " f"{captured.err!r}"
     )
     assert (
@@ -326,12 +399,27 @@ def test_probe_scales_across_the_marker_boundary(tmp_path, monkeypatch) -> None:
 
 
 def test_refusal_is_the_approved_sentence_plus_the_derived_reference_line() -> None:
-    """Two lines, each from ONE home: the approved constant and the located shipped reference."""
-    lines = _admin_ca_wrong_passphrase_refusal().splitlines()
+    """Two lines, each from ONE home: the approved constant and the located shipped reference.
 
+    Both #576 renderings are pinned: the path-substituted headline when the caller names the key, the
+    pathless fallback when it has no path to name.
+    """
+    probe_key = Path("/some/where/admin-ca.key")
+
+    lines = _admin_ca_wrong_passphrase_refusal(probe_key).splitlines()
     assert len(lines) == 2, f"the refusal is the approved line then the reference line: {lines!r}"
-    assert lines[0] == ADMIN_CA_DECRYPT_REFUSAL, f"first line drifted: {lines[0]!r}"
+    assert lines[0] == ADMIN_CA_DECRYPT_REFUSAL.format(
+        key_path=probe_key
+    ), f"first line drifted from the path-substituted home: {lines[0]!r}"
     assert lines[1].startswith(commands.REFERENCE_LINE_PREFIX), f"second line is not the reference: {lines[1]!r}"
+
+    pathless = _admin_ca_wrong_passphrase_refusal().splitlines()
+    assert (
+        pathless[0] == ADMIN_CA_DECRYPT_REFUSAL_NO_PATH
+    ), f"the no-path shape lost the pinned fallback home: {pathless[0]!r}"
+    assert (
+        "{key_path}" not in pathless[0] and "None" not in pathless[0]
+    ), f"the fallback printed an unsubstituted slot instead of naming the key plainly: {pathless[0]!r}"
 
 
 def test_reference_locator_refuses_any_count_but_one(monkeypatch) -> None:
@@ -361,14 +449,28 @@ def test_reference_locator_refuses_any_count_but_one(monkeypatch) -> None:
 
 
 def test_the_approved_sentence_has_exactly_one_hand_written_home() -> None:
-    """The approved bytes are typed once in the product tree: the constant definition above."""
+    """The approved bytes are typed once in the product tree: the constant definition above.
+
+    #576 added a SECOND home on purpose — the pathless fallback — so the discipline is stated per
+    sentence: each is typed exactly once, and the pair may differ by the path clause and nothing else.
+    A third copy, or a fallback that drifts by one word, is what this cell exists to catch (#553's
+    hiding place).
+    """
     source = Path(commands.__file__).read_text(encoding="utf-8")
     typed = [line.strip() for line in source.splitlines() if ADMIN_CA_DECRYPT_REFUSAL in line]
 
     assert len(typed) == 1, (
-        f"the approved sentence appears on {len(typed)} lines of commands.py — exactly the constant "
-        f"definition is allowed, a second hand-written copy is how #553 hid: {typed}"
+        f"the path-substituted sentence appears on {len(typed)} lines of commands.py — exactly the "
+        f"constant definition is allowed, a second hand-written copy is how #553 hid: {typed}"
     )
+    typed_no_path = [line.strip() for line in source.splitlines() if ADMIN_CA_DECRYPT_REFUSAL_NO_PATH in line]
+    assert len(typed_no_path) == 1, (
+        f"the pathless fallback is typed on {len(typed_no_path)} lines, expected only its own "
+        f"definition: {typed_no_path}"
+    )
+    assert (
+        ADMIN_CA_DECRYPT_REFUSAL.replace(" at {key_path}", "") == ADMIN_CA_DECRYPT_REFUSAL_NO_PATH
+    ), "the two refusal homes drifted past the path slot — the fallback is no longer the approved sentence"
 
 
 def test_both_reference_pickers_hold_in_the_composed_tree() -> None:
@@ -400,7 +502,7 @@ def test_both_reference_pickers_hold_in_the_composed_tree() -> None:
 
     # Both refusals render, and they agree on the reference line they print.
     refusal_569 = _admin_ca_plaintext_key_refusal()
-    refusal_572 = _admin_ca_wrong_passphrase_refusal()
+    refusal_572 = _admin_ca_wrong_passphrase_refusal(Path("/some/where/admin-ca.key"))
     assert refusal_569.splitlines()[1] == refusal_572.splitlines()[1], (
         "the two postures stopped sharing one shipped reference line: "
         f"{refusal_569.splitlines()[1]!r} vs {refusal_572.splitlines()[1]!r}"
