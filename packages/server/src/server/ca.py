@@ -1087,11 +1087,18 @@ class AdminCAManager:
           same machine — the returned private key never crosses the network
           (ruling 4d scopes the unencrypted-on-disk question to exactly this
           key; the filesystem control is the installer's ``0600`` write);
+        * what this mint OWNS is the returned bytes and nothing else: it opens
+          no file, chooses no destination and sets no mode. The delivered
+          leaf's destination, its enforced modes and the backup-exclusion
+          statement are the caller's, and the ruled remedy for that delivery
+          path is RF-10's installer commit, not this function (#565 site 1,
+          ruling ``cdcde4e`` — the generation and the plaintext return stay as
+          they are; tests/test_site1_destination_seam_565.py holds that line);
         * the only allowed caller is the installer bootstrap
           (``install-venya-core.sh``, the ``sign_admin_cert`` unpack). A
           caller-interlock cell asserts it — a route reaching this mint is
           a red suite, not a review finding
-          (tests/test_rf7_bootstrap_mint_interlock.py);
+          (tests/test_bootstrap_mint_interlock_rf7.py);
         * the signature and return shape ``(cert, key_pem, cert_pem)`` stay
           byte-compatible with that unpack until RF-10's installer commit
           retires the key handoff. Changing the arity here breaks every
