@@ -1805,6 +1805,7 @@ class ExecutorDaemon:
         strategy = SbxStrategy(
             dns_resolver=self.config.dns_resolver,
             egress_allowlist_path=self.config.egress_allowlist_path,
+            sandbox_memory_mb=self.config.sandbox_memory_mb,
         )
         # #307 D1: the audit sink is executor-mTLS-gated — forward with the
         # same client cert material the daemon client uses (existence is the

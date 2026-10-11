@@ -166,7 +166,9 @@ class TestEnumerate:
 
 class TestOwnershipRegistry:
     def test_create_sandbox_claims_ownership(self):
-        strategy = SbxStrategy()
+        # #578: create refuses without an explicit --memory cap, so this cell
+        # pins one — the claim still registers on a successful create.
+        strategy = SbxStrategy(sandbox_memory_mb=1024)
         with patch.object(sbx.subprocess, "run", return_value=_completed(stdout="")), patch.object(
             strategy, "_copy_sshpass"
         ):

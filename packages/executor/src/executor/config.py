@@ -10,10 +10,29 @@ Loaded from environment variables and/or config file.
 Environment variables are prefixed with VENYA_EXECUTOR_.
 """
 
+import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# #578: `sbx create` must carry an explicit --memory. The vendor's own default
+# is a fraction of the guest (50%, clamped 512 MiB-32 GiB), so an un-pinned
+# sandbox scales with the machine instead of with the design. These are the
+# vendor's bounds, quoted from https://docs.docker.com/reference/cli/sbx/create/
+# (read 2026-10-11): minimum 512 MiB, maximum max(75% of host memory, 512 MiB).
+SANDBOX_MEMORY_MIN_MB = 512
+SANDBOX_MEMORY_VENDOR_MAX_FRACTION = 3 / 4
+
+
+def host_total_memory_mib() -> int:
+    """Total memory of this host in MiB, for the #578 config-load cap check.
+
+    No psutil dependency lives in this package, so this uses the page-count
+    product the kernel already exposes through sysconf — the same number
+    `/proc/meminfo`'s MemTotal reports.
+    """
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1024 * 1024)
 
 
 class MtlsConfig(BaseModel):
@@ -344,12 +363,54 @@ class ExecutorConfig(BaseSettings):
         ),
     )
 
+    # Per-sandbox memory cap, passed to `sbx create --memory` (#578).
+    # Deliberately has no value: unset, the create path refuses rather than
+    # inheriting the vendor default (50% of the guest) — see
+    # SbxStrategy.create_sandbox. RF-3 (measured per-sandbox footprint) is what
+    # establishes the shipped number; until then an operator sets it explicitly.
+    sandbox_memory_mb: int | None = Field(
+        default=None,
+        description=(
+            "Per-sandbox memory cap in MiB passed to `sbx create --memory`. "
+            "REQUIRED for sandbox commands: unset, the executor refuses at create "
+            "with a named reason"
+        ),
+    )
+
     # Logging
     log_level: str = Field(default="info", description="Logging level")
 
     # Daemon mode
     daemonize: bool = Field(default=False, description="Run as daemon (fork to background)")
     pid_file: str = Field(default="/var/lib/venya/executor/venya-executor.pid", description="PID file path")
+
+    @model_validator(mode="after")
+    def _sandbox_memory_within_vendor_bounds(self) -> ExecutorConfig:
+        """#578 fail-closed at config load: a cap the vendor would silently
+        clamp behind our back is a config error, not a pass-through. Refuses a
+        value below the vendor minimum (512 MiB) or above the vendor maximum
+        (max(75% of this machine's memory, 512 MiB)). An unset value is NOT an
+        error here — the create path owns that refusal, so a host that never
+        runs a sandbox still starts.
+        """
+        if self.sandbox_memory_mb is None:
+            return self
+        host_total_mib = host_total_memory_mib()
+        vendor_max_mib = max(
+            int(host_total_mib * SANDBOX_MEMORY_VENDOR_MAX_FRACTION),
+            SANDBOX_MEMORY_MIN_MB,
+        )
+        if self.sandbox_memory_mb < SANDBOX_MEMORY_MIN_MB:
+            raise ValueError(
+                f"sandbox_memory_mb must be at least {SANDBOX_MEMORY_MIN_MB} MiB (the sbx vendor "
+                f"minimum), got {self.sandbox_memory_mb} MiB"
+            )
+        if self.sandbox_memory_mb > vendor_max_mib:
+            raise ValueError(
+                f"sandbox_memory_mb must be at most {vendor_max_mib} MiB — 75% of this machine's "
+                f"{host_total_mib} MiB (the sbx vendor maximum), got {self.sandbox_memory_mb} MiB"
+            )
+        return self
 
     @classmethod
     def from_file(cls, path: str | Path) -> ExecutorConfig:

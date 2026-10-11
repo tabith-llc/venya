@@ -15,6 +15,7 @@ import pytest
 from venya_contract import ASKPASS_HELPER_PATH
 
 from executor.bundles import SecretBundle
+from executor.config import ExecutorConfig, host_total_memory_mib
 from executor.egress_filter import DEFAULT_ALLOWLIST_PATH
 from executor.strategies.sbx_strategy import (
     ASKPASS_HELPER_CONTENT,
@@ -190,6 +191,13 @@ class TestSbxStrategyPrepareSecretIdValidation:
 
 
 class TestSbxStrategyCreateSandbox:
+    """#578: the create path carries an explicit --memory. Every cell here pins
+    a cap because the shipped posture is refuse-without-one; the refusal and
+    the config-load bounds are the paired negatives at the end of this class.
+    """
+
+    MEMORY_MB = 1024
+
     @pytest.fixture
     def ws_base(self, monkeypatch, tmp_path):
         """Point WORKSPACE_BASE at tmp_path (hermetic; not real /dev/shm)."""
@@ -198,17 +206,26 @@ class TestSbxStrategyCreateSandbox:
         return base
 
     def test_create_sandbox_calls_sbx_create(self):
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(sandbox_memory_mb=self.MEMORY_MB)
         with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", "/workspace")
             mock_run.assert_called_once()
             call_args = mock_run.call_args[0][0]
-            assert call_args == ["sbx", "create", "--name", "venya-test123", "shell", "/workspace"]
+            assert call_args == [
+                "sbx",
+                "create",
+                "--name",
+                "venya-test123",
+                "--memory",
+                f"{self.MEMORY_MB}m",
+                "shell",
+                "/workspace",
+            ]
             assert strategy._sandbox_name == "venya-test123"
 
     def test_create_sandbox_raises_on_failure(self, ws_base):
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(sandbox_memory_mb=self.MEMORY_MB)
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="image not found")
             with pytest.raises(RuntimeError, match="Failed to create sandbox"):
@@ -218,12 +235,22 @@ class TestSbxStrategyCreateSandbox:
         """No workspace -> strategy creates a per-run dir and always passes it
         as the last argv element (omission was the bug: sbx create prompts on a
         missing path and fails with "user cancelled operation" under non-TTY)."""
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(sandbox_memory_mb=self.MEMORY_MB)
         with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123")
             call_args = mock_run.call_args_list[0][0][0]
-            assert call_args[:5] == ["sbx", "create", "--name", "venya-test123", "shell"]
+            # #578 shifted this window: --memory sits between --name and shell,
+            # so the first seven tokens are the pinned prefix.
+            assert call_args[:7] == [
+                "sbx",
+                "create",
+                "--name",
+                "venya-test123",
+                "--memory",
+                f"{self.MEMORY_MB}m",
+                "shell",
+            ]
             workspace = call_args[len(call_args) - 1]
             assert os.path.isdir(workspace)
             assert workspace.startswith(str(ws_base) + os.sep)
@@ -231,7 +258,7 @@ class TestSbxStrategyCreateSandbox:
             assert strategy._workspace_dir == workspace
 
     def test_create_sandbox_failure_cleans_created_workspace(self, ws_base):
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(sandbox_memory_mb=self.MEMORY_MB)
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="boom")
             with pytest.raises(RuntimeError, match="Failed to create sandbox"):
@@ -241,7 +268,7 @@ class TestSbxStrategyCreateSandbox:
         assert not any(name.startswith("ws_") for name in remaining)
 
     def test_create_sandbox_uses_configured_timeout(self):
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(sandbox_memory_mb=self.MEMORY_MB)
         with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", "/workspace")
@@ -250,12 +277,43 @@ class TestSbxStrategyCreateSandbox:
             assert used == expected
 
     def test_create_sandbox_timeout_env_override(self, monkeypatch):
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(sandbox_memory_mb=self.MEMORY_MB)
         monkeypatch.setenv("VENYA_SBX_CREATE_TIMEOUT", "777")
         with patch("subprocess.run") as mock_run, patch("shutil.which", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", "/workspace")
             assert mock_run.call_args_list[0].kwargs["timeout"] == 777
+
+    def test_sbx_create_refuses_when_memory_unset(self, ws_base):
+        """NEGATIVE PAIR to the pinned argv above: with the knob unset (the
+        shipped default), create_sandbox refuses and never spawns sbx — so no
+        sandbox ever inherits the vendor's 50%-of-guest default."""
+        strategy = SbxStrategy(sandbox_memory_mb=None)
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value="/usr/bin/sbx"):
+            with pytest.raises(RuntimeError, match="sandbox_memory_mb is not configured"):
+                strategy.create_sandbox("test-negative-578", "/workspace")
+            mock_run.assert_not_called()
+        # The refusal lands before any workspace is created: nothing to clean.
+        assert strategy._workspace_dir is None
+        assert not os.path.isdir(ws_base) or not any(name.startswith("ws_") for name in os.listdir(ws_base))
+
+    def test_config_rejects_memory_below_vendor_min(self) -> None:
+        """Config load refuses 511 MiB with a named reason (vendor minimum is 512 MiB)."""
+        with pytest.raises(ValueError, match="512"):
+            ExecutorConfig(sandbox_memory_mb=511, executor_id="test-exec-578")
+
+    def test_config_rejects_memory_above_vendor_max(self) -> None:
+        """NEGATIVE half of the cap: a value above 75% of this machine's memory is
+        one the vendor would clamp silently, so config load refuses it."""
+        absurd = host_total_memory_mib() * 2
+        with pytest.raises(ValueError, match="75%"):
+            ExecutorConfig(sandbox_memory_mb=absurd, executor_id="test-exec-578")
+
+    def test_config_accepts_memory_at_vendor_min(self) -> None:
+        """The boundary itself loads, and unset stays loadable — a host that never
+        runs a sandbox must still start (the create path owns that refusal)."""
+        assert ExecutorConfig(sandbox_memory_mb=512, executor_id="test-exec-578").sandbox_memory_mb == 512
+        assert ExecutorConfig(executor_id="test-exec-578").sandbox_memory_mb is None
 
 
 class TestSbxStrategyRemoveSandboxWorkspace:
@@ -266,7 +324,7 @@ class TestSbxStrategyRemoveSandboxWorkspace:
         return base
 
     def test_remove_sandbox_deletes_created_workspace_and_keeps_base(self, ws_base):
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(sandbox_memory_mb=1024)
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123")
@@ -281,7 +339,7 @@ class TestSbxStrategyRemoveSandboxWorkspace:
     def test_remove_sandbox_keeps_caller_workspace(self, tmp_path):
         caller_ws = tmp_path / "caller-owned"
         caller_ws.mkdir()
-        strategy = SbxStrategy()
+        strategy = SbxStrategy(sandbox_memory_mb=1024)
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stderr="")
             strategy.create_sandbox("venya-test123", str(caller_ws))
