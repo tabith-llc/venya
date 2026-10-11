@@ -371,10 +371,16 @@ class SbxStrategy(InjectionStrategy):
         secret_base_fd: int = 100,
         dns_resolver: str | None = None,
         egress_allowlist_path: str | Path = DEFAULT_ALLOWLIST_PATH,
+        sandbox_memory_mb: int | None = None,
     ) -> None:
         self.secret_base_fd = secret_base_fd
         self.dns_resolver = dns_resolver
         self.egress_allowlist_path = egress_allowlist_path
+        # #578: the explicit --memory cap for every sandbox this strategy
+        # creates. None is not "unbounded" — it is "refuse at create", so an
+        # unset knob never silently inherits the vendor default (50% of the
+        # guest, which on the shipped 5 GB executor shape is ~2.4 GiB each).
+        self.sandbox_memory_mb = sandbox_memory_mb
         self._session_dir: str | None = None
         # #469: the env-file fallback dir, when THIS instance created it. Owns
         # the removal in _release_fallback_dir() — never a prepare() session dir.
@@ -508,6 +514,17 @@ class SbxStrategy(InjectionStrategy):
                 reaper's ownership key: a created sandbox is registered here
                 so a reap pass can never collect a VM a live session holds.
         """
+        # #578: refuse before anything is created — no workspace directory, no
+        # sandbox, no vendor-default claim. RuntimeError is the existing channel
+        # for strategy-level refusals (see validate()).
+        if self.sandbox_memory_mb is None:
+            raise RuntimeError(
+                "sandbox_memory_mb is not configured — sbx create refuses without an explicit cap. "
+                "Set VENYA_EXECUTOR_SANDBOX_MEMORY_MB to a value between 512 and "
+                "75 percent of the executor guest memory. "
+                "See docs/deployment-sizing.md for sizing guidance."
+            )
+
         created_workspace = False
         if workspace is None:
             # Existing path is mandatory: sbx create prompts interactively
@@ -518,7 +535,16 @@ class SbxStrategy(InjectionStrategy):
             self._workspace_dir = workspace
             created_workspace = True
 
-        cmd = ["sbx", "create", "--name", sandbox_name, "shell", workspace]
+        cmd = [
+            "sbx",
+            "create",
+            "--name",
+            sandbox_name,
+            "--memory",
+            f"{self.sandbox_memory_mb}m",
+            "shell",
+            workspace,
+        ]
         create_timeout = int(os.environ.get("VENYA_SBX_CREATE_TIMEOUT", SBX_CREATE_TIMEOUT))
         result = subprocess.run(  # nosec
             cmd,
