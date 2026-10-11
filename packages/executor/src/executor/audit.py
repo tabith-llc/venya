@@ -34,6 +34,7 @@ from typing import Any
 import httpx2
 
 from .config import AuditForwarderConfig
+from .key_passphrase import ssl_password_callback
 
 logger = logging.getLogger("venya.executor.audit")
 
@@ -338,7 +339,16 @@ class AuditLogger:
             )
         ctx.load_verify_locations(cafile=self._config.ca_cert_path)
         if self._client_cert:
-            ctx.load_cert_chain(certfile=self._client_cert[0], keyfile=self._client_cert[1])
+            # #565: the forwarder dials with the executor's own client pair, and the
+            # key may now be an encrypted envelope. The callback is consulted only
+            # for an encrypted file, so a legacy plaintext key forwards exactly as
+            # before; an envelope this host cannot open raises the named refusal
+            # (a spool-stays-put failure, never a degrade to no-client-cert).
+            ctx.load_cert_chain(
+                certfile=self._client_cert[0],
+                keyfile=self._client_cert[1],
+                password=ssl_password_callback(),
+            )
         return ctx
 
     def _forward_once(self) -> bool:

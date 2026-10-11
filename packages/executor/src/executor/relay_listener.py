@@ -32,6 +32,7 @@ from pydantic import ValidationError
 from venya_contract import RelayRequest, RelayResponse
 
 from .executor import CommandRejected
+from .key_passphrase import ssl_password_callback
 
 logger = logging.getLogger("venya.executor.relay")
 
@@ -298,7 +299,13 @@ class RelayListener:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         # GitLab #323: floor the relay at TLSv1.2 (reject TLSv1.0/1.1 pre-handshake).
         context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.load_cert_chain(self._config.mtls.cert, self._config.mtls.key)
+        # #565: the relay serves on the executor's own leaf key, which is now an
+        # encrypted envelope at rest. The callback is consulted only for an
+        # encrypted file, so a legacy plaintext key binds exactly as before; an
+        # envelope this host cannot open raises the named refusal instead of a bare
+        # ``PEM lib`` error from the listener thread. The trust posture is
+        # untouched: CERT_REQUIRED and the CN allowlist below stay as ruled.
+        context.load_cert_chain(self._config.mtls.cert, self._config.mtls.key, password=ssl_password_callback())
         context.load_verify_locations(self._config.mtls.ca_cert)
         context.verify_mode = ssl.CERT_REQUIRED
         return context

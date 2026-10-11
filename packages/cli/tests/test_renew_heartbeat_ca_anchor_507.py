@@ -400,9 +400,14 @@ class TestSiblingStillWorksAndStoreIsOut:
         seen: list[dict] = []
         real_build = cmd._build_ssl_context
 
-        def _spy(cafile, certfile, keyfile):
+        def _spy(cafile, certfile, keyfile, key_password=None):
+            # #565: the builder grew an optional `key_password` argument (the
+            # executor key is an encrypted envelope now). The spy accepts it so this
+            # cell keeps watching the THREE values it was written about — the anchor,
+            # the cert and the key — and the pin it enforces (no host trust store)
+            # is untouched: real_build is still called with the same positional trio.
             seen.append({"cafile": cafile, "certfile": certfile, "keyfile": keyfile})
-            return real_build(cafile, certfile, keyfile)
+            return real_build(cafile, certfile, keyfile, key_password)
 
         monkeypatch.setattr(cmd, "_build_ssl_context", _spy)
 

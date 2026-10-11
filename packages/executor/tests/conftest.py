@@ -57,6 +57,46 @@ def pytest_report_header(config):
 
 
 # ---------------------------------------------------------------------------
+# #565 — the executor key is written encrypted now, so every writer cell needs
+# a passphrase in the environment, exactly as a deployed unit gets one from the
+# installer's EnvironmentFile. TEST value only (AGENTS.md password protocol).
+#
+# This is an autouse fixture rather than 60 per-cell setenvs because the
+# requirement is unconditional on this plane: NO cell that registers or rotates
+# can succeed without it, so a per-cell opt-in would just relocate the same
+# line 60 times and invite a new cell to forget it. The refusal cells are the
+# exception and they call `no_executor_key_passphrase` explicitly — the negative
+# half is stated, never inherited.
+# ---------------------------------------------------------------------------
+
+#: TEST passphrase for the executor key plane (>= the #573 floor of 15 code points).
+TEST_EXECUTOR_KEY_PASSPHRASE = "test-executor-key-passphrase"  # pragma: allowlist secret — TEST value, never real
+
+
+@pytest.fixture(autouse=True)
+def _executor_key_passphrase_env(monkeypatch):
+    """Supply the executor-key passphrase the way a deployed host does (env).
+
+    Yields nothing; the value is exposed to cells that need to OPEN a written key
+    through the `executor_key_passphrase` fixture below, so no test hard-codes the
+    string and no cell can drift from what the autouse half actually sets.
+    """
+    monkeypatch.setenv("VENYA_EXECUTOR_KEY_PASSPHRASE", TEST_EXECUTOR_KEY_PASSPHRASE)
+
+
+@pytest.fixture
+def executor_key_passphrase() -> str:
+    """The TEST passphrase the autouse env fixture sets — for cells that read a key back."""
+    return TEST_EXECUTOR_KEY_PASSPHRASE
+
+
+@pytest.fixture
+def no_executor_key_passphrase(monkeypatch):
+    """Opt-in for the refusal cells: this host has NO passphrase configured."""
+    monkeypatch.delenv("VENYA_EXECUTOR_KEY_PASSPHRASE", raising=False)
+
+
+# ---------------------------------------------------------------------------
 # CA and certificate helpers
 # ---------------------------------------------------------------------------
 

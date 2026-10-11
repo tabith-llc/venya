@@ -403,7 +403,7 @@ class TestCertificateRotation:
 
         assert cert_manager.needs_rotation() is False
 
-    def test_full_rotation_flow(self, cert_manager, ca_manager, ca_key, ca_cert, cert_files):
+    def test_full_rotation_flow(self, cert_manager, ca_manager, ca_key, ca_cert, cert_files, executor_key_passphrase):
         """Rotation: new CSR → server signs → new cert installed."""
         _cert_path, _key_path = cert_files
 
@@ -443,10 +443,12 @@ class TestCertificateRotation:
         # Serial should be updated
         assert cert_manager.serial == format(new_cert.serial_number, "016x")
 
-        # New key should be installed
+        # New key should be installed (#565: the writer emits the encrypted
+        # envelope now, so the read-back unlocks with the passphrase the env fixture
+        # supplied — the assertion itself is unchanged).
         saved_key = serialization.load_pem_private_key(
             Path(cert_manager.key_path).read_bytes(),
-            password=None,
+            password=executor_key_passphrase.encode("utf-8"),
         )
         assert isinstance(saved_key, ec.EllipticCurvePrivateKey)
 
@@ -461,7 +463,7 @@ class TestCertificateRotation:
         with pytest.raises(RuntimeError, match="must register first"):
             cert_manager.rotate()
 
-    def test_rotation_updates_mtls_client(self, cert_manager, ca_key, ca_cert, tmp_ca_dir):
+    def test_rotation_updates_mtls_client(self, cert_manager, ca_key, ca_cert, tmp_ca_dir, executor_key_passphrase):
         """After rotation, mTLS client cert/key match the new cert."""
         # Create a matching cert/key pair for the initial cert
         initial_key = ec.generate_private_key(ec.SECP256R1())
@@ -497,9 +499,10 @@ class TestCertificateRotation:
 
         # Verify the new cert and key files are valid and well-formed
         saved_cert = x509.load_pem_x509_certificate(Path(cert_manager.cert_path).read_bytes())
+        # #565: read back through the passphrase (see test_full_rotation_flow).
         saved_key = serialization.load_pem_private_key(
             Path(cert_manager.key_path).read_bytes(),
-            password=None,
+            password=executor_key_passphrase.encode("utf-8"),
         )
 
         # Verify key is ECDSA P-256

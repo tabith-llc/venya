@@ -4,6 +4,21 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+- **Executor mTLS key is encrypted at rest on every write path (#565).** The
+  executor's own leaf key (`/etc/venya/executor/executor.key`) was serialized
+  unencrypted by all four of its writers — the daemon's registration and rotation
+  paths, and the workstation CLI's `venya exec register` / `venya exec cert renew`
+  — and none of the readers could answer a passphrase. They now write a PKCS#8
+  `BestAvailableEncryption` envelope keyed by `VENYA_EXECUTOR_KEY_PASSPHRASE`, and
+  every reader (the daemon's control-channel client, the boot identity probe, the
+  relay listener, the audit forwarder, the boot certificate/key pair gate, and the
+  CLI's own renew/heartbeat dials) opens it. A writer with no passphrase configured
+  refuses BEFORE it generates a key or sends a request, so nothing is written and an
+  enrollment token is not consumed. Keys written by earlier releases are plaintext on
+  disk and keep loading unchanged — the requirement lands on the next write. This is
+  disk protection by a file passphrase, not hardware-key custody; the interim shape
+  and its retirement trigger are recorded in `docs/cert-rotation-runbook.md` §2 and
+  `docs/design-fido2-keywrap-565.md` §6. refs #565
 - **CLI: `exec register` verification carries the register-path trust (#395).**
   The post-register verify call now builds its TLS trust in the ruled order —
   config-dir CA if present, else the resolved `--ca-bundle`, else a loud

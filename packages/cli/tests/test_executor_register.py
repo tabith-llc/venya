@@ -1109,7 +1109,7 @@ class TestExecutorRegisterFileModes:
             client.close()
             config_file.unlink()
 
-    def test_key_and_dir_modes_at_creation_under_umask022(self, tmp_path):
+    def test_key_and_dir_modes_at_creation_under_umask022(self, tmp_path, executor_key_passphrase):
         old = os.umask(0o022)
         try:
             assert self._register(tmp_path) == 0
@@ -1119,10 +1119,15 @@ class TestExecutorRegisterFileModes:
         assert stat.S_IMODE(out.stat().st_mode) == 0o700
         key = out / "executor.key"
         assert stat.S_IMODE(key.stat().st_mode) == 0o600
-        assert serialization.load_pem_private_key(key.read_bytes(), password=None) is not None
+        # #565: encrypted at rest now — the read-back unlocks with the env fixture's
+        # passphrase; the assertion (a usable key landed) is unchanged.
+        assert (
+            serialization.load_pem_private_key(key.read_bytes(), password=executor_key_passphrase.encode("utf-8"))
+            is not None
+        )
         assert not list(out.glob(".venya-key-*"))
 
-    def test_key_replaces_preexisting_target_not_merged(self, tmp_path):
+    def test_key_replaces_preexisting_target_not_merged(self, tmp_path, executor_key_passphrase):
         out = tmp_path / "certs"
         out.mkdir()
         key = out / "executor.key"
@@ -1135,7 +1140,7 @@ class TestExecutorRegisterFileModes:
             os.umask(old)
         data = key.read_bytes()
         assert b"GARBAGE" not in data  # replaced, not merged
-        assert serialization.load_pem_private_key(data, password=None) is not None
+        assert serialization.load_pem_private_key(data, password=executor_key_passphrase.encode("utf-8")) is not None
         assert stat.S_IMODE(key.stat().st_mode) == 0o600  # temp mode wins over old 0644
 
     def test_cert_and_ca_modes_pinned_under_umask077(self, tmp_path):

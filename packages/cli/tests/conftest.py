@@ -24,6 +24,38 @@ def _hermetic_venya_env(monkeypatch):
     monkeypatch.delenv("VENYA_EXECUTOR_ENROLLMENT_TOKEN", raising=False)
 
 
+#: TEST-only passphrase for the executor key plane (#565). Declared here so the
+#: one number is in one place; cells that assert the refusal delete it.
+TEST_EXECUTOR_KEY_PASSPHRASE = "test-executor-key-passphrase"  # pragma: allowlist secret — TEST value, never real
+
+
+@pytest.fixture(autouse=True)
+def _executor_key_passphrase_env(monkeypatch):
+    """Supply the executor-key passphrase for the writer cells (#565).
+
+    ``venya exec register`` and ``venya exec cert renew`` now refuse to write a
+    plaintext key, so every cell that expects one of them to SUCCEED must carry a
+    passphrase in the environment — which is exactly what a deployed executor
+    host gets from the installer's EnvironmentFile. Autouse rather than per-cell
+    because the requirement is unconditional on this plane; the refusal cells
+    call `no_executor_key_passphrase` and say so out loud. #573's floor applies
+    here too, so this value is 28 code points.
+    """
+    monkeypatch.setenv("VENYA_EXECUTOR_KEY_PASSPHRASE", TEST_EXECUTOR_KEY_PASSPHRASE)
+
+
+@pytest.fixture
+def no_executor_key_passphrase(monkeypatch):
+    """Opt-in for the refusal cells: this host has NO passphrase configured."""
+    monkeypatch.delenv("VENYA_EXECUTOR_KEY_PASSPHRASE", raising=False)
+
+
+@pytest.fixture
+def executor_key_passphrase() -> str:
+    """The TEST passphrase the env fixture sets — for cells that read a key back."""
+    return TEST_EXECUTOR_KEY_PASSPHRASE
+
+
 @pytest.fixture
 def venya_tls_anchor_536(tmp_path, monkeypatch):
     """A Venya TLS trust anchor for THIS cell only — a self-signed CA under

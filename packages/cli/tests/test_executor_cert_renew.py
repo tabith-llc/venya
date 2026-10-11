@@ -681,7 +681,7 @@ class TestRenewSecretFileModes:
 
             return executor_cert_renew(args)
 
-    def test_key_created_0600_under_umask022(self, tmp_path):
+    def test_key_created_0600_under_umask022(self, tmp_path, executor_key_passphrase):
         cert_path, key_path, _ = _setup_cert_files(tmp_path)
         old = os.umask(0o022)
         try:
@@ -689,11 +689,17 @@ class TestRenewSecretFileModes:
         finally:
             os.umask(old)
         assert key_path.stat().st_mode & 0o777 == 0o600
-        assert serialization.load_pem_private_key(key_path.read_bytes(), password=None) is not None
+        # #565: the writer emits the encrypted envelope, so the read-back unlocks
+        # with the passphrase the env fixture supplies. The assertion (a usable key
+        # landed at this path) is unchanged.
+        assert (
+            serialization.load_pem_private_key(key_path.read_bytes(), password=executor_key_passphrase.encode("utf-8"))
+            is not None
+        )
         assert not list(tmp_path.glob(".venya-key-*"))
         assert not key_path.with_suffix(".key.tmp").exists()
 
-    def test_preexisting_key_target_replaced_not_merged(self, tmp_path):
+    def test_preexisting_key_target_replaced_not_merged(self, tmp_path, executor_key_passphrase):
         cert_path, key_path, _ = _setup_cert_files(tmp_path)
         original_key_data = key_path.read_bytes()
         key_path.chmod(0o644)  # pre-existing target in the loose mode
@@ -704,7 +710,7 @@ class TestRenewSecretFileModes:
             os.umask(old)
         data = key_path.read_bytes()
         assert data != original_key_data  # whole new key, not merged/extended
-        assert serialization.load_pem_private_key(data, password=None) is not None
+        assert serialization.load_pem_private_key(data, password=executor_key_passphrase.encode("utf-8")) is not None
         # temp's 0600 wins over the target's old 0644 — os.replace semantics
         assert key_path.stat().st_mode & 0o777 == 0o600
 
@@ -722,7 +728,7 @@ class TestRenewSecretFileModes:
         assert (tmp_path / "ca.crt").stat().st_mode & 0o777 == 0o644
         assert key_path.stat().st_mode & 0o777 == 0o600
 
-    def test_planted_legacy_key_tmp_collision_fails_safe(self, tmp_path):
+    def test_planted_legacy_key_tmp_collision_fails_safe(self, tmp_path, executor_key_passphrase):
         """Old mechanism used the deterministic name <key>.key.tmp — the new
         random-named temp must neither write nor follow a planted file there."""
         cert_path, key_path, _ = _setup_cert_files(tmp_path)
@@ -734,7 +740,13 @@ class TestRenewSecretFileModes:
         finally:
             os.umask(old)
         assert planted.read_bytes() == b"ATTACKER-PLANTED"  # untouched
-        assert serialization.load_pem_private_key(key_path.read_bytes(), password=None) is not None
+        # #565: the writer emits the encrypted envelope, so the read-back unlocks
+        # with the passphrase the env fixture supplies. The assertion (a usable key
+        # landed at this path) is unchanged.
+        assert (
+            serialization.load_pem_private_key(key_path.read_bytes(), password=executor_key_passphrase.encode("utf-8"))
+            is not None
+        )
 
 
 class TestRenewTempHygiene352:
@@ -957,7 +969,7 @@ class TestRenewCleanupGuard476:
         assert self._leftovers(tmp_path) == []
         assert key_path.read_bytes() != b""  # the key published before the abort stays
 
-    def test_normal_save_path_unchanged(self, tmp_path):
+    def test_normal_save_path_unchanged(self, tmp_path, executor_key_passphrase):
         """AC3 paired positive: the widening moves no file, mode, or rename."""
         cert_path, key_path, _ = _setup_cert_files(tmp_path)
         ca_path = tmp_path / "ca.crt"
@@ -974,7 +986,13 @@ class TestRenewCleanupGuard476:
         assert key_path.stat().st_mode & 0o777 == 0o600
         assert cert_path.stat().st_mode & 0o777 == 0o644
         assert ca_path.stat().st_mode & 0o777 == 0o644
-        assert serialization.load_pem_private_key(key_path.read_bytes(), password=None) is not None
+        # #565: the writer emits the encrypted envelope, so the read-back unlocks
+        # with the passphrase the env fixture supplies. The assertion (a usable key
+        # landed at this path) is unchanged.
+        assert (
+            serialization.load_pem_private_key(key_path.read_bytes(), password=executor_key_passphrase.encode("utf-8"))
+            is not None
+        )
         assert b"CERTIFICATE" in cert_path.read_bytes()
         assert self._leftovers(tmp_path) == []
 
