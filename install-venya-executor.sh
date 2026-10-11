@@ -498,6 +498,40 @@ else
     fi
 fi
 
+# --- Executor key passphrase (VENYA_EXECUTOR_KEY_PASSPHRASE) --- #565
+# The executor now writes its own mTLS leaf key encrypted at rest
+# (packages/executor/src/executor/key_passphrase.py, plus the CLI's aligned copy), and
+# the daemon that reads it is unattended, so the passphrase must exist BEFORE
+# registration runs. Acquisition and re-run idempotency mirror install-venya-core.sh's
+# CA-key pattern: explicit env (operator override; a WRONG value fails loudly
+# downstream at decrypt) > stored in the EnvironmentFile (a re-run PRESERVES the
+# encrypted executor.key, so regenerating the passphrase would make it undecryptable) >
+# TTY prompt > strong random. Generated before the EnvironmentFile write and before
+# every consumer below.
+#
+# INTERIM SHAPE, ruled 2026-10-10 (R7-Q3, decisions.md commit 1bf25ae): a file
+# passphrase is DISK PROTECTION, not hardware custody. It retires when a production
+# fleet host gains authenticator attachment, or when a CSR lifecycle means private
+# material never lands on the host. No banner below may imply a hardware key.
+EXECUTOR_KEY_PASSPHRASE="${VENYA_EXECUTOR_KEY_PASSPHRASE:-}"
+if [ -z "$EXECUTOR_KEY_PASSPHRASE" ] && [ -f /etc/venya/venya-executor.env ]; then
+    EXECUTOR_KEY_PASSPHRASE=$(sed -n 's/^VENYA_EXECUTOR_KEY_PASSPHRASE=//p' /etc/venya/venya-executor.env | head -n1)
+    if [ -n "$EXECUTOR_KEY_PASSPHRASE" ]; then
+        info "Existing install: reusing stored executor key passphrase from /etc/venya/venya-executor.env."
+    fi
+fi
+if [ -z "$EXECUTOR_KEY_PASSPHRASE" ]; then
+    if [ -t 0 ] && [ "${VENYA_SKIP_PROMPT:-}" != "yes" ]; then
+        venya_read_secret_confirm "Executor key passphrase" EXECUTOR_KEY_PASSPHRASE
+    else
+        EXECUTOR_KEY_PASSPHRASE=$(openssl rand -base64 32)
+        info "Unattended install: generated a random executor key passphrase."
+    fi
+fi
+# #326 F-1 shape: gate the finalized value before it is written anywhere or handed to
+# a child's environment -- a newline/CR would split the EnvironmentFile line.
+venya_guard_injection "EXECUTOR_KEY_PASSPHRASE" "$EXECUTOR_KEY_PASSPHRASE"
+
 # --- Write executor config (after CA installation so ca_bundle path is valid) ---
 # #317 umask 077 guard: root-owned /etc/venya needs the inherited 0755 traverse
 # bit for the venya daemon (inner files/dirs individually protected as before).
@@ -539,6 +573,21 @@ mkdir -p /var/log/venya
 } > /etc/venya/executor.toml
 
 info "Executor config written to /etc/venya/executor.toml"
+
+# --- Runtime passphrase delivery: root-only systemd EnvironmentFile (#565) ---
+# Same shape and same mode as the core's /etc/venya/venya-core.env: delete-then-create
+# for a fresh inode (#381 posture), chown root:venya, chmod 0640. systemd reads it as
+# root into the service environment. The value is NOT written into executor.toml --
+# that file is venya:venya 0600 config the service user can rewrite; keeping the
+# secret in a root-owned file is what makes the mode the control.
+# MEASURED: the core installer's EnvironmentFile is 0640 root:venya, NOT 0600
+# venya-owned (install-venya-core.sh, the venya-core.env write). Copied deliberately,
+# per the correction booked in docs/design-fido2-keywrap-565.md section 6.
+rm -f /etc/venya/venya-executor.env
+printf 'VENYA_EXECUTOR_KEY_PASSPHRASE=%s\n' "$EXECUTOR_KEY_PASSPHRASE" > /etc/venya/venya-executor.env
+chown root:venya /etc/venya/venya-executor.env
+chmod 0640 /etc/venya/venya-executor.env
+info "Executor key passphrase delivered via /etc/venya/venya-executor.env (0640 root:venya)."
 info "Sandbox DNS resolver: $DNS_RESOLVER"
 
 # --- Executor-id dial-contract pre-check (ticket installer-executor-id-precheck-guidance) ---
@@ -600,7 +649,11 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
         # --enrollment-token exposed the live token in /proc/*/cmdline to any
         # local user during the install window (Docker-API-key stdin-only precedent).
         REG_EXIT=0
+        # VENYA_EXECUTOR_KEY_PASSPHRASE passes by ENV, exactly like the token above:
+        # argv would put the live secret in /proc/*/cmdline for the install window. If
+        # it is absent the CLI writer REFUSES and writes nothing -- which is the point.
         REG_OUTPUT=$(VENYA_EXECUTOR_ENROLLMENT_TOKEN="${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" \
+            VENYA_EXECUTOR_KEY_PASSPHRASE="$EXECUTOR_KEY_PASSPHRASE" \
             "$INSTALL_DIR/.venv/bin/venya" exec register \
             --executor-id "$EXECUTOR_ID" \
             --core-url "$SERVER_URL" \
@@ -626,6 +679,15 @@ if [ -n "${VENYA_EXECUTOR_ENROLLMENT_TOKEN:-}" ]; then
                 error "Then re-run this installer with the fresh token — the re-run is FAST (idempotent:"
                 error "  apt/Docker/sbx steps skip or cache, so TTL window pressure mostly evaporates):"
                 error "  VENYA_EXECUTOR_ENROLLMENT_TOKEN=<new-token> <same installer command as before>"
+            elif printf '%s' "$REG_OUTPUT" | grep -qiF "must never be stored unencrypted"; then
+                error "CLASS: executor key passphrase NOT AVAILABLE to the register step."
+                error "  The CLI refuses to write an unencrypted executor key (#565): nothing was"
+                error "  written, and the enrollment token was NOT consumed (the refusal precedes"
+                error "  the POST), so the SAME token is still live."
+                error "  Fix: this installer writes the passphrase to /etc/venya/venya-executor.env"
+                error "  (0640 root:venya) before this step. If that file is missing or holds a"
+                error "  different value, re-run with VENYA_EXECUTOR_KEY_PASSPHRASE set explicitly."
+                error "  This is disk protection by a file passphrase, NOT hardware-key custody."
             elif printf '%s' "$REG_OUTPUT" | grep -qiF "does not resolve"; then
                 error "CLASS: executor-id NOT RESOLVABLE from the core. The ID is the relay dial"
                 error "  hostname + cert SAN — every core must resolve it. The rejected attempt did"
@@ -757,6 +819,17 @@ find /etc/venya/executor -name '*.key' -exec chmod 600 {} + || KEY_PIN_RC=$?
 if [ "$KEY_PIN_RC" -ne 0 ]; then
     error "chmod 600 pass over /etc/venya/executor key material failed (exit $KEY_PIN_RC)"
     CRED_ERRORS=$((CRED_ERRORS + 1))
+fi
+# #565: the EnvironmentFile carries the passphrase that unlocks the executor identity,
+# so its mode and ownership are verified with the same authority as the key/cert pins.
+# This pass REFUSES a bad mode; it never silently re-chmods a file it did not create.
+if [ -f /etc/venya/venya-executor.env ]; then
+    ENV_MODE=$(stat -c '%a' /etc/venya/venya-executor.env)
+    ENV_OWNER=$(stat -c '%U:%G' /etc/venya/venya-executor.env)
+    if [ "$ENV_MODE" != "640" ] || [ "$ENV_OWNER" != "root:venya" ]; then
+        error "/etc/venya/venya-executor.env is $ENV_OWNER mode $ENV_MODE; expected root:venya mode 640"
+        CRED_ERRORS=$((CRED_ERRORS + 1))
+    fi
 fi
 CRT_PIN_RC=0
 find /etc/venya/executor -name '*.crt' -exec chmod 644 {} + || CRT_PIN_RC=$?

@@ -23,6 +23,7 @@ import re
 import ssl
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -223,8 +224,24 @@ def _admin_cert_fingerprint(cert_path: str) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _build_ssl_context(cafile: str | None, certfile: str | None, keyfile: str | None) -> ssl.SSLContext:
+def _build_ssl_context(
+    cafile: str | None,
+    certfile: str | None,
+    keyfile: str | None,
+    key_password: Callable[[], bytes] | None = None,
+) -> ssl.SSLContext:
     """Build the single TLS context for APIClient.
+
+    ``key_password`` (#565) is an OPTIONAL callback handed to
+    ``SSLContext.load_cert_chain`` for a client key stored in the encrypted
+    at-rest envelope. OpenSSL invokes it only when the key file really is
+    encrypted, so passing None — the admin path today, and every existing
+    caller — behaves exactly as before: a plaintext key loads, an encrypted one
+    raises. The executor commands pass the callback because their
+    ``executor.key`` is now written encrypted by the same product that reads it
+    (``venya_cli/executor_key.py``); the admin pair stays passphrase-blind, a
+    known gap pinned by cell N4 of ``test_cli_admin_leaf_key_passphrase_547a.py``
+    and owned by Part B, not widened or closed here.
 
     Ticket cli-admin-mtls-verify-cert-conflict (option (a)): httpx2 >= 2.12
     rejects `cert=` combined with a string `verify` — the natural admin flow
@@ -265,7 +282,7 @@ def _build_ssl_context(cafile: str | None, certfile: str | None, keyfile: str | 
         ) from e
     if certfile and keyfile:
         try:
-            ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+            ctx.load_cert_chain(certfile=certfile, keyfile=keyfile, password=key_password)
         except (ssl.SSLError, OSError) as e:
             raise APIClientError(
                 f"Failed to load the admin mTLS client cert/key pair " f"({certfile!r} / {keyfile!r}): {e}"

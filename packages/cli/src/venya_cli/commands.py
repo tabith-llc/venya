@@ -42,6 +42,12 @@ from .at_rest_key import (
     server_passphrase_env_for,
     unwrap_at_rest,
 )
+from .executor_key import (
+    EXECUTOR_KEY_PASSPHRASE_ENV,
+    acquire_write_passphrase,
+    serialize_key_encrypted,
+    ssl_password_callback,
+)
 from .secret_holder import SecretHolder
 
 # --- Version-mismatch advisory (ticket cli-version-mismatch-upgrade-nudge) ---
@@ -3050,6 +3056,19 @@ def executor_register(client: APIClient, args: Any) -> int:
     ):
         return 1
 
+    # #565 AC3/AC4: the executor key is written encrypted, so the passphrase is
+    # resolved HERE — before the keypair, before the CSR, before the POST and
+    # before any directory exists. Two reasons, both load-bearing: the token is
+    # not consumed by a doomed registration (the install guidance already says a
+    # failed attempt leaves the token live), and a refusal that happens first
+    # leaves nothing on disk to clean up. No fallback branch: an unset or
+    # blank value is a refusal, never a plaintext key.
+    try:
+        key_passphrase = acquire_write_passphrase()
+    except RuntimeError as e:
+        print(f"Registration failed: {e}", file=sys.stderr)
+        return 1
+
     # Step 1: Generate ECDSA P-256 keypair
     try:
         print("Generating ECDSA P-256 keypair...")
@@ -3113,13 +3132,13 @@ def executor_register(client: APIClient, args: Any) -> int:
                 print(f"WARNING: cannot hand {output_path} to {EXECUTOR_SERVICE_USER}: {e}", file=sys.stderr)
                 service_ids = None
 
-        # Save private key
+        # Save private key — ENCRYPTED at rest (#565: this used to be
+        # NoEncryption(), an executor private key in the clear beside the cert).
+        # The envelope is PKCS#8 + BestAvailableEncryption under the passphrase
+        # resolved above the POST; mode 0600 and the staged temp + os.replace are
+        # unchanged, so nothing already-correct about the write changed shape.
         key_path = output_path / "executor.key"
-        key_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
+        key_pem = serialize_key_encrypted(private_key, key_passphrase)
         key_tmp: str | None = None
         try:
             with tempfile.NamedTemporaryFile(dir=output_path, prefix=".venya-key-", delete=False) as fd:
@@ -3182,7 +3201,7 @@ def executor_register(client: APIClient, args: Any) -> int:
         # account BEFORE os.replace — no post-publish chown window (#373).
 
         print(f"Certificate saved to {cert_path}")
-        print(f"Private key saved to {key_path} (permissions: 600)")
+        print(f"Private key saved to {key_path} (permissions: 600, passphrase-encrypted)")
         if ca_cert_pem:
             print(f"CA certificate saved to {ca_cert_path}")
     except OSError as e:
@@ -3213,6 +3232,15 @@ def executor_register(client: APIClient, args: Any) -> int:
     print("\nTo use mTLS authentication, set VENYA_MTLS_CERT and VENYA_MTLS_KEY:")
     print(f"  export VENYA_MTLS_CERT={cert_path}")
     print(f"  export VENYA_MTLS_KEY={key_path}")
+    # #565: the key is an encrypted envelope now, so every reader needs the
+    # passphrase. Stated, not implied — and stated as disk protection, not as
+    # hardware custody (R7-Q3's label discipline governs this sentence).
+    print(
+        f"\nThe key is encrypted at rest. Any process that loads it must have\n"
+        f"{EXECUTOR_KEY_PASSPHRASE_ENV} set — on an installed executor the venya-executor\n"
+        "service gets it from the installer's EnvironmentFile. This is disk protection\n"
+        "(a file passphrase), not hardware-key custody."
+    )
     return 0
 
 
@@ -3367,6 +3395,22 @@ def executor_cert_renew(args: Any) -> int:
 
     executor_id = info["executor_id"]
 
+    # #565 AC3/AC4: resolve the passphrase for the NEW key before any network
+    # call. On this path the ordering is not cosmetic — the register endpoint
+    # replaces the server-side certificate record, so a renew that POSTs first
+    # and then fails at its own write leaves the executor holding a certificate
+    # the core now knows about and a key this host cannot use. Refusing here
+    # costs nothing: no request sent, no file touched, the incumbent key still
+    # on disk. (That incumbent key may itself be an encrypted envelope now, which
+    # the read side handles via ssl_password_callback below — a legacy plaintext
+    # key is unaffected, because OpenSSL never asks for a password it does not
+    # need.)
+    try:
+        key_passphrase = acquire_write_passphrase()
+    except RuntimeError as e:
+        print(f"Renewal failed: {e}", file=sys.stderr)
+        return 1
+
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import NameOID
@@ -3434,7 +3478,14 @@ def executor_cert_renew(args: Any) -> int:
     try:
         print("Submitting renewal request via mTLS...")
         ssl_ctx = (
-            _build_ssl_context(cafile=verify_cafile, certfile=cert_path, keyfile=key_path) if tls_verify else False
+            _build_ssl_context(
+                cafile=verify_cafile,
+                certfile=cert_path,
+                keyfile=key_path,
+                key_password=ssl_password_callback(),
+            )
+            if tls_verify
+            else False
         )
         with httpx2.Client(
             verify=ssl_ctx,
@@ -3511,11 +3562,13 @@ def executor_cert_renew(args: Any) -> int:
             os.fchmod(fd.fileno(), 0o644)
             _chown_secret_temp(fd.fileno(), service_ids)
 
-        key_pem = new_private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
+        # #565: the renewed key lands in the SAME encrypted envelope the register
+        # path writes (PKCS#8 + BestAvailableEncryption under the passphrase
+        # resolved above the POST). Mode 0600, the random-name staged temp and the
+        # os.replace publish are unchanged — only the serialization changed. Before
+        # this the renew path wrote NoEncryption(): an executor private key in the
+        # clear beside its certificate.
+        key_pem = serialize_key_encrypted(new_private_key, key_passphrase)
         with tempfile.NamedTemporaryFile(dir=Path(key_path).parent, prefix=".venya-key-", delete=False) as fd:
             key_tmp_name = fd.name
             fd.write(key_pem)
@@ -3567,7 +3620,14 @@ def executor_cert_renew(args: Any) -> int:
     try:
         print("Verifying authentication...")
         ssl_ctx = (
-            _build_ssl_context(cafile=verify_cafile, certfile=cert_path, keyfile=key_path) if tls_verify else False
+            _build_ssl_context(
+                cafile=verify_cafile,
+                certfile=cert_path,
+                keyfile=key_path,
+                key_password=ssl_password_callback(),
+            )
+            if tls_verify
+            else False
         )
         with httpx2.Client(
             verify=ssl_ctx,
@@ -3585,7 +3645,15 @@ def executor_cert_renew(args: Any) -> int:
     print(f"  Serial:         {serial_number}")
     print(f"  Expires:        {not_after}")
     print(f"  Cert:           {cert_path}")
-    print(f"  Key:            {key_path}")
+    print(f"  Key:            {key_path} (passphrase-encrypted)")
+    # #565: name the delivery requirement instead of leaving it to be discovered
+    # at the next daemon restart, and keep the label honest — a file passphrase is
+    # disk protection, not hardware custody (R7-Q3).
+    print(
+        f"  The key is encrypted at rest: readers need {EXECUTOR_KEY_PASSPHRASE_ENV}\n"
+        "  set (the venya-executor service gets it from the installer's EnvironmentFile).\n"
+        "  This is disk protection, not hardware-key custody."
+    )
     return 0
 
 
@@ -3739,7 +3807,12 @@ def executor_heartbeat(args: Any) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     try:
-        ssl_ctx = _build_ssl_context(cafile=verify_cafile, certfile=cert_path, keyfile=key_path)
+        ssl_ctx = _build_ssl_context(
+            cafile=verify_cafile,
+            certfile=cert_path,
+            keyfile=key_path,
+            key_password=ssl_password_callback(),
+        )
         with httpx2.Client(
             verify=ssl_ctx,
             timeout=10.0,

@@ -628,7 +628,7 @@ class TestNeedsRotation:
 class TestRotate:
     """Tests for CertificateManager.rotate()."""
 
-    def test_rotate_success(self, cert_manager: CertificateManager, tmp_ca_dir: Path):
+    def test_rotate_success(self, cert_manager: CertificateManager, tmp_ca_dir: Path, executor_key_passphrase: str):
         """Rotation generates new keypair, submits CSR, installs new cert."""
         ca_key, ca_cert = _make_ca_pair()
         # #500: rotation is checked against the trust anchor already on disk
@@ -658,10 +658,14 @@ class TestRotate:
         saved_cert = x509.load_pem_x509_certificate(Path(cert_manager.cert_path).read_bytes())
         assert saved_cert.serial_number == new_cert.serial_number
 
-        # Verify new key was installed
+        # Verify new key was installed. #565: the writer now emits the encrypted
+        # envelope, so the read-back opens with the passphrase the environment
+        # fixture supplied — the assertion (a usable P-256 key landed) is unchanged,
+        # only the unlock step is. The ENCRYPTED marker is pinned in
+        # test_daemon_key_passphrase_565.py, not here.
         saved_key = serialization.load_pem_private_key(
             Path(cert_manager.key_path).read_bytes(),
-            password=None,
+            password=executor_key_passphrase.encode("utf-8"),
         )
         assert isinstance(saved_key, ec.EllipticCurvePrivateKey)
 

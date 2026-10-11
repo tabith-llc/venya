@@ -119,6 +119,32 @@ sudo /opt/venya/.venv/bin/venya exec cert renew                  # CSR via exist
 sudo /opt/venya/.venv/bin/venya exec cert renew --cert-path /etc/venya/executor/executor.crt
 ```
 
+**The executor key is encrypted at rest (#565), so both `renew` and `register` need
+the passphrase.** `cert renew` reads the incumbent key to authenticate the renewal and
+then writes the new one as an encrypted envelope, so the process must see
+`VENYA_EXECUTOR_KEY_PASSPHRASE` — the same variable the `venya-executor` service reads
+from the installer's root-only `EnvironmentFile`. Two shapes, both supported:
+
+```bash
+# reuse what the service already has (sudo strips the environment, so pass it in):
+sudo VENYA_EXECUTOR_KEY_PASSPHRASE="$(sudo sed -n 's/^VENYA_EXECUTOR_KEY_PASSPHRASE=//p' /etc/venya/venya-executor.env)" \
+  /opt/venya/.venv/bin/venya exec cert renew
+
+# or run it interactively and answer the hidden prompt (the write-time ceremony)
+sudo -E /opt/venya/.venv/bin/venya exec cert renew
+```
+
+Without either, the command refuses and writes NOTHING — no directory, no staged temp,
+no half-renewed key, and no request sent (a renewal that POSTed first would replace the
+server-side certificate record before discovering it cannot store the key). A key
+written by an EARLIER release is plaintext on disk and still reads normally; the
+requirement applies to the next write, so set the passphrase once and rotate.
+
+This is disk protection by a file passphrase, **not** hardware-key custody: the
+passphrase lives on the host, delivered through the service environment. The interim
+exemption and its retirement trigger are written up in
+`docs/design-fido2-keywrap-565.md` §6 (owner ruling R7-Q3).
+
 `renew` authenticates with the CURRENT cert — run it while the cert is still valid
 (the same 3-day window the daemon uses). If the cert already expired, re-register
 instead (§3).

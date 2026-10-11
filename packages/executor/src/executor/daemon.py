@@ -57,6 +57,13 @@ from .command_validator import (
 )
 from .config import ExecutorConfig
 from .executor import Executor
+from .key_passphrase import (
+    load_private_key,
+    passphrase_or_refuse,
+    read_passphrase_or_none,
+    serialize_key_encrypted,
+    ssl_password_callback,
+)
 from .relay_listener import RelayListener
 from .strategies.sbx_strategy import (
     ENV_DIR_PREFIX,
@@ -593,6 +600,17 @@ class CertificateManager:
 
         logger.info("Registering executor: %s", executor_id)
 
+        # #565 AC3/AC4 + R7-Q3: the executor key is written encrypted, so the
+        # passphrase is resolved HERE — after the two local preflights (pair check,
+        # writability) and BEFORE the CSR is generated and the registration POST
+        # leaves this host. A refusal that arrives after the POST would burn the
+        # enrollment token and replace the server-side record while this host still
+        # has no usable key; refusing here costs nothing at all. There is no
+        # fallback branch: unset, empty, whitespace-only or under the #573 floor is
+        # a refusal, never a plaintext key. This is disk protection under a file
+        # passphrase, NOT hardware custody (design note §6, R7-Q3 label discipline).
+        key_passphrase = passphrase_or_refuse()
+
         # Generate ECDSA P-256 keypair
         private_key = _generate_ecdsa_p256_keypair()
 
@@ -705,11 +723,7 @@ class CertificateManager:
 
             _atomic_write(self.cert_path, cert_pem, 0o644)
 
-            key_pem = private_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
+            key_pem = serialize_key_encrypted(private_key, key_passphrase)
             _atomic_write(self.key_path, key_pem, 0o600)
         except OSError as e:
             msg = (
@@ -763,8 +777,24 @@ class CertificateManager:
         # Same anchor-pinned context register() uses; `verify=True` here would mean
         # "host trust store only" and ignore the Venya CA (#502).
         probe_verify: object = self._server_ssl_context() if verify else False
+        # #565: this dial presents the executor's own client certificate and the key
+        # behind it may now be an encrypted envelope. httpx's `cert=` accepts the
+        # 3-tuple (cert, key, password) and hands it to load_cert_chain positionally,
+        # so the passphrase rides the SAME tuple this site already used — `verify`
+        # keeps its ruled shape on both branches (an anchor context when verifying,
+        # the literal False under VENYA_TLS_VERIFY=false), and nothing is downgraded
+        # to make a cell pass. When the key needs no password the 2-tuple is passed
+        # UNCHANGED, so a legacy plaintext host is byte-identical to today (the
+        # #502 pin on this site's cert tuple keeps holding without edits). The
+        # helper raises the named refusal for an envelope this host cannot open, so
+        # a passphrase problem is not reported as a ghost identity — the bare
+        # OpenSSL text would have been classified as a TLS handshake failure.
+        probe_pw = read_passphrase_or_none(self.key_path)
+        probe_cert: object = (
+            (self.cert_path, self.key_path, probe_pw) if probe_pw is not None else (self.cert_path, self.key_path)
+        )
         try:
-            with httpx2.Client(cert=(self.cert_path, self.key_path), verify=probe_verify, timeout=10.0) as client:
+            with httpx2.Client(cert=probe_cert, verify=probe_verify, timeout=10.0) as client:
                 response = client.post(url, json={"executor_id": executor_id})
         except httpx2.TransportError as exc:
             if _is_tls_handshake_failure(exc):
@@ -838,6 +868,14 @@ class CertificateManager:
                 "(must include /etc/venya/executor) or the directory permissions."
             )
 
+        # #565: resolve the passphrase for the rotated key BEFORE the POST. The
+        # comment below (the #EROFS preflight) already states why the order on this
+        # path matters — "a doomed write after the POST still diverges the server
+        # record from disk" — and an unconfigured passphrase is exactly such a
+        # doomed write, one retry per rotation loop forever. Refusing here leaves
+        # the incumbent cert/key untouched and the server record unchanged.
+        key_passphrase = passphrase_or_refuse()
+
         # Generate new keypair and CSR
         private_key = _generate_ecdsa_p256_keypair()
         executor_id = _extract_executor_id_from_cert(self.cert_path)
@@ -885,11 +923,7 @@ class CertificateManager:
         # is the commit point of the pair. A kill between any two replaces
         # leaves a mismatch the register() presence check detects and
         # re-enrolls (see the #480 branch there) instead of a crash-loop.
-        key_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
+        key_pem = serialize_key_encrypted(private_key, key_passphrase)
         _atomic_write(self.key_path, key_pem, 0o600)
 
         _atomic_write(self.cert_path, cert_pem, 0o644)
@@ -1219,7 +1253,14 @@ def _cert_key_pair_matches(cert_path: str | Path, key_path: str | Path) -> bool:
     """
     try:
         cert = x509.load_pem_x509_certificate(Path(cert_path).read_bytes())
-        key = serialization.load_pem_private_key(Path(key_path).read_bytes(), password=None)
+        # #565: this gate used to read the key with password=None, which is a
+        # silent "unparseable" verdict for an encrypted envelope — a valid
+        # identity would have looked mismatched and fallen through to
+        # re-enrollment. load_private_key tries plaintext first (every legacy
+        # host) and then the configured passphrase, so a real mismatch still
+        # returns False while "encrypted and no passphrase on this host" raises
+        # the named refusal instead of quietly re-minting an identity.
+        key = load_private_key(Path(key_path).read_bytes(), key_path=key_path)
     except (OSError, ValueError):
         return False
     der = serialization.Encoding.DER
@@ -1668,7 +1709,15 @@ class ExecutorDaemon:
         try:
             ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             ssl_ctx.verify_flags |= ssl.VERIFY_X509_STRICT | ssl.VERIFY_X509_PARTIAL_CHAIN
-            ssl_ctx.load_cert_chain(self.config.mtls.cert, self.config.mtls.key)
+            # #565: the key may now be an encrypted envelope, so the loader answers
+            # OpenSSL with the configured passphrase. The callback is invoked ONLY
+            # for an encrypted file, so a legacy plaintext key on an existing host
+            # still loads exactly as before with nothing set — the no-regression
+            # half, and the reason this is a callback and not a value. When the key
+            # IS encrypted and the passphrase is missing, the callback raises the
+            # named refusal, which is not an (OSError, ssl.SSLError), so it escapes
+            # this arm intact instead of being restated as "material unusable".
+            ssl_ctx.load_cert_chain(self.config.mtls.cert, self.config.mtls.key, password=ssl_password_callback())
             ssl_ctx.load_verify_locations(self.config.mtls.ca_cert)
         except (OSError, ssl.SSLError) as exc:
             logger.error(

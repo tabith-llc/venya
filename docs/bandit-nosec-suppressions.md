@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**60 suppression lines across 19 files.**
+**62 suppression lines across 21 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -26,6 +26,7 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/cli/src/venya_cli/cli.py` | `except Exception:  # nosec B110 — unwritable config dir must not break the CLI` |
 | `packages/cli/src/venya_cli/commands.py` | `resp = httpx2.get(url, verify=False, timeout=5.0)  # nosec B403 -- scoped TOFU bootstrap; see docstring` |
 | `packages/cli/src/venya_cli/commands.py` | `except Exception:  # nosec B110  # noqa: S110` |
+| `packages/cli/src/venya_cli/executor_key.py` | `EXECUTOR_KEY_PASSPHRASE_ENV = "VENYA_EXECUTOR_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/cli/src/venya_cli/fido2_client.py` | `except Exception:  # noqa: S110  # nosec B110 — deliberate: parse failure keeps raw status text` |
 | `packages/cli/src/venya_cli/webauthn.py` | `except Exception:  # nosec B110  # noqa: S110` |
 | `packages/core/scripts/gen_bandit_suppressions.py` | `import subprocess  # nosec B404 — git ls-files provides the tracked set; fixed argv, no shell` |
@@ -38,6 +39,7 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/executor/src/executor/executor.py` | `import subprocess  # nosec B404 — executor requires subprocess to run commands` |
 | `packages/executor/src/executor/executor.py` | `os.killpg(os.getpgid(process.pid), 9)  # nosec B606 — no shell string; a pid we own` |
 | `packages/executor/src/executor/executor.py` | `shell=False,  # nosec B603 — shell explicitly disabled for security` |
+| `packages/executor/src/executor/key_passphrase.py` | `EXECUTOR_KEY_PASSPHRASE_ENV = "VENYA_EXECUTOR_KEY_PASSPHRASE"  # nosec B105 — env var name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/executor/src/executor/relay_listener.py` | `host: str = "0.0.0.0",  # nosec B104 — private relay net; mTLS CERT_REQUIRED + CN allowlist is the access control` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `import subprocess  # nosec B404 — sandbox strategy requires subprocess for sbx commands` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `SECRET_TMPFS_BASE = "/dev/shm/venya-secrets"  # nosec` | <!-- pragma: allowlist secret -->

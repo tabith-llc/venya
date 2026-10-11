@@ -13,6 +13,14 @@ Type=simple
 User=venya
 Group=venya
 ExecStart=/opt/venya/.venv/bin/venya-executor --config /etc/venya/executor.toml
+# #565: the executor's mTLS leaf key is encrypted at rest now, and the daemon that
+# reads it back is unattended, so the passphrase has to arrive the way the core's CA
+# passphrases do -- through a root-only EnvironmentFile that systemd (PID1, as root)
+# reads into the service's os.environ before privileges drop. The leading "-" keeps an
+# executor installed BEFORE this change booting: no file, no variable, the incumbent
+# key still reads, and the next WRITE (register/rotate) refuses loudly instead of the
+# unit crash-looping.
+EnvironmentFile=-/etc/venya/venya-executor.env
 Restart=always
 RestartSec=5s
 
