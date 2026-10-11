@@ -18,14 +18,20 @@ client (``relay_client_ids``).
 Transport is stdlib (``http.server`` + ``ssl.SSLContext``). The wire shape comes
 from ``venya_contract`` (pydantic) — the frozen relay contract shared with the
 server, so a one-sided field change is an import/type error, not a runtime drift.
+
+RF-3 (2026-10-11): the listener threads. Admission is a
+``threading.Semaphore`` in the handler, sized by
+``VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS`` / ``[executor]
+max_concurrent_commands``; the shipped default is 1.
 """
 
 import json
 import logging
 import ssl
 import threading
+import time
 from collections.abc import Callable
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from pydantic import ValidationError
@@ -50,19 +56,21 @@ MAX_RELAY_BODY_BYTES = 16 * 1024 * 1024
 
 # Per-socket-operation INACTIVITY timeout (not a total-duration ceiling):
 # socketserver applies it via connection.settimeout, so a slow-but-steady
-# transfer of any size never trips it, while a silent peer releases the single
-# handler thread well below SBX_TIMEOUT (1h) and inside one heartbeat interval.
+# transfer of any size never trips it, while a silent peer releases its handler
+# thread well below SBX_TIMEOUT (1h) and inside one heartbeat interval.
 # HTTP/1.0 (BaseHTTPRequestHandler default) closes the connection after every
 # response, so no keep-alive idle clock exists. Residual: a byte-trickle peer
-# can still hold the handler — bounded in practice by core's own httpx2 client
+# can still hold its handler — bounded in practice by core's own httpx2 client
 # timeout (300s), after which the socket EOFs. Threat model is a misbehaving
 # AUTHENTICATED peer (mTLS + CN allowlist), not an adversarial one.
 RELAY_READ_TIMEOUT_SECONDS = 30.0
 
 # #477 (relay-stop-unbounded-skips-cleanup-under-systemd): the bound stop()
-# waits for the in-flight command to finish and its teardown to run. The
-# server is single-threaded and executes INLINE, so an unwaited shutdown was
-# unbounded (a command may run to SBX_TIMEOUT = 1h) — and systemd's default
+# waits for in-flight command(s) to finish and their teardown to run. RF-3 made
+# this "command(s)": the listener threads, so shutdown() no longer implies the
+# engine is done — stop() now bounds the wait by taking every admission permit
+# (see RelayListener.stop). The bound itself is unchanged: an unwaited shutdown
+# was unbounded (a command may run to SBX_TIMEOUT = 1h) — and systemd's default
 # stop deadline then SIGKILLed the process, skipping the sandbox-removal
 # finally and the temp cleanup. 30 s keeps a normal restart prompt; the unit
 # declares TimeoutStopSec=45s so systemd's kill lands only AFTER this bound +
@@ -166,58 +174,97 @@ class ExecuteHandler(BaseHTTPRequestHandler):
 
         # B0.2: wire to the existing engine. The factory is wired to
         # ExecutorDaemon.create_executor in production; tests inject a stub.
-        # Per the plan's failure-mode table, any execution failure is a flat 503
-        # (no retry), which also covers sandbox/subprocess timeouts surfacing as
-        # exceptions from the engine. ONE carve-out (ticket policy-reject-flat-503
-        # #410): a CommandRejected from the pre-run gates is not an execution
-        # failure — nothing ran — and takes a 422-with-reason lane.
-        # env/askpass specs (ticket secret-shape-env-injection) pass through
-        # as plain dicts; secret_id -> plaintext resolution happens inside
-        # execute() where the unwrapped bundles live — the listener never
-        # touches plaintext.
-        env_vars = [e.model_dump() for e in req.env] if req.env else None
-        executor: Any = None
+        #
+        # RF-3 admission point. The permit is taken HERE — after identity, drain
+        # and body-cap gates have all been answered, and around the execution
+        # section only — so the work that parallelises is the engine call, not
+        # the parse. Consequences a reader should not have to rediscover:
+        #   * a peer over cap WAITS (RF-2 ruling: queue inside the core's 300 s
+        #     relay budget — deliberately not a 503 and not a Retry-After); the
+        #     block is ``acquire()`` with no timeout, so the wait is ended by the
+        #     peer giving up or by a slot freeing, never by a synthesized error;
+        #   * waiting costs a thread + an fd + a COMPLETED mTLS handshake. The
+        #     single-threaded listener refused that peer in the kernel accept
+        #     backlog before it ever handshook. Admission outcome at cap=1 is
+        #     unchanged (one command at a time); the handshake/queue timing is not
+        #     identical, and this code does not claim that it is — see
+        #     RelayListener's docstring and tests/test_relay_threading_rf3.py.
+        #   * the shared server-side SSL context (``_build_ssl_context``, built
+        #     once) is now used by concurrent handshakes. That is the filed
+        #     never-rebuilt-on-rotation defect, unchanged by this leg.
+        slots = getattr(self.server, "command_slots", None)  # type: ignore[attr-defined]
+        if slots is not None:
+            slots.acquire()
         try:
-            # The factory call stays INSIDE the try: before this change a raising
-            # factory was covered by the flat 503 lane, and that has to keep
-            # holding. ``executor`` is initialised to None so the finally below
-            # still runs when the factory itself raises.
-            executor = self.server.executor_factory(session_id)  # type: ignore[attr-defined]
-            result = executor.execute(command, secrets, env_vars=env_vars, askpass_helper=req.askpass_helper)
-        except CommandRejected as exc:
-            # The reason describes the CALLER's own command (both gates run
-            # before injection, so secret material is structurally absent) —
-            # safe to surface. 422 is the deliberately-distinct code: the
-            # listener's 400 lane echoes request-body fragments in its
-            # details, so the server forwards ONLY this status's detail
-            # onward (routes/executors.py, #410 hop).
-            logger.warning("Relay /execute policy rejection for session %s: %s", session_id, exc)
-            self._reply(422, {"detail": str(exc)})
-            return
-        except Exception:
-            logger.exception("Relay /execute failed for session %s", session_id)
-            self._reply(503, {"detail": "execution failed"})
-            return
-        finally:
-            # #467: this is the code that ends the session, so this is where the
-            # session's AuditLogger forwarder is stopped. It runs on every lane,
-            # including a raising engine, so a session cannot leak its 1 s-poll
-            # thread. The hasattr guard keeps the injected stubs in
-            # test_relay_listener / test_relay_stop_477 — which model the engine,
-            # not a closable session — exactly as they are.
-            close = getattr(executor, "close", None)
-            if callable(close):
-                close()
+            # #477 again, AFTER admission: a peer that queued while a command ran
+            # must not start a new command once the drain has begun. One check
+            # before the read cannot say that, because the queue itself is new.
+            draining = getattr(self.server, "draining", None)
+            if draining is not None and draining.is_set():
+                logger.warning("Relay /execute rejected at admission: executor is draining (shutdown in progress)")
+                self._reply(503, {"detail": "executor is draining (shutdown in progress)"})
+                return
 
-        self._reply(
-            200,
-            RelayResponse(
-                exit_code=result.exit_code,
-                stdout=result.stdout.decode("utf-8", "replace"),
-                stderr=result.stderr.decode("utf-8", "replace"),
-                masked_count=len(result.masked_secret_ids),
-            ).model_dump(),
-        )
+            # Per the plan's failure-mode table, any execution failure is a flat 503
+            # (no retry), which also covers sandbox/subprocess timeouts surfacing as
+            # exceptions from the engine. ONE carve-out (ticket policy-reject-flat-503
+            # #410): a CommandRejected from the pre-run gates is not an execution
+            # failure — nothing ran — and takes a 422-with-reason lane.
+            # env/askpass specs (ticket secret-shape-env-injection) pass through
+            # as plain dicts; secret_id -> plaintext resolution happens inside
+            # execute() where the unwrapped bundles live — the listener never
+            # touches plaintext.
+            env_vars = [e.model_dump() for e in req.env] if req.env else None
+            executor: Any = None
+            try:
+                # The factory call stays INSIDE the try: before this change a raising
+                # factory was covered by the flat 503 lane, and that has to keep
+                # holding. ``executor`` is initialised to None so the finally below
+                # still runs when the factory itself raises.
+                executor = self.server.executor_factory(session_id)  # type: ignore[attr-defined]
+                result = executor.execute(command, secrets, env_vars=env_vars, askpass_helper=req.askpass_helper)
+            except CommandRejected as exc:
+                # The reason describes the CALLER's own command (both gates run
+                # before injection, so secret material is structurally absent) —
+                # safe to surface. 422 is the deliberately-distinct code: the
+                # listener's 400 lane echoes request-body fragments in its
+                # details, so the server forwards ONLY this status's detail
+                # onward (routes/executors.py, #410 hop).
+                logger.warning("Relay /execute policy rejection for session %s: %s", session_id, exc)
+                self._reply(422, {"detail": str(exc)})
+                return
+            except Exception:
+                logger.exception("Relay /execute failed for session %s", session_id)
+                self._reply(503, {"detail": "execution failed"})
+                return
+            finally:
+                # #467: this is the code that ends the session, so this is where the
+                # session's AuditLogger forwarder is stopped. It runs on every lane,
+                # including a raising engine, so a session cannot leak its 1 s-poll
+                # thread. The hasattr guard keeps the injected stubs in
+                # test_relay_listener / test_relay_stop_477 — which model the engine,
+                # not a closable session — exactly as they are.
+                close = getattr(executor, "close", None)
+                if callable(close):
+                    close()
+
+            self._reply(
+                200,
+                RelayResponse(
+                    exit_code=result.exit_code,
+                    stdout=result.stdout.decode("utf-8", "replace"),
+                    stderr=result.stderr.decode("utf-8", "replace"),
+                    masked_count=len(result.masked_secret_ids),
+                ).model_dump(),
+            )
+        finally:
+            # RF-3: the permit is returned only after the response is written and
+            # the engine teardown (the inner finally above) has run, so a slot is
+            # never handed to the next peer while this command is still alive.
+            # Every lane above releases: success, 422, 503 and the early drain
+            # return all leave through this finally.
+            if slots is not None:
+                slots.release()
 
     def _peer_common_name(self) -> str | None:
         """Return the parsed CN from the peer (client) certificate, or None.
@@ -245,18 +292,46 @@ class ExecuteHandler(BaseHTTPRequestHandler):
 class RelayListener:
     """Run the mTLS relay listener in a background thread.
 
-    Single-threaded ``HTTPServer`` => one command at a time (sequential
-    execution, per the plan). The listener runs in its own daemon thread so it
-    never contends with the reaper, heartbeat, or revocation loops.
+    ``ThreadingHTTPServer`` + a ``threading.Semaphore(cap)`` admission permit,
+    taken in the handler around the execution section (RF-3). ``cap`` comes from
+    the one knob, pinned by the owner 2026-10-11 as both
+    ``VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS`` (env) and
+    ``[executor] max_concurrent_commands`` (TOML); the shipped default is **1**.
+    The listener still runs in its own daemon thread so it never contends with
+    the reaper, heartbeat, or revocation loops.
 
-    DOCUMENTED TRADEOFF (ticket relay-listener-body-cap-and-timeout, part 2 —
-    deliberate, not an omission): sequential execution keeps per-command
-    secrets, filter state, and bundles isolated from interleaving. Consequence,
-    accepted: a legitimately slow command (up to SBX_TIMEOUT) delays every
-    other authorized peer's request behind it — one busy slot starves the
-    daemon's responsiveness. The body cap + inactivity timeout bound the
-    *allocation* and *silence* failure modes, not execution parallelism. Do
-    not "fix" the queueing without re-weighing the isolation argument.
+    WHAT DEFAULT 1 DOES AND DOES NOT REPRODUCE — stated honestly, because the
+    carrier's old "byte-identical" wording described a property this design does
+    not have. At cap=1 the ADMISSION OUTCOME is the same as the single-threaded
+    listener: one command runs at a time, and a second arrival never reaches the
+    engine while the first holds the permit. The HANDSHAKE TIMING is not the
+    same. Today an over-cap arrival is refused in the kernel accept backlog
+    (``socketserver.TCPServer.request_queue_size``, 5 on the shipped
+    interpreter) and never completes a TLS handshake; with admission in the
+    handler it is accepted, handshakes against the shared server context, and
+    holds a thread plus an fd while it waits. Pinned by
+    ``tests/test_relay_threading_rf3.py``.
+
+    OPEN DECISION THAT GATES ANY DEFAULT ABOVE 1 (owner's call, recorded here so
+    the next reader does not re-derive it): WHERE the queue should live.
+      (i)  backlog admission — a connection-level limit keeps refused-before-
+           handshake at cap=1, but past ``request_queue_size`` it is a kernel
+           refusal, not a queue, which is the accident RF-2's ruling says must
+           not be inherited as a spec;
+      (ii) handler admission — what this code implements: a real queue that
+           waits inside the core's 300 s relay budget (not a 503, not a
+           Retry-After), at the cost of a thread + fd + completed handshake per
+           waiting peer.
+    cap=1 is safe under either shape, so this half ships at (ii) with the
+    default still 1. Raising the default above 1 is gated on that ruling AND on
+    the two bench cells RF-2 makes mandatory (cross-command leak, pool-before-
+    listener); neither has run, and the isolation property that serialization
+    used to give for free is now an ACCEPTANCE-CHECKED property, not an assumed
+    one. The cap's ceiling is RAM-derived from the measured per-sandbox
+    footprint — this file deliberately holds no fixed maximum.
+
+    Anti-confusion: ``daemon.py``'s ``ThreadPoolExecutor(max_workers=2)`` is the
+    HTTP/heartbeat pool, NOT command execution.
     """
 
     def __init__(
@@ -272,8 +347,12 @@ class RelayListener:
         self.allowed_client_ids = frozenset(allowed_client_ids)
         self._host = host
         self._port = port
-        self._server: HTTPServer | None = None
+        self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        # RF-3 admission permits. Created in start() from the knob (never here:
+        # a listener that never started must not carry a cap nobody read).
+        self._slots: threading.Semaphore | None = None
+        self._cap = 1
         # #477: set by stop() BEFORE the shutdown is requested. While set, the
         # handler refuses every NEW /execute with a flat 503 — the "no new
         # commands" flag of cooperative drain.
@@ -314,13 +393,25 @@ class RelayListener:
 
         try:
             context = self._build_ssl_context()
-            server = HTTPServer((self._host, self._port), ExecuteHandler)
+            # RF-3: threaded listener; concurrency is limited by the admission
+            # permit below, not by the accept loop. Handler threads are daemon
+            # (http.server.ThreadingHTTPServer sets daemon_threads), which is
+            # also why server_close() does not join a live command — stop()
+            # bounds that wait itself, see below.
+            server = ThreadingHTTPServer((self._host, self._port), ExecuteHandler)
         except Exception:
             logger.exception("Failed to start executor relay listener — relay disabled")
             return
 
+        # The cap is read ONCE here, so a hot config change cannot strand a
+        # permit count that differs from the one stop() waits on.
+        self._cap = self._read_cap()
+        self._slots = threading.Semaphore(self._cap)
+
         server.executor_factory = self._executor_factory  # type: ignore[attr-defined]
         server.allowed_client_ids = self.allowed_client_ids  # type: ignore[attr-defined]
+        # RF-3: the permits the handler acquires around the execution section.
+        server.command_slots = self._slots  # type: ignore[attr-defined]
         # #477: the no-new-commands flag the handler consults before executing.
         server.draining = self._draining  # type: ignore[attr-defined]
         server.socket = context.wrap_socket(server.socket, server_side=True)
@@ -329,37 +420,101 @@ class RelayListener:
         self._thread = threading.Thread(target=server.serve_forever, name="venya-relay", daemon=True)
         self._thread.start()
         logger.info(
-            "Executor relay listener started on %s:%d (mTLS CERT_REQUIRED, %d allowed client CN(s))",
+            "Executor relay listener started on %s:%d (mTLS CERT_REQUIRED, %d allowed client CN(s), "
+            "max_concurrent_commands=%d)",
             self._host,
             self.port,
             len(self.allowed_client_ids),
+            self._cap,
         )
+
+    def _read_cap(self) -> int:
+        """Admission cap from the knob, fail-closed to 1 (today's behaviour).
+
+        A config object that does not carry the field (an older fixture, a stub)
+        must not widen concurrency by accident, and an unparseable value must not
+        either — the default is the safe one, so anything unexpected lands there
+        with a warning rather than raising at start.
+        """
+        executor_cfg = getattr(self._config, "executor", None)
+        raw = getattr(executor_cfg, "max_concurrent_commands", None)
+        if raw is None:
+            return 1
+        try:
+            cap = int(raw)
+        except (TypeError, ValueError):
+            logger.warning("executor.max_concurrent_commands=%r is not an integer — admitting 1 command at a time", raw)
+            return 1
+        if cap < 1:
+            logger.warning("executor.max_concurrent_commands=%d would admit nothing — using 1", cap)
+            return 1
+        return cap
+
+    def _wait_for_idle(self, timeout: float) -> bool:
+        """Take every admission permit within ``timeout``, then hand them back.
+
+        True = idle was reached (nothing is in flight and, with ``_draining``
+        set, nothing new can start). False = the budget ran out while a command
+        still held a permit. Permits are released in the finally so a
+        never-admitted waiter is not starved by a stop that is giving up.
+        """
+        slots = self._slots
+        if slots is None:
+            return True
+        held = 0
+        deadline = time.monotonic() + max(timeout, 0.0)
+        try:
+            for _ in range(self._cap):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not slots.acquire(timeout=remaining):
+                    return False
+                held += 1
+            return True
+        finally:
+            for _ in range(held):
+                slots.release()
 
     def stop(self, deadline_seconds: float = RELAY_STOP_DEADLINE_SECONDS) -> None:
         """Cooperative, BOUNDED shutdown (#477).
 
         Order:
         1. set the draining flag — the handler refuses every NEW /execute
-           with a flat 503 ("no new commands", acceptance 1);
-        2. request the ``serve_forever`` shutdown and wait for it BOUNDED. On
-           the single-threaded server the request completes only once the
-           in-flight command finishes and its ``finally`` (sandbox teardown,
-           executor.py) has run — the common case returns with the teardown
-           done, the first arm of acceptance 2;
-        3. if the in-flight command outlives the bound, return anyway with a
+           with a flat 503 ("no new commands", acceptance 1), both before
+           admission and again at the admission point (RF-3: a peer that queued
+           while a command ran must not start one once the drain has begun);
+        2. request the ``serve_forever`` shutdown and wait for it BOUNDED, then
+           spend what is left of the SAME budget taking every admission permit.
+           Holding all of them is the proof that nothing is in flight: a permit
+           is only returned after the engine's teardown ``finally``
+           (sandbox teardown, executor.py) and the response write. This is the
+           threaded form of the guarantee that, on the old single-threaded
+           server, ``shutdown()`` gave for free — the common case still returns
+           with the teardown done, the first arm of acceptance 2;
+        3. if an in-flight command outlives the bound, return anyway with a
            named ERROR line. The unit's TimeoutStopSec (45 s > this 30 s
            bound) is what would otherwise follow with a SIGKILL — the exact
            skip-the-teardown class this ticket kills. Overflow residue is
            covered by the boot-reaper pairing row; the journal states
            verbatim what could not be finished here.
+
+        NOT redesigned by this leg: what a *queued* (never-admitted) peer costs a
+        shutdown — it is a daemon thread holding an open socket, released when
+        the process exits. That analysis, and the order drain and admission
+        should take above cap=1, stay open with the owner's queue-location
+        ruling.
         """
         self._draining.set()
         overflow = False
         if self._server is not None:
+            budget = time.monotonic() + max(deadline_seconds, 0.0)
             waiter = threading.Thread(target=self._server.shutdown, name="venya-relay-shutdown", daemon=True)
             waiter.start()
-            waiter.join(timeout=deadline_seconds)
-            overflow = waiter.is_alive()
+            waiter.join(timeout=max(budget - time.monotonic(), 0.0))
+            # RF-3: shutdown() alone no longer means the command is done — the
+            # handler runs in its own thread now, so the bound is spent on the
+            # permits, not on the accept loop.
+            if not self._wait_for_idle(timeout=max(budget - time.monotonic(), 0.0)):
+                overflow = True
             if overflow:
                 logger.error(
                     "Relay stop deadline (%.0fs) reached with a command still in flight — "
@@ -370,11 +525,13 @@ class RelayListener:
             self._server.server_close()
             self._server = None
         if self._thread is not None:
-            # On the overflow path the serve thread is the one still running
-            # the command — joining it here would spend a second deadline and
-            # make the "bounded" stop unbounded again. It is a daemon thread:
-            # the shutdown request is already set, so it exits on its own once
-            # the command returns; a non-overflow stop joins normally.
+            # On the overflow path a handler thread is still running the command
+            # (RF-3: it is no longer the serve thread that executes). Joining
+            # handler threads here would spend a second deadline and make the
+            # "bounded" stop unbounded again, so this stays a serve-thread join.
+            # It is a daemon thread: the shutdown request is already set, so it
+            # exits on its own once the poll loop ends; a non-overflow stop
+            # joins normally.
             self._thread.join(timeout=0.0 if overflow else 5.0)
             self._thread = None
         logger.info("Executor relay listener stopped")
