@@ -1718,3 +1718,28 @@ non-test `NoEncryption()` sites with the 1-in / 7-out Q4a split (`server/ca.py:8
 first is redirected here: take the numbers from §7.1. Beyond the §1.6 reconciliation, the header scope line
 above, and this note, nothing in the file changed in the assembly pass; the ten section commits stand as
 written, each carrying its own measurement provenance.
+
+---
+
+**Forward note — RF-10 apply (2026-10-13, `feature/rf10-installer-banner`). Appended, not a rewrite.**
+Everything above this note stands as written at its own measurement date. Two points a later leg must
+carry forward rather than re-derive from the dated text:
+
+1. **§3 (line 389) and §10.3 (line 1591) name repair commands that the shipped CLI does not register.**
+   §3's "`venya admin elevate`-class" and §10.3's "the true statement is 'run `venya admin cert issue`'"
+   were both written before RF-8 landed. The human-plane repair surface is
+   `venya setup <core>` → `venya login <user-id>` → `venya admin cert status` / `venya admin cert renew`
+   (`venya admin cert` registers `status` and `renew` only — verified by walking the argparse tree at
+   `4e73aae`). Elevation is not a subcommand: it runs inside `cmd_admin_cert_renew`
+   (`packages/cli/src/venya_cli/commands.py:1949`, `_elevate(client)`), so no operator ever types it.
+   The naming law those sections invoke is unchanged; what changed is which names are real.
+2. **The §6.3 disposition landed as written — narrow, do not remove.** The installer still calls
+   `sign_admin_cert` because the machine-plane credential needs a mint on a headless core (owner R7-Q1:
+   a core has no display and no USB attachment). §10.3's M1 "mint stop" therefore landed as **labelling**
+   (the block now says machine-plane bootstrap, per §10.7 item 1) plus **M2, the human handoff**: the
+   banner's two `scp` lines are retired by the RF-10 apply changeset, and the 403 line rewritten in the
+   same edit per §10.7 item 3. §626's duty — "writing the marker at the machine/bootstrap mint" — was
+   discharged earlier by RF-7 (`server/ca.py` writes `PLANE_MACHINE` in `sign_admin_cert`), so RF-10 had
+   no marker work to do. The four server-side strings still naming `venya admin elevate` are tracked as
+   **#583**, deliberately NOT touched by this changeset: the installer naming `renew` while the server
+   names `elevate` is the queued fix, not drift.

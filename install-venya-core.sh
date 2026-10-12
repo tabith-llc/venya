@@ -453,9 +453,23 @@ else:
 "
     ' _ "$ADMIN_CA_DIR" <<<"$ADMIN_CA_PASSPHRASE"
 
-    # Generate first admin cert. sign_admin_cert loads the CA key — now
-    # encrypted — so this block needs the passphrase on stdin too (identical
-    # carry). $1=ca_dir $2=cert_dir $3=identity, all positional.
+    # Mint the MACHINE-PLANE admin credential (RF-6 §6.3, §10.7 item 1; ruling 1
+    # "split"). This pair is the core's own credential for its admin surface: it is
+    # long-lived, its identity is hostname-shaped, and the CA writes the two-plane
+    # marker as `machine` at mint (server/ca.py PLANE_MACHINE). It is NOT a person's
+    # credential and it is never copied off the core — a human gets a short-lived
+    # certificate through the security-key ceremony on a workstation instead
+    # (`venya login <user-id>`, then `venya admin cert renew`).
+    #
+    # The unpack below is byte-compatible with sign_admin_cert's
+    # (cert, key_pem, cert_pem) return on purpose: the caller-interlock cell
+    # (packages/server/tests/test_bootstrap_mint_interlock_rf7.py) asserts this is
+    # the ONE allowed call site of the key-returning mint. Retiring the human
+    # handoff does NOT retire this mint.
+    #
+    # sign_admin_cert loads the CA key — now encrypted — so this block needs the
+    # passphrase on stdin too (identical carry). $1=ca_dir $2=cert_dir $3=identity,
+    # all positional.
     sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" bash -c '
         IFS= read -r VENYA_ADMIN_CA_KEY_PASSPHRASE
         export VENYA_ADMIN_CA_KEY_PASSPHRASE
@@ -476,7 +490,7 @@ print(\"Admin cert generated for \" + sys.argv[1])
 " "$3"
     ' _ "$ADMIN_CA_DIR" "$ADMIN_CERT_DIR" "$ADMIN_IDENTITY" <<<"$ADMIN_CA_PASSPHRASE"
 
-    info "Admin CA and first admin cert generated for $ADMIN_IDENTITY"
+    info "Admin CA ready; machine-plane admin credential minted for $ADMIN_IDENTITY (never copied off this core — see the banner at the end of the run)"
 
 fi
 
@@ -742,6 +756,13 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     # NOTE: the admin passphrase is NOT written to .env. pydantic reads .env into
     # the settings object, not into os.environ — and ca.py/app.py read os.environ.
     # Passphrases reach the daemon via the 0640 EnvironmentFile below.
+    # VENYA_ADMIN_MTLS__KNOWN_ADMIN_IDS is the MACHINE-PLANE allowlist only
+    # (RF-6 §3.2, §10.7 item 4; ruling 2 "two-plane identity model"). A
+    # machine-plane leaf must name one of these identities byte-for-byte; a
+    # human-plane leaf is PERSON-shaped and the list does not apply to it — what
+    # authorizes a human on every use is require_admin's role lookup
+    # (middleware/auth.py). Seeding it from $ADMIN_IDENTITY stays: dropping it
+    # fails the machine plane closed (auth.py refuses 403 on an empty list).
     {
         printf 'VENYA_ADMIN_MTLS__ENABLED=true\n'
         printf 'VENYA_ADMIN_MTLS__CA_CERT="%s/admin-ca.crt"\n' "$ADMIN_CA_DIR"
@@ -1139,20 +1160,33 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     echo "==============================================================="
     echo "  ADMIN mTLS IS ENABLED"
     echo "==============================================================="
-    echo "  Your admin certificate is at:"
+    echo "  This core holds its own machine-plane admin credential at:"
     echo "    $ADMIN_CERT_DIR/admin.crt"
-    echo "    $ADMIN_CERT_DIR/admin.key"
+    echo "    $ADMIN_CERT_DIR/admin.key (0600 — it stays on this host)"
     echo ""
-    echo "  Copy these to your workstation:"
-    echo "    scp root@${CORE_HOSTNAME}:$ADMIN_CERT_DIR/admin.crt ~/venya-admin.crt"
-    echo "    scp root@${CORE_HOSTNAME}:$ADMIN_CERT_DIR/admin.key ~/venya-admin.key"
+    echo "  Do not copy that pair to a workstation. It names this core, not a person."
+    echo "  A person's admin certificate is short-lived and is minted on the workstation"
+    echo "  itself, by a security-key ceremony:"
+    echo ""
+    echo "    venya setup <this-core>       # one-time: the server URL and the core CA"
+    echo "    venya login <your-user-id>    # a user that exists on this core, key enrolled"
+    echo "    venya admin cert status       # read-local: prints time left, sends nothing"
+    echo "    venya admin cert renew        # one touch mints a fresh 60-minute certificate"
+    echo ""
+    echo "  Check status before a long job and renew if it would expire inside your"
+    echo "  window; a job that outlives its certificate fails with the same command"
+    echo "  named in the refusal. On Windows the ceremony opens only from an interactive"
+    echo "  desktop session, not from a remote or scheduled shell."
     echo ""
     echo "  Admin CA passphrase stored in: /etc/venya/venya-core.env (0640 root:venya)."
     echo "  The venya-core service loads it via EnvironmentFile; it is NOT in .env"
     echo "  or the unit file. On an unattended install it was randomly generated."
     echo "  Read it (root) with: sudo cat /etc/venya/venya-core.env"
     echo ""
-    echo "  Until you do, admin endpoints will return 403."
+    echo "  Note on the renewed pair: its key is written encrypted at rest, and loading"
+    echo "  an encrypted admin key for admin mTLS is the open read-side work (#565 Part"
+    echo "  B). Until that lands, the headless admin pattern on this core is the"
+    echo "  machine-plane pair above. With neither credential, admin endpoints answer 403."
     echo "  To disable: set VENYA_ADMIN_MTLS_ENABLED=false and reinstall."
     echo "==============================================================="
     echo ""
