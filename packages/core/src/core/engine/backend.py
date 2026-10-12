@@ -62,6 +62,106 @@ SENTINEL_KEY: Final[str] = "kek_sentinel"
 SENTINEL_PLAINTEXT: Final[bytes] = b"kek-sentinel-known-plaintext-v1!"
 LEGACY_SAMPLE_LIMIT: Final[int] = 5
 
+# --- #573: the passphrase LENGTH floor, DB-KEK plane -------------------------
+# Owner ruling (s85 batch, item #554, verbatim): "Deny whitespace-only passphrases
+# and enforce a proper length passcode." The whitespace half shipped as #554 and the
+# length half landed on the CA plane in b50bc9e; this is the same ruled number on the
+# Argon2id side, which is the "same number for BOTH KDFs" clause of the ruling
+# (decisions.md:282). One named constant per plane, and the refusal text below reads
+# the number from it — a literal 15 in the sentence is the defect the owner named.
+#
+# 15 Unicode CODE POINTS, INCLUSIVE (14 refuses, 15 passes), counted on the decoded
+# value before any encode. The ceiling is STATED and never enforced: research clause
+# C2 requires verifiers to PERMIT at least 64, and the owner ruled OPTION 1, so a
+# longer passphrase is accepted and used and MAX_PASSPHRASE_CODE_POINTS exists only to
+# interpolate that sentence.
+MIN_PASSPHRASE_CODE_POINTS: Final[int] = 15
+MAX_PASSPHRASE_CODE_POINTS: Final[int] = 64
+
+# The env names an operator sets this value under — server var first, installer input
+# second, exactly as ``server/app.py`` already names them side by side.
+DB_PASSPHRASE_ENV: Final[str] = "VENYA_DB__PASSPHRASE"
+
+
+def _passphrase_code_points(passphrase: bytes | str) -> int:
+    """The floor's unit: Unicode CODE POINTS, never bytes.
+
+    This plane's intake carries both typing conventions — ``server/dependencies.py``
+    ``init_db()`` hands a ``str`` straight to ``BackendConfig``, while
+    ``Backend.get_core()`` encodes first and ``CoreFactory.from_dict()`` encodes before
+    constructing — so the count decodes what arrived and measures the string, exactly as
+    ``server/ca.py`` and ``executor/key_passphrase.py`` do on their planes. Value-free:
+    the count is returned, the value is never logged or echoed.
+
+    A value that is not valid UTF-8 has no decoded string to count, so its byte length
+    is the measure — that can only be stricter than a code-point count, never looser.
+    """
+    if isinstance(passphrase, str):
+        return len(passphrase)
+    try:
+        return len(passphrase.decode("utf-8"))
+    except UnicodeDecodeError:
+        return len(passphrase)
+
+
+def is_passphrase_below_floor(passphrase: bytes | str | None) -> bool:
+    """True when a SUPPLIED passphrase carries material but is shorter than the floor (#573).
+
+    The blank shapes are NOT this function's question and never become it: unset, empty
+    and whitespace-only are answered upstream by the shipped #570 materiality test as
+    "not supplied", with that gate's own sentence. The floor runs AFTER that decision.
+    DENY, never TRIM — a legal passphrase whose spaces are content is measured as it
+    arrived and delivered byte-for-byte to the KDF.
+    """
+    if passphrase is None:
+        return False
+    if not passphrase.strip():
+        # The shipped #570 materiality answer, asked first: blank is "not supplied", and
+        # that gate's own sentence belongs to it. `.strip()` is defined on both bytes and
+        # str, so neither typing convention reaches the length question as a blank.
+        return False
+    return _passphrase_code_points(passphrase) < MIN_PASSPHRASE_CODE_POINTS
+
+
+def short_passphrase_refusal(subject: str = DB_PASSPHRASE_ENV, *, read_path: bool = False) -> str:
+    """Owner-blessed refusal text for a passphrase under the floor, on the DB-KEK plane.
+
+    The block is the one ruled in as R5(a) (flash1's §6, with the two authorized
+    corrections applied) — the same bytes ``server/ca.py`` and ``venya_cli.commands``
+    ship, with only the SUBJECT and the plane's ARTIFACT nouns varied, exactly as
+    ``executor/key_passphrase.py`` did for its plane in #565. Both numbers interpolate
+    from the constants the door measures with. The read door drops exactly one clause,
+    ``Nothing was written.``; nothing else differs, and no sentence is invented here.
+    """
+    written_clause = "" if read_path else " Nothing was written."
+    return (
+        f"REFUSED: {subject} is set to a passphrase shorter than Venya's minimum.{written_clause}\n"
+        "Why it matters: this passphrase is the only thing between a copy of this host and every\n"
+        "secret this deployment stores, and short passphrases are what an attacker tries first.\n"
+        "To fix it:\n"
+        f"  1. Replace the value of {subject} with a passphrase of at least "
+        f"{MIN_PASSPHRASE_CODE_POINTS} characters. Characters are\n"
+        "     counted as you type them, not as bytes, so a passphrase in any alphabet counts the same.\n"
+        "     Spaces count as characters, but a passphrase made only of spaces counts as no passphrase.\n"
+        f"  2. There is no rule about which characters appear — length is the only requirement, and\n"
+        f"     Venya supports passphrases up to {MAX_PASSPHRASE_CODE_POINTS} characters.\n"
+        "  3. Provide the passphrase through the environment, never as a command-line argument\n"
+        "     (command-line values are visible to other processes on the machine).\n"
+        "Your existing database and its stored secrets were not modified by this refusal.\n"
+        "Reference: docs/BACKUPS.md (the DB + passphrase pairing, and what a backup needs to\n"
+        "restore) and docs/cert-rotation-runbook.md (CA file locations and rotation)."
+    )
+
+
+def _refuse_if_below_floor(passphrase: bytes | str | None, *, read_path: bool = False) -> None:
+    """Raise the blessed refusal for a supplied passphrase under the floor.
+
+    ``BackendConfigurationError``, the same class this gate already raises for "no
+    passphrase at all" — so no caller gains a new exception arm to handle.
+    """
+    if is_passphrase_below_floor(passphrase):
+        raise BackendConfigurationError(short_passphrase_refusal(read_path=read_path))
+
 
 class SentinelStatus(enum.Enum):
     """Outcome of the boot-time passphrase proof (#304)."""
@@ -180,6 +280,13 @@ class BackendConfig:
         # the key it always derived, so an existing encrypted database keeps opening.
         if passphrase is not None and not passphrase.strip():
             passphrase = None
+        # #573: the length floor, asked AFTER the materiality decision above and never
+        # instead of it — blank stays "not supplied" and keeps that gate's own shipped
+        # sentence. This is the boot gate the ticket names, and it is the one place on
+        # this plane that decides the question, so the refusal happens before any
+        # BackendConfig object exists: no engine, no session, no salt read, no write.
+        # DENY, never TRIM — what passes is stored byte-for-byte below.
+        _refuse_if_below_floor(passphrase)
         if passphrase is None and kek is None:
             raise BackendConfigurationError("Either passphrase or kek must be provided")
         if kek is not None and len(kek) != KEK_SIZE:
@@ -354,6 +461,16 @@ class Backend:
             if self._kek_cache.is_populated:
                 return self._kek_cache
             raise BackendConfigurationError("bootstrap_kek: no passphrase or KEK available")
+
+        # #573 read/derive door. The override argument is the one path that reaches the
+        # KDF WITHOUT passing the config gate above (``Backend.get_core(passphrase)``
+        # hands it straight here), so the same predicate asks here too — otherwise the
+        # floor would be a sign on the door and no lock. Refusing here opens no session,
+        # reads no salt, derives nothing and writes nothing: this line sits above
+        # ``get_session()``, so the persisted ``kek_salt`` row and every envelope under it
+        # are untouched. The text is the read variant (the blessed block minus the
+        # ``Nothing was written.`` clause), because this door is not writing.
+        _refuse_if_below_floor(passphrase, read_path=True)
 
         session = self.get_session()
         try:

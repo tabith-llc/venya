@@ -147,7 +147,7 @@ def read_cache(cache) -> bytes:
 class TestBootstrapKek:
     """bootstrap_kek resolves the KEK from the persisted salt and caches it."""
 
-    def _backend_with_mock_session(self, known_salt: bytes, passphrase: bytes = b"pw"):
+    def _backend_with_mock_session(self, known_salt: bytes, passphrase: bytes = b"pw-573-legal-passphrase"):
         config = BackendConfig(database_url="postgresql://x/x", passphrase=passphrase)
         # C-11: passphrase-only config no longer derives a random-salt KEK at init.
         assert config.kek is None
@@ -161,7 +161,7 @@ class TestBootstrapKek:
         known_salt = b"\x01" * ARGON2_SALT_LEN
         backend, config = self._backend_with_mock_session(known_salt)
         cache = backend.bootstrap_kek()
-        expected, _ = derive_kek(b"pw", known_salt)
+        expected, _ = derive_kek(b"pw-573-legal-passphrase", known_salt)
         assert read_cache(cache) == expected
         # The cache is the one stored form: the intake slot is cleared, and
         # every consumer (the core facade, the filter endpoint) shares this one.
@@ -188,8 +188,8 @@ class TestBootstrapKek:
     def test_get_core_core_kek_is_the_backend_cache(self):
         known_salt = b"\x02" * ARGON2_SALT_LEN
         backend, config = self._backend_with_mock_session(known_salt)
-        core = backend.get_core(passphrase="pw")
-        expected, _ = derive_kek(b"pw", known_salt)
+        core = backend.get_core(passphrase="pw-573-legal-passphrase")
+        expected, _ = derive_kek(b"pw-573-legal-passphrase", known_salt)
         assert core.kek is backend.kek_cache
         assert read_cache(core.kek) == expected
         assert config.kek is None
