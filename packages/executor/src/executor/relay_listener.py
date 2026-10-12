@@ -190,9 +190,11 @@ class ExecuteHandler(BaseHTTPRequestHandler):
         #     unchanged (one command at a time); the handshake/queue timing is not
         #     identical, and this code does not claim that it is — see
         #     RelayListener's docstring and tests/test_relay_threading_rf3.py.
-        #   * the shared server-side SSL context (``_build_ssl_context``, built
-        #     once) is now used by concurrent handshakes. That is the filed
-        #     never-rebuilt-on-rotation defect, unchanged by this leg.
+        #   * the server-side SSL context is SHARED by concurrent handshakes,
+        #     but it is no longer mutated in place: a rotation publishes a whole
+        #     new context and each accepted connection is wrapped with whatever
+        #     is current at accept time (``_RelayHTTPServer``, GitLab #579). An
+        #     in-flight handshake finishes on the context it started with.
         slots = getattr(self.server, "command_slots", None)  # type: ignore[attr-defined]
         if slots is not None:
             slots.acquire()
@@ -290,6 +292,39 @@ class ExecuteHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class _RelayHTTPServer(ThreadingHTTPServer):
+    """Threaded HTTP server that TLS-wraps each ACCEPTED connection.
+
+    The listening socket is deliberately left plain and the wrap happens in
+    ``get_request``, after the accept. GitLab #579: wrapping the listening
+    socket welds ONE ``SSLContext`` to the port for the life of the process, so
+    a certificate rotation that rewrites the files on disk is never presented
+    on :8443 until the daemon restarts.
+
+    With the wrap moved to accept time, ``RelayListener`` can publish a freshly
+    built context and every NEW connection is served the new leaf, while a
+    handshake already in flight finishes on the context it started with. The
+    live ``SSLContext`` is never mutated, which is what keeps this safe under
+    RF-3's concurrent handshakes: swapping a reference is atomic under the GIL,
+    mutating a shared OpenSSL CTX under a concurrent handshake is not.
+
+    The ``relay_ssl_context`` attribute is set by ``RelayListener.start()``.
+    """
+
+    relay_ssl_context: ssl.SSLContext
+
+    def get_request(self):
+        conn, addr = self.socket.accept()
+        try:
+            return self.relay_ssl_context.wrap_socket(conn, server_side=True), addr
+        except OSError:
+            # A refused handshake (no client cert / foreign CA) must not leak the
+            # accepted fd, and must stay the OSError the serve loop already
+            # swallows — the shape the wrapped-listener accept path had.
+            conn.close()
+            raise
+
+
 class RelayListener:
     """Run the mTLS relay listener in a background thread.
 
@@ -348,7 +383,7 @@ class RelayListener:
         self.allowed_client_ids = frozenset(allowed_client_ids)
         self._host = host
         self._port = port
-        self._server: ThreadingHTTPServer | None = None
+        self._server: _RelayHTTPServer | None = None
         self._thread: threading.Thread | None = None
         # RF-3 admission permits. Created in start() from the knob (never here:
         # a listener that never started must not carry a cap nobody read).
@@ -405,7 +440,7 @@ class RelayListener:
             # (http.server.ThreadingHTTPServer sets daemon_threads), which is
             # also why server_close() does not join a live command — stop()
             # bounds that wait itself, see below.
-            server = ThreadingHTTPServer((self._host, self._port), ExecuteHandler)
+            server = _RelayHTTPServer((self._host, self._port), ExecuteHandler)
         except Exception:
             logger.exception("Failed to start executor relay listener — relay disabled")
             return
@@ -421,7 +456,9 @@ class RelayListener:
         server.command_slots = self._slots  # type: ignore[attr-defined]
         # #477: the no-new-commands flag the handler consults before executing.
         server.draining = self._draining  # type: ignore[attr-defined]
-        server.socket = context.wrap_socket(server.socket, server_side=True)
+        # #579: the context is PUBLISHED to the accept path, not wrapped onto
+        # the listening socket, so a rotation can swap it (``reload_ssl_context``).
+        server.relay_ssl_context = context
 
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, name="venya-relay", daemon=True)
@@ -434,6 +471,43 @@ class RelayListener:
             len(self.allowed_client_ids),
             self._cap,
         )
+
+    def reload_ssl_context(self) -> bool:
+        """Rebuild the published mTLS context from the on-disk material (#579).
+
+        Called by the daemon's rotation arm right after ``CertificateManager.rotate()``
+        replaces key, cert and CA at the SAME paths. The old context object is left
+        untouched — connections that already handshook keep presenting what they
+        started with, and the next accept is wrapped with the fresh leaf. Never
+        rebuilds the trust set by ADDING to the live one: a whole new context is
+        built by ``_build_ssl_context``, so an anchor that rotate() rewrote is
+        REPLACED, not accumulated (the reason this is not an in-place
+        ``load_cert_chain``).
+
+        Returns True when the new context is published. A rebuild failure keeps
+        the previous context serving — with a loud error line naming the
+        consequence — because rotation already succeeded on disk and taking the
+        relay down here would trade a stale leaf for an executor that cannot be
+        reached at all. The TLS floors are not touched either way: the rebuild is
+        the same ``_build_ssl_context`` the boot path uses.
+        """
+        if self._server is None:
+            logger.error("Relay TLS reload skipped — the listener is not running, so there is no port to publish to")
+            return False
+        try:
+            context = self._build_ssl_context()
+        except Exception:
+            logger.exception(
+                "Relay TLS context rebuild FAILED after rotation — :8443 keeps presenting the "
+                "pre-rotation certificate until a reload succeeds or the daemon restarts"
+            )
+            return False
+        self._server.relay_ssl_context = context
+        logger.info(
+            "Executor relay listener TLS context rebuilt from the on-disk material — "
+            "new :8443 connections present the post-rotation certificate"
+        )
+        return True
 
     def _read_cap(self) -> int:
         """Admission cap from the knob, fail-closed to 1 (today's behaviour).

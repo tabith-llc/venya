@@ -540,6 +540,16 @@ class TestBoundedStopUnderConcurrency:
         src = inspect.getsource(relay_listener)
         assert "server.command_slots" in src, "start() no longer wires the admission permits"
         assert 'getattr(self.server, "command_slots", None)' in src, "the handler no longer consults the permits"
-        assert "ThreadingHTTPServer(" in src, "the listener is not threaded"
+        # #579 moved the bind to a ThreadingHTTPServer SUBCLASS that wraps each
+        # ACCEPTED connection instead of welding one SSLContext to the listening
+        # socket. Same property, named on the class that now carries it — and the
+        # non-threaded-bind half keeps holding.
+        assert "class _RelayHTTPServer(ThreadingHTTPServer)" in src, "the listener is not threaded"
+        assert "server = _RelayHTTPServer(" in src, "start() does not bind the threaded relay server"
         assert "threading.Semaphore(" in src, "admission is not a semaphore"
-        assert "HTTPServer(" not in src.replace("ThreadingHTTPServer(", ""), "a plain HTTPServer bind came back"
+        assert "HTTPSServer(" not in src, "a stdlib TLS server bind came back"
+        # The #579 invariant, pinned statically: the listening socket is never
+        # TLS-wrapped, and the wrap lives at accept time. Either half going back
+        # re-creates the boot-scoped context this row removed.
+        assert "wrap_socket(server.socket" not in src, "the listening socket is TLS-wrapped again (#579 regression)"
+        assert "def get_request" in src, "connections are no longer wrapped at accept time (#579)"
