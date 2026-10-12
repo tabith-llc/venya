@@ -959,7 +959,7 @@ def _install_stderr_tee():
         log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         ensure_secret_dir(log_dir)
         log_path = log_dir / "venya.log"
-        # ponytail: single-generation rotation at 1 MiB; a real retention
+        # shortcut: single-generation rotation at 1 MiB; a real retention
         # policy only if logs ever become operationally important.
         try:
             if log_path.stat().st_size > 1_048_576:

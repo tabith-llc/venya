@@ -541,7 +541,7 @@ class Core:
 
             secrets = query.distinct().all()
 
-            # ponytail: metadata filters in Python (dialect-proof JSON access);
+            # shortcut: metadata filters in Python (dialect-proof JSON access);
             # push into SQL if secret counts ever make the scan measurable.
             if executor:
                 secrets = [s for s in secrets if (s.meta or {}).get("executor") == executor]

@@ -298,7 +298,7 @@ _TLS_ERROR_KEYWORDS = ("ssl", "certificate", "tls", "verif")
 # budget for TRANSIENT registration failures (429/5xx/network). Permanent
 # rejects (401/403/404) never enter this path — they stop loud. The unit
 # (RestartSec/StartLimit) paces anything beyond this budget.
-# ponytail: fixed constants; promote to config knobs only when an operator needs tuning.
+# shortcut: fixed constants; promote to config knobs only when an operator needs tuning.
 _REGISTER_RETRY_ATTEMPTS = 4
 _REGISTER_RETRY_BASE_SECONDS = 5.0
 _REGISTER_RETRY_CAP_SECONDS = 60.0

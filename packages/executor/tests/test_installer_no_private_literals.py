@@ -105,7 +105,7 @@ class TestInstallerNoPrivateLiterals:
         assert not RFC1918.search("version 1.10.27")
 
     def test_zero_rfc1918_literals_tree_wide(self):
-        # ponytail: matches full dotted quads only — bare class shorthand
+        # shortcut: matches full dotted quads only — bare class shorthand
         # (10/8) and IPv6 ULA (fc00::/7) are NOT caught; CIDRs whose base is
         # a full dotted quad DO match (the self-test pins prove it). Widen
         # the regex only on an owner scope decision (Stage-3 ruling: no).

@@ -65,7 +65,7 @@ FORWARDER_IDLE_POLL_SECONDS = 1.0
 # in this process (any threads) that resolves to the same file. Guarantee
 # it does NOT give: cross-PROCESS exclusion — two executor processes
 # sharing one spool home remain the documented unsupported shape
-# ("one executor per host" in _resolve_spool_path's ponytail note).
+# ("one executor per host" in _resolve_spool_path's shortcut note).
 # Entries live for the process lifetime; the count is bounded by the number
 # of distinct spool paths a deployment resolves (one), so no eviction.
 _SPOOL_LOCKS: dict[Path, threading.Lock] = {}
@@ -149,7 +149,7 @@ class AuditLogger:
     different paths hold two different locks and never block each other.
     OUT OF SCOPE: cross-process writers of one spool path — that remains
     the unsupported multi-executor-per-home shape (``_resolve_spool_path``
-    ponytail note), and a new caller must not treat the shared lock as a
+    shortcut note), and a new caller must not treat the shared lock as a
     file lock. Duplicated forwards between coexisting drains stay possible
     and are tolerated (at-least-once, above).
 
@@ -190,7 +190,7 @@ class AuditLogger:
 
     @staticmethod
     def _resolve_spool_path(p: str | None) -> Path:
-        # ponytail: spool lives in the executor user's home — the deployment
+        # shortcut: spool lives in the executor user's home — the deployment
         # model is one executor per host; two executor instances sharing a
         # home would interleave their spools. Upgrade path: add executor_id
         # to the default filename.
