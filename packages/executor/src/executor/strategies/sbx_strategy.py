@@ -905,7 +905,7 @@ class SbxStrategy(InjectionStrategy):
         # "You are not authenticated to Docker"
         # (docs.docker.com/ai/sandboxes/troubleshooting/, accessed 2026-10-09).
         # --sandbox (not --name) scopes the rule to this sandbox.
-        # ponytail: one scoped rule per run is never explicitly removed;
+        # shortcut: one scoped rule per run is never explicitly removed;
         # if the daemon does not GC rules for dead sandboxes, sweep with
         # `sbx policy rm` when `sbx policy ls` grows unbounded.
         for host in egress.get_allowed_hosts():

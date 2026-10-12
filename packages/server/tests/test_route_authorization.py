@@ -88,7 +88,7 @@ def _guards(dependants) -> list[str]:
 def _endpoints(app):
     """Yield (full_path, dependant, include_level_deps) for every APIRoute.
 
-    ponytail: relies on FastAPI's lazy router-inclusion contract
+    shortcut: relies on FastAPI's lazy router-inclusion contract
     (_IncludedRouter.original_router + .include_context). If a FastAPI upgrade
     stops exposing .original_router, walk app.openapi() paths and re-resolve
     the dependants instead — the assertion below stays the same.

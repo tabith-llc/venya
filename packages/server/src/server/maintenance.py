@@ -93,7 +93,7 @@ def cleanup_expired_execution_sessions(db: Session) -> int:
     they target the same row set — a per-statement LIMIT without ORDER BY could diverge
     and orphan a parent delete.
     """
-    # ponytail: no LIMIT (unbounded batch). The backlog is one-time; if a huge first-run
+    # shortcut: no LIMIT (unbounded batch). The backlog is one-time; if a huge first-run
     # delete ever proves problematic, bound it via a materialized id set selected once —
     # NOT a writable CTE (FK visibility across CTE sub-statements is not guaranteed).
     now = datetime.now(UTC)
