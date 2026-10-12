@@ -242,7 +242,7 @@ class TestElevationCeremonyRequired:
         app = _app(session, admin_ca, _session_caller())
         resp = _issue(_client(app), session, elevation=None)
         assert resp.status_code == 403
-        assert "venya admin elevate" in resp.json()["detail"]
+        assert "venya admin cert renew" in resp.json()["detail"]
         assert _audit_rows(session) == []
 
     def test_spent_token_refused_401_and_no_second_mint(self, session, admin_role, admin_ca):

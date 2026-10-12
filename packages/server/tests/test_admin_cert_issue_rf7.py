@@ -422,7 +422,7 @@ class TestCallerShapesRefused:
         assert resp.status_code == 403
         detail = resp.json()["detail"]
         assert "login session" in detail
-        assert "venya admin elevate" in detail
+        assert "venya admin cert renew" in detail
 
     def test_anonymous_caller_is_refused(self, admin_ca, session):
         """Paired negative: no principal at all is a 401, never a mint."""
