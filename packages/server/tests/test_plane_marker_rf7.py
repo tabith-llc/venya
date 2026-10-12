@@ -7,7 +7,8 @@
 """RF-7 chunk 1 — the two-plane marker (RF-6 §3.2).
 
 The plane is CA-written and explicit: a Venya private OID extension carrying
-``machine`` | ``human``, critical, never taken from a CSR. This file pins the
+``machine`` | ``human`` — non-critical since s98 (#588 option A; enforcement
+is app-side in the parser) — never taken from a CSR. This file pins the
 marker from both sides:
 
 * the writer: both mints stamp their plane at issue time — ``human`` on the
@@ -78,10 +79,10 @@ def _utf8(value: str) -> x509.UnrecognizedExtension:
 class TestPlaneMarkerOnMints:
     def test_bootstrap_mint_carries_machine_marker(self, admin_manager):
         """§6.3 item 1: the narrowed bootstrap path writes ``machine`` at mint,
-        critical, and the parser reads it back."""
+        NON-critical (s98, #588 option A), and the parser reads it back."""
         cert, _key_pem, _cert_pem = admin_manager.sign_admin_cert("core-1.internal")
         ext = cert.extensions.get_extension_for_oid(VENYA_PLANE_MARKER_OID)
-        assert ext.critical is True
+        assert ext.critical is False
         assert parse_plane_marker(cert) == PLANE_MACHINE
         # Paired negative: the machine mint never yields the human value.
         assert parse_plane_marker(cert) != PLANE_HUMAN

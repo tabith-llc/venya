@@ -152,12 +152,12 @@ class TestAdminCsrSignerPositive:
         assert window != timedelta(days=30)
         assert window != timedelta(days=90)
 
-    def test_marker_extension_present_human_and_critical(self, admin_manager):
-        """§3.2: CA-written plane marker, value human on this signer, critical
-        bit set."""
+    def test_marker_extension_present_human_noncritical(self, admin_manager):
+        """§3.2: CA-written plane marker, value human on this signer; the bit
+        is NON-critical since s98 (#588 option A — enforcement app-side)."""
         cert = admin_manager.sign_admin_csr(_csr(_key()), _EMAIL_IDENTITY, _SHORT_LIFETIME)
         ext = cert.extensions.get_extension_for_oid(VENYA_PLANE_MARKER_OID)
-        assert ext.critical is True
+        assert ext.critical is False
         assert parse_plane_marker(cert) == PLANE_HUMAN
 
     def test_basic_constraints_and_key_usage(self, admin_manager):

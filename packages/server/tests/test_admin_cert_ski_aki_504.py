@@ -24,7 +24,13 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtensionOID, NameOID
-from server.ca import AdminCAManager, CAManager
+from server.ca import (
+    PLANE_MACHINE,
+    VENYA_PLANE_MARKER_OID,
+    AdminCAManager,
+    CAManager,
+    parse_plane_marker,
+)
 
 _ADMIN_IDENTITY = "admin@venya-test-workstation"
 
@@ -102,18 +108,23 @@ class TestAdminCertSkiAki504:
         """Adding the identifiers must not break chain verification — the CA
         signs the leaf and OpenSSL accepts it.
 
-        RF-7 re-scope (refs RF-6 §3.2): the bootstrap mint now writes the
+        RF-7 re-scope (refs RF-6 §3.2): the bootstrap mint once wrote the
         two-plane marker as a CRITICAL extension, so a stock OpenSSL CLI —
-        which does not know the Venya OID — refuses the leaf with error 34
-        (unhandled critical extension) by design: the marker is a statement
-        a verifier must not skip silently. The verification cells below keep
-        their original point (SKI/AKI did not break the chain) under
-        -ignore_critical, and the paired negative pins that the refusal
-        without the flag is the marker's critical bit, not a broken leaf.
-        The product is unaffected: the app re-verifies with cryptography
-        (middleware/auth.py _verify_forwarded_cert), which does not enforce
-        path-validation criticality policy, and nginx ``ssl_verify_client
-        optional`` forwards the PEM either way (RF-6 §5.2).
+        which does not know the Venya OID — refused the leaf with error 34
+        (unhandled critical extension). That refusal property was RETIRED by
+        owner ruling at s98 (#588 option A): the marker is carried
+        NON-CRITICAL because our own front door — nginx, verifying with
+        stock OpenSSL — is a verifier the admin leaf must not fail. The
+        given-up insurance (an external verifier that does not know the OID
+        now waves marker-carrying certs past instead of refusing them) is
+        written into #588. The cells below keep their original point
+        (SKI/AKI did not break the chain) under -ignore_critical /
+        -x509_strict as statements about chain policy, and the paired cell
+        pins the new truth: stock openssl verify now ACCEPTS the leaf. The
+        product is unaffected: the app re-verifies with cryptography
+        (middleware/auth.py _verify_forwarded_cert), and the plane is
+        enforced by parse_plane_marker, which is criticality-blind and fails
+        closed on missing / unparseable / out-of-set.
         """
         import subprocess
 
@@ -129,18 +140,26 @@ class TestAdminCertSkiAki504:
                 check=False,
             )
             assert proc.returncode == 0, f"openssl verify {extra} failed: {proc.stdout}{proc.stderr}"
-        # Paired negative: without -ignore_critical the CLI must refuse, and
-        # the refusal reason must be the critical marker — nothing else.
-        refused = subprocess.run(
+        # Paired cell — INVERTED at s98 (#588 option A; was: refuse with
+        # error 34 naming the critical extension). The marker is
+        # non-critical, so stock openssl verify must now accept the leaf.
+        accepted = subprocess.run(
             ["openssl", "verify", "-CAfile", str(ca), str(leaf)],
             capture_output=True,
             text=True,
             check=False,
         )
-        assert refused.returncode != 0, "critical plane marker must make stock openssl verify refuse"
-        assert (
-            "unhandled critical extension" in refused.stdout + refused.stderr
-        ), f"refusal must name the critical extension, got: {refused.stdout}{refused.stderr}"
+        assert accepted.returncode == 0, (
+            "non-critical plane marker must let stock openssl verify accept "
+            f"the leaf: {accepted.stdout}{accepted.stderr}"
+        )
+        # Positive cell: the marker is still PRESENT on the minted leaf and
+        # still parses to the machine plane — the bit flip moved enforcement
+        # fully app-side, it did not remove the statement.
+        minted = x509.load_pem_x509_certificate(cert_pem)
+        ext = minted.extensions.get_extension_for_oid(VENYA_PLANE_MARKER_OID)
+        assert ext.critical is False
+        assert parse_plane_marker(minted) == PLANE_MACHINE
         assert key_pem  # returned keypair still present
 
     def test_ac3_root_executor_plane_unchanged(self, tmp_path):

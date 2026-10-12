@@ -490,6 +490,13 @@ CA-written marker**:
   `OU=Admin`) and is a workable fallback, but an extension with a critical bit is a statement the verifier can
   refuse to parse rather than a name that can drift. RF-7 may implement the marker as OU if it prefers a
   human-readable dump; what is **not** negotiable is that the plane is explicit and CA-set.
+  > **Correction (s98, 2026-10-13, #588 option A — owner ruling):** the critical-bit argument above is retired
+  > as shipped design. The marker now rides **non-critical** (server `ca.py`, both admin mint paths), because
+  > nginx — verifying with stock OpenSSL — is a verifier our own admin leaf must not fail; as critical it drew
+  > a 400 at the edge. An external verifier that does not know the OID no longer refuses the leaf; that loss
+  > of insurance is the accepted, written-down cost of the ruling (see #588 and the module comment in
+  > `packages/server/src/server/ca.py`). What still holds unchanged: the plane is explicit, CA-set, and the
+  > app-side parser fails closed.
 - **A cert with no marker, an unparseable marker, or a value outside {machine, human} fails closed at step 3.5**
   with a 403 whose text says the certificate predates the two-plane model and must be re-issued. That is the
   rollout-facing behavior (§3.8, §10): old certs are refused *loudly on the human path* rather than silently
