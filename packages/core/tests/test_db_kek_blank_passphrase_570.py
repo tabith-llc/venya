@@ -193,8 +193,16 @@ class TestRealPassphrasesAreUntouched:
 
     def test_p3_plain_passphrase_and_raw_kek_paths_unchanged(self):
         """The paths that were never broken: real bytes pass, a raw KEK passes, no
-        passphrase at all refuses with the shipped sentence."""
-        assert BackendConfig(database_url=_DB_URL, passphrase=b"pw").passphrase == b"pw"
+        passphrase at all refuses with the shipped sentence.
+
+        #573 data flip (R5(c)): the passphrase literal here was two characters and was
+        lengthened to a legal one, because the floor now refuses the short value. The
+        assertion is unchanged in kind — a supplied, material, legal-length passphrase is
+        stored byte-for-byte — and no check in this file was deleted or skipped.
+        """
+        assert BackendConfig(database_url=_DB_URL, passphrase=b"pw-573-legal-passphrase").passphrase == (
+            b"pw-573-legal-passphrase"
+        )
         assert BackendConfig(database_url=_DB_URL, kek=b"\xbb" * 32).kek == b"\xbb" * 32
         with pytest.raises(BackendConfigurationError) as excinfo:
             BackendConfig(database_url=_DB_URL, passphrase=None)
