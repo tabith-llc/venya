@@ -811,12 +811,20 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # --- Two-plane marker (RF-6 §3.2, refs RF-7) ---
 #
 # A dedicated X.509 extension carrying the credential plane, written by the
-# CA's own signer and NEVER taken from a CSR. The bit is critical: a verifier
-# that does not know the OID must refuse to parse the certificate rather than
-# silently drift past the plane statement (measured at this tip: stock
-# ``openssl verify`` rejects such a leaf with error 34, and -ignore_critical
-# is what lets the rest of the chain still verify — see
-# tests/test_admin_cert_ski_aki_504.py for the re-scoped cells).
+# CA's own signer and NEVER taken from a CSR. Enforcement is app-side, in
+# parse_plane_marker, which reads the value whether or not the critical bit
+# is set and fails closed on missing / unparseable / out-of-set.
+# HISTORY: the bit shipped CRITICAL — a verifier that did not know the OID
+# then refused to parse the leaf rather than silently drift past the plane
+# statement (measured at the CRITICAL tip: stock ``openssl verify`` rejects
+# such a leaf with error 34, and -ignore_critical is what lets the rest of
+# the chain still verify). Ruled back to NON-CRITICAL at s98 (#588, owner
+# option A): our own front door — nginx verifying with stock OpenSSL — is a
+# verifier we must not fail, and the edge returned 400 on the marker-carrying
+# admin leaf. The external-refusal property is given up DELIBERATELY: an
+# outside verifier that does not know the OID now waves marker-carrying
+# certs past; the marker is still present and still enforced by the app.
+# Cells: tests/test_admin_cert_ski_aki_504.py (inverted at s98).
 #
 # OID home: RFC 6996 private-use experimental arc (1.3.6.1.4.1.64496-64511),
 # provisional until a registered Private Enterprise Number exists for Tabith
@@ -839,7 +847,8 @@ def _plane_marker_extension(plane: str) -> x509.UnrecognizedExtension:
         plane: PLANE_MACHINE or PLANE_HUMAN.
 
     Returns:
-        The extension value to add with ``critical=True``.
+        The extension value; callers add it with ``critical=False`` (s98,
+        #588 option A — enforcement is app-side in ``parse_plane_marker``).
     """
     if plane not in _VENYA_PLANES:
         raise ValueError(f"Unknown credential plane {plane!r}; accepted: {_VENYA_PLANES}")
@@ -1176,10 +1185,12 @@ class AdminCAManager:
             )
             # Bootstrap/machine plane, CA-written (RF-6 §3.2): this mint is
             # the marker's machine half, landed with the change itself so a
-            # cert this path produces is never marker-less.
+            # cert this path produces is never marker-less. Carried
+            # NON-critical (s98, #588 option A): the app enforces the plane
+            # in parse_plane_marker; see the module comment for the cost.
             .add_extension(
                 _plane_marker_extension(PLANE_MACHINE),
-                critical=True,
+                critical=False,
             )
         )
 
@@ -1320,11 +1331,14 @@ class AdminCAManager:
                 _build_san_for_identity(identity),
                 critical=False,
             )
-            # Human plane, CA-written (RF-6 §3.2) — critical: a verifier that
-            # cannot see it must refuse the certificate, not infer a plane.
+            # Human plane, CA-written (RF-6 §3.2). NON-critical (s98, #588
+            # option A): enforcement is app-side in parse_plane_marker, and
+            # an external verifier that does not know the OID will NOT
+            # refuse the leaf — the accepted cost of the owner ruling,
+            # written into #588.
             .add_extension(
                 _plane_marker_extension(PLANE_HUMAN),
-                critical=True,
+                critical=False,
             )
         )
 
