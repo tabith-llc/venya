@@ -134,7 +134,7 @@ def _require_human_session(user_info: dict) -> str:
             detail=(
                 "Admin certificate issuance requires a login session, not an admin certificate — "
                 "the mint is bound to the session that passed the security-key ceremony. "
-                "Repair: venya login, then venya admin elevate."
+                "Repair: venya login, then venya admin cert renew."
             ),
         )
 
@@ -144,7 +144,7 @@ def _require_human_session(user_info: dict) -> str:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
                 "A login session is required to issue an admin certificate. "
-                "Repair: venya login, then venya admin elevate."
+                "Repair: venya login, then venya admin cert renew."
             ),
         )
 
@@ -236,7 +236,7 @@ def _consume_elevation_token(request: Request, db: Session, user_id: str) -> Non
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
                 "Elevation token required to issue an admin certificate — prove the security key "
-                "again first. Repair: venya admin elevate."
+                "again first. Repair: venya admin cert renew."
             ),
         )
 
@@ -267,7 +267,8 @@ def _consume_elevation_token(request: Request, db: Session, user_id: str) -> Non
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
-                "Invalid or expired elevation token — one touch mints one certificate. " "Repair: venya admin elevate."
+                "Invalid or expired elevation token — one touch mints one certificate. "
+                "Repair: venya admin cert renew."
             ),
         )
 
