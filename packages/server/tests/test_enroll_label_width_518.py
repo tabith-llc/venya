@@ -79,6 +79,9 @@ def _build_app(tmp_path: Path):
         credential_id=b"cred-123",
         public_key=b"pub-key",
         sign_count=0,
+        attestation_fmt=None,
+        aaguid=None,
+        attestation_object=None,
     )
     app.state.fido2_manager = fido2
     app.state.config = SimpleNamespace(

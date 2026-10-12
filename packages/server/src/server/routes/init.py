@@ -697,6 +697,9 @@ async def init_complete(
             public_key=cred.public_key,
             sign_count=cred.sign_count,
             is_active=True,
+            attestation_fmt=cred.attestation_fmt,
+            aaguid=cred.aaguid,
+            attestation_object=cred.attestation_object,
         )
         db.add(webauthn_cred)
 
