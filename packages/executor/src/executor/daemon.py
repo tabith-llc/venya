@@ -2068,6 +2068,14 @@ class ExecutorDaemon:
                             )
                     self.state.cert_serial = self.cert_manager.serial
                     self.state.cert_not_after = self.cert_manager.not_after
+                    # #579: the OUTBOUND half above is not the whole swap. The relay
+                    # listener is the SERVER side of :8443 and holds its own mTLS
+                    # context; without this call it keeps presenting the pre-rotation
+                    # leaf (a serial the server has already revoked) until a restart.
+                    # Publishes a freshly built context — new connections get it, an
+                    # in-flight handshake finishes on the old one. Never restarts the
+                    # listener (that would trade a stale leaf for a #477 drain window).
+                    self.relay.reload_ssl_context()
                     logger.info(
                         "Certificate rotated in main loop, new expiry: %s",
                         self.state.cert_not_after,
