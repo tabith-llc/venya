@@ -595,6 +595,15 @@ class WebAuthnCredential(Base):
     sign_count = Column(Integer, default=0)
     label = Column(String(64), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    # Attestation record (queue #2 leg 1: STORE only — no enforcement, no
+    # chain verification in this change). Nullable because rows created
+    # before migration 038 have no captured ceremony; every registration
+    # from 038 forward writes all three (finish_registration already
+    # requires the attestationObject). Yubico D1/D2: store the raw
+    # attestation object with the credential so policy can retro-act.
+    attestation_fmt = Column(String(32), nullable=True)
+    aaguid = Column(String(36), nullable=True)
+    attestation_object = Column(LargeBinary, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
     last_used_at = Column(DateTime(timezone=True), nullable=True)
 

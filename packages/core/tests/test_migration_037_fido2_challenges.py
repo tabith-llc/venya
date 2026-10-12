@@ -83,8 +83,10 @@ def test_revision_chain():
 
 
 def test_chain_is_linear_with_one_head():
-    """AC5: 037 hangs off 036 and nothing else hangs off 036 — no fork, one
-    head, and every revision in the graph is reachable from it."""
+    """AC5 (037-era invariant; head ADVANCES deliberately as migrations land —
+    038 moved it in the attestation-store leg): the chain has no fork, exactly
+    one head, and every revision in the graph is reachable from it. 037 hangs
+    off 036 and nothing else hangs off 036."""
     chain = _chain()
     assert "037" in chain
 
@@ -98,7 +100,10 @@ def test_chain_is_linear_with_one_head():
     assert not forks, f"migration chain has a fork: {forks}"
 
     heads = [rev for rev in chain if rev not in children]
-    assert heads == ["037"], f"expected exactly one head (037), got {heads}"
+    # pin the CURRENT head deliberately: adding a migration must make a seat
+    # advance this line on purpose — the invariant (one head, no forks) is
+    # what the cell guards, the identifier is the acknowledgement.
+    assert heads == ["038"], f"expected exactly one head (038), got {heads}"
 
     # walk back from the head: everything reachable, no cycle
     seen = set()

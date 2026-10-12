@@ -98,13 +98,22 @@ class StoredChallenge:
 
 @dataclass
 class StoredCredential:
-    """A stored WebAuthn credential."""
+    """A stored WebAuthn credential.
+
+    The attestation fields are the leg-1 record-only capture (queue #2): the
+    verbatim attestation object as received, its statement format, and the
+    attested AAGUID as a canonical hex string. None for credentials loaded
+    from pre-migration-038 rows. Nothing here is enforced — that is leg 2.
+    """
 
     user_id: str
     credential_id: bytes
     public_key: bytes
     sign_count: int = 0
     label: str | None = None
+    attestation_fmt: str | None = None
+    aaguid: str | None = None
+    attestation_object: bytes | None = None
 
 
 class Fido2Store:
@@ -305,6 +314,9 @@ class Fido2Manager:
                     public_key=db_cred.public_key,
                     sign_count=db_cred.sign_count,
                     label=db_cred.label,
+                    attestation_fmt=db_cred.attestation_fmt,
+                    aaguid=db_cred.aaguid,
+                    attestation_object=db_cred.attestation_object,
                 )
                 self.store.store_credential(stored)
                 loaded += 1
@@ -367,8 +379,8 @@ class Fido2Manager:
                 "displayName": username,
             },
             "pubKeyCredParams": [
-                {"type": "public-key", "alg": -7},  # RS256
-                {"type": "public-key", "alg": -257},  # ES256
+                {"type": "public-key", "alg": -7},  # ES256
+                {"type": "public-key", "alg": -257},  # RS256
             ],
             "timeout": CHALLENGE_TIMEOUT_MS,
             "excludeCredentials": [
@@ -500,11 +512,19 @@ class Fido2Manager:
         public_key_bytes = fido2_cbor.encode(dict(cose_key))
         sign_count = auth_data.counter
 
+        # Record-only attestation capture (queue #2 leg 1): keep the verbatim
+        # object as received plus the parsed fmt/AAGUID, so policy can act
+        # retroactively (Yubico RP guidance: store the raw attestation object
+        # with the credential). No statement verification here — leg 2 wires
+        # the chain check; the bytes below are what it will re-verify.
         cred = StoredCredential(
             user_id=stored.data["user_id"],
             credential_id=attested_credential_id,
             public_key=public_key_bytes,
             sign_count=sign_count,
+            attestation_fmt=ao.fmt,
+            aaguid=str(auth_data.credential_data.aaguid),
+            attestation_object=attestation_bytes,
         )
 
         return cred

@@ -256,6 +256,11 @@ class TestCredentialAddComplete:
             credential_id=b"new-cred-123",
             public_key=b"pub-key-data",
             sign_count=42,
+            # leg-1 capture fields: present for shape fidelity with the real
+            # StoredCredential, not under test in this cell.
+            attestation_fmt=None,
+            aaguid=None,
+            attestation_object=None,
         )
 
         db = _make_valid_elevation_db()
@@ -416,6 +421,9 @@ class TestCredentialAddComplete:
             credential_id=b"cred-bytes",
             public_key=b"pub-key",
             sign_count=10,
+            attestation_fmt=None,
+            aaguid=None,
+            attestation_object=None,
         )
 
         db = _make_valid_elevation_db()

@@ -64,6 +64,9 @@ class TestBrowserEnrollCompleteResponseFields:
             credential_id=b"cred-123",
             public_key=b"pub-key",
             sign_count=0,
+            attestation_fmt=None,
+            aaguid=None,
+            attestation_object=None,
         )
         mock_session = SimpleNamespace(id=1)
         mock_access_token = SimpleNamespace(token="access-token-xyz")

@@ -51,6 +51,12 @@ def _rows(n=2):
             public_key=f"pk-{i}".encode(),
             sign_count=i,
             label=f"key {i}",
+            # leg-1 capture fields: shape fidelity only. The load path must
+            # propagate them; content cells live in
+            # test_fido2_attestation_store_leg1.
+            attestation_fmt=None,
+            aaguid=None,
+            attestation_object=None,
         )
         for i in range(n)
     ]

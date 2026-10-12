@@ -257,7 +257,15 @@ class TestInitEvents:
         q.first = first  # type: ignore[method-assign]
 
         fido = MagicMock()
-        cred = SimpleNamespace(user_id="firstadmin", credential_id=b"c", public_key=b"p", sign_count=0)
+        cred = SimpleNamespace(
+            user_id="firstadmin",
+            credential_id=b"c",
+            public_key=b"p",
+            sign_count=0,
+            attestation_fmt=None,
+            aaguid=None,
+            attestation_object=None,
+        )
         fido.finish_registration.return_value = cred
 
         app = _app(
@@ -925,7 +933,15 @@ def _elev_db():
 
 class TestCredentialEvents:
     def test_credential_added(self):
-        cred = SimpleNamespace(user_id=USER_ID, credential_id=b"nc", public_key=b"pk", sign_count=1)
+        cred = SimpleNamespace(
+            user_id=USER_ID,
+            credential_id=b"nc",
+            public_key=b"pk",
+            sign_count=1,
+            attestation_fmt=None,
+            aaguid=None,
+            attestation_object=None,
+        )
         db = _elev_db()
         fido = MagicMock()
         fido.finish_registration.return_value = cred
@@ -1067,7 +1083,15 @@ class TestEnrollCompleteEvent:
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
         mock_user = SimpleNamespace(id=1, user_id="newuser", status="pending_enrollment", display_name="N", roles=[])
-        mock_cred = SimpleNamespace(user_id="1", credential_id=b"c", public_key=b"p", sign_count=0)
+        mock_cred = SimpleNamespace(
+            user_id="1",
+            credential_id=b"c",
+            public_key=b"p",
+            sign_count=0,
+            attestation_fmt=None,
+            aaguid=None,
+            attestation_object=None,
+        )
         mock_session = SimpleNamespace(id=1, access_token_jti="jti-enr")
         mock_access = SimpleNamespace(token="at", jti="jti-enr")
 

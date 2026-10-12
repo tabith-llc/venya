@@ -295,6 +295,9 @@ async def credentials_add_complete(
             sign_count=cred.sign_count,
             label=req.label,
             is_active=True,
+            attestation_fmt=cred.attestation_fmt,
+            aaguid=cred.aaguid,
+            attestation_object=cred.attestation_object,
         )
         db.add(webauthn_cred)
         db.flush()

@@ -69,6 +69,10 @@ def _run_enroll_complete(session, token_state="in_progress", real_completer=Fals
         credential_id=b"cred-123",
         public_key=b"pub-key",
         sign_count=0,
+        # leg-1 capture fields: shape fidelity only, not under test here.
+        attestation_fmt=None,
+        aaguid=None,
+        attestation_object=None,
     )
     mock_session = SimpleNamespace(id=1)
     mock_access_token = SimpleNamespace(token="access-token-xyz")
