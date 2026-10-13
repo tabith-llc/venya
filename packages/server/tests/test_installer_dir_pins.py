@@ -39,7 +39,13 @@ class TestInstallerDirPins:
         core = _script("install-venya-core.sh")
         assert 'mkdir -p "$ADMIN_CA_DIR"' not in core
         assert 'mkdir -p "$ADMIN_CERT_DIR"' not in core
-        assert "install -d -m 0750 -g venya /var/lib/venya /var/lib/venya/ca" in core
+        assert (
+            "install -d -m 0750 -g venya /var/lib/venya\n" in core
+            and "install -d -m 0700 -g venya /var/lib/venya/ca" in core
+        )  # ca-dir-group-readable-mid-run-on-aborted-reinstall: split pin — the
+        # parent stays 0750 for traversal, the CA leaf is tight AT CREATION; the
+        # paired negative below rejects the old combined group-readable form.
+        assert "install -d -m 0750 -g venya /var/lib/venya /var/lib/venya/ca" not in core
         assert 'install -d -m 0700 -o venya -g venya "$ADMIN_CA_DIR"' in core  # #606: was 0770
         assert "install -d -m 0750 -g venya /etc/venya" in core
         assert 'install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"' in core  # #610: was 0770

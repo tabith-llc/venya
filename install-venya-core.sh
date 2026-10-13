@@ -426,7 +426,20 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     # old chmod 700 + chown venya semantics). The later
     # "install -d -m 0755 /etc/venya" (#317 status-quo pin) re-pins that
     # parent's mode after this block; idempotent.
-    install -d -m 0750 -g venya /var/lib/venya /var/lib/venya/ca
+    install -d -m 0750 -g venya /var/lib/venya
+    # ca-dir-group-readable-mid-run-on-aborted-reinstall: the CA leaf used to ride
+    # the parent pin above at 0750, and the only re-narrower was the root-CA block's
+    # embedded-python chmod (os.chmod of /var/lib/venya/ca to 0o700) much later in
+    # the run — so a re-run that ABORTED between the two (set -e, any of the
+    # passphrase guards) parked the CA directory group-readable against
+    # docs/BACKUPS.md §2 item 4 until the next completing run. Pin it tight at
+    # creation here. Ordering: this stays before the $ADMIN_CA_DIR pin and before
+    # the root-CA block; the block's chmod still runs every invocation and is now
+    # an idempotent 0700->0700 no-op rather than the sole heal. Owner is untouched
+    # by design — the chown -R venya:venya in venya_create_directories
+    # (venya-common.sh, called above this block) is the ownership authority, and
+    # the root-CA child runs its chmod as that owner.
+    install -d -m 0700 -g venya /var/lib/venya/ca
     # #606: 0700, not 0770 — install -d re-applies this mode on EVERY run and the
     # re-run path skips AdminCAManager.initialize's chmod 0700 (CA preserved), so a
     # group bit here re-widened admin-ca past BACKUPS.md §2 item 4 on every re-run.
