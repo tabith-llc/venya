@@ -31,6 +31,7 @@ NO ``user_id`` — a cell that hands the gate a ``user_id``-bearing executor dic
 testing an invention, which is how the old blanket pass stayed invisible for so long.
 """
 
+import ast
 import re
 from pathlib import Path
 from typing import Annotated
@@ -410,19 +411,65 @@ def test_guard_helper_is_the_single_in_body_refusal():
     assert require_user_identity(named) is named
 
 
+def _ac2_index_sites_by_function(rel: str) -> list[tuple[str, int, int | None]]:
+    """[(function name, first index line, guard line)] for every function in the
+    module that reads ``user_info["user_id"]`` / ``auth_user["user_id"]``.
+
+    Read from the AST, not a text count (#608): each site is attributed to the
+    function that owns it, so a guard removed from one site fails for THAT
+    function, and an unrelated guarded site added elsewhere changes nothing.
+    """
+    tree = ast.parse((SERVER / rel).read_text())
+    found: list[tuple[str, int, int | None]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        sites = [
+            n.lineno
+            for n in ast.walk(node)
+            if isinstance(n, ast.Subscript)
+            and isinstance(n.value, ast.Name)
+            and n.value.id in ("user_info", "auth_user")
+            and isinstance(n.slice, ast.Constant)
+            and n.slice.value == "user_id"
+        ]
+        if not sites:
+            continue
+        guards = [
+            n.lineno
+            for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "require_user_identity"
+        ]
+        found.append((node.name, min(sites), min(guards) if guards else None))
+    return found
+
+
 def test_every_ac2_branch_carries_the_guard_and_the_sentence():
-    """Cites each branch AC2 touched, and pins that each carries BOTH the call and
-    the UNREACHABLE-AT-TIP sentence — the sentence is the deliverable, so it must
-    survive at every site, not just once."""
-    sites = {
-        "routes/secrets.py": [339, 344, 453, 477, 481, 516, 541, 705, 767, 773, 796],
-        "routes/executors.py": [1417, 1437, 1442, 1465, 1479, 1533, 1572, 1723, 1752, 1773],
-    }
-    for rel, indexes in sites.items():
+    """Per-site guard contract (#449 AC2), read from the source structure — the
+    count pin it replaces (#608) asserted an arithmetic property of two files this
+    test does not own, and went red for unrelated edits while passing false-green
+    when a guarded site traded places with an unguarded one.
+
+    Now: every function that indexes ``user_id`` must CALL ``require_user_identity``
+    BEFORE its first index site. The sentence half is unchanged: each file still
+    carries the UNREACHABLE-AT-TIP marker at least once — it is the deliverable.
+
+    The six guarded functions as last read (a CITATION POINTER for humans, not an
+    assertion subject): secrets.py — secrets_create, secrets_get, secrets_delete,
+    update_secret_metadata; executors.py — create_execution_session,
+    execute_command_on_executor. Their refusal BEHAVIOR is proven live by
+    ``test_route_guard_refuses_a_user_id_less_identity`` above.
+    """
+    for rel in ("routes/secrets.py", "routes/executors.py"):
         text = (SERVER / rel).read_text()
         assert "require_user_identity(" in text, f"{rel}: no in-body guard"
         assert text.count("UNREACHABLE-AT-TIP, guard retained as defense-in-depth") >= 1, rel
-        # The site list is the citation of record; line numbers shift, so assert
-        # the count of index sites is unchanged rather than the numbers themselves.
-        n = len(re.findall(r'(?:user_info|auth_user)\["user_id"\]', text))
-        assert n == len(indexes), f"{rel}: {n} index sites, cited list has {len(indexes)}"
+        guarded = _ac2_index_sites_by_function(rel)
+        assert guarded, f"{rel}: no user_id index sites found at all — the AC2 surface moved; re-read #449/#608"
+        for name, site_line, guard_line in guarded:
+            assert (
+                guard_line is not None
+            ), f"{rel}:{name} indexes user_id at :{site_line} with no require_user_identity call in the function"
+            assert (
+                guard_line < site_line
+            ), f"{rel}:{name}: require_user_identity at :{guard_line} runs AFTER the index at :{site_line}"
