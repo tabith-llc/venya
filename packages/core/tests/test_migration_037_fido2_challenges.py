@@ -84,7 +84,8 @@ def test_revision_chain():
 
 def test_chain_is_linear_with_one_head():
     """AC5 (037-era invariant; head ADVANCES deliberately as migrations land —
-    038 moved it in the attestation-store leg): the chain has no fork, exactly
+    038 moved it in the attestation-store leg, 039 in the #591 cascade-parity
+    leg): the chain has no fork, exactly
     one head, and every revision in the graph is reachable from it. 037 hangs
     off 036 and nothing else hangs off 036."""
     chain = _chain()
@@ -103,7 +104,7 @@ def test_chain_is_linear_with_one_head():
     # pin the CURRENT head deliberately: adding a migration must make a seat
     # advance this line on purpose — the invariant (one head, no forks) is
     # what the cell guards, the identifier is the acknowledgement.
-    assert heads == ["038"], f"expected exactly one head (038), got {heads}"
+    assert heads == ["039"], f"expected exactly one head (039), got {heads}"
 
     # walk back from the head: everything reachable, no cycle
     seen = set()
