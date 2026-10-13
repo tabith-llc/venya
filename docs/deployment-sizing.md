@@ -119,17 +119,18 @@ makes, and it is the number that decides how many sandboxes a guest can hold.
 | 1024 vs measured footprint | ~527 MB per active sandbox | ≈ 1.9 × the measured need — headroom, not a guess |
 
 **Why the vendor's own limits do not make this number safe.** `sbx` enforces the
-band it documents — measured on the bench: a 48 GiB `--memory` value is REFUSED
-outright, and the 512 MiB floor is the vendor's floor as well as ours. Our
-config-load guard (`_sandbox_memory_within_vendor_bounds`) checks the same band
-earlier, so a bad value is refused with a Venya-named reason instead of a vendor
-one. But **both** checks are per-sandbox, and that is the gap: 2449 MiB is an
-in-band value, so nothing — vendor or Venya — rejects it, yet two sandboxes at
-that figure are 100.0 % of this guest and three are 2449 MiB over it, which is
-exactly the RF-1 / #567 out-of-memory. No in-band per-sandbox cap can see the
-**sum** of several in-band sandboxes. 1024 MiB is chosen on that basis: three
-sandboxes at 1024 are 3072 MiB, inside `MemTotal`, so the shipped number
-survives a concurrency raise instead of needing one.
+band it documents — observed on our own bench (Docker's docs state the band but
+not the enforcement: a 48 GiB `--memory` value was refused outright), and the
+512 MiB floor is the vendor's floor as well as ours. Our config-load guard
+(`_sandbox_memory_within_vendor_bounds`) checks the same band earlier, so a bad
+value is refused with a Venya-named reason instead of a vendor one. But **both**
+checks are per-sandbox, and that is the gap: 2449 MiB is an in-band value, so
+nothing — vendor or Venya — rejects it, yet two sandboxes at that figure are
+100.0 % of this guest and three are 2449 MiB over it, which is exactly the RF-1 /
+#567 out-of-memory. No in-band per-sandbox cap can see the **sum** of several
+in-band sandboxes. 1024 MiB is chosen on that basis: three sandboxes at 1024 are
+3072 MiB, inside `MemTotal`, so the shipped number survives a concurrency raise
+instead of needing one.
 
 **Precedence — read this before telling anyone to set the env spelling.**
 `ExecutorConfig.from_file` passes the toml as init kwargs, so **a
