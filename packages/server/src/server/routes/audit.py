@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
+from sqlalchemy import JSON, cast
 from sqlalchemy.orm import Session
 
 from ..dependencies import get_db, require_role
@@ -157,9 +158,14 @@ async def audit_list(
     if hours is not None:
         cutoff = datetime.now(UTC) - timedelta(hours=hours)
         query = query.filter(AuditEvent.timestamp >= cutoff)
+    if key is not None:
+        # #607: same JSON operator idiom as the executor_id filter below, so a
+        # secret-key filter is auditable the same way. Rows that name a key
+        # carry it under `secret_key` in both classes that do so:
+        # `secret_value_disclosed` and `auditor_secret_read_denied`
+        # (routes/secrets.py).
+        query = query.filter(cast(AuditEvent.fields, JSON).op("->>")("secret_key") == key)
     if executor_id is not None:
-        from sqlalchemy import JSON, cast
-
         query = query.filter(cast(AuditEvent.fields, JSON).op("->>")("executor_id") == executor_id)
 
     if event_type is not None:
