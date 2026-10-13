@@ -394,6 +394,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [Example Workflow](docs/example-workflow.md) | Narrated incident-response walkthrough — every MCP call and its exact output |
 | [Full-Lifecycle Test Plan](docs/full-lifecycle-test.md) | A-Z validation from clean hypervisor to MCP use-a-secret proof |
 | [Installation Guide](docs/installation.md) | Full deployment instructions |
+| [Beta Known Limitations](docs/beta-known-limitations.md) | What works in a beta release, what does not yet, and what an operator does about each |
 | [CLI Reference](docs/cli-reference.md) | Every `venya` command and argument — generated from the parser, test-enforced against drift |
 | [Architecture](docs/architecture.md) | Technical deep dive |
 | [Deployment Configuration](docs/deployment-config.md) | Required config fields, env-var mapping, validation timing |
