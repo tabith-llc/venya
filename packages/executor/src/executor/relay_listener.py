@@ -27,6 +27,7 @@ max_concurrent_commands``; the shipped default is 1.
 
 import json
 import logging
+import socket
 import ssl
 import threading
 import time
@@ -292,6 +293,47 @@ class ExecuteHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+# --- #586 accept gate: the two refusal classes, named ------------------------------
+# A refused connection never receives an HTTP response (the refusal happens before
+# a single request byte is read), so the owner's ruled status split lives in these
+# STRINGS: 403 = revoked, 503 = operational fault. A 3 a.m. reader must be able to
+# tell "this credential was killed" from "this daemon cannot tell either way".
+REFUSE_REVOKED = "403 REVOKED — this executor's credential is revoked server-side"
+REFUSE_NO_ANSWER = (
+    "503 OPERATIONAL FAULT — no revocation answer received this boot "
+    "(the core has neither confirmed nor revoked this credential; check core reachability)"
+)
+REFUSE_NOT_WIRED = (
+    "503 OPERATIONAL FAULT — the relay listener holds no daemon state, so revocation " "cannot be consulted at all"
+)
+
+
+def revocation_accept_reason(state: Any) -> str | None:
+    """Accept-gate verdict for one NEW :8443 connection; None admits.
+
+    SINGLE RULEBOOK, AS A CACHE (#586 STEP 0). This reads the ONE already-computed
+    answer on this side — ``DaemonState.revoked`` — plus a boot-scope flag that says
+    whether the core has ANSWERED the revocation question at all this boot. It holds
+    no copy of the revocation list and implements no serial or identity matching:
+    ``server/revocation.py`` (module contract comment) names a second implementation
+    as the rotation/revocation split-brain, and at :8443 the peer is the CORE's
+    relay-client credential, which the EXECUTOR-serial list never describes — a
+    peer-serial test here would be a second rulebook AND one that cannot match.
+
+    Fail-closed on "cannot consult" (DoD point 3, #586 acceptance 6): no state wired,
+    and no answer yet this boot, both refuse. Once answered the flag stays answered —
+    a later outage is already bounded by ``cert_rotation.max_revocation_failures``,
+    which sets ``state.revoked`` and takes the listener down with the daemon.
+    """
+    if state is None:
+        return REFUSE_NOT_WIRED
+    if getattr(state, "revoked", False):
+        return REFUSE_REVOKED
+    if not getattr(state, "revocation_answered", False):
+        return REFUSE_NO_ANSWER
+    return None
+
+
 class _RelayHTTPServer(ThreadingHTTPServer):
     """Threaded HTTP server that TLS-wraps each ACCEPTED connection.
 
@@ -308,21 +350,57 @@ class _RelayHTTPServer(ThreadingHTTPServer):
     RF-3's concurrent handshakes: swapping a reference is atomic under the GIL,
     mutating a shared OpenSSL CTX under a concurrent handshake is not.
 
-    The ``relay_ssl_context`` attribute is set by ``RelayListener.start()``.
+    #586 builds the revocation gate BESIDE that path, not inside it: after the
+    handshake completes and before the socket reaches a handler, the published
+    state is consulted and a refused connection is closed. No request byte is
+    read, no handler thread starts, and the refusal is journalled — the listener
+    asserts the refusal itself, so the control is not the daemon's cooperative
+    stop wearing a different hat.
+
+    The ``relay_ssl_context`` attribute is set by ``RelayListener.start()``, and so
+    is ``revocation_state``; an absent state is "cannot consult", which refuses.
     """
 
     relay_ssl_context: ssl.SSLContext
+    revocation_state: Any = None
+    # Optional callable ``(reason, host, port)`` — the durable record of one refusal.
+    # None is not a failure: the journal line always fires, and the spool copy exists
+    # only where the daemon has an audit sink wired.
+    refusal_recorder: Callable[[str, str, int], None] | None = None
 
     def get_request(self):
         conn, addr = self.socket.accept()
         try:
-            return self.relay_ssl_context.wrap_socket(conn, server_side=True), addr
+            tls_conn = self.relay_ssl_context.wrap_socket(conn, server_side=True)
         except OSError:
             # A refused handshake (no client cert / foreign CA) must not leak the
             # accepted fd, and must stay the OSError the serve loop already
             # swallows — the shape the wrapped-listener accept path had.
             conn.close()
             raise
+        reason = revocation_accept_reason(self.revocation_state)
+        if reason is None:
+            return tls_conn, addr
+        # Post-handshake refusal — the owner's option 3, and its named window: the
+        # credential was admitted by the handshake and is refused here, before any
+        # request bytes. ConnectionRefusedError is an OSError, which is the shape
+        # ``socketserver._handle_request_noblock`` already swallows from this hook.
+        try:
+            tls_conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        tls_conn.close()
+        host, port = (addr, 0) if isinstance(addr, str) else (addr[0], addr[1])
+        logger.warning("Relay :8443 refused a new connection from %s:%s — %s", host, port, reason)
+        recorder = self.refusal_recorder
+        if recorder is not None:
+            try:
+                recorder(reason, host, port)
+            except Exception:
+                # A failed audit write must never turn a refusal into an accept-loop
+                # crash, and never silently: name it in the journal.
+                logger.exception("Relay refusal audit write failed (peer %s:%s)", host, port)
+        raise ConnectionRefusedError(reason)
 
 
 class RelayListener:
@@ -377,12 +455,24 @@ class RelayListener:
         allowed_client_ids: list[str],
         host: str = "0.0.0.0",  # nosec B104 — private relay net; mTLS CERT_REQUIRED + CN allowlist is the access control
         port: int = RELAY_PORT,
+        state: Any = None,
     ) -> None:
         self._config = config
         self._executor_factory = executor_factory
         self.allowed_client_ids = frozenset(allowed_client_ids)
         self._host = host
         self._port = port
+        # #586: the ONE revocation answer this side holds, published by the daemon's
+        # main loop (``DaemonState.revoked`` + ``revocation_answered``). Held by
+        # reference and read per accept, so a revocation that lands mid-life reaches
+        # the gate without a restart. None = nothing wired = refuse.
+        self.revocation_state = state
+        # #586: the durable audit sink for refusals. The daemon assigns this after
+        # its boot spool forwarder exists (that forwarder is built later, in
+        # ``start()``), so it is a public attribute read per refusal rather than a
+        # constructor argument. None = journal only (see ``_record_refusal``'s
+        # shortcut note).
+        self.refusal_sink: Any = None
         self._server: _RelayHTTPServer | None = None
         self._thread: threading.Thread | None = None
         # RF-3 admission permits. Created in start() from the knob (never here:
@@ -459,6 +549,17 @@ class RelayListener:
         # #579: the context is PUBLISHED to the accept path, not wrapped onto
         # the listening socket, so a rotation can swap it (``reload_ssl_context``).
         server.relay_ssl_context = context
+        # #586: the accept gate reads the daemon's revocation answer per connection.
+        server.revocation_state = self.revocation_state  # type: ignore[attr-defined]
+        server.refusal_recorder = self._record_refusal  # type: ignore[attr-defined]
+        if self.revocation_state is None:
+            logger.error(
+                "Relay listener started with NO revocation state wired — every new "
+                "connection to :%d will be refused (%s). This is the fail-closed "
+                "shape; wire the daemon state.",
+                self._port,
+                REFUSE_NOT_WIRED,
+            )
 
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, name="venya-relay", daemon=True)
@@ -508,6 +609,29 @@ class RelayListener:
             "new :8443 connections present the post-rotation certificate"
         )
         return True
+
+    def _record_refusal(self, reason: str, host: str, port: int) -> None:
+        """Durable record of one accept-gate refusal, on the EXISTING audit spool.
+
+        No new mechanism (DoD point 5): this reuses ``AuditLogger.emit`` — the local
+        disk append every executor audit event already takes, which the boot
+        forwarder carries to the core sink when ``[audit] remote_url`` is set.
+
+        shortcut: a refusal reaches the spool only where the daemon wired an audit
+        sink (``audit_boot_forwarder``); with none configured the journal line in
+        ``_RelayHTTPServer.get_request`` is the only record. Upgrade when the
+        listener is given an unconditional session-less AuditLogger.
+        """
+        sink = self.refusal_sink
+        if sink is None:
+            return
+        sink.emit(
+            "relay_refused",
+            reason=reason,
+            peer_host=host,
+            peer_port=port,
+            executor_id=getattr(self.revocation_state, "executor_id", None),
+        )
 
     def _read_cap(self) -> int:
         """Admission cap from the knob, fail-closed to 1 (today's behaviour).

@@ -51,6 +51,7 @@ from core.iam.models import (
     Base,
     ExecutionSession,
     Executor,
+    ExecutorCert,
     Role,
     RoleMember,
     User,
@@ -124,6 +125,19 @@ def _make_stack(tmp_path, name, seed):
         s.flush()
         s.add(User(user_id="test-user", status="active", auth_mode="security-key"))
         s.add(Executor(id="exec-1", hostname="203.0.113.14", status="active"))
+        # #586 change C: the relay dial refuses an executor the core holds no
+        # registered, unexpired certificate for (503). These cells test the SESSION
+        # gates, so the stack models the normal registered state — a live record.
+        # The revocation-specific cell below overrides this row.
+        s.add(
+            ExecutorCert(
+                executor_id="exec-1",
+                serial_number="0000000000001000",
+                not_before=datetime.now(UTC) - timedelta(days=1),
+                not_after=datetime.now(UTC) + timedelta(days=30),
+                fingerprint="ab" * 32,
+            )
+        )
         s.flush()
         s.add(RoleMember(user_id="test-user", role_id=admin_role.id))
         if seed is not None:
@@ -468,6 +482,17 @@ class TestConcurrentExecutePostgresql:
             s.flush()
             s.add(User(user_id="test-user", status="active", auth_mode="security-key"))
             s.add(Executor(id="exec-1", hostname="203.0.113.14", status="active"))
+            # #586: see the note in _make_stack — the dial gate requires a live
+            # registered certificate, so the race cell seeds one too.
+            s.add(
+                ExecutorCert(
+                    executor_id="exec-1",
+                    serial_number="0000000000001000",
+                    not_before=datetime.now(UTC) - timedelta(days=1),
+                    not_after=datetime.now(UTC) + timedelta(days=30),
+                    fingerprint="ab" * 32,
+                )
+            )
             s.flush()
             s.add(RoleMember(user_id="test-user", role_id=admin_role.id))
             s.add(

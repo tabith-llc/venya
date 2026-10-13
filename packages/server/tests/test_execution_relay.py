@@ -14,6 +14,7 @@ import logging
 import socket
 import ssl
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx2
@@ -37,6 +38,23 @@ def _default_role_permissions():
     rm.get_user_permissions.side_effect = lambda uid: {1: "read-write"}
     with patch("server.dependencies.RoleManager", return_value=rm):
         yield rm
+
+
+def _current_cert():
+    """A REGISTERED, unexpired ``ExecutorCert`` row for the dial gate (#586).
+
+    #586 change C makes the relay dial refuse an executor the core holds no
+    current certificate for (503), so a fixture that wants the relay to RUN must
+    model the registered state instead of the old "no ExecutorCert row"
+    simplification. ``serial_number`` is a valid padded hex so the shared
+    revocation state can do its serial lookup; the
+    ``ExecutorCertRevocation`` query in these fixtures still returns None, so
+    the row reads as LIVE — which is the point those cells are testing.
+    """
+    return SimpleNamespace(
+        serial_number="0000000000001000",
+        not_after=datetime.now(UTC) + timedelta(days=30),
+    )
 
 
 def _create_test_app(backend=None):
@@ -98,9 +116,14 @@ def _mock_db_for_session(executor, secrets_first_side_effect):
     def query_side_effect(model):
         if model.__name__ == "Executor":
             return executor_q
-        if model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
-            # updated: the shared revocation state (executor-revocation-by-identity)
-            # queries cert/CRL when no identity flag is set — model "no rows".
+        if model.__name__ == "ExecutorCert":
+            # #586: the dial gate requires a registered, unexpired cert row; the
+            # shared revocation state (executor-revocation-by-identity) still sees
+            # "no CRL rows" below, so this row reads LIVE.
+            cert_q = MagicMock()
+            cert_q.filter.return_value.first.return_value = _current_cert()
+            return cert_q
+        if model.__name__ == "ExecutorCertRevocation":
             none_q = MagicMock()
             none_q.filter.return_value.first.return_value = None
             return none_q
@@ -122,6 +145,10 @@ class TestCreateExecutionSession:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
         mock_query = MagicMock()
         mock_query.first.return_value = mock_executor
         mock_query.filter.return_value.first.return_value = mock_executor
@@ -174,6 +201,10 @@ class TestCreateExecutionSession:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
         mock_db = _mock_db_for_session(mock_executor, [None])
         backend.get_session.return_value = mock_db
         app.state.core.get_for_injection.side_effect = CoreAccessError("Secret not found: missing-key")
@@ -196,6 +227,10 @@ class TestCreateExecutionSession:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
         mock_db = _mock_db_for_session(mock_executor, [None])
         backend.get_session.return_value = mock_db
 
@@ -227,6 +262,10 @@ class TestCreateExecutionSession:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
         secrets = _mock_secret_rows(("db-password", None), ("api-key", None))
         mock_db = _mock_db_for_session(mock_executor, list(secrets))
         backend.get_session.return_value = mock_db
@@ -260,6 +299,10 @@ class TestCreateExecutionSession:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
         secrets = _mock_secret_rows(("db-password", None))
         mock_db = _mock_db_for_session(mock_executor, list(secrets))
         backend.get_session.return_value = mock_db
@@ -296,6 +339,10 @@ class TestCreateExecutionSession:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
         secrets = _mock_secret_rows(("db-password", {"executor": "other-exec"}))
         mock_db = _mock_db_for_session(mock_executor, list(secrets))
         backend.get_session.return_value = mock_db
@@ -467,6 +514,10 @@ class TestExecuteCommandOnExecutor:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -484,8 +535,13 @@ class TestExecuteCommandOnExecutor:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
-            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
-                # updated: shared revocation state models "no cert/CRL rows"
+            elif model.__name__ == "ExecutorCert":
+                # #586: the dial gate requires a registered, unexpired cert row.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
+            elif model.__name__ == "ExecutorCertRevocation":
+                # updated: shared revocation state models "no CRL rows"
                 none_q = MagicMock()
                 none_q.filter.return_value.first.return_value = None
                 return none_q
@@ -572,6 +628,10 @@ class TestExecuteCommandOnExecutor:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -589,8 +649,13 @@ class TestExecuteCommandOnExecutor:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
-            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
-                # updated: shared revocation state models "no cert/CRL rows"
+            elif model.__name__ == "ExecutorCert":
+                # #586: the dial gate requires a registered, unexpired cert row.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
+            elif model.__name__ == "ExecutorCertRevocation":
+                # updated: shared revocation state models "no CRL rows"
                 none_q = MagicMock()
                 none_q.filter.return_value.first.return_value = None
                 return none_q
@@ -661,6 +726,10 @@ class TestExecutorReachability:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
 
         mock_query = MagicMock()
         mock_query.first.side_effect = [mock_session, mock_executor]
@@ -700,6 +769,10 @@ class TestExecutorReachability:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -716,8 +789,13 @@ class TestExecutorReachability:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
-            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
-                # updated: shared revocation state models "no cert/CRL rows"
+            elif model.__name__ == "ExecutorCert":
+                # #586: the dial gate requires a registered, unexpired cert row.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
+            elif model.__name__ == "ExecutorCertRevocation":
+                # updated: shared revocation state models "no CRL rows"
                 none_q = MagicMock()
                 none_q.filter.return_value.first.return_value = None
                 return none_q
@@ -765,6 +843,10 @@ class TestExecutorReachability:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -781,8 +863,13 @@ class TestExecutorReachability:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
-            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
-                # updated: shared revocation state models "no cert/CRL rows"
+            elif model.__name__ == "ExecutorCert":
+                # #586: the dial gate requires a registered, unexpired cert row.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
+            elif model.__name__ == "ExecutorCertRevocation":
+                # updated: shared revocation state models "no CRL rows"
                 none_q = MagicMock()
                 none_q.filter.return_value.first.return_value = None
                 return none_q
@@ -833,6 +920,10 @@ class TestExecutorReachability:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -849,8 +940,13 @@ class TestExecutorReachability:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
-            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
-                # updated: shared revocation state models "no cert/CRL rows"
+            elif model.__name__ == "ExecutorCert":
+                # #586: the dial gate requires a registered, unexpired cert row.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
+            elif model.__name__ == "ExecutorCertRevocation":
+                # updated: shared revocation state models "no CRL rows"
                 none_q = MagicMock()
                 none_q.filter.return_value.first.return_value = None
                 return none_q
@@ -913,8 +1009,13 @@ class TestExecutorReachability:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
-            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
-                # updated: shared revocation state models "no cert/CRL rows"
+            elif model.__name__ == "ExecutorCert":
+                # #586: the dial gate requires a registered, unexpired cert row.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
+            elif model.__name__ == "ExecutorCertRevocation":
+                # updated: shared revocation state models "no CRL rows"
                 none_q = MagicMock()
                 none_q.filter.return_value.first.return_value = None
                 return none_q
@@ -971,6 +1072,10 @@ class TestMalformedExecutorResponse:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -987,8 +1092,13 @@ class TestMalformedExecutorResponse:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
-            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
-                # updated: shared revocation state models "no cert/CRL rows"
+            elif model.__name__ == "ExecutorCert":
+                # #586: the dial gate requires a registered, unexpired cert row.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
+            elif model.__name__ == "ExecutorCertRevocation":
+                # updated: shared revocation state models "no CRL rows"
                 none_q = MagicMock()
                 none_q.filter.return_value.first.return_value = None
                 return none_q
@@ -1135,6 +1245,10 @@ class TestTlsMisconfiguration:
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None  # updated: shared revocation state reads this (executor-revocation-by-identity)
         mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -1151,8 +1265,13 @@ class TestTlsMisconfiguration:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
-            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
-                # updated: shared revocation state models "no cert/CRL rows"
+            elif model.__name__ == "ExecutorCert":
+                # #586: the dial gate requires a registered, unexpired cert row.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
+            elif model.__name__ == "ExecutorCertRevocation":
+                # updated: shared revocation state models "no CRL rows"
                 none_q = MagicMock()
                 none_q.filter.return_value.first.return_value = None
                 return none_q
@@ -1260,6 +1379,12 @@ def _execute_env_harness(meta: dict, version: str | None, plaintext: str = "s3cr
             return mock_secrets_query
         if name == "Secret":
             return mock_meta_query
+        if name == "ExecutorCert":
+            # #586: the relay dial requires a registered, unexpired cert record; the
+            # CRL query below returns no rows, so the record reads LIVE.
+            cert_q = MagicMock()
+            cert_q.filter.return_value.first.return_value = _current_cert()
+            return cert_q
         none_q = MagicMock()
         none_q.filter.return_value.first.return_value = None
         return none_q
@@ -1506,7 +1631,11 @@ class TestRelayTimeoutAudit407:
         mock_executor.id = "exec-1"
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None
-        mock_executor.serial_number = None
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
 
         mock_executor_query = MagicMock()
         mock_executor_filtered = MagicMock()
@@ -1523,7 +1652,14 @@ class TestRelayTimeoutAudit407:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
-            elif model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+            elif model.__name__ == "ExecutorCert":
+                # #586: the relay dial requires a registered, unexpired cert record.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
+            elif model.__name__ == "ExecutorCertRevocation":
+                # updated: shared revocation state models "no CRL rows" → the record
+                # above reads LIVE, which is the state these #407 cells test.
                 none_q = MagicMock()
                 none_q.filter.return_value.first.return_value = None
                 return none_q
@@ -1658,7 +1794,11 @@ class TestPolicyRejectionRelay410:
         mock_executor.id = "exec-1"
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None
-        mock_executor.serial_number = None
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
         mock_executor.version = "0.1.0a14"
 
         mock_executor_query = MagicMock()
@@ -1674,6 +1814,12 @@ class TestPolicyRejectionRelay410:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
+            elif model.__name__ == "ExecutorCert":
+                # #586: the relay dial requires a registered, unexpired cert record;
+                # the CRL query below still returns no rows, so it reads LIVE.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
             none_q = MagicMock()
             none_q.filter.return_value.first.return_value = None
             return none_q
@@ -1743,7 +1889,11 @@ class TestSessionLockout429:
         mock_executor.id = "exec-1"
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None
-        mock_executor.serial_number = None
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
         mock_db = _mock_db_for_session(mock_executor, [MagicMock()])
         backend.get_session.return_value = mock_db
 
@@ -1811,7 +1961,11 @@ class TestRelayRejectionAudit424:
         mock_executor.id = "exec-1"
         mock_executor.hostname = "192.0.2.14"
         mock_executor.revoked_at = None
-        mock_executor.serial_number = None
+        mock_executor.serial_number = None  # stands in for "no ExecutorCert row" under uniform query mocks
+        # #586: the relay dial now requires a registered, unexpired ExecutorCert
+        # record; under a uniform query mock the cert query lands on this same row,
+        # so not_after is a real aware datetime and the row reads LIVE.
+        mock_executor.not_after = datetime.now(UTC) + timedelta(days=30)
         mock_executor.version = "0.1.0a14"
 
         mock_executor_query = MagicMock()
@@ -1827,6 +1981,12 @@ class TestRelayRejectionAudit424:
                 return mock_executor_query
             elif model.__name__ == "SessionSecret":
                 return mock_secrets_query
+            elif model.__name__ == "ExecutorCert":
+                # #586: the relay dial requires a registered, unexpired cert record;
+                # the CRL query below still returns no rows, so it reads LIVE.
+                cert_q = MagicMock()
+                cert_q.filter.return_value.first.return_value = _current_cert()
+                return cert_q
             none_q = MagicMock()
             none_q.filter.return_value.first.return_value = None
             return none_q
