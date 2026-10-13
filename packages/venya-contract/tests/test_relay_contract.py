@@ -103,7 +103,8 @@ def test_response_masked_count_defaults_zero():
 
 # --- env/askpass additions (ticket secret-shape-env-injection) --------------
 # Coordinated contract change: both directions of the compatibility matrix are
-# pinned (ca-key-export cross-compat precedent).
+# pinned (precedent: the ca-key format pins — re-founded single-package at the
+# CLI layer after b7d814d retired the server twin; #609).
 
 
 def test_old_wire_payload_parses_with_env_defaults():
