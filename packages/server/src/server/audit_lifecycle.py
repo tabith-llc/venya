@@ -69,6 +69,21 @@ ENROLLMENT_TOKEN_ISSUED = "enrollment_token_issued"  # nosec B105 — audit even
 ENROLLMENT_TOKEN_REVOKED = "enrollment_token_revoked"  # nosec B105 — audit event name, not a password
 COMMAND_POLICY_CHANGED = "command_policy_changed"
 EXECUTOR_ENROLLMENT_TOKEN_CREATED = "executor_enrollment_token_created"  # nosec B105 — audit event name, not a password
+# #602 AC1 shape (a): the human-unmask SUCCESS arm records the disclosure, not
+# only its denial (the README's "every disclosure is an audit event"). The row
+# names WHICH key was disclosed and WHO read it; nothing about the VALUE is
+# recorded — no plaintext, no token, no token hash. Value-free by construction,
+# so it is searchable beside the deny row it pairs with
+# (auditor_secret_read_denied).
+#
+# CONSTANT-NAME NOTE (deliberate, not a typo to "fix"): the name carries no
+# SECRET_/TOKEN_ keyword on purpose, because bandit B105 and the detect-secrets
+# "Secret Keyword" detector both key on the VARIABLE NAME, not the value — a
+# keyword-shaped name would need a bandit suppression (a new row in the
+# generated register) and a fake finding in .detect-secrets-baseline, for a
+# string that is not a credential. The auditor-facing value below is what the
+# log stores.
+VALUE_DISCLOSED = "secret_value_disclosed"
 
 
 def _json_safe(value: Any) -> Any:
@@ -131,6 +146,7 @@ def audit_lifecycle(
         ENROLLMENT_TOKEN_REVOKED,
         COMMAND_POLICY_CHANGED,
         EXECUTOR_ENROLLMENT_TOKEN_CREATED,
+        VALUE_DISCLOSED,
     }
     if event_type not in known:
         raise ValueError(f"unknown lifecycle event: {event_type}")

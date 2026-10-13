@@ -32,6 +32,14 @@ Every such refusal is written to the append-only audit log as an
 secret value). A failure of the audit write itself never turns the denial
 into an allow: the request still gets 403.
 
+A read that succeeds is written too, as a `secret_value_disclosed` event
+(actor, secret key, session id, outcome — again never a secret value, and
+never the elevation token). The row is added only once the value is in hand
+and it commits with the token's single-use burn, so a disclosure the caller
+never received is never recorded and one that happened is never lost. An
+auditor asking "who read a value, when, of which key?" therefore gets an
+answer on both arms of the same route — the denial and the disclosure.
+
 ## Elevation issuance is refused to auditor-only callers
 
 Both elevation-assert endpoints (CLI/API and browser) return 403 — logged

@@ -76,6 +76,9 @@ LIFECYCLE_EVENT_STRINGS = [
     "enrollment_token_revoked",
     "command_policy_changed",
     "executor_enrollment_token_created",
+    # #602 AC1 shape (a): the human-unmask disclosure row (value-free — which
+    # key, who, when; never the value). Rides the elevation burn's transaction.
+    "secret_value_disclosed",
 ]
 
 
@@ -138,7 +141,20 @@ class TestSingleWriter:
 
     @pytest.mark.parametrize(
         "module_name",
-        ["init", "auth", "auth_browser", "auth_elevation", "enroll", "recovery", "admin", "roles", "credentials"],
+        [
+            "init",
+            "auth",
+            "auth_browser",
+            "auth_elevation",
+            "enroll",
+            "recovery",
+            "admin",
+            "roles",
+            "credentials",
+            # #602: the unmask route joined the single-writer discipline — it
+            # names the disclosure event through the helper, never literally.
+            "secrets",
+        ],
     )
     def test_every_lifecycle_route_file_uses_the_helper(self, module_name):
         text = (Path(auth_routes.__file__).parent / f"{module_name}.py").read_text()

@@ -22,6 +22,8 @@ from sqlalchemy.orm import Session
 from server.dependencies import get_db, require_role, require_user_identity
 from server.rate_limit import lockout_http_exception
 
+from ..audit_lifecycle import VALUE_DISCLOSED, audit_lifecycle
+
 router = APIRouter()
 logger = logging.getLogger("venya.server")
 
@@ -563,6 +565,28 @@ async def secrets_get(
                     unmask=True,
                     user_id=user_id,
                     role_names=role_names,
+                )
+                # #602 AC1 shape (a): the disclosure itself is an audit event,
+                # as the README's zero-trust parenthetical promises ("every
+                # disclosure is an audit event"). Added AFTER core.get returns
+                # and BEFORE the commit, so the row rides the burn's own
+                # transaction: a value the caller never received is never
+                # recorded (any raise here unwinds the row with the burn), and
+                # a real disclosure cannot lose its row. PRIVACY BOUNDARY: the
+                # auditor learns WHICH key left the server, WHO took it and
+                # WHEN — nothing about the VALUE is ever written here: no
+                # plaintext, no token, no token hash (pinned by
+                # tests/test_unmask_disclosure_audit_602.py).
+                audit_lifecycle(
+                    db,
+                    VALUE_DISCLOSED,
+                    user_id,  # the local already resolved above; not a new index site
+                    {
+                        "outcome": "disclosed",
+                        "secret_key": key,
+                        "endpoint": "/api/v1/secrets/{key}",
+                        "session_id": user_info.get("session_id"),
+                    },
                 )
                 db.commit()
                 return SecretGetResponse(key=key, value=value, masked=False)
