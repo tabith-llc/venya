@@ -8,13 +8,84 @@
 
 Loaded from environment variables and/or config file.
 Environment variables are prefixed with VENYA_EXECUTOR_.
+
+Precedence, ruled 2026-10-13 (#598): the config FILE wins, then the ENVIRONMENT spelling,
+then the field default — `file > env > default`. ``ExecutorConfig.from_file`` is where that
+is decided, because passing the parsed TOML as explicit init arguments is what puts the file
+above the environment in pydantic-settings' own order. The direction is not the defect that
+was filed; the silence was. A key carried by both spellings is now announced at every start
+(``precedence_conflicts``), naming the key, the two sources and which one won.
 """
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
-from pydantic import AliasChoices, BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.sources import EnvSettingsSource
+
+#: The ruled order (#598). One home for the wording the log line, the docs and the tests use.
+PRECEDENCE_RULE = "file > env > default"
+
+
+def _values_agree(file_value: Any, env_value: Any) -> bool:
+    """Whether the two spellings ask for the same thing.
+
+    The environment only ever carries a string, while TOML carries a native value, so the
+    comparison is deliberately loose and biased toward ANNOUNCING: anything this cannot
+    recognise as equal is reported. A redundant warning is noise; a missing one is the very
+    silence #598 was filed about.
+    """
+    if isinstance(file_value, bool):
+        return str(env_value).strip().lower() in ({"true", "1"} if file_value else {"false", "0"})
+    return str(file_value).strip().lower() == str(env_value).strip().lower()
+
+
+def _leaves(payload: Mapping[str, Any], prefix: str = "") -> dict[str, Any]:
+    """Leaf key paths of a nested mapping, as ``{group.key: value}``.
+
+    A section header by itself is not a setting, so an empty table contributes nothing and a
+    file carrying only ``[audit]`` cannot report an ``audit`` conflict.
+    """
+    leaves: dict[str, Any] = {}
+    for name, value in payload.items():
+        path = f"{prefix}{name}"
+        if isinstance(value, Mapping):
+            leaves.update(_leaves(value, f"{path}."))
+        else:
+            leaves[path] = value
+    return leaves
+
+
+def precedence_conflicts(
+    *, file_data: Mapping[str, Any], env_data: Mapping[str, Any], rule: str = PRECEDENCE_RULE
+) -> list[str]:
+    """Keys carried by BOTH the config file and the environment, asking for different things.
+
+    ``env_data`` is pydantic's own environment source resolved against this model, so a key
+    appears here only when the model would genuinely read it from the environment. Naming the
+    variables by hand instead would risk announcing a conflict for a spelling that was never
+    live, and a log line the operator cannot act on is worse than no log line.
+
+    Agreement is NOT reported: two spellings asking for the same value leave nothing
+    defeated, and a warning that fires on every boot teaches the operator to ignore the one
+    that does not (AC2's third row is the both-set-and-different case).
+
+    Lines name the key, both sources and the winner. They deliberately do not print values:
+    this config's key classes include certificate paths and enrollment material, and a
+    precedence line is not where one of those belongs in a journal.
+    """
+    file_leaves = _leaves(file_data)
+    env_leaves = _leaves(env_data)
+    return [
+        f"{key}: set in the executor config file AND in the environment, to different values — "
+        f"{rule}, so the file value is in use and the environment spelling is ignored (#598)"
+        for key in sorted(file_leaves.keys() & env_leaves.keys())
+        if not _values_agree(file_leaves[key], env_leaves[key])
+    ]
+
 
 # #578: `sbx create` must carry an explicit --memory. The vendor's own default
 # is a fraction of the guest (50%, clamped 512 MiB-32 GiB), so an un-pinned
@@ -453,10 +524,14 @@ class ExecutorConfig(BaseSettings):
 
     # Logging
     log_level: str = Field(default="info", description="Logging level")
-
     # Daemon mode
     daemonize: bool = Field(default=False, description="Run as daemon (fork to background)")
     pid_file: str = Field(default="/var/lib/venya/executor/venya-executor.pid", description="PID file path")
+
+    # #598 — the loud list computed by from_file. A private attribute, deliberately not a
+    # setting: it is read from neither the file nor the environment, and save_file must never
+    # write it back, or the report of a conflict would itself become a config key.
+    _precedence_conflicts: list[str] = PrivateAttr(default_factory=list)
 
     @model_validator(mode="after")
     def _sandbox_memory_within_vendor_bounds(self) -> ExecutorConfig:
@@ -517,7 +592,26 @@ class ExecutorConfig(BaseSettings):
         with open(path, "rb") as f:
             data = tomllib.load(f)
 
-        return cls(**data)
+        # #598 — this is the resolution site, so the ruled contract is stated where it is
+        # decided rather than in folklore: passing the parsed TOML as explicit init arguments
+        # is what puts the FILE above the environment in pydantic-settings' order, making the
+        # precedence `file > env > default` (lead ruling, 2026-10-13). The direction was never
+        # the defect; the silence was. Every key BOTH spellings carry is recorded here and
+        # announced by the daemon at start, once logging exists to carry it.
+        config = cls(**data)
+        config._precedence_conflicts = precedence_conflicts(
+            file_data=data,
+            env_data=EnvSettingsSource(cls)(),
+        )
+        return config
+
+    def precedence_conflict_notes(self) -> list[str]:
+        """The #598 loud list: keys this file set that the environment also set.
+
+        Empty when the config was built without a file, or when nothing overlaps. Values are
+        never included — see ``precedence_conflicts``.
+        """
+        return list(self._precedence_conflicts)
 
     def save_file(self, path: str | Path) -> None:
         """Save current configuration to a TOML file.

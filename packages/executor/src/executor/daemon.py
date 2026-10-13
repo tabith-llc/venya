@@ -1910,9 +1910,12 @@ class ExecutorDaemon:
                 "egress policy cannot be built without it. The resolver IP is always "
                 "allowed for sandbox egress; hostname targets resolve only when the "
                 "hostname itself is in the egress allowlist. Set `dns_resolver` in "
-                "/etc/venya/executor.toml or "
-                "VENYA_EXECUTOR_DNS_RESOLVER in the service environment "
-                "(find your resolver: resolvectl status or grep nameserver /etc/resolv.conf)."
+                "/etc/venya/executor.toml — that file's value is the one this daemon "
+                "uses whenever the file carries the key, including as an empty value; "
+                "VENYA_EXECUTOR_DNS_RESOLVER in the service environment is read only "
+                "when the file does not carry `dns_resolver` at all "
+                "(precedence: file > env > default, #598; find your resolver: "
+                "resolvectl status or grep nameserver /etc/resolv.conf)."
             )
             raise SystemExit(1)
         # refs ticket sbx-exec-env-file-noop: refuse boot on an sbx CLI below
@@ -2370,6 +2373,20 @@ def _daemonize_detach() -> None:
         os.close(devnull_fd)
 
 
+def _log_precedence_conflicts(config: ExecutorConfig) -> None:
+    """Announce every file-versus-environment conflict once, at start (#598).
+
+    Kept as a named function on purpose: main() loads the config before logging exists, and
+    the notes have to be emitted after ``basicConfig`` so they arrive through the journal's
+    own formatter. Splitting it out is what makes that ordering testable at all — an inline
+    loop in ``main()`` cannot be reached without booting the daemon.
+
+    The notes carry no values; see ``executor.config.precedence_conflicts``.
+    """
+    for note in config.precedence_conflict_notes():
+        logger.warning("Config precedence: %s", note)
+
+
 def main() -> None:
     """Entry point for venya-executor CLI."""
     import argparse
@@ -2421,6 +2438,12 @@ def main() -> None:
     )
     for handler in logging.root.handlers:
         handler.setFormatter(RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+
+    # #598: say it once, loudly, before any work is done. An operator who set a key in the
+    # environment while the installer wrote the same key into the file is not making a
+    # mistake — it is the ruled order — but it was invisible, and an operator who believes
+    # the env spelling took effect is running a configuration they did not choose.
+    _log_precedence_conflicts(config)
 
     # Create and start daemon
     daemon = ExecutorDaemon(config)
