@@ -533,10 +533,12 @@ alongside each one before repeating them.
 
 **Source anchor:** the statements above were read against the shipped source at `dev`
 `2e0e751` and the `#590` entry against `dev` `e8d5a22`; the two `Revocation` entries (`#586`,
-`#597`) were re-read against `dev` **`4543eb5`**, with `#586`'s dial half read at the merge that
-carries it (`54457a6`) and the listener accept gate at the merge that carries *that* (`5b0dd31`).
-Two entries came out of this page on
-2026-10-13 after being re-read against `dev` `3268081` — the `#598` precedence entry (the
+`#597`) were written against `dev` `4543eb5` and **every cite in them was re-read at
+`dev` `29beb1b`**, which is the anchor this page carries — with `#586`'s dial half read at the
+merge that carries it (`54457a6`) and the listener accept gate at the merge that carries *that*
+(`5b0dd31`). `29beb1b` moved no file either entry cites (its face is `routes/audit.py` and two
+test files), so the numbers are unchanged between the two tips. Two entries came out of this
+page on 2026-10-13 after being re-read against `dev` `3268081` — the `#598` precedence entry (the
 direction is ruled, the silence is removed, and the contract is written once in
 [deployment-config.md](deployment-config.md)) and the `#589` memory-setting entry (that merge
 ships the per-sandbox default). The **executor-config-file rewrite** entry above replaces the
