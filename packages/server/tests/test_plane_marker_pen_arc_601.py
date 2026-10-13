@@ -8,7 +8,9 @@
 
 Dual-arc read, single-arc write (owner-ruled HOW, verbatim: "BEFORE BETA.
 It rides."). WRITE: 1.3.6.1.4.1.67159.1.1 (PEN 67159 = Tabith LLC, re-read
-from the RAW IANA registry file at this landing — line 268652). READ: the
+from the RAW IANA registry file at this landing — the registry is BLOCK
+format, so the citation is the block at lines 268652-268653: "67159" then
+"Tabith LLC"). READ: the
 registered arc first, then the legacy 1.3.6.1.4.1.64496.1.1 for a bounded
 transition window, so pre-#601 leaves keep resolving (#588's
 non-retroactivity precedent). Markers on BOTH arcs at once refuse — the

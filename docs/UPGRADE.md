@@ -29,6 +29,18 @@ Guaranteed by a version-changing re-run:
 - **Operator config survives.** Keys you added to `/opt/venya/.env` are
   preserved across the regeneration (see "Operator .env keys").
 - **Downgrades are refused** unless explicitly allowed (see "Downgrades").
+- **The service is stopped for the migration window and proven on the new
+  bytes before the run claims success.** The re-run halts
+  `venya-core.service` before migrations (announced by a `NOTICE` — the schema
+  must not move under a process still running the previous build, #587), then
+  restarts it on the deployed bytes. The guard is a running unit, not a version
+  change, so a same-version re-run pauses too; a first install never stops.
+  No manual `systemctl restart` is needed. The run closes with a
+  `PROOF-OF-FRESH-BYTES` line attesting the probes hit the new process; that
+  proof is a gate — an unattested run says so in the transcript instead of
+  printing `Installation verified successfully`. Plan a seconds-long
+  interruption, not an outage. The full wording of both halves is in
+  [installation.md](installation.md) §1.
 
 NOT guaranteed: **the database schema never downgrades.** Alembic migrations
 are forward-only; an allowed version downgrade leaves the schema at the newer
@@ -88,7 +100,12 @@ Database migrations complete.
 ```
 
 The backup lines appear **before** the migration lines — no backup, no
-upgrade. Verify afterwards:
+upgrade. The transcript above was captured in the 2026-09-29 drill, which
+predates #587: a re-run on a current build prints two `NOTICE` lines about the
+deliberate service stop immediately **before** `Running database migrations...`,
+and a `PROOF-OF-FRESH-BYTES` line further down. Both are recorded in
+[installation.md](installation.md) §1; nothing was re-observed in a drill on a
+post-#587 build at the time of writing. Verify afterwards:
 
 ```bash
 curl -sk https://<core-host>/api/v1/health
@@ -246,7 +263,10 @@ by this drill.
 - **Health still reports the OLD version after a re-run:** look for the
   restart NOTICE and the `PROOF-OF-FRESH-BYTES` line in the installer output —
   the re-run contract restarts the service when the process predates the new
-  bytes ([installation.md](installation.md) §1).
+  bytes ([installation.md](installation.md) §1). A `VERIFICATION NOT CLAIMED`
+  line means that proof did not land and the run said so rather than claiming
+  a verification it could not stand behind; re-run the installer (it is
+  idempotent) after checking the unit.
 - **First sandbox command after an executor re-install:** seconds-scale (the
   installer warms the sbx template); cold-start guidance in
   [installation.md](installation.md) Troubleshooting.

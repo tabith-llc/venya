@@ -833,13 +833,16 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # (https://www.iana.org/assignments/enterprise-numbers/enterprise-numbers,
 # fetched 5,145,254 bytes, last updated 2026-10-12) defines the prefix
 # iso.org.dod.internet.private.enterprise = 1.3.6.1.4.1, decimal numbers
-# assigned by IANA; registry line 268652 reads "67159 / Tabith LLC".
+# assigned by IANA. The registry is BLOCK format, so the citation is a block,
+# not a line: lines 268652-268653 read "67159" then "Tabith LLC" (holder and
+# contact lines follow). Grep the digits, never a word like "arc".
 # HISTORY OF THE OLD HOME (kept so the next reader re-derives instead of
 # re-litigating): this constant shipped at 1.3.6.1.4.1.64496.1.1 under a
 # comment citing "RFC 6996 private-use experimental arc" — measured false
 # twice over at #601: RFC 6996 is an Autonomous System reservation document
 # (fetched: 8,198 bytes, zero occurrences of "enterprise"), and PEN 64496
-# is registered to Premier-D LLC (same registry, line 258000), not to us.
+# is registered to Premier-D LLC (same registry, block at lines 258000-258001:
+# "64496" then "Premier-D LLC"), not to us.
 # The comment's own wait-condition — provisional until Tabith LLC holds a
 # registered PEN — was met, and this change is it acting on that.
 # TRANSITION WINDOW (#601, owner-ruled HOW: dual-arc read, single-arc
