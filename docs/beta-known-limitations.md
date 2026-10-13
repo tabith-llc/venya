@@ -26,7 +26,7 @@ and only pointed at:
 
 ## Revocation
 
-### A revoked credential is refused by the core's dial, not by the executor's listener
+### The relay checks revocation on the core's dial only; the executor's listener cannot assert peer revocation at all
 
 Status: known limitation in beta · Target: no date set · Tracked as: #586 (open — the remedy
 is BOTH doors and only one landed)
@@ -59,7 +59,11 @@ executor's own leaf, the CA anchor and `verify_mode = ssl.CERT_REQUIRED`
 `VERIFY_CRL` flag anywhere in the executor's shipped source** — re-derivable with
 `git grep -i crl -- packages/executor/src`, which returns nothing at this tip, and
 `git grep VERIFY_CRL -- packages/`, whose only hits in the product are the dial line above and
-the unit cell that asserts it.
+the unit cell that asserts it. The two relay surfaces are also **not symmetric in any verify
+flag**: the file sets no `verify_flags` line at all, so it lacks the
+`VERIFY_X509_STRICT | VERIFY_X509_PARTIAL_CHAIN` the dial sets deliberately
+(`packages/server/src/server/routes/executors.py:657`). Chain handling differs between the two
+doors, not just list handling.
 
 What the listener DOES have is a post-handshake accept gate
 (`revocation_accept_reason`, `packages/executor/src/executor/relay_listener.py:311`, fired at
@@ -84,6 +88,22 @@ stops such a peer today is the CN allowlist — `relay_client_ids`, compared in
 IDENTITY test, not a revocation test, and is answered after the handshake has already
 succeeded.
 
+And the stronger thing, which the page has to say rather than imply: **at this surface the listener
+cannot assert peer revocation at all today, and bolting a list consult onto it would not change
+that.** The service CA that signs the core's relay-client credential
+(`-CA /var/lib/venya/ca/ca.crt`, `install-venya-core.sh:963`) is the same CA that signs executor
+leaves (`CAManager.ca_cert_path`, `packages/server/src/server/ca.py:394`, leaf mint at
+`packages/server/src/server/ca.py:621`), and the list that CA mints is populated from
+`ExecutorCertRevocation` alone (`CAManager.generate_crl`,
+`packages/server/src/server/ca.py:715`, query at `packages/server/src/server/ca.py:749`; the model
+is titled "Revoked executor certificate serial numbers",
+`packages/core/src/core/iam/models.py:380`). The only peer that legitimately dials `:8443` is the
+core's relay-client credential, and that credential is recorded in no registry (#597), so it has
+no row in that list. Same issuer, different population: the gap is at serial level, not at chain
+level. **A `VERIFY_CRL_CHECK_LEAF` added to the listener today would be a no-op against the peer
+it is aimed at** — a green test could be written for the flag and no revocation would be enforced
+by it. That is why #597 is the sequenced prerequisite for this half, and not a detail of it.
+
 **Who is affected in the shipped posture.** Reachability, not theory. The listener binds
 `:8443` (`RELAY_PORT`, `packages/executor/src/executor/relay_listener.py:46`) on the executor
 and takes connections from the core network (default `host="0.0.0.0"` in `RelayListener.__init__`,
@@ -98,8 +118,17 @@ came from. Executor leaves are dual-purpose, `SERVER_AUTH` and `CLIENT_AUTH`
 (`packages/server/src/server/ca.py:51`), so an executor credential is also a credential that
 can present as a client.
 
-**The proof that has not been run.** No physical revoke-then-refuse test has ever been
-executed on a served fleet, for either door. What exists in the tree is unit-level: the dial
+**One boundary is settled and is not on the plan: work already in flight is NOT terminated by a
+revocation.** That is the owner's ruling, recorded in the shipped source
+(`packages/server/src/server/routes/executors.py:695-698` and the scope note at
+`packages/server/src/server/routes/executors.py:1913-1915`); fail-closed on a stale list applies
+at the dial, and killing live sessions is ruled AGAINST, not deferred. The accept point already
+matches that boundary: a refusal happens after the handshake and before any request byte
+(`packages/executor/src/executor/relay_listener.py:381-403`), and the RF-3 admission permit is
+taken later, inside the handler — so a refusal at accept can only ever deny new work.
+
+**The proof that has not been run.** No physical revoke-then-refuse test has ever been executed on
+a served fleet, for either door. What exists in the tree is unit-level: the dial
 half is pinned by `packages/server/tests/test_relay_dial_crl_586.py`, which mints a real CA,
 real leaves, a real CRL and a real loopback handshake but runs **no venya daemon on either
 side** (its own module docstring, `packages/server/tests/test_relay_dial_crl_586.py:21-24`);
@@ -109,17 +138,36 @@ loopback handshake is not a revocation feature proved on a customer deployment. 
 dial half must not be read as "revocation works at the handshake"** — it is one of two doors,
 and the unrun physical proof covers neither.
 
-**Plan.** The row stays open because the remedy is both doors and the listener door is
-absent. The listener-side mechanism has no ruled shape: the accept-gate
-resolution that shipped is the python-side, post-handshake gate, and the handshake CRL at the
-listener is named as an unruled option in the test that pins the landed gate
-(`packages/executor/tests/test_relay_revocation_gate_586.py:9-12`). The physical
-revoke-and-observe proof is ceremony-bound (it needs a revoked credential on a served core and
-an operator present) and has no date. **One boundary is settled and is not on the plan: work
-already in flight is NOT terminated by a revocation.** That is the owner's ruling, recorded in
-the shipped source (`packages/server/src/server/routes/executors.py:695-698` and the scope
-note at `packages/server/src/server/routes/executors.py:1913-1915`); fail-closed on a stale
-list applies at the dial, and killing live sessions is ruled AGAINST, not deferred.
+**Plan — what is NOT planned.** This entry does not promise a listener CRL consult, and a reader
+should not read one into it. The half that is open here cannot be closed by adding two flags at
+the listener, for the population reason above: **the enforcement gap is #597's, and #597 is the
+sequenced prerequisite.** #586 stays open past beta on this half.
+
+One alternative exists and is **the owner's call, not this page's plan, and not a scheduled
+item**: build the transport consult anyway. It would buy the wording "a CRL is consulted at every
+relay handshake" while delivering, as its only real effect, a **stop clock** — a list lapse makes
+the listener refuse new connections. The clock is an hour, not an abstraction: the minted list
+carries `next_update = now + 1 hour` (`packages/server/src/server/ca.py:758`, and the same stamp
+on the admin sibling at `packages/server/src/server/ca.py:1470`), while the listener's published
+context is rebuilt only by `RelayListener.reload_ssl_context`
+(`packages/executor/src/executor/relay_listener.py:576`) whose one production caller is the
+daemon's rotation arm (`packages/executor/src/executor/daemon.py:2095`) — a 30-day cadence
+(`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:46`). A list baked in at boot is
+therefore certain to lapse inside an hour, and under the ruled fail-closed posture a lapsed list
+means the executor refusing every new relay connection. That is a fleet-wide availability trade,
+it is the owner's to make, and it is named here as his rather than as a task.
+
+**What is enforced at that door today, because it is enforceable without #597.** Two things, and
+the page should not let the peer-revocation gap hide them. First, the core's own application gate
+refuses a revoked EXECUTOR serial per request, on the inbound plane, in
+`_validate_executor_mtls` → `executor_revocation_state` with the presented serial
+(`packages/server/src/server/middleware/auth.py:731`, lookup at
+`packages/server/src/server/middleware/auth.py:810`). Second, the executor daemon stops
+cooperatively on a bounded outage rather than serving on an unanswered question —
+`max_revocation_failures`, default 3
+(`packages/executor/src/executor/config.py:149-152`), fed at
+`packages/executor/src/executor/daemon.py:2133`. Neither of those is peer revocation at `:8443`
+and neither is claimed as such here; they are the controls that exist while #597 is open.
 
 **What an operator can do now.** Four things are in the shipped product, and one common
 assumption is not:
@@ -203,17 +251,21 @@ nothing on the core records *this* credential to be consulted about. Until #597 
 accurate description of the surface is: revocation exists for the credentials that are
 recorded, and not for this one.
 
-**Read this entry together with #586, which depends on it.** The dial door of #586 landed at
-`54457a6` and consults a real list (`_build_relay_ssl_context`,
+**Read this entry together with #586, which depends on it — structurally, not by scheduling.** The
+dial door of #586 landed at `54457a6` and consults a real list (`_build_relay_ssl_context`,
 `packages/server/src/server/routes/executors.py:622`), and that list is populated from the
 revocation tables this product actually has — `ExecutorCertRevocation`
-(`packages/core/src/core/iam/models.py:379`, read by
+(`packages/core/src/core/iam/models.py:379`, described in the model itself as "Revoked executor
+certificate serial numbers" at `packages/core/src/core/iam/models.py:380` and read by
+`CAManager.generate_crl`, `packages/server/src/server/ca.py:715` with the query at
 `packages/server/src/server/ca.py:749`) and `AdminCertRevocation`
 (`packages/core/src/core/iam/models.py:613`). A core relay-client credential has **no row in
-either**, because it has no registry at all. So today there is no revoked serial of this class
-in existence: the test that would show a listener refusing a revoked machine-client credential
-cannot be written until this row lands. That is #586's dependency on #597, and it is the
-reason #586 stays open after its dial half merged.
+either**, because it has no registry at all — and that is not "not added yet": a serial of this
+class cannot appear in an executor-serial list. So today there is no revoked serial of this class
+in existence for any verifier to consult, and the test that would show a listener refusing a
+revoked machine-client credential cannot be written until this row lands. That is #586's
+dependency on #597, and it is the reason #586 stays open after its dial half merged: adding a CRL
+check at the listener would enforce nothing over the peer that actually dials it.
 
 ---
 
