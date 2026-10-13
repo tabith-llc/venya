@@ -195,6 +195,68 @@ interval disappears and this entry comes out), or the interval stays and the run
 long it lasted as well as when it began. The owner has not yet chosen which; this entry is
 marked pending that decision, and comes out entirely if he rules that it lands.
 
+### An executor setting you put in the config file disappears the next time the installer re-runs
+
+Status: known limitation in beta · Target: no date set · Tracked as: #598 (the precedence
+contract landed; this is row AC6, the installer half, which did not)
+
+**Who is affected:** an operator who tunes an executor by editing
+`/etc/venya/executor.toml` — which is exactly what the config reference and the precedence
+page tell you to do — and later re-runs `install-venya-executor.sh` on that host. Re-runs are
+the supported upgrade path, so this is not an edge case.
+
+**What you get today:** the installer rebuilds that file from nothing on every run — the
+write in `install-venya-executor.sh` redirects the whole generated block over the file
+(`} > /etc/venya/executor.toml`), so afterwards the only lines in it are the ones that run
+printed: `server_url`, `executor_id`, `log_level`, `daemonize`, `injection_method`,
+`secret_base_fd`, `ca_bundle`, `dns_resolver`, `relay_client_ids`, the `[mtls]` trio
+(`ca_cert`, `cert`, `key`), a conditional `[audit]` section carrying `remote_url` and
+`ca_cert_path`, and nothing else. **A key you added there is gone.**
+
+One key is deliberately rescued before that rewrite: `dns_resolver` is read back out of the
+existing file when the environment does not supply it
+(`venya_resolve_dns_resolver`, `venya-common.sh`), so a configured resolver survives.
+Everything else does not.
+
+**The service environment file is rewritten too, and harder.** The same installer removes
+and rewrites `/etc/venya/venya-executor.env` with one line — the `rm -f` followed by the
+single `printf 'VENYA_EXECUTOR_KEY_PASSPHRASE=…'` — so any executor setting an operator
+added to that file is destroyed on the next re-run as well. Both file-based carriers are
+installer-owned.
+
+There is a second consequence worth naming, because it changes behavior rather than merely
+losing it. The executor's precedence is config file, then environment, then the field default.
+So a knob that only ever lived in the file — `sandbox_memory_mb`, or `max_concurrent_commands`
+under its `[executor]` table — reverts to whatever the environment or the shipped default
+gives after a re-run, with no message saying your tuning was replaced. The change is silent
+because nothing was wrong: the file simply no longer carries the key.
+
+**Workaround:** put executor tuning where the installer does not reach, and re-check it after
+any re-run. One carrier survives: a systemd drop-in of your own name. The installer creates
+the `.d` directory but removes and rewrites **only its own** `10-sandboxd.conf`, so an
+override you add under a different name is untouched by a re-run:
+
+```bash
+sudo systemctl edit venya-executor        # writes /etc/systemd/system/venya-executor.service.d/override.conf
+# add:
+#   [Service]
+#   Environment=VENYA_EXECUTOR_SANDBOX_MEMORY_MB=1024
+sudo systemctl restart venya-executor
+journalctl -u venya-executor -n 50
+```
+
+That works because the environment spelling wins wherever the file does not carry the key —
+which, after a re-run, it no longer does. (The installer's own `10-sandboxd.conf` carries no
+`Environment=` line, so it does not compete with yours.)
+
+Read the boot lines after a restart rather than trusting the file you edited: the daemon names
+any key that both spellings carry to different values, and a re-run that dropped your key shows
+up as the setting you expect no longer taking effect.
+
+**What changes at beta+:** #598 AC6 — the re-run preserving an operator's set value the way
+`dns_resolver` reuse already does, instead of overwriting it. Until that lands, treat
+`/etc/venya/executor.toml` as installer-owned: safe to read, not safe to hand-edit.
+
 ---
 
 ## Running commands
@@ -267,7 +329,10 @@ the fix is in a build, not when the ruling is announced.
 2026-10-13 after being re-read against `dev` `3268081` — the `#598` precedence entry (the
 direction is ruled, the silence is removed, and the contract is written once in
 [deployment-config.md](deployment-config.md)) and the `#589` memory-setting entry (that merge
-ships the per-sandbox default). Both shas are the merges that carry the change, read from the
-history. When a fix listed here merges, re-read the entry against your tip before editing — the
-entry, not the memory of it. Symbols, not line numbers, are the citations here on purpose: the
-numbers rot within a day or two on this tree.
+ships the per-sandbox default). The **executor-config-file rewrite** entry above replaces the
+first of those: it is a different limitation that survived the fix (`#598` row AC6, not landed —
+the fix touches no installer file), and this page's rule is that a limitation staying true after a
+fix gets its own entry rather than a softened one. Both shas are the merges that carry the change,
+read from the history. When a fix listed here merges, re-read the entry against your tip before
+editing — the entry, not the memory of it. Symbols, not line numbers, are the citations here on
+purpose: the numbers rot within a day or two on this tree.
