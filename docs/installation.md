@@ -94,12 +94,40 @@ curl -sk https://<core-host>/api/v1/health
 host reuses stored secrets (`.env` stays byte-identical; an explicitly passed
 passphrase must MATCH the stored one or the install aborts — and if the stored
 file itself is gone, the installer still authenticates the existing database
-role before any write, aborting rather than rotating its password silently),
-redeploys the packages, and **restarts the running service when the process
-predates the new bytes** — a loud NOTICE names both timestamps and a PROOF-OF-FRESH-BYTES
-line attests the verification probed the new process (ticket
-`installer-rerun-no-service-restart`). No manual `systemctl restart` is
-needed after a re-run; check for the PROOF line in the transcript before
+role before any write, aborting rather than rotating its password silently)
+and redeploys the packages.
+
+**A core re-run that meets a running service briefly stops it on purpose.**
+Before database migrations, `install-venya-core.sh` stops
+`venya-core.service` behind a named `NOTICE`, because the schema must not move
+under a process still running the previous build (ticket
+`installer-stale-process-window-before-service-sync`); the same run brings the
+service back up on the deployed bytes further down. Plan for that short
+interruption — while the unit is held stopped the core is not answering, so
+requests are refused rather than misanswered by old code over a newer schema.
+The guard is the unit being active, not the version moving: every re-run that
+meets a running service takes the pause (a same-version re-run's migrations
+change nothing, but the stop still happens), and a first install has no unit
+yet and never stops.
+
+The run then **restarts the service when the process predates the new bytes** —
+a loud NOTICE names both timestamps — and no manual `systemctl restart` is
+needed after a re-run (ticket `installer-rerun-no-service-restart`).
+
+**The fresh-bytes proof is a gate on the success claim, not a transcript note.**
+`venya_service_freshness` compares the running process's start time against
+that run's deploy stamp and answers FRESH, STALE or UNDECIDABLE, and the
+summary consumes the answer: FRESH prints
+`PROOF-OF-FRESH-BYTES: ... verification probes the NEW process` and the run
+closes with `Installation verified successfully`; UNDECIDABLE (a stamp that
+could not be read, a start time that did not parse) prints
+`VERIFICATION NOT CLAIMED` naming the reason, and the install still completes
+— a host whose clock we cannot read is not reported broken; STALE prints the
+same line as an error and the run exits 1 instead of attesting a verification
+it cannot stand behind. Read the ordering with this: the sync above restarts a
+stale unit *before* the proof runs, so on the ordinary re-run you meet the
+attestation, not the refusal — the STALE and UNDECIDABLE arms govern what the
+sync did not leave healthy. Check for the PROOF line in the transcript before
 trusting any acceptance probe. Upgrading between released versions? See
 [UPGRADE.md](UPGRADE.md) — the drill-tested in-place upgrade runbook.
 

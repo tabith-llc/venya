@@ -423,7 +423,46 @@ preserving it, and rotate the KEK (§6) if secret ciphertext exposure is in scop
 | CA keypair pairing after restore | §5 openssl diff | `PAIRING OK` |
 | Rotation not failing silently | `journalctl -u venya-executor \| grep -i "rotation failed"` | no hits (on pre-fix units, hits near expiry mean the RO-mount bug — upgrade the unit, §1) |
 
-## 9. Known issues affecting this runbook (tickets)
+## 9. The credential-plane marker: what rotation re-issues and what it does not (#601)
+
+Every administrator leaf the core mints carries a plane marker — an X.509
+extension identifying it as machine-plane or human-plane. The middleware reads
+that marker to decide which admin policy applies, and refuses a certificate
+with no readable marker (fail-closed, `packages/server/src/server/middleware/auth.py`,
+the `parse_plane_marker` step).
+
+The marker's OID moved to **Tabith LLC's registered Private Enterprise Number
+(`1.3.6.1.4.1.67159.1.1`)**. Certificates minted before that change carry the
+earlier arc (`1.3.6.1.4.1.64496.1.1`). `parse_plane_marker` reads **both arcs**
+during a bounded transition window, so credentials already in the field keep
+working; new mints write the registered arc only. Constants and the window's
+own terms are at `VENYA_PLANE_MARKER_OID` / `VENYA_PLANE_MARKER_OID_LEGACY`,
+`packages/server/src/server/ca.py`.
+
+**What this means for an operator:** you do not have to re-mint anything inside
+the window, and re-minting inside the window is harmless. But rotation is not a
+sweep — it re-issues some copies and never touches others.
+
+| Copy | Rotation re-issues it onto the registered arc? | Mechanism, or why not |
+|---|---|---|
+| Core machine-plane pair `/etc/venya/admin/admin.crt\|.key` | **Yes** | every core installer run re-issues the pair (`sign_admin_cert`) |
+| Workstation human-plane short certificate | **Yes, when it is minted next** | the CSR/login-ceremony signer (`sign_admin_csr`) mints it and the mint is an explicit act — `venya admin cert renew`; there is no automatic re-mint loop in the CLI, and the leaf lives about an hour (`ADMIN_SHORT_CERT_LIFETIME_SECONDS`, `packages/server/src/server/ca.py`), so the copy in hand keeps the arc it was minted on until it is renewed |
+| Admin leaf an operator **copied by hand** off a core (the `admin-cert/admin.crt` pair the workstation copy step writes — §7 step 6 here, and [installation.md](installation.md) §2 — a copy kept for a second host, a break-glass copy on removable media) | **No** | nothing re-writes a file that lives outside the product; the copy keeps the arc it was minted on and is admitted only while the window is open |
+| Admin leaf **cached by a peer** (a workstation's on-disk `admin.crt`) | **No**, not by the core | the core never writes to another host's copy; that file changes only when the workstation mints its own replacement (`venya admin cert renew`) or an operator re-copies it from the core. `venya login` alone stores a session token, not a certificate |
+| `/etc/nginx/ssl/client-ca-bundle.crt` (Root + Admin CA, §1 trust boundary) | **Not applicable** | a bundle of CA certificates, and CA certificates carry no plane marker; no arc migration is owed here |
+| Revocation records (`AdminCertRevocation` serials) | **Not applicable** | serial-keyed and arc-independent; a revoked old-arc serial stays revoked after the window closes |
+
+**When the window closes.** The legacy read is a loan with a named exit: it
+closes once every plane-bearing credential path has been re-minted per plane —
+machine (installer/bootstrap mint) and human (CSR/login-ceremony signer are
+separate proofs, and one does not stand in for the other). The removal leg
+deletes the legacy read branch and pins the paired negative that an old-arc
+marker is no longer read as ours; **after that, a hand-copied pre-#601 leaf
+fails closed** with the named re-issue refusal, not a silent plane default. If
+you hold such a copy, refresh it from a core running the current build (the §7
+workstation step) before the removal leg ships.
+
+## 10. Known issues affecting this runbook (tickets)
 
 - `executor-cert-rotation-erofs` (H) — FIXED 2026-09-19 (unit RW path + rotate() ordering; pre-fix hosts need the unit refresh, §1); physical probe OPEN with trigger: lands with the next executor deployment or before any fleet is expected to live 30 days
 - `executor-revocation-by-identity` (M) — serial-match revocation can miss a diverged identity after a failed persist (§1 residual note)
