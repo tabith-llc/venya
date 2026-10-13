@@ -1030,7 +1030,11 @@ venya_service_sync venya-executor "$INSTALL_DIR/.deploy-stamp"
 
 # --- Service retry ---
 venya_service_retry venya-executor
-venya_service_freshness venya-executor "$INSTALL_DIR/.deploy-stamp"
+# #587: the outcome is consumed by the success claim below — STALE refuses it,
+# UNDECIDABLE withholds it, FRESH proceeds.
+VENYA_FRESHNESS_RC=0
+VENYA_FRESHNESS_SERVICE=venya-executor
+venya_service_freshness venya-executor "$INSTALL_DIR/.deploy-stamp" || VENYA_FRESHNESS_RC=$?
 
 # --- Verification ---
 venya_verify_install \
