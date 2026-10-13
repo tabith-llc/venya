@@ -26,38 +26,46 @@ and only pointed at:
 
 ## Revocation
 
-### A revoked executor certificate is not checked during the TLS handshake
+### A core's own relay credential cannot be revoked
 
-Status: known limitation in beta · Target: no date set · Tracked as: #586
+Status: known limitation in beta · Target: no date set · Tracked as: #597
 
-**Who is affected:** any deployment where an executor's credential has been revoked and
-something on the relay network can still open a connection to that executor's `:8443`.
-That includes a host you expected to be quiet: a revoked executor keeps listening until its
-own daemon finds out, and it finds out on the daemon's schedule, not yours.
+**Who is affected:** an operator who needs to retire a core's relay client certificate — a
+host being decommissioned, a relay key that may have been read by someone who should not have
+had it, or a fleet being re-pointed at a new core. It also reaches anyone who assumes the
+word *revoke* covers every certificate the product issues: for this one class of credential it
+does not, yet.
 
-**What you get today:** revocation is enforced where the request is handled, not where the
-connection opens. Three controls are real and are doing the work — the core's own dial gates
-refuse to route a command to a revoked executor, the executor's inbound API paths refuse a
-revoked identity, and the executor daemon stops itself when it learns it has been revoked.
-What is absent is a check *of the certificate*: the handshake verifies the chain to the
-configured certificate authority, and the client-name allowlist is applied afterwards, when
-the request is handled. Neither one asks whether the certificate was revoked.
+**What you get today:** the certificate the core presents when it calls an executor's relay
+listener is created by the installer, on the core, and lives only as two files on that host —
+`/etc/venya/relay/relay-client.crt` and its key. It is trusted by every executor's listener for
+its whole validity year (chain to your CA, plus the configured relay client name), but the
+core keeps **no record of it**: there is no row for it in any table, so there is no command,
+endpoint or runbook step that can revoke it. The two credential registries that do exist serve
+executor leaves and administrator leaves; this class has neither a registry nor a revocation
+list beside it. Revoking an *executor* works, and revoking an *administrator* certificate
+works; retiring a core's relay credential does not.
 
-**Workaround:** revoke the executor with the identity form, `venya admin revoke-executor
-<executor-id>`, which the core's dial gates honour on the next attempt; if you need the
-executor unreachable at the network rather than merely unserved, stop its service
-(`systemctl stop venya-executor`) or remove it from the network. There is **no
-CRL-based workaround — do not go looking for one**: the CRL this product mints and serves
-has no reader inside the product, and issued certificates carry no distribution point
-unless an operator configures one, which is not the default and does not change what Venya
-enforces. Publishing a CRL would tell a third party about revocations; it would not make
-this handshake check anything.
+**Workaround:** contain it the way you contain a host, not the way you contain a credential.
+The certificate is useless to a caller that cannot reach `:8443`, so: restrict reachability to
+the relay network (the private network and host firewall rules described in
+[FIREWALL.md](FIREWALL.md)), and when decommissioning a core, stop its `venya-core` service and
+take the relay key material with it. Rotating the certificate authority does retire every
+derived credential, including this one — that is the heavy, fleet-wide answer in
+[cert-rotation-runbook.md](cert-rotation-runbook.md), not the routine one. **Do not mistake two existing verbs for a path here.** `venya admin revoke-executor` names an
+*executor*, and `venya admin revoke-admin-cert` names an *administrator* certificate; neither
+takes a machine-client credential. Worse, the serial form of the executor command will record
+any well-formed hex value without checking that it belongs to anything — so the operator can
+appear to succeed at revoking a relay certificate, and nothing about the relay changes, because
+no verifier consults a list for this class of credential. If you need the credential dead,
+contain the host and the network, or rotate the certificate authority.
 
-**What changes at beta+:** the enforcement point moves closer to the connection. A
-post-handshake refusal at the listener's accept point is in review, and refusing *during*
-the handshake is a separate design that needs its own decision first (it reaches the
-certificate-authority shape, not just this code path). Until one of those lands, read this
-entry as: revoked means unserved, not unreachable.
+**What changes at beta+:** #597 is the registry-and-verb row — a store for machine-client
+credentials and a revocation operation that reaches them. Its companion, the consultation half
+(#586), is now enforced at the executor's accept point for the credentials the executor *can*
+know about: its own. That landed; what remains open here is the fact that nothing on the core
+records this credential to be consulted *about*. Until #597 lands, the accurate description of the surface is: revocation exists for the
+credentials that are recorded, and not for this one.
 
 ---
 
@@ -65,38 +73,48 @@ entry as: revoked means unserved, not unreachable.
 
 ### An administrator certificate issued before the marker fix is still refused at the proxy
 
-Status: known limitation in beta · Target: none — this is a back-population limit, not a defect · Tracked as: #588 (closed; recorded here because the closed row is no longer read as a live limit)
+Status: known limitation in beta · Target: none — this is a back-population limit, not a defect · Tracked as: #588 (closed with both the proxy-facing cell and the old-credential cell proved on a served install, at zero key ceremonies; recorded here because a closed row stops being read as a live limit)
 
-**Who is affected:** every install whose admin certificate was issued before the fix that
-carried the two-plane marker non-critical. Both shapes are in the field at once — the
-installed code is fixed, the credential on the desk may not be — which is why this needs a
-line here rather than only a closed issue.
+**Who is affected:** an operator holding an administrator credential that was issued before
+the fix that carried the two-plane marker non-critical. Both shapes are present in real
+deployments at once — the installed code is fixed, the credential on the desk may not be —
+which is why this needs a line here rather than only a closed issue. Nothing about a
+certificate issued *after* the fix is limited: on a served install, the machine-plane pair the
+core installer creates for itself is admitted at the front door and reaches the application,
+and an administrator credential minted through the certificate-signing-request path has been
+proven to do the same.
 
-**What you get today:** a freshly minted admin certificate is accepted at the front door
-and reaches the application; a certificate minted before that change still carries the
-marker as critical, and a verifier that does not recognise the marker rejects it, so the
-request is answered at the proxy before it reaches any Venya code. Nothing about the
-certificate is wrong — the fix is in how the marker is carried, and old bytes keep the old
-carrying.
+**What you get today:** a freshly minted administrator certificate is accepted by the proxy and
+served by the application; a certificate minted before that change still carries the marker as
+critical, and a verifier that does not recognise the marker rejects it, so the request is
+answered at the proxy before it reaches any Venya code. Nothing about the certificate is
+invalid — the fix is in how the marker is carried, and old bytes keep the old carrying.
 
-**Workaround:** re-mint the credential. On a workstation leaf: `venya admin cert renew`.
-On the core's own machine-plane pair, either re-run the core installer (the certificate
-authority itself is preserved by a re-run, and the credential is minted again — see
-[installation.md](installation.md) §1 for what a re-run guarantees to keep) or mint it
-directly, the same way the installer does:
+**Workaround:** re-mint the credential. For the core's own machine-plane pair, re-run the core
+installer: a re-run preserves the certificate authority and issues that pair again
+unconditionally, so the new leaf carries the marker the accepted way. To mint one directly,
+the same call the installer makes is
 
 ```bash
 venya admin generate-admin-cert <identity> --output-dir /etc/venya/admin
 ```
 
-That command needs the admin CA passphrase and the leaf-key passphrase in its environment,
-and it refuses before writing anything if either is missing or too short — so run it the way
-the installer runs it, from the core, as the `venya` user, with the stored passphrase
-delivered from `/etc/venya/venya-core.env` rather than typed into a shell history.
+which needs the admin CA passphrase and the leaf-key passphrase in its environment and refuses
+before writing anything if either is missing or too short — run it the way the installer runs
+it, on the core, as the `venya` user, with the stored passphrase delivered from
+`/etc/venya/venya-core.env` rather than typed into a shell history.
 
-**What changes at beta+:** nothing further is planned. Every certificate issued from here
-carries the marker the accepted way, so this limit ages out on its own as credentials are
-renewed — one re-mint per affected credential, not a fleet-wide action.
+For a person's short-lived workstation certificate the path is `venya admin cert renew`, and
+one thing about it belongs in the same breath: the renewed key is written **encrypted at rest**,
+and the command-line cannot yet load an encrypted administrator key for administrator
+mutual-TLS. So a renewed pair fixes the proxy refusal and lands in the separate, already
+documented read-side limit — see [installation.md](installation.md) §2, which states that
+pairing rule once. Use the machine-plane pair for headless work until that read-side work
+lands.
+
+**What changes at beta+:** nothing further is planned for this one. Every certificate issued
+from here carries the marker the accepted way, so the limit ages out credential by credential
+as they are renewed — one re-mint per affected credential, not a fleet-wide action.
 
 ### Two paths still handle private key material without a passphrase
 
@@ -218,21 +236,24 @@ for choosing it.
 once the fix shape is ruled. It will not be closed by giving the knob an arbitrary default —
 that would put back the cap-less claim this refusal exists to prevent.
 
-### Some administrator commands cannot run on a core that has no credential of its own yet
+### Administrator commands that issue no request asked for a security-key ceremony
 
-Status: known limitation in beta · Target: fix in review · Tracked as: #590
+Status: known limitation in beta, for installs predating the fix · Target: landed in `dev` · Tracked as: #590 (row stays open — the served-core recovery proof is still owed)
 
 **Who is affected:** an operator on a served core whose administrator credential does not
 exist yet — a first initialisation, or a disaster recovery where the certificate authority
-is the thing being restored. This is the path where those commands matter most.
+is the thing being restored — **running a build from before this fix shipped.** On a current
+build the six commands below are recognised as local and no longer asked for a ceremony; the
+limit that remains is the older install, and this entry stays here so a partner on one is not
+left guessing. This is the path where those commands matter most.
 
-**What you get today:** `venya admin export-ca-key`, `restore-ca-key`, `split-ca-key`,
-`export-ca-cert`, `init-admin-ca` and `generate-admin-cert` touch no network — they read
-and write files on the core and prompt the operator. The command dispatcher still asks for
-a security-key ceremony before it will run any administrator command, so on a host with no
-credential pair and no workstation key attached, these six are refused before their own code
-runs. The transcript looks like this, and it is the message that misleads rather than the
-behaviour:
+**What you get today, on an install from before the fix:** `venya admin export-ca-key`,
+`restore-ca-key`, `split-ca-key`, `export-ca-cert`, `init-admin-ca` and `generate-admin-cert`
+touch no network — they read and write files on the core and prompt the operator. The command
+dispatcher asked for a security-key ceremony before it would run any administrator command, so
+on a host with no credential pair and no workstation key attached, these six were refused
+before their own code ran. The transcript looked like this, and it is the message that misleads
+rather than the behaviour:
 
 ```
 Authenticating with security key...
@@ -253,10 +274,12 @@ key and a physical touch, which a headless core does not have; on Windows it ope
 an interactive desktop session, so a remote or scheduled shell is not a place one can be
 done.
 
-**What changes at beta+:** the commands that issue no request stop requiring a ceremony for
-themselves (commands that do talk to the core keep requiring it, unchanged). That fix is
-built and awaiting merge review; once it ships in a release, this entry narrows to installs
-predating it.
+**What changes at beta+:** landed in `dev` — the commands that issue no request no longer
+require a ceremony for themselves, while commands that do talk to the core keep requiring it,
+unchanged, and the administrator-pair raises that catch a half-configured pair are preserved.
+The row is **not** closed by that merge: the physical proof of the recovery path on a served
+core is still owed, so treat this entry as current for any install older than the release that
+carries the fix.
 
 ---
 
@@ -274,5 +297,7 @@ ones where the choice between "fix it" and "disclose it" is still open; if the c
 out as fix, the entry comes out before the release.
 
 **Source anchor:** the statements above were read against the shipped source at `dev`
-`8621a83`. When a fix listed here merges, re-read the entry against your tip before editing —
-the entry, not the memory of it.
+`2e0e751`, and the `#590` entry against `dev` `e8d5a22`. When a fix listed here merges,
+re-read the entry against your tip before editing — the entry, not the memory of it. Symbols,
+not line numbers, are the citations here on purpose: the numbers rot within a day or two on
+this tree.
