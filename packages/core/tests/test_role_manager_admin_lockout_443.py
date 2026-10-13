@@ -654,7 +654,8 @@ class TestConcurrentRemovalsPostgresql:
         try:
             admin_role_id = self._seed(factory, admin_ids)
             results = []
-            barrier = threading.Barrier(len(targets))
+            # Bounded: a peer that dies before the barrier must not hang this one forever.
+            barrier = threading.Barrier(len(targets), timeout=10)
 
             def worker(target):
                 s = factory()

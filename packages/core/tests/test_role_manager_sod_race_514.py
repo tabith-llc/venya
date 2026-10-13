@@ -455,7 +455,8 @@ class TestConcurrentMixedGrantPostgresql:
 
             outcomes: list[str] = []
             outcomes_lock = threading.Lock()
-            barrier = threading.Barrier(2)
+            # Bounded: a peer that dies before the barrier must not hang this one forever.
+            barrier = threading.Barrier(2, timeout=10)
 
             def worker(role_id: int) -> None:
                 session = factory()

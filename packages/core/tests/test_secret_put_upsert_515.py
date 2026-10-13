@@ -482,7 +482,8 @@ class TestConcurrentPutPostgresql:
             s.commit()
             s.close()
 
-            barrier = threading.Barrier(2)
+            # Bounded: a peer that dies before the barrier must not hang this one forever.
+            barrier = threading.Barrier(2, timeout=10)
             ids: list[str] = []
             ids_lock = threading.Lock()
 
