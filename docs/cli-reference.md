@@ -131,7 +131,7 @@ venya store <KEY> [VALUE] --roles ROLES [OPTIONS]
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `KEY` (positional) | **yes** | string | — | Secret key |
-| `VALUE` (positional, nargs=?) | no | string | — | Secret value; '-' or omitted reads stdin BYTE-EXACT, incl. any trailing newline (interactive TTY: hidden prompt; use 'printf %%s' when piping single-line values) |
+| `VALUE` (positional, nargs=?) | no | string | — | Secret value; '-' or omitted reads stdin BYTE-EXACT, incl. any trailing newline (interactive TTY: hidden prompt; use 'printf %s' when piping single-line values) |
 | `--roles` | **yes** | repeatable/space-separated list | — | Role(s) to scope the secret to (comma- and/or space-separated) |
 | `--key-version` | no | string | — | Key version ID to encrypt with (default: server's active key version) |
 | `--metadata`, `-m` | no | repeatable (accumulates) | — | Metadata key=value pair (can be specified multiple times) |

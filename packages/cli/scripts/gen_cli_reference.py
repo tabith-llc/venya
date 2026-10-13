@@ -392,16 +392,35 @@ PARSERS = walk_parsers()
 PARSER_BY_PATH = dict(PARSERS)
 
 
+def _rendered_help(text: str | None, *, default: object = None, prog: str) -> str:
+    """A help/description line as argparse actually shows it.
+
+    Ticket cli-help-percent-interpolation: argparse expands every help string before
+    printing it, so a doubled ``%%`` means one literal percent and the documented
+    ``%(default)s`` / ``%(prog)s`` keys are substituted. Emitting the stored string raw
+    put ``printf %%s`` in this document while ``venya store --help`` printed ``printf %s``.
+    A line with no ``%`` is returned untouched, which is what the formatter does too.
+
+    shortcut: substitutes only the two documented keys; a help string naming another
+    argparse key raises here and fails generation loudly — upgrade to the formatter's own
+    expansion if that ever happens.
+    """
+    if not text or "%" not in text:
+        return text or ""
+    return text % {"default": default, "prog": prog}
+
+
 def command_help(path: tuple[str, ...]) -> str:
     """One-line help as registered on the parent via add_parser(help=...)."""
     if not path:
-        return PARSER_BY_PATH[()].description or ""
+        root = PARSER_BY_PATH[()]
+        return _rendered_help(root.description, prog=root.prog)
     parent = PARSER_BY_PATH[path[:-1]]
     for a in parent._actions:
         if isinstance(a, argparse._SubParsersAction):
             for pseudo in a._choices_actions:
                 if pseudo.dest == path[-1]:
-                    return pseudo.help or ""
+                    return _rendered_help(pseudo.help, prog=parent.prog)
     return ""
 
 
@@ -505,7 +524,7 @@ def _arg_table(parser: argparse.ArgumentParser) -> list[str]:
                 shape = f" (positional, nargs={a.nargs})"
             name = f"`{a.metavar or a.dest.upper()}`" + shape
             req = "no" if a.nargs in ("?", "*") or a.nargs == argparse.REMAINDER else "**yes**"
-        help_text = (a.help or "").replace("|", "\\|") or "—"
+        help_text = _rendered_help(a.help, default=a.default, prog=parser.prog).replace("|", "\\|") or "—"
         lines.append(f"| {name} | {req} | {_fmt_type(a)} | {_fmt_default(a)} | {help_text} |")
     return lines
 
