@@ -427,7 +427,11 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     # "install -d -m 0755 /etc/venya" (#317 status-quo pin) re-pins that
     # parent's mode after this block; idempotent.
     install -d -m 0750 -g venya /var/lib/venya /var/lib/venya/ca
-    install -d -m 0770 -o venya -g venya "$ADMIN_CA_DIR"
+    # #606: 0700, not 0770 — install -d re-applies this mode on EVERY run and the
+    # re-run path skips AdminCAManager.initialize's chmod 0700 (CA preserved), so a
+    # group bit here re-widened admin-ca past BACKUPS.md §2 item 4 on every re-run.
+    # venya keeps access as the OWNER (-o venya); no consumer needs the group bit.
+    install -d -m 0700 -o venya -g venya "$ADMIN_CA_DIR"
     install -d -m 0750 -g venya /etc/venya
     install -d -m 0770 -o venya -g venya "$ADMIN_CERT_DIR"
 
