@@ -122,6 +122,29 @@ def _run_argv_strict_utf8_error(command_args: Any) -> int | None:
     return None
 
 
+# #590: admin subcommands whose BODIES issue no HTTP request — verified by
+# reading each handler (export-ca-cert/export-ca-key/split-ca-key/restore-ca-key/
+# init-admin-ca/generate-admin-cert: they read and write local files and prompt
+# the operator; none touches `client`). `admin revoke-executor` is deliberately
+# NOT here despite the family — its body delegates to executor_cert_revoke(),
+# which posts (body-verified, not name-verified). `admin cert status` is exempt
+# by construction — it dispatches before the APIClient exists (RF-8a). The
+# exemption is a property of the COMMAND, not of credential posture: a recovery
+# operator (and a never-initialised core) has no VENYA_ADMIN_CERT/KEY, and
+# demanding a FIDO2 ceremony for a zero-request command made the
+# disaster-recovery path unreachable on the machine that needs it.
+_ADMIN_LOCAL_NO_REQUEST = frozenset(
+    {
+        "export-ca-cert",
+        "export-ca-key",
+        "split-ca-key",
+        "restore-ca-key",
+        "init-admin-ca",
+        "generate-admin-cert",
+    }
+)
+
+
 def run_command(args: Any) -> int:
     """Run a CLI command.
 
@@ -196,11 +219,21 @@ def run_command(args: Any) -> int:
         and getattr(args, "admin_command", None) == "cert"
         and getattr(args, "admin_cert_command", None) == "renew"
     )
+    # #590: purely-local admin commands never reach the transport, so a
+    # ceremony can neither authenticate them nor succeed on a core with an
+    # empty user table (users=0 — no credential to assert). The skip is
+    # decided by the command identity (_ADMIN_LOCAL_NO_REQUEST,
+    # body-verified), not by has_admin_mtls — and ONLY the ceremony is
+    # skipped: the APIClient construction above already ran, so
+    # cert-without-key, key-without-cert and a nonexistent cert path keep
+    # raising exactly as before.
+    admin_local_no_request = command == "admin" and getattr(args, "admin_command", None) in _ADMIN_LOCAL_NO_REQUEST
     admin_mtls_exempt = command == "admin" and getattr(client, "has_admin_mtls", False) and not admin_cert_renew
     if admin_mtls_exempt and not client.config.access_token:
         print("Using admin mTLS certificate (VENYA_ADMIN_CERT) for authentication.")
     elif (
         command not in ("init", "setup", "enroll", "login", "recovery", "config", "exec")
+        and not admin_local_no_request
         and not client.config.access_token
     ):
         user_id = getattr(args, "user_id", None)
