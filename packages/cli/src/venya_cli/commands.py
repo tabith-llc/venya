@@ -4055,10 +4055,12 @@ def cmd_admin_export_ca_cert(args: Any) -> int:
 # --- CA-key backup envelope (ticket fido2-device-layer-sweep-findings
 # finding 5, canonical-format ruling 2026-09-21) --------------------------
 # Canonical: b"VENYACA1" + PBKDF2 salt(16) + GCM nonce(12) + AES-256-GCM
-# ciphertext+tag; KDF = PBKDF2HMAC(SHA256, 32, salt, 600_000). Byte-identical
-# to the server ca.py envelope — the CLI has no `core` dependency, so the
-# implementations are ALIGNED COPIES pinned by the cross-compat contract
-# tests in tests/test_cli_ca_key_format.py (both directions).
+# ciphertext+tag; KDF = PBKDF2HMAC(SHA256, 32, salt, 600_000). CLI-side, ONE
+# implementation: the server's export/restore pair was retired by issue 336
+# ruling A (`b7d814d`) and the CLI custody path owns this format. It is pinned
+# by tests/test_cli_ca_key_format.py — frozen-spec cells re-founded at the CLI
+# layer (independent decoder + reference-minted blob, both directions, no
+# server import) (#609).
 # Restore is a DUAL-FORMAT reader: canonical GCM primary + legacy alpha.11
 # CBC (salt16 + iv16 + PKCS7 ct) read-only (precedent: the bootstrap-token
 # dual-location reader) — no exported key material may be stranded.
