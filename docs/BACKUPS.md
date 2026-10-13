@@ -113,10 +113,19 @@ For off-site / escrow custody of the CA key, the CLI has purpose-built break-gla
 (they never write the plaintext key to disk or stdout):
 
 - `venya admin export-ca-key --output <file>` — re-encrypts the CA key under a passphrase
-  **you** provide (PBKDF2 + AES-256-CBC). Store `<file>` + that passphrase separately.
+  **you** provide: PBKDF2-HMAC-SHA256 (600,000 iterations) + **AES-256-GCM**, an
+  authenticated envelope (`VENYACA1`), so a wrong passphrase or a tampered/corrupted blob
+  fails loudly at restore (`GCM authentication failed`) instead of yielding silently
+  damaged key material. Store `<file>` + that passphrase separately. There is no external
+  `openssl enc` decode for this blob — the instrument is `venya admin restore-ca-key`.
+- **Which blob do you hold?** A current export starts with the 8 magic bytes `VENYACA1`
+  (`head -c 8 <file>`). Older alpha.11-era exports (no magic header — PBKDF2 +
+  AES-256-CBC) still restore through the same command: the reader is dual-format, CBC
+  read-only with full PKCS7 validation. New exports are always GCM/`VENYACA1`.
 - `venya admin split-ca-key` — splits the CA key with Shamir's Secret Sharing; distribute
   the shares (e.g. to different custodians), recombine with a threshold.
-- `venya admin restore-ca-key` — restores the CA key from shares or an encrypted export.
+- `venya admin restore-ca-key` — restores the CA key from shares or an encrypted export
+  (both blob formats above).
 
 These cover the **CA key only**. The database and `.env` (KEK passphrase, pepper) still need
 the file/DB backup above. See [cli-reference.md](cli-reference.md) for exact flags.
