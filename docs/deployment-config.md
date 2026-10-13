@@ -51,7 +51,7 @@ Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart
 
 ### `dns_resolver` (executor)
 
-**Config key:** `dns_resolver` (top-level field on the EXECUTOR config; env `VENYA_EXECUTOR_DNS_RESOLVER`; toml key `dns_resolver` in `/etc/venya/executor.toml`)
+**Config key:** `dns_resolver` (top-level field on the EXECUTOR config; toml key `dns_resolver` in `/etc/venya/executor.toml`; env `VENYA_EXECUTOR_DNS_RESOLVER` — read only when the file does not carry the key. Precedence is `file > env > default`, see [Executor configuration precedence](#executor-configuration-precedence-file--env--default), #598)
 
 **Requirement:** MUST be set to a valid IPv4 address. With no value the executor daemon **refuses to start** — the check runs in `ExecutorDaemon.start()` before registration, so the one-shot enrollment token is never consumed on a doomed boot. This is a named, loud failure by design (owner ruling D1 option (a): "Venya never guesses your network"); there is no built-in default.
 
@@ -59,8 +59,13 @@ Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart
 
 **Error on missing (named ERROR log then `exit 1`; verbatim from `daemon.py` `start()`):**
 ```
-dns_resolver is not configured — refusing to start: the sandbox egress policy cannot be built without it. The resolver IP is always allowed for sandbox egress; hostname targets resolve only when the hostname itself is in the egress allowlist. Set `dns_resolver` in /etc/venya/executor.toml or VENYA_EXECUTOR_DNS_RESOLVER in the service environment (find your resolver: resolvectl status or grep nameserver /etc/resolv.conf).
+dns_resolver is not configured — refusing to start: the sandbox egress policy cannot be built without it. The resolver IP is always allowed for sandbox egress; hostname targets resolve only when the hostname itself is in the egress allowlist. Set `dns_resolver` in /etc/venya/executor.toml — that file's value is the one this daemon uses whenever the file carries the key, including as an empty value; VENYA_EXECUTOR_DNS_RESOLVER in the service environment is read only when the file does not carry `dns_resolver` at all (precedence: file > env > default, #598; find your resolver: resolvectl status or grep nameserver /etc/resolv.conf).
 ```
+
+The instruction names the file first because on an installer-served host the file carries this key, so the environment
+spelling cannot win there — including in the empty-value case, where the daemon refuses to start *and* the env form is
+inert at once. Before #598 the sentence offered the two spellings as equals, which was true only on a host whose file
+omits the key.
 
 **How to find the value:** `resolvectl status` or `grep nameserver /etc/resolv.conf`.
 
@@ -77,6 +82,48 @@ The server config is a pydantic-settings `BaseSettings` class (`packages/server/
 3. Field defaults (where defined)
 
 Unknown `VENYA_*` names are silently ignored (`extra="ignore"`) — a misspelled var is a no-op, so verify names against `config.py`.
+
+### Executor configuration precedence (`file > env > default`)
+
+The executor plane is **not** the server plane: it has a TOML file, `/etc/venya/executor.toml`, and that file is the
+first source. Ruled 2026-10-13 (#598); stated in code at `ExecutorConfig.from_file`, which passes the parsed TOML as
+explicit init arguments — the position in `pydantic-settings`' own order that makes the file outrank the environment.
+
+Sources, in precedence order, for the executor daemon:
+
+1. **The config file** `/etc/venya/executor.toml` — for every key it carries.
+2. **Process environment variables** — format `VENYA_EXECUTOR_<KEY>` for a top-level field, `VENYA_EXECUTOR_<SECTION>__<KEY>`
+   for a field inside a table. One exception is pinned by the owner's RF-3 ruling: the concurrency group is reached as
+   `VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS`, because that section's field carries an alias pair; the
+   `VENYA_EXECUTOR_EXECUTOR__…` and `VENYA_EXECUTOR_MAX_CONCURRENT_COMMANDS` shapes are **not** read.
+3. **A `.env` in the daemon's working directory** — read below the process environment (a relative `env_file`, so it
+   is not `/etc/venya/venya-executor.env`, which is a systemd `EnvironmentFile` and therefore arrives as source 2).
+4. **Field defaults**, where one is defined.
+
+**A key carried by both the file and the environment is announced at every start.** One WARNING line per key, naming the
+key, both sources and which one won, before any command is served:
+
+```
+Config precedence: dns_resolver: set in the executor config file AND in the environment, to different values — file > env > default, so the file value is in use and the environment spelling is ignored (#598)
+```
+
+The line names no values, because this plane's key classes include certificate and enrollment material and the line is
+emitted by the daemon, where it lands in the journal. Two spellings that ask for the **same** value produce no line:
+nothing is defeated in that case, and a warning on every boot is how a real one stops being read.
+
+**What that means for an operator:** to change a setting on an installer-served executor, edit
+`/etc/venya/executor.toml`. The `VENYA_EXECUTOR_*` spelling is the way to set a key the file does **not** carry — which
+is the normal shape of a container or a hand-written unit override — and it will not override a key the installer
+already wrote. Read the boot lines after a restart: if the daemon reports a precedence conflict for the key you just
+set, the file still owns it.
+
+| Key class | File wins? | Environment spelling the daemon reads | Announced when both are set |
+|---|---|---|---|
+| top-level field (`dns_resolver`, `log_level`, `server_url`, `sandbox_memory_mb`, …) | yes | `VENYA_EXECUTOR_<KEY>` | yes, one line per key |
+| key inside a table (`[mtls] cert`, `[audit] remote_url`, …) | yes | `VENYA_EXECUTOR_<TABLE>__<KEY>` | yes |
+| `[executor] max_concurrent_commands` (RF-3) | yes | `VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS` — the aliased form only | yes |
+| key the file does not carry | n/a | environment (then `.env`, then default) | no — nothing is being overridden |
+| `injection_method` | n/a | not read from either source | n/a |
 
 ### Environment Variable Mapping (examples)
 

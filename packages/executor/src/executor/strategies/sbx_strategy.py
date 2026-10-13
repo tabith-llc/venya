@@ -887,8 +887,12 @@ class SbxStrategy(InjectionStrategy):
         if self.dns_resolver is None:
             raise RuntimeError(
                 "dns_resolver is not configured — set `dns_resolver` in "
-                "/etc/venya/executor.toml or VENYA_EXECUTOR_DNS_RESOLVER in the "
-                "daemon environment (find it: resolvectl status or /etc/resolv.conf)"
+                "/etc/venya/executor.toml (that file's value wins whenever the file "
+                "carries the key, including as an empty value; "
+                "VENYA_EXECUTOR_DNS_RESOLVER in the daemon environment is read only "
+                "when the file does not carry `dns_resolver` at all — precedence is "
+                "file > env > default, #598) "
+                "(find it: resolvectl status or /etc/resolv.conf)"
             )
 
         # Config values arrive via the constructor (daemon.create_executor wires
