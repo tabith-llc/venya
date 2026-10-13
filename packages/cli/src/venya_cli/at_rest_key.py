@@ -9,8 +9,10 @@
 The server stores ca.key / admin-ca.key as OpenSSL PKCS#8 encrypted PEM
 (``BestAvailableEncryption``) keyed by VENYA_CA_KEY_PASSPHRASE /
 VENYA_ADMIN_CA_KEY_PASSPHRASE — the spec is server/ca.py (_serialize_key_encrypted
-/_deserialize_key/_load_passphrase). The CLI has no core/server dependency
-(same rule as the VENYACA1 aligned copies), so these are library-level ALIGNED
+/_deserialize_key/_load_passphrase). The CLI has no core/server dependency —
+the same rule that keeps the CA-key BACKUP envelope CLI-side, one implementation
+(the server pair was retired by `b7d814d`, #336 ruling A; #609 corrected the
+comment that still claimed a twin) — so these are library-level ALIGNED
 COPIES of that codec, pinned by tests/test_cli_ca_key_at_rest.py against the
 same cryptography calls the server makes.
 
