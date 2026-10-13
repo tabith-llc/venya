@@ -45,7 +45,7 @@ for the threat-model pitch see the [README](../README.md).
 | `packages/executor` | `executor` | Daemon: mTLS registration + rotation + revocation polling, relay listener, sandbox execution (sbx), secret injection, output filtering via the Rust extension, egress allowlist enforcement |
 | `packages/cli` | `venya-cli` | Workstation CLI (`venya`): init/enroll/login (FIDO2 via python-fido2, USB HID), admin operations (mTLS client cert), secrets, `run`, executor lifecycle. Deps: httpx2, fido2, cryptography — nothing server-side |
 | `packages/mcp` | `venya-mcp` | MCP stdio server exposing exactly four tools: `list_secrets` (metadata only), `list_executors`, `run_command`, `get_audit` |
-| Rust filter extension | (built at executor install) | `venya_filter.cpython-*.so` — scans command output for secret material, replaces matches with `[REDACTED:...]` markers before anything leaves the sandbox host |
+| Rust filter extension | (built at executor install) | `venya_filter.cpython-*.so` — scans command output for secret material in the executor host daemon, replacing matches with `[REDACTED:...]` markers before anything reaches the caller (see "Secret lifecycle" step 4 for the two-stage flow) |
 
 The CLI is deliberately standalone (no `core` dependency) so a workstation
 never installs server-side packages; a parity-tested duplication of the
