@@ -159,13 +159,26 @@ class _RecordingQuery:
         return self._real.all()
 
 
+# Sessions the test app opened, tracked so they can be released before any DDL.
+# An open transaction holds an AccessShareLock on audit_events, which makes a
+# later DROP TABLE wait forever (the same pin shape as #603, inside a fixture).
+_OPEN_SESSIONS: list = []
+
+
 class _RecordingDb:
     def __init__(self, SessionLocal, sink):
         self._SessionLocal = SessionLocal
         self.criteria = sink
 
     def query(self, model):
-        return _RecordingQuery(self._SessionLocal().query(model), self.criteria)
+        session = self._SessionLocal()
+        _OPEN_SESSIONS.append(session)
+        return _RecordingQuery(session.query(model), self.criteria)
+
+
+def _close_open_sessions():
+    while _OPEN_SESSIONS:
+        _OPEN_SESSIONS.pop().close()
 
 
 _STARTED_PATCHERS: list = []
@@ -175,6 +188,7 @@ _STARTED_PATCHERS: list = []
 def _clean_leaks():
     original = audit_routes._is_admin
     yield
+    _close_open_sessions()
     audit_routes._is_admin = original
     while _STARTED_PATCHERS:
         _STARTED_PATCHERS.pop().stop()
@@ -427,7 +441,10 @@ class TestKeyFilterPostgresql:
     def _factory(self):
         from core.iam.models import AuditEvent
 
-        engine = create_engine(os.environ[PG_URL_ENV])
+        _close_open_sessions()
+        # lock_timeout so a blocked DDL goes RED loudly instead of hanging the
+        # suite forever behind a leaked read transaction.
+        engine = create_engine(os.environ[PG_URL_ENV], connect_args={"options": "-c lock_timeout=5000"})
         AuditEvent.__table__.drop(engine, checkfirst=True)
         AuditEvent.__table__.create(engine)
         return sessionmaker(bind=engine), engine
