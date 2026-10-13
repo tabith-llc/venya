@@ -40,7 +40,7 @@ class TestInstallerDirPins:
         assert 'mkdir -p "$ADMIN_CA_DIR"' not in core
         assert 'mkdir -p "$ADMIN_CERT_DIR"' not in core
         assert "install -d -m 0750 -g venya /var/lib/venya /var/lib/venya/ca" in core
-        assert 'install -d -m 0770 -o venya -g venya "$ADMIN_CA_DIR"' in core
+        assert 'install -d -m 0700 -o venya -g venya "$ADMIN_CA_DIR"' in core  # #606: was 0770
         assert "install -d -m 0750 -g venya /etc/venya" in core
         assert 'install -d -m 0770 -o venya -g venya "$ADMIN_CERT_DIR"' in core
 
