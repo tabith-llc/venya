@@ -247,6 +247,12 @@ class DaemonState:
         self.executor_id: str = "default"
         self.command_policy: Any = None
         self.revoked = False
+        # #586: boot-scope record that the core has ANSWERED the revocation question
+        # for this credential at least once since this daemon started. Written at ONE
+        # site (the poll dispatch in ``_main_loop``) and read by the relay accept gate.
+        # False is "we do not know", never "we know it is live" — the same honesty the
+        # tri-state poll was built for (#442 site 4).
+        self.revocation_answered = False
         self.cert_serial: str | None = None
         self.cert_not_after: datetime | None = None
         self._consecutive_revocation_failures: int = 0
@@ -1665,8 +1671,11 @@ class ExecutorDaemon:
 
         # Relay listener (B0) — wired to the existing execution engine. The
         # factory is the bound create_executor; it reads self.client at call
-        # time, so it is safe to stash here before the client exists.
-        self.relay = RelayListener(config, self.create_executor, config.relay_client_ids)
+        # time, so it is safe to stash here before the client exists. Same
+        # lazy-binding shape for #586: ``state`` is this object's own DaemonState
+        # (created above, before the relay), so the accept gate reads the ONE
+        # revocation answer this side holds — not a second revocation list.
+        self.relay = RelayListener(config, self.create_executor, config.relay_client_ids, state=self.state)
 
         # Signal handling
         self._shutdown_event = threading.Event()
@@ -2013,6 +2022,11 @@ class ExecutorDaemon:
                 BOOT_FORWARDER_SESSION_ID,
                 client_cert=(mtls.cert, mtls.key) if mtls.cert and mtls.key else None,
             )
+            # #586: the accept gate's durable record — refusals land on the same spool
+            # this forwarder drains. Wired here (not in __init__) because the sink does
+            # not exist until now; the listener reads it per refusal, and with it unset
+            # a refusal still journals (see _record_refusal's shortcut note).
+            self.relay.refusal_sink = self.audit_boot_forwarder
             logger.info("Audit spool forwarder booted (session-less drain armed)")
 
         # Mark as running
@@ -2100,6 +2114,12 @@ class ExecutorDaemon:
                     self.state._consecutive_revocation_failures += 1
                 else:
                     self.state._consecutive_revocation_failures = 0
+                    # #586: the ONE write site for the gate's bootstrap flag. Sticky by
+                    # design: a later UNREACHABLE does not clear it, because the bounded
+                    # answer to an outage is already the threshold below (which sets
+                    # ``state.revoked`` and takes the listener down with the daemon).
+                    # Clearing it here would refuse live work on a single dropped poll.
+                    self.state.revocation_answered = True
             except TimeoutError:
                 logger.debug("Revocation check timed out")
                 self.state._consecutive_revocation_failures += 1

@@ -24,6 +24,7 @@ import datetime
 import ssl
 from datetime import UTC, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -237,7 +238,17 @@ def _relay_app(ca_dir: str, mtls: tuple[str, str] | None = None):
             return executor_query
         if model.__name__ == "SessionSecret":
             return secrets_query
-        if model.__name__ in ("ExecutorCert", "ExecutorCertRevocation"):
+        if model.__name__ == "ExecutorCert":
+            # #586: the relay dial refuses an executor with no registered, current
+            # certificate (503), so a cell that wants the dial to RUN must model one.
+            # The revocation row query below still returns None → the record reads LIVE.
+            cert_q = MagicMock()
+            cert_q.filter.return_value.first.return_value = SimpleNamespace(
+                serial_number="0000000000001000",
+                not_after=datetime.datetime.now(datetime.UTC) + timedelta(days=30),
+            )
+            return cert_q
+        if model.__name__ == "ExecutorCertRevocation":
             none_q = MagicMock()
             none_q.filter.return_value.first.return_value = None
             return none_q

@@ -43,6 +43,10 @@ EVENT_TYPES = (
     "command_executed",
     "command_rejected",
     "token_revocation_failed",
+    # #586: the relay accept gate refused a connection (revoked credential, or no
+    # revocation answer this boot). Recorded because a silent refusal is invisible
+    # to the customer whose premise is the trail.
+    "relay_refused",
 )
 
 # Idle poll interval (seconds) for the forwarder between events. Audit

@@ -212,7 +212,10 @@ checked FIRST, then serial history (presented serial, else the current
   CRLs the current record serial. Dial gates
   (`create_execution_session`/`execute`) refuse immediately with 403 — this is
   the control that stops an UNCOOPERATIVE daemon (command routing is
-  core→executor push; nothing else can). Registration under a revoked identity
+  core→executor push; nothing else can). The relay dial adds two operational
+  refusals beside it (#586): no registered certificate, or an expired record, is a
+  503, not a 403 — the credential is unusable, not killed. Registration under a
+  revoked identity
   403s even with a valid fresh token (the token is NOT burned — the 403 rolls
   back its consumption; it expires unused).
 - **Serial form** (`--serial <hex>`): CRLs ONE credential without touching the
@@ -240,6 +243,36 @@ dies within one poll.
 - Fail-loud: 3 consecutive unreachable-server revocation checks
   (`max_revocation_failures`, `config.py:42-45`) → the executor self-revokes
   and stops.
+
+**Relay-listener accept gate (#586, owner-ruled option 3).** The listener on :8443
+consults the ONE revocation answer this side holds (`DaemonState.revoked`, plus a
+boot-scope "has the core answered?" flag) on every NEW connection, after the TLS
+handshake and before a single request byte is read. It holds no copy of the
+revocation list and does no serial matching of its own — `server/revocation.py` is
+the one rulebook and a second implementation is the split-brain its contract comment
+forbids. Three states, two of them refusals:
+
+| State at accept | Outcome | Journal line (grep-able) |
+|---|---|---|
+| core answered, credential live | admitted, `/execute` runs as before | `Executor relay listener started …` |
+| `revoked` (poll, heartbeat flag, or the failure threshold) | connection closed, no HTTP response | `Relay :8443 refused a new connection from <ip>:<port> — 403 REVOKED …` |
+| no answer yet this boot / no state wired | connection closed, no HTTP response | `… — 503 OPERATIONAL FAULT — no revocation answer received this boot …` |
+
+**Read the two refusals apart.** `403 REVOKED` means an admin killed this
+credential. `503 OPERATIONAL FAULT` means this daemon has not been able to ASK —
+the remedy is core reachability, not re-enrollment. The bootstrap window is short by
+construction: the relay binds and the FIRST revocation poll runs in the same
+main-loop entry, so the refused window is one HTTP round trip, and a core that stays
+unreachable ends the process at the failure threshold above anyway.
+
+**What this does NOT claim.** Enforcement is post-handshake: a revoked peer
+credential completes the TLS handshake and is refused at accept, so the honest
+sentence is "a revoked credential is refused when the connection is admitted, before
+any request is served" — not "refused at the handshake". Connection-layer CRL
+consultation (at the proxy or in the TLS stack) is a different, unadopted option; and
+no CRL Distribution Point is published by default (`crl_url` defaults to None and no
+installer sets `VENYA_CRL__CRL_URL`), so nothing in this runbook should be read as
+saying one exists.
 
 **Lifecycle:** the identity flag dies only with the Executor row — never via
 the CRL retention purge. The CRL table (`crl_retention_days`, default 90) is

@@ -205,8 +205,22 @@ def _factory(exec_obj: _FakeExec, sessions: list):
     return _make
 
 
-def _start(config, factory, allowed, host="127.0.0.1", port=0) -> RelayListener:
-    listener = RelayListener(config, factory, allowed, host=host, port=port)
+def _live_state():
+    """The ONE revocation answer a healthy daemon holds, as the #586 gate sees it.
+
+    ``revoked=False`` + ``revocation_answered=True`` is the shape of "the core
+    ANSWERED this boot and this credential is live" — the accept gate admits on it.
+    A listener built WITHOUT any state now refuses every connection (fail-closed),
+    so the shared launcher has to wire one; the refusal classes are covered by
+    ``tests/test_relay_revocation_gate_586.py``.
+    """
+    return SimpleNamespace(revoked=False, revocation_answered=True, executor_id="relay-test")
+
+
+def _start(config, factory, allowed, host="127.0.0.1", port=0, state=None) -> RelayListener:
+    listener = RelayListener(
+        config, factory, allowed, host=host, port=port, state=state if state is not None else _live_state()
+    )
     listener.start()
     assert listener.active is True, "listener failed to start"
     return listener

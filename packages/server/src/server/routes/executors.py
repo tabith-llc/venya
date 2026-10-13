@@ -518,6 +518,54 @@ def _record_relay_timeout_audit(
         db.close()
 
 
+def _record_relay_refusal_audit(
+    request: Request,
+    session_id: str,
+    executor_id: str,
+    auth_user: dict,
+    reason: str,
+) -> None:
+    """Best-effort ledger row for a relay dial the core refuses on credential state (#586).
+
+    A silent refusal is invisible to the customer whose premise is the trail, so both
+    new 503 arms (no registered certificate / expired certificate) record their own
+    cause here. Same standalone-transaction posture as ``_record_relay_timeout_audit``
+    (#407) and ``_record_rejection_audit`` (#424): the request's get_db session rolls
+    back when the HTTPException unwinds, so the write uses its own session, and an
+    audit failure is logged, never swallowed into the response.
+
+    Value-free by construction: session id, executor id, the refusal reason, and the
+    caller. No command text, no secret keys. The caller dict is passed whole (not an
+    indexed ``user_id``) because this refusal is not one of the AC2 guard sites the
+    #449 pin counts in ``routes/executors.py`` — reading it here would move that pin's
+    cited count without adding any guard.
+    """
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None:
+        return
+    db = backend.get_session()
+    try:
+        db.add(
+            AuditEvent(
+                event_type="command_rejected",
+                user_id=auth_user.get("user_id"),
+                fields={
+                    "session_id": session_id,
+                    "executor_id": executor_id,
+                    "reason": f"relay refused: {reason}",
+                    "outcome": "refused_executor_credential",
+                },
+                timestamp=datetime.now(UTC),
+            )
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Relay-refusal audit write failed for session %s on executor %s", session_id, executor_id)
+    finally:
+        db.close()
+
+
 def _record_rejection_audit(
     request: Request,
     session_id: str,
@@ -1559,6 +1607,40 @@ async def execute_command_on_executor(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Executor '{id}' is revoked ({_rev.reason}) — refusing to route execution",
+        )
+
+    # Dial gate #2b (#586 change C — the owner's ruled status split): a revoked
+    # credential is a 403, answered by the shared state immediately above; a
+    # credential that CANNOT be dialled because the core holds no registered
+    # certificate for it, or holds one that has expired, is an operational fault =
+    # 503. Both read the CURRENT ``ExecutorCert`` record — neither re-implements
+    # revocation semantics (that stays `server/revocation.py`'s job, and
+    # `executor_revocation_state` above is the one call into it). Runs BEFORE the
+    # #513 claim, so a refused dial never burns the caller's single-use session.
+    #
+    # Why this half is not "chain validation only": the relay POST below verifies the
+    # executor's leaf against the Venya anchor and nothing else, so before this gate a
+    # credential the core had stopped trusting at the record level was still dialled
+    # and the failure surfaced as an unlabeled transport error.
+    current_cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == id).first()
+    if current_cert is None:
+        _record_relay_refusal_audit(request, session.id, id, auth_user, "no registered certificate")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Executor '{id}' has no registered certificate — refusing to route execution",
+        )
+    server_config = getattr(request.app.state, "config", None)
+    cert_tolerance = getattr(getattr(server_config, "clock_skew", None), "cert_tolerance_seconds", 0)
+    # Same knob the executor-plane chain check reads (middleware/auth.py, cert
+    # tolerance); a non-integer (no config object in a test harness) means 0, never
+    # a MagicMock inside the timedelta below.
+    if not isinstance(cert_tolerance, int):
+        cert_tolerance = 0
+    if is_expired(current_cert.not_after, cert_tolerance):
+        _record_relay_refusal_audit(request, session.id, id, auth_user, "certificate expired")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Executor '{id}' certificate expired — refusing to route execution",
         )
 
     # Dial gate #3 (execute, #513): the session is single-use. The gates above
