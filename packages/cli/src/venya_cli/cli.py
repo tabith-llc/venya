@@ -72,7 +72,7 @@ def create_parser() -> argparse.ArgumentParser:
     store_parser.add_argument(
         "value",
         nargs="?",
-        help="Secret value; '-' or omitted reads stdin BYTE-EXACT, incl. any trailing newline (interactive TTY: hidden prompt; use 'printf %s' when piping single-line values)",
+        help="Secret value; '-' or omitted reads stdin BYTE-EXACT, incl. any trailing newline (interactive TTY: hidden prompt; use 'printf %%s' when piping single-line values)",
     )
     store_parser.add_argument(
         "--roles",
