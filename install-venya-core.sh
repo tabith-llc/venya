@@ -1271,6 +1271,22 @@ if [ -n "$INSTALLED_VERSION" ] && [ -n "$INCOMING_VERSION" ] && [ "$INSTALLED_VE
 fi
 
 # --- Run database migrations (core-specific) ---
+# #587: the schema must not move under a process that is still running the
+# previous build. A re-run swaps packages at the top of this script and Python
+# keeps the imports it loaded at its own start time, so until the fresh-bytes
+# sync further down this file the live core is the OLD build — and the
+# installer's own downgrade guard calls old code over a newer schema undefined
+# behavior. Stop first; venya_service_sync below starts it again on the new
+# bytes. The stop is announced because it is a deliberate, seconds-long outage
+# on a version-changing re-run (owner ruling: LAND — stop before migration).
+# Guarded: on a first install there is no unit yet, and `stop` there is a
+# non-zero command under set -e — so a fresh install never stops and never
+# aborts here.
+if systemctl is-active --quiet venya-core.service 2>/dev/null; then
+    warn "NOTICE: stopping venya-core.service BEFORE database migrations (#587) — the schema does not move under old code."
+    warn "NOTICE: this core will not answer requests until the fresh-bytes line below restarts it."
+    systemctl stop venya-core.service
+fi
 info "Running database migrations..."
 # DB URL via stdin (here-doc): keeps $VENYA_DB_PASSWORD off every process's /proc/*/cmdline.
 sudo -u venya env PATH="$INSTALL_DIR/.venv/bin:$PATH" bash -c '
@@ -1307,7 +1323,11 @@ venya_service_sync venya-core "$INSTALL_DIR/.deploy-stamp"
 
 # --- Service retry ---
 venya_service_retry venya-core
-venya_service_freshness venya-core "$INSTALL_DIR/.deploy-stamp"
+# #587: the outcome is consumed by the success claim below — STALE refuses it,
+# UNDECIDABLE withholds it, FRESH proceeds.
+VENYA_FRESHNESS_RC=0
+VENYA_FRESHNESS_SERVICE=venya-core
+venya_service_freshness venya-core "$INSTALL_DIR/.deploy-stamp" || VENYA_FRESHNESS_RC=$?
 
 # --- Verification ---
 venya_verify_install \

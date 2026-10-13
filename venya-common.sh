@@ -1010,16 +1010,33 @@ venya_service_freshness() {
     # Post-start verification proof: the running process must be NEWER than
     # the deployed bytes, so every probe that follows attests the new build
     # (PROCESS RULE: proof-of-new-bytes before mutating probes).
+    #
+    # #587: THREE outcomes, each with its own rc — the caller consumes them.
+    #   0 = FRESH       the running process started at/after the deploy stamp
+    #   1 = STALE       the running process provably predates these bytes
+    #   2 = UNDECIDABLE a timestamp could not be read or parsed
+    # 1 and 2 are deliberately NOT collapsed: a host whose clock or systemd
+    # output we cannot read must not fail an install that worked, while a
+    # provably stale process must stop the success claim dead.
     local service_name="${1:-}" stamp="${2:-}"
     local start_raw start_epoch stamp_epoch
     start_raw="$(systemctl show -p ActiveEnterTimestamp --value "${service_name}.service" 2>/dev/null)"
     start_epoch="$(date -d "$start_raw" +%s 2>/dev/null || echo 0)"
     stamp_epoch="$(stat -c %Y "$stamp" 2>/dev/null || echo 0)"
-    if [ "$start_epoch" -gt 0 ] && [ "$start_epoch" -ge "$stamp_epoch" ]; then
-        info "PROOF-OF-FRESH-BYTES: ${service_name} started ${start_raw} >= deploy stamp $(date -d "@${stamp_epoch}") — verification probes the NEW process"
-    else
-        warn "PROOF-OF-FRESH-BYTES FAILED: ${service_name} start '${start_raw}' is not at/after the deploy stamp — do NOT trust verification probes"
+    if [ "$stamp_epoch" -eq 0 ]; then
+        warn "PROOF-OF-FRESH-BYTES UNDECIDABLE: ${service_name} — deploy stamp '${stamp}' unreadable — freshness cannot be decided"
+        return 2
     fi
+    if [ "$start_epoch" -eq 0 ]; then
+        warn "PROOF-OF-FRESH-BYTES UNDECIDABLE: ${service_name} start '${start_raw}' did not parse — freshness cannot be decided"
+        return 2
+    fi
+    if [ "$start_epoch" -ge "$stamp_epoch" ]; then
+        info "PROOF-OF-FRESH-BYTES: ${service_name} started ${start_raw} >= deploy stamp $(date -d "@${stamp_epoch}") — verification probes the NEW process"
+        return 0
+    fi
+    error "PROOF-OF-FRESH-BYTES FAILED: ${service_name} start '${start_raw}' is BEFORE the deploy stamp $(date -d "@${stamp_epoch}") — the running process is NOT these bytes"
+    return 1
 }
 
 # --- 16. Verify installation ---
@@ -1048,6 +1065,20 @@ venya_verify_install() {
         error "Installation completed with $ERRORS error(s). Check output above."
         exit 1
     fi
+    # #587: the success claim is only about files until the running service is
+    # proven to BE those files. STALE (1) refuses the claim outright;
+    # UNDECIDABLE (2) is not a failure — the install completed — but the claim
+    # is withheld and the reason named, so a host we could not read is never
+    # reported as proven, and never reported as broken either.
+    case "${VENYA_FRESHNESS_RC:-0}" in
+        0) : ;;
+        2) warn "VERIFICATION NOT CLAIMED: the fresh-bytes proof was UNDECIDABLE on ${VENYA_FRESHNESS_SERVICE:-the service} — the install completed, but no probe above is attested against the running process."
+           warn "Next: check 'systemctl show -p ActiveEnterTimestamp ${VENYA_FRESHNESS_SERVICE:-venya}.service' against the deploy stamp, then re-run this installer (it is idempotent)."
+           return 0 ;;
+        *) error "VERIFICATION NOT CLAIMED: the running ${VENYA_FRESHNESS_SERVICE:-the service} process predates the bytes just deployed."
+           error "Do not trust probe results above. Next: systemctl status ${VENYA_FRESHNESS_SERVICE:-venya}.service, then re-run this installer (it is idempotent)."
+           exit 1 ;;
+    esac
     info "Installation verified successfully"
 }
 
