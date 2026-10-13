@@ -62,10 +62,11 @@ contain the host and the network, or rotate the certificate authority.
 
 **What changes at beta+:** #597 is the registry-and-verb row — a store for machine-client
 credentials and a revocation operation that reaches them. Its companion, the consultation half
-(#586), is now enforced at the executor's accept point for the credentials the executor *can*
-know about: its own. That landed; what remains open here is the fact that nothing on the core
-records this credential to be consulted *about*. Until #597 lands, the accurate description of the surface is: revocation exists for the
-credentials that are recorded, and not for this one.
+(#586), landed in `dev` at `e8d5a22`: the executor's accept point now refuses for the one
+credential it can legitimately know about — its own. What remains open there is the fact that
+nothing on the core records *this* credential to be consulted about. Until #597 lands, the
+accurate description of the surface is: revocation exists for the credentials that are
+recorded, and not for this one.
 
 ---
 
@@ -274,12 +275,12 @@ key and a physical touch, which a headless core does not have; on Windows it ope
 an interactive desktop session, so a remote or scheduled shell is not a place one can be
 done.
 
-**What changes at beta+:** landed in `dev` — the commands that issue no request no longer
-require a ceremony for themselves, while commands that do talk to the core keep requiring it,
-unchanged, and the administrator-pair raises that catch a half-configured pair are preserved.
-The row is **not** closed by that merge: the physical proof of the recovery path on a served
-core is still owed, so treat this entry as current for any install older than the release that
-carries the fix.
+**What changes at beta+:** landed in `dev` at `e8d5a22` — the commands that issue no request no
+longer require a ceremony for themselves, while commands that do talk to the core keep requiring
+it, unchanged, and the administrator-pair raises that catch a half-configured pair are
+preserved. The row is **not** closed by that merge: the physical proof of the recovery path on a
+served core is still owed, so treat this entry as current for any install older than the release
+that carries the fix.
 
 ---
 
