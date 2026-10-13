@@ -433,7 +433,16 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     # venya keeps access as the OWNER (-o venya); no consumer needs the group bit.
     install -d -m 0700 -o venya -g venya "$ADMIN_CA_DIR"
     install -d -m 0750 -g venya /etc/venya
-    install -d -m 0770 -o venya -g venya "$ADMIN_CERT_DIR"
+    # #610: 0700, not 0770 — install -d re-applies this mode on EVERY run and nothing
+    # re-narrows /etc/venya/admin afterwards, so a group bit left the machine-plane
+    # admin key dir group-writable after every re-run (same mechanism as #606, which
+    # tightened the sibling $ADMIN_CA_DIR pin above). Consumers read as OWNER: the
+    # sudo -u venya mint child, the banner's `sudo -u venya ... VENYA_ADMIN_KEY=...`
+    # CLI path, and `venya admin cert renew`; root contexts (ssh+sudo cat, the
+    # nginx-copy cp below) bypass the mode, and nothing in any installer adds a
+    # member to group venya (venya-common.sh useradd is the only writer) — so the
+    # group bit is load-bearing for no one.
+    install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"
 
     # Generate admin CA. The passphrase crosses the sudo boundary on STDIN —
     # never via export (sudo's env_reset strips it) and never on argv (visible

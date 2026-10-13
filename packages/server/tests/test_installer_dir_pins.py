@@ -42,7 +42,7 @@ class TestInstallerDirPins:
         assert "install -d -m 0750 -g venya /var/lib/venya /var/lib/venya/ca" in core
         assert 'install -d -m 0700 -o venya -g venya "$ADMIN_CA_DIR"' in core  # #606: was 0770
         assert "install -d -m 0750 -g venya /etc/venya" in core
-        assert 'install -d -m 0770 -o venya -g venya "$ADMIN_CERT_DIR"' in core
+        assert 'install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"' in core  # #610: was 0770
 
     def test_sbx_state_tree_pinned(self):
         """Executor sbx state dir: parents venya must traverse, leaf is venya-owned."""
