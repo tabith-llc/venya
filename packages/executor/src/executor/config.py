@@ -24,6 +24,22 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 SANDBOX_MEMORY_MIN_MB = 512
 SANDBOX_MEMORY_VENDOR_MAX_FRACTION = 3 / 4
 
+# #589: the shipped per-sandbox cap. 1024 MiB, measured on the live 5 GiB
+# executor shape (venya-exec-5, 2026-10-13): guest MemTotal 4898 MiB (the base
+# host_total_memory_mib() reads — NOT the declared 5120, which sits 222 MiB
+# above what the guest reports), so the VENDOR default would claim 2449 MiB each
+# and two of them are 100.0% of the machine, three are 2449 MiB OVER — the
+# #578/#567 condition in numbers. `sbx` enforces its own per-sandbox band and
+# refuses an out-of-band value outright (RF-4 bench: 48g rejected), so the
+# vendor is not absent here; what neither the vendor nor the #578 guard can do
+# is see the SUM of several in-band sandboxes. At 1024 two concurrent sandboxes
+# take 2048 MiB and leave ~2850 MiB for the daemon and the OS, and three still
+# fit inside MemTotal, which the vendor default never did. This is a CODE field
+# default, not a TOML key: `from_file` ends in `cls(**data)` (#598), so a value
+# written into the installer's TOML would silently outrank an operator's
+# `VENYA_EXECUTOR_SANDBOX_MEMORY_MB` — a default has nothing above it to invert.
+SANDBOX_MEMORY_DEFAULT_MB = 1024
+
 
 def host_total_memory_mib() -> int:
     """Total memory of this host in MiB, for the #578 config-load cap check.
@@ -416,16 +432,22 @@ class ExecutorConfig(BaseSettings):
     )
 
     # Per-sandbox memory cap, passed to `sbx create --memory` (#578).
-    # Deliberately has no value: unset, the create path refuses rather than
-    # inheriting the vendor default (50% of the guest) — see
-    # SbxStrategy.create_sandbox. RF-3 (measured per-sandbox footprint) is what
-    # establishes the shipped number; until then an operator sets it explicitly.
+    # #589: the shipped default is 1024 MiB (see SANDBOX_MEMORY_DEFAULT_MB for
+    # the measurement), so a fresh install runs a command without an
+    # operator-supplied value. An operator value in either carrier still wins:
+    # the default is the LAST plane, and the #578 floor/ceiling check below is
+    # untouched. Deliberately does NOT go in the installer TOML — a key there
+    # silently outranks the env spelling (the #598 precedence inversion).
+    # Still `int | None`: an explicit null remains representable and keeps the
+    # #578 create-time refusal reachable, so shipping a default does not narrow
+    # what an operator can ask for.
     sandbox_memory_mb: int | None = Field(
-        default=None,
+        default=SANDBOX_MEMORY_DEFAULT_MB,
         description=(
             "Per-sandbox memory cap in MiB passed to `sbx create --memory`. "
-            "REQUIRED for sandbox commands: unset, the executor refuses at create "
-            "with a named reason"
+            f"Defaults to {SANDBOX_MEMORY_DEFAULT_MB} MiB (the shipped measurement, #589); "
+            "env VENYA_EXECUTOR_SANDBOX_MEMORY_MB or the `sandbox_memory_mb` toml key "
+            "override it, and a value outside the vendor bounds refuses at config load"
         ),
     )
 
@@ -438,12 +460,21 @@ class ExecutorConfig(BaseSettings):
 
     @model_validator(mode="after")
     def _sandbox_memory_within_vendor_bounds(self) -> ExecutorConfig:
-        """#578 fail-closed at config load: a cap the vendor would silently
-        clamp behind our back is a config error, not a pass-through. Refuses a
-        value below the vendor minimum (512 MiB) or above the vendor maximum
-        (max(75% of this machine's memory, 512 MiB)). An unset value is NOT an
-        error here — the create path owns that refusal, so a host that never
-        runs a sandbox still starts.
+        """#578 fail-closed at config load: an out-of-band cap is a config error,
+        not a pass-through. Refuses a value below the vendor minimum (512 MiB) or
+        above the vendor maximum (max(75% of this machine's memory, 512 MiB)).
+
+        Corrected at #589: this docstring used to say the vendor would "silently
+        clamp behind our back". That was our guess, never a cited vendor
+        statement, and the RF-4 bench disproved it — `sbx` REFUSES an out-of-band
+        value (a 48 GiB `--memory` was rejected outright). The guard stays for
+        what it actually buys: a Venya-named refusal at config load, before any
+        sandbox exists, instead of a vendor error at create. It is NOT the only
+        protection — but both checks are per-sandbox, so neither sees the SUM of
+        several in-band caps; that aggregate is why the shipped default is
+        measured rather than max-allowed (see `SANDBOX_MEMORY_DEFAULT_MB`).
+        #589 gave the field a shipped default, so an unset knob no longer reaches
+        the create-time refusal by accident — an explicit null still does.
         """
         if self.sandbox_memory_mb is None:
             return self

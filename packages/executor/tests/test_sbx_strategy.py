@@ -15,7 +15,13 @@ import pytest
 from venya_contract import ASKPASS_HELPER_PATH
 
 from executor.bundles import SecretBundle
-from executor.config import ExecutorConfig, host_total_memory_mib
+from executor.config import (
+    SANDBOX_MEMORY_DEFAULT_MB,
+    SANDBOX_MEMORY_MIN_MB,
+    SANDBOX_MEMORY_VENDOR_MAX_FRACTION,
+    ExecutorConfig,
+    host_total_memory_mib,
+)
 from executor.egress_filter import DEFAULT_ALLOWLIST_PATH
 from executor.strategies.sbx_strategy import (
     ASKPASS_HELPER_CONTENT,
@@ -304,16 +310,148 @@ class TestSbxStrategyCreateSandbox:
 
     def test_config_rejects_memory_above_vendor_max(self) -> None:
         """NEGATIVE half of the cap: a value above 75% of this machine's memory is
-        one the vendor would clamp silently, so config load refuses it."""
+        out of the vendor's documented band, so config load refuses it with our own
+        named reason. `sbx` enforces that band too (RF-4 bench: a 48 GiB value was
+        refused outright) — this cell pins that we refuse EARLIER, not that we are
+        the only check."""
         absurd = host_total_memory_mib() * 2
         with pytest.raises(ValueError, match="75%"):
             ExecutorConfig(sandbox_memory_mb=absurd, executor_id="test-exec-578")
 
     def test_config_accepts_memory_at_vendor_min(self) -> None:
-        """The boundary itself loads, and unset stays loadable — a host that never
-        runs a sandbox must still start (the create path owns that refusal)."""
+        """The boundary itself loads. The #589 default replaces the old
+        unset-loads-as-None assertion: an explicit null is still loadable, so a
+        host that never runs a sandbox can still ask for the create-time
+        refusal — but a FRESH config now carries the shipped 1024, which is what
+        this row was filed to fix."""
         assert ExecutorConfig(sandbox_memory_mb=512, executor_id="test-exec-578").sandbox_memory_mb == 512
-        assert ExecutorConfig(executor_id="test-exec-578").sandbox_memory_mb is None
+        assert ExecutorConfig(executor_id="test-exec-578").sandbox_memory_mb == SANDBOX_MEMORY_DEFAULT_MB
+
+
+class TestSandboxMemoryDefault:
+    """#589: the knob ships a value, and an operator's value still wins.
+
+    The shipped default lives in CODE (`SANDBOX_MEMORY_DEFAULT_MB`), never in the
+    installer's TOML, because `from_file` ends in `cls(**data)` (#598) and a TOML
+    key therefore silently outranks the documented env spelling. Each cell below
+    NAMES which carrier won, so a fixture TOML can never quietly decide what an
+    env cell measured — the failure flash1 pinned for `max_concurrent_commands`.
+    """
+
+    ENV_PINNED = "VENYA_EXECUTOR_SANDBOX_MEMORY_MB"
+
+    def test_fresh_config_carries_the_shipped_default(self, monkeypatch):
+        """POSITIVE, and it is #589's defect being gone: no env var, no TOML key,
+        no operator action — the value is 1024, not None."""
+        monkeypatch.delenv(self.ENV_PINNED, raising=False)
+        cfg = ExecutorConfig(executor_id="test-exec-589")
+        assert cfg.sandbox_memory_mb == SANDBOX_MEMORY_DEFAULT_MB == 1024
+
+    def test_default_is_within_the_vendor_bounds_on_this_machine(self) -> None:
+        """The shipped default must satisfy the SAME guard #578 landed, computed
+        here the way the validator computes it — a default that config load would
+        refuse is worse than no default."""
+        ceiling = max(int(host_total_memory_mib() * SANDBOX_MEMORY_VENDOR_MAX_FRACTION), SANDBOX_MEMORY_MIN_MB)
+        assert SANDBOX_MEMORY_MIN_MB <= SANDBOX_MEMORY_DEFAULT_MB <= ceiling
+        assert ExecutorConfig(executor_id="test-exec-589").sandbox_memory_mb == SANDBOX_MEMORY_DEFAULT_MB
+
+    def test_env_alone_beats_the_default(self, monkeypatch):
+        """NEGATIVE half of a default: the operator wins. Carrier that won = ENV
+        (no TOML exists in this cell)."""
+        monkeypatch.setenv(self.ENV_PINNED, "2048")
+        cfg = ExecutorConfig(executor_id="test-exec-589")
+        assert cfg.sandbox_memory_mb == 2048, "the default overrode an operator value"
+
+    def test_toml_alone_beats_the_default(self, tmp_path, monkeypatch):
+        """NEGATIVE half, other carrier. Carrier that won = TOML (via init
+        kwargs); env is delisted so nothing else can be credited with it."""
+        monkeypatch.delenv(self.ENV_PINNED, raising=False)
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text("sandbox_memory_mb = 2048\n")
+        cfg = ExecutorConfig.from_file(toml_path)
+        assert cfg.sandbox_memory_mb == 2048, "the default overrode an operator value"
+
+    def test_toml_outranks_env_is_the_pinned_precedence(self, tmp_path, monkeypatch):
+        """#598 stated, not hidden: with BOTH carriers set, TOML wins because
+        from_file passes the dict as init kwargs. Asserted here so the
+        precedence is a documented fact of this model, and so a reader of the env
+        doc knows what it does NOT do when a toml key is present."""
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text("sandbox_memory_mb = 2048\n")
+        monkeypatch.setenv(self.ENV_PINNED, "3072")
+        cfg = ExecutorConfig.from_file(toml_path)
+        assert cfg.sandbox_memory_mb == 2048  # winner: TOML
+        assert cfg.sandbox_memory_mb != 3072  # env did NOT win
+        # ...and with no TOML key at all, the SAME env value wins over the default
+        toml_path.write_text('executor_id = "test-exec-589"\n')
+        assert ExecutorConfig.from_file(toml_path).sandbox_memory_mb == 3072  # winner: env
+
+    def test_explicit_null_still_refuses_at_create(self, monkeypatch):
+        """The #578 refusal is not softened: an operator who nulls the knob
+        deliberately still gets the create-time refusal, not a silent
+        vendor-default claim."""
+        monkeypatch.delenv(self.ENV_PINNED, raising=False)
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value="/usr/bin/sbx"):
+            strategy = SbxStrategy(sandbox_memory_mb=None)
+            with pytest.raises(RuntimeError, match="sandbox_memory_mb is not configured"):
+                strategy.create_sandbox("test-negative-589", "/workspace")
+            mock_run.assert_not_called()
+
+    def test_default_is_chosen_on_the_aggregate_not_the_band(self):
+        """#589's justification, as a cell: a per-sandbox cap inside the vendor
+        band can still outsubscribe the guest when several sandboxes run at once,
+        because band checks — ours and the vendor's — are per-sandbox and never
+        see the sum. Measured on the 5 GiB shape (exec-5 MemTotal 4898 MiB):
+        the vendor default 2449 passes every band check yet 2 x it = 100.0% of the
+        guest and 3 x it = 2449 MiB OVER (the #567 OOM). 1024 keeps three
+        sandboxes inside MemTotal.
+
+        Uses the MEASURED guest figure, not the declared 5120 shape — that gap
+        (222 MiB) is why the declared shape is the wrong denominator.
+        """
+        guest_mib = 4898  # exec-5 /proc/meminfo MemTotal, measured 2026-10-13
+        vendor_default_mib = guest_mib // 2  # the vendor's 50% of host memory
+        assert vendor_default_mib == 2449
+        assert 2 * vendor_default_mib == guest_mib  # 100.0% — zero room left
+        assert 3 * vendor_default_mib > guest_mib  # the over-memory condition
+        # The shipped default keeps three concurrent sandboxes inside the guest.
+        assert 3 * SANDBOX_MEMORY_DEFAULT_MB <= guest_mib
+        # ...and it is well inside the vendor's per-sandbox band, so it is not a
+        # value chosen to satisfy the band.
+        assert SANDBOX_MEMORY_MIN_MB <= SANDBOX_MEMORY_DEFAULT_MB < vendor_default_mib
+
+    def test_default_is_not_written_into_the_installer_toml(self):
+        """PAIRED NEGATIVE on the carrier choice (the owner's "plane #598 cannot
+        invert"): install-venya-executor.sh must NOT emit a sandbox_memory_mb
+        line. If a later leg ships the value that way, every operator env
+        spelling silently stops working — this cell is the tripwire."""
+        installer = Path(__file__).resolve().parents[3] / "install-venya-executor.sh"
+        assert installer.is_file(), f"installer not found at {installer}"
+        assert "sandbox_memory_mb" not in installer.read_text(encoding="utf-8")
+
+    def test_argv_carries_the_default_value(self, monkeypatch):
+        """End-to-end at unit level: config default -> strategy -> the exact argv
+        sbx receives. Proves the shipped number is the one that reaches the
+        vendor flag, in the vendor's documented `512m` unit form."""
+        monkeypatch.delenv(self.ENV_PINNED, raising=False)
+        cfg = ExecutorConfig(executor_id="test-exec-589")
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value="/usr/bin/sbx"):
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy = SbxStrategy(sandbox_memory_mb=cfg.sandbox_memory_mb)
+            strategy.create_sandbox("venya-test589", "/workspace")
+        # create is the FIRST spawn; later calls are the sshpass copy and policy
+        # rules, so index 0 of call_args_list is the create argv (same reason the
+        # neighbouring cells use call_args_list[0]).
+        assert mock_run.call_args_list[0][0][0] == [
+            "sbx",
+            "create",
+            "--name",
+            "venya-test589",
+            "--memory",
+            f"{SANDBOX_MEMORY_DEFAULT_MB}m",
+            "shell",
+            "/workspace",
+        ]
 
 
 class TestSbxStrategyRemoveSandboxWorkspace:
