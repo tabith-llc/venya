@@ -7,9 +7,10 @@
 """CA-key backup envelope contract (ticket fido2-device-layer-sweep-findings
 finding 5, canonical-format ruling 2026-09-21).
 
-Canonical envelope (byte-identical in CLI and server — the CLI has no `core`
-dependency, so the implementations are ALIGNED and pinned by these
-cross-compat contract tests instead of shared code):
+Canonical envelope (CLI-side single implementation — the server's export/
+restore pair was retired by issue 336 ruling A, `b7d814d`, and the CLI custody
+path owns this format; both "directions" are re-founded here as frozen-spec
+pins, no server import — see TestCrossCompatContract):
 
     b"VENYACA1" + PBKDF2 salt (16) + GCM nonce (12) + AES-256-GCM ct+tag
     KDF: PBKDF2HMAC(SHA256, 32, salt, 600_000)
