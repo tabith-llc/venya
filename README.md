@@ -159,6 +159,8 @@ Venya speaks the Model Context Protocol — the open standard for connecting AI 
 
 ## Security Guarantees
 
+The table below states what the product enforces. For what a beta release does not do yet, and what an operator does about each, see [docs/beta-known-limitations.md](docs/beta-known-limitations.md).
+
 | Guarantee | How It's Enforced |
 |-----------|-------------------|
 | AI never sees plaintext credentials | Server-side wrapping + executor-side unwrapping + Rust output filter |
