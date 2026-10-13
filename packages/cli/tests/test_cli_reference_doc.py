@@ -111,6 +111,59 @@ class TestExampleCompleteness:
                 assert line in text, f"example missing from doc: {line}"
 
 
+def _row(doc: str, needle: str) -> str:
+    """The single argument-table line naming `needle`, or fail."""
+    rows = [line for line in doc.splitlines() if line.startswith("|") and needle in line]
+    assert len(rows) == 1, f"expected exactly one doc row for {needle!r}, got {len(rows)}"
+    return rows[0]
+
+
+class TestHelpStringsRenderAsArgparseDisplaysThem:
+    """Ticket cli-help-percent-interpolation — the generator must show what the operator sees.
+
+    argparse expands every help string before printing it (`HelpFormatter._expand_help`
+    does ``help_string % params``, and returns the string untouched when it carries no
+    ``%``), so a doubled ``%%`` in the source means ONE literal percent on screen. The
+    generator used to emit the stored string raw, which put ``printf %%s`` in this
+    document while ``venya store --help`` correctly printed ``printf %s``.
+
+    Non-vacuous by construction: the escape cell and the ``%(default)s``/``%(prog)s``
+    cells each assert a CHANGE of bytes (two characters in, one out), and the last cell
+    pins the doc row against the live CLI's own rendered help, so a doc that keeps the
+    raw spelling cannot pass.
+    """
+
+    def test_escaped_percent_becomes_one_literal_percent(self):
+        assert (
+            gen._rendered_help("use 'printf %%s' when piping", default=None, prog="venya store")
+            == "use 'printf %s' when piping"
+        )
+
+    def test_documented_default_key_substitutes(self):
+        assert gen._rendered_help("value (default: %(default)s)", default="askpass", prog="venya store") == (
+            "value (default: askpass)"
+        )
+
+    def test_documented_prog_key_substitutes(self):
+        assert gen._rendered_help("run %(prog)s first", default=None, prog="venya store") == "run venya store first"
+
+    def test_string_without_percent_is_returned_untouched(self):
+        """The short-circuit, and the braces the CLI uses for {secret_path} survive it."""
+        raw = "template; reference the secret only via {secret_path}"
+        assert gen._rendered_help(raw, default=None, prog="venya store") == raw
+        assert gen._rendered_help(None, default=None, prog="venya store") == ""
+
+    def test_doc_row_matches_the_rendered_help_of_the_live_cli(self):
+        doc = _DOC.read_text(encoding="utf-8")
+        row = _row(doc, "`VALUE` (positional, nargs=?)")
+        assert "printf %s" in row, f"doc row does not show the literal the CLI shows: {row}"
+        assert "printf %%s" not in row, f"doc row leaks the argparse escape: {row}"
+        # same sentence, straight off the live parser's public rendering path
+        subparsers = next(a for a in create_parser()._actions if isinstance(a, argparse._SubParsersAction))
+        rendered = " ".join(subparsers.choices["store"].format_help().split())
+        assert "printf %s" in rendered, rendered
+
+
 def test_generator_main_writes_doc(monkeypatch, tmp_path):
     """The script entrypoint writes exactly what generate() returns."""
     target = tmp_path / "cli-reference.md"
