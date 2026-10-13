@@ -30,9 +30,15 @@ umask 077
 #   VENYA_DB_PASSWORD   - PostgreSQL venya user password (prompts if unset;
 #                         on re-run an explicit value must MATCH the password
 #                         stored in .env's VENYA_DB_URL or the install aborts)
-#   VENYA_DB_PASSPHRASE - Server encryption passphrase — NO DEFAULT. Re-run:
+#   VENYA_DB_PASSPHRASE - Server encryption passphrase — NO DEFAULT, and a hard floor
+#                         of 15 Unicode code points (the #573 door the core enforces at
+#                         boot, mirrored here so a short value refuses BEFORE any
+#                         mutation). Re-run:
 #                         reused from $INSTALL_DIR/.env (an explicit env value
-#                         must MATCH the stored one or the install aborts).
+#                         must MATCH the stored one or the install aborts; a re-run
+#                         carrying a STORED passphrase under the floor now refuses at
+#                         this same pre-mutation gate — recovery is a deliberate
+#                         reinstall, not a silent KEK rotation).
 #                         Fresh install: prompted (interactive) or required (unattended).
 #   VENYA_RECOVERY_PEPPER - Recovery-code pepper — reused from .env on re-run;
 #                         strong random when unset on a fresh install.
@@ -199,6 +205,57 @@ elif [ -z "$DB_PASSPHRASE_SUPPLIED" ]; then
         error "VENYA_DB_PASSPHRASE is required for unattended install (stdin is not a TTY)."
         exit 1
     fi
+fi
+
+# --- #573 DB-KEK passphrase floor, checked BEFORE any mutation (refs #615) -----------
+# The core refuses to BOOT on a DB passphrase under this floor; until now the installer
+# checked nothing, so a short value was written, the install mutated halfway, and the
+# refusal arrived at the service start. Same number, same words, asked one step earlier.
+# The mirror is the constant, not a copy of the logic: MIN_PASSPHRASE_CODE_POINTS,
+# packages/core/src/core/engine/backend.py:78 — the guard cell in
+# packages/core/tests/test_installer_db_passphrase_floor_gate_615.py byte-compares this
+# refusal against core.engine.backend.short_passphrase_refusal("VENYA_DB_PASSPHRASE"),
+# so a future edit to either side trips loudly (the generated-docs interlock pattern).
+#
+# MAX is deliberately NOT a door here: backend.py:76 states the 64-point ceiling and never
+# enforces it, and server/ca.py:101 says the same on its plane — longer is accepted and
+# used, so the installer must not invent a refusal the core does not have.
+#
+# Whose value is measured: the FINAL DB_PASSPHRASE — env, stored-reuse, or a TTY prompt —
+# not the env-supplied copy alone. A typed short passphrase and a re-run that reuses a
+# stored short one both walk into the same boot door, and #615's own acceptance cells name
+# both. Blank/whitespace is NOT this gate's question and stays on the shipped #570
+# not-supplied path unchanged, in the same order the core asks it (materiality first,
+# length second): the stripped copy decides whether a value was supplied at all.
+#
+# Counted in Unicode CODE POINTS, never bytes: the value goes to python3 through the
+# ENVIRONMENT only (never argv, which is world-readable in /proc/*/cmdline) and is never
+# echoed — the only thing this prints on failure is a sentence with no material in it.
+DB_PASSPHRASE_FLOOR=15
+if [ -n "${DB_PASSPHRASE//[[:space:]]/}" ]; then
+    _db_pp_points=$(DB_PASSPHRASE="$DB_PASSPHRASE" python3 -c 'import os;print(len(os.environ["DB_PASSPHRASE"]))') \
+        || { error "cannot count the server passphrase's code points (python3 unavailable) — refusing to continue, nothing written."; exit 1; }
+    if [ "$_db_pp_points" -lt "$DB_PASSPHRASE_FLOOR" ]; then
+        error "$(cat <<'VENYA_DB_PASSPHRASE_FLOOR_REFUSAL'
+REFUSED: VENYA_DB_PASSPHRASE is set to a passphrase shorter than Venya's minimum. Nothing was written.
+Why it matters: this passphrase is the only thing between a copy of this host and every
+secret this deployment stores, and short passphrases are what an attacker tries first.
+To fix it:
+  1. Replace the value of VENYA_DB_PASSPHRASE with a passphrase of at least 15 characters. Characters are
+     counted as you type them, not as bytes, so a passphrase in any alphabet counts the same.
+     Spaces count as characters, but a passphrase made only of spaces counts as no passphrase.
+  2. There is no rule about which characters appear — length is the only requirement, and
+     Venya supports passphrases up to 64 characters.
+  3. Provide the passphrase through the environment, never as a command-line argument
+     (command-line values are visible to other processes on the machine).
+Your existing database and its stored secrets were not modified by this refusal.
+Reference: docs/BACKUPS.md (the DB + passphrase pairing, and what a backup needs to
+restore) and docs/cert-rotation-runbook.md (CA file locations and rotation).
+VENYA_DB_PASSPHRASE_FLOOR_REFUSAL
+)"
+        exit 1
+    fi
+    unset _db_pp_points
 fi
 
 # --- Recovery-code pepper — same stored-reuse rule: rotating it on re-run
