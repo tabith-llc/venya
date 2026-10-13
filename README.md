@@ -56,9 +56,6 @@ The following are planned for future releases:
   with configurable agency trust anchors and certificate revocation checking.
 - **High-availability core.** Multi-node core deployment for availability
   without changing the trust-anchor model.
-- **Tested backup and disaster recovery.** A documented backup set (encrypted
-  CA material, database, server configuration) with a tested, step-by-step
-  restore procedure — not just a doc that claims to work.
 - **More secret shapes.** Beyond the shipped stack (env injection, askpass,
   sudo-stdin, sshpass): a custom shape registry so teams can define their own
   consumption patterns safely.
@@ -115,7 +112,7 @@ Human: "The Reston datacenter NAS appears to be offline."
 4. **Venya handles the rest:**
    - Server decrypts the secret and wraps it with cryptographic sentinel markers
    - Server relays the command + wrapped secret to the executor over mutual TLS
-   - Executor materializes the secret as a read-only file inside the isolated sbx microVM (`/run/secrets/venya/<id>`, mode 0400) — the command consumes it there; it never exists outside the sandbox
+   - Executor materializes the secret as a read-only file inside the isolated sbx microVM (`/run/secrets/venya/<id>`, mode 0400) — the command consumes it there; the plaintext exists only transiently in executor-host RAM (tmpfs staging, never disk), zeroed and deleted at run end
    - A Rust-based output filter scans stdout/stderr for any leaked secret values and replaces them with `[REDACTED:<id>]` markers before the AI ever sees it
 5. **The AI reads the filtered output** — it sees the command succeeded, sees the volume-status report, but never sees the password
 6. **Every step is logged** — the audit trail records who authorized the session, what command ran, on which executor, and when
@@ -127,7 +124,7 @@ When the first probe fails, the agent adapts — switches executors, escalates, 
 ## Why Venya Is Different
 
 ### Zero-Knowledge Secret Injection
-The AI agent never touches plaintext credentials. Not in its context window. Not in transit. Not in output. The secret is decrypted server-side, wrapped with sentinel markers, relayed over mTLS, and unwrapped only inside the executor's sandboxed process. The Rust filter ensures that even if a command accidentally echoes a credential in its output, it's replaced with `[REDACTED:<id>]` before the AI ever sees it.
+The AI agent never touches plaintext credentials. Not in its context window. Not in transit. Not in output. The secret is decrypted server-side, wrapped with sentinel markers, relayed over mTLS, and unwrapped only inside the executor's host daemon — the plaintext lives in RAM-backed tmpfs (never disk) and is consumed inside the sandbox. The Rust filter ensures that even if a command accidentally echoes a credential in its output, it's replaced with `[REDACTED:<id>]` before the AI ever sees it.
 
 **To our knowledge, no other platform pairs this with the other four elements.** Existing secrets managers hand plaintext to the requesting process; several agent-credential tools now achieve this one element on its own — the [published comparison](docs/security-landscape.md) names them. Venya's difference is the combination.
 
@@ -407,7 +404,7 @@ Visit [venya.ai](https://venya.ai/) to learn more or request alpha access.
 | [Deployment Sizing Guide](docs/deployment-sizing.md) | How many executors you need + measured CPU/RAM/disk/throughput figures |
 | [Cert & Key Rotation Runbook](docs/cert-rotation-runbook.md) | Rotation procedures for every certificate and key, source-cited |
 | [Firewall & Network Requirements](docs/FIREWALL.md) | Ports/protocols per host type — *(alpha, untested)* |
-| [Backup & Restore](docs/BACKUPS.md) | What to back up, the crypto pairings, restore + backup security — *(alpha, untested)* |
+| [Backup & Restore](docs/BACKUPS.md) | What to back up, the crypto pairings, restore + backup security — *(restore procedure validated by physical drill, 2026-09-30, on 0.1.0alpha16; record at the top of the doc)* |
 | [FAQ](docs/faq.md) | Frequently asked questions |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy + safe harbor |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute (incl. license terms for contributions) |

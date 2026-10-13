@@ -137,8 +137,8 @@ Volume reston-data-01 status: DEGRADED
 Note what happened at `Replication peer auth:` — the NAS dumped its stored
 replication credential (the same password) into its own status output. Masking
 then runs in two stages. **Stage 1** is the executor's Rust filter, which
-replaces the value with `[REDACTED:12]` inside the executor, before the output
-leaves the sandbox. **Stage 2** is the definitive one: the executor ships the
+replaces the value with `[REDACTED:12]` in the executor's host daemon, before
+the masked output is returned to the caller. **Stage 2** is the definitive one: the executor ships the
 *unfiltered* bytes to the core over its mTLS channel
 (`POST /api/v1/sessions/{id}/filter`), the core re-screens them against what
 it actually knows, and its answer is adopted. Stage 2 fails **closed** — an
