@@ -826,11 +826,35 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # certs past; the marker is still present and still enforced by the app.
 # Cells: tests/test_admin_cert_ski_aki_504.py (inverted at s98).
 #
-# OID home: RFC 6996 private-use experimental arc (1.3.6.1.4.1.64496-64511),
-# provisional until a registered Private Enterprise Number exists for Tabith
-# LLC; swapping the number is a one-constant change plus its cells (flagged
-# to the lead in the RF-7 chunk-1 report).
-VENYA_PLANE_MARKER_OID = x509.ObjectIdentifier("1.3.6.1.4.1.64496.1.1")
+# OID home: Tabith LLC's registered Private Enterprise Number. WRITE SITE:
+# 1.3.6.1.4.1.67159.1.1. Verified against fetched text at this landing
+# (#601, no authority from memory): the raw IANA "Private Enterprise
+# Numbers" registry
+# (https://www.iana.org/assignments/enterprise-numbers/enterprise-numbers,
+# fetched 5,145,254 bytes, last updated 2026-10-12) defines the prefix
+# iso.org.dod.internet.private.enterprise = 1.3.6.1.4.1, decimal numbers
+# assigned by IANA; registry line 268652 reads "67159 / Tabith LLC".
+# HISTORY OF THE OLD HOME (kept so the next reader re-derives instead of
+# re-litigating): this constant shipped at 1.3.6.1.4.1.64496.1.1 under a
+# comment citing "RFC 6996 private-use experimental arc" — measured false
+# twice over at #601: RFC 6996 is an Autonomous System reservation document
+# (fetched: 8,198 bytes, zero occurrences of "enterprise"), and PEN 64496
+# is registered to Premier-D LLC (same registry, line 258000), not to us.
+# The comment's own wait-condition — provisional until Tabith LLC holds a
+# registered PEN — was met, and this change is it acting on that.
+# TRANSITION WINDOW (#601, owner-ruled HOW: dual-arc read, single-arc
+# write): parse_plane_marker ALSO reads VENYA_PLANE_MARKER_OID_LEGACY
+# below, so leaves minted before this change keep resolving — a landed
+# fix is not retroactive (#588's precedent; dropping the old read at the
+# swap moment would have been a lock-out dressed as a compliance fix).
+# The window is a loan, not a design: it closes when every plane-bearing
+# credential path is re-minted PER PLANE (machine = installer/bootstrap
+# mint, human = CSR/login-ceremony signer — enumerated on #601; a
+# per-plane proof is not one proof). The removal leg deletes the legacy
+# read branch and carries its own paired negative pinning that an
+# old-arc extension is NO LONGER read as ours.
+VENYA_PLANE_MARKER_OID = x509.ObjectIdentifier("1.3.6.1.4.1.67159.1.1")
+VENYA_PLANE_MARKER_OID_LEGACY = x509.ObjectIdentifier("1.3.6.1.4.1.64496.1.1")
 PLANE_MACHINE = "machine"
 PLANE_HUMAN = "human"
 _VENYA_PLANES: tuple[str, ...] = (PLANE_MACHINE, PLANE_HUMAN)
@@ -862,10 +886,21 @@ def parse_plane_marker(cert: x509.Certificate) -> str:
     Fails closed — every miss raises ValueError and the caller refuses the
     certificate; nothing in this parser defaults into a plane:
 
-    * no marker at all (a certificate predating the two-plane model),
+    * no marker on either arc (a certificate predating the two-plane model),
+    * markers on BOTH arcs at once — one marker per mint is the contract,
+      and the #601 window refuses to choose between them silently (the
+      behaviour is named here so it cannot become an accident);
     * an unparseable marker value (not a short-form DER UTF8String, a length
       mismatch, or a non-ASCII body),
     * a value outside the accepted set {machine, human}.
+
+    #601 transition window (dual-arc read, single-arc write): the registered
+    arc (1.3.6.1.4.1.67159.1.1) is consulted, then the legacy arc
+    (1.3.6.1.4.1.64496.1.1), and the same plane is returned either way so
+    pre-#601 leaves keep resolving. The window's exit condition and the
+    removal leg are stated at the constant declaration above and on #601.
+    The parser stays criticality-blind: it reads the value whether or not
+    the extension sets the CRITICAL bit (#588 option A).
 
     The middleware consumption of this result is RF-7 chunk 2; the parser
     ships and is tested with the signer (chunk 1).
@@ -877,15 +912,27 @@ def parse_plane_marker(cert: x509.Certificate) -> str:
         PLANE_MACHINE or PLANE_HUMAN.
 
     Raises:
-        ValueError: Missing / unparseable / out-of-set marker (see above).
+        ValueError: Missing / both-arc duplicate / unparseable / out-of-set
+            marker (see above).
     """
-    try:
-        ext = cert.extensions.get_extension_for_oid(VENYA_PLANE_MARKER_OID)
-    except x509.ExtensionNotFound:
+    markers = []
+    for marker_oid in (VENYA_PLANE_MARKER_OID, VENYA_PLANE_MARKER_OID_LEGACY):
+        try:
+            markers.append(cert.extensions.get_extension_for_oid(marker_oid))
+        except x509.ExtensionNotFound:
+            pass
+    if len(markers) > 1:
+        raise ValueError(
+            "certificate carries plane markers on BOTH the registered and "
+            "legacy arcs — refusing (one marker per mint is the contract; "
+            "#601 window)"
+        )
+    if not markers:
         raise ValueError(
             "certificate carries no Venya plane marker — it predates the "
             "two-plane model and must be re-issued (RF-6 §3.2)"
-        ) from None
+        )
+    ext = markers[0]
     raw = ext.value
     if not isinstance(raw, x509.UnrecognizedExtension):
         # TRY004 would prefer TypeError, but this parser's contract is
