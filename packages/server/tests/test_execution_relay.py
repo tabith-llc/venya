@@ -40,6 +40,18 @@ def _default_role_permissions():
         yield rm
 
 
+@pytest.fixture(autouse=True)
+def _fake_dial_crl_store():
+    """#586 Slice 1 seam: this file tests relay PAYLOAD/audit/wire shapes with the
+    transport faked (the AsyncClient is a MagicMock in every cell here), so the
+    dial-side CRL store is stubbed to None — the builder then produces exactly the
+    pre-Slice-1 context and every assertion below tests what it always tested.
+    Real CRL behaviour at the handshake lives in test_relay_dial_crl_586.py, and
+    the anchor-trust-set cells run the REAL store in test_relay_dial_trust_store_501."""
+    with patch("server.routes.executors._ensure_dial_crl_store", return_value=None):
+        yield
+
+
 def _current_cert():
     """A REGISTERED, unexpired ``ExecutorCert`` row for the dial gate (#586).
 

@@ -58,6 +58,8 @@ def _relay_patched(relay_client):
     with (
         patch("server.routes.executors.httpx2.AsyncClient", return_value=relay_client),
         patch("server.routes.executors._build_relay_ssl_context", return_value=MagicMock()),
+        # #586 Slice 1: same faked-transport seam as in test_execute_session_replay_513
+        patch("server.routes.executors._ensure_dial_crl_store", return_value="/nonexistent-in-fake"),
     ):
         yield
 
