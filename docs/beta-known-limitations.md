@@ -62,7 +62,7 @@ contain the host and the network, or rotate the certificate authority.
 
 **What changes at beta+:** #597 is the registry-and-verb row — a store for machine-client
 credentials and a revocation operation that reaches them. Its companion, the consultation half
-(#586), landed in `dev` at `e8d5a22`: the executor's accept point now refuses for the one
+(#586), landed in `dev` at `5b0dd31`: the executor's accept point now refuses for the one
 credential it can legitimately know about — its own. What remains open there is the fact that
 nothing on the core records *this* credential to be consulted about. Until #597 lands, the
 accurate description of the surface is: revocation exists for the credentials that are
@@ -195,13 +195,76 @@ interval disappears and this entry comes out), or the interval stays and the run
 long it lasted as well as when it began. The owner has not yet chosen which; this entry is
 marked pending that decision, and comes out entirely if he rules that it lands.
 
+### An executor configuration file silently beats the environment spelling the docs give you
+
+Status: known limitation in beta · Target: no date set — **the precedence direction is not yet ruled; disposition pending** · Tracked as: #598
+
+**Who is affected:** any operator who sets a documented `VENYA_EXECUTOR_*` environment
+variable on an executor installed with `install-venya-executor.sh`. The installer writes
+`/etc/venya/executor.toml` from scratch on every run, and the keys it lands — `server_url`,
+`executor_id`, `log_level`, `daemonize`, `secret_base_fd`, `ca_bundle`, `dns_resolver`,
+`relay_client_ids`, the `[mtls]` trio and a conditional `[audit]` section — are therefore
+present on the winning side of every served executor. A hand-written config file puts the
+same operator in scope for whatever keys it carries.
+
+**What you get today:** the file's value, and nothing else. The environment spelling is read,
+then loses, with **no error, no warning and no log line** — the daemon boots, the service is
+healthy, and the setting you documented did not take. The mechanism is one line of loader: in
+`ExecutorConfig.from_file` the parsed TOML is returned as `cls(**data)`, so every key the file
+carries arrives as an explicit init argument, and `pydantic-settings` orders init arguments
+above environment variables. `ExecutorConfig` reads its environment through `env_prefix =
+"VENYA_EXECUTOR_"`, so the two spellings exist side by side and only one of them wins.
+
+This was measured independently by two lanes on two different knobs before anything named it,
+and re-measured at the tip this entry was written against:
+
+- **`max_concurrent_commands`** — `VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS` alone produced its
+  value; the same variable with a `[executor]` table in the file produced the file's value.
+- **`sandbox_memory_mb`** — `VENYA_EXECUTOR_SANDBOX_MEMORY_MB` alone produced its value; the
+  same variable plus a file value produced the file's value.
+- **`dns_resolver`** — `VENYA_EXECUTOR_DNS_RESOLVER` alone produced the address it was given;
+  the same variable against the `dns_resolver` line the installer writes produced the file's
+  address.
+
+Two lanes, three knobs, one mechanism. The knob is not dead and the value is not wrong — the
+source that wins is not the one the instruction points at.
+
+**Workaround:** set the value in the file the daemon reads, and do not rely on the environment
+spelling. Edit `/etc/venya/executor.toml` — a top-level key above the first `[section]` header
+for the daemon-level knobs (`dns_resolver`, `ca_bundle`, `log_level`, and the rest), or
+`max_concurrent_commands` under its `[executor]` table — then restart the service:
+
+```bash
+sudo systemctl restart venya-executor
+```
+
+Confirm it took from the boot line rather than from the file, because the file is what you
+edited and the environment is what you may still be carrying:
+
+```bash
+journalctl -u venya-executor -n 50
+```
+
+Two paths are outside this limitation. `VENYA_EXECUTOR_KEY_PASSPHRASE` lives in the
+root-owned `/etc/venya/venya-executor.env` and is deliberately never written into the TOML, so
+it has no file competitor and works as documented. And the installer's own inputs
+(`VENYA_SERVER_URL`, `VENYA_EXECUTOR_ID` and the rest) are read by the installer and written
+into the file, so that route agrees with the file instead of competing with it.
+
+**What changes at beta+:** a stated precedence per key class, plus no silent winner — when
+both spellings carry the same key, the daemon names the key, both sources and which one won, or
+refuses to start. Which direction wins is not yet ruled; what is ruled is that the two
+spellings must produce one value, and that today they do not. If the ruling makes the file the
+documented winner and the environment's role disappears from the docs, this entry comes out and
+the documentation is corrected instead. The row itself stays open until the silence is removed.
+
 ---
 
 ## Running commands
 
 ### A freshly installed executor needs one memory setting before it will run anything
 
-Status: known limitation in beta · Target: no date set — **fix shape not yet ruled; disposition pending** · Tracked as: #589
+Status: known limitation in beta · Target: **ruled to land — the value is still being confirmed**, and this entry comes out when a build carries one · Tracked as: #589
 
 **Who is affected:** every new executor installed with the shipped defaults. This is the
 common path, not an edge case: a default install reaches this on its first command.
@@ -226,16 +289,26 @@ name the setting.
 sandbox_memory_mb = 1024
 ```
 
-or in the executor's service environment: `VENYA_EXECUTOR_SANDBOX_MEMORY_MB=1024`.
+or in the executor's service environment: `VENYA_EXECUTOR_SANDBOX_MEMORY_MB=1024`. That second
+form works here for one reason only — the installer does not write this key into
+`/etc/venya/executor.toml`, so nothing is competing with it. If the file ever carries
+`sandbox_memory_mb`, the environment spelling stops doing anything, silently: see the
+precedence entry under **Installing and upgrading**.
 
 The value is a real decision, not a formality: it is bounded below at 512 MiB by the sandbox
 tool's own minimum and above at 75% of the executor's memory, and it multiplies by the
 number of commands allowed at once. [deployment-sizing.md](deployment-sizing.md) is the page
 for choosing it.
 
-**What changes at beta+:** the shipped default, or the value being carried by the installer,
-once the fix shape is ruled. It will not be closed by giving the knob an arbitrary default —
-that would put back the cap-less claim this refusal exists to prevent.
+**What changes at beta+:** the owner has ruled that this lands — the knob ships with a value,
+carried by the installer, instead of leaving every new executor to meet a refusal on its first
+command. The number itself is not settled yet, and this page deliberately does not print one:
+the figure that came out of the sizing arithmetic is the value this cap exists to prevent, in
+different clothes — twice the default concurrency against the guest's memory lets two commands
+claim the whole machine, which is the condition the sandbox ceiling is drawn to stop. So the
+carrier is a confirmed number from the owner, chosen the way [deployment-sizing.md](deployment-sizing.md)
+describes choosing it, and not a rounded convenience. This entry comes out when a build carries
+that value; it will not be softened into a note about a default that does not exist.
 
 ### Administrator commands that issue no request asked for a security-key ceremony
 
@@ -292,13 +365,17 @@ change for the entry to leave.
 
 An entry is **removed**, never softened, when its fix lands — and a limitation that stays
 true after a fix is a different limitation, so it gets its own entry (that is why the
-certificate entry above sits under a closed issue). A document that contradicts the
-product is corrected in the document. Entries marked *pending owner disposition* are the
-ones where the choice between "fix it" and "disclose it" is still open; if the choice comes
-out as fix, the entry comes out before the release.
+certificate entry above sits under a closed issue). Where an entry names a merge, it names the
+merge **that carries the change it describes**, and that sha is read from the history rather
+than written from memory — the page's whole value is that a reader can go and look. A document
+that contradicts the product is corrected in the document. Entries marked *pending owner
+disposition* are the ones where the choice between "fix it" and "disclose it" is still open;
+if the choice comes out as fix, the entry comes out before the release — and it comes out when
+the fix is in a build, not when the ruling is announced.
 
 **Source anchor:** the statements above were read against the shipped source at `dev`
-`2e0e751`, and the `#590` entry against `dev` `e8d5a22`. When a fix listed here merges,
-re-read the entry against your tip before editing — the entry, not the memory of it. Symbols,
-not line numbers, are the citations here on purpose: the numbers rot within a day or two on
-this tree.
+`2e0e751`, the `#590` entry against `dev` `e8d5a22`, and the `#598` entry against `dev`
+`ef1d184` (its precedence readings were re-run in that tip's own environment). When a fix
+listed here merges, re-read the entry against your tip before editing — the entry, not the
+memory of it. Symbols, not line numbers, are the citations here on purpose: the numbers rot
+within a day or two on this tree.
