@@ -426,14 +426,36 @@ if [ "$ADMIN_MTLS_ENABLED" = "true" ]; then
     # old chmod 700 + chown venya semantics). The later
     # "install -d -m 0755 /etc/venya" (#317 status-quo pin) re-pins that
     # parent's mode after this block; idempotent.
-    install -d -m 0750 -g venya /var/lib/venya /var/lib/venya/ca
+    install -d -m 0750 -g venya /var/lib/venya
+    # ca-dir-group-readable-mid-run-on-aborted-reinstall: the CA leaf used to ride
+    # the parent pin above at 0750, and the only re-narrower was the root-CA block's
+    # embedded-python chmod (os.chmod of /var/lib/venya/ca to 0o700) much later in
+    # the run — so a re-run that ABORTED between the two (set -e, any of the
+    # passphrase guards) parked the CA directory group-readable against
+    # docs/BACKUPS.md §2 item 4 until the next completing run. Pin it tight at
+    # creation here. Ordering: this stays before the $ADMIN_CA_DIR pin and before
+    # the root-CA block; the block's chmod still runs every invocation and is now
+    # an idempotent 0700->0700 no-op rather than the sole heal. Owner is untouched
+    # by design — the chown -R venya:venya in venya_create_directories
+    # (venya-common.sh, called above this block) is the ownership authority, and
+    # the root-CA child runs its chmod as that owner.
+    install -d -m 0700 -g venya /var/lib/venya/ca
     # #606: 0700, not 0770 — install -d re-applies this mode on EVERY run and the
     # re-run path skips AdminCAManager.initialize's chmod 0700 (CA preserved), so a
     # group bit here re-widened admin-ca past BACKUPS.md §2 item 4 on every re-run.
     # venya keeps access as the OWNER (-o venya); no consumer needs the group bit.
     install -d -m 0700 -o venya -g venya "$ADMIN_CA_DIR"
     install -d -m 0750 -g venya /etc/venya
-    install -d -m 0770 -o venya -g venya "$ADMIN_CERT_DIR"
+    # #610: 0700, not 0770 — install -d re-applies this mode on EVERY run and nothing
+    # re-narrows /etc/venya/admin afterwards, so a group bit left the machine-plane
+    # admin key dir group-writable after every re-run (same mechanism as #606, which
+    # tightened the sibling $ADMIN_CA_DIR pin above). Consumers read as OWNER: the
+    # sudo -u venya mint child, the banner's `sudo -u venya ... VENYA_ADMIN_KEY=...`
+    # CLI path, and `venya admin cert renew`; root contexts (ssh+sudo cat, the
+    # nginx-copy cp below) bypass the mode, and nothing in any installer adds a
+    # member to group venya (venya-common.sh useradd is the only writer) — so the
+    # group bit is load-bearing for no one.
+    install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"
 
     # Generate admin CA. The passphrase crosses the sudo boundary on STDIN —
     # never via export (sudo's env_reset strips it) and never on argv (visible

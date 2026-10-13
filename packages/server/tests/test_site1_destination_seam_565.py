@@ -209,8 +209,9 @@ class TestDestinationAndModesLiveInTheInstaller:
             "the delivered key's enforced 0600 mode is not where this row says it is — re-derive the seam "
             "before editing it (RF-10: role-dir destination, enforced modes, stated backup exclusion)"
         )
-        assert 'install -d -m 0770 -o venya -g venya "$ADMIN_CERT_DIR"' in plain, (
-            "the delivered-leaf directory (role dir, 0770 venya:venya) moved — RF-10's destination "
+        assert 'install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"' in plain, (
+            "the delivered-leaf directory (role dir, 0700 venya:venya — #610: was 0770) "
+            "moved — RF-10's destination "
             "obligation has to be measured against the real line, not a remembered one"
         )
 
