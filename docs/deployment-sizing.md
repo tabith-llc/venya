@@ -95,6 +95,51 @@ Both: Ubuntu 24.04 LTS. The "5–8 GB RAM" sizing figure is **headroom**, not a
 floor — the measured serial floor is ~1.2 GB per executor (OS + services + one
 ~527 MB sandbox); the extra room covers OS overhead and safety margin.
 
+### Per-sandbox memory cap — `sandbox_memory_mb` (#578, #589)
+
+**Config key:** `sandbox_memory_mb` (top-level field on the executor config; env
+`VENYA_EXECUTOR_SANDBOX_MEMORY_MB`; toml key `sandbox_memory_mb` in
+`/etc/venya/executor.toml`). **Shipped default: 1024 MiB.** It is a code default,
+not a value written into the installer's toml — see the precedence note below.
+
+This is the cap handed to `sbx create --memory` for every sandbox the executor
+makes, and it is the number that decides how many sandboxes a guest can hold.
+
+**Why 1024, measured on the shipped shape** (`venya-exec-5`, 2026-10-13 — a
+2 vCPU / 5 GB executor guest as delivered):
+
+| figure | value | note |
+|---|---|---|
+| guest `MemTotal` | **4898 MiB** | what `/proc/meminfo` reports and what our own `host_total_memory_mib()` returns — the same number |
+| declared shape | 5120 MiB | 222 MiB (4.34 %) above `MemTotal`; **the declared shape is the wrong denominator** — a fraction of it describes a machine that does not exist |
+| **vendor** default (50 % of host memory) | **2449 MiB** | Docker's own `sbx create` default, quoted from https://docs.docker.com/reference/cli/sbx/create/ (read 2026-10-13) |
+| 2 × vendor default | 4898 MiB = **100.0 % of the guest** | two sandboxes alone claim the whole machine — the #578 defect, in numbers |
+| 3 × vendor default | 7347 MiB = **2449 MiB OVER** | predicts the RF-1 / #567 three-sandbox out-of-memory by arithmetic |
+| 2 × **1024** | 2048 MiB, leaving **~2850 MiB** | room for the daemon, the OS, and one more sandbox |
+| 1024 vs measured footprint | ~527 MB per active sandbox | ≈ 1.9 × the measured need — headroom, not a guess |
+
+**Why the vendor's own limits do not make this number safe.** `sbx` enforces the
+band it documents — measured on the bench: a 48 GiB `--memory` value is REFUSED
+outright, and the 512 MiB floor is the vendor's floor as well as ours. Our
+config-load guard (`_sandbox_memory_within_vendor_bounds`) checks the same band
+earlier, so a bad value is refused with a Venya-named reason instead of a vendor
+one. But **both** checks are per-sandbox, and that is the gap: 2449 MiB is an
+in-band value, so nothing — vendor or Venya — rejects it, yet two sandboxes at
+that figure are 100.0 % of this guest and three are 2449 MiB over it, which is
+exactly the RF-1 / #567 out-of-memory. No in-band per-sandbox cap can see the
+**sum** of several in-band sandboxes. 1024 MiB is chosen on that basis: three
+sandboxes at 1024 are 3072 MiB, inside `MemTotal`, so the shipped number
+survives a concurrency raise instead of needing one.
+
+**Precedence — read this before telling anyone to set the env spelling.**
+`ExecutorConfig.from_file` passes the toml as init kwargs, so **a
+`sandbox_memory_mb` key present in `/etc/venya/executor.toml` silently outranks
+`VENYA_EXECUTOR_SANDBOX_MEMORY_MB`** (file > env > default; no comparison and no
+log line — the #598 precedence inversion). The env spelling wins over the shipped
+default **only when no toml key exists**. On a default install there is no such
+key: the installer does not write `sandbox_memory_mb`, so 1024 applies until an
+operator sets it in either carrier.
+
 Every figure above is a **serial** measurement — one active sandbox per executor
 at a time — and each carries that method basis where it appears. Concurrency on
 the shipped 5 GB executor shape is **unmeasured beyond 2**. The one spike that
