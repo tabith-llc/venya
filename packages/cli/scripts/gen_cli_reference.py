@@ -400,13 +400,12 @@ def _rendered_help(text: str | None, *, default: object = None, prog: str) -> st
     ``%(default)s`` / ``%(prog)s`` keys are substituted. Emitting the stored string raw
     put ``printf %%s`` in this document while ``venya store --help`` printed ``printf %s``.
     A line with no ``%`` is returned untouched, which is what the formatter does too.
-
-    shortcut: substitutes only the two documented keys; a help string naming another
-    argparse key raises here and fails generation loudly — upgrade to the formatter's own
-    expansion if that ever happens.
     """
     if not text or "%" not in text:
         return text or ""
+    # shortcut: substitutes only the two documented keys, upgrade to the formatter's own
+    # expansion if a help string ever names another argparse key (it would raise here and
+    # fail generation loudly rather than quietly disagree with --help).
     return text % {"default": default, "prog": prog}
 
 
