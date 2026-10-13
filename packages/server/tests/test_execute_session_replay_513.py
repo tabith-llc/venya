@@ -171,6 +171,10 @@ def _relay_patched(relay_client):
     with (
         patch("server.routes.executors.httpx2.AsyncClient", return_value=relay_client),
         patch("server.routes.executors._build_relay_ssl_context", return_value=MagicMock()),
+        # #586 Slice 1: the dial-side CRL store is part of the same real-transport
+        # seam these cells fake wholesale (no TLS stack runs here; the CRL matrix
+        # lives in test_relay_dial_crl_586.py with real handshakes).
+        patch("server.routes.executors._ensure_dial_crl_store", return_value="/nonexistent-in-fake"),
     ):
         yield
 

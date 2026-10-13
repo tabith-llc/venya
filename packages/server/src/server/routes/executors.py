@@ -15,10 +15,12 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import shlex
 import socket
 import ssl
+import subprocess  # nosec B404 — CRL capath bootstrap uses `openssl rehash`; same system-tool seam as utils/disk_encryption.py
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -621,6 +623,7 @@ def _build_relay_ssl_context(
     ca_cert_path: str | None,
     mtls_cert: str | None = None,
     mtls_key: str | None = None,
+    crl_capath: str | None = None,
 ) -> ssl.SSLContext:
     """TLS context for the core->executor relay dial — Venya CA anchors ONLY.
 
@@ -653,9 +656,128 @@ def _build_relay_ssl_context(
     ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ssl_ctx.verify_flags |= ssl.VERIFY_X509_STRICT | ssl.VERIFY_X509_PARTIAL_CHAIN
     ssl_ctx.load_verify_locations(cafile=ca_cert_path)
+    if crl_capath is not None:
+        # #586 Slice 1 (owner ruling 2026-10-13, "if its a stronger connection-time
+        # refusal, build it"): consult the CRL at the TLS layer itself, so a revoked
+        # executor leaf dies in the handshake, not in application code. LEAF mode, NOT
+        # CHAIN — measured at this venue (CPython 3.14.6 / OpenSSL 3.5.7): our one-link
+        # chains make CHAIN mode fail closed on every connection without an anchor CRL,
+        # and CPython 3.14's stdlib exposes no crlfile= hook, so the hash-named PEM
+        # capath prepared by _ensure_dial_crl_store is the only stdlib mechanism.
+        # The anchor stays exactly where it was (cafile above); this ADDS a revocation
+        # source, it never widens or relaxes one (row AC5).
+        ssl_ctx.load_verify_locations(capath=crl_capath)
+        ssl_ctx.verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF
     if mtls_cert and mtls_key:
         ssl_ctx.load_cert_chain(mtls_cert, mtls_key)
     return ssl_ctx
+
+
+# --- #586 Slice 1: the dial-side revocation list (transport refusal) -----------
+
+_DIAL_CRL_STORE_NAME = "crl-dial"
+# X509 verify codes (openssl x509_vfy.h): 3 = unable to get CRL, 12 = CRL has
+# expired, 23 = certificate revoked. Only 23 is a revocation ASSERTION; 3 and 12
+# are LIST-STATE failures and must never be reported as "revoked" (the #603 lesson:
+# do not name a security event that did not happen).
+_X509_V_ERR_UNABLE_TO_GET_CRL = 3
+_X509_V_ERR_CRL_HAS_EXPIRED = 12
+_X509_V_ERR_CERT_REVOKED = 23
+
+_STALE_LIST_DETAIL = "Revocation list stale or unavailable — dial refused (no revocation asserted)"
+
+
+def _ensure_dial_crl_store(request: Request, db: Session) -> str:
+    """Prepare the per-dial CRL capath and return its path (#586 Slice 1).
+
+    Owner's ruled posture (2026-10-13, verbatim: "to me it sounds like the only safe
+    thing to do is refuse everything until a properly refreshed list arrives."):
+    ANY failure to produce a freshly minted list raises — the caller refuses the
+    dial with the stale-class 503 and never falls back to a CRL-less context. The
+    refusal is at the NEW connection (the dial), never a yank of work already in
+    flight (owner: "agree completely" to the boundary).
+
+    Mechanism: the CRL is minted IN THIS PROCESS (`CAManager.generate_crl`, the same
+    capped single-fetch population discipline as the served GET, #337), written
+    into a 0700 dir under the state root, and hash-named by `openssl rehash` —
+    CPython 3.14's stdlib exposes no crlfile= hook and OpenSSL's hash-dir lookup
+    accepts ONLY these names (measured at this venue; a hand-named file is
+    silently "unable to get certificate CRL", and a DER copy is silently not
+    found — this writes PEM). The dir carries the CRL and nothing else: the
+    ANCHOR stays exactly where the builder already loads it (cafile), so the
+    store cannot duplicate or widen the trust set — #501's invariant holds even
+    under the new capath. rehash runs only when the store is new or the CA anchor
+    changed (tracked by fingerprint); steady-state dials just atomically rewrite
+    crl.pem and the existing <hash>.r0 link follows the name by path.
+
+    The list lands fresh every dial, so next_update (+1h shipped at ca.py) cannot
+    lapse between mint and verify; if the DB read or the mint ever stalls or fails,
+    this function raises and the dial refuses — fail-closed by construction.
+
+    shortcut: reads the shared revocations table on the dial path; moving the
+    staleness decision off the lockable DB path is ruled follow-on work (#586
+    slice-1 follow-on (c), the #603 family), upgrade when that slice lands.
+    """
+    ca_manager = _get_ca_manager(request)
+    config = getattr(request.app.state, "config", None)
+    if config is None:
+        raise RuntimeError("no server config — cannot locate the CA dir for the dial CRL store")
+    ca_dir = Path(config.ca_dir)
+    ca_bytes = (ca_dir / "ca.crt").read_bytes()
+    crl_der = ca_manager.generate_crl(db)
+    if not isinstance(crl_der, bytes) or not crl_der:
+        raise RuntimeError("generate_crl returned no bytes — refusing to dial without a real list")
+
+    store = ca_dir.parent / _DIAL_CRL_STORE_NAME
+    store.mkdir(mode=0o700, exist_ok=True)
+
+    def _write_atomic(name: str, payload: bytes) -> None:
+        tmp = store / f".{name}.tmp"
+        tmp.write_bytes(payload)
+        os.replace(tmp, store / name)
+
+    _write_atomic(
+        "crl.pem",
+        x509.load_der_x509_crl(crl_der).public_bytes(serialization.Encoding.PEM),
+    )
+
+    fingerprint = hashlib.sha256(ca_bytes).hexdigest()
+    marker = store / ".anchor-fingerprint"
+    links_exist = any(store.glob("*.r0"))
+    if not links_exist or not marker.is_file() or marker.read_text() != fingerprint:
+        # (Re)link the dir. openssl rehash removes its own managed symlinks first,
+        # so a rotated CA leaves no stale-name CRL behind. check=True: a failed
+        # link pass raises, and a raise here refuses the dial (owner posture).
+        subprocess.run(  # nosec B603 B607 — fixed argv, no shell, constant 'openssl' on PATH; same seam as utils/disk_encryption.py
+            ["openssl", "rehash", str(store)],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+        if not any(store.glob("*.r0")):
+            raise RuntimeError("openssl rehash produced no CRL link — the dial would carry no revocation source")
+        _write_atomic(".anchor-fingerprint", fingerprint.encode())
+    return str(store)
+
+
+def _dial_crl_verdict_for(exc: ssl.SSLError) -> tuple[int, int, str] | None:
+    """Classify a dial handshake failure raised by the #586 Slice 1 CRL check.
+
+    Returns (x509_verify_code, http_status, detail) for the two CRL classes, or
+    None when the SSLError is some other verification failure (the caller's
+    established "mTLS verification failed" arm keeps those verbatim).
+
+    The strings are the point of the function: 23 alone may say "revoked" — it is
+    the only code that ASSERTS a revocation. 3 and 12 say the LIST is unavailable
+    or expired and must not read as a revocation event, per the #603 lesson and
+    the owner's ruled refusal-everything posture.
+    """
+    code = getattr(exc, "verify_code", 0)
+    if code == _X509_V_ERR_CERT_REVOKED:
+        return code, 403, "Executor certificate revoked — refused at the TLS dial handshake"
+    if code in (_X509_V_ERR_UNABLE_TO_GET_CRL, _X509_V_ERR_CRL_HAS_EXPIRED):
+        return code, 503, _STALE_LIST_DETAIL
+    return None
 
 
 def _dial_hostname_resolvable(hostname: str) -> bool:
@@ -1783,9 +1905,31 @@ async def execute_command_on_executor(
     mtls_cert = config.mtls_cert if config else None
     mtls_key = config.mtls_key if config else None
 
+    # #586 Slice 1 (owner ruling 2026-10-13): the dial carries a freshly minted CRL
+    # and consults it AT THE HANDSHAKE. Preparing the list can fail (no CA manager,
+    # DB stall, mint error, missing openssl for the hash-name pass) — under the
+    # ruled posture that is a REFUSAL of this new dial, never a silent fallback to
+    # the old CRL-less context. The message names the LIST, never a revocation.
+    # Scope note (ruled boundary): this refuses the connection; it does not yank
+    # work already in flight, and nothing here may be "hardened" into doing that
+    # without a fresh owner ruling.
+    try:
+        crl_capath = _ensure_dial_crl_store(request, db)
+    except HTTPException:
+        raise  # _get_ca_manager's own 503 keeps its established wording
+    except (OSError, TypeError) as e:
+        # Anchor unreadable/missing or config gone — the established #501 failure
+        # class and wording, unchanged by this row; the store deliberately does NOT
+        # relabel a missing CA as a revocation-list event.
+        logger.warning("TLS misconfiguration: %s", e)
+        raise HTTPException(status_code=503, detail="Server TLS misconfiguration")
+    except Exception as e:
+        logger.warning("Relay dial refused, %s: %s", _STALE_LIST_DETAIL, e)
+        raise HTTPException(status_code=503, detail=_STALE_LIST_DETAIL)
+
     # OSError also catches ssl.SSLError (corrupt cert contents) — keep broad deliberately
     try:
-        ssl_ctx = _build_relay_ssl_context(ca_cert_path, mtls_cert, mtls_key)
+        ssl_ctx = _build_relay_ssl_context(ca_cert_path, mtls_cert, mtls_key, crl_capath=crl_capath)
     except (OSError, TypeError) as e:
         logger.warning("TLS misconfiguration: %s", e)
         raise HTTPException(status_code=503, detail="Server TLS misconfiguration")
@@ -1801,6 +1945,15 @@ async def execute_command_on_executor(
         _c, _d = (e.__cause__ or e.__context__), 0
         while _c and _d < 5 and not isinstance(_c, (ssl.SSLError, socket.gaierror)):
             _c, _d = (_c.__cause__ or _c.__context__), _d + 1
+        _crl_verdict = _dial_crl_verdict_for(_c) if isinstance(_c, ssl.SSLError) else None
+        if _crl_verdict is not None:
+            # #586 Slice 1: the CRL rode the handshake — say WHICH half failed. A
+            # revoked leaf is a revocation ASSERTION (403, matching the dial gate's
+            # ruled status split); an expired/missing list at verify time is the
+            # stale class (503) and must never read as "revoked" (#603 lesson).
+            _code, _status, _detail = _crl_verdict
+            logger.warning("Relay dial refused by the TLS-layer CRL check (code %d): %s", _code, _c)
+            raise HTTPException(status_code=_status, detail=_detail)
         if _c and isinstance(_c, ssl.SSLError):
             logger.warning("mTLS verification failed: %s", _c)
             raise HTTPException(status_code=503, detail="mTLS verification failed")

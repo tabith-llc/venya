@@ -207,10 +207,17 @@ def _write_material(tmp_path, name: str, cert, key) -> tuple[str, str]:
 
 
 def _relay_app(ca_dir: str, mtls: tuple[str, str] | None = None):
-    """App wired for one relay call; returns (app, backend)."""
+    """App wired for one relay call; returns (app, backend).
+
+    #586 Slice 1: ``app.state.ca_manager`` carries the REAL CAManager on this
+    ca_dir, so the dial-side CRL store runs its production path here (these cells
+    assert the trust set the dial actually builds — faking the store would let
+    Slice 1 regress invisibly). The store dir lands under ca_dir.parent (tmp).
+    """
     app, backend = _create_test_app()
     app.state.config.ca_dir = ca_dir
     app.state.config.mtls_cert, app.state.config.mtls_key = mtls if mtls else (None, None)
+    app.state.ca_manager = CAManager(ca_dir)
 
     db = MagicMock()
     session = MagicMock()

@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**62 suppression lines across 21 files.**
+**64 suppression lines across 22 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -75,6 +75,8 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/server/src/server/middleware/auth.py` | `ACCESS_TOKEN_COOKIE = "venya_access_token"  # nosec B105 — cookie name, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/rate_limit.py` | `except Exception:  # nosec B110 — best-effort JSON parse, None falls through  # noqa: S110` |
 | `packages/server/src/server/routes/auth_browser.py` | `except Exception:  # nosec B110 — rollback best-effort before raising HTTPException` |
+| `packages/server/src/server/routes/executors.py` | `import subprocess  # nosec B404 — CRL capath bootstrap uses `openssl rehash`; same system-tool seam as utils/disk_encryption.py` |
+| `packages/server/src/server/routes/executors.py` | `subprocess.run(  # nosec B603 B607 — fixed argv, no shell, constant 'openssl' on PATH; same seam as utils/disk_encryption.py` |
 | `packages/server/src/server/routes/secrets.py` | `SECRET_KEY_PATTERN = r"^[A-Za-z0-9._-]{1,128}$"  # nosec B105 — charset pattern, not a password` | <!-- pragma: allowlist secret -->
 | `packages/server/src/server/utils/disk_encryption.py` | `import subprocess  # nosec B404 — disk encryption check requires subprocess for system commands` |
 | `packages/server/src/server/utils/disk_encryption.py` | `result = subprocess.run(  # nosec` |
