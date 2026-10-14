@@ -603,24 +603,33 @@ venya_apply_code_fixes() {
     # the retired env-only form (checked v0.1.0-alpha .. v0.1.0alpha16), so a
     # sed for it could never fire — the guard asserts the live shape instead and
     # touches nothing. Any other shape is a dead anchor and aborts the install.
+    # The reason is named per cause (lead ruling s108): either half can be true
+    # while the behavior is wrong, so a message that says "and/or" would leave
+    # the next operator reading two files blind.
+    local a fix1_reason=""
     f="$INSTALL_DIR/packages/server/src/server/dependencies.py"
     a="$INSTALL_DIR/packages/server/src/server/app.py"
-    if [ ! -f "$f" ] || [ ! -f "$a" ]; then
-        error "  Fix 1 (db URL from config): FAILED-ANCHOR-MISSING - server source absent"
-        n_failed=$((n_failed + 1))
-    elif grep -qF 'database_url = db_url or os.environ.get("VENYA_DB_URL")' "$f" \
-        && grep -qF 'init_db(config.db, db_url=config.db.database_url)' "$a"; then
+    if [ ! -f "$f" ]; then
+        fix1_reason="dependencies.py absent ($f)"
+    elif ! grep -qF 'database_url = db_url or os.environ.get("VENYA_DB_URL")' "$f"; then
+        fix1_reason="the db_url-with-env-fallback expression is not in dependencies.py ($f); app.py was not reached"
+    elif [ ! -f "$a" ]; then
+        fix1_reason="app.py absent ($a); the dependencies.py half is present, the call-site half could not be read"
+    elif ! grep -qF 'init_db(config.db, db_url=config.db.database_url)' "$a"; then
+        fix1_reason="app.py does not pass the configured URL — no init_db(config.db, db_url=config.db.database_url) in $a; the expression half is present, so the env value would be in charge"
+    fi
+    if [ -z "$fix1_reason" ]; then
         info "  Fix 1 (db URL from config): already clean"
         n_clean=$((n_clean + 1))
     else
-        error "  Fix 1 (db URL from config): FAILED-ANCHOR-MISSING - $f and/or $a no longer holds the config-value/env-fallback shape (upstream shape changed)"
+        error "  Fix 1 (db URL from config): FAILED-ANCHOR-MISSING - $fix1_reason"
         n_failed=$((n_failed + 1))
     fi
 
     # --- Fix 2: init.py relative imports (from ..iam.models -> core) ---
     f="$INSTALL_DIR/packages/server/src/server/routes/init.py"
     if [ ! -f "$f" ]; then
-        error "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - file absent"
+        error "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - file absent ($f)"
         n_failed=$((n_failed + 1))
     elif grep -qF 'from ..iam.models' "$f"; then
         sed -i 's/from \.\.iam\.models/from core.iam.models/g' "$f"
@@ -644,7 +653,7 @@ venya_apply_code_fixes() {
     # 'db.flush()' grep let any unrelated occurrence mask a missing site
     # flush. Every db.add(admin_role) line must now be followed by the flush.
     if [ ! -f "$f" ]; then
-        error "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - file absent"
+        error "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - file absent ($f)"
         n_failed=$((n_failed + 1))
     else
         local n_anchor n_paired
@@ -675,10 +684,10 @@ venya_apply_code_fixes() {
     # this patch appends. The check now looks within the anchor's own lines.
     f="$INSTALL_DIR/packages/server/src/server/routes/executors.py"
     if [ ! -f "$f" ]; then
-        error "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - file absent"
+        error "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - file absent ($f)"
         n_failed=$((n_failed + 1))
     elif ! grep -qF 'not_after = current_cert.not_after' "$f"; then
-        error "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - not_after anchor absent (upstream shape changed)"
+        error "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - not_after anchor absent from $f (upstream shape changed)"
         n_failed=$((n_failed + 1))
     elif grep -A2 -F 'not_after = current_cert.not_after' "$f" | grep -qF 'not_after.tzinfo'; then
         info "  Fix 4 (executors.py heartbeat tz guard): already clean"

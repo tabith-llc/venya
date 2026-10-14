@@ -318,6 +318,7 @@ def test_one_dead_anchor_alone_aborts_and_names_the_file() -> None:
     lines = _dead_anchor_lines(out)
     assert len(lines) == 1 and "Fix 1" in lines[0] and "[ERROR]" in lines[0], out
     assert "dependencies.py" in lines[0], out
+    assert "app.py was not reached" in lines[0], out
     # The three healthy fixes still did their work before the stop.
     assert "from core.iam.models" in (root / _INIT).read_text()
     assert re.search(r"db\.add\(admin_role\)\n\s*db\.flush\(\)", (root / _INIT).read_text())
@@ -328,7 +329,10 @@ def test_call_site_drift_alone_is_a_dead_anchor() -> None:
     """The presence assertion is a PAIR: a tree whose dependencies.py still
     carries the expression but whose app.py stopped passing the configured URL
     (the shape that would put the env value back in charge) is a dead anchor,
-    not a clean report. This is the scenario Fix 1 existed to prevent."""
+    not a clean report. This is the scenario Fix 1 existed to prevent. Also
+    pinned here: the abort text names WHICH half went missing (lead ruling
+    s108) — either half can be true while the behavior is wrong, so an "and/or"
+    message would leave the operator reading two files blind."""
     root = Path(tempfile.mkdtemp())
     _write_tree(root, LIVE_DEPS, PATCHED_INIT, PATCHED_EXEC, app=NO_ANCHOR_APP)
     proc = _run_fixes(root)
@@ -336,3 +340,64 @@ def test_call_site_drift_alone_is_a_dead_anchor() -> None:
     assert proc.returncode != 0, out
     lines = _dead_anchor_lines(out)
     assert len(lines) == 1 and "Fix 1" in lines[0], out
+    assert "app.py does not pass the configured URL" in lines[0], out
+    assert "app.py" in lines[0] and "init_db(config.db, db_url=config.db.database_url)" in lines[0], out
+
+
+def test_missing_expression_names_itself_and_says_app_was_not_reached() -> None:
+    """Distinct message per cause, the other half: dependencies.py moved. The
+    line has to say the expression is what is missing AND that app.py was never
+    examined — an operator told 'the call-site is wrong' about a tree whose
+    dependencies.py is the moved file chases the wrong file."""
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root, NO_ANCHOR_DEPS, PATCHED_INIT, PATCHED_EXEC, app=LIVE_APP)
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    lines = _dead_anchor_lines(out)
+    assert len(lines) == 1 and "Fix 1" in lines[0], out
+    assert "db_url-with-env-fallback expression is not in dependencies.py" in lines[0], out
+    assert "app.py was not reached" in lines[0], out
+
+
+def test_absent_files_abort_too_one_distinct_message_per_file() -> None:
+    """File-absent joins the abort set (lead ruling s108): the core and executor
+    archives are the identical whole-tree git archive, so a missing source file
+    is truncation, a wrong target or a foreign tree — a broken install claiming
+    success, which is the #519 class. Each cause prints its own line naming the
+    path it looked at."""
+    # (a) dependencies.py absent — Fix 1's own cause line.
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root)
+    (root / _DEPS).unlink()
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    lines = _dead_anchor_lines(out)
+    assert len(lines) == 1 and "Fix 1" in lines[0], out
+    assert "dependencies.py absent" in lines[0], out
+    assert str(root / "packages/server/src/server/dependencies.py") in lines[0], out
+
+    # (b) app.py absent — the second cause line, which must NOT be the same
+    # text as (a): it says the first half is present and the second unread.
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root)
+    (root / _APP).unlink()
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    lines = _dead_anchor_lines(out)
+    assert len(lines) == 1 and "app.py absent" in lines[0], out
+    assert "dependencies.py half is present" in lines[0], out
+
+    # (c) a file the remaining fixes patch is absent (executors.py) — the same
+    # abort posture applies to fixes 2/3/4, whose anchors are live.
+    root = Path(tempfile.mkdtemp())
+    _write_tree(root)
+    (root / _EXEC).unlink()
+    proc = _run_fixes(root)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    lines = _dead_anchor_lines(out)
+    assert len(lines) == 1 and "Fix 4" in lines[0], out
+    assert "file absent" in lines[0] and str(root / _EXEC) in lines[0], out
