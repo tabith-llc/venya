@@ -769,6 +769,18 @@ PROPOSE-ONLY and unapplied.
 
 ---
 
+**Forward note — RF-11 doc sweep (2026-10-14, `feature/rf11-ageout-rollout-docs`). Appended, not a
+rewrite of the dated prose above.** Both proposed blocks in this section have now been overtaken by
+what actually shipped: RF-10 retired the installer banner's `scp` pair on 2026-10-12 (`2b70210`,
+merge `832c11c`), and RF-11 retired the operator-side copies — `docs/installation.md` §2 no longer
+tells anyone to carry `/etc/venya/admin/admin.crt|.key` to a workstation, and
+`docs/cert-rotation-runbook.md` §7 step 6 no longer refreshes workstation copies. The remedy the
+second block proposed adding (a "this pair does not load yet" status line) landed in a different
+form: §3 of `installation.md` states the pairing rule once, and
+`docs/cert-rotation-runbook.md` §0.1 now publishes the computed age-out date for credentials minted
+before the cut-over. Nothing in the prose above was deleted; it stands as written at its own
+measurement date.
+
 ## 12. APPENDIX — hardware enumeration of the fleet's authenticators — **UNMEASURED (SLOT, EMPTY BY DESIGN)**
 
 **Status: EMPTY. Nothing below has been measured.** This section exists because R7-Q5 ordered the

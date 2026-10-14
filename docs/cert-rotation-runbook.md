@@ -17,7 +17,7 @@
 | Server TLS leaf | core: `/etc/venya/tls/server.crt|.key` | 365 days; re-signed on every installer run (`install-venya-core.sh`, the `Server TLS certificate signed with Venya CA` block) | CN + SAN DNS = `CORE_HOSTNAME` |
 | Relay client cert | core: `/etc/venya/relay/relay-client.crt|.key` | regenerated on installer run (the `Relay client certificate signed and verified` block) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids` |
 | Executor client cert | executor: `/etc/venya/executor/executor.crt|.key` (ca.crt alongside) | 30 days (`EXECUTOR_VALIDITY_DAYS = 30`, server `ca.py`); auto-rotation attempted 3 days before expiry (`rotate_before_days`, executor `config.py`) | Auto-rotation persistence FIXED 2026-09-19 (ticket `executor-cert-rotation-erofs`, §1); pre-fix hosts need the unit refresh; manual path: §2 |
-| Admin client certs | workstations / core: `/etc/venya/admin/admin.crt|.key` | manual (§7); routine expiry is minted from the workstation (note below) | re-issued on every core installer run |
+| Admin client certs | core (machine plane): `/etc/venya/admin/admin.crt|.key` · person (human plane): a workstation path you choose | core pair: 90 days (`ADMIN_CERT_VALIDITY_DAYS`, `server/ca.py`), re-minted every installer run · person's certificate: 60 minutes, minted by ceremony (note below) | manual rotation: §7; the two credentials are different things and rotate differently |
 | Secret-encryption KEK + key versions | core: database + server config | `venya admin rotate-key` (§6) | independent of the TLS CA hierarchy |
 
 **Admin client certificates also have a renewal path of their own.** The row
@@ -33,6 +33,50 @@ certificate-authenticated admin commands until that read-side work lands
 (#565, Part B). Exact flags: `cli-reference.md` (generated). What an interactive
 desktop ceremony requires, including on Windows, is covered in `faq.md` and
 `installation.md` and is deliberately not restated here.
+
+### 0.1 The age-out date for a certificate an installer used to hand to a workstation
+
+**Published date: 2027-01-10.** It is computed, not chosen, and the inputs are these:
+
+| Input | Value | Where it was read |
+|---|---|---|
+| Lifetime of the pair the installer mints | 90 days | `ADMIN_CERT_VALIDITY_DAYS = 90`, `packages/server/src/server/ca.py` (Admin CA constants block; consumed by `AdminCAManager.sign_admin_cert`) |
+| Cut-over — the run of the installer that stopped printing the copy instruction | 2026-10-12 | `2b70210` 11:35:25 -0600, merged into `dev` as `832c11c` 11:36:13 -0600 (RF-10) |
+| Sum | **2027-01-10** | `date -u -d "2026-10-12 + 90 days"` → 2027-01-10 |
+
+The clock starts at the cut-over because the age-out is about the **handoff**: an
+install made with an installer that still told you to copy the pair mints a
+credential that lives 90 days from *that* install. So the published date is a floor,
+not a guarantee, and one fact about the cut-over matters to it: `2b70210` landed on
+the development branch, and the newest published tag at this file's base
+(`v0.1.0alpha16`, 2026-09-27) still prints the old copy instruction. Until a release
+carries the new banner, an operator installing today still mints an old-shape pair,
+and that install's own closure date is its install day plus 90 days — readable, not
+guessable, on the core that holds it:
+
+```bash
+sudo openssl x509 -in /etc/venya/admin/admin.crt -noout -enddate
+```
+
+Re-anchor this section on the release that first ships the new banner.
+
+- **What the date means:** up to it, a credential minted by a pre-cut-over installer
+  — including one copied to a workstation — is still valid on its own schedule. Past
+  it, nothing such an installer minted can still authenticate anywhere.
+- **What it does NOT mean: this is not a revocation mechanism.** Under the two-plane
+  ruling, lifetime stopped being the revocation mechanism and became purely the theft
+  window. Removing a person's administrator role takes effect on their next request;
+  revoking a certificate serial is what closes an exposure early, and it costs a
+  lockout if you pick the wrong serial — the same serial may be the core's own
+  machine-plane credential.
+- **The honest limit:** nothing in the product knows where copies were made. A copy
+  taken before the cut-over dies on the date above unless its serial is revoked; a
+  copy made from an older build dies 90 days after that build's own mint.
+- **The skew tail:** a certificate is admitted until `not_valid_after` plus the
+  deployment's `VENYA_CLOCK_SKEW__CERT_TOLERANCE_SECONDS` (default 60 s,
+  `ClockSkewConfig.cert_tolerance_seconds`, `packages/server/src/server/config.py`),
+  so the last usable instant is the date above plus that tolerance — read the
+  deployment's value rather than assuming the default.
 
 nginx terminates TLS on :443 and proxies to the backend over the inner-mTLS
 channel: uvicorn serves TLS on the loopback bind only and nginx presents the
@@ -149,10 +193,11 @@ exemption and its retirement trigger are written up in
 (the same 3-day window the daemon uses). If the cert already expired, re-register
 instead (§3).
 
-Revoke (admin action, from a workstation holding the admin mTLS cert, or on the core):
+Revoke (admin action, on the core with its machine-plane pair, or from a session
+that carries the administrator role):
 
 ```bash
-VENYA_ADMIN_CERT=admin-cert/admin.crt VENYA_ADMIN_KEY=admin-cert/admin.key \
+VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
   venya admin revoke-executor <executor-id>
 # or, targeting the executor's own cert from the executor host:
 sudo /opt/venya/.venv/bin/venya exec cert revoke --executor-id <executor-id>
@@ -178,7 +223,7 @@ with an actionable journal error naming `executor_enrollment.require_token`
 registration with a bootstrap token:
 
 ```bash
-# 1. On the core (admin mTLS cert lives there) or a workstation holding it:
+# 1. On the core (that is where the machine-plane admin pair lives — §0.1):
 venya admin executor-enroll <executor-id> --output-dir /secure/enroll
 #    (token TTL default 1800 s, single-use, stored hashed — server config.py:131-136)
 
@@ -356,9 +401,11 @@ then re-enroll every executor.
 executor must re-register (§3). The admin CA under `/var/lib/venya/ca/admin-ca/` can be
 PRESERVED (installer re-creates it only if absent — the `if not cm.has_ca` /
 `Admin CA already exists - preserved` branch) — preserving it keeps
-existing admin client certs valid for mTLS, but note the installer still RE-ISSUES the
-`/etc/venya/admin/admin.crt|.key` pair each run (the `Admin cert generated` block), so workstation copies
-should be refreshed from the core afterwards. The database (users, secrets, KEK,
+existing admin client certs valid for mTLS. Note what the installer does to the
+core's own pair each run: it RE-ISSUES `/etc/venya/admin/admin.crt|.key` (the
+machine-plane mint), and that pair is not copied anywhere — a person's certificate
+comes from the workstation ceremony (`venya admin cert renew`), so there is no
+workstation copy left to refresh after a re-run. The database (users, secrets, KEK,
 sessions) is untouched — secret encryption does not depend on the TLS CA.
 
 ```bash
@@ -388,7 +435,8 @@ curl -fsSL <origin>/install-venya-core.sh | sudo \
   VENYA_ADMIN_CA_PASSPHRASE=<value from venya-core.env — optional on pre-fix-free installs, see above> \
   bash -s
 # New CA generated; server + relay certs re-signed; system trust, well-known copy,
-# and nginx bundle (root + admin) rebuilt; admin cert pair re-issued.
+# and nginx bundle (root + admin) rebuilt; the core's machine-plane admin pair is
+# re-minted on that core (it is not copied to any workstation — §0.1).
 
 # --- 4. Verify the core:
 curl -sk https://<core-host>/api/v1/health
@@ -397,12 +445,12 @@ curl -sk https://<core-host>/api/v1/health
 # --- 5. Every executor: re-install with a fresh token (§3). Runtime re-registration
 #        is not possible (read-only /etc/venya).
 
-# --- 6. Every workstation: refresh CA + admin cert copies, then re-login:
+# --- 6. Every workstation: refresh the CA it dials, then re-establish a session:
 venya setup <core-host>    # re-fetch the NEW CA (fingerprint printed for out-of-band verification)
-ssh <core-host> "sudo cat /etc/venya/admin/admin.crt" > admin-cert/admin.crt
-ssh <core-host> "sudo cat /etc/venya/admin/admin.key" > admin-cert/admin.key
-chmod 600 admin-cert/admin.key
 venya login <user-id>   # FIDO2 touch
+# Then, for administrator certificate work: `venya admin cert renew` mints this
+# workstation's own short-lived certificate by ceremony. The core's
+# `/etc/venya/admin/` pair is NOT copied to workstations (§0.1).
 
 # --- 7. Smoke-test end to end:
 venya run --executor-id <executor-id> -- /usr/bin/true
@@ -447,8 +495,8 @@ sweep — it re-issues some copies and never touches others.
 |---|---|---|
 | Core machine-plane pair `/etc/venya/admin/admin.crt\|.key` | **Yes** | every core installer run re-issues the pair (`sign_admin_cert`) |
 | Workstation human-plane short certificate | **Yes, when it is minted next** | the CSR/login-ceremony signer (`sign_admin_csr`) mints it and the mint is an explicit act — `venya admin cert renew`; there is no automatic re-mint loop in the CLI, and the leaf lives about an hour (`ADMIN_SHORT_CERT_LIFETIME_SECONDS`, `packages/server/src/server/ca.py`), so the copy in hand keeps the arc it was minted on until it is renewed |
-| Admin leaf an operator **copied by hand** off a core (the `admin-cert/admin.crt` pair the workstation copy step writes — §7 step 6 here, and [installation.md](installation.md) §2 — a copy kept for a second host, a break-glass copy on removable media) | **No** | nothing re-writes a file that lives outside the product; the copy keeps the arc it was minted on and is admitted only while the window is open |
-| Admin leaf **cached by a peer** (a workstation's on-disk `admin.crt`) | **No**, not by the core | the core never writes to another host's copy; that file changes only when the workstation mints its own replacement (`venya admin cert renew`) or an operator re-copies it from the core. `venya login` alone stores a session token, not a certificate |
+| Admin leaf an operator **copied by hand** off a core (the `admin-cert/admin.crt` pair the pre-RF-10 copy step used to write — that step is retired from both §7 step 6 here and [installation.md](installation.md) §2; the copies it left behind are what this row is about — a copy kept for a second host, a break-glass copy on removable media) | **No** | nothing re-writes a file that lives outside the product; the copy keeps the arc it was minted on and is admitted only while the window is open and only until it ages out (§0.1) |
+| Admin leaf **cached by a peer** (a workstation's on-disk `admin.crt`) | **No**, not by the core | the core never writes to another host's copy; that file changes only when the workstation mints its own replacement (`venya admin cert renew`). `venya login` alone stores a session token, not a certificate |
 | `/etc/nginx/ssl/client-ca-bundle.crt` (Root + Admin CA, §1 trust boundary) | **Not applicable** | a bundle of CA certificates, and CA certificates carry no plane marker; no arc migration is owed here |
 | Revocation records (`AdminCertRevocation` serials) | **Not applicable** | serial-keyed and arc-independent; a revoked old-arc serial stays revoked after the window closes |
 
@@ -459,8 +507,10 @@ separate proofs, and one does not stand in for the other). The removal leg
 deletes the legacy read branch and pins the paired negative that an old-arc
 marker is no longer read as ours; **after that, a hand-copied pre-#601 leaf
 fails closed** with the named re-issue refusal, not a silent plane default. If
-you hold such a copy, refresh it from a core running the current build (the §7
-workstation step) before the removal leg ships.
+you hold such a copy, do not refresh it from the core — retire it: mint your own
+short-lived certificate on the workstation (`venya admin cert renew`, §0), let the
+copy die at the computed age-out date (§0.1), and revoke its serial if you cannot
+wait for that date.
 
 ## 10. Known issues affecting this runbook (tickets)
 
