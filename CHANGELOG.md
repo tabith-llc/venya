@@ -4,80 +4,44 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
-- **Executor mTLS key is encrypted at rest on every write path (#565).** The
-  executor's own leaf key (`/etc/venya/executor/executor.key`) was serialized
-  unencrypted by all four of its writers — the daemon's registration and rotation
-  paths, and the workstation CLI's `venya exec register` / `venya exec cert renew`
-  — and none of the readers could answer a passphrase. They now write a PKCS#8
-  `BestAvailableEncryption` envelope keyed by `VENYA_EXECUTOR_KEY_PASSPHRASE`, and
-  every reader (the daemon's control-channel client, the boot identity probe, the
-  relay listener, the audit forwarder, the boot certificate/key pair gate, and the
-  CLI's own renew/heartbeat dials) opens it. A writer with no passphrase configured
-  refuses BEFORE it generates a key or sends a request, so nothing is written and an
-  enrollment token is not consumed. Keys written by earlier releases are plaintext on
-  disk and keep loading unchanged — the requirement lands on the next write. This is
-  disk protection by a file passphrase, not hardware-key custody; the interim shape
-  and its retirement trigger are recorded in `docs/cert-rotation-runbook.md` §2 and
-  `docs/design-fido2-keywrap-565.md` §6. refs #565
-- **CLI: `exec register` verification carries the register-path trust (#395).**
-  The post-register verify call now builds its TLS trust in the ruled order —
-  config-dir CA if present, else the resolved `--ca-bundle`, else a loud
-  error — so a config-less host that registered with `--ca-bundle` can verify
-  instead of always hitting a certificate error. Verification failure now
-  exits non-zero with the certificate kept and the wording
-  `registered, auth NOT verified`; a verified registration still exits 0 with
-  `registered successfully` as before. refs #395
-- **End-to-end mTLS: client identity is crypto-verified at the app.** Admin
-  and executor mTLS now read identity from the client certificate the app
-  verifies itself (forwarded by nginx over the new inner nginx→uvicorn mTLS
-  channel as a per-connection certificate file), replacing the
-  `X-Client-Verified`/`X-Client-Subject`/`X-Client-Serial` header chain. The
-  app serves TLS with required client certificates when
-  `VENYA_INNER_MTLS__ENABLED=true`, so a direct app-port connection stops at
-  the handshake; per-plane CA binding (admin stage vs admin CA, executor
-  stage vs Root CA) refuses cross-plane certificates at the chain check.
-  Header-based identity reads no longer exist in the server package
-  (interlock test pins the posture). refs #314
-- **IAM: `auditor` permission tier.** Roles can now be created with
-  `permissions="auditor"` (API, CLI `role create --permissions auditor`).
-  Auditors keep the read-tier listings (secrets/roles/executors metadata)
-  and gain audit-log visibility, but NEVER satisfy read-write gates (no
-  secret create/delete, no session create, no command execution) and never
-  reach admin routes.
-- **Secret values deny auditors at the chokepoint.** An auditor-only caller
-  (ALL memberships auditor-tier; a union with any other tier keeps its
-  rights) receives a 403 on any secret-value read — enforced inside the
-  masked-get unmask path BEFORE the single-use elevation token is consumed,
-  so denied attempts never burn tokens. Every denial is audit-logged
-  (`auditor_secret_read_denied`, value-free fields; the audit-write itself
-  can never turn a denial into an allow).
-- **Elevation tokens are not issued to auditor-only callers.** Both elevate
-  assert endpoints (CLI/API and browser) 403 before creating the token, and
-  audit-log the refusal (`auditor_elevation_denied`).
-  Because the same token gates self-service security-key registration
-  (`credential add`), an auditor cannot add their own credential: an
-  administrator provisions it (the tiers being exclusive means a
-  second non-auditor role is not an option either — release-notes item).
-- **The auditor tier is EXCLUSIVE by design (separation of duties).** A
-  role grant (`POST /roles/{id}/members`) or role tier flip
-  (`PUT /roles/{id}`) that would make one user hold `auditor` together
-  with any other tier is refused with 409 and audit-logged
-  (`auditor_sod_denied`, value-free fields; the refusal stands even if the
-  audit write itself fails). Auditor+auditor remains legal; the tier ships
-  for the first time with this rule, so no mixed state can pre-exist. The
-  union permission math is unchanged underneath as defense-in-depth.
-  Aligned with NIST SP 800-53 Rev 5 AC-5 (Separation of Duties); the
-  audit-logged denials above provide evidence for NIST AU-3/AU-6 and PCI
-  DSS 10.2.1. Aligned — not certified: attestation requires an assessor.
-- **Behavior change: the audit log is auditor-scoped.** `GET /api/v1/audit`
-  moved from the read tier to the auditor gate: plain `read`-only users are
-  now 403 there (auditor and read-write/admin retain access). Auditor-tier
-  holders see the FULL log — other users' events included — the same
-  visibility the `admin` role holds; every other non-admin caller keeps
-  the self-filter to their own events.
+## [0.1.0alpha17] - 2026-10-13
+
+There is no backwards compatibility during alpha. Three changes in this window are
+things an operator has to act on, so they are named at the top rather than buried in
+the lists below.
+
+- **The database encryption passphrase now has a length floor (#573, #615).** A
+  `VENYA_DB_PASSPHRASE` shorter than 15 characters — counted the way you type them,
+  as Unicode code points, so 15 passes and 14 refuses — is refused twice over: by the
+  installer at the point where the value resolves, BEFORE it writes or changes
+  anything on the host, and by the core at boot. The same floor carries the CA-key
+  passphrases, and blank or whitespace-only values are refused on those planes
+  (#554, #570). An install made earlier that holds a shorter passphrase is not
+  quietly rotated: its re-run refuses at that gate, and the path forward is a
+  deliberate reinstall or a deliberate rotation, made by the operator.
+- **A freshly installed executor ships a per-sandbox memory cap (#589).** The shipped
+  number is 1024 MiB per sandbox, passed to `sbx create --memory`. Before this
+  release the knob had no shipped value: a sandbox command either ran under the
+  vendor's own default (half of the guest) or, since #578, refused at create until an
+  operator named a number. An operator value in the config file or in the environment
+  still wins, and the vendor band (512 MiB floor, 75% of this machine as the ceiling)
+  is still checked at config load.
+- **A core re-run that meets a running service now stops it before migrating
+  (#587).** The
+  run announces it (`NOTICE: stopping venya-core.service BEFORE database migrations`)
+  and guards it — a first install has no unit yet, so there it never stops and never
+  aborts. The guard is the unit being up, not the version moving: a same-version
+  re-run takes the same pause, and its migrations change nothing. The end-of-run
+  proof now has three named outcomes instead of two: FRESH
+  proceeds, STALE (the running process provably predates the bytes just deployed)
+  refuses the success claim, and UNDECIDABLE (a timestamp that could not be read or
+  parsed) withholds the claim without reporting a good install as broken.
+  `docs/UPGRADE.md` and `docs/installation.md` §1 carry the re-run contract.
+
+### Added
+
 - **Docs: added `docs/UPGRADE.md`** — the tested in-place upgrade runbook (core upgrade drill alpha15→alpha16: backup, migrations, config preservation, downgrade policy).
 - **Docs: added `docs/ease-of-use.md`** — the deliberate-relaxation guide: the scp worked recipe (command policy + egress allowlist, with the paired locked default), a per-knob gain/loss catalog of every supported relaxation surface, and the never-relax list. Docs-only; no behavior change.
-
 - **Break-glass recovery-code RE-ISSUE.** `venya admin reissue-recovery-code`
   mints a fresh code for the logged-in caller without reinstalling: gated by
   admin mTLS (the `/api/v1/admin/` middleware chain) AND a session bearer AND
@@ -87,18 +51,6 @@ Notable changes to Venya will be documented in this file.
   audit row. Lost-printed-code operators keep their key AND their
   break-glass. Multi-factor loss (key AND code) remains out of scope:
   Shamir CA shares + backups + reinstall is still the last-resort path.
-
-- **Removed: `venya admin set-command-policy --custom`.** The flag was inert
-  surface (#289): it posted a `custom` key the API model does not define (and
-  never even opened the file it named), so the server silently dropped it.
-  Replaced by explicit `--custom-allowed` / `--custom-dangerous` (comma-
-  and/or space-separated), each mapping 1:1 to a real API field; each list
-  REPLACES its stored counterpart (replace-not-union), an omitted flag leaves
-  the stored list untouched.
-- **Changed: `POST /api/v1/admin/command-policy` now rejects unknown body
-  keys with 422** (`extra="forbid"` on the request model, #289 Q4). Junk
-  keys on this control-plane route can no longer succeed silently; documented
-  senders (which use the real fields) are unaffected.
 - **Server: the admin lifecycle is now auditable.** Every lifecycle write —
   core init and first-admin enrollment, login (success and value-free failure),
   browser session end, break-glass recovery, user create/update/delete, role
@@ -132,8 +84,57 @@ Notable changes to Venya will be documented in this file.
   plaintext), and allowlist additions. The command-policy and executor
   enrollment-token audit rows moved behind the single lifecycle writer, so
   every lifecycle event shares one construction path and one posture.
+- **Docs: added `docs/beta-known-limitations.md`** — the release-facing carrier for
+  what beta does not yet enforce, one entry per tracked issue, read against the
+  shipped source rather than summarized from intent.
+- **Handing out a value is now itself an audit event (#602).** The elevated unmask
+  path writes a disclosure row in the same transaction as the burn, naming the key,
+  the caller and the time. No value, token or token hash is ever written there, and a
+  disclosure that loses its row loses the burn with it.
+- **Attestation material is stored with a security key (#565, leg 1).** Migration 038
+  adds the columns that keep the raw attestation object beside the credential, so
+  attestation policy can act retroactively later. Storage only — nothing is enforced
+  on it yet.
+
+### Changed
+
+- **Changed: `POST /api/v1/admin/command-policy` now rejects unknown body
+  keys with 422** (`extra="forbid"` on the request model, #289 Q4). Junk
+  keys on this control-plane route can no longer succeed silently; documented
+  senders (which use the real fields) are unaffected.
+- **CLI: local `admin` commands no longer ask for a key ceremony (#590).** The
+  subcommands whose bodies issue no request (the list is body-verified) skip the
+  ceremony, which could neither authenticate them nor succeed against a core with an
+  empty user table. The certificate checks are NOT skipped: a cert without its key, a
+  key without its cert, and a nonexistent cert path still raise exactly as before.
+- **Executor configuration states its precedence, and says when two spellings
+  disagree (#598).** The ruled order is config file, then environment, then the field
+  default. When one key is set in both carriers to different values, the start now
+  names the key and the value in use instead of choosing silently.
+- **The pip-audit hook names the feed it queried (#566, #568).** A clean result is now
+  a statement about OSV, and a test pins the feed choice so that statement cannot
+  rot.
+
+### Removed
+
+- **Removed: `venya admin set-command-policy --custom`.** The flag was inert
+  surface (#289): it posted a `custom` key the API model does not define (and
+  never even opened the file it named), so the server silently dropped it.
+  Replaced by explicit `--custom-allowed` / `--custom-dangerous` (comma-
+  and/or space-separated), each mapping 1:1 to a real API field; each list
+  REPLACES its stored counterpart (replace-not-union), an omitted flag leaves
+  the stored list untouched.
 
 ### Fixed
+
+- **CLI: `exec register` verification carries the register-path trust (#395).**
+  The post-register verify call now builds its TLS trust in the ruled order —
+  config-dir CA if present, else the resolved `--ca-bundle`, else a loud
+  error — so a config-less host that registered with `--ca-bundle` can verify
+  instead of always hitting a certificate error. Verification failure now
+  exits non-zero with the certificate kept and the wording
+  `registered, auth NOT verified`; a verified registration still exits 0 with
+  `registered successfully` as before. refs #395
 - **Installer: interactive secret prompts now confirm at entry.** The core
   install's server encryption passphrase, PostgreSQL password, and both CA
   key passphrases, and the executor install's Docker access token, are read
@@ -274,7 +275,6 @@ Notable changes to Venya will be documented in this file.
   `session.session_timeout` greater than `session.max_session_duration` now
   fails config validation loudly at startup (nothing else validated that
   pairing).
-
 - **GET /secrets/{key} now passes the caller's role names to core.get.**
   The GET route omitted the `role_names` argument that `_resolve_secret_in`
   uses as the visibility contract, so every role-scoped secret 404'd for
@@ -283,7 +283,6 @@ Notable changes to Venya will be documented in this file.
   passed at all three core.get call sites; scoped-out keys stay
   404-indistinguishable from nonexistent ones, and a visibility 404 on the
   unmask path still never burns the elevation token (rollback pin test).
-
 - **Rotated executor certificates no longer leak their HTTP clients.**
   Cert rotation rebuilt the mTLS client and swapped it into the daemon,
   cert manager, and reaper, but never closed the pre-rotation client — its
@@ -313,13 +312,130 @@ Notable changes to Venya will be documented in this file.
   minting guidance (`venya admin executor-enroll <id>`, single-use, ~30-min
   TTL) before any system write, mirroring the `VENYA_SERVER_URL` Require
   block; re-runs over an existing certificate proceed tokenless as before.
- - **Installer: confirm questions no longer print before the skip check
+-- **Installer: confirm questions no longer print before the skip check
    (#389).** `venya_prompt_gate` now runs before `Install to ...? [Y/n]` and
    `Reinstall? [y/N]` are emitted: with `VENYA_SKIP_PROMPT=yes` the documented
    default is taken silently with zero question lines; a non-TTY run without
    the flag exits loud with guidance instead of consuming EOF defaults; the
    interactive TTY path is unchanged. The #203/EXEC co-location hard stop is
    untouched and still refuses regardless of the skip flag.
+- **`GET /api/v1/audit` applies the `key=` filter it accepts (#607).** The clause was
+  collected and never applied, so a disclosure or a denied secret read could not be
+  found by the key it names. It is cast against the same JSON operator idiom the
+  `executor_id` filter already uses; the self-filter for non-privileged callers is
+  unchanged and proven by its own cell.
+- **The relay listener presents rotated certificate material on new connections
+  (#579).** The mTLS context is published to the accept path and rebuilt from the
+  on-disk material, so a rotation reaches the `:8443` side instead of leaving that
+  door on its boot-time context.
+- **Migration 039 gives two declared CASCADEs a real `ON DELETE` (#591).**
+  `execution_sessions.user_id` and `role_members.role_id` carried cascade semantics
+  the schema never had, so a path that trusted the declaration — an ops clear, an
+  offboarding script, your own SQL — met an FK violation instead of a cascade.
+- **CLI: `venya store --help` renders its default the way argparse displays it
+  (#604)**, and the generated reference agrees with the shipped text.
+- **Windows installer: the DAcl enumeration no longer walks a wildcard path (#493).**
+- **Elevation repair strings name the real command (#583)** instead of a form the CLI
+  does not accept.
+- **The docs read the way the tip behaves (#563 follow, #600, #601, #605, #609, #615).**
+  The disclosure and secret-lifecycle claims now state the mechanism the code
+  implements; `BACKUPS.md` names the shipped authenticated envelope and says which
+  blob an operator is holding; the CA-key comments describe the CLI-only codec, the
+  server pair having been retired; the re-run, rotation and beta-terms pages match
+  what the installer does today; and the served README and `installation.md` name the
+  passphrase minimum.
+
+### Security
+
+- **Executor mTLS key is encrypted at rest on every write path (#565).** The
+  executor's own leaf key (`/etc/venya/executor/executor.key`) was serialized
+  unencrypted by all four of its writers — the daemon's registration and rotation
+  paths, and the workstation CLI's `venya exec register` / `venya exec cert renew`
+  — and none of the readers could answer a passphrase. They now write a PKCS#8
+  `BestAvailableEncryption` envelope keyed by `VENYA_EXECUTOR_KEY_PASSPHRASE`, and
+  every reader (the daemon's control-channel client, the boot identity probe, the
+  relay listener, the audit forwarder, the boot certificate/key pair gate, and the
+  CLI's own renew/heartbeat dials) opens it. A writer with no passphrase configured
+  refuses BEFORE it generates a key or sends a request, so nothing is written and an
+  enrollment token is not consumed. Keys written by earlier releases are plaintext on
+  disk and keep loading unchanged — the requirement lands on the next write. This is
+  disk protection by a file passphrase, not hardware-key custody; the interim shape
+  and its retirement trigger are recorded in `docs/cert-rotation-runbook.md` §2 and
+  `docs/design-fido2-keywrap-565.md` §6. refs #565
+- **End-to-end mTLS: client identity is crypto-verified at the app.** Admin
+  and executor mTLS now read identity from the client certificate the app
+  verifies itself (forwarded by nginx over the new inner nginx→uvicorn mTLS
+  channel as a per-connection certificate file), replacing the
+  `X-Client-Verified`/`X-Client-Subject`/`X-Client-Serial` header chain. The
+  app serves TLS with required client certificates when
+  `VENYA_INNER_MTLS__ENABLED=true`, so a direct app-port connection stops at
+  the handshake; per-plane CA binding (admin stage vs admin CA, executor
+  stage vs Root CA) refuses cross-plane certificates at the chain check.
+  Header-based identity reads no longer exist in the server package
+  (interlock test pins the posture). refs #314
+- **IAM: `auditor` permission tier.** Roles can now be created with
+  `permissions="auditor"` (API, CLI `role create --permissions auditor`).
+  Auditors keep the read-tier listings (secrets/roles/executors metadata)
+  and gain audit-log visibility, but NEVER satisfy read-write gates (no
+  secret create/delete, no session create, no command execution) and never
+  reach admin routes.
+- **Secret values deny auditors at the chokepoint.** An auditor-only caller
+  (ALL memberships auditor-tier; a union with any other tier keeps its
+  rights) receives a 403 on any secret-value read — enforced inside the
+  masked-get unmask path BEFORE the single-use elevation token is consumed,
+  so denied attempts never burn tokens. Every denial is audit-logged
+  (`auditor_secret_read_denied`, value-free fields; the audit-write itself
+  can never turn a denial into an allow).
+- **Elevation tokens are not issued to auditor-only callers.** Both elevate
+  assert endpoints (CLI/API and browser) 403 before creating the token, and
+  audit-log the refusal (`auditor_elevation_denied`).
+  Because the same token gates self-service security-key registration
+  (`credential add`), an auditor cannot add their own credential: an
+  administrator provisions it (the tiers being exclusive means a
+  second non-auditor role is not an option either — release-notes item).
+- **The auditor tier is EXCLUSIVE by design (separation of duties).** A
+  role grant (`POST /roles/{id}/members`) or role tier flip
+  (`PUT /roles/{id}`) that would make one user hold `auditor` together
+  with any other tier is refused with 409 and audit-logged
+  (`auditor_sod_denied`, value-free fields; the refusal stands even if the
+  audit write itself fails). Auditor+auditor remains legal; the tier ships
+  for the first time with this rule, so no mixed state can pre-exist. The
+  union permission math is unchanged underneath as defense-in-depth.
+  Aligned with NIST SP 800-53 Rev 5 AC-5 (Separation of Duties); the
+  audit-logged denials above provide evidence for NIST AU-3/AU-6 and PCI
+  DSS 10.2.1. Aligned — not certified: attestation requires an assessor.
+- **Behavior change: the audit log is auditor-scoped.** `GET /api/v1/audit`
+  moved from the read tier to the auditor gate: plain `read`-only users are
+  now 403 there (auditor and read-write/admin retain access). Auditor-tier
+  holders see the FULL log — other users' events included — the same
+  visibility the `admin` role holds; every other non-admin caller keeps
+  the self-filter to their own events.
+- **The relay asks the revocation question at both ends it can answer (#586).** The
+  core's dial to an executor now consults the certificate revocation list at the TLS
+  handshake: a revoked leaf is refused and the refusal says revoked, while a stale or
+  unreadable list is refused with a 503 whose text says "no revocation asserted" and
+  never claims a revocation that did not happen. On the other side, the executor's
+  relay accept gate (`revocation_accept_reason`,
+  `packages/executor/src/executor/relay_listener.py`) refuses a new `:8443`
+  connection while THIS daemon's own credential is revoked server-side or has
+  received no revocation answer since boot — it fails closed on "cannot tell", and
+  the two answers stay distinct status strings. What a peer's credential can still do
+  at that door is written up in `docs/beta-known-limitations.md`.
+- **Plane markers on Venya certificates are carried non-critical and enforced by the
+  app (#588), and now mint on Tabith LLC's registered enterprise number (#601).** The
+  marker OID moved to the project's own PEN; the reader accepts the earlier arc for a
+  bounded window so credentials already in the field keep resolving.
+- **The CA and certificate directories are tighter at creation and across re-runs
+  (#606, #610).** `/var/lib/venya/ca` and the admin CA directory are created 0700 and
+  pinned back to 0700 on every run, so an interrupted install never leaves them
+  group-readable.
+- **A passphrase that will not open a stored key says so in Venya's words, at one
+  home, naming the real file (#569, #572, #574, #576).** A damaged key file is no
+  longer blamed on the passphrase: which refusal you get is chosen by whether the
+  BYTES PARSE, not by whether an input was supplied (#577).
+- **The MCP client transport requires an explicit verify anchor (#571).** The
+  constructor seam refuses an unanchored configuration before any transport exists,
+  rather than falling back to a system store.
 
 ## [0.1.0alpha16] - 2026-09-27
 
