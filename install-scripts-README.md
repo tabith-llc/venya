@@ -33,7 +33,7 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 | `VENYA_INSTALL_DIR` | `/opt/venya` | Install location |
 | `VENYA_SKIP_PROMPT` | (empty) | Set to `yes` to skip confirmation prompts |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL venya user password |
-| `VENYA_DB_PASSPHRASE` | (reuse / prompt) | Server encryption passphrase — no default. Re-run: reused from `$INSTALL_DIR/.env`; an explicit value must match the stored one or the install aborts. Fresh install: prompted (interactive) or required (unattended) |
+| `VENYA_DB_PASSPHRASE` | (reuse / prompt) | Server encryption passphrase (15+ chars) — no default. Re-run: reused from `$INSTALL_DIR/.env`; an explicit value must match the stored one or the install aborts. Fresh install: prompted (interactive) or required (unattended). *Alpha warning: there is no backwards compatibility during alpha.* |
 | `VENYA_RECOVERY_PEPPER` | (reuse / random) | Recovery-code pepper — reused from `.env` on re-run (mismatch aborts); strong random when unset on a fresh install |
 | `VENYA_TARBALL` | `https://github.com/tabith-llc/venya/releases/latest/download/venya-core-install.tar.gz` | Tarball URL |
 | `VENYA_TARBALL_SHA256` | (optional) | Pin expected sha256 (strict integrity). Unset: fetched from `<tarball>.sha256` on the same origin (corruption guardrail); fail-closed. Required (no sidecar fallback, abort before any fetch/write) when the tarball source is NOT https — file:// or plain http:// (#375, extending #327) |
