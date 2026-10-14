@@ -13,7 +13,9 @@ Installs the Venya Core server on a fresh VM. Includes:
 - **Nginx** reverse proxy (installed first for TLS)
 - **PostgreSQL** (user, database, trust auth for localhost)
 - Python virtual environment + core/server packages
-- Code fixes (database_url, imports, timezone handling)
+- Code fixes: a source-shape check on the DB-URL wiring plus the imports /
+  admin-role flush / heartbeat timezone patches — any fix whose anchor is
+  absent from the installed source is an error and stops the install there
 - Configuration: `.env`, Nginx site config
 - Nginx CA trust installation
 - Database migrations
@@ -52,7 +54,7 @@ Installs the Venya Executor daemon on a fresh VM. Includes:
 - **Rust** toolchain (venya user)
 - Python virtual environment + executor/core packages
 - Rust extension build (`venya_filter.so`)
-- Code fixes (same as core)
+- Code fixes (same as core, including the dead-anchor stop)
 - **sbx** CLI (Docker Sandboxes)
 - Configuration: `executor.toml`
 - `venya-executor.service` systemd unit
