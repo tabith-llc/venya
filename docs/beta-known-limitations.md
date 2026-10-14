@@ -619,9 +619,12 @@ merge that carries it (`54457a6`) and the listener accept gate at the merge that
 (`5b0dd31`); those two shas are history cites for the merges that landed the code, so they do not
 move when the tree moves. **`dev` `7b055e4` is the anchor this page carries now**: the three
 `Revocation` entries were re-derived there by symbol on 2026-10-14 and the numbers below moved to
-what this tip actually reads (`29beb1b` had already shifted `install-venya-core.sh` and the
-executor package relative to `2e0e751`, so both anchor sets are now expressed at one tip). The
-propagation-window entry's numbers were unchanged by that re-read except the daemon tick.
+what this tip actually reads. The moves are between this page's old anchor and this tip —
+`install-venya-core.sh` took 59 insertions and 2 deletions since `29beb1b` (net +57, which is
+exactly the relay block's shift), `daemon.py` +22/-6 and `relay_listener.py` +7/-1 (the accept
+gate and the main-loop tick), `config.py` +2/-1 (the `relay_client_ids` field). The
+propagation-window entry was re-read the same way: one number moved, the daemon tick, and it is
+restated below.
 `29beb1b` moved no file either entry cites (its face is `routes/audit.py` and two
 test files), so the numbers are unchanged between the two tips. Two entries came out of this
 page on 2026-10-13 after being re-read against `dev` `3268081` — the `#598` precedence entry (the
