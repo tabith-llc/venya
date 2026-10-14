@@ -83,9 +83,10 @@ always means a human touching a physical key.
 The refusal names the command: `venya admin cert renew`. It mints a fresh
 admin certificate on a login session plus one security-key ceremony, never the
 expired credential. Whether your session counts as an interactive desktop for
-that ceremony is answered under "What platforms are supported?" below; what the
-renewed pair can serve today is stated once in the
-[rotation runbook](cert-rotation-runbook.md). Flags:
+that ceremony is answered under "What platforms are supported?" below; the
+Windows check-and-renew path in full, step by step, is
+[win11-admin-cert.md](win11-admin-cert.md); what the renewed pair can serve
+today is stated once in the [rotation runbook](cert-rotation-runbook.md). Flags:
 [cli-reference.md](cli-reference.md).
 
 ## Deployment

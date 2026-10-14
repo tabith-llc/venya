@@ -482,7 +482,9 @@ udev rules needed).
 
 Renewal follows the same rule: `venya admin cert renew` mints a fresh admin
 certificate on a login session plus one security-key ceremony, so on Windows it
-is a console action like the one above. What that renewed pair can and cannot
+is a console action like the one above. The Windows ceremony-and-renewal path,
+and the physical cells it still owes, are gathered in
+[win11-admin-cert.md](win11-admin-cert.md). What that renewed pair can and cannot
 serve today is stated once, in the opening note of
 [cert-rotation-runbook.md](cert-rotation-runbook.md); flag table:
 [cli-reference.md](cli-reference.md).
