@@ -666,6 +666,15 @@ and none of them is answerable by a documentation leg:
    explicitly not part of this set; it stays in
    `features/passphrase-length-floor-n15.md`. Noted here only so a reader does not mistake the R7
    rulings for a length rule; there is none.
+   **[Currency, #573/#615: that sentence is superseded — the floor now EXISTS and ships. 15 Unicode
+   code points, inclusive, counted as typed and not as bytes, with the 64-point maximum stated but
+   never enforced: `core/engine/backend.py` `MIN_PASSPHRASE_CODE_POINTS` (DB-KEK boot + read doors),
+   `server/ca.py` (CA plane), `venya_cli/commands.py` + `venya_cli/executor_key.py` (CLI planes),
+   `executor/key_passphrase.py` (daemon plane), and `install-venya-core.sh`, which asks the same
+   question before any mutation (#615). Operator-facing wording lives in
+   [installation.md](installation.md) §1 and
+   [deployment-config.md](deployment-config.md) `db.passphrase`; this note records the ruling
+   history only.]**
 6. **The date/host row of the batched owner-present fleet session** (§8 Q6) — **owner**; R7-Q6 settled
    the composition (AC7 + #466 AC2 + the #565 AC3 class + the R11 window in one booking), leaving only
    when and on which host.

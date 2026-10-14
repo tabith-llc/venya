@@ -55,6 +55,18 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 (interactive runs are prompted; re-runs reuse the stored value and an explicit
 value must MATCH it).
 
+It also carries a **minimum length of 15 Unicode code points**, counted as you
+type them and not as bytes, so a passphrase in any alphabet counts the same. The
+installer asks that question where the value resolves and **before it changes
+anything on the host**, mirroring the core's own boot door
+(`MIN_PASSPHRASE_CODE_POINTS` in `packages/core/src/core/engine/backend.py`): a
+short passphrase can no longer walk an install halfway and only fail at service
+start. The floor is measured on the final value, so a **re-run that reuses a
+stored passphrase under it refuses at that same gate** — repairing such an install
+is a deliberate reinstall, never a silent rotation of the stored key-encryption
+key. The 64-code-point maximum is stated and NOT enforced: a longer passphrase is
+accepted and used.
+
 The installer is SHA-256-gated and fail-closed: with `VENYA_TARBALL_SHA256`
 set it verifies against that pin (strict integrity — required on every
 non-https origin, recommended everywhere else); unset on an https origin, it
@@ -76,7 +88,7 @@ Key environment variables (all optional):
 |---|---|---|
 | `VENYA_TARBALL_SHA256` | (sidecar fetch) | integrity gate — recommended; if unset, the installer fetches the `.sha256` sidecar from the same origin and aborts on fetch failure or mismatch. Required (no sidecar fallback) whenever the tarball origin is not https:// — file:// paths (#327) and plain-http:// sources alike (#375, #328). |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL password |
-| `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-20); on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts |
+| `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-20) and a **15 Unicode code-point minimum** (counted as typed, not as bytes) refused by the installer before any mutation, the same floor the core enforces at boot; 64 is stated as the maximum, not enforced; on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts, and a re-run reusing a stored passphrase under the floor refuses at that gate |
 | `CORE_HOSTNAME` | `$(hostname)` | TLS cert SAN and relay CN base |
 | `VENYA_ADMIN_MTLS_ENABLED` | `true` | admin client-cert enforcement |
 | `VENYA_ADMIN_CA_PASSPHRASE` | auto-generated | stored in `/etc/venya/venya-core.env` (0640) |
