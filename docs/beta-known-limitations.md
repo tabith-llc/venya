@@ -267,6 +267,52 @@ revoked machine-client credential cannot be written until this row lands. That i
 dependency on #597, and it is the reason #586 stays open after its dial half merged: adding a CRL
 check at the listener would enforce nothing over the peer that actually dials it.
 
+### A revoked credential is honoured no longer than one hour by the lists we publish, and a reporting executor stops on its next beat
+
+Status: known limitation in beta · Target: no date set · Tracked as: #586 (open — the window
+below is the freshness stamp carried by that row's lists; it is disclosed here, not owed there)
+
+**First, plainly: revocation works today.** An operator who revokes an administrator certificate
+or an executor credential sees it take effect through the shipped poll-and-heartbeat mechanism —
+this entry is about how long full propagation takes, not about a capability that is missing.
+
+**The committed window is one hour, and it is the certificate plane.** Every revocation list this
+product signs carries a stated validity of one hour. The two builders say it in the same words —
+`CAManager.generate_crl`, `packages/server/src/server/ca.py:758`, and `AdminCAManager.generate_crl`,
+`packages/server/src/server/ca.py:1470`, each verbatim
+`builder = builder.next_update(now + timedelta(hours=1))`. A verifier that consumes a published
+list and trusts it until that stated time can therefore still honour a revoked certificate for up
+to 60 minutes. That is the beta security commitment for the window: worst case, one hour.
+One caveat keeps the sentence honest: this does **not** describe the core's own relay connections.
+The core mints the list fresh at every dial and refuses the connection outright if a current list
+cannot be produced (`_ensure_dial_crl_store`,
+`packages/server/src/server/routes/executors.py:690`), so the hour binds relying parties that
+consume a published list to its stamp — not the core's own path.
+
+**The executor's own stop is much faster, and that is the operational plane.** A revoked executor
+that is still reporting to its core stops itself on its next heartbeat — the shipped cadence is a
+beat every 30 seconds (`ExecutorDaemon._main_loop`,
+`packages/executor/src/executor/daemon.py:2147`, `self._shutdown_event.wait(30.0)`, with the
+heartbeat and the revocation poll on the same tick). The core's fleet view marks a credential
+no-longer-online once 60 seconds pass without a beat (`packages/server/src/server/routes/executors.py:1512`),
+so about a minute is the outer edge of what an operator waits to SEE the stop. These 30- and 60-second
+figures are properties of the reporting mechanism. They are not a second window, and they are not
+what the one-hour commitment prices — the two numbers have different jobs and neither rules the
+other. Separately, an executor that cannot reach its core at all keeps a bounded failure counter of
+its own; that counter is an operational safeguard and carries no timing commitment — it is named
+here only so no reader prices it as one.
+
+**Workaround:** where a faster hard stop is needed than propagation, confirm the stop you can see —
+revoke, then watch the fleet view flip the executor to not-online (about a minute), or restart the
+relying service so it drops any list it was holding to its stamp. Do not re-revoke on a timer;
+nothing accumulates from waiting.
+
+**What changes at beta+:** shortening the committed hour is a product decision with its own cost
+(more frequent list consumption by every relying party), and is not scheduled here. The entry
+comes out when the shipped `next_update` stamp changes or when #586's remedy makes propagation
+instant-by-construction across verifiers — whichever lands first makes the sentence untrue as
+written, and an untrue entry comes out.
+
 ---
 
 ## Certificates and credentials
@@ -523,13 +569,16 @@ disposition* are the ones where the choice between "fix it" and "disclose it" is
 if the choice comes out as fix, the entry comes out before the release — and it comes out when
 the fix is in a build, not when the ruling is announced.
 
-**Exception to the symbols-only rule, and why it is here.** The two `Revocation` entries above
-(`#586`, `#597`) carry `file:line` cites rather than symbol-only cites, because the claim being
+**Exception to the symbols-only rule, and why it is here.** The three `Revocation` entries above
+(`#586`, `#597`, and the propagation-window entry) carry `file:line` cites rather than symbol-only
+cites, because the claim being
 disclosed is *the absence of a control at a specific place* — "no CRL load and no `VERIFY_CRL`
 flag anywhere in the executor package" is only checkable if the reader is pointed at the
 context builder and at the one `VERIFY_CRL` line that exists elsewhere, at a named commit. The
 anchor below is that commit; if the tree has moved, re-derive the numbers by the symbol named
-alongside each one before repeating them.
+alongside each one before repeating them. The propagation-window entry cites two more things the
+same way, because its claim is a shipped cadence rather than a fixed number: the hour is read at
+the two `generate_crl` stamps in `ca.py`, and the 30-second beat at the daemon's main-loop tick.
 
 **Source anchor:** the statements above were read against the shipped source at `dev`
 `2e0e751` and the `#590` entry against `dev` `e8d5a22`; the two `Revocation` entries (`#586`,
@@ -547,5 +596,8 @@ the fix touches no installer file), and this page's rule is that a limitation st
 fix gets its own entry rather than a softened one. Both shas are the merges that carry the change,
 read from the history. When a fix listed here merges, re-read the entry against your tip before
 editing — the entry, not the memory of it. Symbols are the citations here on purpose, because
-the numbers rot within a day or two on this tree; the two `Revocation` entries above are the
-named exception, for the reason stated just before the anchor.
+the numbers rot within a day or two on this tree; the three `Revocation` entries above are the
+named exception, for the reason stated just before the anchor. The propagation-window entry was
+written and every cite in it re-read against `dev` `583d902` (`ca.py:758` in `CAManager.generate_crl`,
+`ca.py:1470` in `AdminCAManager.generate_crl`, `daemon.py:2147` in `ExecutorDaemon._main_loop`,
+`routes/executors.py:690` `_ensure_dial_crl_store`, `routes/executors.py:1512` in `list_executors`).
