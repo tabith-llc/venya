@@ -308,7 +308,7 @@ For a person's short-lived workstation certificate the path is `venya admin cert
 one thing about it belongs in the same breath: the renewed key is written **encrypted at rest**,
 and the command-line cannot yet load an encrypted administrator key for administrator
 mutual-TLS. So a renewed pair fixes the proxy refusal and lands in the separate, already
-documented read-side limit — see [installation.md](installation.md) §2, which states that
+documented read-side limit — see [installation.md](installation.md) §3, which states that
 pairing rule once. Use the machine-plane pair for headless work until that read-side work
 lands.
 
@@ -345,7 +345,7 @@ the backup set in [BACKUPS.md](BACKUPS.md) already does, and that pair is not co
 core — and run the export/restore custody commands on the core itself rather than on a host
 whose process memory you do not control. An administrator credential that renews into an
 encrypted key is a separate, known read-side gap, documented once in
-[installation.md](installation.md) §2.
+[installation.md](installation.md) §3.
 
 **What changes at beta+:** the open half of #565 closes the remaining writers, and the ruled
 exemption above changes only when the work that replaces the core-held key lands.
@@ -486,7 +486,7 @@ Authentication failed: <reason naming the transport, not the file operation>
 
 **Workaround:** the ceremony is skipped when the command-line already holds an administrator
 credential — set both `VENYA_ADMIN_CERT` and `VENYA_ADMIN_KEY` (the headless pattern in
-[installation.md](installation.md) §2), or supply a bearer token from a signed-in session —
+[installation.md](installation.md) §3), or supply a bearer token from a signed-in session —
 and with either one these six commands run on the core. That covers the ordinary case.
 Where it does not reach is the case the row is really about: the credential is the thing you
 cannot present because the certificate authority it chains to is the thing being recovered.

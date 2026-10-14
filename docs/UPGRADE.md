@@ -15,6 +15,15 @@ An upgrade is **re-running the installer over the existing install** —
 in-place, same host, same paths. Data, stored secrets, and the CA stack are
 preserved.
 
+One credential is not preserved: every run of the core installer mints a **new**
+machine-plane admin credential at `/etc/venya/admin/` on that core. That pair is
+the core's own and it is not copied to workstations, so nothing on a workstation
+has to be refreshed after an upgrade — a person's administrator certificate comes
+from the security-key ceremony instead
+([installation.md](installation.md) §2), and the date the older hand-off copies
+finally expire on is computed in
+[cert-rotation-runbook.md](cert-rotation-runbook.md) §0.1.
+
 Guaranteed by a version-changing re-run:
 
 - **Stored-reuse, fail-loud.** The stored DB password, server passphrase, and

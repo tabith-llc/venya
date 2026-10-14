@@ -153,9 +153,18 @@ executor count in the run's results file.
   cannot run on the headless core VM (no key → the browser-less ceremony dies
   with `Connection refused [Errno 111]`). The PIN prompt needs a TTY — a
   pipe/heredoc breaks it (`CliInteraction.request_pin` refuses non-TTY stdin).
-- **Admin mTLS cert is per-core.** Every core install mints a fresh Admin CA +
-  client cert pair. The workstation copy (`$ADMIN_WS/admin-cert/`) is stale
-  after every core reinstall — re-sync (Phase C.1) or `admin …` commands 403.
+- **Admin credentials come in two kinds, and this harness uses the core's own.**
+  Every core install mints a fresh Admin CA plus a machine-plane pair at
+  `/etc/venya/admin/admin.crt|.key` on that core; it names the core, not a person,
+  and the shipped installer banner tells an operator never to copy it off the host.
+  A person's certificate is minted on the workstation by the security-key ceremony
+  (`venya login` → `venya admin cert renew`). Neither shape is a hand-off: the
+  workstation pair this runbook reads at `$ADMIN_WS/admin-cert/` is a **harness
+  stand-in, not operator guidance** — the renewed pair cannot serve these cells yet
+  because its key is written encrypted and the CLI has no passphrase read path for
+  an admin key (#565 Part B), so the harness copies the core's pair into the role
+  dir to drive `admin …` cells headlessly. Re-sync (Phase C.1) after every core
+  reinstall or `admin …` commands 403.
 - **`enrollment_tokens` (users) ≠ `executor_enrollment_tokens` (executors).**
   Executor tokens are stored hashed (HMAC-SHA256 + pepper), single-use, TTL
   ~30 min (default 1800 s). User enrollment tokens: 15-min TTL. Plaintext is
@@ -471,7 +480,7 @@ Workstation layout:
 $ADMIN_WS/
 ├── .venv/
 ├── config.json          # written by the CLI (VENYA_CONFIG)
-└── admin-cert/          # admin.crt + admin.key (synced in C.1)
+└── admin-cert/          # admin.crt + admin.key (the harness stand-in staged in C.1)
 ```
 
 ### C.0 Pre-flight (no keys attached)
@@ -510,10 +519,18 @@ with socket.create_connection(('$CORE_HOST', 443)) as s, ctx.wrap_socket(s) as t
 " | openssl x509 -noout -ext authorityKeyIdentifier
 ```
 
-### C.1 Sync the admin mTLS cert pair (**mandatory after any core reinstall**)
+### C.1 Stage the admin mTLS pair for the harness (**mandatory after any core reinstall**)
+
+> **Not an operator procedure.** The core's machine-plane pair is never copied to a
+> workstation in a real deployment — see [installation.md](installation.md) §2 for the
+> ceremony a person's credential comes from, and
+> [cert-rotation-runbook.md](cert-rotation-runbook.md) §0.1 for the date pre-cut-over
+> copies age out on. This step exists because #565 Part B is open: the renewed pair
+> writes its key encrypted and the CLI cannot load it for admin mTLS yet, so the
+> harness borrows the core's pair to run `admin …` cells headlessly.
 
 Each core install mints a **new** Admin CA and client pair; the workstation
-copy is stale until re-synced — Phase C.3 mTLS fails (403) otherwise.
+stand-in is stale until re-synced — Phase C.3 mTLS fails (403) otherwise.
 
 ```bash
 mkdir -p $ADMIN_WS/admin-cert
@@ -650,7 +667,7 @@ Deliver this token to the executor operator out-of-band.
 Capture `EXEC_TOKEN` and run Phase B.4 immediately (single-use, ~30 min).
 
 A 403 here means the admin mTLS client-cert presentation is broken (stale
-cert pair — re-sync C.1). Record it as a failure; do **not** paper over it
+harness pair — re-sync C.1). Record it as a failure; do **not** paper over it
 with sudo-curl on the core.
 
 ### C.5 (Full matrix only) Create + enroll the regular user `[FIDO2 — KEY_B]`
@@ -1035,7 +1052,7 @@ injected secret file**, uses it, and the returned output has the value
 | Pasted block did nothing after the ssh banner | paste race: lines typed while ssh connects are consumed by the local terminal buffer (observed twice, 2026-09-17) | verify remote state before rerunning (`ls /tmp/...`, `ls /opt/venya`); use single-line commands or paste only after the remote prompt |
 | `ClientError code=3 CONFIGURATION_UNSUPPORTED` on init/enroll/login | key has NO PIN (UV impossible). Keys WITH a PIN but no built-in UV (clientPin-only, TrustKey class) are supported since fc94308 — raw clientPin registration path | set the PIN (C.2), re-run — on current servers the retry needs no `--installation-reset` (pending rows auto-superseded) |
 | CLI 409 message unclear | stale CLI predating detail-carrying fix | update the workstation venv/install (B.3); state also visible via `journalctl -u venya-core` or the `users` table |
-| `admin …` 403 | admin mTLS client cert stale/missing | re-sync C.1; do not sudo-curl around it |
+| `admin …` 403 | admin mTLS client cert stale/missing | re-sync C.1 (harness stand-in); do not sudo-curl around it |
 | `venya store` fails: "No active key version configured" | pre-027 install with no active key version (503) — post-027 fresh installs seed `v1`; if seen there, check `alembic_version` | pass `--key-version v1` (pre-027 installs only) |
 | `venya store` 422 `key_version_id Field required` | running a pre-fix CLI | update the workstation venv/install (B.3) |
 | Executor offline after install | token single-use/expired, or mTLS | re-mint (C.4), reinstall executor |
@@ -1118,7 +1135,7 @@ Create per run: `testing/results-YYYY-MM-DD-HH-MM.md`
 | Step | Result |
 |------|--------|
 | C.0 health + CA fetch (SKI==AKI) | |
-| C.1 admin cert pair synced (hashes match) | |
+| C.1 harness admin pair staged (hashes match) | |
 | C.2 key resets + PINs set | |
 | C.3 venya init (recovery code → secure storage) | |
 | C.3 venya login + token harvested | |
