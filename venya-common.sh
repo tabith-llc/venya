@@ -29,7 +29,7 @@
 #   venya_download_tarball      # Download tarball (type=core|executor)
 #   venya_extract_tarball       # Extract tarball to INSTALL_DIR
 #   venya_create_venv           # Create Python venv + install packages
-#   venya_apply_code_fixes      # Apply Python code patches (sed)
+#   venya_apply_code_fixes      # Verify/patch shipped source; a dead anchor aborts (#618)
 #   venya_create_directories    # Create runtime directories
 #   venya_service_retry         # Retry loop for systemctl start
 #   venya_verify_install        # Verify installation (file checks)
@@ -581,46 +581,51 @@ venya_apply_code_fixes() {
     # fix that did nothing. Each fix now verifies a PATCH-SITE post-condition
     # (no file-wide pre-checks — an unrelated occurrence used to mask a
     # needed fix) and reports exactly one outcome:
-    #   applied / already clean / FAILED-ANCHOR-MISSING (loud warn, never a
-    #   success line). Idempotent: a second run on a patched tree reports
+    #   applied / already clean / FAILED-ANCHOR-MISSING (never a success
+    #   line). Idempotent: a second run on a patched tree reports
     #   "already clean". set -euo pipefail safe: every count capture ends in
     #   `|| true` because grep exits 1 on zero matches.
+    #
+    # #618 dead-anchor hard abort: a FAILED-ANCHOR-MISSING used to be a [WARN]
+    # the installer sailed past, which is how Fix 1 rotted unnoticed while
+    # firing on every healthy install. Any dead anchor now prints [ERROR] and
+    # ends the run nonzero, at the foot of this function — before the venv,
+    # before migrations, before the service starts, so the only thing touched
+    # is the extracted tree under $INSTALL_DIR.
     local f n_applied=0 n_clean=0 n_failed=0
 
-    # --- Fix 1: dependencies.py — init_db reads db_config.database_url ---
+    # --- Fix 1: the DB URL comes from the configured value, env is fallback ---
+    # #618 re-anchor. The two literals this guard matched are gone from the
+    # product: init_db now takes the URL as a parameter, so shipped source reads
+    #     dependencies.py: database_url = db_url or os.environ.get("VENYA_DB_URL")
+    #     app.py call-site: init_db(config.db, db_url=config.db.database_url)
+    # which is the intent the old sed existed to create. No served ref carries
+    # the retired env-only form (checked v0.1.0-alpha .. v0.1.0alpha16), so a
+    # sed for it could never fire — the guard asserts the live shape instead and
+    # touches nothing. Any other shape is a dead anchor and aborts the install.
     f="$INSTALL_DIR/packages/server/src/server/dependencies.py"
-    if [ ! -f "$f" ]; then
-        warn "  Fix 1 (dependencies.py db_config): FAILED-ANCHOR-MISSING - file absent"
+    a="$INSTALL_DIR/packages/server/src/server/app.py"
+    if [ ! -f "$f" ] || [ ! -f "$a" ]; then
+        error "  Fix 1 (db URL from config): FAILED-ANCHOR-MISSING - server source absent"
         n_failed=$((n_failed + 1))
-    elif grep -qF 'database_url = db_config.database_url or os.environ.get("VENYA_DB_URL")' "$f"; then
-        info "  Fix 1 (dependencies.py db_config): already clean"
+    elif grep -qF 'database_url = db_url or os.environ.get("VENYA_DB_URL")' "$f" \
+        && grep -qF 'init_db(config.db, db_url=config.db.database_url)' "$a"; then
+        info "  Fix 1 (db URL from config): already clean"
         n_clean=$((n_clean + 1))
-    elif grep -qF 'database_url = os.environ.get("VENYA_DB_URL")' "$f"; then
-        sed -i 's|database_url = os.environ.get("VENYA_DB_URL")|database_url = db_config.database_url or os.environ.get("VENYA_DB_URL")|' "$f"
-        if ! head -10 "$f" | grep -q "^import os"; then
-            sed -i '/from __future__ import annotations/a\\nimport os' "$f"
-        fi
-        if grep -qF 'database_url = db_config.database_url or os.environ.get("VENYA_DB_URL")' "$f"; then
-            info "  Fix 1 (dependencies.py db_config): applied"
-            n_applied=$((n_applied + 1))
-        else
-            warn "  Fix 1 (dependencies.py db_config): FAILED-ANCHOR-MISSING - sed did not land the patch"
-            n_failed=$((n_failed + 1))
-        fi
     else
-        warn "  Fix 1 (dependencies.py db_config): FAILED-ANCHOR-MISSING - anchor absent from installed source (upstream shape changed)"
+        error "  Fix 1 (db URL from config): FAILED-ANCHOR-MISSING - $f and/or $a no longer holds the config-value/env-fallback shape (upstream shape changed)"
         n_failed=$((n_failed + 1))
     fi
 
     # --- Fix 2: init.py relative imports (from ..iam.models -> core) ---
     f="$INSTALL_DIR/packages/server/src/server/routes/init.py"
     if [ ! -f "$f" ]; then
-        warn "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - file absent"
+        error "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - file absent"
         n_failed=$((n_failed + 1))
     elif grep -qF 'from ..iam.models' "$f"; then
         sed -i 's/from \.\.iam\.models/from core.iam.models/g' "$f"
         if grep -qF 'from ..iam.models' "$f"; then
-            warn "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - relative import survived the sed"
+            error "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - relative import survived the sed"
             n_failed=$((n_failed + 1))
         else
             info "  Fix 2 (init.py imports): applied"
@@ -630,7 +635,7 @@ venya_apply_code_fixes() {
         info "  Fix 2 (init.py imports): already clean"
         n_clean=$((n_clean + 1))
     else
-        warn "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - neither import form present (upstream shape changed)"
+        error "  Fix 2 (init.py imports): FAILED-ANCHOR-MISSING - neither import form present (upstream shape changed)"
         n_failed=$((n_failed + 1))
     fi
 
@@ -639,14 +644,14 @@ venya_apply_code_fixes() {
     # 'db.flush()' grep let any unrelated occurrence mask a missing site
     # flush. Every db.add(admin_role) line must now be followed by the flush.
     if [ ! -f "$f" ]; then
-        warn "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - file absent"
+        error "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - file absent"
         n_failed=$((n_failed + 1))
     else
         local n_anchor n_paired
         n_anchor=$(grep -cF 'db.add(admin_role)' "$f" || true)
         n_paired=$(grep -A1 -F 'db.add(admin_role)' "$f" | grep -cE '^[[:space:]]*db\.flush\(\)[[:space:]]*$' || true)
         if [ "${n_anchor:-0}" -eq 0 ]; then
-            warn "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - db.add(admin_role) anchor absent (upstream shape changed)"
+            error "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - db.add(admin_role) anchor absent (upstream shape changed)"
             n_failed=$((n_failed + 1))
         elif [ "$n_paired" -ge "$n_anchor" ]; then
             info "  Fix 3 (init.py admin_role flush): already clean"
@@ -658,7 +663,7 @@ venya_apply_code_fixes() {
                 info "  Fix 3 (init.py admin_role flush): applied"
                 n_applied=$((n_applied + 1))
             else
-                warn "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - sed did not land the flush"
+                error "  Fix 3 (init.py admin_role flush): FAILED-ANCHOR-MISSING - sed did not land the flush"
                 n_failed=$((n_failed + 1))
             fi
         fi
@@ -670,10 +675,10 @@ venya_apply_code_fixes() {
     # this patch appends. The check now looks within the anchor's own lines.
     f="$INSTALL_DIR/packages/server/src/server/routes/executors.py"
     if [ ! -f "$f" ]; then
-        warn "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - file absent"
+        error "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - file absent"
         n_failed=$((n_failed + 1))
     elif ! grep -qF 'not_after = current_cert.not_after' "$f"; then
-        warn "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - not_after anchor absent (upstream shape changed)"
+        error "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - not_after anchor absent (upstream shape changed)"
         n_failed=$((n_failed + 1))
     elif grep -A2 -F 'not_after = current_cert.not_after' "$f" | grep -qF 'not_after.tzinfo'; then
         info "  Fix 4 (executors.py heartbeat tz guard): already clean"
@@ -684,16 +689,20 @@ venya_apply_code_fixes() {
             info "  Fix 4 (executors.py heartbeat tz guard): applied"
             n_applied=$((n_applied + 1))
         else
-            warn "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - sed did not land the guard"
+            error "  Fix 4 (executors.py heartbeat tz guard): FAILED-ANCHOR-MISSING - sed did not land the guard"
             n_failed=$((n_failed + 1))
         fi
     fi
 
     if [ "$n_failed" -gt 0 ]; then
-        warn "Code fixes summary: $n_applied applied, $n_clean already clean, $n_failed anchor-missing failures (see [WARN] lines above)"
-    else
-        info "Code fixes summary: $n_applied applied, $n_clean already clean, 0 failures"
+        error "Code fixes summary: $n_applied applied, $n_clean already clean, $n_failed anchor-missing failure(s) (see [ERROR] lines above)"
+        error "Those fixes are NOT in place on this host, and the behavior they carry is not"
+        error "provable, so the install stops here — before the venv, migrations and service."
+        error "Re-anchor venya_apply_code_fixes in venya-common.sh to the current source shape"
+        error "(or drop the fix if upstream now carries it), then re-run the installer."
+        exit 1
     fi
+    info "Code fixes summary: $n_applied applied, $n_clean already clean, 0 failures"
 }
 
 # --- 14. Create directories ---
