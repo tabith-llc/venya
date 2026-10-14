@@ -323,12 +323,18 @@ def revocation_accept_reason(state: Any) -> str | None:
     Fail-closed on "cannot consult" (DoD point 3, #586 acceptance 6): no state wired,
     and no answer yet this boot, both refuse. Once answered the flag stays answered —
     a later outage is already bounded by ``cert_rotation.max_revocation_failures``,
-    which sets ``state.revoked`` and takes the listener down with the daemon.
+    which carries a #603 fault reason (``state.revocation_fault_reason``) and takes the
+    listener down with the daemon; it does NOT set ``state.revoked``, because no answer
+    is a server-side revocation claim.
     """
     if state is None:
         return REFUSE_NOT_WIRED
     if getattr(state, "revoked", False):
         return REFUSE_REVOKED
+    if getattr(state, "revocation_fault_reason", None) is not None:
+        # #603: the threshold tripped with no answer ever arriving — same 503 class as
+        # a boot that was never answered, never the 403 revocation claim.
+        return REFUSE_NO_ANSWER
     if not getattr(state, "revocation_answered", False):
         return REFUSE_NO_ANSWER
     return None

@@ -48,6 +48,7 @@ import pytest
 
 from executor.config import CertificateRotationConfig, ExecutorConfig
 from executor.daemon import CertificateManager, ExecutorDaemon, RevocationStatus
+from executor.relay_listener import REFUSE_NO_ANSWER
 
 REVOCATION_PATH = "/api/v1/executors/certs/revocation-list"
 SERVER_URL = "https://example.com"
@@ -234,9 +235,11 @@ class TestStatusErrorIsAFailedCheck:
     def test_a_run_of_status_errors_still_trips_the_existing_threshold(self, caplog):
         """Bounded fail-closed applies to status errors too — via #442's threshold.
 
-        THRESHOLD consecutive UNREACHABLE answers flip ``state.revoked`` on the
-        ``max_revocation_failures`` branch, with #442's unchanged warning text.
-        Nothing here is new policy: #551 only makes the status error FEED the
+        THRESHOLD consecutive UNREACHABLE answers trip the
+        ``max_revocation_failures`` branch and stop the daemon. #603 amended what the
+        trip ASSERTS (a carried fault reason, never a revocation claim) and re-pointed
+        #442's warning-text promise at the honest line — that is the surface this cell
+        now pins. Nothing here is new policy: #551 only makes the status error FEED the
         counter it used to bypass by killing the loop first.
         """
         manager = _manager(max_revocation_failures=THRESHOLD)
@@ -248,11 +251,13 @@ class TestStatusErrorIsAFailedCheck:
             # that reaches the threshold never completes.
             ticks = _run_ticks(daemon, THRESHOLD + 1)
 
-        assert daemon.state.revoked is True, "a persistent status outage fails closed on the threshold"
+        assert daemon.state.revoked is False, "a persistent outage fails closed, but never as a revocation"
+        assert daemon.state.revocation_fault_reason is REFUSE_NO_ANSWER, "the stop carries the honest reason"
         assert daemon.state._consecutive_revocation_failures == THRESHOLD
         assert manager.client.get.call_count == THRESHOLD, "one poll per tick, tripped exactly at the threshold"  # type: ignore[union-attr]
         assert ticks == THRESHOLD - 1, "the looping stopped on the trip, not on this cell's stop signal"
-        assert "treating certificate as revoked" in caplog.text
+        assert "reached the fault threshold" in caplog.text
+        assert "no revocation answer received, stopping service" in caplog.text
 
     def test_a_good_answer_between_status_errors_still_resets(self):
         """Paired negative on the counter: UNREACHABLE counts, NOT_REVOKED resets."""
