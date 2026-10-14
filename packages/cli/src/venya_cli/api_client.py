@@ -452,7 +452,9 @@ class APIClient:
                 if not os.path.isfile(p):
                     raise APIClientError(
                         f"{var} points at {p!r}, which does not exist. "
-                        "Copy the admin cert/key from the core (see installer banner) and retry."
+                        "Do not copy the core's admin pair here — it names the core, not a "
+                        "person. Run `venya setup <core>` and `venya login <user-id>`, then "
+                        "`venya admin cert renew` (see the installer banner) and retry."
                     )
             # Existence AND, on POSIX, group/other-unreadable — one legible block.
             # The KEY authorizes admin operations without a security-key touch, so
