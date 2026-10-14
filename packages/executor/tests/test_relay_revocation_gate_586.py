@@ -6,6 +6,16 @@
 
 """#586 — the revocation accept gate at the executor's :8443 relay listener.
 
+NODE-ID NOTE (#603 changeset, so a suite shrinkage is never mistaken for a deleted
+contract): NOTHING was deleted or renamed here. The ruled cell
+``test_the_threshold_revocation_reaches_the_gate`` keeps its id and its plumbing
+intent; only its two assertions were amended to the honest end state. Its name is now
+slightly off-label (what reaches the gate is a fault, not a revocation) — renaming it
+would DELETE a node-id the ticket cites, so the lead is asked to rule on that
+separately. Three fault-arm cells are ADDED
+(``TestTheFaultArmCarriesAReasonNotARevocation``), so this file nets +3 collected items
+against the standing run at `583d902` and the removed-id list is empty.
+
 The carrier's claim: the product mints a CRL, publishes a CRL, and consulted
 nothing at the transport. The owner's ruled resolution (option 3) is a
 PYTHON-SIDE, POST-HANDSHAKE gate on the listener, consulting the single
@@ -209,9 +219,16 @@ class TestTheAnswerFlagHasOneWriter:
         assert daemon.relay.revocation_state is daemon.state
 
     def test_the_threshold_revocation_reaches_the_gate(self, daemon_config):
-        """The bounded fail-closed the poll threshold already implements must reach
-        :8443 without a restart: after ``max_revocation_failures`` unanswered ticks
-        the state reads revoked, and the gate refuses."""
+        """#586's plumbing guarantee, carried intact through #603: the state the poll
+        threshold computes reaches :8443 WITHOUT a restart. What #603 corrected is the
+        NAME it reaches with. After ``max_revocation_failures`` unanswered ticks the
+        fault arm has received no revocation answer, so the gate refuses with the
+        503 OPERATIONAL FAULT class — it must NOT read that stop as a server-side
+        revocation, because the server asserted nothing.
+
+        The id is kept verbatim from the ruled cell on purpose: this is an amendment of
+        an approved contract, not a deletion of it, and the id is what the ticket cites.
+        """
         from executor.daemon import ExecutorDaemon, RevocationStatus
 
         daemon = ExecutorDaemon(daemon_config)
@@ -219,7 +236,100 @@ class TestTheAnswerFlagHasOneWriter:
         daemon.state.running = True
         daemon.state._consecutive_revocation_failures = daemon.config.cert_rotation.max_revocation_failures - 1
         self._drive_one_tick(daemon, RevocationStatus.UNREACHABLE)
+        # The threshold tripped: counter at threshold, and the daemon stopped serving.
+        assert daemon.state._consecutive_revocation_failures == daemon.config.cert_rotation.max_revocation_failures
+        # #603: the fault arm never asserts a revocation the server did not make.
+        assert daemon.state.revoked is False
+        assert daemon.state.revocation_fault_reason is REFUSE_NO_ANSWER
+        # And that honest state reaches the accept gate with no restart — #586's intent.
+        assert revocation_accept_reason(daemon.state) is REFUSE_NO_ANSWER
+
+
+class TestTheFaultArmCarriesAReasonNotARevocation:
+    """#603 — the truth table's missing negatives.
+
+    The threshold is a bounded fail-closed on an OUTAGE. Before #603 it reached the
+    accept gate through the same boolean an answered revocation uses, so the journal
+    asserted "revoked server-side" on a path where the server had asserted nothing.
+    These cells pin the separation: the stop survives, the claim does not.
+    """
+
+    @pytest.fixture()
+    def daemon_config(self):
+        from executor.config import ExecutorConfig
+
+        return ExecutorConfig(server_url="https://core.test", executor_id="fault-test")
+
+    def test_the_fault_arm_never_asserts_revocation_even_at_threshold(self, daemon_config):
+        """Direct #603 falsifier: N unanswered ticks trip the threshold, and the
+        revocation boolean is NOT what did it. Counter at threshold, stop taken, a
+        carried fault reason named — ``revoked`` untouched."""
+        from executor.daemon import RevocationStatus
+
+        daemon = _drive_to_threshold(daemon_config, RevocationStatus.UNREACHABLE)
+        assert daemon.state._consecutive_revocation_failures == daemon.config.cert_rotation.max_revocation_failures
+        assert daemon.state.revoked is False
+        assert daemon.state.revocation_fault_reason is REFUSE_NO_ANSWER
+
+    def test_a_boot_that_was_answered_then_starved_still_refuses_at_the_gate(self, daemon_config):
+        """The fail-open guard, asserted on the EXECUTOR-side string.
+
+        The core's ``revocation_answered`` flag is sticky, so once a boot has had an
+        answer the gate's "no answer this boot" arm can no longer fire. If the fault
+        arm only stopped asserting revocation and carried nothing the gate reads, an
+        answered-then-starved executor would start ADMITTING at :8443 — trading the lie
+        for a hole. The fault reason is what keeps the refusal, honestly classed.
+
+        The core does not forward the 5xx reason body, so a cell asserting on the
+        core's response would pass vacuously; this asserts the executor's own string.
+        """
+        from executor.daemon import ExecutorDaemon, RevocationStatus
+
+        daemon = ExecutorDaemon(daemon_config)
+        daemon.client = MagicMock()
+        daemon.state.running = True
+        threshold = daemon.config.cert_rotation.max_revocation_failures
+
+        def _answers():
+            yield RevocationStatus.NOT_REVOKED  # the boot IS answered
+            for _ in range(threshold):
+                yield RevocationStatus.UNREACHABLE  # then the route goes quiet
+
+        gen = _answers()
+
+        with (
+            patch.object(daemon.cert_manager, "needs_rotation", return_value=False),
+            patch.object(daemon.cert_manager, "check_revocation", side_effect=lambda: next(gen)),
+            patch.object(daemon, "_send_heartbeat"),
+            patch.object(daemon._shutdown_event, "wait", return_value=False),
+        ):
+            # No stop signal injected: the loop ends on the threshold's own break,
+            # which is also the proof the fault arm fired.
+            daemon._main_loop()
+
+        assert daemon.state.revocation_answered is True, "the first tick really was an answer"
+        assert daemon.state._consecutive_revocation_failures == threshold
+        assert daemon.state.revoked is False, "a starvation stop is not a revocation claim"
+        assert revocation_accept_reason(daemon.state) is REFUSE_NO_ANSWER
+
+    def test_a_server_asserted_revocation_still_refuses_byte_identically(self, daemon_config):
+        """#603's positive half, and the reason this is a testable change rather than a
+        cosmetic one: the heartbeat ``revoked`` flag (``daemon.py:2273``) is the server
+        NAMING this credential, and it must still set ``revoked`` and still serve the
+        byte-identical 403 refusal. If this cell ever goes red, the fault-arm change
+        swallowed a real revocation — a fail-open, not a fix."""
+        from executor.daemon import ExecutorDaemon
+
+        daemon = ExecutorDaemon(daemon_config)
+        daemon.client = MagicMock()
+        resp = MagicMock()
+        resp.json.return_value = {"revoked": True, "new_cert_required": False}
+        daemon.client.post.return_value = resp
+
+        daemon._send_heartbeat()
+
         assert daemon.state.revoked is True
+        assert daemon.state.revocation_fault_reason is None, "an answer is not a fault"
         assert revocation_accept_reason(daemon.state) is REFUSE_REVOKED
 
 
@@ -428,6 +538,28 @@ class TestRefusalIsRecorded:
             assert resp_ok.status_code == 200, resp_ok.text
         finally:
             listener.stop()
+
+
+def _drive_to_threshold(daemon_config, answer):
+    """Run ``_main_loop`` from a fresh daemon to the fault threshold on ``answer``.
+
+    Returns the daemon. The threshold's own ``break`` ends the loop, so no stop signal
+    is injected — which is also how the caller knows the trip happened.
+    """
+    from executor.daemon import ExecutorDaemon
+
+    daemon = ExecutorDaemon(daemon_config)
+    daemon.client = MagicMock()
+    daemon.state.running = True
+
+    with (
+        patch.object(daemon.cert_manager, "needs_rotation", return_value=False),
+        patch.object(daemon.cert_manager, "check_revocation", return_value=answer),
+        patch.object(daemon, "_send_heartbeat"),
+        patch.object(daemon._shutdown_event, "wait", return_value=False),
+    ):
+        daemon._main_loop()
+    return daemon
 
 
 def _relay_lines(caplog) -> str:

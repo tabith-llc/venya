@@ -300,8 +300,10 @@ dies within one poll.
   immediately zeroed by this path; the tmpfs reaper (TTL, default 300 s) and
   the next daemon start's sweep clean up.
 - Fail-loud: 3 consecutive unreachable-server revocation checks
-  (`max_revocation_failures`, `config.py:42-45`) → the executor self-revokes
-  and stops.
+  (`max_revocation_failures`, `config.py:149-152`) → the executor STOPS as an
+  operational fault. #603: this is not a self-revocation — the core asserted
+  nothing about the credential, and the refusal it produces is the 503 class
+  below, never `403 REVOKED`.
 
 **Relay-listener accept gate (#586, owner-ruled option 3).** The listener on :8443
 consults the ONE revocation answer this side holds (`DaemonState.revoked`, plus a
@@ -314,15 +316,16 @@ forbids. Three states, two of them refusals:
 | State at accept | Outcome | Journal line (grep-able) |
 |---|---|---|
 | core answered, credential live | admitted, `/execute` runs as before | `Executor relay listener started …` |
-| `revoked` (poll, heartbeat flag, or the failure threshold) | connection closed, no HTTP response | `Relay :8443 refused a new connection from <ip>:<port> — 403 REVOKED …` |
-| no answer yet this boot / no state wired | connection closed, no HTTP response | `… — 503 OPERATIONAL FAULT — no revocation answer received this boot …` |
+| `revoked` (poll answer, or heartbeat flag — a server assertion ONLY) | connection closed, no HTTP response | `Relay :8443 refused a new connection from <ip>:<port> — 403 REVOKED …` |
+| no answer yet this boot / fault-threshold stop / no state wired | connection closed, no HTTP response | `… — 503 OPERATIONAL FAULT — no revocation answer received …` |
 
 **Read the two refusals apart.** `403 REVOKED` means an admin killed this
 credential. `503 OPERATIONAL FAULT` means this daemon has not been able to ASK —
 the remedy is core reachability, not re-enrollment. The bootstrap window is short by
 construction: the relay binds and the FIRST revocation poll runs in the same
 main-loop entry, so the refused window is one HTTP round trip, and a core that stays
-unreachable ends the process at the failure threshold above anyway.
+unreachable ends the process at the failure threshold above anyway — as a fault, and
+it is refused and journalled in the 503 class, not as a revocation (#603).
 
 **What this does NOT claim.** Enforcement is post-handshake: a revoked peer
 credential completes the TLS handshake and is refused at accept, so the honest

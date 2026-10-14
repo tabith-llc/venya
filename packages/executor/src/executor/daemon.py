@@ -64,7 +64,7 @@ from .key_passphrase import (
     serialize_key_encrypted,
     ssl_password_callback,
 )
-from .relay_listener import RelayListener
+from .relay_listener import REFUSE_NO_ANSWER, RelayListener
 from .strategies.sbx_strategy import (
     ENV_DIR_PREFIX,
     SECRET_TMPFS_BASE,
@@ -253,6 +253,14 @@ class DaemonState:
         # False is "we do not know", never "we know it is live" — the same honesty the
         # tri-state poll was built for (#442 site 4).
         self.revocation_answered = False
+        # #603: WHY the fault arm stopped service, carried BESIDE the bool instead
+        # of being asserted through it. The consecutive-failure threshold means the
+        # core never ANSWERED — it is not a server-side revocation, and saying so at
+        # the accept point is the whole of this fix. Set only by the threshold arm in
+        # ``_main_loop``; read by ``relay_listener.revocation_accept_reason`` so an
+        # executor that once had an answer and then starved still refuses (503 class),
+        # never admits.
+        self.revocation_fault_reason: str | None = None
         self.cert_serial: str | None = None
         self.cert_not_after: datetime | None = None
         self._consecutive_revocation_failures: int = 0
@@ -2119,8 +2127,9 @@ class ExecutorDaemon:
                     self.state._consecutive_revocation_failures = 0
                     # #586: the ONE write site for the gate's bootstrap flag. Sticky by
                     # design: a later UNREACHABLE does not clear it, because the bounded
-                    # answer to an outage is already the threshold below (which sets
-                    # ``state.revoked`` and takes the listener down with the daemon).
+                    # answer to an outage is already the threshold below (which carries a
+                    # #603 fault reason and takes the listener down with the daemon — it
+                    # does NOT assert revocation).
                     # Clearing it here would refuse live work on a single dropped poll.
                     self.state.revocation_answered = True
             except TimeoutError:
@@ -2130,14 +2139,21 @@ class ExecutorDaemon:
                 logger.debug("Revocation check failed (server unreachable)")
                 self.state._consecutive_revocation_failures += 1
 
+            # #603: the threshold is a FAULT, never a revocation. It keeps counting
+            # (#442's posture — an outage must not erase its own evidence), keeps
+            # stopping the daemon (stopping under starvation is fail-safe), and stops
+            # claiming a server-side fact the server never asserted. The refusal the
+            # accept point serves is the 503 OPERATIONAL FAULT sentence that already
+            # ships (#586), so no new operator vocabulary is invented here.
             if self.state._consecutive_revocation_failures >= self.config.cert_rotation.max_revocation_failures:
                 logger.warning(
-                    "Consecutive revocation check failures (%d) reached threshold (%d) — "
-                    "treating certificate as revoked",
+                    "Consecutive revocation check failures (%d) reached the fault threshold (%d) — "
+                    "no revocation answer received, stopping service "
+                    "(the core has neither confirmed nor revoked this credential; check core reachability)",
                     self.state._consecutive_revocation_failures,
                     self.config.cert_rotation.max_revocation_failures,
                 )
-                self.state.revoked = True
+                self.state.revocation_fault_reason = REFUSE_NO_ANSWER
                 break
 
             # Heartbeat — fire and forget, but bounded (skip+warn if prior in flight)

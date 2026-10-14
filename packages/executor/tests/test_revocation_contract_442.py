@@ -15,16 +15,30 @@ transport fault → ``counter=0``, only a ``future.result()`` timeout incremente
 
 Ruled fix (R3, shape 1): ``RevocationStatus`` — NOT_REVOKED / REVOKED /
 UNREACHABLE. The caller now resets only on NOT_REVOKED and counts UNREACHABLE
-toward the existing threshold. ``cert_rotation.max_revocation_failures`` and the
-"treating certificate as revoked" log line are UNCHANGED — what feeds them is
-what got fixed.
+toward the existing threshold. ``cert_rotation.max_revocation_failures`` is
+UNCHANGED and the counter promise (an outage must not erase its own evidence) is
+UNCHANGED — and that is what R3 was really protecting.
+
+SUPERSEDED PART OF R3 (#603, owner "603, land it" 2026-10-14): R3 also promised
+the threshold's log line stays byte-stable, quoting a phrase that asserted the
+certificate was being treated as revoked. That byte-stability clause is dead, because
+the threshold's consequence on the FAULT arm turned out to be a false revocation claim
+— the server asserted nothing, and a green suite enforcing that claim is the defect
+#603 closes. The literal is now the honest one (no revocation answer received; fault
+threshold crossed; stopping service), and string stability survives FOR THE HONEST
+STRING — the cell below asserts it by equality. The genuine server-side revocation
+paths (``REVOKED`` answer, heartbeat ``revoked`` flag) still set ``state.revoked`` and
+still refuse with the byte-identical ``REFUSE_REVOKED``; see
+``TestCallerCountsWhatItUsedToWipe::test_revoked_answer_is_terminal_immediately`` and
+``tests/test_relay_revocation_gate_586.py``.
 
 Truth table, both halves, plus the end-to-end consequence:
 
   rejected — transport fault → UNREACHABLE (not an assertion of liveness), logged
              above debug, and counted by the caller;
   rejected — a run of UNREACHABLE answers still trips the threshold at exactly
-             max_revocation_failures and flips state.revoked;
+             max_revocation_failures and STOPS the daemon — as a carried fault
+             reason (#603), never as an assertion of revocation;
   accepted — server answered "live" → NOT_REVOKED, counter reset, daemon keeps
              running, log stays quiet;
   accepted — server answered "revoked" → REVOKED, terminal, unchanged.
@@ -38,8 +52,17 @@ import pytest
 
 from executor.config import CertificateRotationConfig, ExecutorConfig
 from executor.daemon import CertificateManager, ExecutorDaemon, RevocationStatus
+from executor.relay_listener import REFUSE_NO_ANSWER
 
 CERT_DIR = "certs"
+
+#: #603: the honest threshold line, asserted VERBATIM (R3's string-stability promise,
+#: re-pointed at the true claim). Stability of this literal is what the cell guards.
+_FAULT_THRESHOLD_LINE = (
+    "Consecutive revocation check failures (3) reached the fault threshold (3) — "
+    "no revocation answer received, stopping service "
+    "(the core has neither confirmed nor revoked this credential; check core reachability)"
+)
 
 
 @pytest.fixture()
@@ -202,28 +225,40 @@ class TestCallerCountsWhatItUsedToWipe:
 
     def test_threshold_still_flips_revoked_at_exactly_max(self, daemon_config):
         """Threshold UNCHANGED (R3): 3 consecutive unreachable answers against
-        max_revocation_failures=3 trips state.revoked, and two do not."""
+        max_revocation_failures=3 trips the threshold and stops the daemon, and two
+        do not. #603 amends WHAT the trip asserts: at exactly max the state carries a
+        fault reason, it does not claim a revocation — the server answered nothing.
+        Node-id kept as ruled; the docstring names the amended consequence."""
         daemon = ExecutorDaemon(daemon_config)
         daemon.client = MagicMock(spec=httpx2.Client)
         daemon.state.running = True
         _drive_loop(daemon, [RevocationStatus.UNREACHABLE], stop_after=3)
-        assert daemon.state.revoked is True
+        assert daemon.state._consecutive_revocation_failures == 3
+        assert daemon.state.revoked is False
+        assert daemon.state.revocation_fault_reason is REFUSE_NO_ANSWER
 
         daemon2 = ExecutorDaemon(daemon_config)
         daemon2.client = MagicMock(spec=httpx2.Client)
         daemon2.state.running = True
         _drive_loop(daemon2, [RevocationStatus.UNREACHABLE], stop_after=2)
         assert daemon2.state.revoked is False
+        assert daemon2.state.revocation_fault_reason is None
         assert daemon2.state._consecutive_revocation_failures == 2
 
     def test_threshold_warning_text_is_unchanged(self, daemon_config, caplog):
-        """R3 keeps the "treating certificate as revoked" line verbatim."""
+        """#603 amends R3's byte-stability clause, not the clause itself: the threshold
+        line is still asserted VERBATIM, now for the honest string. Equality (not a
+        substring hunt) is what proves the line carries no revocation claim at all —
+        and it keeps the superseded wording out of the tree entirely, which is #603
+        AC-item-9's grep-to-zero property.
+        """
         daemon = ExecutorDaemon(daemon_config)
         daemon.client = MagicMock(spec=httpx2.Client)
         daemon.state.running = True
         with caplog.at_level(logging.WARNING, logger="venya.executor"):
             _drive_loop(daemon, [RevocationStatus.UNREACHABLE], stop_after=3)
-        assert any("treating certificate as revoked" in r.getMessage() for r in caplog.records), caplog.text
+        threshold_lines = [r.getMessage() for r in caplog.records if "fault threshold" in r.getMessage()]
+        assert threshold_lines == [_FAULT_THRESHOLD_LINE], threshold_lines
 
     def test_answered_live_keeps_the_daemon_running_quietly(self, daemon_config, caplog):
         """Positive half of the pair: a server that answers "live" never advances

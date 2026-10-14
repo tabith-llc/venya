@@ -148,7 +148,8 @@ class CertificateRotationConfig(BaseModel):
     )
     max_revocation_failures: int = Field(
         default=3,
-        description="Consecutive revocation check failures before treating as revoked",
+        description="Consecutive revocation check failures with no answer before the executor stops "
+        "service (a fault, not a revocation: the core has neither confirmed nor revoked the credential)",
     )
 
 

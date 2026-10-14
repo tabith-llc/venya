@@ -56,6 +56,7 @@ import pytest
 
 from executor.config import CertificateRotationConfig, ExecutorConfig
 from executor.daemon import CertificateManager, ExecutorDaemon, RevocationStatus
+from executor.relay_listener import REFUSE_NO_ANSWER
 
 # The #552 guard symbols are imported INSIDE the cells that name them, so this module
 # still COLLECTS at the parent: the fix-half cells then go RED with the class the
@@ -398,14 +399,16 @@ class TestMalformedPayloadIsAFailedCheck:
         assert PAYLOAD_ARM_TEXT in _text(_above_debug(caplog))
 
     def test_a_run_of_bad_bodies_still_trips_the_existing_threshold(self):
-        """Bounded fail-closed covers this class too — via #442's threshold, no new policy."""
+        """Bounded fail-closed covers this class too — via #442's threshold, no new
+        policy. #603: the trip carries a fault reason, it does not assert revocation."""
         manager = _manager(max_revocation_failures=THRESHOLD)
         manager.client.get.return_value = _response(content=b"not-json")  # type: ignore[union-attr]
         daemon = _daemon(manager)
 
         _run_ticks(daemon, THRESHOLD + 1)
 
-        assert daemon.state.revoked is True, "a persistently mis-shaped endpoint fails closed"
+        assert daemon.state.revoked is False, "a persistently mis-shaped endpoint fails closed as a FAULT"
+        assert daemon.state.revocation_fault_reason is REFUSE_NO_ANSWER
         assert daemon.state._consecutive_revocation_failures == THRESHOLD
         assert manager.client.get.call_count == THRESHOLD  # type: ignore[union-attr]
 
