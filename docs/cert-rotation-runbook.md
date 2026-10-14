@@ -44,6 +44,20 @@ desktop ceremony requires, including on Windows, is covered in `faq.md` and
 | Cut-over — the run of the installer that stopped printing the copy instruction | 2026-10-12 | `2b70210` 11:35:25 -0600, merged into `dev` as `832c11c` 11:36:13 -0600 (RF-10) |
 | Sum | **2027-01-10** | `date -u -d "2026-10-12 + 90 days"` → 2027-01-10 |
 
+**Which number is enforced where**, because two of these lifetimes are one hour apart
+in name only and a third number nearby is not a lifetime at all:
+
+- **90 days** — `ADMIN_CERT_VALIDITY_DAYS = 90`, `packages/server/src/server/ca.py` (the Admin CA
+  constants block), enforced in `AdminCAManager.sign_admin_cert` as
+  `not_valid_after(now + timedelta(days=ADMIN_CERT_VALIDITY_DAYS))`. This is the machine-plane pair
+  the installer mints, and it is the input to the date above.
+- **60 minutes** — `ADMIN_SHORT_CERT_LIFETIME_SECONDS = 3600`, same block, enforced by the
+  human-plane mint: `routes/admin_certs.py`, `admin_issue_cert` calls `sign_admin_csr` with
+  `lifetime_seconds=ADMIN_SHORT_CERT_LIFETIME_SECONDS`. A person's certificate, not the core's.
+- **Not a lifetime:** the `next_update(now + timedelta(hours=1))` stamps in `CAManager.generate_crl`
+  and `AdminCAManager.generate_crl` are how often a **revocation list** goes stale. They read like
+  an hour and mean something else entirely — never cite them as a credential lifetime.
+
 The clock starts at the cut-over because the age-out is about the **handoff**: an
 install made with an installer that still told you to copy the pair mints a
 credential that lives 90 days from *that* install. So the published date is a floor,
