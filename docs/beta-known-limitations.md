@@ -267,6 +267,83 @@ revoked machine-client credential cannot be written until this row lands. That i
 dependency on #597, and it is the reason #586 stays open after its dial half merged: adding a CRL
 check at the listener would enforce nothing over the peer that actually dials it.
 
+### A copied administrator credential stays usable until it expires — up to one hour — while revocation itself lands within about a minute
+
+Status: known limitation in beta · Target: no date set · Tracked as: #586 (open — that row owns
+only the list-freshness sentences below; the one-hour credential window is a ruled design
+property of the short-lived-admin-cert program (RF-7), and there is deliberately **no defect
+row for it** — it is the commitment beta makes, not a bug beta has)
+
+**First, plainly: revocation works today.** An operator who revokes an administrator certificate
+or an executor credential sees it take effect through the shipped poll-and-heartbeat mechanism —
+this entry is about the one window the product keeps open on purpose, and how fast everything
+else lands, not about a capability that is missing.
+
+**The committed hour is a theft window, and it is enforced by expiry.** Every short-lived
+administrator credential this product issues is minted with a lifetime of one hour — the single
+value `ADMIN_SHORT_CERT_LIFETIME_SECONDS = 3600` (`packages/server/src/server/ca.py:803`),
+consumed at signing time as `lifetime_seconds` by the admin-cert route
+(`packages/server/src/server/routes/admin_certs.py:317`) and pinned by an interlock test so the
+number cannot drift unremembered (`packages/server/tests/test_clock_skew_fraction_rf7.py:55`,
+`assert ADMIN_SHORT_CERT_LIFETIME_SECONDS == 3600`). Read the number for what it is, in the
+owner's own reframe behind the design: because a revoked role is refused at the next request,
+**certificate lifetime is not the revocation mechanism — it is purely the theft window.** So the
+enforceable claim is this: a stolen or copied administrator credential stops working on its own
+within 60 minutes, because the certificate expires. Enforced by expiry, at the minute scale for
+legitimate use, and by revocation checks the moment they are asked about — not by anyone waiting
+on a list.
+
+**Internal verifiers never wait on a list's expiry — and we will not quote you an hour for this
+plane, because it is not true.** Three shipped mechanisms, all tighter than the theft window:
+the core re-mints the revocation list fresh at every relay connection and refuses outright if a
+current list cannot be produced (`_ensure_dial_crl_store`,
+`packages/server/src/server/routes/executors.py:690` — its docstring carries the owner's ruled
+posture, "refuse everything until a properly refreshed list arrives", 2026-10-13); a stale or
+missing list is answered as a refusal with 503 that asserts no revocation
+(`_STALE_LIST_DETAIL`, `executors.py:687`, routed by `_dial_crl_verdict_for`, `executors.py:779`
+— of the three handshake codes, only `CERT_REVOKED` (23) is ever reported as revoked; "unable to
+get CRL" (3) and "CRL expired" (12) are staleness, deliberately never relabelled revocations);
+and on the administrator plane, revocation is a per-request serial lookup at the front door
+(`_validate_admin_mtls`, `packages/server/src/server/middleware/auth.py:493`: "nginx has no
+`ssl_crl`, so this lookup is the enforcement point"). Immediate, both directions.
+
+**Mentioned once, so it is not mistaken for the mechanism: the `next_update` stamp.** The
+revocation lists this product signs carry a stated validity of one hour
+(`builder = builder.next_update(now + timedelta(hours=1))`, `CAManager.generate_crl`,
+`packages/server/src/server/ca.py:758`, and `AdminCAManager.generate_crl`, `ca.py:1470`). That
+field is a signature-horizon on the published artifact for whatever consumes it off-box. **No
+shipped verifier reads it as a trust tolerance** — the code above re-mints per dial and refuses
+at staleness — so its one-hour number is a coincidence with the theft window's one hour, not the
+same commitment. A future seat must not anchor the owner's 60 minutes here.
+
+**The executor's own stop, which is the operational plane.** A revoked executor
+that is still reporting to its core stops itself on its next heartbeat — the shipped cadence is a
+beat every 30 seconds: `ExecutorDaemon._main_loop`,
+`packages/executor/src/executor/daemon.py:2147` (`self._shutdown_event.wait(30.0)`, heartbeat and
+revocation poll on the same tick); the core's heartbeat route states the same cadence ("Executors
+POST to this endpoint every 30s", `packages/server/src/server/routes/executors.py`, `heartbeat`),
+and server-side changes reach each executor "on each executor's next heartbeat (~30 s)"
+(`packages/server/src/server/routes/admin.py:1064`). The core's fleet view marks a credential
+no-longer-online once 60 seconds pass without a beat (`list_executors`,
+`packages/server/src/server/routes/executors.py:1512`), so about a minute is the outer edge of
+what an operator waits to SEE the stop. These figures are better than the "roughly five minutes"
+this bound was described as while this page was being drafted — the shipped number is the one
+above, and nothing here is a regression against it. They remain properties of the reporting
+mechanism, not a second window: the numbers have different jobs and neither rules the other.
+Separately, an executor that cannot reach its core at all keeps a bounded failure counter of
+its own; that counter is an operational safeguard and carries no timing commitment — it is named
+here only so no reader prices it as one.
+
+**Workaround:** none is needed for revocation itself — it lands in about a minute, and the
+administrator lookup is immediate. Where an operator wants a copied credential dead RIGHT NOW
+without waiting on expiry, revoke it: the per-request lookup refuses it from the next request,
+and a still-reporting executor self-stops on its next beat.
+
+**What changes at beta+:** shortening the theft window is an owner ruling with its own cost
+(re-issue cadence against long jobs), and is not scheduled here. The entry comes out if the
+shipped lifetime value changes — the interlock test pins it, so a change is a deliberate, checked
+event — and the list-freshness sentences retire with their #586 follow-on, not before.
+
 ---
 
 ## Certificates and credentials
@@ -523,13 +600,16 @@ disposition* are the ones where the choice between "fix it" and "disclose it" is
 if the choice comes out as fix, the entry comes out before the release — and it comes out when
 the fix is in a build, not when the ruling is announced.
 
-**Exception to the symbols-only rule, and why it is here.** The two `Revocation` entries above
-(`#586`, `#597`) carry `file:line` cites rather than symbol-only cites, because the claim being
+**Exception to the symbols-only rule, and why it is here.** The three `Revocation` entries above
+(`#586`, `#597`, and the propagation-window entry) carry `file:line` cites rather than symbol-only
+cites, because the claim being
 disclosed is *the absence of a control at a specific place* — "no CRL load and no `VERIFY_CRL`
 flag anywhere in the executor package" is only checkable if the reader is pointed at the
 context builder and at the one `VERIFY_CRL` line that exists elsewhere, at a named commit. The
 anchor below is that commit; if the tree has moved, re-derive the numbers by the symbol named
-alongside each one before repeating them.
+alongside each one before repeating them. The propagation-window entry cites two more things the
+same way, because its claim is a shipped cadence rather than a fixed number: the hour is read at
+the two `generate_crl` stamps in `ca.py`, and the 30-second beat at the daemon's main-loop tick.
 
 **Source anchor:** the statements above were read against the shipped source at `dev`
 `2e0e751` and the `#590` entry against `dev` `e8d5a22`; the two `Revocation` entries (`#586`,
@@ -547,5 +627,15 @@ the fix touches no installer file), and this page's rule is that a limitation st
 fix gets its own entry rather than a softened one. Both shas are the merges that carry the change,
 read from the history. When a fix listed here merges, re-read the entry against your tip before
 editing — the entry, not the memory of it. Symbols are the citations here on purpose, because
-the numbers rot within a day or two on this tree; the two `Revocation` entries above are the
-named exception, for the reason stated just before the anchor.
+the numbers rot within a day or two on this tree; the three `Revocation` entries above are the
+named exception, for the reason stated just before the anchor. The propagation-window entry was
+written and every cite in it re-read against `dev` `583d902` — after the s108 anchor correction the
+carrying cites are `ca.py:803` `ADMIN_SHORT_CERT_LIFETIME_SECONDS` (with its consumer
+`routes/admin_certs.py:317` and its interlock `tests/test_clock_skew_fraction_rf7.py:55`), the
+stale-vs-revoked routing at `executors.py:687`/`:779` (`_dial_crl_verdict_for`), the per-request
+admin lookup comment at `middleware/auth.py:493` (`_validate_admin_mtls`), the per-dial mint at
+`executors.py:690` `_ensure_dial_crl_store`, the 30 s beat at `daemon.py:2147`
+(`ExecutorDaemon._main_loop`), the online window at `executors.py:1512` (`list_executors`), the
+~30 s propagation note at `routes/admin.py:1064`, and the `next_update` stamp itself at
+`ca.py:758`/`ca.py:1470` — named in the entry as a signature field only, because no shipped
+verifier honours it.
