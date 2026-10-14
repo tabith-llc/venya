@@ -342,8 +342,9 @@ provenance. Any `github.com` in the download lines = STOP, the override did
 not take effect.
 
 Core env vars (beyond the common three): `VENYA_DB_PASSWORD` (PostgreSQL),
-`VENYA_DB_PASSPHRASE` (server encryption passphrase; a dev-only default exists
-in the script header — production must override), `CORE_HOSTNAME` (server name
+`VENYA_DB_PASSPHRASE` (server encryption passphrase — NO default, and a hard
+floor of 15 Unicode code points the installer checks before any mutation; the
+former dev-only default was removed 2026-09-20), `CORE_HOSTNAME` (server name
 + TLS cert SAN; default `$(hostname)`), `VENYA_ADMIN_MTLS_ENABLED` /
 `VENYA_ADMIN_IDENTITY` / `VENYA_ADMIN_CA_PASSPHRASE` (admin mTLS; enabled by
 default, passphrase auto-generated unattended and delivered via
