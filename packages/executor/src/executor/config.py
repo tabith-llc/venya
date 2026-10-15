@@ -148,41 +148,8 @@ class CertificateRotationConfig(BaseModel):
     )
     max_revocation_failures: int = Field(
         default=3,
-        description="Consecutive revocation check failures before treating as revoked",
-    )
-
-
-class SessionConfig(BaseModel):
-    """Session configuration for executor sessions."""
-
-    session_timeout: int = Field(
-        default=900,
-        description="Idle timeout in seconds before session expires (default: 15 min)",
-    )
-    access_token_ttl: int = Field(
-        default=300,
-        description="Access token lifetime in seconds (default: 5 min)",
-    )
-    max_session_duration: int = Field(
-        default=14400,
-        description="Hard cap on session duration in seconds (default: 4 hours)",
-    )
-
-
-class OutputCaptureConfig(BaseModel):
-    """Output capture configuration."""
-
-    max_output_bytes: int = Field(
-        default=262144,  # 256 KB
-        description="Maximum output bytes per stream (stdout/stderr)",
-    )
-    hash_window_size: int = Field(
-        default=20,
-        description="Sliding window size for content hash matching",
-    )
-    min_match_length: int = Field(
-        default=8,
-        description="Minimum match length for content hash detection",
+        description="Consecutive revocation check failures with no answer before the executor stops "
+        "service (a fault, not a revocation: the core has neither confirmed nor revoked the credential)",
     )
 
 
@@ -216,7 +183,14 @@ SERVER_INGEST_MAX_LINES = 2000
 
 
 class AuditForwarderConfig(BaseModel):
-    """Audit log forwarder configuration."""
+    """Audit log forwarder configuration.
+
+    Deliberately has NO ``local_retention_days`` field (#620): nothing read it. The spool
+    is bounded by ``max_buffer_size`` and ``max_batch_lines`` below, and no code pruned
+    audit events by age, so setting it in ``[audit]`` silently did nothing. Old
+    ``executor.toml`` files carrying the key still load (extra keys are ignored); see the
+    #620 TOML-compat pin in ``tests/test_config.py``.
+    """
 
     remote_url: str | None = Field(
         default=None,
@@ -255,10 +229,6 @@ class AuditForwarderConfig(BaseModel):
     spool_path: str | None = Field(
         default=None,
         description="Durable audit event spool file (default: ~/.venya/audit-spool.jsonl)",
-    )
-    local_retention_days: int = Field(
-        default=90,
-        description="Local audit log retention days",
     )
     max_batch_lines: int = Field(
         default=500,
@@ -454,11 +424,16 @@ class ExecutorConfig(BaseSettings):
     # Certificate rotation
     cert_rotation: CertificateRotationConfig = Field(default_factory=CertificateRotationConfig)
 
-    # Sessions
-    session: SessionConfig = Field(default_factory=SessionConfig)
-
-    # Output capture
-    output_capture: OutputCaptureConfig = Field(default_factory=OutputCaptureConfig)
+    # Sessions and output capture carry no fields here on purpose (#620). Both tables
+    # existed with seven keys in total — session_timeout / access_token_ttl /
+    # max_session_duration, and max_output_bytes / hash_window_size / min_match_length —
+    # that no code read: the live session pair is the SERVER model (server config.py
+    # ``SessionConfig``, fed through server session_gate_config.py into core's
+    # session_manager), and output limits come from executor.py's ``MAX_OUTPUT_BYTES``
+    # constant plus filter.py's own parameters. An operator could set any of them and
+    # change nothing, while the #598 precedence line assured them the file value was in
+    # use. The tables are removed, not wired; a deployed ``executor.toml`` that still
+    # carries them loads unchanged because ``model_config`` ignores extra keys.
 
     # Command validation
     command_validator: CommandValidatorConfig = Field(default_factory=CommandValidatorConfig)

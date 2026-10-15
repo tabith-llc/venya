@@ -209,7 +209,7 @@ Keep it true; everything hostname-based depends on it.)
 
 | Knob | You gain | You lose | Where | Default |
 |------|----------|----------|-------|---------|
-| `VENYA_CLOCK_SKEW__*` tolerances | hosts without tight time sync stop failing token/cert checks | expired tokens/certs are accepted a little longer | `/opt/venya/.env` | 60 s tokens / 300 s certs |
+| `VENYA_CLOCK_SKEW__*` tolerances | hosts without tight time sync stop failing token/cert checks | expired tokens/certs are accepted a little longer | `/opt/venya/.env` | 60 s tokens / 60 s certs |
 | `VENYA_EXECUTION_TIMEOUT` | slow first runs finish instead of timing out at the client | you wait longer on a genuinely dead path | workstation environment | 340 s |
 | `VENYA_SBX_CREATE_TIMEOUT` | a cold sandbox image pull completes instead of aborting | same, on the executor | executor environment | 240 s |
 | `log_level = "debug"` / `VENYA_DEBUG` | full exception detail when diagnosing | noisier logs; internal detail lands in log files | executor config / environment | `info`, unset |

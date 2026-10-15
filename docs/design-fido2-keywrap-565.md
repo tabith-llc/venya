@@ -666,6 +666,15 @@ and none of them is answerable by a documentation leg:
    explicitly not part of this set; it stays in
    `features/passphrase-length-floor-n15.md`. Noted here only so a reader does not mistake the R7
    rulings for a length rule; there is none.
+   **[Currency, #573/#615: that sentence is superseded — the floor now EXISTS and ships. 15 Unicode
+   code points, inclusive, counted as typed and not as bytes, with the 64-point maximum stated but
+   never enforced: `core/engine/backend.py` `MIN_PASSPHRASE_CODE_POINTS` (DB-KEK boot + read doors),
+   `server/ca.py` (CA plane), `venya_cli/commands.py` + `venya_cli/executor_key.py` (CLI planes),
+   `executor/key_passphrase.py` (daemon plane), and `install-venya-core.sh`, which asks the same
+   question before any mutation (#615). Operator-facing wording lives in
+   [installation.md](installation.md) §1 and
+   [deployment-config.md](deployment-config.md) `db.passphrase`; this note records the ruling
+   history only.]**
 6. **The date/host row of the batched owner-present fleet session** (§8 Q6) — **owner**; R7-Q6 settled
    the composition (AC7 + #466 AC2 + the #565 AC3 class + the R11 window in one booking), leaving only
    when and on which host.
@@ -759,6 +768,18 @@ this section proposes is separately owner-ok-gated (#565 AC8), so both blocks ab
 PROPOSE-ONLY and unapplied.
 
 ---
+
+**Forward note — RF-11 doc sweep (2026-10-14, `feature/rf11-ageout-rollout-docs`). Appended, not a
+rewrite of the dated prose above.** Both proposed blocks in this section have now been overtaken by
+what actually shipped: RF-10 retired the installer banner's `scp` pair on 2026-10-12 (`2b70210`,
+merge `832c11c`), and RF-11 retired the operator-side copies — `docs/installation.md` §2 no longer
+tells anyone to carry `/etc/venya/admin/admin.crt|.key` to a workstation, and
+`docs/cert-rotation-runbook.md` §7 step 6 no longer refreshes workstation copies. The remedy the
+second block proposed adding (a "this pair does not load yet" status line) landed in a different
+form: §3 of `installation.md` states the pairing rule once, and
+`docs/cert-rotation-runbook.md` §0.1 now publishes the computed age-out date for credentials minted
+before the cut-over. Nothing in the prose above was deleted; it stands as written at its own
+measurement date.
 
 ## 12. APPENDIX — hardware enumeration of the fleet's authenticators — **UNMEASURED (SLOT, EMPTY BY DESIGN)**
 

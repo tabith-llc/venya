@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from executor.config import (
     AuditForwarderConfig,
@@ -19,9 +19,7 @@ from executor.config import (
     ExecutorConfig,
     MtlsConfig,
     NetworkConfig,
-    OutputCaptureConfig,
     ReaperConfig,
-    SessionConfig,
 )
 
 
@@ -153,36 +151,115 @@ class TestConcurrencyKnob:
             ExecutorConfig(executor={"max_concurrent_commands": 0})
 
 
-class TestSessionConfig:
-    """Tests for SessionConfig defaults."""
+class TestDeadSessionAndCaptureKnobs620:
+    """#620: seven executor keys that bound nothing are gone, and they must stay gone.
 
-    def test_default_session_timeout(self):
-        cfg = SessionConfig()
-        assert cfg.session_timeout == 900
+    Removal pins in the shape the dead rotation knobs used (`85bfa85`): an absence
+    assertion for every removed name, a compat half proving a deployed `executor.toml`
+    that still carries the tables loads instead of failing to boot, and the #598 half —
+    the removed keys used to be ANNOUNCED as "in use", so the announcement must stop
+    naming them while still naming a key that really binds. The live twin (server
+    `SessionConfig` -> core `session_manager`) is asserted where it lives, so a later
+    leg cannot re-add the dead copy in this package and pass.
+    """
 
-    def test_default_access_token_ttl(self):
-        cfg = SessionConfig()
-        assert cfg.access_token_ttl == 300
+    #: Every key #620 removed, by name, whatever section it lived in.
+    REMOVED_KEYS = (
+        "session_timeout",
+        "access_token_ttl",
+        "max_session_duration",
+        "max_output_bytes",
+        "hash_window_size",
+        "min_match_length",
+        "local_retention_days",
+    )
 
-    def test_default_max_session_duration(self):
-        cfg = SessionConfig()
-        assert cfg.max_session_duration == 14400
+    def test_session_and_output_capture_tables_are_gone(self):
+        """AC1: both containing blocks disappear, not just the fields inside them."""
+        assert "session" not in ExecutorConfig.model_fields
+        assert "output_capture" not in ExecutorConfig.model_fields
+        cfg = ExecutorConfig()
+        assert not hasattr(cfg, "session")
+        assert not hasattr(cfg, "output_capture")
 
+    def test_no_executor_model_binds_a_removed_key(self):
+        """The absence pin, scoped to the whole module rather than one class: re-adding
+        any of the seven names to any executor config model fails here."""
+        import inspect
 
-class TestOutputCaptureConfig:
-    """Tests for OutputCaptureConfig defaults."""
+        import executor.config as config_module
 
-    def test_default_max_output_bytes(self):
-        cfg = OutputCaptureConfig()
-        assert cfg.max_output_bytes == 262144
+        models = [
+            obj
+            for obj in vars(config_module).values()
+            if inspect.isclass(obj) and issubclass(obj, BaseModel) and obj is not BaseModel
+        ]
+        bound = {name for model in models for name in model.model_fields}
+        for key in self.REMOVED_KEYS:
+            assert key not in bound, f"{key} is bound again by the executor config model"
 
-    def test_default_hash_window_size(self):
-        cfg = OutputCaptureConfig()
-        assert cfg.hash_window_size == 20
+    def test_the_dead_section_models_are_gone_not_merely_unhooked(self):
+        import executor.config as config_module
 
-    def test_default_min_match_length(self):
-        cfg = OutputCaptureConfig()
-        assert cfg.min_match_length == 8
+        assert not hasattr(config_module, "SessionConfig"), "the dead executor session model is back"
+        assert not hasattr(config_module, "OutputCaptureConfig"), "the dead output-capture model is back"
+
+    def test_legacy_toml_with_removed_keys_still_loads(self, tmp_path):
+        """Deployed executor.toml files may still carry the removed tables — they must
+        load (ignored), not fail (negative half of the removal)."""
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text(
+            "[session]\nsession_timeout = 45\naccess_token_ttl = 45\nmax_session_duration = 45\n"
+            "[output_capture]\nmax_output_bytes = 45\nhash_window_size = 45\nmin_match_length = 45\n"
+            "[audit]\nlocal_retention_days = 45\n"
+            "[reaper]\ncheck_interval = 2.5\n"
+        )
+        cfg = ExecutorConfig.from_file(toml_path)
+        assert cfg.reaper.check_interval == 2.5, "a live key in the same file must still land"
+        assert not hasattr(cfg, "session")
+        assert not hasattr(cfg, "output_capture")
+        assert not hasattr(cfg.audit, "local_retention_days")
+
+    def test_removed_session_keys_no_longer_announce_precedence(self, tmp_path, monkeypatch):
+        """The false line goes away: file + env both naming a removed key must produce
+        no announcement, because nothing reads either value."""
+        monkeypatch.setenv("VENYA_EXECUTOR_SESSION__ACCESS_TOKEN_TTL", "45")
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text("[session]\naccess_token_ttl = 900\n")
+        cfg = ExecutorConfig.from_file(toml_path)
+        notes = cfg.precedence_conflict_notes()
+        assert not any("session" in note for note in notes), notes
+
+    def test_a_live_pair_still_announces_after_the_removal(self, tmp_path, monkeypatch):
+        """Positive half of the pair above: removing the dead keys must not silence the
+        #598 announcement for a key that actually binds."""
+        monkeypatch.setenv("VENYA_EXECUTOR_LOG_LEVEL", "debug")
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text('log_level = "warning"\n')
+        cfg = ExecutorConfig.from_file(toml_path)
+        notes = cfg.precedence_conflict_notes()
+        assert len(notes) == 1, f"exactly one conflict expected, got {notes}"
+        assert "log_level" in notes[0]
+
+    def test_the_live_session_twin_still_lives_in_the_server_plane(self):
+        """AC2's paired negative, stated where a reader can check it: the three session
+        names belong to the server model and the core dataclass its builder feeds, and
+        no executor file may declare them again. Source-shape pin, labelled as such —
+        the server suite's own cells are what prove the twin binds."""
+        packages_dir = Path(__file__).resolve().parents[2]
+        server_config = (packages_dir / "server/src/server/config.py").read_text()
+        assert "class SessionConfig(BaseModel):" in server_config
+        for key in ("session_timeout", "access_token_ttl", "max_session_duration"):
+            assert f"{key}: int = Field(" in server_config, f"the live twin lost {key}"
+        gate = (packages_dir / "server/src/server/session_gate_config.py").read_text()
+        assert "from core.iam.session_manager import SessionConfig" in gate
+        executor_src = packages_dir / "executor/src/executor"
+        offenders = [
+            path.name
+            for path in sorted(executor_src.glob("*.py"))
+            if "class SessionConfig" in path.read_text() or "class OutputCaptureConfig" in path.read_text()
+        ]
+        assert offenders == [], f"a dead section model reappeared in {offenders}"
 
 
 class TestCommandValidatorConfig:
@@ -235,10 +312,6 @@ class TestAuditForwarderConfig:
     def test_default_spool_path(self):
         cfg = AuditForwarderConfig()
         assert cfg.spool_path is None
-
-    def test_default_local_retention_days(self):
-        cfg = AuditForwarderConfig()
-        assert cfg.local_retention_days == 90
 
 
 class TestReaperConfig:
@@ -380,14 +453,6 @@ class TestExecutorConfigDefaults:
     def test_default_cert_rotation_config(self):
         cfg = ExecutorConfig()
         assert isinstance(cfg.cert_rotation, CertificateRotationConfig)
-
-    def test_default_session_config(self):
-        cfg = ExecutorConfig()
-        assert isinstance(cfg.session, SessionConfig)
-
-    def test_default_output_capture_config(self):
-        cfg = ExecutorConfig()
-        assert isinstance(cfg.output_capture, OutputCaptureConfig)
 
     def test_default_command_validator_config(self):
         cfg = ExecutorConfig()

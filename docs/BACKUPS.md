@@ -250,8 +250,13 @@ admin) and the executor re-registers. Target hosts hold nothing — no backup ne
    - **KEK + salt + ciphertext**: a `venya run` / `run_command` that injects a
      pre-existing stored secret → the value decrypts end-to-end and comes back redacted
      (`[REDACTED:<id>]`), exit 0. A wrong passphrase cannot produce this.
-   - **Admin CA chain**: an admin mTLS request from your existing operator cert (e.g.
-     `venya admin list`) → 200 through nginx + the server.
+   - **Admin CA chain**: an admin mTLS request carrying the core's own machine-plane
+     pair on that core (e.g. `venya admin list`) → 200 through nginx + the server.
+     A person's ceremony-minted certificate is the other kind of administrator
+     credential, and the server admits one once it is presented and the role check
+     passes — but the CLI writes its key encrypted at rest with no passphrase read
+     path yet (#565 Part B), so that pair is not the credential this drill step can
+     be performed with.
    - **CA key + passphrase**: already proven if step 5's `openssl verify` passed.
    - **Recovery-code + pepper**: only verifiable by **using** a code — which burns it
      (single-use). Prefer not to spend one in a test; if you do, reissue immediately

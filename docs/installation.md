@@ -55,6 +55,18 @@ curl -fsSL https://github.com/tabith-llc/venya/releases/latest/download/install-
 (interactive runs are prompted; re-runs reuse the stored value and an explicit
 value must MATCH it).
 
+It also carries a **minimum length of 15 Unicode code points**, counted as you
+type them and not as bytes, so a passphrase in any alphabet counts the same. The
+installer asks that question where the value resolves and **before it changes
+anything on the host**, mirroring the core's own boot door
+(`MIN_PASSPHRASE_CODE_POINTS` in `packages/core/src/core/engine/backend.py`): a
+short passphrase can no longer walk an install halfway and only fail at service
+start. The floor is measured on the final value, so a **re-run that reuses a
+stored passphrase under it refuses at that same gate** — repairing such an install
+is a deliberate reinstall, never a silent rotation of the stored key-encryption
+key. The 64-code-point maximum is stated and NOT enforced: a longer passphrase is
+accepted and used.
+
 The installer is SHA-256-gated and fail-closed: with `VENYA_TARBALL_SHA256`
 set it verifies against that pin (strict integrity — required on every
 non-https origin, recommended everywhere else); unset on an https origin, it
@@ -76,7 +88,7 @@ Key environment variables (all optional):
 |---|---|---|
 | `VENYA_TARBALL_SHA256` | (sidecar fetch) | integrity gate — recommended; if unset, the installer fetches the `.sha256` sidecar from the same origin and aborts on fetch failure or mismatch. Required (no sidecar fallback) whenever the tarball origin is not https:// — file:// paths (#327) and plain-http:// sources alike (#375, #328). |
 | `VENYA_DB_PASSWORD` | (prompt) | PostgreSQL password |
-| `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-20); on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts |
+| `VENYA_DB_PASSPHRASE` | (prompt) | server encryption passphrase — NO default (the former dev default was removed 2026-09-19 (`803acd9`, first shipped 2026-09-20 in v0.1.0alpha12) and a **15 Unicode code-point minimum** (counted as typed, not as bytes) refused by the installer before any mutation, the same floor the core enforces at boot; 64 is stated as the maximum, not enforced; on re-runs the stored value is reused and an explicit value must MATCH it or the install aborts, and a re-run reusing a stored passphrase under the floor refuses at that gate |
 | `CORE_HOSTNAME` | `$(hostname)` | TLS cert SAN and relay CN base |
 | `VENYA_ADMIN_MTLS_ENABLED` | `true` | admin client-cert enforcement |
 | `VENYA_ADMIN_CA_PASSPHRASE` | auto-generated | stored in `/etc/venya/venya-core.env` (0640) |
@@ -151,27 +163,65 @@ Touch the security key when prompted. A **recovery code is printed once** —
 store it securely; it is the only way back if the key is lost. Migrations
 already ran at install time; `venya init` never migrates.
 
-Copy the admin mTLS certificate pair to the workstation (needed for
-`venya admin ...` commands — the key at this path is the unencrypted-by-design
-site-1 shape described under §3, which is what makes these commands read it):
+The pair at `/etc/venya/admin/` is the core's **own** admin credential: it names
+that core, not a person, and it does not leave that host. A person's admin
+certificate is minted on the workstation itself, by a security-key ceremony —
+the same four commands the installer's closing banner prints:
 
 ```bash
-ssh <core-vm> "sudo cat /etc/venya/admin/admin.crt" > admin-cert/admin.crt
-ssh <core-vm> "sudo cat /etc/venya/admin/admin.key" > admin-cert/admin.key
-chmod 600 admin-cert/admin.key
+venya setup <core-host>       # one-time: the server URL and the core CA
+venya login <your-user-id>    # a user that exists on this core, key enrolled
+venya admin cert status       # read-local: prints time left, sends nothing
+venya admin cert renew        # one touch mints a fresh 60-minute certificate
 ```
 
-Keep both files **outside your home directory** (for example `/etc/venya/admin/`),
-at mode `0600` on the key. **[Currency, #565 AC5, ruling `cdcde4e`: an s84 doc audit
-booked this handoff as a pattern "the CLI cannot read". It is not — measured against the shipped
-read path, the site-1 key this step copies loads fine, and the accusation expired because R7-Q1
-makes that plaintext-at-rest shape the design. What that ruling did NOT do is release the handoff itself:
-carrying the key to a workstation unencrypted "remains a defect and stays in the fix set" (role-dir
-destination, enforced modes, a stated backup-exclusion requirement), owned by RF-10, not by this
-file. So the guidance below stays, and it is a placement instruction only — it makes no claim about
-what guards the key once it is on the workstation.]**
-Sync, backup, and desktop-index agents read home
-directories by default, and the admin **key** authorizes admin operations
+Check `status` before a long job and renew if it would expire inside your window;
+a job that outlives its certificate fails with the same command named in the
+refusal. On Windows the ceremony opens only from an interactive desktop session,
+not from a remote or scheduled shell.
+
+What serves `venya admin ...` today, because the shapes are not interchangeable: on an
+install with admin mTLS enabled (the default, §3) the administrator path needs a client
+certificate, and the pair that carries one today is the core's own machine-plane pair
+presented on that core. A signed-in session that carries the administrator role does not
+open that path by itself — an admin request with no client certificate is refused 403
+(`_validate_admin_mtls`, `packages/server/src/server/middleware/auth.py`); the session-only
+shape serves admin commands only where an install turns admin mTLS off. The one shipped
+exception is the mint itself: `POST /api/v1/admin/certs/issue` is session-shaped by ruling
+(RF-6 §2.2), which is why `venya admin cert renew` runs from a login session and nothing
+else in the admin set does. The certificate
+`venya admin cert renew` mints is written with its key encrypted at rest, and the
+CLI cannot yet load an encrypted administrator key for admin mTLS — §3 states that
+pairing rule once, and #565 Part B owns the read-side work that closes it.
+
+Two lifetimes, because the two credentials are not the same credential:
+
+- **a person's certificate lives 60 minutes**
+  (`ADMIN_SHORT_CERT_LIFETIME_SECONDS`, `packages/server/src/server/ca.py`, the
+  short-cert constant that sits beside the Admin CA constants);
+- **the core's machine-plane pair lives 90 days** (`ADMIN_CERT_VALIDITY_DAYS = 90`,
+  same module — the Admin CA constants block — consumed by
+  `AdminCAManager.sign_admin_cert`), and every core installer run re-mints it.
+
+What that 90-day number means for installs made before the copy instruction was
+retired — the published age-out date, its arithmetic, and what that date does
+*not* do — is stated once, in
+[cert-rotation-runbook.md](cert-rotation-runbook.md) §0.1.
+
+**[Record, #565 AC5, ruling `cdcde4e`: this section used to carry a `sudo cat`
+copy step for that pair. An s84 doc audit had booked the handoff as a pattern
+"the CLI cannot read", and that accusation was not true — measured against the
+shipped read path the key the step copied loads fine, because R7-Q1 makes that
+plaintext-at-rest shape the design. What the ruling did not do was release the
+handoff: carrying the key to a workstation unencrypted "remains a defect and
+stays in the fix set" (role-dir destination, enforced modes, a stated
+backup-exclusion requirement). RF-10 retired the installer's copy instruction on
+2026-10-12 (`2b70210`, merge `832c11c`); this changeset retires this section's
+copy of it, so the ceremony above is the whole workstation procedure now.]**
+
+If you do hold an admin key file on a workstation, keep it **outside your home
+directory** and at mode `0600` on the key. Sync, backup, and desktop-index agents
+read home directories by default, and the admin **key** authorizes admin operations
 *without a security-key touch* — a group- or other-readable key is a credential
 anyone on the machine can borrow. On POSIX systems the CLI prints one `warning:`
 line on stderr (and proceeds — it never blocks) when the key it is about to use
@@ -184,8 +234,8 @@ than claiming a mode it cannot read.
 
 Executors need a single-use enrollment token minted by an admin. With admin
 mTLS enabled (the default), the admin client cert alone authorizes these
-operations **server-side** — from any workstation holding the cert
-(`VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`). Both headless paths below work on a
+operations **server-side** — from the core that holds its own machine-plane pair
+(`VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY`, §2). Both headless paths below run on a
 core with no browser (CLI gate fix `d59a068` + `VENYA_SERVER_URL` resolution
 fix `3f3ed1b`, dev/unreleased; physically verified 2026-09-20).
 
@@ -439,7 +489,9 @@ udev rules needed).
 
 Renewal follows the same rule: `venya admin cert renew` mints a fresh admin
 certificate on a login session plus one security-key ceremony, so on Windows it
-is a console action like the one above. What that renewed pair can and cannot
+is a console action like the one above. The Windows ceremony-and-renewal path,
+and the physical cells it still owes, are gathered in
+[win11-admin-cert.md](win11-admin-cert.md). What that renewed pair can and cannot
 serve today is stated once, in the opening note of
 [cert-rotation-runbook.md](cert-rotation-runbook.md); flag table:
 [cli-reference.md](cli-reference.md).
@@ -461,11 +513,11 @@ venya login <user-id>
 
 ## 5. Enroll regular users
 
-Uses the pair from §2 (that site-1 shape; see §3 for what the CLI can and cannot
-load):
+Run this on the core with its machine-plane pair (that site-1 shape; see §3 for
+what the CLI can and cannot load):
 
 ```bash
-VENYA_ADMIN_CERT=admin-cert/admin.crt VENYA_ADMIN_KEY=admin-cert/admin.key \
+VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \
 venya admin create-user <user-id> --roles user
 ```
 
@@ -606,8 +658,10 @@ only, not a security boundary.
   regenerated only if absent — an uninstall or a fresh machine mints a new
   one; a plain reinstall reuses the existing CA but re-signs the server
   leaf cert).
-- Admin endpoints return 403: admin mTLS is enforced — pass
-  `VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY` from the current core install.
+- Admin endpoints return 403: admin mTLS is enforced — the credential that
+  answers this today is the core's own machine-plane pair, presented through
+  `VENYA_ADMIN_CERT`/`VENYA_ADMIN_KEY` on that core (§3); it is not a copy kept on
+  a workstation, and §2 names the ceremony a person's credential comes from.
   Distinguish that from the load failure, which is the other thing that can go
   wrong here: if the pair was refreshed by `venya admin cert renew` or
   `venya admin generate-admin-cert`, its key is encrypted at rest and this CLI

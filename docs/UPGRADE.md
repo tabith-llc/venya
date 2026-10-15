@@ -15,6 +15,15 @@ An upgrade is **re-running the installer over the existing install** —
 in-place, same host, same paths. Data, stored secrets, and the CA stack are
 preserved.
 
+One credential is not preserved: every run of the core installer mints a **new**
+machine-plane admin credential at `/etc/venya/admin/` on that core. That pair is
+the core's own and it is not copied to workstations, so nothing on a workstation
+has to be refreshed after an upgrade — a person's administrator certificate comes
+from the security-key ceremony instead
+([installation.md](installation.md) §2), and the date the older hand-off copies
+finally expire on is computed in
+[cert-rotation-runbook.md](cert-rotation-runbook.md) §0.1.
+
 Guaranteed by a version-changing re-run:
 
 - **Stored-reuse, fail-loud.** The stored DB password, server passphrase, and
@@ -84,7 +93,11 @@ tag-exact tarball, `venya-common.sh`, and the checksum sidecar.
 An upgrade re-run needs **no secrets** — the stored DB password, passphrase,
 and pepper are reused from `/opt/venya/.env` (a fresh install needs
 `VENYA_DB_PASSWORD`/`VENYA_DB_PASSPHRASE`; see
-[installation.md](installation.md) §1).
+[installation.md](installation.md) §1). The one exception is the passphrase
+floor: a re-run whose STORED `VENYA_DB__PASSPHRASE` is under 15 Unicode code
+points refuses at the installer's pre-mutation gate, because carrying it forward
+would boot on a KEK the core now rejects. That is a deliberate reinstall (or a
+deliberate rotation), never a silent pass.
 
 Drill-observed key output, in this order (order is the guarantee):
 

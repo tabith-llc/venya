@@ -26,6 +26,189 @@ and only pointed at:
 
 ## Revocation
 
+### The relay checks revocation on the core's dial only; the executor's listener cannot assert peer revocation at all
+
+Status: known limitation in beta · Target: no date set · Tracked as: #586 (open — the remedy
+is BOTH doors and only one landed)
+
+**What is enforced today.** One door: the DIAL, which is the core connecting OUT to an
+executor. The relay context is built by `_build_relay_ssl_context`
+(`packages/server/src/server/routes/executors.py:622`) and, since `54457a6`, that builder
+consults a certificate revocation list at the TLS handshake —
+`ssl_ctx.load_verify_locations(capath=crl_capath)` then
+`ssl_ctx.verify_flags |= ssl.VERIFY_CRL_CHECK_LEAF`
+(`packages/server/src/server/routes/executors.py:669-670`). The list is minted fresh for
+every dial by `_ensure_dial_crl_store` (`.../executors.py:690`), which the relay path calls
+at `.../executors.py:1930`, and the context carrying it is built at
+`.../executors.py:1945`. In operator language: when the core is about to send a command to
+an executor, it will not complete that handshake against a credential the list says is
+revoked, and it will not complete it against a list it cannot refresh either. The three
+answers are distinct and deliberately named apart — a revoked leaf is refused with 403 and
+says so (`.../executors.py:777`); a stale or unavailable list is refused with 503 whose text
+says **"no revocation asserted"** (`.../executors.py:687`) and never claims a revocation that
+did not happen; a missing CA anchor keeps the pre-existing TLS-misconfiguration wording
+(`.../executors.py:1938`, and the same wording again at `:1948` for a context that cannot be
+built) rather than being relabelled as a revocation event.
+
+**What is NOT enforced.** The other door — the LISTENER, the executor's `:8443` side that
+ACCEPTS a connection — does no revocation consultation at all. Its TLS context is built by
+`RelayListener._build_ssl_context`
+(`packages/executor/src/executor/relay_listener.py:505`) and sets the TLS floor, the
+executor's own leaf, the CA anchor and `verify_mode = ssl.CERT_REQUIRED`
+(`packages/executor/src/executor/relay_listener.py:509-520`). There is **no CRL load and no
+`VERIFY_CRL` flag anywhere in the executor's shipped source** — re-derivable with
+`git grep -i crl -- packages/executor/src`, which returns nothing at this tip, and
+`git grep VERIFY_CRL -- packages/`, whose only hits in the product are the dial line above and
+the unit cell that asserts it. The two relay surfaces are also **not symmetric in any verify
+flag**: the file sets no `verify_flags` line at all, so it lacks the
+`VERIFY_X509_STRICT | VERIFY_X509_PARTIAL_CHAIN` the dial sets deliberately
+(`packages/server/src/server/routes/executors.py:657`). Chain handling differs between the two
+doors, not just list handling.
+
+What the listener DOES have is a post-handshake accept gate
+(`revocation_accept_reason`, `packages/executor/src/executor/relay_listener.py:311`, fired at
+`packages/executor/src/executor/relay_listener.py:387`). Read it precisely, because it is not
+a peer check: it consults the ONE answer this daemon holds about **itself** —
+`DaemonState.revoked` and `revocation_answered`
+(`DaemonState.__init__`, `packages/executor/src/executor/daemon.py:249`,
+`packages/executor/src/executor/daemon.py:255`)
+as written by `ExecutorDaemon._main_loop` (`packages/executor/src/executor/daemon.py:2122`,
+`packages/executor/src/executor/daemon.py:2134`, and the consecutive-failure cutoff at
+`packages/executor/src/executor/daemon.py:2148`). So it refuses every new connection when THIS
+executor has been revoked or has received no revocation answer since boot; it holds no copy of
+any list and does no serial or identity matching of the peer in front of it, and its own
+contract comment says why — at `:8443` the peer is the core's relay-client credential, which
+the executor-serial list never describes
+(`packages/executor/src/executor/relay_listener.py:319`).
+
+The shape of the exposure, stated plainly: **a credential the CA has revoked can still
+complete a TLS handshake at an executor listener.** Nothing on that side asks the list. What
+stops such a peer today is the CN allowlist — `relay_client_ids`, compared in
+`ExecuteHandler.do_POST` (`packages/executor/src/executor/relay_listener.py:116`) — which is an
+IDENTITY test, not a revocation test, and is answered after the handshake has already
+succeeded.
+
+And the stronger thing, which the page has to say rather than imply: **at this surface the listener
+cannot assert peer revocation at all today, and bolting a list consult onto it would not change
+that.** The service CA that signs the core's relay-client credential
+(`-CA /var/lib/venya/ca/ca.crt`, `install-venya-core.sh:1020`) is the same CA that signs executor
+leaves (`CAManager.ca_cert_path`, `packages/server/src/server/ca.py:394`, leaf mint at
+`packages/server/src/server/ca.py:621`), and the list that CA mints is populated from
+`ExecutorCertRevocation` alone (`CAManager.generate_crl`,
+`packages/server/src/server/ca.py:715`, query at `packages/server/src/server/ca.py:749`; the model
+is titled "Revoked executor certificate serial numbers",
+`packages/core/src/core/iam/models.py:380`). The only peer that legitimately dials `:8443` is the
+core's relay-client credential, and that credential is recorded in no registry (#597), so it has
+no row in that list. Same issuer, different population: the gap is at serial level, not at chain
+level. **A `VERIFY_CRL_CHECK_LEAF` added to the listener today would be a no-op against the peer
+it is aimed at** — a green test could be written for the flag and no revocation would be enforced
+by it. That is why #597 is the sequenced prerequisite for this half, and not a detail of it.
+
+**Who is affected in the shipped posture.** Reachability, not theory. The listener binds
+`:8443` (`RELAY_PORT`, `packages/executor/src/executor/relay_listener.py:46`) on the executor
+and takes connections from the core network (default `host="0.0.0.0"` in `RelayListener.__init__`,
+`packages/executor/src/executor/relay_listener.py:462`, and the inbound `8443/tcp` rule for an
+executor in [FIREWALL.md](FIREWALL.md):50). The peer that presents at that door is the
+core's relay-client credential, signed by the core installer with a **365-day** validity
+(`-days 365`, `install-venya-core.sh:1022`), CN `${CORE_HOSTNAME}-relay`
+(`install-venya-core.sh:1013`). So: any core host that still holds a relay-client certificate
+that was once signed by your CA, and whose CN is still in the executor's `relay_client_ids`,
+completes the handshake at that executor — whether or not the CA has retired the machine it
+came from. Executor leaves are dual-purpose, `SERVER_AUTH` and `CLIENT_AUTH`
+(`packages/server/src/server/ca.py:51`), so an executor credential is also a credential that
+can present as a client.
+
+**One boundary is settled and is not on the plan: work already in flight is NOT terminated by a
+revocation.** That is the owner's ruling, recorded in the shipped source
+(`packages/server/src/server/routes/executors.py:695-698` and the scope note at
+`packages/server/src/server/routes/executors.py:1926-1928`); fail-closed on a stale list applies
+at the dial, and killing live sessions is ruled AGAINST, not deferred. The accept point already
+matches that boundary: a refusal happens after the handshake and before any request byte
+(`packages/executor/src/executor/relay_listener.py:387-409`), and the RF-3 admission permit is
+taken later, inside the handler — so a refusal at accept can only ever deny new work.
+
+**The proof that has not been run.** No physical revoke-then-refuse test has ever been executed on
+a served fleet, for either door. What exists in the tree is unit-level: the dial
+half is pinned by `packages/server/tests/test_relay_dial_crl_586.py`, which mints a real CA,
+real leaves, a real CRL and a real loopback handshake but runs **no venya daemon on either
+side** (its own module docstring, `packages/server/tests/test_relay_dial_crl_586.py:21-24`);
+the listener accept gate is pinned by
+`packages/executor/tests/test_relay_revocation_gate_586.py`. A unit that refuses a leaf in a
+loopback handshake is not a revocation feature proved on a customer deployment. **The merged
+dial half must not be read as "revocation works at the handshake"** — it is one of two doors,
+and the unrun physical proof covers neither.
+
+**Plan — what is NOT planned.** This entry does not promise a listener CRL consult, and a reader
+should not read one into it. The half that is open here cannot be closed by adding two flags at
+the listener, for the population reason above: **the enforcement gap is #597's, and #597 is the
+sequenced prerequisite.** #586 stays open past beta on this half.
+
+One alternative exists and is **the owner's call, not this page's plan, and not a scheduled
+item**: build the transport consult anyway. It would buy the wording "a CRL is consulted at every
+relay handshake" while delivering, as its only real effect, a **stop clock** — a list lapse makes
+the listener refuse new connections. The clock is an hour, not an abstraction: the minted list
+carries `next_update = now + 1 hour` (`packages/server/src/server/ca.py:758`, and the same stamp
+on the admin sibling at `packages/server/src/server/ca.py:1470`), while the listener's published
+context is rebuilt only by `RelayListener.reload_ssl_context`
+(`packages/executor/src/executor/relay_listener.py:582`) whose one production caller is the
+daemon's rotation arm (`packages/executor/src/executor/daemon.py:2103`) — a 30-day cadence
+(`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:46`). A list baked in at boot is
+therefore certain to lapse inside an hour, and under the ruled fail-closed posture a lapsed list
+means the executor refusing every new relay connection. That is a fleet-wide availability trade,
+it is the owner's to make, and it is named here as his rather than as a task.
+
+**What is enforced at that door today, because it is enforceable without #597.** Two things, and
+the page should not let the peer-revocation gap hide them. First, the core's own application gate
+refuses a revoked EXECUTOR serial per request, on the inbound plane, in
+`_validate_executor_mtls` → `executor_revocation_state` with the presented serial
+(`packages/server/src/server/middleware/auth.py:731`, lookup at
+`packages/server/src/server/middleware/auth.py:833`). Second, the executor daemon stops
+cooperatively on a bounded outage rather than serving on an unanswered question —
+`max_revocation_failures`, default 3
+(`packages/executor/src/executor/config.py:149-152`), fed at
+`packages/executor/src/executor/daemon.py:2148`. Neither of those is peer revocation at `:8443`
+and neither is claimed as such here; they are the controls that exist while #597 is open.
+
+**What an operator can do now.** Four things are in the shipped product, and one common
+assumption is not:
+
+- **Remove the identity, not the credential.** `relay_client_ids` is the executor's allow-list
+  of core client CNs (`ExecutorConfig.relay_client_ids`,
+  `packages/executor/src/executor/config.py:416`); drop a retired core's CN
+  and `ExecuteHandler.do_POST` refuses it with 403
+  (`packages/executor/src/executor/relay_listener.py:116`). It fails closed when the
+  list is empty — the listener does not bind at all
+  (`packages/executor/src/executor/relay_listener.py:524-529`, and the same guard in
+  `ExecutorDaemon.start` at `packages/executor/src/executor/daemon.py:1899`). Caveat that
+  matters: the executor installer
+  **rewrites** this key on every run (`relay_client_ids = ["${CORE_HOSTNAME}-relay"]`,
+  `install-venya-executor.sh:558`), so a hand-edit there is not durable across a re-run — the
+  rewrite is documented in its own entry below (#598).
+- **Re-mint the core's relay pair, and know what that does NOT do.** A completing run of
+  `install-venya-core.sh` regenerates the relay key and re-signs the credential with no
+  existence guard on the files (`openssl ecparam -genkey ... relay-client.key`,
+  `install-venya-core.sh:1005`, then the sign at `install-venya-core.sh:1022`), while the run
+  preserves the certificate authority — the same re-run behaviour named in the `#588` entry
+  below. So a re-run rotates what the core presents. It does **not** retire what the core used
+  to present: the previous credential is not recorded anywhere and is not on any list, so a
+  copy of the old pair keeps completing the handshake at every executor listener until it
+  expires at its 365th day.
+- **Contain reachability**, per [FIREWALL.md](FIREWALL.md):50 — inbound `8443/tcp` on an
+  executor restricted to your core host(s).
+- **Retire everything derived from the CA** by rotating the certificate authority —
+  [cert-rotation-runbook.md](cert-rotation-runbook.md), whose custody path
+  (`venya admin split-ca-key`, `packages/cli/src/venya_cli/cli.py:379`) is the break-glass
+  half. This is the heavy, fleet-wide answer, not the routine one.
+
+**There is no revocation path for a core's relay-client credential, and do not read
+short-lived certificates as one.** The 30-day short lifetime that exists is the
+EXECUTOR leaf (`EXECUTOR_VALIDITY_DAYS = 30`, `packages/server/src/server/ca.py:46`); the
+core relay-client credential is minted at 365 days (`install-venya-core.sh:1022`). And the cell
+that would prove a revoked peer is refused at `:8443` **cannot be written against today's
+product** — see #597 below: there is no registry and therefore no revocation record for any
+machine-client credential, so there is no revoked serial in existence that a listener could be
+shown refusing. #586's acceptance criterion 1 depends on #597 for exactly that reason.
+
 ### A core's own relay credential cannot be revoked
 
 Status: known limitation in beta · Target: no date set · Tracked as: #597
@@ -68,6 +251,99 @@ nothing on the core records *this* credential to be consulted about. Until #597 
 accurate description of the surface is: revocation exists for the credentials that are
 recorded, and not for this one.
 
+**Read this entry together with #586, which depends on it — structurally, not by scheduling.** The
+dial door of #586 landed at `54457a6` and consults a real list (`_build_relay_ssl_context`,
+`packages/server/src/server/routes/executors.py:622`), and that list is populated from the
+revocation tables this product actually has — `ExecutorCertRevocation`
+(`packages/core/src/core/iam/models.py:379`, described in the model itself as "Revoked executor
+certificate serial numbers" at `packages/core/src/core/iam/models.py:380` and read by
+`CAManager.generate_crl`, `packages/server/src/server/ca.py:715` with the query at
+`packages/server/src/server/ca.py:749`) and `AdminCertRevocation`
+(`packages/core/src/core/iam/models.py:613`). A core relay-client credential has **no row in
+either**, because it has no registry at all — and that is not "not added yet": a serial of this
+class cannot appear in an executor-serial list. So today there is no revoked serial of this class
+in existence for any verifier to consult, and the test that would show a listener refusing a
+revoked machine-client credential cannot be written until this row lands. That is #586's
+dependency on #597, and it is the reason #586 stays open after its dial half merged: adding a CRL
+check at the listener would enforce nothing over the peer that actually dials it.
+
+### A copied administrator credential stays usable until it expires — up to one hour — while revocation itself lands within about a minute
+
+Status: known limitation in beta · Target: no date set · Tracked as: #586 (open — that row owns
+only the list-freshness sentences below; the one-hour credential window is a ruled design
+property of the short-lived-admin-cert program (RF-7), and there is deliberately **no defect
+row for it** — it is the commitment beta makes, not a bug beta has)
+
+**First, plainly: revocation works today.** An operator who revokes an administrator certificate
+or an executor credential sees it take effect through the shipped poll-and-heartbeat mechanism —
+this entry is about the one window the product keeps open on purpose, and how fast everything
+else lands, not about a capability that is missing.
+
+**The committed hour is a theft window, and it is enforced by expiry.** Every short-lived
+administrator credential this product issues is minted with a lifetime of one hour — the single
+value `ADMIN_SHORT_CERT_LIFETIME_SECONDS = 3600` (`packages/server/src/server/ca.py:803`),
+consumed at signing time as `lifetime_seconds` by the admin-cert route
+(`packages/server/src/server/routes/admin_certs.py:317`) and pinned by an interlock test so the
+number cannot drift unremembered (`packages/server/tests/test_clock_skew_fraction_rf7.py:55`,
+`assert ADMIN_SHORT_CERT_LIFETIME_SECONDS == 3600`). Read the number for what it is, in the
+owner's own reframe behind the design: because a revoked role is refused at the next request,
+**certificate lifetime is not the revocation mechanism — it is purely the theft window.** So the
+enforceable claim is this: a stolen or copied administrator credential stops working on its own
+within 60 minutes, because the certificate expires. Enforced by expiry, at the minute scale for
+legitimate use, and by revocation checks the moment they are asked about — not by anyone waiting
+on a list.
+
+**Internal verifiers never wait on a list's expiry — and we will not quote you an hour for this
+plane, because it is not true.** Three shipped mechanisms, all tighter than the theft window:
+the core re-mints the revocation list fresh at every relay connection and refuses outright if a
+current list cannot be produced (`_ensure_dial_crl_store`,
+`packages/server/src/server/routes/executors.py:690` — its docstring carries the owner's ruled
+posture, "refuse everything until a properly refreshed list arrives", 2026-10-13); a stale or
+missing list is answered as a refusal with 503 that asserts no revocation
+(`_STALE_LIST_DETAIL`, `executors.py:687`, routed by `_dial_crl_verdict_for`, `executors.py:779`
+— of the three handshake codes, only `CERT_REVOKED` (23) is ever reported as revoked; "unable to
+get CRL" (3) and "CRL expired" (12) are staleness, deliberately never relabelled revocations);
+and on the administrator plane, revocation is a per-request serial lookup at the front door
+(`_validate_admin_mtls`, `packages/server/src/server/middleware/auth.py:493`: "nginx has no
+`ssl_crl`, so this lookup is the enforcement point"). Immediate, both directions.
+
+**Mentioned once, so it is not mistaken for the mechanism: the `next_update` stamp.** The
+revocation lists this product signs carry a stated validity of one hour
+(`builder = builder.next_update(now + timedelta(hours=1))`, `CAManager.generate_crl`,
+`packages/server/src/server/ca.py:758`, and `AdminCAManager.generate_crl`, `ca.py:1470`). That
+field is a signature-horizon on the published artifact for whatever consumes it off-box. **No
+shipped verifier reads it as a trust tolerance** — the code above re-mints per dial and refuses
+at staleness — so its one-hour number is a coincidence with the theft window's one hour, not the
+same commitment. A future seat must not anchor the owner's 60 minutes here.
+
+**The executor's own stop, which is the operational plane.** A revoked executor
+that is still reporting to its core stops itself on its next heartbeat — the shipped cadence is a
+beat every 30 seconds: `ExecutorDaemon._main_loop`,
+`packages/executor/src/executor/daemon.py:2163` (`self._shutdown_event.wait(30.0)`, heartbeat and
+revocation poll on the same tick); the core's heartbeat route states the same cadence ("Executors
+POST to this endpoint every 30s", `packages/server/src/server/routes/executors.py`, `heartbeat`),
+and server-side changes reach each executor "on each executor's next heartbeat (~30 s)"
+(`packages/server/src/server/routes/admin.py:1064`). The core's fleet view marks a credential
+no-longer-online once 60 seconds pass without a beat (`list_executors`,
+`packages/server/src/server/routes/executors.py:1525`), so about a minute is the outer edge of
+what an operator waits to SEE the stop. These figures are better than the "roughly five minutes"
+this bound was described as while this page was being drafted — the shipped number is the one
+above, and nothing here is a regression against it. They remain properties of the reporting
+mechanism, not a second window: the numbers have different jobs and neither rules the other.
+Separately, an executor that cannot reach its core at all keeps a bounded failure counter of
+its own; that counter is an operational safeguard and carries no timing commitment — it is named
+here only so no reader prices it as one.
+
+**Workaround:** none is needed for revocation itself — it lands in about a minute, and the
+administrator lookup is immediate. Where an operator wants a copied credential dead RIGHT NOW
+without waiting on expiry, revoke it: the per-request lookup refuses it from the next request,
+and a still-reporting executor self-stops on its next beat.
+
+**What changes at beta+:** shortening the theft window is an owner ruling with its own cost
+(re-issue cadence against long jobs), and is not scheduled here. The entry comes out if the
+shipped lifetime value changes — the interlock test pins it, so a change is a deliberate, checked
+event — and the list-freshness sentences retire with their #586 follow-on, not before.
+
 ---
 
 ## Certificates and credentials
@@ -109,7 +385,7 @@ For a person's short-lived workstation certificate the path is `venya admin cert
 one thing about it belongs in the same breath: the renewed key is written **encrypted at rest**,
 and the command-line cannot yet load an encrypted administrator key for administrator
 mutual-TLS. So a renewed pair fixes the proxy refusal and lands in the separate, already
-documented read-side limit — see [installation.md](installation.md) §2, which states that
+documented read-side limit — see [installation.md](installation.md) §3, which states that
 pairing rule once. Use the machine-plane pair for headless work until that read-side work
 lands.
 
@@ -146,7 +422,7 @@ the backup set in [BACKUPS.md](BACKUPS.md) already does, and that pair is not co
 core — and run the export/restore custody commands on the core itself rather than on a host
 whose process memory you do not control. An administrator credential that renews into an
 encrypted key is a separate, known read-side gap, documented once in
-[installation.md](installation.md) §2.
+[installation.md](installation.md) §3.
 
 **What changes at beta+:** the open half of #565 closes the remaining writers, and the ruled
 exemption above changes only when the work that replaces the core-held key lands.
@@ -287,7 +563,7 @@ Authentication failed: <reason naming the transport, not the file operation>
 
 **Workaround:** the ceremony is skipped when the command-line already holds an administrator
 credential — set both `VENYA_ADMIN_CERT` and `VENYA_ADMIN_KEY` (the headless pattern in
-[installation.md](installation.md) §2), or supply a bearer token from a signed-in session —
+[installation.md](installation.md) §3), or supply a bearer token from a signed-in session —
 and with either one these six commands run on the core. That covers the ordinary case.
 Where it does not reach is the case the row is really about: the credential is the thing you
 cannot present because the certificate authority it chains to is the thing being recovered.
@@ -324,9 +600,34 @@ disposition* are the ones where the choice between "fix it" and "disclose it" is
 if the choice comes out as fix, the entry comes out before the release — and it comes out when
 the fix is in a build, not when the ruling is announced.
 
+**Exception to the symbols-only rule, and why it is here.** The three `Revocation` entries above
+(`#586`, `#597`, and the propagation-window entry) carry `file:line` cites rather than symbol-only
+cites, because the claim being
+disclosed is *the absence of a control at a specific place* — "no CRL load and no `VERIFY_CRL`
+flag anywhere in the executor package" is only checkable if the reader is pointed at the
+context builder and at the one `VERIFY_CRL` line that exists elsewhere, at a named commit. The
+anchor below is that commit; if the tree has moved, re-derive the numbers by the symbol named
+alongside each one before repeating them. The propagation-window entry cites two more things the
+same way, because its claim is a shipped cadence rather than a fixed number: the hour is read at
+the two `generate_crl` stamps in `ca.py`, and the 30-second beat at the daemon's main-loop tick.
+
 **Source anchor:** the statements above were read against the shipped source at `dev`
-`2e0e751` and the `#590` entry against `dev` `e8d5a22`. Two entries came out of this page on
-2026-10-13 after being re-read against `dev` `3268081` — the `#598` precedence entry (the
+`2e0e751` and the `#590` entry against `dev` `e8d5a22`; the two `Revocation` entries (`#586`,
+`#597`) were written against `dev` `4543eb5` and **every cite in them was re-read at
+`dev` `29beb1b`** — with `#586`'s dial half read at the
+merge that carries it (`54457a6`) and the listener accept gate at the merge that carries *that*
+(`5b0dd31`); those two shas are history cites for the merges that landed the code, so they do not
+move when the tree moves. **`dev` `7b055e4` is the anchor this page carried** (the three
+`Revocation` entries were re-derived there by symbol on 2026-10-14 and the numbers moved to
+what that tip actually reads). The moves it recorded were between its old anchor and itself —
+`install-venya-core.sh` took 59 insertions and 2 deletions since `29beb1b` (net +57, which is
+exactly the relay block's shift), `daemon.py` +22/-6 and `relay_listener.py` +7/-1 (the accept
+gate and the main-loop tick), `config.py` +2/-1 (the `relay_client_ids` field). The
+propagation-window entry was re-read the same way: one number moved, the daemon tick, and it is
+restated below.
+`29beb1b` moved no file either entry cites (its face is `routes/audit.py` and two
+test files), so the numbers are unchanged between the two tips. Two entries came out of this
+page on 2026-10-13 after being re-read against `dev` `3268081` — the `#598` precedence entry (the
 direction is ruled, the silence is removed, and the contract is written once in
 [deployment-config.md](deployment-config.md)) and the `#589` memory-setting entry (that merge
 ships the per-sandbox default). The **executor-config-file rewrite** entry above replaces the
@@ -334,5 +635,44 @@ first of those: it is a different limitation that survived the fix (`#598` row A
 the fix touches no installer file), and this page's rule is that a limitation staying true after a
 fix gets its own entry rather than a softened one. Both shas are the merges that carry the change,
 read from the history. When a fix listed here merges, re-read the entry against your tip before
-editing — the entry, not the memory of it. Symbols, not line numbers, are the citations here on
-purpose: the numbers rot within a day or two on this tree.
+editing — the entry, not the memory of it. Symbols are the citations here on purpose, because
+the numbers rot within a day or two on this tree; the three `Revocation` entries above are the
+named exception, for the reason stated just before the anchor. The propagation-window entry was
+written and every cite in it re-read against `dev` `583d902` — after the s108 anchor correction the
+carrying cites are `ca.py:803` `ADMIN_SHORT_CERT_LIFETIME_SECONDS` (with its consumer
+`routes/admin_certs.py:317` and its interlock `tests/test_clock_skew_fraction_rf7.py:55`), the
+stale-vs-revoked routing at `executors.py:687`/`:779` (`_dial_crl_verdict_for`), the per-request
+admin lookup comment at `middleware/auth.py:493` (`_validate_admin_mtls`), the per-dial mint at
+`executors.py:690` `_ensure_dial_crl_store`, the 30 s beat at `daemon.py:2163`
+(`ExecutorDaemon._main_loop`, re-read at `7b055e4` — it sat at `:2147` at `583d902`), the online window at `executors.py:1525` (`list_executors`), the
+~30 s propagation note at `routes/admin.py:1064`, and the `next_update` stamp itself at
+`ca.py:758`/`ca.py:1470` — named in the entry as a signature field only, because no shipped
+verifier honours it.
+
+**`dev` `90f2bcb` is the anchor this page carries now** — re-derived by symbol on 2026-10-15, and
+nine numbers moved. The arithmetic is recorded so the pass self-documents instead of just
+restating digits: between the two anchors exactly three cited source files changed —
+`routes/executors.py` +23/-10 (`0467a31`, the snapshot-served revocation list: net **+13** for
+lines below its `:1240` hunk), `middleware/auth.py` +24/-1 (`1be04da`, reserved liveness
+connections: net **+23** below its `:795` hunk), and `executor/config.py` +18/-44 (`7a003ad`, the
+#620 dead-key removal: net **−31** above `:447`). So the dial-path call site moved
+`:1917`→`:1930`, the context build `:1932`→`:1945`, the two TLS-misconfiguration raises
+`:1925`/`:1935`→`:1938`/`:1948`, the ruled scope note `:1913-1915`→`:1926-1928`, the online-window
+lookup `:1512`→`:1525` (twice — the entry and this note), the executor-mTLS serial lookup
+`:810`→`:833`, and `relay_client_ids` `:447`→`:416`. Each new number was proved by reading the
+line it now names, not by adding the offset: `:1930` is `crl_capath = _ensure_dial_crl_store(request, db)`,
+`:1945` is the `_build_relay_ssl_context(...)` call, `:1938` and `:1948` are the two
+`"Server TLS misconfiguration"` 503 raises, `:1926-1928` is the scope note, `:1525` is
+`is_online = 0.0 <= delta.total_seconds() < 60`, `:833` is the `executor_revocation_state(...)`
+call, `:416` is the `relay_client_ids: list[str] = Field(` declaration.
+
+Every other numeric cite on this page was re-read at this tip too, and lands: the eight
+`executors.py` cites whose line numbers sit before the `:1240` change point (`:622`, `:657`,
+`:669-670`, `:687`, `:690`, `:695-698`, `:777`, `:779`), `middleware/auth.py:493` and `:731`, and
+`config.py:149-152`. The rest of the
+page's targets are files whose `git diff --numstat 7b055e4 90f2bcb` is **empty** — `ca.py`,
+`daemon.py`, `relay_listener.py`, `core/iam/models.py`, `routes/admin.py`, `routes/admin_certs.py`,
+`venya_cli/cli.py`, `tests/test_clock_skew_fraction_rf7.py`, `tests/test_relay_dial_crl_586.py`,
+`install-venya-core.sh`, `install-venya-executor.sh` — so those numbers cannot have moved, and the
+four source files that did change in range but are never cited by number here (`backend.py`,
+`app.py`, `filter.py`, `revocation_snapshot.py`) carry no cite to fix.

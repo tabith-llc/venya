@@ -62,7 +62,13 @@ executor-ID validator is the only shared logic (see
   session. Expiry yields an actionable error for LLM clients ("ask the user
   to re-authenticate") — an agent can never renew a human's authorization.
 - **Admin plane:** admin API paths additionally require a client certificate
-  chained to the per-install Admin CA (nginx mTLS). The Admin CA key is
+  chained to the per-install Admin CA (nginx mTLS). There are two kinds of that
+  certificate, and they are not interchangeable: the core's own **machine-plane**
+  pair, minted on the core by the installer, valid 90 days, and never copied off
+  that host; and a **person's** certificate, minted on their own workstation by a
+  security-key ceremony, valid about an hour, and checked against their role on
+  every use — so taking the role away stops the credential on the next request,
+  rather than at expiry. The Admin CA key is
   encrypted at rest; its passphrase reaches the daemon only via a 0640
   root:venya EnvironmentFile.
 - **Executors:** X.509 client certificates issued by the core at enrollment
@@ -81,7 +87,7 @@ executor-ID validator is the only shared logic (see
 | Venya root CA | core: `/var/lib/venya/ca/` | signs server TLS certs, relay client certs; distributed to clients via `/.well-known/venya-ca.crt` (workstations: `venya setup` installs it beside `config.json`) and installed into VM trust stores |
 | Server TLS cert | core: `/etc/venya/tls/` | nginx termination for `<core-host>` |
 | Relay client cert | core: `/etc/venya/relay/` | CN `<core-host>-relay`; presented when the core dials an executor's relay listener |
-| Admin CA | core: `/var/lib/venya/ca/admin-ca/` (key encrypted) | admin mTLS client certs |
+| Admin CA | core: `/var/lib/venya/ca/admin-ca/` (key encrypted) | admin mTLS client certs — the core's own machine-plane pair (90 days, stays on the core) and a person's workstation certificate (about an hour, security-key ceremony) |
 | Executor client cert | executor: `/etc/venya/executor/` (0700/0600) | executor → core mTLS identity; SAN = executor-id; issued by the core CA (`/var/lib/venya/ca/`), copied to the executor as `/etc/venya/executor/ca.crt` |
 
 Relay CN contract: executors accept relay connections only from client-cert

@@ -68,8 +68,8 @@ class TestCoreInstallerModePreservation381:
         string, so the file text carries backslash-quote literally.
         """
         core = _core()
-        unlink_key = r'Path(\"$2/admin.key\").unlink(missing_ok=True)'
-        unlink_crt = r'Path(\"$2/admin.crt\").unlink(missing_ok=True)'
+        unlink_key = r"Path(\"$2/admin.key\").unlink(missing_ok=True)"
+        unlink_crt = r"Path(\"$2/admin.crt\").unlink(missing_ok=True)"
         assert unlink_key in core and unlink_crt in core
-        assert core.index(unlink_key) < core.index("Path(\\\"$2/admin.key\\\").write_bytes(key_pem)")
-        assert core.index(unlink_crt) < core.index("Path(\\\"$2/admin.crt\\\").write_bytes(cert_pem)")
+        assert core.index(unlink_key) < core.index('Path(\\"$2/admin.key\\").write_bytes(key_pem)')
+        assert core.index(unlink_crt) < core.index('Path(\\"$2/admin.crt\\").write_bytes(cert_pem)')

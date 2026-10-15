@@ -35,7 +35,7 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 **Config key:** `db.passphrase` (env `VENYA_DB__PASSPHRASE` — note the DOUBLE underscore: `db` is a nested config section)
 
-**Requirement:** MUST be set in production. In debug mode startup proceeds WITHOUT a warning — but the system is not usable for secrets: every secret operation fails closed with `CoreError("KEK not configured")`. There is NO unencrypted-storage fallback path.
+**Requirement:** MUST be set, in every mode. The missing-passphrase check in `app.py` is unconditional — the former `not config.debug` exemption was a dead letter and was removed (`7e80f13`, 2026-09-20): `init_db()` constructs `BackendConfig` earlier in `lifespan()`, and that raises `BackendConfigurationError` on a missing passphrase before any request is served. There is NO unencrypted-storage fallback path.
 
 **Purpose:** Passphrase used to derive the Key Encryption Key (KEK) for encrypting secrets at rest (envelope encryption: KEK wraps a per-secret DEK via AES-256-KW; values are ChaCha20-Poly1305).
 
@@ -46,6 +46,8 @@ Core secrets cannot be encrypted without a passphrase.
 Set VENYA_DB__PASSPHRASE in /opt/venya/.env and restart
 (installer input variable: VENYA_DB_PASSPHRASE).
 ```
+
+**Length floor (the installer input `VENYA_DB_PASSPHRASE`, and this server key with it):** a supplied passphrase carries a minimum of **15 Unicode code points** — counted as you type them, not as bytes, so a passphrase in any alphabet counts the same. Below the floor the core refuses at boot: `BackendConfig` (`packages/core/src/core/engine/backend.py`, `MIN_PASSPHRASE_CODE_POINTS`) raises `BackendConfigurationError` with that refusal on the write door and on the read door. `install-venya-core.sh` asks the identical question of its `VENYA_DB_PASSPHRASE` input and refuses **before it mutates anything**, including a re-run that would reuse a stored value under the floor — repairing such an install is a deliberate reinstall, never a silent rotation. Unset, empty and whitespace-only are NOT this rule: they answer the earlier "was a passphrase supplied?" test as *not supplied*, so the length door never runs on a blank. The 64-code-point maximum is stated and never enforced — a longer passphrase is accepted and used.
 
 ---
 
@@ -147,7 +149,7 @@ see `cert-rotation-runbook.md` §1 (tokenless `rotate()` is exempt for the verif
 incumbent credential — clean revocation state plus serial == current record).
 | `cors.origins` (JSON list) | `VENYA_CORS__ORIGINS` |
 
-Installer-level input variables (e.g. `VENYA_DB_PASSWORD`, `VENYA_DB_PASSPHRASE`, `VENYA_RECOVERY_PEPPER`, `CORE_HOSTNAME`) are consumed by `install-venya-core.sh`, which writes the correctly-named server variables into `/opt/venya/.env`. Setting an installer var in the server's environment does nothing.
+Installer-level input variables (e.g. `VENYA_DB_PASSWORD`, `VENYA_DB_PASSPHRASE`, `VENYA_RECOVERY_PEPPER`, `CORE_HOSTNAME`) are consumed by `install-venya-core.sh`, which writes the correctly-named server variables into `/opt/venya/.env`. Setting an installer var in the server's environment does nothing. `VENYA_DB_PASSPHRASE` is checked on the way in: the installer refuses a value under the **15-Unicode-code-point floor** named in [`db.passphrase`](#dbpassphrase-production-only) before it mutates anything, so a short passphrase never reaches `.env`.
 
 ---
 
