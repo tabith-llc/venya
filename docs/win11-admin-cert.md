@@ -285,17 +285,24 @@ install half did not run, and on the tip it was measured against it could not ha
 - **Run it this way:**
 
   ```powershell
-  # elevated shell (win), from idaho:
+  # elevated PowerShell on the guest (`win`), from the box that serves the tarballs:
   $env:VENYA_SKIP_PROMPT      = "yes"
   $env:VENYA_INSTALL_DIR      = "C:\temp[gate]"
-  $env:VENYA_TARBALL          = "http://10.27.27.53:8080/venya-cli-install.tar.gz"
-  $env:VENYA_TARBALL_SHA256   = "40e04a8e5d706ab28c63c34d2f62f1ad51201eb74a0769a61994c11f45508168"  # pragma: allowlist secret
+  $env:VENYA_TARBALL          = "http://$BuildHost:8080/venya-cli-install.tar.gz"
+  $env:VENYA_TARBALL_SHA256   = "$CliSha"
   # after the install succeeds, prove readability AS venyastd at ITS OWN console (unelevated):
   #   Get-Content "C:\temp[gate]\bin\venya.exe" -TotalCount 1
   ```
 
-  The sha256 above is the served CLI tarball's sidecar
-  (`serve/idaho-8080/venya-cli-install.tar.gz.sha256`), read at s120 — re-read it at use time.
+  **Neither value is written here, on purpose — derive both at use time.** `$BuildHost` is
+  your installer host's serve root: the `:8080` docroot the tarballs were built into. `$CliSha`
+  is the hash in the `<tarball>.sha256` sidecar lying beside that tarball, read the way it is
+  read anywhere — `cut -d' ' -f1 venya-cli-install.tar.gz.sha256`. A served hash changes with
+  every build, and an address written into a page goes stale the first time the server moves.
+  This is the same derivation [full-lifecycle-test.md](full-lifecycle-test.md) already uses
+  (`http://$BUILD_HOST_IP:8080/<tarball>` with `VENYA_TARBALL_SHA256=$CLI_SHA`), and it is not
+  optional here either: on an `http` origin the installer **requires** that hash and aborts
+  before any fetch or write without it (#375, #328).
   `venya.exe` is the install-root `bin` shim; the paths under `VENYA_INSTALL_DIR` are what the
   gate enumerates.
 - **Success:** the run prints `ACL check passed: N file(s) enumerated and ACL-read, 0
