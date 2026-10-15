@@ -230,7 +230,7 @@ must also prove, and the reason it is outstanding.
 
 | Cell | Status (guest preflight at `dev` `f0a2c3a`) |
 |---|---|
-| 1 — installer ACL gate on a wildcard path (#493) | **PREFLIGHT EVIDENCED, INSTALL HALF NOT RUN** |
+| 1 — installer ACL gate on a wildcard path (#493) | **POSITIVE HALF RUN/PASS at `664f267` · ZERO-ENUMERATION ARM RUN/PASS IN HARNESS · PROTECTED-DACL ARM RUN IN HARNESS, EXPECTATION NOT MET · INCOMPLETE ARM RUN IN HARNESS, EXPECTATION NOT MET (both misses are harness setup, not gate behavior — the ACL those scenarios meant to apply never landed, so the rejection lines were never reached) · COUNT-COVERAGE ANSWERED, NOT A COVERAGE GAP · PAIRED venyastd READABILITY HALF NOT RUN (owner console)** |
 | 2 — the ceremony from an interactive desktop | **NOT RUN** |
 | 3 — the renewal round trip | **NOT RUN** |
 
@@ -244,13 +244,67 @@ must also prove, and the reason it is outstanding.
 
 ### Cell 1 — the installer's ACL gate on a path containing wildcards (#493)
 
-**PREFLIGHT EVIDENCED, INSTALL HALF NOT RUN.** The guest read ran and is recorded below. The
-install half did not run, and on the tip it was measured against it could not have passed:
+**POSITIVE HALF — RUN, PASS at `664f267`.** The abort that blocked this cell was #628, and it is
+fixed and merged: the installer's path probes now read `-LiteralPath`, so a base whose name
+carries brackets is taken literally. The install then ran **elevated** at the guest against the
+merged script, fetched over a scratch port because the served docroot copy is still pre-fix, and
+its gate printed verbatim `ACL check passed: 4285 file(s) enumerated and ACL-read, 0 protected
+DACLs.` with the run exiting 0. That is the PASS line this cell was blocked from observing.
+
+**REJECTION ARMS — RUN IN A HARNESS ON A SCENARIO TREE, NOT BY THE INSTALLER.** The gate block —
+byte-identical to `install-venya-cli.ps1:246-283` at `664f267` — was driven against five scenario
+trees. A harness is the only way these arms get executed at all, and the page should say so
+plainly: the class this guard exists to catch is hardlink mode, which a `copy`-mode install never
+produces, so no ordinary install run can present a protected DACL to it. Of the three rejection
+arms, one reached its rejection line and two did not reach theirs, and each miss is measured rather
+than assumed; two positive controls say the counter itself is live.
+- Zero-enumeration arm — harness on a scenario tree whose base exists and holds no files: printed
+  verbatim `[ERROR] ACL check could not verify any file: 0 file(s) enumerated under an existing
+  C:\temp\s121h\case-C, so this check proved nothing. Refusing to report a pass - report this
+  message with the install directory.` and the harness read exit 1. **This arm fired as designed**:
+  a gate that read no file refuses rather than reporting a pass.
+- Protected-DACL arm — harness on a scenario tree: printed `[INFO]  ACL check passed: 1 file(s)
+  enumerated and ACL-read, 0 protected DACLs.` with exit 0. **RUN, EXPECTATION NOT MET.** Two
+  causes, both measured: the scenario's `icacls` call was handed a bare SID, which that tool
+  refuses (`No mapping between account names and security IDs was done`, rc 1332, zero files
+  processed), so no protected DACL was ever set; and with the SID form corrected, protecting a
+  *directory* still leaves the files under it reading `AreAccessRulesProtected=False`, so an
+  enumerator that walks files cannot see that scenario — the arm needs a file whose own DACL is
+  protected (that form does report `PROTECTED=1` to this gate's own walk, measured).
+- INCOMPLETE arm — harness on a scenario tree holding one file with an explicit deny-on-read:
+  printed `[INFO]  ACL check passed: 1 file(s) enumerated and ACL-read, 0 protected DACLs.` with
+  exit 0. **RUN, EXPECTATION NOT MET.** Same SID cause (rc 1332, nothing applied); and with the
+  SID form corrected the elevated ACL read still succeeds, because a deny on read stops reading
+  the *file* and not reading its descriptor — so this arm needs a scenario that fails the
+  enumeration, not the read.
+- Two positive controls, harness — one readable file printed `ACL check passed: 1 file(s) ...`
+  and two readable files printed `ACL check passed: 2 file(s) ...`, exit 0 each. The enumerator
+  and the counter are live, so the numbers above are the gate's own and not a silent zero.
+
+**COUNT-COVERAGE — ANSWERED, AND NOTHING RIDES ON IT.** The gate's count is a snapshot taken while
+the installed tree is still gaining `__pycache__` files on first import. Measured on this installed
+base: `--version` and `--help` together add **0** files (`NEW=0 GONE=0` under both enumerators), so
+running the product does not move the number; the 4,715-vs-6,857 spread between two enumeration
+methods is one directory junction double-counting 2,142 alias paths that all land on files the
+gate's own walk already read, so it is **not** a coverage gap; and all 4,715 files read today report
+`PROTECTED=0` with 0 ACL errors. 490 `__pycache__` files carry a write time later than the
+installer's last non-`__pycache__` write, which places the gate's `4285` inside that first-import
+burst — the honest limit being that the run log carries no timestamp, so the placement is derived
+from file times, not measured. **No product defect and no ticket ride on this**: the gate's coverage
+is sound and its number is a moment.
+
+**PAIRED HALF — NOT RUN.** What still belongs to this cell is the standard-user readability check:
+one `Get-Content` of an installed file typed by `venyastd` at the guest's own unelevated console. It
+is an owner act at the desk and it is held there, not here. The `PROTECTED=0` reads above are
+evidence about DACLs, and are named as corroboration — they are not that read. The guest preflight
+and the #628 history follow.
 
 > the shipped installer aborts at `install-venya-cli.ps1:163` (`uv.exe missing after
 > extraction`) when `VENYA_INSTALL_DIR` contains PowerShell wildcard characters, because that
 > check uses `-Path` semantics while #493's fix covered only the ACL-gate enumeration; filed
-> as #628, fix leg in flight; no gate message has been observed executing.
+> as #628, whose fix merged at `664f267`; the sentence above is history — the gate messages have
+> since been observed executing, once in the installer itself (the PASS line) and once in a harness
+> (the zero-file refusal).
 
 **Guest preflight (ran, rc=0; read-only, as `win` over SSH from the agent box):**
 
@@ -265,10 +319,11 @@ install half did not run, and on the tip it was measured against it could not ha
 | `$env:VENYA_ADMIN_CERT` | empty |
 
 - **Surface under test:** the protected-DACL enumeration and its counters in
-  `install-venya-cli.ps1:240-277` (cites re-anchored at `dev` `f0a2c3a`) —
-  `Get-ChildItem -LiteralPath $Base -Recurse -Force -File` (`:254`), `Get-Acl -LiteralPath`
-  (`:256`), the `$protected` / `$verified` / `$notChecked` counters (`:247-249`, `:257-263`),
-  and the three report lines at `:271`, `:274` and `:276`.
+  `install-venya-cli.ps1:246-283` (cites re-anchored at `dev` `664f267`, which is where the run
+  below was made) —
+  `Get-ChildItem -LiteralPath $Base -Recurse -Force -File` (`:260`), `Get-Acl -LiteralPath`
+  (`:262`), the `$protected` / `$verified` / `$notChecked` counters (`:253-255`, `:263-266`),
+  and the report lines at `:271`, `:277`, `:280` and `:282`.
 - **Shape:** run the machine-wide install **elevated**, in an Administrator terminal, with
   `VENYA_INSTALL_DIR` pointed at a path that contains PowerShell wildcard characters — a
   bracketed directory name is the shape that made the old positional `-Path` bind nothing.
@@ -308,18 +363,20 @@ install half did not run, and on the tip it was measured against it could not ha
 - **Success:** the run prints `ACL check passed: N file(s) enumerated and ACL-read, 0
   protected DACLs` with **N greater than zero**, and the installed files are readable by a
   standard user afterwards.
-- **Paired rejection (what must FAIL) — all three NOT RUN, blocked by #628:** none of these
-  messages has been observed executing.
+- **Paired rejection (what must FAIL) — driven in a harness; see the arms paragraph above for
+  which of these three has been observed printing its own line and which has not.**
   1. a run that enumerates zero files under an existing `$Base` must print
      `ACL check could not verify any file: 0 file(s) enumerated … Refusing to report a pass`
      and exit 1 — a gate that read nothing must never read as a pass
-     (`install-venya-cli.ps1:267-271`);
+     (`install-venya-cli.ps1:275-277`; **observed printing this line, in a harness, exit 1**);
   2. any file whose ACL reports `AreAccessRulesProtected` must fail the install with the
      shipped message naming `--link-mode copy` as the likely cause
-     (`install-venya-cli.ps1:264-265`);
+     (`install-venya-cli.ps1:270-271`; **not yet observed** — the scenario that reached this arm
+     never applied a protected DACL);
   3. an item that errors during enumeration or ACL-read must be disclosed as
      `ACL check INCOMPLETE: N item(s) … NOT checked`, not counted as verified
-     (`install-venya-cli.ps1:273-274`).
+     (`install-venya-cli.ps1:279-280`; **not yet observed** — same reason, and a deny-on-read
+     file does not fail an elevated `Get-Acl`, so the scenario needs to break enumeration).
 - **Why this cell is not optional:** the `--link-mode copy` posture is what keeps hardlinked
   files from inheriting the installing administrator's security descriptor, and this gate is
   the only thing standing between a silent revert and an install standard users cannot read.
