@@ -279,7 +279,7 @@ class TestFilterAndRedact:
         assert f"[REDACTED:{long_id}]".encode() in masked_stdout
         # Negative half: a distinct long id must not alias with another.
         other_id = "unrelated-other-identifier"
-        masked_stdout2, _, stdout_ids2, _ = filter_and_redact(
+        _masked_stdout2, _, stdout_ids2, _ = filter_and_redact(
             b"value " + secret + b" and other ",
             b"",
             secrets + [{"secret_id": other_id, "value": b"other-value"}],
