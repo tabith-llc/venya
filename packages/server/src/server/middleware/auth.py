@@ -792,7 +792,30 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 content={"detail": detail},
             )
 
-        db = backend.get_session()
+        # #603 AC2 step 1 (a′-i): the revocation read runs on the RESERVED
+        # connections when the backend supplies them, so it cannot queue behind
+        # ordinary command traffic for one of the shared pool's 15 slots.
+        #
+        # The discriminator is the CLASS, not the instance: ``getattr(backend, ...)``
+        # on a test double answers any attribute name, and 60 server test files wire
+        # ``MagicMock`` backends — an instance lookup would silently move those cells
+        # onto a second mock session and change what they assert. ``type(backend)``
+        # carries only real implementations, so a double without a reservation keeps
+        # the shipped ``get_session`` path byte-for-byte (test matrix 5: zero behavior
+        # delta for every caller that has no reserved pool).
+        #
+        # FAIL-CLOSED (the owner's hard condition): if the reserved engine cannot be
+        # built, or a reserved connection cannot be checked out within
+        # ``Backend.LIVENESS_POOL_TIMEOUT``, the raise below is NOT caught here — it
+        # propagates through this middleware (the ``try`` at :806 has no ``except``) to
+        # a 500. The request is REFUSED; revocation is never assumed. It is
+        # deliberately not a 403: ``daemon.py:319/_PERMANENT_REGISTER_STATUSES`` treats
+        # 403 as a permanent rejection, so answering a capacity fault with 403 would
+        # read to the executor as a revocation that never happened.
+        if callable(getattr(type(backend), "get_liveness_session", None)):
+            db = backend.get_liveness_session()
+        else:
+            db = backend.get_session()
         try:
             from core.iam.models import Executor
 

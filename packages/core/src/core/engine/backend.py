@@ -361,10 +361,30 @@ class Backend:
     in a protected buffer, and readers get a scoped read-only view of it.
     """
 
+    #: #603 AC2 step 1 (a′-i) — capacity PARTITION, not capacity growth. The
+    #: shared pool (``pool_size=5, max_overflow=10`` below) is what ordinary request
+    #: traffic consumes; a starved pool used to make the executor-mTLS revocation read
+    #: wait behind command traffic, which reads to the caller as a fault. These three
+    #: connections are held back for that read so it cannot be starved. Deliberately
+    #: NOT derived from ``ConcurrencyConfig.max_concurrent_commands`` — sizing that
+    #: tracks shipped concurrency is the capacity-raise route #603 AC6 / RF-4 forbid.
+    #: Headroom only: an ``ACCESS EXCLUSIVE`` lock on the revocation table still stalls
+    #: this read (same table), which is why step 1 does not close AC2.
+    LIVENESS_POOL_SIZE = 1
+    LIVENESS_MAX_OVERFLOW = 1
+    #: Short by design: if the reserved connections are all held, the revocation read
+    #: must fail LOUD and fast (the shipped raise → 500 path) rather than queue for
+    #: the 30 s QueuePool default behind the traffic it was carved out to escape.
+    LIVENESS_POOL_TIMEOUT = 2.0
+
     def __init__(self, config: BackendConfig) -> None:
         self.config = config
         self._engine: Engine | None = None
         self._session_factory: sessionmaker[Session] | None = None
+        # #603 AC2 step 1: the reserved liveness pair. Same database URL as the
+        # shared engine — it acquires NO new credential and owns no key material.
+        self._liveness_engine: Engine | None = None
+        self._liveness_session_factory: sessionmaker[Session] | None = None
         # One owner, one buffer. Pinning is attempted here and reported; the
         # outcome never decides whether the core starts.
         self._kek_cache = KekCache(KEK_SIZE)
@@ -400,6 +420,69 @@ class Backend:
     def get_session(self) -> Session:
         """Create a new database session."""
         return self.session_factory()
+
+    @property
+    def liveness_engine(self) -> Engine:
+        """The reserved engine for the liveness/revocation read (#603 AC2 step 1).
+
+        A second engine on the SAME ``config.database_url`` — no new credential, no
+        new permission, no key material — with its own small bounded pool, so the
+        revocation read cannot be starved by ordinary request traffic.
+        """
+        if self._liveness_engine is None:
+            self._create_liveness_engine()
+        return self._liveness_engine
+
+    @property
+    def liveness_session_factory(self) -> sessionmaker[Session]:
+        """Session factory bound to the reserved liveness engine."""
+        if self._liveness_session_factory is None:
+            self._liveness_session_factory = sessionmaker(bind=self.liveness_engine)
+        return self._liveness_session_factory
+
+    def get_liveness_session(self) -> Session:
+        """Open a session on the reserved liveness connections.
+
+        Fail-closed contract: if the reserved engine cannot be built, or no reserved
+        connection can be checked out within ``LIVENESS_POOL_TIMEOUT``, this RAISES.
+        It never returns a session bound to the shared pool, because falling back
+        there is the starvation this step removes — a caller that catches the raise
+        must refuse the request, never allow it. The executor-mTLS path lets it
+        propagate (the shipped raise → 500 shape), which refuses without asserting a
+        revocation that never happened.
+        """
+        return self.liveness_session_factory()
+
+    def _create_liveness_engine(self) -> None:
+        """Create the reserved liveness engine (#603 AC2 step 1, shape (a′-i)).
+
+        Mirrors the shared engine's connection settings — same URL, same
+        ``pool_pre_ping``, same PRAGMA listener body — differing ONLY in pool size,
+        so a reserved connection is not a second, weaker rulebook for the read.
+        """
+        self._liveness_engine = create_engine(
+            self.config.database_url,
+            pool_pre_ping=True,
+            pool_size=self.LIVENESS_POOL_SIZE,
+            max_overflow=self.LIVENESS_MAX_OVERFLOW,
+            pool_timeout=self.LIVENESS_POOL_TIMEOUT,
+        )
+
+        # Same connection-level settings as the shared engine: the revocation read
+        # must run under the identical statement timeout, or the reserved path would
+        # be a different (more forgiving) plan than the path it replaces.
+        @event.listens_for(self._liveness_engine, "connect")
+        def set_liveness_pragmas(dbapi_connection: Any, connection_record: Any) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                if self.config.wal_mode:
+                    cursor.execute("SET synchronous_commit = ON")
+                cursor.execute("SET statement_timeout = '300s'")
+                cursor.execute("SET enable_partition_pruning = ON")
+                cursor.close()
+            except Exception:
+                cursor.close()
+                raise
 
     def _create_engine(self) -> None:
         """Create the PostgreSQL engine."""
@@ -525,6 +608,12 @@ class Backend:
             self._engine.dispose()
             self._engine = None
             self._session_factory = None
+        # #603 AC2 step 1: the reserved pair is disposed on the same process-lifetime
+        # boundary as the shared engine — a held-back connection must not outlive it.
+        if self._liveness_engine is not None:
+            self._liveness_engine.dispose()
+            self._liveness_engine = None
+            self._liveness_session_factory = None
         self._kek_cache.release()
 
     def __enter__(self) -> Self:
