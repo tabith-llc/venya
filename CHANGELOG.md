@@ -25,6 +25,16 @@ Notable changes to Venya will be documented in this file.
   `Relay dial refused` are dial-true log prefixes and were left alone; a composed line
   can now read `Relay dial refused, Revocation list stale or unavailable — request
   refused (no revocation asserted)`, which is redundant and correct.
+- **Executor: the `[session]` and `[output_capture]` tables are gone (#620).** Seven keys
+  an operator could set in `/etc/venya/executor.toml` — `session_timeout`,
+  `access_token_ttl`, `max_session_duration`, `max_output_bytes`, `hash_window_size`,
+  `min_match_length`, and `[audit] local_retention_days` — were read by no code. Session
+  lifetimes are decided on the core from the server's own config, output limits come from
+  the executor's `MAX_OUTPUT_BYTES` constant, and the audit spool is bounded by buffer
+  size and batch lines. The #598 start-up line had been telling whoever set them that
+  "the file value is in use", which was not true of any of the seven; the promise now
+  stops where the capability does. A deployed `executor.toml` that still carries these
+  tables loads unchanged — unrecognised keys are ignored — so no reinstall is needed.
 
 ## [0.1.0alpha17] - 2026-10-13
 
