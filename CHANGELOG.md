@@ -4,6 +4,28 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+- **The executor's revocation poll is answered from a freshness-bounded snapshot
+  (#603, AC2 step 2).** A core republishes the revoked-serial and revoked-identity
+  population every 10 s and answers `GET /api/v1/executors/certs/revocation-list` from
+  that snapshot, so the poll no longer queues behind ordinary command traffic for a
+  database connection and no longer waits on a lock held over the revocation table.
+  The visible change for an operator is a new, deliberate answer on that endpoint: a
+  snapshot older than 45 s — or none yet, during a core's own startup — is refused with
+  `503` and the "no revocation asserted" wording the dial paths already used, never
+  served as a stale all-clear. A refused poll is counted by the executor exactly as an
+  unreachable core is counted today, so three consecutive refusals stop the daemon with
+  the operational-fault reason, not a revocation claim. Enforcement at the dial gates is
+  unchanged and does not depend on the snapshot; the numbers 45 s and 10 s are shipped
+  constants, not configuration.
+- **The stale-class refusal now says "request refused" instead of "dial refused"
+  (#603).** One sentence serves both the TLS dial and the poll, so the wording names
+  whichever request was refused rather than one transport. The clause operators read
+  for meaning — `no revocation asserted` — is unchanged, and `docs/beta-known-limitations.md`
+  cites that clause by name and line, so it needed no edit. Journal lines that begin
+  `Relay dial refused` are dial-true log prefixes and were left alone; a composed line
+  can now read `Relay dial refused, Revocation list stale or unavailable — request
+  refused (no revocation asserted)`, which is redundant and correct.
+
 ## [0.1.0alpha17] - 2026-10-13
 
 There is no backwards compatibility during alpha. Three changes in this window are
