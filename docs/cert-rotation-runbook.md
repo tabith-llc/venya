@@ -207,8 +207,10 @@ exemption and its retirement trigger are written up in
 (the same 3-day window the daemon uses). If the cert already expired, re-register
 instead (§3).
 
-Revoke (admin action, on the core with its machine-plane pair, or from a session
-that carries the administrator role):
+Revoke (admin action, on the core with its machine-plane pair — with admin mTLS
+enabled, which is the default, an admin request that carries no client certificate is
+refused 403, so a session alone is not a path here; the session arm applies only on an
+install made with admin mTLS off):
 
 ```bash
 VENYA_ADMIN_CERT=/etc/venya/admin/admin.crt VENYA_ADMIN_KEY=/etc/venya/admin/admin.key \

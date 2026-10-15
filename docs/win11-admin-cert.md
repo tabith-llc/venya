@@ -36,9 +36,14 @@ the theft window.** This page does not restate that argument; read it there.
 and the CLI prints it: `venya admin cert renew` writes the private key ENCRYPTED with
 `VENYA_ADMIN_CA_KEY_PASSPHRASE`, and the CLI cannot yet load an encrypted administrator key
 for admin mTLS (`_admin_leaf_key_encrypted_notice`,
-`packages/cli/src/venya_cli/commands.py:4806-4816`). So a renewed pair authenticates the person
-through their login session, not through certificate auth, until that read-side work lands
-(#565 Part B). The full statement lives in the opening note of
+`packages/cli/src/venya_cli/commands.py:4806-4816`). So a renewed pair does not serve the
+certificate-authenticated admin commands today, and a login session alone does not either:
+with admin mTLS enabled (the default) an admin request without a client certificate is
+refused 403. Until that read-side work lands (#565 Part B), the credential for those
+commands is the core's own machine-plane pair on the core — see
+[installation.md](installation.md) §2 and §3. The renewal call itself is the session-shaped
+exception (§5 step 6 still works): `POST /api/v1/admin/certs/issue` is authorized by the
+person's session by ruling, RF-6 §2.2. The full statement lives in the opening note of
 [cert-rotation-runbook.md](cert-rotation-runbook.md) §0.
 
 ## 2. Check it — no key, no network, works from a remote shell
@@ -197,8 +202,8 @@ Using only surfaces that exist at this tip:
    (`_win_ceremony_hint`, `packages/cli/src/venya_cli/commands.py:312-317`; printed by the
    elevation step at `commands.py:1979-1981`).
 7. **Confirm, then continue remotely:** `venya admin cert status` again. The renewed pair's
-   limit in §1 applies — plan on the session for admin commands that need certificate auth
-   today.
+   limit in §1 applies — the core's own machine-plane pair is what carries admin commands
+   that need certificate auth today.
 
 If you cannot reach a console and the job must run now: the machine-plane pair on the core
 itself is the headless path, and it stays on that host — see
