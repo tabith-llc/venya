@@ -180,9 +180,16 @@ a job that outlives its certificate fails with the same command named in the
 refusal. On Windows the ceremony opens only from an interactive desktop session,
 not from a remote or scheduled shell.
 
-What serves `venya admin ...` today, because the two shapes are not interchangeable:
-a signed-in session that carries the administrator role (the `venya login` above), or
-the core's own machine-plane pair presented on that core (§3). The certificate
+What serves `venya admin ...` today, because the shapes are not interchangeable: on an
+install with admin mTLS enabled (the default, §3) the administrator path needs a client
+certificate, and the pair that carries one today is the core's own machine-plane pair
+presented on that core. A signed-in session that carries the administrator role does not
+open that path by itself — an admin request with no client certificate is refused 403
+(`_validate_admin_mtls`, `packages/server/src/server/middleware/auth.py`); the session-only
+shape serves admin commands only where an install turns admin mTLS off. The one shipped
+exception is the mint itself: `POST /api/v1/admin/certs/issue` is session-shaped by ruling
+(RF-6 §2.2), which is why `venya admin cert renew` runs from a login session and nothing
+else in the admin set does. The certificate
 `venya admin cert renew` mints is written with its key encrypted at rest, and the
 CLI cannot yet load an encrypted administrator key for admin mTLS — §3 states that
 pairing rule once, and #565 Part B owns the read-side work that closes it.
