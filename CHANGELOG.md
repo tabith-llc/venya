@@ -4,6 +4,8 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.0beta1] - 2026-10-15
+
 - **The executor's revocation poll is answered from a freshness-bounded snapshot
   (#603, AC2 step 2).** A core republishes the revoked-serial and revoked-identity
   population every 10 s and answers `GET /api/v1/executors/certs/revocation-list` from
