@@ -45,10 +45,15 @@ SERVER_URL = "https://example.com"
 LOGGER_NAME = "venya.executor.daemon"
 THRESHOLD = 3
 
-# The server-side stale-class detail, at this base routes/executors.py:687. Copied as a
-# LITERAL here because the executor package must not import the server package; the
-# cell that owns the constant's bytes is the server-side suite.
-STALE_LIST_DETAIL = "Revocation list stale or unavailable — dial refused (no revocation asserted)"
+# The server-side stale-class detail, imported BY REFERENCE from its one owner
+# (`routes/executors.py:687`) rather than copied: the caller never parses a 5xx body, so
+# the only honest thing this file can do with the string is hold the same bytes the
+# server sends. A copied literal would have gone stale the moment the owner reworded it
+# ("Reword — to `request refused`", 2026-10-15) and the drift would have looked like
+# product inconsistency in a green suite. Executor source stays free of the server
+# package; the precedent for a test importing across packages is this suite's own
+# `test_integration.py:31` and `conftest.py:33`.
+from server.routes.executors import _STALE_LIST_DETAIL as STALE_LIST_DETAIL
 
 GOOD_ETAG = '"good-etag"'
 

@@ -684,7 +684,7 @@ _X509_V_ERR_UNABLE_TO_GET_CRL = 3
 _X509_V_ERR_CRL_HAS_EXPIRED = 12
 _X509_V_ERR_CERT_REVOKED = 23
 
-_STALE_LIST_DETAIL = "Revocation list stale or unavailable — dial refused (no revocation asserted)"
+_STALE_LIST_DETAIL = "Revocation list stale or unavailable — request refused (no revocation asserted)"
 
 
 def _ensure_dial_crl_store(request: Request, db: Session) -> str:
