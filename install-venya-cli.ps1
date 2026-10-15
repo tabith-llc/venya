@@ -73,7 +73,7 @@ function Invoke-Native {
 
 function Get-SystemTool([string]$name) {
     $p = Join-Path $env:SystemRoot "System32\$name"
-    if (-not (Test-Path $p)) { Fail "Required Windows component not found: $p" }
+    if (-not (Test-Path -LiteralPath $p)) { Fail "Required Windows component not found: $p" }
     return $p
 }
 
@@ -93,6 +93,12 @@ Re-run from an elevated terminal: right-click PowerShell -> Run as administrator
 $curl = Get-SystemTool 'curl.exe'
 $tar  = Get-SystemTool 'tar.exe'
 
+# Every path below is derived from an operator-set variable. Test-Path's
+# positional parameter is -Path, which resolves wildcards, so a directory named
+# with [ and ] (a test root called C:\temp[gate], for instance) matches nothing
+# and a file that exists reads as missing. -LiteralPath does not parse
+# wildcards, so every existence check in this script uses it (#628 - the same
+# class #493 fixed inside the ACL gate, whose upstream checks stayed positional).
 $Base      = if ($env:VENYA_INSTALL_DIR) { $env:VENYA_INSTALL_DIR } else { 'C:\Program Files\Venya' }
 $UvDir     = Join-Path $Base 'uv'
 $UvExe     = Join-Path $UvDir 'uv.exe'
@@ -137,7 +143,7 @@ New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 
 try {
     # --- uv (machine-wide, pinned, sha256-verified) ---
-    if ((Test-Path $UvExe) -and ((& $UvExe --version 2>&1) -match [regex]::Escape($UvVersion))) {
+    if ((Test-Path -LiteralPath $UvExe) -and ((& $UvExe --version 2>&1) -match [regex]::Escape($UvVersion))) {
         Info "uv $UvVersion already present at $UvExe"
     } else {
         Info "Fetching uv $UvVersion..."
@@ -160,7 +166,7 @@ Refusing to run an unverified binary. Aborting.
         Info 'uv SHA-256 verified.'
         Invoke-Native -Exe $tar -Arguments @('-xf', $uvZip, '-C', $UvDir) -What 'uv archive extraction'
         Remove-Item -LiteralPath $uvZip -Force
-        if (-not (Test-Path $UvExe)) { Fail "uv.exe missing after extraction into $UvDir" }
+        if (-not (Test-Path -LiteralPath $UvExe)) { Fail "uv.exe missing after extraction into $UvDir" }
     }
 
     # Machine-wide locations, so nothing depends on the installing admin's profile.
@@ -212,7 +218,7 @@ Possible MITM or corrupted download. Aborting.
     Invoke-Native -Exe $tar -Arguments @('xzf', $tarballFile, '-C', $extractDir) -What 'Tarball extraction'
     Remove-Item -LiteralPath $tarballFile -Force
 
-    if (-not (Test-Path (Join-Path $extractDir 'packages\cli\pyproject.toml'))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $extractDir 'packages\cli\pyproject.toml'))) {
         Fail 'Tarball layout unexpected: packages/cli/pyproject.toml not found.'
     }
 
@@ -230,7 +236,7 @@ Possible MITM or corrupted download. Aborting.
 
     $installMcp = if ($env:VENYA_INSTALL_MCP) { $env:VENYA_INSTALL_MCP } else { 'yes' }
     if ($installMcp -ne 'no') {
-        if (-not (Test-Path (Join-Path $extractDir 'packages\mcp\pyproject.toml'))) {
+        if (-not (Test-Path -LiteralPath (Join-Path $extractDir 'packages\mcp\pyproject.toml'))) {
             Fail 'Tarball layout unexpected: packages/mcp/pyproject.toml not found (VENYA_INSTALL_MCP != no).'
         }
         Info 'Installing venya-mcp via uv tool (copy link mode)...'
@@ -288,7 +294,7 @@ Possible MITM or corrupted download. Aborting.
 
     # --- Verify ---
     $venyaExe = Join-Path $BinDir 'venya.exe'
-    if (-not (Test-Path $venyaExe)) { Fail "venya shim not found at $venyaExe after install." }
+    if (-not (Test-Path -LiteralPath $venyaExe)) { Fail "venya shim not found at $venyaExe after install." }
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     & $venyaExe --help *> $null
@@ -299,11 +305,11 @@ Possible MITM or corrupted download. Aborting.
 
     if ($installMcp -ne 'no') {
         $mcpExe = Join-Path $BinDir 'venya-mcp.exe'
-        if (-not (Test-Path $mcpExe)) { Fail "venya-mcp shim not found at $mcpExe after install." }
+        if (-not (Test-Path -LiteralPath $mcpExe)) { Fail "venya-mcp shim not found at $mcpExe after install." }
         # No --help probe: venya-mcp is a stdio server and would block. Import check.
         # Windows venvs put the interpreter in Scripts\, not bin/.
         $mcpPython = Join-Path $ToolDir 'venya-mcp\Scripts\python.exe'
-        if (Test-Path $mcpPython) {
+        if (Test-Path -LiteralPath $mcpPython) {
             Invoke-Native -Exe $mcpPython -Arguments @('-c', 'import venya_mcp.server') -What 'venya-mcp server module import'
             # #396 contract: claims gate on verification — the installed claim
             # prints only after the import check actually ran (and passed;
@@ -316,7 +322,7 @@ Possible MITM or corrupted download. Aborting.
     }
 } finally {
     Remove-Item Env:\UV_PYTHON_INSTALL_DIR, Env:\UV_TOOL_DIR, Env:\UV_TOOL_BIN_DIR, Env:\UV_CACHE_DIR -ErrorAction SilentlyContinue
-    if (Test-Path $workDir) {
+    if (Test-Path -LiteralPath $workDir) {
         # #401: the sweep discloses its result instead of silently leaving
         # venya-cli-install-<guid> scratch dirs behind.
         $sweepErr = @()
