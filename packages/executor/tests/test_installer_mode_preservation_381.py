@@ -46,8 +46,7 @@ class TestExecutorInstallerModePreservation381:
     def test_p5_unit_files_install_m_replaces_cp(self):
         """P5: all three unit files land via install -m 0600; no cp revival."""
         ex = _executor()
-        for name in ("venya-executor.service", "tmp-venya_secrets.mount",
-                     "venya-executor.seccomp"):
+        for name in ("venya-executor.service", "tmp-venya_secrets.mount", "venya-executor.seccomp"):
             assert f'install -m 0600 "$INSTALL_DIR/systemd/{name}" "$SYSTEMD_DIR/"' in ex
         assert 'cp "$INSTALL_DIR/systemd/' not in ex
 
@@ -60,6 +59,6 @@ class TestExecutorInstallerModePreservation381:
         w = "> /var/lib/venya/executor/bootstrap-token"
         pin380 = "install -d -m 0750 -o venya -g venya /var/lib/venya/executor"
         assert guard in ex and rm in ex
-        assert ex.index(pin380) < ex.index(guard)      # #380 boundary preserved
+        assert ex.index(pin380) < ex.index(guard)  # #380 boundary preserved
         assert ex.index(guard) < ex.index(rm) < ex.index(w)
         assert ex.count(pin380) == 1

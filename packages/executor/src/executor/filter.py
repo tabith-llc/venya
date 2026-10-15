@@ -62,13 +62,10 @@ def build_filter_entries(
         value = secret["value"]
 
         if not isinstance(secret_id, str):
-            raise TypeError(
-                f"secret entry {i}: secret_id must be str, got {type(secret_id).__name__}"
-            )
+            raise TypeError(f"secret entry {i}: secret_id must be str, got {type(secret_id).__name__}")
         if not isinstance(value, bytes):
             raise TypeError(
-                f"secret entry {i} (secret_id={secret_id!r}): "
-                f"value must be bytes, got {type(value).__name__}"
+                f"secret entry {i} (secret_id={secret_id!r}): " f"value must be bytes, got {type(value).__name__}"
             )
         id_bytes = len(secret_id.encode("utf-8"))
         if id_bytes > _MAX_SECRET_ID_BYTES:
