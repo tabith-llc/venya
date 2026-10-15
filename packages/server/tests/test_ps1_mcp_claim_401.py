@@ -24,8 +24,11 @@ SRC = (REPO_ROOT / "install-venya-cli.ps1").read_text(encoding="utf-8")
 
 
 def _mcp_branches() -> tuple[str, str]:
+    # The #628 sweep made this site literal, so the anchor names the literal
+    # form: a revert to the positional -Path fails here as well as in
+    # test_ps1_testpath_literal_628.py.
     m = re.search(
-        r"if \(Test-Path \$mcpPython\) \{\n(?P<yes>.*?)\n        \} else \{\n(?P<no>.*?)\n        \}",
+        r"if \(Test-Path -LiteralPath \$mcpPython\) \{\n(?P<yes>.*?)\n        \} else \{\n(?P<no>.*?)\n        \}",
         SRC,
         re.DOTALL,
     )
