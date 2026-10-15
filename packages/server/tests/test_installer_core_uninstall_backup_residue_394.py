@@ -51,9 +51,7 @@ def test_removes_list_and_rm_line_cover_backup_dir() -> None:
     header = src.split("NOT removed")[0]
     assert "/var/backups/venya" in header, "Removes-list omits the backup dir"
     assert "/var/backups/venya" in _rm_targets(src), "no rm covers it"
-    assert re.search(
-        r'info "Removed /var/backups/venya', src
-    ), "loud-removal printed line missing"
+    assert re.search(r'info "Removed /var/backups/venya', src), "loud-removal printed line missing"
 
 
 def test_only_venya_under_var_backups_is_removed() -> None:

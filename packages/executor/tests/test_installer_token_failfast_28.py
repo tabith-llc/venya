@@ -50,8 +50,7 @@ def _run_guard(tmp_path: Path, token, cert_bytes) -> subprocess.CompletedProcess
     body = (
         "set -euo pipefail\n"
         "EXECUTOR_ID=venya-exec-cell\n"
-        "error() { echo \"[ERROR] $*\"; }\n"
-        + fragment.replace(CERT_SENTINEL, f'"{cert_path}"')
+        'error() { echo "[ERROR] $*"; }\n' + fragment.replace(CERT_SENTINEL, f'"{cert_path}"')
     )
     script.write_text(body, encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if k != "VENYA_EXECUTOR_ENROLLMENT_TOKEN"}
