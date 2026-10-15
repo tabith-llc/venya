@@ -38,7 +38,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from venya_contract import ASKPASS_HELPER_PATH, RelayEnvVar, RelayRequest, RelayResponse, RelaySecret
 
-from .. import metrics
+from .. import metrics, revocation_snapshot
 from ..ca import CAManager, accepted_csr_curve_names, csr_curve_hint
 from ..dependencies import get_db, require_role, require_user_identity
 from ..middleware.auth import (
@@ -1238,20 +1238,33 @@ async def get_revocation_list(
     if their certificate has been revoked. Supports conditional GET
     via ETag for caching — returns 304 Not Modified when the list
     has not changed.
-    """
-    from core.iam.models import ExecutorCertRevocation
 
+    #603 AC2 step 2: the population is served from the freshness-bounded snapshot the
+    core's publisher republishes every ``REVOCATION_SNAPSHOT_REFRESH_SECONDS``
+    (``server/revocation_snapshot.py``), so this request path issues no DB read. A
+    snapshot that is missing or at/past ``REVOCATION_SNAPSHOT_MAX_AGE_SECONDS``
+    REFUSES in the shipped stale class (503, "no revocation asserted") and never
+    answers live — an empty population read as "nothing revoked" is the fail-open this
+    step exists to close. The staleness gate runs BEFORE the ETag branch, so a stale
+    snapshot can never be answered as a 304 (a 304 carries no body, so nothing
+    downstream could catch it).
+    """
     # READ-ONLY (ticket sec-sweep-low-informational #23b): this public GET
     # used to purge expired revocations on every poll (~30s x fleet) — an
     # unauthenticated write-on-read. The purge now runs as a maintenance-loop
     # pass (maintenance.run_maintenance, 5-minute schedule).
 
-    # Fetch remaining revocations
-    revocations = db.query(ExecutorCertRevocation).all()
-    serials = sorted([r.serial_number for r in revocations])
-    # Identity-level revocations (terminal flag on the Executor row) ride
-    # alongside the serial history — additive wire field, ETag covers BOTH.
-    identities = sorted(row[0] for row in db.query(Executor.id).filter(Executor.revoked_at.isnot(None)).all())
+    # The one place the poll decides whether it has an answer at all. Raises
+    # RevocationSnapshotUnavailable for a missing/stale snapshot; the refusal detail is
+    # the shipped stale-class constant, imported by reference, never retyped.
+    try:
+        serials, identities = revocation_snapshot.read_populations(db)
+    except revocation_snapshot.RevocationSnapshotUnavailable as e:
+        raise HTTPException(status_code=503, detail=_STALE_LIST_DETAIL) from e
+
+    # Payload and ETag stay computed together, off the ONE population this request
+    # decided to answer from (#337: a stored ETag beside a separately-built body is
+    # the divergence class; the snapshot therefore never carries an etag).
     payload = json.dumps({"s": serials, "i": identities}, sort_keys=True).encode()
     etag = f'"{hashlib.sha256(payload).hexdigest()}"'
 

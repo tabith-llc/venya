@@ -16,6 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from . import revocation_snapshot
 from .config import CASecurityConfig, ServerConfig
 
 logger = logging.getLogger("venya.server")
@@ -436,6 +437,24 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     cleanup_task = asyncio.create_task(session_cleanup_loop(), name="session-cleanup")
     cleanup_task._created_at = time.monotonic()  # type: ignore[attr-defined]
 
+    # #603 AC2 step 2: the revocation-liveness snapshot publisher, beside the shipped
+    # cleanup-loop idiom. It owns the poll's population read from here on — the route
+    # answers from the snapshot and refuses in the stale class when the snapshot is
+    # missing or past the freshness ceiling, so a locked or pool-queued liveness read
+    # can no longer destroy an executor's answer. It reads on the ORDINARY pool
+    # (spec 7.7): step 1's reserved connection stays reserved for the request-path
+    # reads that still exist, and a periodic timer must not compete with them for a
+    # 1+1-slot pool. The session factory is resolved off `type(backend)` the way the
+    # middleware does it, so a supply with no `get_session` never reaches a mock.
+    #
+    # FAIL-CLOSED ORDER: `revocation_snapshot_loop` sets the running flag BEFORE its
+    # first publish, so a poll that arrives in that startup window REFUSES (503 stale
+    # class) instead of falling back to a live DB read — the cold start is a refusal,
+    # never an all-clear. Cancelled on shutdown the same way `cleanup_task` is.
+    snapshot_task = asyncio.create_task(
+        revocation_snapshot.revocation_snapshot_loop(backend.get_session), name="revocation-snapshot"
+    )
+
     yield
 
     # Shutdown
@@ -443,6 +462,12 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         cleanup_task.cancel()
         try:
             await cleanup_task
+        except asyncio.CancelledError:
+            pass
+    if snapshot_task is not None:
+        snapshot_task.cancel()
+        try:
+            await snapshot_task
         except asyncio.CancelledError:
             pass
     shutdown_backend = getattr(app.state, "backend", None)
