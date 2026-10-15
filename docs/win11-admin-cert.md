@@ -5,8 +5,10 @@
 > warnings, and the server constants. Every command printed here was read in
 > `packages/cli/src/venya_cli/cli.py` (`create_parser`, verified at `dev` `7b055e4`), and
 > every quoted clause cites the file and symbol it came from.
-> **Section 6 is different: those cells were DESIGNED, NOT RUN.** No Windows physical was
-> performed for this page, and nothing in section 6 is evidence of anything.
+> **Section 6 is different: those cells are NOT RUN, each with the exception it states.**
+> The only Windows physical performed for this page is a read-only guest preflight (section 6
+> says which reads and when); no install, ceremony, or renewal has run, and nothing in those
+> cells is evidence of anything.
 
 ## 1. What the credential is
 
@@ -220,51 +222,123 @@ and the route forward is the ceremony above.
 Authenticator reset and PIN set/change are not CLI operations on Windows; the vendor tool
 owns them (`install-venya-cli.ps1:342-343`).
 
-## 6. Physical cells — DESIGNED, NOT RUN
+## 6. Physical cells — status as run
 
-**Nothing in this section is evidence.** Every cell below was written from source and was
-never executed. Each one carries its success criterion, the paired rejection it must also
-prove, and the reason it is outstanding.
+**Nothing in this section is evidence unless its own status line says it is.** Every cell
+below was written from source. Each one carries its success criterion, the paired rejection it
+must also prove, and the reason it is outstanding.
 
-> **NOT RUN — requires the `win11` guest booted by the owner.** That guest is a montana
-> domain, montana is frozen, and no lane boots, halts, defines or queries it. A ceremony also
-> needs a security key attached to the machine the operator sits at — nothing that arrives
+| Cell | Status (guest preflight at `dev` `f0a2c3a`) |
+|---|---|
+| 1 — installer ACL gate on a wildcard path (#493) | **PREFLIGHT EVIDENCED, INSTALL HALF NOT RUN** |
+| 2 — the ceremony from an interactive desktop | **NOT RUN** |
+| 3 — the renewal round trip | **NOT RUN** |
+
+> **What the guest gives, and what it does not.** The `win11` guest is a montana domain and
+> montana is frozen: no lane boots, halts, defines or queries it (`virsh` reads included) —
+> that stays the owner's. Its booted state, its PowerShell version and its installed CLI were
+> read over SSH as `win` (rc=0) from the agent box; that read is the preflight table under
+> Cell 1, and it is the only Windows physical this page holds. A ceremony needs, in addition,
+> a security key attached to that machine and a person at its console — nothing that arrives
 > over the network can stand in for one.
 
 ### Cell 1 — the installer's ACL gate on a path containing wildcards (#493)
 
-**NOT RUN — requires the `win11` guest booted by the owner.**
+**PREFLIGHT EVIDENCED, INSTALL HALF NOT RUN.** The guest read ran and is recorded below. The
+install half did not run, and on the tip it was measured against it could not have passed:
+
+> the shipped installer aborts at `install-venya-cli.ps1:163` (`uv.exe missing after
+> extraction`) when `VENYA_INSTALL_DIR` contains PowerShell wildcard characters, because that
+> check uses `-Path` semantics while #493's fix covered only the ACL-gate enumeration; filed
+> as #628, fix leg in flight; no gate message has been observed executing.
+
+**Guest preflight (ran, rc=0; read-only, as `win` over SSH from the agent box):**
+
+| Read | Result |
+|---|---|
+| `whoami` / `hostname` | `win11\win` / `win11` |
+| `$PSVersionTable.PSVersion` | `5.1.26100.9444` |
+| `(Get-Command venya).Source` | `C:\Program Files\Venya\bin\venya.exe` |
+| `venya --version` | `0.1.0alpha16` |
+| `Get-LocalUser venyastd` | present |
+| `Test-Path ~\.venya\config.json` | `False` (no CLI config in the `win` profile) |
+| `$env:VENYA_ADMIN_CERT` | empty |
 
 - **Surface under test:** the protected-DACL enumeration and its counters in
-  `install-venya-cli.ps1:248-277` — `Get-ChildItem -LiteralPath $Base -Recurse -Force -File`
-  (`:254`), `Get-Acl -LiteralPath` (`:256`), the `$protected` / `$verified` / `$notChecked`
-  counters (`:248-250`, `:257-263`), and the three report lines at `:273-277`.
-- **Shape:** run the machine-wide install as the standard-user identity of the guest
-  (`venyastd`, not the administrator account), with `VENYA_INSTALL_DIR` pointed at a path
-  that contains PowerShell wildcard characters — a bracketed directory name is the shape that
-  made the old positional `-Path` bind nothing.
+  `install-venya-cli.ps1:240-277` (cites re-anchored at `dev` `f0a2c3a`) —
+  `Get-ChildItem -LiteralPath $Base -Recurse -Force -File` (`:254`), `Get-Acl -LiteralPath`
+  (`:256`), the `$protected` / `$verified` / `$notChecked` counters (`:247-249`, `:257-263`),
+  and the three report lines at `:271`, `:274` and `:276`.
+- **Shape:** run the machine-wide install **elevated**, in an Administrator terminal, with
+  `VENYA_INSTALL_DIR` pointed at a path that contains PowerShell wildcard characters — a
+  bracketed directory name is the shape that made the old positional `-Path` bind nothing.
+  The install is elevated **by design**, not as a workaround: Windows refuses junction
+  traversal by a Medium-integrity process while `uv` needs a junction for its Python alias,
+  so the install takes the admin token and only the *use* is unelevated — "Install =
+  elevated, use = unelevated, and that is by design" (the Windows venue law 4, `ad2c2ab`; the
+  same split is in [installation.md](installation.md): "Elevated **install**, unelevated
+  **use**"). The installer says so itself — it refuses an unelevated run outright at
+  `install-venya-cli.ps1:83-91` ("Administrator rights are REQUIRED to install the Venya CLI
+  on Windows", the same junction reason). The standard-user half of this cell is therefore its
+  paired assertion: it is proven **after** the install, at `venyastd`'s own console in a
+  non-elevated terminal, that the installed files are readable there.
+- **Run it this way:**
+
+  ```powershell
+  # elevated PowerShell on the guest (`win`), from the box that serves the tarballs:
+  $env:VENYA_SKIP_PROMPT      = "yes"
+  $env:VENYA_INSTALL_DIR      = "C:\temp[gate]"
+  $env:VENYA_TARBALL          = "http://$BuildHost:8080/venya-cli-install.tar.gz"
+  $env:VENYA_TARBALL_SHA256   = "$CliSha"
+  # after the install succeeds, prove readability AS venyastd at ITS OWN console (unelevated):
+  #   Get-Content "C:\temp[gate]\bin\venya.exe" -TotalCount 1
+  ```
+
+  **Neither value is written here, on purpose — derive both at use time.** `$BuildHost` is
+  your installer host's serve root: the `:8080` docroot the tarballs were built into. `$CliSha`
+  is the hash in the `<tarball>.sha256` sidecar lying beside that tarball, read the way it is
+  read anywhere — `cut -d' ' -f1 venya-cli-install.tar.gz.sha256`. A served hash changes with
+  every build, and an address written into a page goes stale the first time the server moves.
+  This is the same derivation [full-lifecycle-test.md](full-lifecycle-test.md) already uses
+  (`http://$BUILD_HOST_IP:8080/<tarball>` with `VENYA_TARBALL_SHA256=$CLI_SHA`), and it is not
+  optional here either: on an `http` origin the installer **requires** that hash and aborts
+  before any fetch or write without it (#375, #328).
+  `venya.exe` is the install-root `bin` shim; the paths under `VENYA_INSTALL_DIR` are what the
+  gate enumerates.
 - **Success:** the run prints `ACL check passed: N file(s) enumerated and ACL-read, 0
   protected DACLs` with **N greater than zero**, and the installed files are readable by a
   standard user afterwards.
-- **Paired rejection (what must FAIL):**
+- **Paired rejection (what must FAIL) — all three NOT RUN, blocked by #628:** none of these
+  messages has been observed executing.
   1. a run that enumerates zero files under an existing `$Base` must print
      `ACL check could not verify any file: 0 file(s) enumerated … Refusing to report a pass`
      and exit 1 — a gate that read nothing must never read as a pass
-     (`install-venya-cli.ps1:270-272`);
+     (`install-venya-cli.ps1:267-271`);
   2. any file whose ACL reports `AreAccessRulesProtected` must fail the install with the
      shipped message naming `--link-mode copy` as the likely cause
-     (`install-venya-cli.ps1:264-266`);
+     (`install-venya-cli.ps1:264-265`);
   3. an item that errors during enumeration or ACL-read must be disclosed as
      `ACL check INCOMPLETE: N item(s) … NOT checked`, not counted as verified
-     (`install-venya-cli.ps1:273-277`).
+     (`install-venya-cli.ps1:273-274`).
 - **Why this cell is not optional:** the `--link-mode copy` posture is what keeps hardlinked
   files from inheriting the installing administrator's security descriptor, and this gate is
   the only thing standing between a silent revert and an install standard users cannot read.
 
 ### Cell 2 — the ceremony from an interactive desktop
 
-**NOT RUN — requires the `win11` guest booted by the owner**, plus a security key attached to
-that machine and a person at its console.
+**NOT RUN.** Two independent blockers, both measured at the preflight above:
+
+1. the CLI installed on the guest is `C:\Program Files\Venya\bin\venya.exe`, version
+   **`0.1.0alpha16`**, and it has **no `admin cert` group** — `venya admin cert status` fails
+   at the parser with `invalid choice: 'cert'`, so the surface this cell renews does not exist
+   in the installed artifact (it is in the source: the `admin cert` group inside
+   `create_parser`, `packages/cli/src/venya_cli/cli.py:481`, verified at `dev` `f0a2c3a`); and
+2. the security key is not attached to the domain, and the ceremony needs a human at its
+   console.
+
+**Owner acts required before Cell 2 or Cell 3 can run — three, and no lane can do any of
+them:** (1) attach security key A to the `win11` guest, (2) install a current CLI on it
+(installs are the owner's act on every box), (3) be at that machine's console for the tap.
 
 - **Shape:** at the guest's own console, from a standard (non-elevated) terminal, in the
   standard-user profile: `venya setup <core>` once, then `venya login <user-id>`, then
@@ -285,7 +359,9 @@ that machine and a person at its console.
 
 ### Cell 3 — the renewal round trip
 
-**NOT RUN — requires the `win11` guest booted by the owner.**
+**NOT RUN.** `venya admin cert status` does not exist in the installed `0.1.0alpha16` CLI
+(parser error quoted under Cell 2), and the renewal it measures is the console ceremony of
+Cell 2, so the same three owner acts gate this cell.
 
 - **Success:** `venya admin cert status` before → renew at the console → `status` after shows
   a lifetime inside the committed hour, and the ceremony's refusal order holds: with no login
