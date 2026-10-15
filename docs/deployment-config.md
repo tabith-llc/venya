@@ -129,6 +129,26 @@ set, the file still owns it.
 
 ### Environment Variable Mapping (examples)
 
+**Every row in this table is a core/server-plane field.** They are all members of `ServerConfig`
+(`packages/server/src/server/config.py`), read from the process environment with the `VENYA_` prefix and the `__`
+section delimiter, or from `$VENYA_ENV_DIR/.env` (default `/opt/venya/.env`). None of them is an executor knob: the
+executor is a separate plane with its own model (`ExecutorConfig`), its own file (`/etc/venya/executor.toml`) and its own
+prefix (`VENYA_EXECUTOR_`), so setting one of these names on an executor box does not change the value the row above
+records. Two look-alikes are named below because both are live traps in this table.
+
+| Row above | What it actually is | Where the look-alike misleads |
+|---|---|---|
+| `session.session_timeout` | **core/session plane.** `ServerConfig.SessionConfig` field, enforced by the session manager (`core/iam/session_manager.py`, `expires_at = now + self.config.session_timeout`) and by the auth middleware (`server/middleware/auth.py`). | The only name in this table that an operator can also set on the EXECUTOR, under a different spelling — see below. |
+| `executor_enrollment.token_ttl_seconds`<br>`executor_enrollment.require_token` | **core/server plane**, despite the name. `ExecutorEnrollmentConfig` is a `ServerConfig` section: it governs how the CORE admits executors (`POST /api/v1/executors/register`). | Its env spelling is `VENYA_EXECUTOR_ENROLLMENT__*` — that is the core's `VENYA_` prefix plus the `EXECUTOR_ENROLLMENT__` section, **not** the executor's `VENYA_EXECUTOR_` prefix. The executor model carries no `executor_enrollment` field at all; its own registration secret is the separate `bootstrap.enrollment_token`. |
+
+`session.session_timeout` is the one row here whose name also appears on the EXECUTOR plane, and that is the trap #620
+tracks: the executor accepts a `VENYA_EXECUTOR_SESSION__SESSION_TIMEOUT` spelling (and a `[session]` block in
+`/etc/venya/executor.toml`) but **no session lifetime on the core changes because of it** — the two planes are read by
+different processes from different models, and nothing in the executor path feeds the core's `SessionConfig`. Whatever #620
+finally does with those executor-side fields — delete them or wire them — the row above stays a **core** setting, and an
+executor-side value is not how you change it. Set the rows above on the core; set executor keys in
+`/etc/venya/executor.toml` or with `VENYA_EXECUTOR_*`, per the precedence table above.
+
 | Config field | Environment Variable |
 |-----------|---------------------|
 | `recovery_code_pepper` | `VENYA_RECOVERY_CODE_PEPPER` |
