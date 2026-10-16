@@ -277,7 +277,26 @@ class TestPairedNegatives577:
         assert message == _ca_key_decrypt_refusal(None)
         # from e is KEPT (AC2): the leak is fixed by what is shown, not by dropping the chain.
         assert isinstance(excinfo.value.__cause__, ValueError)
-        assert "Incorrect password" in str(excinfo.value.__cause__)
+        # #612 — the cause's WORDING belongs to the library, and this cell used to pin it. The old
+        # line was ``assert "Incorrect password" in str(excinfo.value.__cause__)``, which reddened this
+        # cell while the product sentence above it was byte-correct: on a fresh PBES2 key (random salt
+        # and IV) cryptography 50.0.0 answers a wrong passphrase with "Incorrect password" about 99.65%
+        # of the time and with an "ASN.1 parsing error" the rest — 82 of 23,600 fresh keys measured at
+        # s126, and 2 failures in 215 isolated reps of THIS cell. A pad check that passes by chance
+        # (~1/256) lets the parser reach DER, where it fails on structure instead. Pinning either
+        # phrase makes the cell a dice roll, and matching a library message is exactly what #541's
+        # blanket rule and this file's own probe doctrine forbid. What is asserted here is therefore
+        # wording-independent: the cause CLASS, that a mechanism really was chained (non-empty), that
+        # our ruled sentence is NOT what the library said, and the discriminator the branch actually
+        # used — the bytes parse, so a passphrase was a meaningful thing to get wrong.
+        cause = excinfo.value.__cause__
+        assert str(cause).strip(), "the chained cause is empty — the mechanism was dropped, not re-worded"
+        assert _PASSPHRASE_BLAME not in str(
+            cause
+        ), "our ruled sentence is riding the cause instead of the refusal — the operator voice moved"
+        assert (
+            encrypted_key_is_parseable(data) is True
+        ), "this arm is only the #574 passphrase voice while the key is intact; the fixture stopped being one"
 
     def test_intact_key_with_correct_passphrase_still_loads_on_both_planes(self, tmp_path, monkeypatch):
         """AC3(i) — a catch that eats success would be worse than the blame it fixed."""

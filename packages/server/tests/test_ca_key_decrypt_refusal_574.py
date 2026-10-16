@@ -71,6 +71,31 @@ _CONDITIONAL_RESTORE = "when either was made for this key"
 _SETUP_ALTERNATIVE = "otherwise re-run the CA setup"
 
 
+def _assert_chained_cause_is_library_voice(exc: RuntimeError) -> str:
+    """#612 — the chained cause must be a real library refusal, WITHOUT naming which sentence.
+
+    Two cells in this file used to assert ``"Incorrect password" in str(exc.__cause__)``. That string
+    is the library's choice, not ours: on a freshly generated PBES2 key (random salt and IV) a wrong
+    passphrase answers with "Incorrect password" roughly 99.65 % of the time and with an
+    ``ASN.1 parsing error`` the rest — 82 of 23,600 fresh keys measured at s126, where the pinned
+    sentence reddened the sibling cell in `test_ca_key_damaged_refusal_577.py` while the operator-
+    facing refusal above it was byte-correct. The mechanism is that a pad check passes by chance
+    (~1/256), so the parser reaches DER and fails on structure instead of on the password.
+
+    What these cells actually need is the non-vacuity half: SOMETHING was there to leak, and it is the
+    library's voice rather than ours. That is wording-independent — exception CLASS, non-empty text,
+    and none of our ruled sentences inside it — so the cell is deterministic and still catches the
+    defect class: a dropped cause, or our own operator sentence smuggled onto the chain.
+    """
+    cause = exc.__cause__
+    assert isinstance(cause, ValueError), "the loader's ValueError is no longer chained (from e was lost)"
+    text = str(cause)
+    assert text.strip(), "the chained cause carries no library sentence — there was nothing there to leak"
+    for ours in (_HEADLINE, _RETRY_POINTER, _CONDITIONAL_RESTORE, _SETUP_ALTERNATIVE):
+        assert ours not in text, f"our ruled operator sentence is riding the cause, not the refusal: {ours!r}"
+    return text
+
+
 def _assert_class_shape(message: str, expect_path: str | None) -> None:
     """The ruled invariant, as an assertion: our words · no library voice · path named · pointer present."""
     assert _HEADLINE in message, f"the ruled headline is missing: {message!r}"
@@ -116,8 +141,8 @@ class TestWrongPassphraseRefuses574:
         _assert_class_shape(message, expect_path=str(root_manager.ca_key_path))
         assert message.startswith(f"The CA key at {root_manager.ca_key_path} ")
         # The mechanism is NOT lost — it rides the chained cause for a support engineer.
-        assert isinstance(excinfo.value.__cause__, ValueError)
-        assert "Incorrect password" in str(excinfo.value.__cause__)
+        # #612: the cause is asserted as a library voice without naming which one it chose.
+        _assert_chained_cause_is_library_voice(excinfo.value)
 
     def test_admin_load_refuses_in_the_ruled_shape_with_the_real_path(
         self, admin_manager: AdminCAManager, monkeypatch
@@ -243,11 +268,10 @@ class TestSurfacesCarryNoLibraryVoice574:
 
         # The mechanism is still preserved internally (this is NOT a traceback-integrity check —
         # :118-119 own that; this line says the surfaces are clean WHILE the cause is intact).
-        assert isinstance(excinfo.value.__cause__, ValueError)
-        assert "Incorrect password" in str(excinfo.value.__cause__), (
-            "precondition: the library sentence really exists in this process — if it does not, the "
-            "absence assertions above are vacuous because nothing was there to leak"
-        )
+        # #612: this is the cell's non-vacuity precondition, and it needs a library sentence to exist,
+        # not a particular library sentence — see the helper. The absence loops above stay exactly as
+        # ruled; only the vendor-string pin on the cause is replaced.
+        _assert_chained_cause_is_library_voice(excinfo.value)
 
 
 class TestDoNotMovePins574:
