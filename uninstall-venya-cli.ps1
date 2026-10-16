@@ -71,7 +71,7 @@ if (-not $purge) {
     }
 }
 
-if (Test-Path $Base) {
+if (Test-Path -LiteralPath $Base) {
     Remove-Item -LiteralPath $Base -Recurse -Force
     # No "Removed" claim here: #402 gates every success claim on the
     # verify-absent loop below (the #396 bash contract).
@@ -93,9 +93,9 @@ if ($machinePath) {
 }
 
 if ($purge -eq 'yes') {
-    if (Test-Path $cfgDir) { Remove-Item -LiteralPath $cfgDir -Recurse -Force; Info "Removed $cfgDir" }
+    if (Test-Path -LiteralPath $cfgDir) { Remove-Item -LiteralPath $cfgDir -Recurse -Force; Info "Removed $cfgDir" }
     $legacy = Join-Path $env:USERPROFILE '.config\venya'
-    if (Test-Path $legacy) { Remove-Item -LiteralPath $legacy -Recurse -Force; Info "Removed $legacy (pre-%APPDATA% build)" }
+    if (Test-Path -LiteralPath $legacy) { Remove-Item -LiteralPath $legacy -Recurse -Force; Info "Removed $legacy (pre-%APPDATA% build)" }
 }
 
 # #402 verify-absent (mirrors the #396 bash contract): re-test every declared
