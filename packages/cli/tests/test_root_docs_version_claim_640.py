@@ -99,7 +99,11 @@ def violations(root: Path = REPO_ROOT) -> list[str]:
             tail = text[m.start() : text.index("\n", m.start()) if "\n" in text[m.start() :] else len(text)]
             for v in VERSION_TOKEN.finditer(tail):
                 if v.group(1) != truth:
-                    line = text.count("\n", 0, v.start()) + 1
+                    # `v.start()` is an offset into TAIL, not into TEXT. Counting newlines against the
+                    # full text from 0 to a slice-relative offset names the wrong line — it reported
+                    # `CHANGELOG.md:3` for a claim at line 1348. Carry the slice's origin back in.
+                    # Detection is untouched: only WHERE the violation is reported changed.
+                    line = text.count("\n", 0, m.start() + v.start()) + 1
                     found.append(f"{rel}:{line}: claims {v.group(1)!r} as current, dist says {truth!r}")
     return found
 
@@ -309,6 +313,44 @@ class TestPlantedClaim:
         )
         got = violations(root)
         assert any("CHANGELOG.md" in v for v in got), f"suffixless CHANGELOG head went unchecked: {got}"
+
+    def test_a_claim_far_down_a_page_reports_its_own_line(self, tmp_path: Path):
+        """The paired negative the shipped suite could not have: a lie at a NON-TRIVIAL line must be
+        reported AT that line.
+
+        Every other falsifier in this file plants its claim within three lines of the top of a
+        one-paragraph fixture, so a slice-offset line number came out right by accident and the suite
+        stayed green over wrong coordinates — which is a cite-rot defect inside the tool built to catch
+        cite rot. The line expected here is derived from the written bytes, not from my arithmetic, so
+        the cell cannot agree with the guard by sharing its bug.
+        """
+        shutil_tree(tmp_path)
+        lie = wrong_version(dist_version())
+        sentence = f"The current version is {lie}."
+        lines = ["# Notes", ""] + [f"background line {i}" for i in range(1, 140)] + [sentence]
+        text = "\n".join(lines) + "\n"
+        page = tmp_path / "NOTES.md"
+        page.write_text(text, encoding="utf-8")
+
+        expected = text[: text.index(sentence)].count("\n") + 1
+        assert expected >= 100, f"fixture is not deep enough to test line attribution: {expected}"
+        assert text.splitlines()[expected - 1] == sentence, "the derived line does not hold the claim"
+
+        got = violations(tmp_path)
+        assert any(f"NOTES.md:{expected}:" in v for v in got), (
+            f"claim is on line {expected}; the gate reported {got} — the slice origin is not carried "
+            "into the newline count, so the violation points at a line that holds no claim"
+        )
+        # and the head branch was already right; pinned here so a "fix" cannot move it
+        assert not any("CHANGELOG" in v for v in got), got
+
+    def test_a_claim_on_the_first_line_still_reports_the_first_line(self, tmp_path: Path):
+        """Positive half of the pair: correcting the arithmetic must not shift a shallow claim off line 1."""
+        shutil_tree(tmp_path)
+        lie = wrong_version(dist_version())
+        (tmp_path / "EARLY.md").write_text(f"The current version is {lie}.\n", encoding="utf-8")
+        got = violations(tmp_path)
+        assert any("EARLY.md:1:" in v for v in got), got
 
 
 class TestBlindSpotIsRecorded:
