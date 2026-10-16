@@ -65,9 +65,19 @@ repos:
         pass_filenames: false
         files: "^(uv\\.lock|venya-(core|executor)-requirements\\.txt|pyproject\\.toml|packages/[^/]+/pyproject\\.toml)$"
 
+      # Refs #627: `uv run` syncs the project environment, and that sync REWRITES the
+      # tracked uv.lock whenever the lock disagrees with a just-edited
+      # packages/*/pyproject.toml — which is exactly what this hook's `files:` pattern
+      # fires on. The chain therefore mutated tracked state mid-commit (revision 3 -> 5
+      # plus version lines, 16 lines nobody chose) while pip-audit itself reported "No
+      # known vulnerabilities found", so the failure text pointed at the hook instead of
+      # at the lockfile decision the committer had to own. `--locked` keeps the audit
+      # question identical and makes uv refuse to write: a stale lock now fails the
+      # commit with "run `uv lock`" instead of silently landing a re-lock. Enforcement
+      # of the assertion itself is packages/core/tests/test_pip_audit_hook_lock_safety_627.py.
       - id: pip-audit
         name: pip-audit (dependency CVEs, OSV feed)
-        entry: uv run pip-audit --vulnerability-service osv
+        entry: uv run --locked pip-audit --vulnerability-service osv
         language: system
         pass_filenames: false
         files: "^packages/.*pyproject\\.toml$"
