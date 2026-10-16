@@ -1058,24 +1058,44 @@ def cmd_admin_executor_enroll(client: APIClient, args: Any) -> int:
     """Generate an enrollment token for executor bootstrap registration."""
     try:
         output_dir = getattr(args, "output_dir", None)
-        if output_dir:
+        output_path = Path(output_dir) if output_dir else None
+        if output_path is not None:
+            # #616: the generated docs promise this command CREATES the output
+            # directory ("creates token, core-server-ca.crt, admin-ca.crt"), so
+            # the creation happens BEFORE the mint — a failed round trip must not
+            # hold the documented directory hostage, and an un-creatable path
+            # must reach the operator as a named refusal carrying the path, not
+            # as an OS error string.
+            if output_path.exists() and not output_path.is_dir():
+                print(
+                    f"Enrollment failed: --output-dir {output_dir} is an existing file, not a "
+                    "directory. Nothing was minted.",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                output_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            except OSError as e:
+                print(
+                    f"Enrollment failed: cannot create --output-dir {output_dir}: {e.strerror}. " "Nothing was minted.",
+                    file=sys.stderr,
+                )
+                return 1
+            ensure_secret_dir(output_path)
+
             # Stale-token defense BEFORE the mint (ticket
             # cli-executor-enroll-token-ux): a failed POST must never leave a
             # previous run's dead token on disk for `test -s` to trust.
             # Removal AFTER the POST would resurrect the bug on a crash
             # between the two.
-            (Path(output_dir) / "token").unlink(missing_ok=True)
+            (output_path / "token").unlink(missing_ok=True)
 
         result = client.post(f"/api/v1/admin/executors/{args.executor_id}/enroll")
         token = result.get("enrollment_token", "")
         expires_in = result.get("expires_in_seconds", 900)
 
-        if output_dir:
+        if output_path is not None:
             import hashlib as hashlib_mod
-
-            output_path = Path(output_dir)
-            output_path.mkdir(parents=True, exist_ok=True, mode=0o700)
-            ensure_secret_dir(output_path)
 
             token_path = output_path / "token"
             token_tmp: str | None = None
