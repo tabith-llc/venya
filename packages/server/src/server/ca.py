@@ -826,10 +826,10 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # certs past; the marker is still present and still enforced by the app.
 # Cells: tests/test_admin_cert_ski_aki_504.py (inverted at s98).
 #
-# OID home: Tabith LLC's registered Private Enterprise Number. WRITE SITE:
-# 1.3.6.1.4.1.67159.1.1. Verified against fetched text at this landing
-# (#601, no authority from memory): the raw IANA "Private Enterprise
-# Numbers" registry
+# OID home: Tabith LLC's registered Private Enterprise Number. WRITE SITE AND
+# THE ONLY READ SITE: 1.3.6.1.4.1.67159.1.1. Verified against fetched text at
+# this landing (#601, no authority from memory): the raw IANA "Private
+# Enterprise Numbers" registry
 # (https://www.iana.org/assignments/enterprise-numbers/enterprise-numbers,
 # fetched 5,145,254 bytes, last updated 2026-10-12) defines the prefix
 # iso.org.dod.internet.private.enterprise = 1.3.6.1.4.1, decimal numbers
@@ -837,27 +837,30 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # not a line: lines 268652-268653 read "67159" then "Tabith LLC" (holder and
 # contact lines follow). Grep the digits, never a word like "arc".
 # HISTORY OF THE OLD HOME (kept so the next reader re-derives instead of
-# re-litigating): this constant shipped at 1.3.6.1.4.1.64496.1.1 under a
-# comment citing "RFC 6996 private-use experimental arc" — measured false
-# twice over at #601: RFC 6996 is an Autonomous System reservation document
-# (fetched: 8,198 bytes, zero occurrences of "enterprise"), and PEN 64496
-# is registered to Premier-D LLC (same registry, block at lines 258000-258001:
-# "64496" then "Premier-D LLC"), not to us.
-# The comment's own wait-condition — provisional until Tabith LLC holds a
-# registered PEN — was met, and this change is it acting on that.
-# TRANSITION WINDOW (#601, owner-ruled HOW: dual-arc read, single-arc
-# write): parse_plane_marker ALSO reads VENYA_PLANE_MARKER_OID_LEGACY
-# below, so leaves minted before this change keep resolving — a landed
-# fix is not retroactive (#588's precedent; dropping the old read at the
-# swap moment would have been a lock-out dressed as a compliance fix).
-# The window is a loan, not a design: it closes when every plane-bearing
-# credential path is re-minted PER PLANE (machine = installer/bootstrap
-# mint, human = CSR/login-ceremony signer — enumerated on #601; a
-# per-plane proof is not one proof). The removal leg deletes the legacy
-# read branch and carries its own paired negative pinning that an
-# old-arc extension is NO LONGER read as ours.
+# re-litigating): this marker formerly shipped on ANOTHER enterprise's arc,
+# under a comment citing "RFC 6996 private-use experimental arc". That
+# citation was measured false twice over at #601: RFC 6996 is an Autonomous
+# System reservation document (fetched: 8,198 bytes, zero occurrences of
+# "enterprise"), and the legacy PEN is registered to a different enterprise,
+# not to us. The legacy number and that holder's name are recorded on #601 and
+# are deliberately NOT repeated anywhere in this tree — released prose has no
+# business carrying somebody else's registration, and the ticket is the record.
+# THE WINDOW THAT USED TO LIVE HERE (#601): parse_plane_marker once read that
+# legacy arc alongside the registered one so leaves minted before the move kept
+# resolving while the fleet was re-minted per plane. The window is now CLOSED
+# and its read branch removed, on the owner's ruling of 2026-10-16 that
+# nothing alpha-era is supported — no backwards compatibility with alpha, so
+# there is no old-arc credential left to protect, and a read branch for a
+# foreign arc is then only a foreign registration kept alive in our source plus
+# a path that resolves bytes we never mint. The earlier per-plane re-mint
+# precondition, the dual-arc HOW it gated, and the owner's sentence are on
+# #601; clerk holds the ticket pen. The paired negative that pins the closure —
+# an old-arc extension is NO LONGER read as ours — lives at
+# tests/test_plane_marker_pen_arc_601.py, class TestLegacyArcIsNoLongerRead.
+# The comment's own original wait-condition — provisional until Tabith LLC
+# holds a registered PEN — was met, and the move to the registered arc is it
+# acting on that.
 VENYA_PLANE_MARKER_OID = x509.ObjectIdentifier("1.3.6.1.4.1.67159.1.1")
-VENYA_PLANE_MARKER_OID_LEGACY = x509.ObjectIdentifier("1.3.6.1.4.1.64496.1.1")
 PLANE_MACHINE = "machine"
 PLANE_HUMAN = "human"
 _VENYA_PLANES: tuple[str, ...] = (PLANE_MACHINE, PLANE_HUMAN)
@@ -889,21 +892,22 @@ def parse_plane_marker(cert: x509.Certificate) -> str:
     Fails closed — every miss raises ValueError and the caller refuses the
     certificate; nothing in this parser defaults into a plane:
 
-    * no marker on either arc (a certificate predating the two-plane model),
-    * markers on BOTH arcs at once — one marker per mint is the contract,
-      and the #601 window refuses to choose between them silently (the
-      behaviour is named here so it cannot become an accident);
+    * no marker at the registered arc (a certificate predating the two-plane
+      model, or one whose only marker sits on any other arc — see the window
+      note at the constant above),
     * an unparseable marker value (not a short-form DER UTF8String, a length
       mismatch, or a non-ASCII body),
     * a value outside the accepted set {machine, human}.
 
-    #601 transition window (dual-arc read, single-arc write): the registered
-    arc (1.3.6.1.4.1.67159.1.1) is consulted, then the legacy arc
-    (1.3.6.1.4.1.64496.1.1), and the same plane is returned either way so
-    pre-#601 leaves keep resolving. The window's exit condition and the
-    removal leg are stated at the constant declaration above and on #601.
-    The parser stays criticality-blind: it reads the value whether or not
-    the extension sets the CRITICAL bit (#588 option A).
+    Single-arc read, single-arc write: the registered arc
+    (1.3.6.1.4.1.67159.1.1) is the only OID this parser consults. It used to
+    read a second, foreign arc as a bounded transition window for alpha-era
+    leaves (#601); that window is closed and its branch removed, so plane-
+    shaped bytes anywhere else are simply not ours and raise the missing-marker
+    refusal. The history, the retired number and the owner's ruling are on #601
+    — not repeated in this tree. The parser stays criticality-blind: it reads
+    the value whether or not the extension sets the CRITICAL bit (#588
+    option A).
 
     The middleware consumption of this result is RF-7 chunk 2; the parser
     ships and is tested with the signer (chunk 1).
@@ -915,27 +919,18 @@ def parse_plane_marker(cert: x509.Certificate) -> str:
         PLANE_MACHINE or PLANE_HUMAN.
 
     Raises:
-        ValueError: Missing / both-arc duplicate / unparseable / out-of-set
-            marker (see above).
+        ValueError: Missing / unparseable / out-of-set marker (see above).
     """
-    markers = []
-    for marker_oid in (VENYA_PLANE_MARKER_OID, VENYA_PLANE_MARKER_OID_LEGACY):
-        try:
-            markers.append(cert.extensions.get_extension_for_oid(marker_oid))
-        except x509.ExtensionNotFound:
-            pass
-    if len(markers) > 1:
-        raise ValueError(
-            "certificate carries plane markers on BOTH the registered and "
-            "legacy arcs — refusing (one marker per mint is the contract; "
-            "#601 window)"
-        )
-    if not markers:
+    try:
+        ext = cert.extensions.get_extension_for_oid(VENYA_PLANE_MARKER_OID)
+    except x509.ExtensionNotFound:
+        # The one refusal path, unchanged in wording from the dual-arc era: a
+        # cert whose marker is anywhere other than the registered arc lands
+        # here, which is exactly the closure this leg had to pin (#601).
         raise ValueError(
             "certificate carries no Venya plane marker — it predates the "
             "two-plane model and must be re-issued (RF-6 §3.2)"
-        )
-    ext = markers[0]
+        ) from None
     raw = ext.value
     if not isinstance(raw, x509.UnrecognizedExtension):
         # TRY004 would prefer TypeError, but this parser's contract is
