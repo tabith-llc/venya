@@ -129,6 +129,13 @@ set, the file still owns it.
 
 ### Environment Variable Mapping (examples)
 
+**Every row in this table is a core/server-plane field**, read by the core's `ServerConfig`
+(`packages/server/src/server/config.py`) from the process environment under the `VENYA_` prefix with the `__` section
+delimiter, or from `$VENYA_ENV_DIR/.env` (default `/opt/venya/.env`). None of them is an executor setting: the executor is
+a separate plane with its own model (`ExecutorConfig`), its own file (`/etc/venya/executor.toml`) and its own prefix
+(`VENYA_EXECUTOR_`), so setting one of these names on an executor box does not change the value recorded here. Two rows
+read as executor settings and are not — mapped below the table.
+
 | Config field | Environment Variable |
 |-----------|---------------------|
 | `recovery_code_pepper` | `VENYA_RECOVERY_CODE_PEPPER` |
@@ -148,6 +155,13 @@ proven); do not disable outside deliberately open test networks. Rotation intera
 see `cert-rotation-runbook.md` §1 (tokenless `rotate()` is exempt for the verified
 incumbent credential — clean revocation state plus serial == current record).
 | `cors.origins` (JSON list) | `VENYA_CORS__ORIGINS` |
+
+**Plane map for the two rows an operator misreads as executor settings:**
+
+| Row above | What it actually is | Why the spelling misleads |
+|---|---|---|
+| `executor_enrollment.token_ttl_seconds`, `executor_enrollment.require_token` | **Core/server plane.** `ExecutorEnrollmentConfig` is a section of `ServerConfig`; it governs how the CORE admits executors (`POST /api/v1/executors/register`). | `VENYA_EXECUTOR_ENROLLMENT__*` is the core's `VENYA_` prefix plus the `EXECUTOR_ENROLLMENT__` section — not the executor's `VENYA_EXECUTOR_` prefix. The executor model has no `executor_enrollment` field; its own registration secret is the separate `bootstrap.enrollment_token`. |
+| `session.session_timeout` | **Core/session plane.** A `ServerConfig` section field, enforced by the session manager (`core/iam/session_manager.py`) and the auth middleware (`server/middleware/auth.py`), both fed from `server_config.session` by `build_core_session_config` (`server/session_gate_config.py`). | The one row here that an operator CAN also set on the executor, spelled `VENYA_EXECUTOR_SESSION__SESSION_TIMEOUT` or as a `[session]` block in `/etc/venya/executor.toml`. It does not reach the core: the two planes are read by different processes from different models, and no executor path feeds `build_core_session_config`. Whatever #620 does with those executor-side fields — delete them or wire them — this row stays a core setting, and an executor-side value is not how you change it. |
 
 Installer-level input variables (e.g. `VENYA_DB_PASSWORD`, `VENYA_DB_PASSPHRASE`, `VENYA_RECOVERY_PEPPER`, `CORE_HOSTNAME`) are consumed by `install-venya-core.sh`, which writes the correctly-named server variables into `/opt/venya/.env`. Setting an installer var in the server's environment does nothing. `VENYA_DB_PASSPHRASE` is checked on the way in: the installer refuses a value under the **15-Unicode-code-point floor** named in [`db.passphrase`](#dbpassphrase-production-only) before it mutates anything, so a short passphrase never reaches `.env`.
 
