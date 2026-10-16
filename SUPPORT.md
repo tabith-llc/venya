@@ -28,8 +28,8 @@ Send no secret material with the report: no passphrase, no private key file, no
 Venya is pre-release. Outside the security reports, nothing in this repository commits to a
 response time, and this page creates no such commitment: the commitments that exist are the ones
 [SECURITY.md](SECURITY.md) states, and they govern vulnerability reports. Elsewhere the tree only
-points at them — [docs/faq.md](docs/faq.md) names the 48-hour acknowledgment as SECURITY.md's, not
-as a second promise.
+points at them — [docs/faq.md](docs/faq.md) names the acknowledgment as SECURITY.md's rather than
+setting a clock of its own, so this page points at the same place and copies no number from it.
 
 - **Fair to expect:** that a confirmed defect is treated as ours to fix, and never by asking you to
   weaken a security control — the shipped rule is that the CA is provisioned and verification is
