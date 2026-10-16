@@ -508,6 +508,22 @@ class TestConcurrentExecutePostgresql:
             s.add(admin_role)
             s.flush()
             s.add(User(user_id="test-user", status="active", auth_mode="security-key"))
+            # The machine identity comes first, because the product creates it: registering an
+            # executor auto-writes the `users` row that `executor_certs.executor_id` points at
+            # (routes/executors.py, the mTLS identity creation in the registration path), and
+            # executor_certs.executor_id is a real FK to users.user_id (core/iam/models.py, class
+            # ExecutorCert; migration 001 creates it, 019 gives it ON DELETE CASCADE). PostgreSQL
+            # enforces that FK; this file's SQLite stack does not set PRAGMA foreign_keys, so the
+            # same seed reads green there and IntegrityError here. Seed the row, do not drop the FK.
+            s.add(
+                User(
+                    user_id="exec-1",
+                    status="active",
+                    auth_mode="mtls",
+                    enrolled_at=datetime.now(UTC),
+                )
+            )
+            s.flush()
             s.add(Executor(id="exec-1", hostname="203.0.113.14", status="active"))
             # #586: see the note in _make_stack — the dial gate requires a live
             # registered certificate, so the race cell seeds one too.

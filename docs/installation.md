@@ -124,7 +124,8 @@ yet and never stops.
 
 The run then **restarts the service when the process predates the new bytes** —
 a loud NOTICE names both timestamps — and no manual `systemctl restart` is
-needed after a re-run (ticket `installer-rerun-no-service-restart`).
+needed after a re-run (landed at `6b6f2af`; the pre-GitLab ticket slug was
+`installer-rerun-no-service-restart`).
 
 **The fresh-bytes proof is a gate on the success claim, not a transcript note.**
 `venya_service_freshness` compares the running process's start time against
@@ -208,7 +209,7 @@ retired — the published age-out date, its arithmetic, and what that date does
 *not* do — is stated once, in
 [cert-rotation-runbook.md](cert-rotation-runbook.md) §0.1.
 
-**[Record, #565 AC5, ruling `cdcde4e`: this section used to carry a `sudo cat`
+**[Record, #565 AC5, ruling R7-Q1 (ruled on row #565): this section used to carry a `sudo cat`
 copy step for that pair. An s84 doc audit had booked the handoff as a pattern
 "the CLI cannot read", and that accusation was not true — measured against the
 shipped read path the key the step copied loads fine, because R7-Q1 makes that
@@ -242,8 +243,8 @@ fix `3f3ed1b`, dev/unreleased; physically verified 2026-09-20).
 Which key they work with, stated because the two admin key shapes are not
 interchangeable here: the pair under `/etc/venya/admin/` that the core installer
 mints is written **unencrypted at rest** (`AdminCAManager.sign_admin_cert`,
-`server/ca.py`), and that is the accepted posture by ruling — #565 R7-Q1, ledger
-`cdcde4e`: site 1 is exempt by design, the `0600` root-owned mode is the control,
+`server/ca.py`), and that is the accepted posture by ruling — #565 R7-Q1, ruled on
+that row: site 1 is exempt by design, the `0600` root-owned mode is the control,
 and the exemption is retired only by the CSR or TPM-sealing changeset, never
 inherited elsewhere. The CLI's admin mTLS read path
 (`api_client.py::_build_ssl_context`) supplies no passphrase, so a key of that
@@ -286,7 +287,7 @@ fast (idempotent: apt/Docker/sbx steps skip or cache):
 
 ```bash
 # re-mint on a core (admin mTLS), then re-run the executor installer with the fresh token
-venya admin executor-enroll <executor-id>          # add --bundle for offline/air-gapped CA copy
+venya admin executor-enroll <executor-id>          # add --output-dir for offline/air-gapped CA copy
 ```
 
 The core
@@ -673,7 +674,7 @@ only, not a security boundary.
   **[Correction, #565 AC5: this bullet used to stop at the sentence above it, and
   the reading it invited — that an unreadable renewed pair shows up as a 403 — is
   not what the shipped code does. The pair never reaches the server, so the server
-  never gets to say 403. Recorded with the ruling cite `cdcde4e` and the Part B
+  never gets to say 403. Recorded with the ruling cite R7-Q1 on row #565 and the Part B
   reference rather than deleted, so the earlier wording stays visible.]**
 - Executor relay rejects the core (403 at handshake): the core's relay
   client-cert CN must be `<core-hostname>-relay` and listed in the

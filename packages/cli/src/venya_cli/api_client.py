@@ -29,6 +29,8 @@ from typing import Any
 
 import httpx2
 
+from .name_resolution import dial_failure_text
+
 logger = logging.getLogger("venya_cli.api_client")
 
 
@@ -774,7 +776,10 @@ class APIClient:
                 raise APIClientAuthenticationError(error_msg)
             raise APIClientError(error_msg)
         except httpx2.ConnectError as e:
-            raise APIClientError(f"Connection failed: {e}")
+            # #633: a name that does not resolve here never reached the network, so say
+            # that instead of a connection sentence; every other ConnectError (refused,
+            # reset, handshake) still renders exactly as before.
+            raise APIClientError(dial_failure_text(e, url=self.config.server_url, default=f"Connection failed: {e}"))
         except httpx2.TimeoutException as e:
             raise APIClientError(f"Request timed out: {e}")
 
@@ -875,7 +880,8 @@ class APIClient:
                 raise APIClientAuthenticationError(error_msg)
             raise APIClientError(error_msg)
         except httpx2.ConnectError as e:
-            raise APIClientError(f"Connection failed: {e}")
+            # #633: shared classifier — name-resolution only, wording otherwise unchanged.
+            raise APIClientError(dial_failure_text(e, url=self.config.server_url, default=f"Connection failed: {e}"))
 
         if response.content:
             return response.json()
@@ -1065,7 +1071,10 @@ class APIClient:
                 raise APIClientError(
                     f"Registration failed: TLS verification error — {e}. " "Verify server CA is trusted."
                 ) from e
-            raise APIClientError(f"Connection failed: {e}")
+            # #633: the TLS keyword branch above is left as it is (out of scope for this
+            # row). A resolver failure carries none of those keywords, so it reaches here
+            # and the shared classifier gives it the name-resolution sentence.
+            raise APIClientError(dial_failure_text(e, url=str(url), default=f"Connection failed: {e}"))
         except httpx2.RequestError as e:
             raise APIClientError(f"Request failed: {e}")
 

@@ -110,13 +110,48 @@ class TestSetupCommand:
         assert (tmp_path / "config.json").exists()
         assert "setup incomplete" in capsys.readouterr().err
 
-    def test_unreachable_host(self, tmp_path: Path):
-        """NEGATIVE: ConnectError -> rc=1, nothing written."""
+    def test_unreachable_host(self, tmp_path: Path, capsys: pytest.CaptureFixture):
+        """NEGATIVE: ConnectError -> rc=1, nothing written.
+
+        #633 paired negative, tightened rather than replaced: this exception carries
+        NO cause chain, so it is not the name-resolution class and must keep the
+        fetch sentence with no mention of resolution. The sibling cell below is the
+        half that proves the two classes are separable from the text alone.
+        """
         client = APIClient(config_file=tmp_path / "config.json")
         with patch("venya_cli.commands.httpx2.get", side_effect=httpx2.ConnectError("no route to host")):
             rc = commands_mod.cmd_setup(client, _args("venya-core-1"))
         assert rc == 1
         assert not client.config.ca_path.exists()
+        err = capsys.readouterr().err
+        assert "cannot fetch CA certificate" in err
+        assert "resolve" not in err
+
+    def test_unresolved_name_names_the_host_and_the_local_fix(self, tmp_path: Path, capsys: pytest.CaptureFixture):
+        """#633 POSITIVE: the name the operator typed has no answer on this
+        workstation. The output must name the host, say the NAME did not resolve
+        here, point at the hosts file / name service, and carry no fetch wording —
+        while rc 1 and write-nothing stay exactly as they were."""
+        import socket
+
+        bottom = socket.gaierror(-2, "Name or service not known")
+        middle = httpx2.NetworkError(str(bottom))
+        middle.__cause__ = bottom
+        outer = httpx2.ConnectError(str(middle))
+        outer.__cause__ = middle
+
+        client = APIClient(config_file=tmp_path / "config.json")
+        with patch("venya_cli.commands.httpx2.get", side_effect=outer):
+            rc = commands_mod.cmd_setup(client, _args("venya-core-1"))
+        assert rc == 1
+        assert not client.config.ca_path.exists()
+        err = capsys.readouterr().err
+        assert "venya-core-1" in err
+        assert "did not resolve" in err
+        assert "hosts file" in err
+        assert "cannot fetch" not in err
+        assert "setup incomplete" in err  # the family of setup failures is unchanged
+        assert "re-run" in err
 
     def test_404_is_not_a_venya_core(self, tmp_path: Path, capsys: pytest.CaptureFixture):
         """NEGATIVE: 404 = not a venya core -> rc=1, loud."""

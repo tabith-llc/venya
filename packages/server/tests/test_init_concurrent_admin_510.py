@@ -578,7 +578,13 @@ class TestConcurrentBootstrapPostgresql:
         fido.start_registration("alice", "alice")
         fido.start_registration("bob", "bob")
         app = FastAPI()
-        app.state.backend = _FakeBackend(_SessionPerRequest(SessionLocal))
+        # The backend IS the per-request factory: `get_db` yields `backend.get_session()`, so wrapping
+        # the shim in _FakeBackend hands the ROUTE the shim itself, which has neither get_bind() nor
+        # execute() — the advisory-lock call in routes/init.py then raised AttributeError, both threads
+        # got a 500, and the cell asserted on an empty admin list without ever reaching the lock. Pass
+        # it directly (the shape test_init_reset_race_511.py:649 uses) and get_session() returns a real
+        # Session, so this cell exercises the same engine path production does.
+        app.state.backend = _SessionPerRequest(SessionLocal)
         app.state.config = SimpleNamespace(recovery_code_pepper="pep")
         app.state.fido2_manager = fido
         app.include_router(init_routes.router, prefix="/api/v1")

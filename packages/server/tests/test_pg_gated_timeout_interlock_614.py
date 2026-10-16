@@ -1,11 +1,20 @@
 """R1 (#614, #630) interlock — every PostgreSQL-gated test cell carries a bounded timeout.
 
-**Why this file exists.** The eight `*Postgresql` classes in this repo had never run on the
-shipping engine (no venue sets ``VENYA_TEST_PG_URL``), and when one finally did run (#607,
-s105) it hung: a read transaction left open holds an ``AccessShareLock`` on the table, the
-next cell's ``DROP TABLE``/``drop_all`` asks for ``AccessExclusiveLock`` on the same table,
-and with no deadline PostgreSQL waits forever. Both backends were the test process's own two
-connections, so nothing external could clear it.
+**Why this file exists.** The eight `*Postgresql` classes in this repo were written before any
+venue could run them on the shipping engine, and the first one that did run (#607, s105) hung:
+a read transaction left open holds an ``AccessShareLock`` on the table, the next cell's ``DROP
+TABLE``/``drop_all`` asks for ``AccessExclusiveLock`` on the same table, and with no deadline
+PostgreSQL waits forever. Both backends were the test process's own two connections, so
+nothing external could clear it.
+
+**The gate is an opt-in URL, not a closed door.** Every class here skips on one condition:
+``VENYA_TEST_PG_URL`` is unset. That is a property of the host, not of the cell — a machine
+with no reachable PostgreSQL has nothing to point the variable at, so the skip is the honest
+report. A venue that DOES have a reachable scratch database can and should set it and run the
+cells; that is the intended state, not an exception to be apologised for. This interlock exists
+to catch a gated cell that skips *silently* — one whose engine carries no deadline, or a new
+file whose class the scan cannot see — and it must never be read as a claim that the door can
+only ever stay shut.
 
 **What this file pins (seven claims).**
 
@@ -46,26 +55,32 @@ pinned IN-TREE by ``test_control_c_fixture_is_caught_by_the_helper_walk``,
 functions the shipped claims run. Revert the helper walk or the barrier claim and those cells
 fail loudly instead of quietly agreeing with the tree.
 
-**Counts, re-derived at dev ``59cf8ef`` on 2026-10-15 (#630 AC4 — counts rot, so re-run this):**
-``git grep -ln 'VENYA_TEST_PG_URL' -- 'packages/*/tests/*'`` → 9 files, minus this scanner = 8
-scan targets (a whole-tree grep returns the same 9, and ``rglob`` over the two roots finds no
-extra — which is what claim 7 now enforces); 8 ``*Postgresql`` classes; 12 gated cells inside
-them; 18 ``create_engine`` calls across the 8 files — 8 PG (one per gated class, every one of
-them inside a class body today) and 10 SQLite, so claim 5 has no work to do on the current tree
-and is proven by its fixtures and by the live control C run (see the #630 report);
-7 ``threading.Barrier`` constructions and 8 ``.wait()`` calls, all inside gated classes; 19
-helper defs the closure binds across the 8 files, the ``MIN_BOUND_HELPERS`` floor. This file
-collects 47 cells at that tip (8 files x 5 parametrised claims + the shared-deadline cell + 1
-subdirectory cell + 5 non-parametrised cells).
+**Counts, re-derived at dev ``04eb349`` on 2026-10-16 (#630 AC4 — counts rot, so re-run this;**
+``git grep -ln 'VENYA_TEST_PG_URL' -- 'packages/*/tests/*' | wc -l`` **and the scan-target count
+below, then the AST tallies this file's own helpers print):** ``git grep -ln 'VENYA_TEST_PG_URL'
+-- 'packages/*/tests/*'`` → 10 files, minus this scanner = 9 scan targets (a whole-tree grep
+returns the same 10, and ``rglob`` over the two roots finds no extra — which is what claim 7 now
+enforces); 9 ``*Postgresql`` classes; 15 gated cells inside them; 21 ``create_engine`` calls
+across the 9 files — 10 PG and 11 SQLite, every PG one still inside a class body today, so
+claim 5 has no work to do on the current tree and is proven by its fixtures and by the live
+control C run (see the #630 report); 7 ``threading.Barrier`` constructions and 8 ``.wait()``
+calls, all inside gated classes; 23 helper defs the closure binds across the 9 files, the
+``MIN_BOUND_HELPERS`` floor. This file collects 52 cells at that tip (9 files x 5 parametrised
+claims + the shared-deadline cell + 1 subdirectory cell + 5 non-parametrised cells). The same
+figures at the pre-re-anchor base ``59cf8ef`` were 9 files / 8 targets / 8 classes / 12 cells /
+18 engines (8 PG, 10 SQLite) / 19 helper defs / 47 cells; the move is #613's gated file joining
+the tree, not a count that was ever wrong.
 
 **What this file does NOT pin (stated so nobody over-reads it).**
 
 1. It proves the knob is present and sent, not that a live server *fired* it. The firing proof
-   needs a scratch database and is a different instrument: seed a table, hold a conflicting
-   ``ACCESS EXCLUSIVE`` lock from a second connection, run the cell, and expect
-   ``psycopg2.errors.LockNotAvailable`` ("canceling statement due to lock timeout") in roughly
-   ``lock_timeout`` ms instead of a hang. The #614 report records that half as NOT RUN wherever
-   no venue existed — do not read green here as a firing proof there.
+   needs a reachable scratch database — the same opt-in URL above, pointed at it — and is a
+   different instrument: seed a table, hold a conflicting ``ACCESS EXCLUSIVE`` lock from a second
+   connection, run the cell, and expect ``psycopg2.errors.LockNotAvailable`` ("canceling
+   statement due to lock timeout") in roughly ``lock_timeout`` ms instead of a hang. Where no
+   such database was reachable the #614 report recorded that half as NOT RUN; setting the URL on
+   a venue that has one is how this cell's result stops being a hypothesis — do not read green
+   HERE as a firing proof there.
 2. PRODUCT imports are NOT walked. A gated cell that reaches its engine through product code
    (``Backend(BackendConfig(database_url=...))``, which 512 and 513 also do alongside their own
    bounded engine) arrives at a connection this guard cannot read. That is the shape #630 leaves
@@ -705,8 +720,9 @@ CONTROL_UNBOUND_SOURCE = CONTROL_C_SOURCE.replace(
 
 #: Floor on the helper defs the closure must bind across the gated files. A drop here means the
 #: closure stopped FOLLOWING calls, and claim 5 would then pass by seeing nothing (#630 AC4).
-#: Measured at dev ``59cf8ef``: 19 across the 8 gated files.
-MIN_BOUND_HELPERS = 19
+#: Measured at dev ``04eb349``: 23 across the 9 gated files (19 across 8 at the pre-re-anchor
+#: base ``59cf8ef``) — re-run ``test_the_helper_walk_is_not_vacuous_on_the_shipped_tree``.
+MIN_BOUND_HELPERS = 23
 
 
 def test_the_scan_roots_are_not_blind_to_a_subdirectory() -> None:
@@ -715,7 +731,7 @@ def test_the_scan_roots_are_not_blind_to_a_subdirectory() -> None:
     A gated file dropped into a subdirectory of either root would name the env var, be missed
     by every claim, and read exactly like a clean tree — the same silent-pass family this row
     was filed for, found while re-deriving the counts AC4 asked for. The recursive walk is the
-    check; today the two agree at 8 files, and there is no subdirectory under either root
+    check; today the two agree at 9 files, and there is no subdirectory under either root
     (``packages/executor/tests/helpers/`` is the only tests subdir in the repo and executor
     carries no PG-gated cell).
     """

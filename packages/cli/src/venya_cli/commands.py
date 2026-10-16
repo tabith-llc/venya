@@ -48,6 +48,7 @@ from .executor_key import (
     serialize_key_encrypted,
     ssl_password_callback,
 )
+from .name_resolution import dial_failure_text
 from .secret_holder import SecretHolder
 
 # --- Version-mismatch advisory (ticket cli-version-mismatch-upgrade-nudge) ---
@@ -2230,7 +2231,14 @@ def cmd_setup(client: APIClient, args: Any) -> int:
     try:
         resp = httpx2.get(url, verify=False, timeout=5.0)  # nosec B403 -- scoped TOFU bootstrap; see docstring
     except httpx2.HTTPError as e:
-        print(f"setup incomplete: cannot fetch CA certificate from {url}: {e}", file=sys.stderr)
+        # #633: a name that does not resolve on this workstation never reaches the
+        # network, so "cannot fetch" sends the operator hunting for routing instead
+        # of the one missing hosts line. Only the gaierror class is re-worded; every
+        # other transport fault keeps this sentence verbatim (paired negatives).
+        print(
+            f"setup incomplete: {dial_failure_text(e, url=url, default=f'cannot fetch CA certificate from {url}: {e}')}",
+            file=sys.stderr,
+        )
         print(f"Server URL saved: {core} — re-run 'venya setup {args.corename}' to retry", file=sys.stderr)
         return 1
     if resp.status_code == 404:
@@ -3034,7 +3042,7 @@ def _verify_register_auth(client: APIClient, server_url: str, ca_bundle: str | N
     except httpx2.HTTPStatusError as e:
         raise APIClientError(f"Server returned {e.response.status_code}") from e
     except httpx2.ConnectError as e:
-        raise APIClientError(f"Connection failed: {e}") from e
+        raise APIClientError(dial_failure_text(e, url=server_url, default=f"Connection failed: {e}")) from e
 
 
 def executor_register(client: APIClient, args: Any) -> int:
@@ -3611,7 +3619,11 @@ def executor_cert_renew(args: Any) -> int:
             print(f"Renewal failed: {error_msg}", file=sys.stderr)
         return 1
     except httpx2.ConnectError as e:
-        print(f"Connection failed: {e}", file=sys.stderr)
+        # #633: an unresolvable core name never reached the network — say that, and
+        # where to fix it, instead of a connection sentence that aims the operator at
+        # routing. Every other ConnectError still prints exactly what it printed before
+        # this change.
+        print(dial_failure_text(e, url=server_url, default=f"Connection failed: {e}"), file=sys.stderr)
         return 1
     except httpx2.TimeoutException as e:
         print(f"Request timed out: {e}", file=sys.stderr)
@@ -3924,7 +3936,8 @@ def executor_heartbeat(args: Any) -> int:
         print(f"Heartbeat failed: {e}", file=sys.stderr)
         return 1
     except httpx2.ConnectError as e:
-        print(f"Connection failed: {e}", file=sys.stderr)
+        # #633: same shared classifier as `venya setup` and renew.
+        print(dial_failure_text(e, url=server_url, default=f"Connection failed: {e}"), file=sys.stderr)
         return 1
     except httpx2.TimeoutException as e:
         print(f"Request timed out: {e}", file=sys.stderr)

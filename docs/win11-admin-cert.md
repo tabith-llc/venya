@@ -5,10 +5,13 @@
 > warnings, and the server constants. Every command printed here was read in
 > `packages/cli/src/venya_cli/cli.py` (`create_parser`, verified at `dev` `7b055e4`), and
 > every quoted clause cites the file and symbol it came from.
-> **Section 6 is different: those cells are NOT RUN, each with the exception it states.**
-> The only Windows physical performed for this page is a read-only guest preflight (section 6
-> says which reads and when); no install, ceremony, or renewal has run, and nothing in those
-> cells is evidence of anything.
+> **Section 6 is different: each cell carries its own run status, and cells 2 and 3 are now
+> RUN AND PASSING.** The only Windows physical this page held when section 6 was written was a
+> read-only guest preflight (section 6 says which reads and when); no install, ceremony, or
+> renewal had run then. Both have since run on the Windows guest and passed — the evidence is
+> commit `8c73fc0c` with its report at `wave27-specs-20261015/ultra-rf8-cells23-s124-report.md`
+> (named, not restated here), against target **core-3**, identity **`venya-adm3`**. Cell 1 keeps
+> the exception its own row states.
 
 ## 1. What the credential is
 
@@ -224,23 +227,34 @@ owns them (`install-venya-cli.ps1:342-343`).
 
 ## 6. Physical cells — status as run
 
-**Nothing in this section is evidence unless its own status line says it is.** Every cell
-below was written from source. Each one carries its success criterion, the paired rejection it
-must also prove, and the reason it is outstanding.
+**Each cell below carries its own run status; nothing here is evidence unless its status line
+says it is.** Every cell was written from source. Each one carries its success criterion, the
+paired rejection it must also prove, and, where it applies, the reason it is outstanding.
 
-| Cell | Status (guest preflight at `dev` `f0a2c3a`) |
+> **Where the verdicts on this page come from.** Cells 2 and 3 are recorded RUN AND PASSING on
+> the lead's own scorecard correction (`beta-gate-scorecard.md`, commit `3aaeb169`) and its
+> evidence commit `8c73fc0c`. This page was written by a docs seat that did not attend that run
+> and did not open the report; it states the verdict, the target (**core-3**), the identity
+> (**`venya-adm3`**) and the evidence path, and it deliberately does not restate the run itself.
+> Anything finer — including which paired-negative arm of a cell was observed — belongs to that
+> report, not to this page.
+
+| Cell | Status (the preflight reads under Cell 1 are dated `dev` `f0a2c3a` and are no longer a blocker) |
 |---|---|
 | 1 — installer ACL gate on a wildcard path (#493) | **POSITIVE HALF RUN/PASS at `664f267` · ZERO-ENUMERATION ARM RUN/PASS IN HARNESS · PROTECTED-DACL ARM RUN/PASS IN HARNESS (the second rejection line this guard has ever been seen to print) · INCOMPLETE ARM RUN IN HARNESS, NOT PRODUCIBLE FROM AN ELEVATED BODY (measured: the applied deny lands and the walk cannot see it) · COUNT-COVERAGE ANSWERED, NOT A COVERAGE GAP · PAIRED venyastd READABILITY HALF NOT RUN (owner console)** |
-| 2 — the ceremony from an interactive desktop | **NOT RUN** |
-| 3 — the renewal round trip | **NOT RUN** |
+| 2 — the ceremony from an interactive desktop | **RUN AND PASSING (s124, session 2)** — evidence `8c73fc0c`, report `wave27-specs-20261015/ultra-rf8-cells23-s124-report.md`, target **core-3**, identity **`venya-adm3`** |
+| 3 — the renewal round trip | **RUN AND PASSING (s124, session 2)** — same evidence, same target and identity |
 
 > **What the guest gives, and what it does not.** The `win11` guest is a montana domain and
 > montana is frozen: no lane boots, halts, defines or queries it (`virsh` reads included) —
 > that stays the owner's. Its booted state, its PowerShell version and its installed CLI were
 > read over SSH as `win` (rc=0) from the agent box; that read is the preflight table under
-> Cell 1, and it is the only Windows physical this page holds. A ceremony needs, in addition,
-> a security key attached to that machine and a person at its console — nothing that arrives
-> over the network can stand in for one.
+> Cell 1. **That preflight is no longer the live face of the guest.** A current CLI has since
+> been installed on it (installs are the owner's act on every box) — the deployed build on the
+> target core carries the same version line, lead-corroborated, so **no reinstall is required
+> to reach this page's renewal route**; and a ceremony still needs a security key attached to
+> that machine and a person at its console — nothing that arrives over the network can stand in
+> for one. Both of those owner acts were performed for the run that closed cells 2 and 3.
 
 ### Cell 1 — the installer's ACL gate on a path containing wildcards (#493)
 
@@ -399,19 +413,26 @@ and the #628 history follow.
 
 ### Cell 2 — the ceremony from an interactive desktop
 
-**NOT RUN.** Two independent blockers, both measured at the preflight above:
+**RUN, PASS (s124, session 2).** Evidence `8c73fc0c`; report
+`wave27-specs-20261015/ultra-rf8-cells23-s124-report.md`; target **core-3**, identity
+**`venya-adm3`**; verdict carried by the lead's scorecard row at `3aaeb169`.
 
-1. the CLI installed on the guest is `C:\Program Files\Venya\bin\venya.exe`, version
-   **`0.1.0alpha16`**, and it has **no `admin cert` group** — `venya admin cert status` fails
-   at the parser with `invalid choice: 'cert'`, so the surface this cell renews does not exist
-   in the installed artifact (it is in the source: the `admin cert` group inside
-   `create_parser`, `packages/cli/src/venya_cli/cli.py:481`, verified at `dev` `f0a2c3a`); and
-2. the security key is not attached to the domain, and the ceremony needs a human at its
-   console.
+The two blockers this cell carried are **spent, and both were owner acts, not code work**:
 
-**Owner acts required before Cell 2 or Cell 3 can run — three, and no lane can do any of
-them:** (1) attach security key A to the `win11` guest, (2) install a current CLI on it
-(installs are the owner's act on every box), (3) be at that machine's console for the tap.
+1. the installed CLI. The preflight under Cell 1 read `C:\Program Files\Venya\bin\venya.exe` at
+   **`0.1.0alpha16`**, a build with **no `admin cert` group** — `venya admin cert status` failed
+   at the parser with `invalid choice: 'cert'`, so the surface this cell renews did not exist in
+   the installed artifact (it is in the source: the `admin cert` group inside `create_parser`,
+   `packages/cli/src/venya_cli/cli.py:481`, verified at `dev` `f0a2c3a`; re-derived at `dev`
+   `59cf8ef`, where the `# admin cert — the readout …` group comment sits at `cli.py:483`, the
+   pin having drifted by two lines). A current CLI has since
+   been installed on the guest, which is the owner's act on every box;
+2. the key was not attached to the domain and no person was at its console. Both have been
+   supplied for this run.
+
+**The owner acts this cell needed — attach the key, install a current CLI, be at that machine's
+console — have all been performed.** They stay owner acts: no lane can do any of them, and a
+re-image or a new core index puts them back on the list.
 
 - **Shape:** at the guest's own console, from a standard (non-elevated) terminal, in the
   standard-user profile: `venya setup <core>` once, then `venya login <user-id>`, then
@@ -432,9 +453,11 @@ them:** (1) attach security key A to the `win11` guest, (2) install a current CL
 
 ### Cell 3 — the renewal round trip
 
-**NOT RUN.** `venya admin cert status` does not exist in the installed `0.1.0alpha16` CLI
-(parser error quoted under Cell 2), and the renewal it measures is the console ceremony of
-Cell 2, so the same three owner acts gate this cell.
+**RUN, PASS (s124, session 2).** Same evidence as Cell 2 — `8c73fc0c`, report
+`wave27-specs-20261015/ultra-rf8-cells23-s124-report.md`, target **core-3**, identity
+**`venya-adm3`** — and the same spent blocker: the read-below-and-renew-above sequence this cell
+measures needs `venya admin cert status`, which the `0.1.0alpha16` build on the guest did not
+carry (parser error quoted under Cell 2). It runs on the current installed CLI.
 
 - **Success:** `venya admin cert status` before → renew at the console → `status` after shows
   a lifetime inside the committed hour, and the ceremony's refusal order holds: with no login
