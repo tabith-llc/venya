@@ -123,10 +123,13 @@ class TestScanIsNotVacuous:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             shutil_tree(tmp)
-            (tmp / "SUPPORT.md").write_text("Venya support\n\nThe current version is 0.1.0beta1.\n", encoding="utf-8")
+            truth = dist_version()
+            (tmp / "SUPPORT.md").write_text(f"Venya support\n\nThe current version is {truth}.\n", encoding="utf-8")
             assert "SUPPORT.md" in {p.name for p in root_docs(tmp)}
             assert violations(tmp) == [], "a TRUE claim on a brand-new root page must read clean"
-            (tmp / "SUPPORT.md").write_text("Venya support\n\nThe current version is 0.9.9beta9.\n", encoding="utf-8")
+            (tmp / "SUPPORT.md").write_text(
+                f"Venya support\n\nThe current version is {wrong_version(truth)}.\n", encoding="utf-8"
+            )
             assert violations(tmp), "a FALSE claim on a brand-new root page must be seen"
 
 
@@ -139,13 +142,14 @@ class TestPlantedClaim:
 
     def test_planted_false_claim_turns_the_gate_red(self, tmp_path: Path):
         shutil_tree(tmp_path)
+        lie = wrong_version(dist_version())
         (tmp_path / "SUPPORT.md").write_text(
-            "# Support\n\nThe current version is 0.9.9beta9 and it ships weekly.\n", encoding="utf-8"
+            f"# Support\n\nThe current version is {lie} and it ships weekly.\n", encoding="utf-8"
         )
         got = violations(tmp_path)
         assert got, "the gate did not see a false version claim on a root-level page"
         assert any("SUPPORT.md" in v for v in got), got
-        assert any("0.9.9beta9" in v for v in got), got
+        assert any(lie in v for v in got), got
 
     def test_the_same_page_with_a_true_claim_is_green(self, tmp_path: Path):
         shutil_tree(tmp_path)
@@ -156,13 +160,26 @@ class TestPlantedClaim:
         assert violations(tmp_path) == []
 
     def test_false_changelog_head_turns_the_gate_red(self, tmp_path: Path):
-        """The other root-level claim shape: the newest CHANGELOG entry vs the plate."""
+        """The other root-level claim shape: the newest CHANGELOG entry vs the plate.
+
+        The planted value is DERIVED from the real plate, never written here as a literal: a falsifier
+        that hardcodes `0.1.0beta1` is itself a version claim, and it would start failing on the next
+        release bump for a reason that has nothing to do with the guard — which is the exact defect
+        class this row was filed for.
+        """
         shutil_tree(tmp_path)
+        truth = dist_version()
+        bump = wrong_version(truth)
         cl = tmp_path / "CHANGELOG.md"
-        text = cl.read_text(encoding="utf-8")
-        cl.write_text(text.replace("## [0.1.0beta1]", "## [0.1.0beta7]", 1), encoding="utf-8")
+        cl.write_text(cl.read_text(encoding="utf-8").replace(f"## [{truth}]", f"## [{bump}]", 1), encoding="utf-8")
         got = violations(tmp_path)
-        assert any("CHANGELOG.md" in v for v in got), got
+        assert any("CHANGELOG.md" in v for v in got), (got, truth, bump)
+        assert any(bump in v for v in got), got
+
+    def test_true_changelog_head_is_green(self, tmp_path: Path):
+        """Paired positive: the same fixture with the head left AT the plate reads clean."""
+        shutil_tree(tmp_path)
+        assert violations(tmp_path) == []
 
     def test_historical_version_note_is_not_treated_as_a_claim(self, tmp_path: Path):
         """The paired negative on the NARROW class: a dated record naming an old plate is not a claim
@@ -180,7 +197,7 @@ class TestBlindSpotIsRecorded:
 
     def test_old_name_list_enumeration_misses_a_new_root_page(self, tmp_path: Path):
         shutil_tree(tmp_path)
-        lie = "# Support\n\nThe current version is 0.9.9beta9.\n"
+        lie = f"# Support\n\nThe current version is {wrong_version(dist_version())}.\n"
         (tmp_path / "SUPPORT.md").write_text(lie, encoding="utf-8")
 
         # The old shape (as at test_terminology_yubico.py:27): a tuple of names + docs/**/*.md.
@@ -231,15 +248,29 @@ class TestShippedTree:
 # --- fixture -----------------------------------------------------------------------------------
 
 
+def wrong_version(truth: str) -> str:
+    """A version token guaranteed to differ from `truth`, built from it.
+
+    Every planted lie in this file goes through here. A literal like `0.9.9beta9` happens to differ
+    from the plate on this branch and would not necessarily differ on another one, and a falsifier
+    that stops being false when the version moves is a falsifier that quietly stopped testing.
+    """
+    if m := re.search(r"(\d+)$", truth):
+        return truth[: m.start()] + str(int(m.group(1)) + 7)
+    return truth + "-nope"
+
+
 def shutil_tree(root: Path) -> None:
     """A minimal repo skeleton that `violations()` can read: a CLI pyproject and a CHANGELOG.
 
     The version plate in the fixture is copied from the real tree so a cell that plants a lie cannot
     pass for the wrong reason (an unreadable source), and the true-claim cells stay true if the plate
-    ever moves.
+    ever moves. The CHANGELOG head is written from `dist_version()` for the same reason — this helper
+    must not itself carry a version literal.
     """
     import shutil
 
+    root.mkdir(parents=True, exist_ok=True)
     cli = root / "packages" / "cli"
     cli.mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO_ROOT / "packages" / "cli" / "pyproject.toml", cli / "pyproject.toml")
