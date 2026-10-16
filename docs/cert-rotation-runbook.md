@@ -499,37 +499,43 @@ with no readable marker (fail-closed, `packages/server/src/server/middleware/aut
 the `parse_plane_marker` step).
 
 The marker's OID moved to **Tabith LLC's registered Private Enterprise Number
-(`1.3.6.1.4.1.67159.1.1`)**. Certificates minted before that change carry the
-earlier arc (`1.3.6.1.4.1.64496.1.1`). `parse_plane_marker` reads **both arcs**
-during a bounded transition window, so credentials already in the field keep
-working; new mints write the registered arc only. Constants and the window's
-own terms are at `VENYA_PLANE_MARKER_OID` / `VENYA_PLANE_MARKER_OID_LEGACY`,
-`packages/server/src/server/ca.py`.
+(`1.3.6.1.4.1.67159.1.1`)**, and that arc is now the only one the product
+reads. The bounded transition window that also read an earlier arc — a
+registration belonging to a different enterprise, recorded on ticket #601 and
+deliberately not printed in this runbook — has been **closed and its read
+branch removed**, on the owner's ruling that nothing alpha-era is supported.
+`parse_plane_marker` consults the registered arc only, and new mints write it.
+The constant is `VENYA_PLANE_MARKER_OID`, `packages/server/src/server/ca.py`; a
+certificate whose marker sits anywhere else is refused at the marker leg with
+the named re-issue text, exactly as a certificate with no marker is.
 
-**What this means for an operator:** you do not have to re-mint anything inside
-the window, and re-minting inside the window is harmless. But rotation is not a
-sweep — it re-issues some copies and never touches others.
+**What this means for an operator:** there is no window to be inside any more.
+Rotation re-issues some copies onto the registered arc and never touches
+others, so a copy that was minted before the move — above all a hand-copied
+leaf — now fails closed rather than being admitted while you decide. Treat
+retiring those copies as part of rotation, not as an optional follow-up.
 
 | Copy | Rotation re-issues it onto the registered arc? | Mechanism, or why not |
 |---|---|---|
 | Core machine-plane pair `/etc/venya/admin/admin.crt\|.key` | **Yes** | every core installer run re-issues the pair (`sign_admin_cert`) |
 | Workstation human-plane short certificate | **Yes, when it is minted next** | the CSR/login-ceremony signer (`sign_admin_csr`) mints it and the mint is an explicit act — `venya admin cert renew`; there is no automatic re-mint loop in the CLI, and the leaf lives about an hour (`ADMIN_SHORT_CERT_LIFETIME_SECONDS`, `packages/server/src/server/ca.py`), so the copy in hand keeps the arc it was minted on until it is renewed |
-| Admin leaf an operator **copied by hand** off a core (the `admin-cert/admin.crt` pair the pre-RF-10 copy step used to write — that step is retired from both §7 step 6 here and [installation.md](installation.md) §2; the copies it left behind are what this row is about — a copy kept for a second host, a break-glass copy on removable media) | **No** | nothing re-writes a file that lives outside the product; the copy keeps the arc it was minted on and is admitted only while the window is open and only until it ages out (§0.1) |
+| Admin leaf an operator **copied by hand** off a core (the `admin-cert/admin.crt` pair the pre-RF-10 copy step used to write — that step is retired from both §7 step 6 here and [installation.md](installation.md) §2; the copies it left behind are what this row is about — a copy kept for a second host, a break-glass copy on removable media) | **No** | nothing re-writes a file that lives outside the product; with the window closed a copy minted before the move is **refused**, so retire it (see the paragraph after this table) |
 | Admin leaf **cached by a peer** (a workstation's on-disk `admin.crt`) | **No**, not by the core | the core never writes to another host's copy; that file changes only when the workstation mints its own replacement (`venya admin cert renew`). `venya login` alone stores a session token, not a certificate |
 | `/etc/nginx/ssl/client-ca-bundle.crt` (Root + Admin CA, §1 trust boundary) | **Not applicable** | a bundle of CA certificates, and CA certificates carry no plane marker; no arc migration is owed here |
-| Revocation records (`AdminCertRevocation` serials) | **Not applicable** | serial-keyed and arc-independent; a revoked old-arc serial stays revoked after the window closes |
+| Revocation records (`AdminCertRevocation` serials) | **Not applicable** | serial-keyed and arc-independent; a revoked serial on any arc stays revoked |
 
-**When the window closes.** The legacy read is a loan with a named exit: it
-closes once every plane-bearing credential path has been re-minted per plane —
-machine (installer/bootstrap mint) and human (CSR/login-ceremony signer are
-separate proofs, and one does not stand in for the other). The removal leg
-deletes the legacy read branch and pins the paired negative that an old-arc
-marker is no longer read as ours; **after that, a hand-copied pre-#601 leaf
-fails closed** with the named re-issue refusal, not a silent plane default. If
-you hold such a copy, do not refresh it from the core — retire it: mint your own
-short-lived certificate on the workstation (`venya admin cert renew`, §0), let the
-copy die at the computed age-out date (§0.1), and revoke its serial if you cannot
-wait for that date.
+**The window is closed — what that costs you.** The legacy read was a loan with
+a named exit: it was to close once every plane-bearing credential path had been
+re-minted per plane (machine = installer/bootstrap mint, human = CSR/login-
+ceremony signer — separate proofs). The owner ruled instead that no alpha-era
+credential is supported, so the read branch came out and the exit is now. A
+hand-copied pre-#601 leaf **fails closed** with the named re-issue refusal, not
+a silent plane default. If you hold such a copy, do not refresh it from the
+core — retire it: mint your own short-lived certificate on the workstation
+(`venya admin cert renew`, §0), and revoke the old serial if you cannot wait
+for it to age out (§0.1). The per-plane re-mint census that the earlier
+precondition asked for is recorded on #601; the refusal above is the behavior
+either way.
 
 ## 10. Known issues affecting this runbook (tickets)
 
