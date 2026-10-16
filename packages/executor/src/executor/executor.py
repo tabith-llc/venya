@@ -45,6 +45,7 @@ from .injector import (
 from .strategies.base import InjectionResult, InjectionStrategy
 from .strategies.sbx_strategy import (
     CONTAINER_SECRET_DIR,
+    SbxCreateTimeoutError,
     SbxStrategy,
     reap_orphan_sandboxes,
 )
@@ -1011,13 +1012,26 @@ class Executor:
                 original_stderr_size=original_stderr_size,
             )
 
-        except subprocess.TimeoutExpired:
-            logger.error("Sandbox command timed out after %d seconds", SBX_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            # #639: name the stage that actually timed out, and the bound IT carried. This
+            # lane used to print "Command timed out after 3600 seconds" for ANY
+            # TimeoutExpired in the guarded region — including a create that hung under
+            # SBX_CREATE_TIMEOUT (240 s) or VENYA_SBX_CREATE_TIMEOUT — because the guarded
+            # region starts BEFORE create (#406) and the create site raised the bare
+            # exception. The strategy now raises the named SbxCreateTimeoutError with the
+            # real value on it, so the operator can tell a hung create from a hung command
+            # and reads a number that is the bound that fired, not a constant.
+            if isinstance(exc, SbxCreateTimeoutError):
+                logger.error("Sandbox CREATE timed out after %s seconds", exc.timeout)
+                timed_out = f"Sandbox create timed out after {exc.timeout} seconds"
+            else:
+                logger.error("Sandbox command timed out after %s seconds", exc.timeout)
+                timed_out = f"Sandbox command timed out after {exc.timeout} seconds"
             return CommandResult(
                 command=command,
                 exit_code=-1,
                 stdout=b"",
-                stderr=f"Command timed out after {SBX_TIMEOUT} seconds".encode(),
+                stderr=timed_out.encode(),
             )
         except Exception:
             logger.exception("Sandbox execution failed")
