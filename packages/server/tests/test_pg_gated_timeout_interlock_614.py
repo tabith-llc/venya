@@ -61,7 +61,8 @@ below, then the AST tallies this file's own helpers print):** ``git grep -ln 'VE
 -- 'packages/*/tests/*'`` → 10 files, minus this scanner = 9 scan targets (a whole-tree grep
 returns the same 10, and ``rglob`` over the two roots finds no extra — which is what claim 7 now
 enforces); 9 ``*Postgresql`` classes; 15 gated cells inside them; 21 ``create_engine`` calls
-across the 9 files — 10 PG and 11 SQLite, every PG one still inside a class body today, so
+across the 9 files — 10 PG and 11 SQLite. Nine of the ten PG engines sit inside a gated class
+body; the tenth is named as blind spot 5 below and is bounded by hand-check, not by a claim, so
 claim 5 has no work to do on the current tree and is proven by its fixtures and by the live
 control C run (see the #630 report); 7 ``threading.Barrier`` constructions and 8 ``.wait()``
 calls, all inside gated classes; 23 helper defs the closure binds across the 9 files, the
@@ -91,6 +92,14 @@ the tree, not a count that was ever wrong.
 4. SQLite engines are exempt BY VALUE wherever they sit, including inside a helper: demanding a
    PostgreSQL GUC of a SQLite URL would be a wrong test, not a stronger one. That exemption is
    exercised by ``test_control_sqlite_helper_stays_exempt`` so it cannot be quietly widened.
+5. An engine in a gated FILE whose enclosing class is NOT named ``*Postgresql`` is read by no
+   claim. Found re-deriving these counts at ``04eb349``: 613:299 (``TestVenueGateHonesty``, the
+   unreachable-URL cells) opens a real PG engine outside every gated class body and outside any
+   helper a gated class reaches. It DOES carry ``connect_args=_PG_DEADLINE`` — read at this tip,
+   not inferred — so the tree is correct today, but claim 2 cannot see it and claim 5 does not
+   reach it: dropping that deadline there would pass every cell in this file. Closing it means
+   widening the class-name test or walking every engine in a gated file, which is a larger
+   change than #630 ruled and is NOT made here; this row names what still escapes.
 """
 
 import ast
