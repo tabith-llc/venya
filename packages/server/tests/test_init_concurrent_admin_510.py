@@ -35,7 +35,7 @@ from core.iam.models import AuditEvent, Base, Role, RoleMember, User, WebAuthnCr
 from fastapi import FastAPI
 from server.fido2.manager import Fido2Store, StoredCredential, WebAuthnError
 from server.routes import init as init_routes
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 from starlette.testclient import TestClient
 
@@ -538,10 +538,16 @@ class TestLockStatementConstruction:
 class TestConcurrentBootstrapPostgresql:
     """AC2 + AC6, physically: the two-connection race on PostgreSQL.
 
-    WRITTEN, NOT RUN ON THIS LEG — the spec bars VMs and fleet, so this class
-    skipped and its claims are unverified against a live server. Point
-    VENYA_TEST_PG_URL at a SCRATCH database (it drops and recreates the IAM
-    tables); never at anything live.
+    RUN on the PostgreSQL door (s126, base `04eb349`, socket venue — see the #645 cells at the
+    bottom of this class for what each one proves). Point VENYA_TEST_PG_URL at a SCRATCH database
+    (it drops and recreates the IAM tables); never at anything live.
+
+    Which cell proves which half (#645): the barrier race below proves the OUTCOME — one enrolled
+    admin, the loser refused, on two real connections. It is NOT by itself the paired negative: it
+    measured 2-of-3 GREEN with the ``db.execute(...)`` at routes/init.py:122-125 neutered, because
+    thread timing alone can also produce [201, 409]. The two #645 cells under it are the paired
+    negative — one watches the statement arrive on the wire, the other watches PostgreSQL refuse to
+    let the bootstrap pass while another transaction holds the key.
 
     This is the cell the SQLite suite cannot substitute: two Session objects on
     two connections released together by a barrier, so both step-2 re-checks
@@ -557,6 +563,32 @@ class TestConcurrentBootstrapPostgresql:
         Base.metadata.drop_all(engine)
         Base.metadata.create_all(engine)
         return engine, sessionmaker(bind=engine)
+
+    def _pg_stack(self, SessionLocal, *user_ids):
+        """Roles + PENDING admins + issued ceremonies — the state step 2 reads."""
+        ids = user_ids or ("alice", "bob")
+        with SessionLocal() as s:
+            _seed_roles(s)
+            admin_role = s.query(Role).filter(Role.name == "admin").one()
+            for uid in ids:
+                s.add(User(user_id=uid, auth_mode="security-key", enrolled_at=None))
+                s.add(RoleMember(user_id=uid, role_id=admin_role.id))
+            s.commit()
+        fido = PerUserFido2()
+        for uid in ids:
+            fido.start_registration(uid, uid)
+        app = FastAPI()
+        # The backend IS the per-request factory: `get_db` yields `backend.get_session()`, so wrapping
+        # the shim in _FakeBackend hands the ROUTE the shim itself, which has neither get_bind() nor
+        # execute() — the advisory-lock call in routes/init.py then raised AttributeError, both threads
+        # got a 500, and the cell asserted on an empty admin list without ever reaching the lock. Pass
+        # it directly (the shape test_init_reset_race_511.py:649 uses) and get_session() returns a real
+        # Session, so this cell exercises the same engine path production does.
+        app.state.backend = _SessionPerRequest(SessionLocal)
+        app.state.config = SimpleNamespace(recovery_code_pepper="pep")
+        app.state.fido2_manager = fido
+        app.include_router(init_routes.router, prefix="/api/v1")
+        return TestClient(app, raise_server_exceptions=False), fido
 
     def test_two_connections_one_admin(self):
         import threading
@@ -610,6 +642,143 @@ class TestConcurrentBootstrapPostgresql:
             assert sorted(codes.values()) == [201, 409], codes
         finally:
             s.close()
+
+    # ---- #645 AC2: the paired negative. Both cells below FAIL if the advisory lock leaves the route.
+
+    def test_the_route_sends_the_advisory_statement_from_both_connections(self):
+        """AC2, first half — the statement arrives on the WIRE, once per racing connection.
+
+        Pins the ``db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), ...)`` inside
+        :func:`server.routes.init._lock_first_admin_bootstrap` (`routes/init.py:122-125` at base
+        `04eb349`; grep the symbol, numbers rot), reached from the step-2 call site in
+        :func:`init_complete` (`routes/init.py:637`).
+
+        WHY a witness and not a row count: `test_two_connections_one_admin` above measures the
+        race OUTCOME, and the outcome can also be produced by timing alone — measured at s126 with
+        that ``db.execute`` neutered, it stayed GREEN on 2 of 3 runs (`assert 2 == 1`, left
+        `['alice', 'bob']`, on the third). This cell cannot be satisfied by luck: an engine
+        `before_cursor_execute` witness counts what psycopg2 actually hands PostgreSQL, and the
+        assertion is one advisory statement from each of the two connections with the key bound as
+        a parameter. Neuter the statement and `sent` is empty — no timing argument available.
+        """
+        import threading
+
+        engine, SessionLocal = self._engine_and_factory()
+        client, _ = self._pg_stack(SessionLocal)
+
+        sent: list = []
+        tally = threading.Lock()
+
+        def witness(conn, cursor, statement, parameters, context, executemany):
+            if "pg_advisory_xact_lock" in statement:
+                with tally:
+                    sent.append((threading.get_ident(), statement, parameters))
+
+        event.listen(engine, "before_cursor_execute", witness)
+        codes, bodies = {}, {}
+        try:
+            barrier = threading.Barrier(2)
+
+            def run(uid):
+                barrier.wait(timeout=10)
+                resp = _complete(client, uid)
+                codes[uid] = resp.status_code
+                bodies[uid] = resp.text[:160]
+
+            threads = [threading.Thread(target=run, args=(uid,)) for uid in ("alice", "bob")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+        finally:
+            event.remove(engine, "before_cursor_execute", witness)
+
+        # AC3 first: the codes are asserted BEFORE the rows, so a harness 500 reads as a code, not
+        # as "zero admins" — the swallowing that made #510's red uninformative.
+        assert sorted(codes.values()) == [201, 409], f"codes={codes} bodies={bodies}"
+        assert len(sent) == 2, f"expected one advisory statement per racing connection, saw {sent}"
+        assert len({ident for ident, _, _ in sent}) == 2, f"not two connections: {sent}"
+        assert all("hashtext" in stmt for _, stmt, _ in sent), sent
+        assert all(params == {"key": init_routes.INIT_BOOTSTRAP_LOCK_KEY} for _, _, params in sent), sent
+
+        with SessionLocal() as s:
+            assert len(_enrolled_admins(s)) == 1, _enrolled_admins(s)
+            assert s.query(WebAuthnCredential).count() == 1
+
+    def test_the_route_waits_for_the_key_a_competing_transaction_holds(self):
+        """AC2, second half (CAUSAL) — PostgreSQL itself refuses to let the bootstrap pass.
+
+        The wire witness above proves the statement goes out; this one proves the statement is what
+        serializes. A competing transaction takes the SAME key and holds it. On the shipping route
+        the request then parks inside `pg_advisory_xact_lock` — visible as an ungranted advisory row
+        for `hashtext(key)` in `pg_locks` — and only completes after the holder commits. Neuter the
+        `db.execute` in :func:`_lock_first_admin_bootstrap` and the request returns 201 WHILE ANOTHER
+        TRANSACTION HOLDS THE KEY, so the `blocked` assertion fails immediately; nothing here depends
+        on two threads landing in the same millisecond.
+
+        The holder is a competitor for the lock, not a stand-in for the route: the enrollment under
+        test is performed by the real `/init/complete` route on a real connection.
+        """
+        import threading
+        import time
+
+        _, SessionLocal = self._engine_and_factory()
+        client, _ = self._pg_stack(SessionLocal, "alice")
+        key = init_routes.INIT_BOOTSTRAP_LOCK_KEY
+
+        waiting_sql = text(
+            "SELECT pid, classid, objid FROM pg_locks"
+            " WHERE locktype = 'advisory' AND NOT granted"
+            "   AND objid::bigint = hashtext(:key)::bigint"
+        )
+
+        holder = SessionLocal()
+        observer = SessionLocal()
+        box: dict = {}
+        done = threading.Event()
+        try:
+            holder.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
+            assert holder.in_transaction(), "the holder must keep its transaction open to hold the key"
+            objid = holder.execute(text("SELECT hashtext(:key)"), {"key": key}).scalar()
+
+            def run():
+                box["resp"] = _complete(client, "alice")
+                done.set()
+
+            racer = threading.Thread(target=run, daemon=True)
+            racer.start()
+
+            waited = []
+            deadline = time.monotonic() + 5.0
+            # Exit on EITHER observation: a wait row appeared (serialized) or the request came back
+            # while the holder still had the key (not serialized) — the second is the mutation face.
+            while not waited and not done.is_set() and time.monotonic() < deadline:
+                waited = observer.execute(waiting_sql, {"key": key}).fetchall()
+                if not waited and not done.is_set():
+                    time.sleep(0.05)
+
+            # AC3: the code is asserted before the row counts below, and an early 500 would surface
+            # here as "the request finished" rather than as an empty admin list.
+            blocked = not done.is_set()
+            holder.commit()  # release the key; the route must then go through
+            racer.join(timeout=30)
+
+            assert blocked, (
+                f"the bootstrap completed while another transaction held advisory key {key!r} "
+                f"(hashtext {objid}); the route is not serializing on it. Observed "
+                f"status={box.get('resp').status_code if 'resp' in box else 'still running'} "
+                f"body={box.get('resp').text[:160] if 'resp' in box else ''}"
+            )
+            assert waited, f"no ungranted advisory lock row for hashtext({key!r}) = {objid} was ever observed"
+            assert done.is_set(), "the request never finished after the holder released the key"
+            assert box["resp"].status_code == 201, box["resp"].text[:200]
+        finally:
+            observer.close()
+            holder.close()
+
+        with SessionLocal() as s:
+            assert len(_enrolled_admins(s)) == 1, _enrolled_admins(s)
+            assert s.query(WebAuthnCredential).count() == 1
 
 
 class _SessionPerRequest:
