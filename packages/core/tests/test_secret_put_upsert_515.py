@@ -439,6 +439,14 @@ def test_put_still_writes_on_a_real_sqlite_session(engine_and_factory):
 # --------------------------------------------------------------------------------
 
 _PG_URL_ENV = "VENYA_TEST_PG_URL"
+# R1 (#614): one deadline, one name, shared by every PostgreSQL-gated cell in this file.
+# `lock_timeout` is the fix for the s105 shape — a read transaction left open pins the next
+# cell's DDL forever, and this gives that wait a ceiling so it reports instead of hanging.
+# `statement_timeout` is the backstop for a stall that is not a lock wait, set far above the
+# milliseconds these cells actually take: a cap that could abort the row-lock wait the race
+# cells depend on (the loser blocks until the winner commits) would test a different
+# statement than production runs.
+_PG_DEADLINE = {"options": "-c lock_timeout=5000 -c statement_timeout=60000"}
 
 
 @pytest.mark.skipif(
@@ -462,7 +470,7 @@ class TestConcurrentPutPostgresql:
     def test_two_concurrent_puts_of_one_visible_key_leave_one_row(self):
         from core.iam.models import Base as IAMBase
 
-        engine = create_engine(os.environ[_PG_URL_ENV])
+        engine = create_engine(os.environ[_PG_URL_ENV], connect_args=_PG_DEADLINE)
         IAMBase.metadata.drop_all(engine)
         IAMBase.metadata.create_all(engine)
         maker = sessionmaker(bind=engine)
@@ -474,7 +482,8 @@ class TestConcurrentPutPostgresql:
             s.commit()
             s.close()
 
-            barrier = threading.Barrier(2)
+            # Bounded: a peer that dies before the barrier must not hang this one forever.
+            barrier = threading.Barrier(2, timeout=10)
             ids: list[str] = []
             ids_lock = threading.Lock()
 

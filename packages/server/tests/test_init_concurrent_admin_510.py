@@ -40,6 +40,28 @@ from sqlalchemy.orm import sessionmaker
 from starlette.testclient import TestClient
 
 PG_URL_ENV = "VENYA_TEST_PG_URL"
+# R1 (#614): every engine a PostgreSQL cell builds is tracked and disposed when that cell
+# ends, so a connection left checked out (and whatever transaction it still holds) cannot pin
+# the NEXT file's drop_all. Disposal is part of the ordering, not cleanup for tidiness: the
+# #607 s105 hang was exactly one idle-in-transaction read blocking a later DROP.
+_PG_ENGINES: list = []
+
+
+@pytest.fixture(autouse=True)
+def _dispose_pg_engines():
+    yield
+    while _PG_ENGINES:
+        _PG_ENGINES.pop().dispose()
+
+
+# R1 (#614): one deadline, one name, shared by every PostgreSQL-gated cell in this file.
+# `lock_timeout` is the fix for the s105 shape — a read transaction left open pins the next
+# cell's DDL forever, and this gives that wait a ceiling so it reports instead of hanging.
+# `statement_timeout` is the backstop for a stall that is not a lock wait, set far above the
+# milliseconds these cells actually take: a cap that could abort the row-lock wait the race
+# cells depend on (the loser blocks until the winner commits) would test a different
+# statement than production runs.
+_PG_DEADLINE = {"options": "-c lock_timeout=5000 -c statement_timeout=60000"}
 
 
 class PerUserFido2:
@@ -530,7 +552,8 @@ class TestConcurrentBootstrapPostgresql:
     """
 
     def _engine_and_factory(self):
-        engine = create_engine(os.environ[PG_URL_ENV])
+        engine = create_engine(os.environ[PG_URL_ENV], connect_args=_PG_DEADLINE)
+        _PG_ENGINES.append(engine)
         Base.metadata.drop_all(engine)
         Base.metadata.create_all(engine)
         return engine, sessionmaker(bind=engine)
@@ -540,14 +563,16 @@ class TestConcurrentBootstrapPostgresql:
 
         _, SessionLocal = self._engine_and_factory()
         s = SessionLocal()
-        s.add_all([Role(name="admin", permissions="read-write"), Role(name="user", permissions="read")])
-        s.commit()
-        admin_role = s.query(Role).filter(Role.name == "admin").one()
-        for uid in ("alice", "bob"):
-            s.add(User(user_id=uid, auth_mode="security-key", enrolled_at=None))
-            s.add(RoleMember(user_id=uid, role_id=admin_role.id))
-        s.commit()
-        s.close()
+        try:
+            s.add_all([Role(name="admin", permissions="read-write"), Role(name="user", permissions="read")])
+            s.commit()
+            admin_role = s.query(Role).filter(Role.name == "admin").one()
+            for uid in ("alice", "bob"):
+                s.add(User(user_id=uid, auth_mode="security-key", enrolled_at=None))
+                s.add(RoleMember(user_id=uid, role_id=admin_role.id))
+            s.commit()
+        finally:
+            s.close()
 
         fido = PerUserFido2()
         fido.start_registration("alice", "alice")

@@ -83,6 +83,14 @@ SECOND_KEY = "vault/second"
 KEY_NOWHERE = "keys/never-touched"
 
 PG_URL_ENV = "VENYA_TEST_PG_URL"
+# R1 (#614): one deadline, one name, shared by every PostgreSQL-gated cell in this file.
+# `lock_timeout` is the fix for the s105 shape — a read transaction left open pins the next
+# cell's DDL forever, and this gives that wait a ceiling so it reports instead of hanging.
+# `statement_timeout` is the backstop for a stall that is not a lock wait, set far above the
+# milliseconds these cells actually take: a cap that could abort the row-lock wait the race
+# cells depend on (the loser blocks until the winner commits) would test a different
+# statement than production runs.
+_PG_DEADLINE = {"options": "-c lock_timeout=5000 -c statement_timeout=60000"}
 
 # (id, event_type, user_id, fields) — one row per class that names a key, one
 # row that names an executor, one with no fields at all.
@@ -444,7 +452,7 @@ class TestKeyFilterPostgresql:
         _close_open_sessions()
         # lock_timeout so a blocked DDL goes RED loudly instead of hanging the
         # suite forever behind a leaked read transaction.
-        engine = create_engine(os.environ[PG_URL_ENV], connect_args={"options": "-c lock_timeout=5000"})
+        engine = create_engine(os.environ[PG_URL_ENV], connect_args=_PG_DEADLINE)
         AuditEvent.__table__.drop(engine, checkfirst=True)
         AuditEvent.__table__.create(engine)
         return sessionmaker(bind=engine), engine

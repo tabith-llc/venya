@@ -999,6 +999,68 @@ def _install_stderr_tee():
         return None
 
 
+# #595: the catch-all below is process-wide, so whatever a command body raises
+# reaches the operator through these two helpers. Keep them free of argument
+# VALUES: a positional can carry a secret (`venya store <key> <value>`), and this
+# line is printed on the terminal and tee'd to the log.
+def _command_path(args: argparse.Namespace) -> str:
+    """Rebuild the command path the operator typed, e.g. "admin cert renew".
+
+    Every subparser in create_parser() uses dest "command" or "<group>_command", and
+    argparse fills the namespace top-down, so filtering on that dest shape recovers the
+    path. Subcommand NAMES are parser choices, never free text, so nothing the operator
+    typed can ride along in the line this feeds.
+    """
+    parts: list[str] = []
+    for key, value in vars(args).items():
+        if (key == "command" or key.endswith("_command")) and isinstance(value, str) and value:
+            parts.append(value)
+    return " ".join(parts)
+
+
+def _operator_error_line(exc: Exception, args: argparse.Namespace, log_path: object) -> str:
+    """Render the catch-all's single operator-facing line (#595).
+
+    A message with content is returned as it has always been returned - `Error: <text>`
+    byte-identical - because command bodies own their own wording and this handler must
+    not reformat, truncate or swallow it. The blank case is the one this fixes: an
+    exception constructed with nothing to say (`EOFError()` at a prompt, `queue.Empty`,
+    a bare `ValueError`) used to print a bare `Error:`, which names no cause and gives
+    the operator no next step. So the empty render carries the exception TYPE, the
+    COMMAND that was running, where the detail went, and how to get a traceback.
+
+    Whitespace-only is deliberately NOT treated as blank: `str(e)` is the contract here,
+    and `Error:   ` from a raiser that passed spaces stays exactly what it printed before
+    (#595 AC2 keeps every non-empty render byte-identical).
+    """
+    detail = str(exc)
+    if detail:
+        return f"Error: {detail}"
+    command = _command_path(args) or "the requested command"
+    where = f"cause logged to {log_path}" if log_path is not None else "no error log could be written for this run"
+    return (
+        f"Error: {_qualified_type(exc)} from `venya {command}` carried no message - "
+        f"{where}; re-run with --verbose for the traceback"
+    )
+
+
+def _qualified_type(exc: Exception) -> str:
+    """`EOFError` for a builtin, `queue.Empty` for anything that came from a module.
+
+    A bare type name is cryptic for the classes this path actually meets - `Empty` on its
+    own does not say which queue timed out - and the module is part of the CLASS, read off
+    ``type(exc).__module__``, never from anything the operator typed (AC8). One alias is
+    unwound: `queue.Empty` is implemented in the C module `_queue`, and printing
+    `_queue.Empty` would name a module no operator has ever typed.
+    """
+    cls = type(exc)
+    name = cls.__qualname__
+    module = getattr(cls, "__module__", "") or ""
+    if module.startswith("_") and not module.startswith("__"):
+        module = module[1:]
+    return name if module in ("", "builtins") else f"{module}.{name}"
+
+
 def main() -> int:
     """Entry point for the CLI."""
     parser = create_parser()
@@ -1018,7 +1080,7 @@ def main() -> int:
     except Exception as e:
         if args.verbose:
             raise
-        print(f"Error: {e}", file=sys.stderr)
+        print(_operator_error_line(e, args, log_path), file=sys.stderr)
         rc = 1
     if rc != 0 and log_path is not None:
         print(f"(error details logged to {log_path})", file=sys.stderr)
