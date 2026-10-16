@@ -127,6 +127,22 @@ set, the file still owns it.
 | key the file does not carry | n/a | environment (then `.env`, then default) | no — nothing is being overridden |
 | `injection_method` | n/a | not read from either source | n/a |
 
+The concurrency knob above has a floor and **no** ceiling: the code refuses `max_concurrent_commands` below 1 at config
+load (`ConcurrencyConfig._at_least_one_slot`, `packages/executor/src/executor/config.py`) and checks no upper bound at
+all, so nothing in the executor stops a large value — the first real wall is the **core's** shared database pool, 5
+connections plus 10 overflow, in a process the executor cannot see, and each relayed command in flight can hold one of
+those 15 for as long as its own relay timeout allows (the relay route dials with `timeout=300`, so up to 300 seconds:
+`execute_command_on_executor`, `packages/server/src/server/routes/executors.py`). Setting the knob above that wall does
+not damage correctness; it moves latency and throughput, because would-be queries then wait on the pool instead of
+running. Re-derive both numbers rather than trusting this sentence, which is a snapshot of the tree at your checkout:
+
+```bash
+# the core's shared pool: expect pool_size=5 and max_overflow=10 in _create_engine
+git -C <venya-dev> show origin/dev:packages/core/src/core/engine/backend.py | grep -n 'pool_size=\|max_overflow='
+# and that the executor carries no pool of its own: expect zero
+grep -rn 'pool_size' <venya-dev>/packages/executor/src | wc -l
+```
+
 ### Environment Variable Mapping (examples)
 
 **Every row in this table is a core/server-plane field**, read by the core's `ServerConfig`
