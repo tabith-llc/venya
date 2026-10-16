@@ -230,7 +230,7 @@ must also prove, and the reason it is outstanding.
 
 | Cell | Status (guest preflight at `dev` `f0a2c3a`) |
 |---|---|
-| 1 — installer ACL gate on a wildcard path (#493) | **POSITIVE HALF RUN/PASS at `664f267` · ZERO-ENUMERATION ARM RUN/PASS IN HARNESS · PROTECTED-DACL ARM RUN IN HARNESS, EXPECTATION NOT MET · INCOMPLETE ARM RUN IN HARNESS, EXPECTATION NOT MET (both misses are harness setup, not gate behavior — the ACL those scenarios meant to apply never landed, so the rejection lines were never reached) · COUNT-COVERAGE ANSWERED, NOT A COVERAGE GAP · PAIRED venyastd READABILITY HALF NOT RUN (owner console)** |
+| 1 — installer ACL gate on a wildcard path (#493) | **POSITIVE HALF RUN/PASS at `664f267` · ZERO-ENUMERATION ARM RUN/PASS IN HARNESS · PROTECTED-DACL ARM RUN/PASS IN HARNESS (the second rejection line this guard has ever been seen to print) · INCOMPLETE ARM RUN IN HARNESS, NOT PRODUCIBLE FROM AN ELEVATED BODY (measured: the applied deny lands and the walk cannot see it) · COUNT-COVERAGE ANSWERED, NOT A COVERAGE GAP · PAIRED venyastd READABILITY HALF NOT RUN (owner console)** |
 | 2 — the ceremony from an interactive desktop | **NOT RUN** |
 | 3 — the renewal round trip | **NOT RUN** |
 
@@ -256,27 +256,43 @@ byte-identical to `install-venya-cli.ps1:246-283` at `664f267` — was driven ag
 trees. A harness is the only way these arms get executed at all, and the page should say so
 plainly: the class this guard exists to catch is hardlink mode, which a `copy`-mode install never
 produces, so no ordinary install run can present a protected DACL to it. Of the three rejection
-arms, one reached its rejection line and two did not reach theirs, and each miss is measured rather
+arms, two have now reached their rejection line and one has not, and each miss is measured rather
 than assumed; two positive controls say the counter itself is live.
 - Zero-enumeration arm — harness on a scenario tree whose base exists and holds no files: printed
   verbatim `[ERROR] ACL check could not verify any file: 0 file(s) enumerated under an existing
   C:\temp\s121h\case-C, so this check proved nothing. Refusing to report a pass - report this
   message with the install directory.` and the harness read exit 1. **This arm fired as designed**:
   a gate that read no file refuses rather than reporting a pass.
-- Protected-DACL arm — harness on a scenario tree: printed `[INFO]  ACL check passed: 1 file(s)
-  enumerated and ACL-read, 0 protected DACLs.` with exit 0. **RUN, EXPECTATION NOT MET.** Two
-  causes, both measured: the scenario's `icacls` call was handed a bare SID, which that tool
-  refuses (`No mapping between account names and security IDs was done`, rc 1332, zero files
-  processed), so no protected DACL was ever set; and with the SID form corrected, protecting a
-  *directory* still leaves the files under it reading `AreAccessRulesProtected=False`, so an
-  enumerator that walks files cannot see that scenario — the arm needs a file whose own DACL is
-  protected (that form does report `PROTECTED=1` to this gate's own walk, measured).
-- INCOMPLETE arm — harness on a scenario tree holding one file with an explicit deny-on-read:
-  printed `[INFO]  ACL check passed: 1 file(s) enumerated and ACL-read, 0 protected DACLs.` with
-  exit 0. **RUN, EXPECTATION NOT MET.** Same SID cause (rc 1332, nothing applied); and with the
-  SID form corrected the elevated ACL read still succeeds, because a deny on read stops reading
-  the *file* and not reading its descriptor — so this arm needs a scenario that fails the
-  enumeration, not the read.
+- Protected-DACL arm — **RUN, PASS in a harness on a scenario tree.** The scenario is one **file**
+  whose own DACL is stripped of inheritance and re-granted to `*S-1-5-32-544` (the SID prefixed
+  with `*`, which is the form `icacls` takes as a SID rather than a name; the bare form was the
+  first run's miss, rc 1332, nothing applied). The landing is proven before the gate speaks:
+  `PROTECT_RC=0` and `FILE_PROTECTED_BEFORE_GATE=True`. The guard then printed verbatim
+  `[ERROR] 1 file(s) under C:\temp\s121h\case-B carry a protected DACL and would be unreadable by
+  standard users. Likely cause: --link-mode copy was dropped. Refusing to leave a broken install.`
+  and the harness read `GATE_EXIT=1`. The scenario was reversed in the same run and the reversal
+  was proven: `RESET_RC=0`, `B_REVERSAL_PROTECTED=False`. **This is the second of the guard's three
+  rejection lines to be observed executing, and it is still a harness on a scenario tree — not an
+  installer run.** The directory-shaped version of the same scenario stays invisible to this gate:
+  it walks files, and files under a protected directory still read
+  `AreAccessRulesProtected=False`.
+- INCOMPLETE arm — **RUN, NOT PRODUCIBLE FROM AN ELEVATED BODY.** First run's miss was the same
+  bare-SID `icacls` refusal (rc 1332, nothing applied). Re-aimed at the arm's *other* input — the
+  warning line counts enumeration failures as well as ACL-read failures — the scenario is a
+  subdirectory carrying `icacls /deny '*S-1-1-0:(OI)(AD)'`, a deny on listing it. That deny lands
+  (`DENY_RC=0`) and reads back as `Everyone | AppendData | ObjectInheritNone`, and the walk still
+  sees straight through it: `cmd dir /b` returns the child name, `Get-ChildItem` on the subdirectory
+  returns 1 item with no error, and the gate's own walk reports 0 enumeration errors, 1 file
+  verified, 0 not checked — so the guard printed its PASS line, `[INFO]  ACL check passed: 1 file(s)
+  enumerated and ACL-read, 0 protected DACLs.`, exit 0. **The honest verdict: the INCOMPLETE warning
+  is not producible by an elevated body through a self-applied deny.** The reason is in the body, not
+  the gate: this guest's SSH token is High Mandatory Level with `SeBackupPrivilege` and
+  `SeRestorePrivilege` **Enabled**, so the walk's directory opens carry backup semantics and the DACL
+  is bypassed for them; and the read-side half was already measured — a self-applied read-deny makes
+  the *file contents* unreadable (`Get-Content` throws) while `Get-Acl` on the same file still
+  succeeds, which is exactly why the ACL-read arm cannot throw either. Both inputs to that warning are
+  out of reach from this body class, so no third scenario is offered here. Reversal proven: `RESET_RC=0`
+  on both the subdirectory and its file.
 - Two positive controls, harness — one readable file printed `ACL check passed: 1 file(s) ...`
   and two readable files printed `ACL check passed: 2 file(s) ...`, exit 0 each. The enumerator
   and the counter are live, so the numbers above are the gate's own and not a silent zero.
@@ -303,8 +319,8 @@ and the #628 history follow.
 > extraction`) when `VENYA_INSTALL_DIR` contains PowerShell wildcard characters, because that
 > check uses `-Path` semantics while #493's fix covered only the ACL-gate enumeration; filed
 > as #628, whose fix merged at `664f267`; the sentence above is history — the gate messages have
-> since been observed executing, once in the installer itself (the PASS line) and once in a harness
-> (the zero-file refusal).
+> since been observed executing, once in the installer itself (the PASS line) and twice in a harness
+> (the zero-file refusal and the protected-DACL refusal).
 
 **Guest preflight (ran, rc=0; read-only, as `win` over SSH from the agent box):**
 
