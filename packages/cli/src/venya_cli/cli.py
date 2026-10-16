@@ -1047,11 +1047,15 @@ def _qualified_type(exc: Exception) -> str:
 
     A bare type name is cryptic for the classes this path actually meets - `Empty` on its
     own does not say which queue timed out - and the module is part of the CLASS, read off
-    ``type(exc).__module__``, never from anything the operator typed (AC8).
+    ``type(exc).__module__``, never from anything the operator typed (AC8). One alias is
+    unwound: `queue.Empty` is implemented in the C module `_queue`, and printing
+    `_queue.Empty` would name a module no operator has ever typed.
     """
     cls = type(exc)
     name = cls.__qualname__
     module = getattr(cls, "__module__", "") or ""
+    if module.startswith("_") and not module.startswith("__"):
+        module = module[1:]
     return name if module in ("", "builtins") else f"{module}.{name}"
 
 

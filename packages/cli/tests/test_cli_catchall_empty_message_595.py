@@ -120,6 +120,13 @@ class TestOperatorErrorLineUnit:
         assert "EOFError" in _operator_error_line(EOFError(), SimpleNamespace(command="get"), None)
         assert "builtins.EOFError" not in _operator_error_line(EOFError(), SimpleNamespace(command="get"), None)
 
+    def test_private_module_alias_is_unwound_in_the_type_name(self):
+        """`queue.Empty` is implemented in the C module `_queue`. Naming it would print a
+        module no operator ever typed, so the leading underscore is dropped."""
+        line = _operator_error_line(queue.Empty(), SimpleNamespace(command="get"), None)
+        assert "queue.Empty" in line, line
+        assert "_queue.Empty" not in line, line
+
     def test_future_timeout_error_is_named_by_its_own_class(self):
         line = _operator_error_line(FutureTimeoutError(), SimpleNamespace(command="audit"), None)
         assert "TimeoutError" in line, line
