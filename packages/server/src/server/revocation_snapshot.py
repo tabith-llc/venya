@@ -40,6 +40,15 @@ What this module does NOT own — the law that keeps it honest:
 * THE ABSENCE OF AN ANSWER KEEPS ITS SHIPPED MEANING. Step 2 changes WHEN an answer is
   available, never what its absence means: the strike counter, the threshold, the
   cadence, the fault arm and the refusal routing all stay exactly as they ship.
+* SURVIVAL (#626). A publisher task used to end on any raise that escaped ``publish_once``
+  — a faulting ``close()`` in that function's own ``finally`` sat outside its ``except``, and
+  a raise in a ``finally`` also replaces whatever the ``try`` returned, so one bad teardown
+  cost both a good snapshot and the task. The loop's ``finally`` then disarmed and NOTHING
+  in-process re-armed it: the core ran the lockable live read for the rest of its life with
+  one latched WARNING as the only trace. So the teardown is now guarded where it happens, the
+  tick is guarded again at the call site behind a bounded, doubling backoff, and every exit is
+  journalled — the lifespan's shutdown cancel quietly at INFO, anything else at ERROR with its
+  reason. The journal is the evidence surface; no new module state carries it.
 """
 
 from __future__ import annotations
@@ -65,6 +74,24 @@ REVOCATION_SNAPSHOT_MAX_AGE_SECONDS = 45
 #: Publisher interval. ``validate_snapshot_windows`` requires it strictly below the
 #: ceiling, so a snapshot can never sit older than one interval when it is read.
 REVOCATION_SNAPSHOT_REFRESH_SECONDS = 10
+
+# --- #626 retry pair: how a tick that ESCAPED the guard is retried --------------------
+#
+# These two are NOT the ruled refresh/ceiling pair above and must never be read as such:
+# #603 AC2 owns 10/45, and those numbers are untouched here. This pair governs only what
+# happens after a tick raises something ``publish_once`` did not absorb — a backoff floor
+# that doubles to a ceiling of its own, so a persistent fault costs one retry per
+# increasingly long nap rather than a burst (#626 AC5: no respawn storm).
+
+#: First retry nap after an escaped tick. One second, because the ruled 45 s ceiling
+#: already tolerates four missed 10 s refreshes, and a transient teardown fault should
+#: cost one publish, not the whole window.
+REVOCATION_SNAPSHOT_RETRY_BACKOFF_SECONDS = 1.0
+
+#: Upper bound on that nap. A fault that outlives the doubling (1, 2, 4, 8, 16, 30, 30 …)
+#: settles at one retry every 30 s: persistent, so the plane recovers on its own when the
+#: fault clears, and never a burst against a pool that is already sick (#626 AC5).
+REVOCATION_SNAPSHOT_RETRY_BACKOFF_MAX_SECONDS = 30.0
 
 
 class RevocationSnapshotUnavailable(RuntimeError):
@@ -281,9 +308,26 @@ def publish_once(session_factory: Callable[[], Session]) -> RevocationSnapshot |
         )
         return None
     finally:
+        # The teardown is guarded SEPARATELY from the read, and that is the #626 hole. This
+        # ``finally`` sits outside the ``except Exception`` above, so a faulting ``close()``
+        # (rollback-on-close against a dead or broken connection is the case) used to leave
+        # the function whole — and a raise here replaces whatever the ``try`` returned, so a
+        # population that had ALREADY been swapped in was thrown away along with the task.
+        # Absorbing it keeps the published snapshot, keeps the function's own promise ("nothing
+        # about a tick is allowed to escape") true for the teardown as well as the read, and
+        # leaves the loop's backoff guard to cover anything else a tick can still raise.
         close = getattr(db, "close", None)
         if callable(close):
-            close()
+            try:
+                close()
+            except Exception as teardown_fault:
+                logger.warning(
+                    "Revocation snapshot publish could not close its session (#626): %r — the "
+                    "population it read is already published and stays served; the pool's own "
+                    "recycle is the backstop for a session that would not close",
+                    teardown_fault,
+                    exc_info=True,
+                )
 
 
 async def revocation_snapshot_loop(session_factory: Callable[[], Session]) -> None:
@@ -304,13 +348,85 @@ async def revocation_snapshot_loop(session_factory: Callable[[], Session]) -> No
     session is created, used and closed entirely inside the worker thread, so no
     Session ever crosses threads. (This is the server's first offload; ``app.py``
     measured zero hits for ``run_in_threadpool|to_thread`` at the step-2 base.)
+
+    SURVIVAL (#626). ``publish_once`` absorbs its own read failures, but it could not absorb a
+    raise from the ``close()`` in its own ``finally`` — that call sat OUTSIDE the
+    ``except Exception`` it sits next to, so an escaped teardown raise left the function, the
+    ``while``, and (before this change) the task itself: the ``finally`` disarmed, nothing
+    re-armed in-process, and the core lost the snapshot plane for the rest of its life with one
+    latched WARNING as the only trace. So the tick is guarded HERE, at the call site, and an
+    escaped tick costs a bounded backoff nap instead of a death.
+
+    WHAT THE GUARD COVERS, named because #626 AC4 asks: ``Exception``, which is what a faulting
+    ``Session.close()`` raises (``sqlalchemy.exc.SQLAlchemyError`` and its subclasses are all
+    ``Exception`` descendants). It deliberately does NOT cover ``asyncio.CancelledError``, which
+    on this interpreter is NOT in ``Exception`` (measured here: ``issubclass(asyncio.CancelledError,
+    Exception)`` → False on CPython 3.14) — a cancel is the shutdown shape ``app.py`` uses, and
+    swallowing it would turn a clean stop into a task that never ends. Anything else that still
+    ends the task is logged at ERROR with its reason on the way out, because the row's complaint
+    was precisely that a death looked like a shutdown.
     """
+    # The retry counter and the last reason live HERE, on the task's own frame, not in module
+    # state: the module already carries four globals and a counter that only this task reads
+    # would be a fifth nobody clears. The journal is the operator-facing record (#626 AC3).
+    retries = 0
+    backoff = REVOCATION_SNAPSHOT_RETRY_BACKOFF_SECONDS  # task-local: no new module state (#626)
+
     validate_snapshot_windows()
     arm_publisher()
     try:
         while True:
-            await asyncio.to_thread(publish_once, session_factory)
+            try:
+                await asyncio.to_thread(publish_once, session_factory)
+            except asyncio.CancelledError:
+                # Re-raised untouched: named explicitly so the class the guard covers, and the
+                # one it does not, are readable at the site rather than inferred from a comment.
+                raise
+            except Exception as escape:
+                # The #626 hole, now a retry instead of a death. The last good snapshot keeps
+                # answering until the ceiling and the poll refuses past it, so this branch does
+                # not touch the fail-closed door — see the TT refusal cells.
+                retries += 1
+                logger.error(
+                    "Revocation snapshot publish escaped its own guard (#626): %r — the publisher "
+                    "is RETRYING in %.1f s rather than ending (attempt %d since the last good tick)"
+                    "; the revocation poll still answers from the last snapshot until the ceiling, "
+                    "then refuses",
+                    escape,
+                    backoff,
+                    retries,
+                    exc_info=escape,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, REVOCATION_SNAPSHOT_RETRY_BACKOFF_MAX_SECONDS)
+                continue
+            if retries:
+                logger.info("Revocation snapshot publisher recovered after %d escaped tick(s) (#626)", retries)
+            retries = 0
+            backoff = REVOCATION_SNAPSHOT_RETRY_BACKOFF_SECONDS
             await asyncio.sleep(REVOCATION_SNAPSHOT_REFRESH_SECONDS)
+    except asyncio.CancelledError:
+        # The intended exit: ``app.py``'s lifespan cancels this task, the ``finally`` below
+        # disarms, and the poll falls back to the shipped live read. Not an alarm — an ERROR on
+        # every clean shutdown is how the real one gets missed (#626 AC3's paired negative).
+        logger.info(
+            "Revocation snapshot publisher stopped on a shutdown cancel (#626): the revocation "
+            "poll falls back to the live read from here"
+        )
+        raise
+    except BaseException as death:
+        # Not ``Exception``, so not the read path and not the teardown close(): a
+        # KeyboardInterrupt, a SystemExit, a generator thrown in from outside. The tick guard
+        # above deliberately does not swallow these, so when one still ends the task the line
+        # says so, with its reason — which is the half of #626 that a latched WARNING cannot be.
+        logger.error(
+            "Revocation snapshot publisher stopped unexpectedly (%s) and will not restart in this "
+            "process (#626): the revocation poll is back on the lockable live-read path until a "
+            "core restart",
+            f"{type(death).__name__}: {death}",
+            exc_info=death,
+        )
+        raise
     finally:
         disarm_publisher()
 
@@ -320,7 +436,8 @@ def reset_snapshot_state() -> None:
 
     Module state is process-global and the suites run one process, so a cell that
     armed the publisher without clearing it would silently change what every later
-    poll cell observes — the same reason ``health._reset_health_cache`` exists.
+    poll cell observes — the same reason ``health._reset_health_cache`` exists. The #626
+    retry counter is local to the task and needs no clearing for the same reason.
     """
     global _published, _publisher_running, _unarmed_warned
     _published = None
