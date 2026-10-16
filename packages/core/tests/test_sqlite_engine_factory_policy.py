@@ -38,6 +38,7 @@ file only ever asks the shipped code what it does.
 from __future__ import annotations
 
 import inspect
+import sys
 from pathlib import Path
 
 import pytest
@@ -216,14 +217,21 @@ def test_the_plain_url_is_not_the_problem_the_listener_is(sqlite_url: str) -> No
         assert conn.exec_driver_sql("select 1").scalar() == 1
     plain.dispose()
 
-    source = inspect.getsource(Backend._create_engine)
-    assert "SET statement_timeout" in source, (
+    engine_source = inspect.getsource(Backend._create_engine)
+    assert "SET statement_timeout" in engine_source, (
         "the shipped engine body no longer carries the PostgreSQL statement this file names as the "
-        f"refusal cause; measured source: {source[:200]!r} — re-read the policy before editing these "
-        "cells, and expect the refusal cells to change form rather than be deleted"
+        f"refusal cause; measured source: {engine_source[:200]!r} — re-read the policy before editing "
+        "these cells, and expect the refusal cells to change form rather than be deleted"
     )
-    assert "foreign_keys" not in source, (
-        "the factory's sqlite path now mentions foreign_keys, so the #634 product-side claim this cell "
-        "pins has moved - and the two refusal cells above must be flipped to enforcement assertions "
-        "(PRAGMA foreign_keys == 1, orphan insert refused), not left pinning a refusal nobody performs"
+
+    # The whole module, not one method: the first version of this check scoped itself to
+    # _create_engine and STAYED GREEN under the #634 fix, because that fix calls a helper - a
+    # guard that misses the change it exists to catch is worse than no guard. Measured at this
+    # base: the string "foreign_keys" appears nowhere in product src (git grep count 0).
+    policy_source = inspect.getsource(sys.modules[Backend.__module__])
+    assert "foreign_keys" not in policy_source, (
+        "the engine module now mentions foreign_keys, so the #634 product-side claim this cell pins "
+        "has moved - flip the two refusal cells above to enforcement assertions "
+        "(PRAGMA foreign_keys == 1 on a factory-built sqlite connection, orphan insert refused) in the "
+        "same change that lands the fix, rather than leaving them pinning a refusal nobody performs"
     )
