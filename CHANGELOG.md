@@ -4,18 +4,6 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
-- **The revocation-snapshot publisher now survives a faulty teardown and says so (#626).** A core
-  republishes the revocation population every 10 s; if the session teardown at the end of one of
-  those publishes raised, the publisher task ended, the snapshot plane went back to the lockable
-  live DB read for the rest of the process's life, and the only journal evidence was a warning that
-  appears once per process. Such a publish now absorbs the teardown fault, keeps the population it
-  had already read, and retries on a bounded backoff (1 s doubling to 30 s), so the plane recovers on
-  its own when the fault clears. A publisher task that ends for any other reason is logged at ERROR
-  with its reason, and a shutdown cancel is still logged quietly at INFO. The poll's answers are
-  unchanged: the 45 s freshness ceiling, the 10 s interval, and the stale-class `503` that says "no
-  revocation asserted" all stand as shipped, and a core with no publisher still answers from the
-  current live read.
-
 ## [0.1.0beta1] - 2026-10-15
 
 - **The executor's revocation poll is answered from a freshness-bounded snapshot
@@ -49,6 +37,91 @@ Notable changes to Venya will be documented in this file.
   "the file value is in use", which was not true of any of the seven; the promise now
   stops where the capability does. A deployed `executor.toml` that still carries these
   tables loads unchanged — unrecognised keys are ignored — so no reinstall is needed.
+- **The revocation-snapshot publisher now survives a faulty teardown and says so (#626).** A core
+  republishes the revocation population every 10 s; if the session teardown at the end of one of
+  those publishes raised, the publisher task ended, the snapshot plane went back to the lockable
+  live DB read for the rest of the process's life, and the only journal evidence was a warning that
+  appears once per process. Such a publish now absorbs the teardown fault, keeps the population it
+  had already read, and retries on a bounded backoff (1 s doubling to 30 s), so the plane recovers on
+  its own when the fault clears. A publisher task that ends for any other reason is logged at ERROR
+  with its reason, and a shutdown cancel is still logged quietly at INFO. The poll's answers are
+  unchanged: the 45 s freshness ceiling, the 10 s interval, and the stale-class `503` that says "no
+  revocation asserted" all stand as shipped, and a core with no publisher still answers from the
+  current live read.
+- **A CLI error that carried no message now names itself (#595).** The catch-all that prints the
+  one line an operator sees used to render a bare `Error:` when the raised exception had nothing
+  to say — an empty prompt read, a queue that timed out, a bare `ValueError`. That line now
+  carries the exception type (`queue.Empty`, not `Empty`), the command that was running, where the
+  detail was logged, and the `--verbose` hint for the traceback. Every exception that does have a
+  message prints exactly the line it printed before: command bodies keep their own wording, and
+  the argument values a command was given are deliberately not included, so a secret passed as a
+  positional cannot reach the terminal or the log through this path.
+- **`venya admin executor enroll --output-dir` makes the directory it documents (#616).** The
+  generated reference says this command creates the output directory, and the directory was in
+  fact only made after a successful round trip. It is now created before the token is minted, at
+  `0700` through the same secret-directory helper the rest of the CLI uses, so a path that cannot
+  be made — an existing file of that name, a parent with no write permission — stops with a
+  refusal that names the path and says nothing was minted, rather than printing an OS error string
+  after a token had already been issued.
+- **The installer stops on a source patch it can no longer find (#618).** `venya_apply_code_fixes`
+  reports each patch as applied, already clean, or a dead anchor, and a dead anchor used to be a
+  `[WARN]` the run sailed past. It is now an `[ERROR]` that ends the install nonzero before the
+  virtualenv, the migrations and the service start, so the only thing touched is the extracted
+  tree. The DB-URL patch it guards was also re-anchored: the two source forms the old check looked
+  for are not in the product any more — shipped source now reads
+  `database_url = db_url or os.environ.get("VENYA_DB_URL")` with `app.py` passing the configured
+  URL — so the guard could only ever report a miss, which is what it did on every healthy install.
+  It now asserts that live shape and touches nothing, and the message names which half it could not
+  satisfy: the expression in `dependencies.py`, or the call site in `app.py`.
+- **The admin-pair advice points at the ceremony, not at a copy (#619).** When
+  `VENYA_ADMIN_CERT` or `VENYA_ADMIN_KEY` named a file that is not there, the CLI told the operator
+  to copy the core's admin pair to the workstation. It now says not to, and gives the supported
+  route instead: `venya setup <core>`, then `venya login <user-id>`, then
+  `venya admin cert renew`. The pair on a core names that core, not a person.
+- **`venya admin configure-user` no longer accepts a setting nothing reads (#625).** The command
+  had one knob, `--timeout`, and the value it wrote went into `users.session_timeout`, a column no
+  expiry decision in the product reads — the live idle window comes from the core's own
+  `session.session_timeout` / `VENYA_SESSION__SESSION_TIMEOUT`. The option, the request field, the
+  write and the audit entry for that value are gone, and the command now refuses by name until a
+  setting that reaches a read field joins it, instead of reporting success on a change with no
+  effect. An operator still sending the old key gets a `422` rather than a quiet no-op. The
+  `users.session_timeout` column stays as it is; dropping it would cost a migration for no gain.
+- **Windows install paths with `[` or `]` in the name are seen (#628).** `Test-Path`'s positional
+  parameter resolves wildcards, so a directory named with brackets — a test root called
+  `C:\temp[gate]`, say — matched nothing and files that existed read as missing: the installer
+  could stop at the `uv` check or report a shim it had just installed as absent. Nine existence
+  probes in `install-venya-cli.ps1` now bind `-LiteralPath`, which does not parse wildcards. The
+  #493 ACL gate keeps its own checks; this brings the probes upstream of it into the same form.
+- **The Windows uninstaller finds the same kind of path (#629).** The three install-root probes in
+  `uninstall-venya-cli.ps1` were positional for the same reason #628 fixed, so a root whose name
+  contains wildcard characters was read as absent: nothing was removed and the run still reported
+  the directory gone. They now bind `-LiteralPath`, so that root is seen, removed, and verified
+  gone. The verify-absent loop is untouched — it is the check that catches this class.
+- **A core name that does not resolve says so (#633).** A dial that never left the workstation and
+  a dial that reached the network and got no answer used to render as the same connection or fetch
+  sentence, which sent operators looking at routing for a missing hosts line. One classifier in
+  `packages/cli/src/venya_cli/name_resolution.py` now reads the exception cause chain for
+  `socket.gaierror` — by cause class, not by message text, so no platform's errno wording and no
+  wording change moves it — and the setup CA read, the API client dials and the login path route
+  through it. The new line names the host, says the name did not resolve on this workstation, and
+  points at the hosts file or the server URL. A refused connection, a timeout and a handshake
+  failure keep the sentence they had.
+- **A hung sandbox create and a vendor memory refusal now name themselves (#639).** Both used to
+  reach the operator through the shared command-timeout lane, which reported the wrong stage and
+  the wrong number: a create bounded by `SBX_CREATE_TIMEOUT` (240 s) could be announced as
+  "Command timed out after 3600 seconds", and a refusal that came from the vendor's memory check
+  was indistinguishable from any other failed create. The create site now raises named errors, the
+  executor's journal carries the stage and the bound that actually fired, and the create path
+  reads the timeout it used rather than the constant. The wire is unchanged: a refused create
+  stays the flat `503` it was, and the vendor's own stderr still does not cross the relay
+  boundary — the distinction is made in the executor's own lines.
+- **The core installer checks the value before it removes anything (#641).** The stale CA-link
+  cleanup in `/etc/ssl/certs` built its operand from an unsanitized, error-silenced
+  `openssl x509 -subject_hash`: when that produced nothing, the operand degraded to a
+  directory-wide dotfile pattern and the run removed files it never meant to name. The hash is now
+  resolved once, asserted to be a bare hex name, and used only for that one prefix; an openssl that
+  is missing or fails warns, names what it gave back, and continues the install without the
+  cleanup.
 
 ## [0.1.0alpha17] - 2026-10-13
 
