@@ -267,9 +267,10 @@ session/TTL rules are real and source-matched. The diagrams and the
 animation carry the same split: their lanes and mechanisms come from
 [architecture.md](architecture.md), while the host names, addresses and NAS
 output in them (including the echoed password the animation shows being
-redacted) are the illustrative fiction described above. The SVGs and the GIF
-are rendered from sources that are not part of this repository; the files in
-`docs/diagrams/` are those renders.*
+redacted) are the illustrative fiction described above. The SVGs are
+generated from `docs/diagrams/` via `scripts/render-diagrams.sh` (edit the
+sources there, not the renders); the GIF is rendered from a separate animation
+source that is not part of this repository.*
 
 **See also:** [alpha-demo.md](alpha-demo.md) — run the real thing yourself in
 5 minutes · [agents.md](agents.md) — the operating brief for your agent ·
