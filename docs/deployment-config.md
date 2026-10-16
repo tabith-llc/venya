@@ -147,8 +147,9 @@ read as executor settings and are not — mapped below the table.
 | `executor_enrollment.token_ttl_seconds` | `VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS` |
 | `executor_enrollment.require_token` | `VENYA_EXECUTOR_ENROLLMENT__REQUIRE_TOKEN` |
 
-`executor_enrollment.require_token` defaults to **true** (ticket
-`executor-rotation-require-token-400`, 2026-09-20): `POST /api/v1/executors/register`
+`executor_enrollment.require_token` defaults to **true** (landed at `6a2c313`,
+2026-09-20; the pre-GitLab ticket slug was `executor-rotation-require-token-400`,
+which is **not** issue #400): `POST /api/v1/executors/register`
 without a valid enrollment token is rejected 400. Setting it `false` restores open
 enrollment — any host reaching the core can mint an executor identity (physically
 proven); do not disable outside deliberately open test networks. Rotation interaction:
