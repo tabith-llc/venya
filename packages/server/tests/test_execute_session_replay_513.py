@@ -60,6 +60,7 @@ from fastapi import FastAPI
 from server.dependencies import get_current_user
 from server.routes import executors as executors_routes
 from sqlalchemy import create_engine, event
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from starlette.testclient import TestClient
 
@@ -146,6 +147,23 @@ def _make_stack(tmp_path, name, seed):
         s.add(admin_role)
         s.flush()
         s.add(User(user_id="test-user", status="active", auth_mode="security-key"))
+        # #644: the machine identity is seeded here too, before the certificate, because
+        # executor_certs.executor_id is a real FK to users.user_id (core/iam/models.py,
+        # class ExecutorCert; migration 001 creates it, 019 gives it ON DELETE CASCADE) and
+        # registering an executor auto-writes that row (routes/executors.py, the mTLS
+        # identity creation in the registration path). SQLite does not enforce it, so this
+        # line is inert HERE and load-bearing the moment the stack runs on the shipping
+        # engine — the PostgreSQL-gated canary at the bottom of this file asserts the
+        # constraint is alive. Seed the parent, never drop the FK.
+        s.add(
+            User(
+                user_id="exec-1",
+                status="active",
+                auth_mode="mtls",
+                enrolled_at=datetime.now(UTC),
+            )
+        )
+        s.flush()
         s.add(Executor(id="exec-1", hostname="203.0.113.14", status="active"))
         # #586 change C: the relay dial refuses an executor the core holds no
         # registered, unexpired certificate for (503). These cells test the SESSION
@@ -515,6 +533,11 @@ class TestConcurrentExecutePostgresql:
             # ExecutorCert; migration 001 creates it, 019 gives it ON DELETE CASCADE). PostgreSQL
             # enforces that FK; this file's SQLite stack does not set PRAGMA foreign_keys, so the
             # same seed reads green there and IntegrityError here. Seed the row, do not drop the FK.
+            # Measured at this base (so the flush below is not read as decoration): adding the
+            # parent row WITHOUT flushing it first is still refused — SQLAlchemy does not sort two
+            # mappers linked by a bare FK with no relationship() — and deleting this flush turns
+            # the cell RED on the PostgreSQL door with executor_certs_executor_id_fkey. The
+            # both-halves canary for that constraint is TestExecutorCertSeedFk644 below.
             s.add(
                 User(
                     user_id="exec-1",
@@ -600,3 +623,127 @@ class TestConcurrentExecutePostgresql:
         with SessionLocal() as s:
             assert s.query(ExecutionSession).filter(ExecutionSession.id == "sess-race").one().exit_code == 0
             assert len(_replay_refusals(s)) == 1
+
+
+@pytest.mark.skipif(
+    not __import__("os").environ.get(PG_URL_ENV),
+    reason=f"real-concurrency cell needs a scratch PostgreSQL in {PG_URL_ENV} (not available on this venue)",
+)
+class TestExecutorCertSeedFk644:
+    """#644 AC3 — the negative half of the seed the race cell above depends on.
+
+    The cell above is only evidence if the constraint it respects is ALIVE on the
+    door it runs, and SQLite never says anything: ``PRAGMA foreign_keys`` defaults
+    OFF and this file's SQLite stack never sets it (measured at this base — the
+    pragma reads 0 on a fresh engine, and the same orphan seed that raises here
+    passes there). Before #644 the seed wrote an ``ExecutorCert`` with no parent
+    ``users`` row at all, so the PostgreSQL cell could not fail for the reason it
+    exists to prove.
+
+    So this class asserts both halves on the engine where the FK lives:
+
+    * NEGATIVE — the orphan the seed used to write, and the parent written in the
+      SAME flush, are each refused by ``executor_certs_executor_id_fkey``.
+    * POSITIVE — the shape the product writes (parent flushed FIRST) is accepted.
+
+    Scope honesty: this is #644's own seed, not the
+    ``sqlite-test-engines-build-with-foreign-keys-off`` (634) class — that row owns
+    the cell that fails when SQLite enforcement is silently OFF, and nothing here
+    discharges it.
+    """
+
+    SERIAL_ORPHAN = "0000000000006401"
+    SERIAL_SAME_FLUSH = "0000000000006402"
+    SERIAL_FLUSHED_FIRST = "0000000000006403"
+
+    def _stack(self):
+        import os
+
+        engine = create_engine(os.environ[PG_URL_ENV], connect_args=_PG_DEADLINE)
+        _PG_ENGINES.append(engine)
+        Base.metadata.drop_all(engine)
+        Base.metadata.create_all(engine)
+        return sessionmaker(bind=engine)
+
+    def _cert(self, serial):
+        now = datetime.now(UTC)
+        return ExecutorCert(
+            executor_id="exec-1",
+            serial_number=serial,
+            not_before=now - timedelta(days=1),
+            not_after=now + timedelta(days=30),
+            fingerprint="ab" * 32,
+        )
+
+    def test_orphan_executor_cert_is_refused_by_the_engine(self):
+        """The seed's pre-#644 shape: a certificate with no parent users row."""
+        SessionLocal = self._stack()
+        with pytest.raises(IntegrityError) as excinfo:
+            with SessionLocal() as s:
+                s.add(Role(name="admin", permissions="read-write"))
+                s.add(User(user_id="test-user", status="active", auth_mode="security-key"))
+                s.add(Executor(id="exec-1", hostname="203.0.113.14", status="active"))
+                s.add(self._cert(self.SERIAL_ORPHAN))
+                s.commit()
+        assert "executor_certs_executor_id_fkey" in str(excinfo.value), excinfo.value
+
+    def test_parent_written_in_the_same_flush_is_refused_too(self):
+        """The non-obvious half: adding the parent row is NOT sufficient without ordering.
+
+        SQLAlchemy does not topologically sort two mappers linked by a bare FK with no
+        ``relationship()``, so the certificate can still be inserted first inside one
+        flush. This cell is the reason the seed's parent-first ``s.flush()`` is
+        load-bearing rather than decoration — delete it and this cell goes RED, which is
+        what the race cell's own seed would do as well (measured on this leg: removing
+        that one flush line turns ``test_two_threads_one_relay`` RED here with the same
+        constraint name).
+
+        A ``DID NOT RAISE`` here is not a product defect: it would mean SQLAlchemy began
+        sorting these two mappers on its own (they are linked by a bare FK with no
+        ``relationship()``), at which point the seed's parent-first flush stops being
+        load-bearing and can be deleted in the same changeset that reddens this cell.
+        """
+        SessionLocal = self._stack()
+        with pytest.raises(IntegrityError) as excinfo:
+            with SessionLocal() as s:
+                s.add(Role(name="admin", permissions="read-write"))
+                s.add(User(user_id="test-user", status="active", auth_mode="security-key"))
+                s.add(
+                    User(
+                        user_id="exec-1",
+                        status="active",
+                        auth_mode="mtls",
+                        enrolled_at=datetime.now(UTC),
+                    )
+                )
+                s.add(Executor(id="exec-1", hostname="203.0.113.14", status="active"))
+                s.add(self._cert(self.SERIAL_SAME_FLUSH))
+                s.commit()
+        assert "executor_certs_executor_id_fkey" in str(excinfo.value), excinfo.value
+
+    def test_the_products_own_order_is_accepted(self):
+        """POSITIVE control — the refusal above is the FK, not a broken stack.
+
+        Parent flushed first, then the dependent certificate: exactly what
+        ``register_executor`` does (routes/executors.py — it adds the auto-created
+        executor user, flushes, and only then writes the ``ExecutorCert``).
+        """
+        SessionLocal = self._stack()
+        with SessionLocal() as s:
+            s.add(Role(name="admin", permissions="read-write"))
+            s.add(User(user_id="test-user", status="active", auth_mode="security-key"))
+            s.add(
+                User(
+                    user_id="exec-1",
+                    status="active",
+                    auth_mode="mtls",
+                    enrolled_at=datetime.now(UTC),
+                )
+            )
+            s.flush()
+            s.add(Executor(id="exec-1", hostname="203.0.113.14", status="active"))
+            s.add(self._cert(self.SERIAL_FLUSHED_FIRST))
+            s.commit()
+        with SessionLocal() as s:
+            row = s.query(ExecutorCert).filter(ExecutorCert.serial_number == self.SERIAL_FLUSHED_FIRST).one()
+            assert row.executor_id == "exec-1"
