@@ -457,8 +457,9 @@ class Backend:
         """Create the reserved liveness engine (#603 AC2 step 1, shape (a′-i)).
 
         Mirrors the shared engine's connection settings — same URL, same
-        ``pool_pre_ping``, same PRAGMA listener body — differing ONLY in pool size,
-        so a reserved connection is not a second, weaker rulebook for the read.
+        ``pool_pre_ping``, same ``SET``-statement connect listener (synchronous_commit,
+        statement_timeout, enable_partition_pruning) — differing ONLY in pool size, so a
+        reserved connection is not a second, weaker rulebook for the read.
         """
         self._liveness_engine = create_engine(
             self.config.database_url,
@@ -493,7 +494,10 @@ class Backend:
             max_overflow=10,
         )
 
-        # Set PostgreSQL PRAGMAs (connection-level settings)
+        # Connection-level PostgreSQL parameters, set once per NEW pooled DBAPI
+        # connection (the "connect" event fires when the pool opens a connection, not on
+        # every checkout): synchronous_commit = ON, but only when wal_mode is on;
+        # statement_timeout = '300s'; enable_partition_pruning = ON.
         @event.listens_for(self._engine, "connect")
         def set_pragmas(dbapi_connection: Any, connection_record: Any) -> None:
             cursor = dbapi_connection.cursor()
