@@ -24,7 +24,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes
 
 from executor.command_validator import DEFAULT_DANGEROUS_PATTERNS, DEFAULT_TRUSTED_PATHS
-from executor.config import ExecutorConfig, ReaperConfig
+from executor.config import SANDBOX_MEMORY_DEFAULT_MB, ExecutorConfig, ReaperConfig
 from executor.daemon import DaemonState, ExecutorDaemon, ReaperLoop, RevocationStatus
 
 # ---------------------------------------------------------------------------
@@ -840,6 +840,85 @@ class TestCreateExecutorPlumbing:
         strategy = executor.injection_strategy
         assert strategy.dns_resolver == "198.51.100.53"
         assert strategy.egress_allowlist_path == "/tmp/venya-t5.txt"
+
+    # ------------------------------------------------------------------ #643
+    # The third knob the same line carries was unpinned. Measured before these cells existed:
+    # deleting `sandbox_memory_mb=self.config.sandbox_memory_mb` from ExecutorDaemon.create_executor
+    # (daemon.py:1874 at dev d9a4f36) left the four files that could have caught it reading
+    # IDENTICAL — 3 failed, 192 passed, 16 errors, same node ids — because the only cell that pins
+    # the argv re-plays the daemon's call by hand (`SbxStrategy(sandbox_memory_mb=cfg.sandbox_memory_mb)`,
+    # test_sbx_strategy.py:440) instead of going through create_executor(). These three cells make
+    # the daemon hop the subject, not an assumption.
+
+    def _daemon(self, config: ExecutorConfig) -> ExecutorDaemon:
+        daemon = ExecutorDaemon(config)
+        daemon.client = MagicMock(spec=httpx2.Client)
+        return daemon
+
+    def test_create_executor_plumbs_the_memory_cap_into_the_emitted_argv(self, config: ExecutorConfig):
+        """POSITIVE, non-default value: what the operator configured must be what `sbx` is given.
+
+        2048 and not 1024 on purpose — a hardcoded cap at the daemon would pass a default-value
+        assertion while silently outranking the operator (the exact defect this class's docstring says
+        it exists to prevent: "previously it constructed a bare SbxStrategy() and the hardcoded values
+        won"). Asserted on the strategy create_executor BUILT, and then on the argv that strategy
+        emits.
+        """
+        config.sandbox_memory_mb = 2048
+        with patch("shutil.which", return_value="/usr/bin/sbx"):
+            strategy = self._daemon(config).create_executor("sess-mem").injection_strategy
+
+        assert strategy.sandbox_memory_mb == 2048, (
+            "the daemon did not carry the configured cap to the strategy — a dropped "
+            "sandbox_memory_mb kwarg in ExecutorDaemon.create_executor falls back to the constructor "
+            "default (None) and every session then refuses at create (#643)"
+        )
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value="/usr/bin/sbx"):
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy.create_sandbox("venya-mem", "/workspace")
+        argv = mock_run.call_args_list[0][0][0]
+        assert argv == [
+            "sbx",
+            "create",
+            "--name",
+            "venya-mem",
+            "--memory",
+            f"{config.sandbox_memory_mb}m",
+            "shell",
+            "/workspace",
+        ], f"the daemon-built strategy emitted {argv!r} — the configured cap did not reach the argument"
+
+    def test_create_executor_shipped_default_reaches_the_argv_too(self, config: ExecutorConfig):
+        """SECOND POSITIVE: the shipped default, through the daemon, in the vendor's unit form.
+
+        `config` carries no sandbox_memory_mb (the package fixture never sets it), so this is the
+        fresh-install path: 1024 -> `--memory 1024m`, with no operator action in between.
+        """
+        assert config.sandbox_memory_mb == SANDBOX_MEMORY_DEFAULT_MB
+        with patch("shutil.which", return_value="/usr/bin/sbx"):
+            strategy = self._daemon(config).create_executor("sess-def").injection_strategy
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value="/usr/bin/sbx"):
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            strategy.create_sandbox("venya-def", "/workspace")
+        assert mock_run.call_args_list[0][0][0][5] == f"{SANDBOX_MEMORY_DEFAULT_MB}m", (
+            f"the daemon-built strategy's create argv carried {mock_run.call_args_list[0][0][0][5]!r}, "
+            f"not the shipped {SANDBOX_MEMORY_DEFAULT_MB}m — the default stopped reaching the vendor flag"
+        )
+
+    def test_create_executor_refuses_when_the_operator_nulled_the_cap(self, config: ExecutorConfig):
+        """PAIRED NEGATIVE: an explicit null through the DAEMON must still refuse, and never spawn.
+
+        This is the cell that stops the hop from being "fixed" with a fallback default at the daemon.
+        A hardcoded `sandbox_memory_mb=1024` in create_executor passes both positives above and
+        FAILS here, because the #578 create-time refusal is the shipped contract for a nulled knob.
+        """
+        config.sandbox_memory_mb = None
+        with patch("shutil.which", return_value="/usr/bin/sbx"):
+            strategy = self._daemon(config).create_executor("sess-null").injection_strategy
+        with patch("subprocess.run") as mock_run, patch("shutil.which", return_value="/usr/bin/sbx"):
+            with pytest.raises(RuntimeError, match="sandbox_memory_mb is not configured"):
+                strategy.create_sandbox("venya-null", "/workspace")
+            mock_run.assert_not_called()
 
 
 class TestHeartbeatCommandPolicyPropagation:
