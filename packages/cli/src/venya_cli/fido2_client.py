@@ -50,6 +50,7 @@ from fido2.webauthn import (
     UserVerificationRequirement,
 )
 
+from .name_resolution import dial_failure_text
 from .webauthn import b64_decode_id as _b64_decode_id
 
 logger = logging.getLogger("venya_cli.fido2")
@@ -331,7 +332,17 @@ class Fido2Auth:
                 pass
             raise Fido2ClientError(error_msg)
         except httpx2.ConnectError as e:
-            raise Fido2ClientError(f"Connection failed: {e}{self._tls_absent_hint(e)}")
+            # #633: a name that does not resolve on this workstation never reached the
+            # core, so it is not a connection failure and does not carry the trust hint
+            # (which is empty for a resolver fault anyway). Every other ConnectError, TLS
+            # included, renders exactly as before.
+            raise Fido2ClientError(
+                dial_failure_text(
+                    e,
+                    url=self.server_url,
+                    default=f"Connection failed: {e}{self._tls_absent_hint(e)}",
+                )
+            )
 
     def _post(self, path: str, json_data: dict[str, Any]) -> dict[str, Any]:
         """Simple POST request."""
@@ -369,7 +380,17 @@ class Fido2Auth:
                 pass
             raise Fido2ClientError(error_msg)
         except httpx2.ConnectError as e:
-            raise Fido2ClientError(f"Connection failed: {e}{self._tls_absent_hint(e)}")
+            # #633: a name that does not resolve on this workstation never reached the
+            # core, so it is not a connection failure and does not carry the trust hint
+            # (which is empty for a resolver fault anyway). Every other ConnectError, TLS
+            # included, renders exactly as before.
+            raise Fido2ClientError(
+                dial_failure_text(
+                    e,
+                    url=self.server_url,
+                    default=f"Connection failed: {e}{self._tls_absent_hint(e)}",
+                )
+            )
 
     def authenticate(self, user_id: str | None = None, timeout: float = 60.0) -> dict[str, Any]:
         """Perform WebAuthn authentication.

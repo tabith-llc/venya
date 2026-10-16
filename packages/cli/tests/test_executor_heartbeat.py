@@ -388,6 +388,40 @@ class TestHeartbeatNetworkErrors:
         captured = capsys.readouterr()
         assert "Connection failed" in captured.err
 
+    def test_heartbeat_unresolved_name_says_the_name_did_not_resolve(self, tmp_path, capsys):
+        """#633 paired positive for this site. The cell above pins the refusal half
+        (connection wording, unchanged); this pins the resolver half on the same
+        call site — name named, no connection sentence."""
+        import socket
+
+        import httpx2
+
+        cert_path, _key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = None
+        args.core_url = "https://venya-core-3"
+
+        bottom = socket.gaierror(-2, "Name or service not known")
+        middle = httpx2.NetworkError(str(bottom))
+        middle.__cause__ = bottom
+        outer = httpx2.ConnectError(str(middle))
+        outer.__cause__ = middle
+
+        mock_client = _make_mock_client(post_error=outer)
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_heartbeat
+
+            result = executor_heartbeat(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "venya-core-3" in captured.err
+        assert "did not resolve" in captured.err
+        assert "Connection failed" not in captured.err
+
     def test_heartbeat_timeout(self, tmp_path, capsys):
         """Heartbeat exits 1 on timeout."""
         import httpx2
