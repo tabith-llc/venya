@@ -112,7 +112,18 @@ class TestOperatorErrorLineUnit:
     def test_missing_log_path_says_so_instead_of_pointing_at_nothing(self):
         line = _operator_error_line(queue.Empty(), SimpleNamespace(command="get"), None)
         assert "no error log could be written" in line, line
-        assert "queue" not in line  # type name is Empty; the module is not interpolated
+
+    def test_module_qualifies_the_type_name_except_for_builtins(self):
+        """`Empty` alone does not say which queue; `queue.Empty` does. A builtin stays
+        unqualified, and the module comes off the CLASS, never off operator input."""
+        assert "queue.Empty" in _operator_error_line(queue.Empty(), SimpleNamespace(command="get"), None)
+        assert "EOFError" in _operator_error_line(EOFError(), SimpleNamespace(command="get"), None)
+        assert "builtins.EOFError" not in _operator_error_line(EOFError(), SimpleNamespace(command="get"), None)
+
+    def test_future_timeout_error_is_named_by_its_own_class(self):
+        line = _operator_error_line(FutureTimeoutError(), SimpleNamespace(command="audit"), None)
+        assert "TimeoutError" in line, line
+        assert "audit" in line, line
 
     def test_command_path_rebuilds_nested_and_top_level(self):
         parser = create_parser()

@@ -1037,9 +1037,22 @@ def _operator_error_line(exc: Exception, args: argparse.Namespace, log_path: obj
     command = _command_path(args) or "the requested command"
     where = f"cause logged to {log_path}" if log_path is not None else "no error log could be written for this run"
     return (
-        f"Error: {type(exc).__name__} from `venya {command}` carried no message - "
+        f"Error: {_qualified_type(exc)} from `venya {command}` carried no message - "
         f"{where}; re-run with --verbose for the traceback"
     )
+
+
+def _qualified_type(exc: Exception) -> str:
+    """`EOFError` for a builtin, `queue.Empty` for anything that came from a module.
+
+    A bare type name is cryptic for the classes this path actually meets - `Empty` on its
+    own does not say which queue timed out - and the module is part of the CLASS, read off
+    ``type(exc).__module__``, never from anything the operator typed (AC8).
+    """
+    cls = type(exc)
+    name = cls.__qualname__
+    module = getattr(cls, "__module__", "") or ""
+    return name if module in ("", "builtins") else f"{module}.{name}"
 
 
 def main() -> int:
