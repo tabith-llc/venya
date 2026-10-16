@@ -85,6 +85,68 @@ class SbxVersionError(RuntimeError):
     pass
 
 
+class SbxCreateTimeoutError(subprocess.TimeoutExpired):
+    """`sbx create` exceeded its own budget (#639).
+
+    Before this row the create site caught NOTHING, so a hung create propagated as the
+    bare `subprocess.TimeoutExpired` the caller's COMMAND-timeout lane already handles,
+    and the operator was told "Command timed out after 3600 seconds" — the wrong stage
+    and the wrong number for a create bounded by ``SBX_CREATE_TIMEOUT`` (240 s) or
+    ``VENYA_SBX_CREATE_TIMEOUT``. Naming the class keeps the caller's existing lane
+    (this IS a `TimeoutExpired`, so the relay outcome is unchanged — #639 AC4) while
+    making the create stage and its real bound sayable.
+    """
+
+
+class SbxMemoryRefusalError(RuntimeError):
+    """The vendor refused `sbx create` on a memory-shaped line (#639).
+
+    Subclasses `RuntimeError` on purpose: this is the strategy-level refusal channel the
+    create path already uses (see `validate()` and the #578 no-cap refusal), so the relay
+    status for a refused create is EXACTLY what it was before this row. The name and the
+    log line are what change — the vendor's own stderr deliberately does NOT cross the
+    relay boundary, because the listener's reason-bearing lane belongs to
+    `CommandRejected` alone (#410: it describes the caller's own command, never foreign
+    material). A refused create stays a flat 503 on the wire; the distinction this row
+    buys is the named line in the executor's own journal.
+    """
+
+
+# #639: the shapes we call a memory refusal, and nothing else. Every entry names memory
+# or OOM as the resource; none of them can fire on a bare path, a name collision, or a
+# disk-space error. The list may be NARROWED; it may never be widened without a guest
+# that has the vendor binary, because a classifier that fires on everything converts an
+# unhelpful 503 into a wrong 4xx (that is the load-bearing rule in this row's AC3, and
+# the paired-negative cells in tests/test_sbx_create_outcome_639.py are the proof).
+_SBX_MEMORY_REFUSAL_SHAPES: tuple[str, ...] = (
+    "out of memory",
+    "out-of-memory",
+    "cannot allocate memory",
+    "could not allocate memory",
+    "insufficient memory",
+    "not enough memory",
+    "memory allocation failed",
+    "oomkilled",
+    "oom killer",
+)
+
+
+def sbx_memory_refusal_shape(stderr: str | None) -> str | None:
+    """Return the matched memory shape from vendor stderr, or None.
+
+    Matching is substring against the lower-cased text and ONLY against the list above,
+    so "cannot allocate '/workspace/my_memory_dir': no such file" (a path) and "sandbox
+    name memory-test already exists" (a name collision) both return None.
+    """
+    if not stderr:
+        return None
+    lowered = stderr.lower()
+    for shape in _SBX_MEMORY_REFUSAL_SHAPES:
+        if shape in lowered:
+            return shape
+    return None
+
+
 def _parse_sbx_version(raw: str) -> tuple[int, int, int]:
     m = re.search(r"v?(\d+)\.(\d+)\.(\d+)", raw)
     if not m:
@@ -546,18 +608,59 @@ class SbxStrategy(InjectionStrategy):
             workspace,
         ]
         create_timeout = int(os.environ.get("VENYA_SBX_CREATE_TIMEOUT", SBX_CREATE_TIMEOUT))
-        result = subprocess.run(  # nosec
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=create_timeout,
-            check=False,
-        )
-        if result.returncode != 0:
-            logger.error("sbx create failed: %s", result.stderr)
+        try:
+            result = subprocess.run(  # nosec
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=create_timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # #639 AC2 — the THIRD catch of this exception in this file (the version probe
+            # at require_supported_sbx and the reap pass in reap_orphan_sandboxes already
+            # caught it; only create did not). Name the create stage and the number that
+            # actually bounded it: VENYA_SBX_CREATE_TIMEOUT, resolved here, defaulting to
+            # SBX_CREATE_TIMEOUT — NOT SBX_TIMEOUT, the command budget, which is what the
+            # caller's shared TimeoutExpired lane used to print for a hung create.
             if created_workspace:
                 shutil.rmtree(workspace, ignore_errors=True)
                 self._workspace_dir = None
+            logger.error(
+                "sbx create timed out after %s seconds (VENYA_SBX_CREATE_TIMEOUT, "
+                "SBX_CREATE_TIMEOUT default %s) for sandbox %s — no sandbox was created",
+                create_timeout,
+                SBX_CREATE_TIMEOUT,
+                sandbox_name,
+            )
+            raise SbxCreateTimeoutError(cmd, create_timeout) from exc
+        if result.returncode != 0:
+            memory_shape = sbx_memory_refusal_shape(result.stderr)
+            if created_workspace:
+                shutil.rmtree(workspace, ignore_errors=True)
+                self._workspace_dir = None
+            if memory_shape:
+                # #639 AC1 — a named, operator-actionable outcome, in the executor's own
+                # journal, beside the sizing knob and the page that explains them. The
+                # vendor's stderr is logged (it is the evidence) but it does NOT cross the
+                # relay boundary: the create stays a RuntimeError refusal on the existing
+                # channel, so the relay status for it is unchanged (#639 AC4).
+                logger.error(
+                    "sbx create refused for memory (matched %r) — sandbox %s needs %s MiB "
+                    "(VENYA_EXECUTOR_SANDBOX_MEMORY_MB); the guest cannot fit it. Lower the "
+                    "cap or size the executor up: see docs/deployment-sizing.md. "
+                    "vendor stderr: %s",
+                    memory_shape,
+                    sandbox_name,
+                    self.sandbox_memory_mb,
+                    result.stderr,
+                )
+                raise SbxMemoryRefusalError(
+                    f"Failed to create sandbox: the vendor refused the memory request "
+                    f"(matched {memory_shape!r}); cap={self.sandbox_memory_mb} MiB, "
+                    f"see docs/deployment-sizing.md"
+                )
+            logger.error("sbx create failed: %s", result.stderr)
             raise RuntimeError(f"Failed to create sandbox: {result.stderr}")
 
         self._sandbox_name = sandbox_name
