@@ -828,13 +828,22 @@ failure was logged (login still succeeded by design) — record it.
      mid-run:
 
      ```bash
-     ssh bot@$CORE_HOST "echo 'VENYA_SESSION__SESSION_TIMEOUT=28800' | sudo tee -a /opt/venya/.env && sudo systemctl restart venya-core"
+     ssh bot@$CORE_HOST "echo 'VENYA_SESSION__SESSION_TIMEOUT=28800' | sudo tee -a /opt/venya/.env && echo 'VENYA_SESSION__MAX_SESSION_DURATION=28800' | sudo tee -a /opt/venya/.env && sudo systemctl restart venya-core"
      ```
 
-     > **Hard cap:** total session lifetime is separately capped at
-     > `VENYA_SESSION__MAX_SESSION_DURATION` (default 14400 s = 4 h, measured
-     > from creation — raising SESSION_TIMEOUT alone does NOT extend it). For
-     > runs longer than 4 h, raise both.
+     > **Hard cap — raise both or the core will not start.** Total session
+     > lifetime is separately capped at `VENYA_SESSION__MAX_SESSION_DURATION`
+     > (default 14400 s = 4 h, measured from creation), and `SessionConfig`
+     > rejects an idle timeout above that cap **while the config is built**. That
+     > build is the first statement of `server.app:main()` — the `ExecStart` of
+     > `venya-core.service` — with no handler around it, so a bare
+     > `SESSION_TIMEOUT=28800` does not merely fail to extend the window: the
+     > process exits with a `ValidationError` traceback on stderr (in the journal,
+     > reading `session.session_timeout (28800s) must not exceed
+     > session.max_session_duration (14400s)`) and the unit comes back **failed**.
+     > The command above therefore sets the pair together; for any idle window
+     > above 4 h both lines are required. What each knob gives and costs is
+     > tabulated in [ease-of-use.md](ease-of-use.md).
 
   2. *Enrollment token TTLs* — defaults are 15 min (user enrollment) and
      30 min (executor enrollment, `VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS`,

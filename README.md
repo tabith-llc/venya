@@ -335,16 +335,23 @@ the per-release records, not here (they rot with every merge).
 - **Verified MCP clients:** [opencode](https://opencode.com) and local LLMs
   via [omlx.ai](https://omlx.ai) — both drive `venya-mcp` as a stdio server.
 - **Hardware:** FIDO2 ceremonies verified with Yubico Security Keys.
-- **Longer timeouts for testing:** default session idle is 15 min and executor
-  enrollment tokens expire in 30 min. For relaxed test runs, append to
-  `/opt/venya/.env` on the core, restart, and **re-login** (existing sessions
-  keep their original expiry):
+- **Longer timeouts for testing:** default session idle is 15 min inside a 4 h
+  hard cap, and executor enrollment tokens expire in 30 min. For relaxed test
+  runs, append to `/opt/venya/.env` on the core, restart, and **re-login**
+  (existing sessions keep their original expiry):
 
   ```bash
   echo 'VENYA_SESSION__SESSION_TIMEOUT=28800' | sudo tee -a /opt/venya/.env
+  echo 'VENYA_SESSION__MAX_SESSION_DURATION=28800' | sudo tee -a /opt/venya/.env
   echo 'VENYA_EXECUTOR_ENROLLMENT__TOKEN_TTL_SECONDS=14400' | sudo tee -a /opt/venya/.env
   sudo systemctl restart venya-core
   ```
+
+  Raise the idle window and the hard cap **together**: a
+  `VENYA_SESSION__SESSION_TIMEOUT` above `VENYA_SESSION__MAX_SESSION_DURATION`
+  (default 14400 s = 4 h) is rejected while the config is built, so the core
+  **refuses to start** rather than simply keeping the shorter window. What each
+  knob costs you is tabulated in [docs/ease-of-use.md](docs/ease-of-use.md).
 
 ---
 
