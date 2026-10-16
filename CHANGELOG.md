@@ -4,18 +4,6 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
-- **The revocation-snapshot publisher now survives a faulty teardown and says so (#626).** A core
-  republishes the revocation population every 10 s; if the session teardown at the end of one of
-  those publishes raised, the publisher task ended, the snapshot plane went back to the lockable
-  live DB read for the rest of the process's life, and the only journal evidence was a warning that
-  appears once per process. Such a publish now absorbs the teardown fault, keeps the population it
-  had already read, and retries on a bounded backoff (1 s doubling to 30 s), so the plane recovers on
-  its own when the fault clears. A publisher task that ends for any other reason is logged at ERROR
-  with its reason, and a shutdown cancel is still logged quietly at INFO. The poll's answers are
-  unchanged: the 45 s freshness ceiling, the 10 s interval, and the stale-class `503` that says "no
-  revocation asserted" all stand as shipped, and a core with no publisher still answers from the
-  current live read.
-
 ## [0.1.0beta1] - 2026-10-15
 
 - **The executor's revocation poll is answered from a freshness-bounded snapshot
@@ -49,6 +37,17 @@ Notable changes to Venya will be documented in this file.
   "the file value is in use", which was not true of any of the seven; the promise now
   stops where the capability does. A deployed `executor.toml` that still carries these
   tables loads unchanged — unrecognised keys are ignored — so no reinstall is needed.
+- **The revocation-snapshot publisher now survives a faulty teardown and says so (#626).** A core
+  republishes the revocation population every 10 s; if the session teardown at the end of one of
+  those publishes raised, the publisher task ended, the snapshot plane went back to the lockable
+  live DB read for the rest of the process's life, and the only journal evidence was a warning that
+  appears once per process. Such a publish now absorbs the teardown fault, keeps the population it
+  had already read, and retries on a bounded backoff (1 s doubling to 30 s), so the plane recovers on
+  its own when the fault clears. A publisher task that ends for any other reason is logged at ERROR
+  with its reason, and a shutdown cancel is still logged quietly at INFO. The poll's answers are
+  unchanged: the 45 s freshness ceiling, the 10 s interval, and the stale-class `503` that says "no
+  revocation asserted" all stand as shipped, and a core with no publisher still answers from the
+  current live read.
 
 ## [0.1.0alpha17] - 2026-10-13
 
