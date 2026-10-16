@@ -684,8 +684,24 @@ class TestResetVersusInitCompletePostgresql:
             # and the unauthenticated reset then deleted that identity.
             assert not (codes.get("complete") == 201 and codes.get("reset") == 200 and not enrolled), codes
             if codes.get("complete") == 201:
-                assert codes.get("reset") == 409, f"a live enrollment must refuse the wipe: {codes}"
-                assert enrolled
+                # #511 as ruled, not as first written: the claim of this row is the INVARIANT
+                # (a committed enrollment is never deleted by a concurrent reset), and the route
+                # refuses that wipe two legitimate ways. The #450 gate answers 401 when its own
+                # read already sees an initialized core (`init.py` ``require_admin_when_initialized``);
+                # the in-body re-check answers 409 when the gate passed while the core still looked
+                # uninitialized and identity appeared before the wipe could run. Which of the two
+                # fires is decided by where the barrier leaves the threads, and the cell cannot
+                # order them — so pinning ONE code was a check that failed a legal outcome. This
+                # file pins 401 as legal itself: ``TestLegitimatePathsStayGreen::
+                # test_anonymous_reset_still_answers_401``. Accept either refusal, then insist on
+                # what neither may do: the identity survives. A code outside this pair is not a
+                # refusal of the same kind — 200 means the wipe ran — and ``assert enrolled`` is
+                # what catches a refusal that answered while still deleting.
+                assert codes.get("reset") in (401, 409), (
+                    f"a live enrollment must be REFUSED — 401 by the #450 gate or 409 by the #511 "
+                    f"in-body re-check; anything else (200 above all) means the wipe was not refused: {codes}"
+                )
+                assert enrolled, f"the reset refused, yet the committed enrollment is gone: {codes}"
 
 
 class _SessionPerRequestBackend:
