@@ -4,44 +4,55 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""#601 — the plane marker moves onto Tabith LLC's registered PEN arc.
+"""#601 — the plane marker lives on Tabith LLC's registered PEN arc, and nowhere else.
 
-Dual-arc read, single-arc write (owner-ruled HOW, verbatim: "BEFORE BETA.
-It rides."). WRITE: 1.3.6.1.4.1.67159.1.1 (PEN 67159 = Tabith LLC, re-read
-from the RAW IANA registry file at this landing — the registry is BLOCK
-format, so the citation is the block at lines 268652-268653: "67159" then
-"Tabith LLC"). READ: the
-registered arc first, then the legacy 1.3.6.1.4.1.64496.1.1 for a bounded
-transition window, so pre-#601 leaves keep resolving (#588's
-non-retroactivity precedent). Markers on BOTH arcs at once refuse — the
-named behaviour of the window, never an accident of lookup order.
+This file used to pin a DUAL-ARC READ: the registered arc, plus a bounded
+transition window that also resolved an older arc belonging to a different
+enterprise, so alpha-era leaves kept working. That window is CLOSED. The owner
+ruled (2026-10-16, relayed via courier, recorded on #601) that nothing
+alpha-era is supported — no backwards compatibility with alpha — so there is no
+old-arc credential to protect and the read branch came out with it. What this
+file now pins is the paired negative the shipped source always demanded at the
+moment of removal: **a marker on any arc other than ours is NOT read as ours.**
 
-Truth table (row AC4 in full):
-* mint cells — exactly one marker, registered arc, critical=False
-  unchanged, legacy arc ABSENT from anything this code writes;
-* read cells — registered parses, legacy parses (the window is the point),
-  both-at-once refuses (same-value AND contradictory-value shapes);
-* fail-closed halves preserved on BOTH arcs: missing / unparseable DER /
-  out-of-set / wrong extension type still raise ValueError;
-* AC4(a) — a foreign cert carrying plane-shaped bytes at the legacy OID:
-  the parser alone DOES resolve it (recorded, by design of the window);
-  the middleware refuses it at the chain leg BEFORE the marker read
-  (auth.py:403 runs before :438). Wording law observed: such a cert "would
-  be parsed as our plane marker" at parser level — it is NOT claimed or
-  tested as "accepted as admin", and this file proves the accept path is
-  closed by the chain check, naming which 403 text fired;
-* AC4(b)-in-window — a pre-change leaf (legacy arc, CRITICAL bit set, the
-  exact shape old mints wrote), signed by the real admin CA, still reaches
-  200 through the real middleware;
-* AC4(c) — the shipped refusals cannot regress into fail-open while the
-  forged case is under test: a markerless admin-CA cert still refuses 403
-  naming the re-issue.
+**The retired number is not in this tree, and does not need to be.** Its digits
+and its holder's name live on #601. The cells below use `_FOREIGN_ARC`, a
+PEN-shaped ObjectIdentifier that is not ours, because `parse_plane_marker`
+consults exactly one OID (`VENYA_PLANE_MARKER_OID`): every other arc is the same
+case, so pinning "not ours" pins the retired arc too — and the structural cell
+`test_the_module_declares_one_plane_marker_arc` is what stops the legacy
+constant coming back by another name.
 
-The window's exit condition is stated on the row and at the constants
-(machine plane and human plane enumerated separately; removal leg carries
-its own paired negative). No removal code here.
+Truth table (row AC4, re-shaped for the closed window):
+* mint cells — exactly one marker, at the registered arc
+  (1.3.6.1.4.1.67159.1.1 — PEN 67159 = Tabith LLC, re-read from the RAW IANA
+  registry file at the #601 landing: the registry is BLOCK format, so the
+  citation is the block at lines 268652-268653, "67159" then "Tabith LLC"),
+  `critical=False` unchanged, and no other enterprise-number arc present on
+  anything we write;
+* read cells — the registered arc parses on both planes; the fail-closed halves
+  (unparseable DER / length mismatch / out-of-set / no marker) still raise
+  ValueError on that arc;
+* **inverted window cells — plane-shaped bytes on a foreign arc REFUSE**, in
+  every value shape, and they refuse with the missing-marker text: the parser
+  never looks there, which is the whole point of closing the window;
+* the combined shape (our marker plus a foreign one) resolves from OURS — the
+  named behavior that replaced the old both-arcs refusal, which became
+  structurally unreachable when only one arc is read (see the report; a
+  certificate cannot carry two extensions with the same OID);
+* fail-closed at the app boundary — a chain-valid leaf whose only marker is on
+  a foreign arc now gets the 403 that names the re-issue (this cell WAS the
+  window's promise of 200, and it is inverted, not deleted), a markerless
+  admin-CA leaf still refuses 403, and a foreign-CA forgery is still stopped by
+  the CHAIN leg before the marker leg ever runs;
+* wording law kept: nothing here claims a foreign cert is "accepted as admin" —
+  the accept path is proven closed by naming which 403 text fired (auth.py's
+  chain leg runs before the marker read).
 """
 
+import ast
+import inspect
+import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -53,12 +64,12 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1
 from cryptography.x509.oid import NameOID
 from fastapi import Depends, FastAPI
+from server import ca as ca_module
 from server.ca import (
     ADMIN_SHORT_CERT_LIFETIME_SECONDS,
     PLANE_HUMAN,
     PLANE_MACHINE,
     VENYA_PLANE_MARKER_OID,
-    VENYA_PLANE_MARKER_OID_LEGACY,
     AdminCAManager,
     _plane_marker_extension,
     parse_plane_marker,
@@ -71,6 +82,11 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
+# Our own registration, spelled out here (and only in prose — every assertion
+# reads VENYA_PLANE_MARKER_OID) so a reader can check the arc the product is on
+# without leaving the file: 1.3.6.1.4.1.67159.1.1, PEN 67159, Tabith LLC.
+_REGISTERED_ARC_TEXT = "1.3.6.1.4.1.67159.1.1"
+
 _ADMIN_IDENTITY = "admin@example.com"  # the machine-plane slot
 _HUMAN_ID = "alice-id"
 _PASSPHRASE = b"test_passphrase"
@@ -78,6 +94,20 @@ _PASSPHRASE = b"test_passphrase"
 # DER UTF8String bodies for plane-shaped value bytes (the 0x0C idiom).
 _MACHINE_BYTES = b"\x0c\x07machine"
 _HUMAN_BYTES = b"\x0c\x05human"
+
+# An enterprise-number arc that is NOT ours. The retired legacy arc's digits are
+# on #601 and are deliberately not repeated here: the parser reads exactly one
+# OID, so "some other arc" is the same case as "the retired arc" — and this
+# stand-in keeps the tree free of a foreign registration.
+_FOREIGN_ARC = x509.ObjectIdentifier("1.3.6.1.4.1.99999.1.1")
+
+# The iso.org.dod.internet.private.enterprise prefix, for the cell that pins
+# "no other PEN arc is present on anything we mint".
+_PEN_PREFIX = "1.3.6.1.4.1."
+
+# The refusal every not-ours shape must land on: the parser never consults a
+# foreign arc, so a foreign marker is indistinguishable from no marker.
+_NO_MARKER = "predates the two-plane model"
 
 
 @pytest.fixture(autouse=True)
@@ -121,17 +151,30 @@ def _marker(oid, value_bytes=_MACHINE_BYTES, critical=False):
     return (oid, value_bytes, critical)
 
 
+def _pen_arc_extension(cert):
+    """Every marker extension on cert whose OID is an enterprise-number arc.
+
+    `dotted_string` is the accessor — `str()` on a cryptography
+    ObjectIdentifier renders the whole repr ("<ObjectIdentifier(oid=..., name=
+    Unknown OID)>"), which is exactly the kind of thing a prefix test silently
+    passes or fails on depending on how it was written.
+    """
+    return [ext.oid for ext in cert.extensions if ext.oid.dotted_string.startswith(_PEN_PREFIX)]
+
+
 class TestWriteSiteIsRegisteredArc:
     def test_bootstrap_mint_writes_registered_arc_only(self, admin_ca):
         """Machine plane: one marker, at 67159.1.1, non-critical (#588 A
-        preserved), and the legacy arc is ABSENT from anything we write."""
+        preserved), and no other enterprise-number arc on anything we write."""
         cert, _key_pem, _pem = admin_ca.sign_admin_cert(_ADMIN_IDENTITY)
         oids = [e.oid for e in cert.extensions]
         assert oids.count(VENYA_PLANE_MARKER_OID) == 1
-        assert VENYA_PLANE_MARKER_OID_LEGACY not in oids
+        assert [o.dotted_string for o in _pen_arc_extension(cert)] == [VENYA_PLANE_MARKER_OID.dotted_string]
+        assert _FOREIGN_ARC not in oids
         ext = cert.extensions.get_extension_for_oid(VENYA_PLANE_MARKER_OID)
         assert ext.critical is False
         assert parse_plane_marker(cert) == PLANE_MACHINE
+        assert VENYA_PLANE_MARKER_OID.dotted_string == _REGISTERED_ARC_TEXT  # 67159.1.1 is the arc, ours
 
     def test_csr_signer_writes_registered_arc_only(self, admin_ca):
         """Human plane: same contract on the other mint path."""
@@ -140,98 +183,171 @@ class TestWriteSiteIsRegisteredArc:
         cert = admin_ca.sign_admin_csr(csr, _HUMAN_ID, ADMIN_SHORT_CERT_LIFETIME_SECONDS)
         oids = [e.oid for e in cert.extensions]
         assert oids.count(VENYA_PLANE_MARKER_OID) == 1
-        assert VENYA_PLANE_MARKER_OID_LEGACY not in oids
+        assert [o.dotted_string for o in _pen_arc_extension(cert)] == [VENYA_PLANE_MARKER_OID.dotted_string]
+        assert _FOREIGN_ARC not in oids
         ext = cert.extensions.get_extension_for_oid(VENYA_PLANE_MARKER_OID)
         assert ext.critical is False
         assert parse_plane_marker(cert) == PLANE_HUMAN
 
+    def test_the_module_declares_one_plane_marker_arc(self):
+        """Structural pin for the closed window: `server.ca` exposes exactly ONE
+        plane-marker ObjectIdentifier constant, the registered one. A legacy
+        constant returning under its old name, or a new second one, reddens this
+        cell — which is the check the digit-grep cannot be, because the retired
+        digits are not in this tree at all."""
+        marker_consts = {
+            name
+            for name, value in vars(ca_module).items()
+            if name.startswith("VENYA_PLANE_MARKER") and isinstance(value, x509.ObjectIdentifier)
+        }
+        assert marker_consts == {"VENYA_PLANE_MARKER_OID"}, marker_consts
 
-class TestDualArcReadWindow:
-    def test_registered_arc_parses(self):
-        cert = _selfsigned([_marker(VENYA_PLANE_MARKER_OID, _HUMAN_BYTES)])
-        assert parse_plane_marker(cert) == PLANE_HUMAN
 
-    def test_legacy_arc_parses_the_window_is_the_point(self):
-        cert = _selfsigned([_marker(VENYA_PLANE_MARKER_OID_LEGACY, _MACHINE_BYTES)])
+class TestRegisteredArcRead:
+    """The one readable arc: positive on both planes, and every shipped
+    fail-closed half still raising ValueError."""
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [(_MACHINE_BYTES, PLANE_MACHINE), (_HUMAN_BYTES, PLANE_HUMAN)],
+        ids=["machine", "human"],
+    )
+    def test_registered_arc_parses_on_both_planes(self, body, expected):
+        cert = _selfsigned([_marker(VENYA_PLANE_MARKER_OID, body)])
+        assert parse_plane_marker(cert) == expected
+
+    def test_critical_bit_is_still_read_anyway(self):
+        """#588 option A survives the window's closure: criticality-blind on the
+        arc we do read."""
+        cert = _selfsigned([_marker(VENYA_PLANE_MARKER_OID, _MACHINE_BYTES, critical=True)])
         assert parse_plane_marker(cert) == PLANE_MACHINE
 
+    def test_unparseable_der_raises(self):
+        cert = _selfsigned([_marker(VENYA_PLANE_MARKER_OID, b"\x0a\x01b")], sn=9)
+        with pytest.raises(ValueError, match="unparseable plane marker"):
+            parse_plane_marker(cert)
+
+    def test_length_mismatch_raises(self):
+        cert = _selfsigned([_marker(VENYA_PLANE_MARKER_OID, b"\x0c\x09mach")], sn=10)
+        with pytest.raises(ValueError, match="length mismatch"):
+            parse_plane_marker(cert)
+
+    def test_out_of_set_plane_raises(self):
+        cert = _selfsigned([_marker(VENYA_PLANE_MARKER_OID, b"\x0c\x05ghost")], sn=11)
+        with pytest.raises(ValueError, match="outside the accepted set"):
+            parse_plane_marker(cert)
+
+    def test_no_marker_raises_reissue_text(self):
+        cert = _selfsigned()
+        with pytest.raises(ValueError, match=_NO_MARKER):
+            parse_plane_marker(cert)
+
+
+class TestAnyOtherArcIsNoLongerRead:
+    """THE INVERSION, and the reason this leg was allowed to land at all.
+
+    Before #601's closure a marker on the retired arc resolved to a plane —
+    that WAS the transition window. Now the parser consults one OID and nothing
+    else, so a foreign-arc marker collapses into the same refusal as a
+    certificate with no marker at all, whatever bytes it carries. Parametrized
+    across the value shapes so the closure cannot hold only for the tidy case:
+    plane-shaped, contradictory, unparseable, length-mismatched, out-of-set and
+    CRITICAL-marked all refuse the same way.
+    """
+
     @pytest.mark.parametrize(
-        "second_value",
-        [_MACHINE_BYTES, _HUMAN_BYTES],
-        ids=["same-plane-both-arcs", "contradictory-planes"],
+        ("body", "critical", "case"),
+        [
+            (_MACHINE_BYTES, False, "plane-machine"),
+            (_HUMAN_BYTES, False, "plane-human"),
+            (b"\x0a\x01b", False, "unparseable-der"),
+            (b"\x0c\x09mach", False, "length-mismatch"),
+            (b"\x0c\x05ghost", False, "out-of-set"),
+            (_MACHINE_BYTES, True, "critical-bit-set"),
+        ],
+        ids=["plane-machine", "plane-human", "unparseable-der", "length-mismatch", "out-of-set", "critical-set"],
     )
-    def test_both_arcs_at_once_refuses_named_not_accidental(self, second_value):
-        """The window never silently prefers one arc: two markers refuse,
-        whether they agree (lookup-order accident bait) or contradict."""
+    def test_foreign_arc_marker_refuses_as_no_marker(self, body, critical, case):
+        cert = _selfsigned([_marker(_FOREIGN_ARC, body, critical=critical)], sn=12)
+        with pytest.raises(ValueError, match=_NO_MARKER) as excinfo:
+            parse_plane_marker(cert)
+        # Named so the shape cannot drift into a different refusal by accident:
+        # the parser never looked at this arc, so this is the missing-marker path.
+        assert "no Venya plane marker" in str(excinfo.value), case
+
+    def test_our_marker_beside_a_foreign_one_resolves_from_ours(self):
+        """The behavior that replaced the old both-arcs refusal, named so it is
+        not an accident of lookup order.
+
+        The duplicate refusal became structurally unreachable when only one arc
+        is read (a DER extension set cannot carry the same OID twice), so the
+        ruling was to remove it and keep the missing-marker refusal as the only
+        no-ours path. What a foreign marker beside ours now means: ours is read,
+        the foreign bytes are inert — which is how every other unrecognized
+        extension already behaves.
+        """
         cert = _selfsigned(
-            [_marker(VENYA_PLANE_MARKER_OID, _MACHINE_BYTES), _marker(VENYA_PLANE_MARKER_OID_LEGACY, second_value)],
+            [_marker(VENYA_PLANE_MARKER_OID, _MACHINE_BYTES), _marker(_FOREIGN_ARC, _HUMAN_BYTES)],
             sn=8,
         )
-        with pytest.raises(ValueError, match="BOTH the registered and legacy arcs"):
-            parse_plane_marker(cert)
+        assert parse_plane_marker(cert) == PLANE_MACHINE
 
-    @pytest.mark.parametrize(
-        "arc",
-        [VENYA_PLANE_MARKER_OID, VENYA_PLANE_MARKER_OID_LEGACY],
-        ids=["registered", "legacy"],
-    )
-    class TestFailClosedPreservedOnBothArcs:
-        """House truth table: the negatives run on BOTH readable arcs."""
+    def test_the_parser_source_names_one_arc_only(self):
+        """Source-level pin, because the digit-grep cannot be the check.
 
-        def test_unparseable_der_raises(self, arc):
-            cert = _selfsigned([_marker(arc, b"\x0a\x01b")], sn=9)
-            with pytest.raises(ValueError, match="unparseable plane marker"):
-                parse_plane_marker(cert)
+        The retired arc's digits are deliberately absent from this tree, so a
+        cell that only tests a stand-in arc would not catch a second arc coming
+        back hardcoded with the REAL retired number. This does, over the
+        function's EXECUTABLE shape (via `ast`, comments and the docstring
+        excluded — prose is allowed to name the arc, code is not): the parser
+        must reference exactly one marker constant (`VENYA_PLANE_MARKER_OID`) and
+        must carry no literal enterprise-number arc in any string constant, so
+        the value has to come from the module constant, which the structural cell
+        above pins to one. The two-element read tuple this row removed — our arc
+        plus a second one — reddens it in both halves.
+        """
+        fn = ast.parse(textwrap.dedent(inspect.getsource(parse_plane_marker))).body[0]
+        docstring = ast.get_docstring(fn, clean=False)
+        named = {
+            node.id for node in ast.walk(fn) if isinstance(node, ast.Name) and node.id.startswith("VENYA_PLANE_MARKER")
+        }
+        assert named == {"VENYA_PLANE_MARKER_OID"}, named
+        literal_arcs = [
+            node.value
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and node.value != docstring
+            and "1.3.6.1.4.1." in node.value
+        ]
+        assert literal_arcs == [], literal_arcs
 
-        def test_length_mismatch_raises(self, arc):
-            cert = _selfsigned([_marker(arc, b"\x0c\x09mach")], sn=10)
-            with pytest.raises(ValueError, match="length mismatch"):
-                parse_plane_marker(cert)
-
-        def test_out_of_set_plane_raises(self, arc):
-            cert = _selfsigned([_marker(arc, b"\x0c\x05ghost")], sn=11)
-            with pytest.raises(ValueError, match="outside the accepted set"):
-                parse_plane_marker(cert)
-
-        def test_criticality_is_blind_on_either_arc(self, arc):
-            """Pre-#601 machine leaves ride the legacy arc WITH the critical
-            bit set (the shape old mints wrote, pre-#588-A too) — the parser
-            stays criticality-blind on both arcs."""
-            cert = _selfsigned([_marker(arc, _MACHINE_BYTES, critical=True)])
-            assert parse_plane_marker(cert) == PLANE_MACHINE
-
-    def test_no_marker_on_either_arc_raises_reissue_text(self):
-        cert = _selfsigned()
-        with pytest.raises(ValueError, match="predates the two-plane model"):
-            parse_plane_marker(cert)
+    def test_parser_alone_refuses_foreign_plane_bytes(self):
+        """The inverted first half of the old AC4(a): parse_plane_marker has no
+        provenance check and never needed one, but it now also has no path to a
+        foreign arc — a forged cert carrying plane-shaped bytes at an arc that is
+        not ours resolves to NOTHING, so the window's parser-level exposure
+        closed with the branch. Wording law still observed: this cell is about
+        the parser, and the next class is what the product actually does."""
+        forged = _selfsigned([_marker(_FOREIGN_ARC, _MACHINE_BYTES)], sn=42)
+        with pytest.raises(ValueError, match=_NO_MARKER):
+            parse_plane_marker(forged)
 
 
-class TestAC4aParsedButNeverAccepted:
-    """Wording law binding: the claim is 'would be PARSED as our plane
-    marker', and this class is the test attached to it — in BOTH directions:
-    the parser alone DOES resolve plane-shaped bytes at the legacy OID (the
-    window is deliberate), and the middleware still REFUSES such a foreign
-    cert at the chain leg before the marker read ever runs. Nobody may
-    upgrade this to 'accepted as admin' — the accept path is proven closed
-    here, by naming which refusal fires."""
-
-    def test_parser_alone_resolves_foreign_legacy_bytes(self):
-        """Recorded behavior (AC4(a) first half): a cert NOT of our chain,
-        carrying 0x0C-style 'machine' at the legacy OID, parses to a plane.
-        parse_plane_marker has no provenance check — matching by OID only is
-        the row's mechanism, stated to the limit of what is tested."""
-        forged = _selfsigned([_marker(VENYA_PLANE_MARKER_OID_LEGACY, _MACHINE_BYTES)], sn=42)
-        assert parse_plane_marker(forged) == PLANE_MACHINE
+class TestForeignLeafNeverAccepted:
+    """The app-boundary halves. The chain leg still runs before the marker read
+    (auth.py:403 before :438), so a foreign-CA forgery is stopped there whatever
+    the marker says — and with the window closed, a chain-VALID leaf whose only
+    marker is on a foreign arc is stopped at the marker leg instead."""
 
     def test_middleware_refuses_the_forged_leaf_at_the_chain_leg(self, admin_ca, session, tmp_path):
-        """AC4(a) second half: presented through the real middleware, the
-        same foreign cert is refused 403 by the chain check (auth.py:403
-        runs BEFORE the marker read at :438) — the refusal text is the
-        client-certificate one, NOT the plane re-issue one, which is how
-        this cell proves WHICH leg closed the path.
+        """Unchanged by this leg: a cert NOT of our chain, carrying plane-shaped
+        bytes at a foreign arc, is refused 403 by the CHAIN check, and the
+        refusal text names the client certificate — not the plane re-issue —
+        which is how this cell proves WHICH leg closed the path.
 
-        The forged leaf carries an allowlist-shaped identity so the only
-        thing that can stop it is the chain leg.
+        The forged leaf carries an allowlist-shaped identity so the only thing
+        that can stop it is the chain leg.
         """
         key = ec.generate_private_key(SECP256R1())
         name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _ADMIN_IDENTITY)])
@@ -245,7 +361,7 @@ class TestAC4aParsedButNeverAccepted:
             .not_valid_before(now - timedelta(hours=1))
             .not_valid_after(now + timedelta(days=1))
             .add_extension(x509.SubjectAlternativeName([x509.RFC822Name(_ADMIN_IDENTITY)]), critical=False)
-            .add_extension(x509.UnrecognizedExtension(VENYA_PLANE_MARKER_OID_LEGACY, _MACHINE_BYTES), critical=False)
+            .add_extension(x509.UnrecognizedExtension(_FOREIGN_ARC, _MACHINE_BYTES), critical=False)
             .sign(key, hashes.SHA256())
         )
         app = _make_admin_app(admin_ca, session, known_ids=[_ADMIN_IDENTITY], tmp_path=tmp_path)
@@ -256,41 +372,46 @@ class TestAC4aParsedButNeverAccepted:
         assert detail == "Admin access requires valid client certificate"
         assert "two-plane" not in detail  # refused at the chain leg, not the marker leg
 
+    def test_pre_change_shape_leaf_now_refuses_naming_the_reissue(self, admin_ca, session, tmp_path):
+        """THE inversion at the app boundary.
 
-class TestAC4bPreChangeLeafAdmittedAndAC4cRefusalsHold:
-    def test_pre_change_legacy_critical_leaf_still_reaches_200(self, admin_ca, session, tmp_path):
-        """The window's promise, at the app boundary: a leaf minted BEFORE
-        this change — legacy arc, CRITICAL bit set (the exact pre-#588/pre-
-        #601 wire shape), signed by the real admin CA — still resolves its
-        plane and gets admitted on the machine path."""
-        leaf = _admin_ca_signed_legacy_leaf(admin_ca, _ADMIN_IDENTITY, critical=True)
+        This cell used to assert 200: a leaf minted before #601 — marker on the
+        retired arc, CRITICAL bit set, the exact pre-#588/pre-#601 wire shape —
+        was admitted while the window stayed open. The window is closed, so the
+        same wire material is now refused, and refused by the marker leg naming
+        the re-issue. Inverted, not deleted, not skipped: the shape is still
+        built by hand from the real CA key because the product no longer writes
+        it, which is exactly why the pin has to be here.
+        """
+        leaf = _admin_ca_signed_foreign_arc_leaf(admin_ca, _ADMIN_IDENTITY, critical=True)
+        app = _make_admin_app(admin_ca, session, known_ids=[_ADMIN_IDENTITY], tmp_path=tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/probe", headers=_cert_headers(leaf))
+        assert resp.status_code == 403
+        detail = resp.json()["detail"]
+        assert "predates the two-plane model" in detail, detail
+
+    def test_markerless_admin_ca_cert_still_refuses_naming_reissue(self, admin_ca, session, tmp_path):
+        """AC4(c): the shipped refusal cannot regress into fail-open while the
+        forged case is under test — a chain-valid admin-CA cert with NO marker
+        still gets the 403 that names the re-issue."""
+        leaf = _admin_ca_signed_foreign_arc_leaf(admin_ca, _ADMIN_IDENTITY, critical=True, marker=None)
+        app = _make_admin_app(admin_ca, session, known_ids=[_ADMIN_IDENTITY], tmp_path=tmp_path)
+        client = TestClient(app, raise_server_exceptions=False)
+        resp = client.get("/api/v1/admin/probe", headers=_cert_headers(leaf))
+        assert resp.status_code == 403
+        assert "predates the two-plane model" in resp.json()["detail"]
+
+    def test_admin_ca_leaf_with_our_marker_and_a_foreign_one_is_admitted(self, admin_ca, session, tmp_path):
+        """The combined shape at the app boundary, pinned rather than assumed:
+        ours is read, the foreign bytes are inert, and the cert is admitted —
+        the named successor to the old both-arcs 403 (see
+        ``test_our_marker_beside_a_foreign_one_resolves_from_ours``)."""
+        leaf = _admin_ca_signed_foreign_arc_leaf(admin_ca, _ADMIN_IDENTITY, critical=True, also_ours=True)
         app = _make_admin_app(admin_ca, session, known_ids=[_ADMIN_IDENTITY], tmp_path=tmp_path)
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/api/v1/admin/probe", headers=_cert_headers(leaf))
         assert resp.status_code == 200
-
-    def test_markerless_admin_ca_cert_still_refuses_naming_reissue(self, admin_ca, session, tmp_path):
-        """AC4(c): the shipped refusal cannot regress into fail-open while
-        the forged case is under test — a chain-valid admin-CA cert with NO
-        marker still gets the 403 that names the re-issue."""
-        leaf = _admin_ca_signed_legacy_leaf(admin_ca, _ADMIN_IDENTITY, critical=True, marker=None)
-        app = _make_admin_app(admin_ca, session, known_ids=[_ADMIN_IDENTITY], tmp_path=tmp_path)
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get("/api/v1/admin/probe", headers=_cert_headers(leaf))
-        assert resp.status_code == 403
-        assert "predates the two-plane model" in resp.json()["detail"]
-
-    def test_both_arcs_leaf_signed_by_admin_ca_refuses_at_marker_leg(self, admin_ca, session, tmp_path):
-        """The both-arcs refusal is not just parser trivia: even a cert of
-        OUR chain carrying duplicate markers on both arcs refuses 403, and
-        the text is the marker leg's (the chain check passes first) — no
-        silent preference anywhere in the product."""
-        leaf = _admin_ca_signed_legacy_leaf(admin_ca, _ADMIN_IDENTITY, critical=True, both_arcs=True)
-        app = _make_admin_app(admin_ca, session, known_ids=[_ADMIN_IDENTITY], tmp_path=tmp_path)
-        client = TestClient(app, raise_server_exceptions=False)
-        resp = client.get("/api/v1/admin/probe", headers=_cert_headers(leaf))
-        assert resp.status_code == 403
-        assert "predates the two-plane model" in resp.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -373,10 +494,14 @@ def _ca_pair(admin_ca: AdminCAManager):
     return ca_cert, ca_key
 
 
-def _admin_ca_signed_legacy_leaf(admin_ca, cn, *, critical, marker=_MACHINE_BYTES, both_arcs=False):
-    """A chain-valid leaf built BY HAND in an old or anomalous wire shape —
+def _admin_ca_signed_foreign_arc_leaf(admin_ca, cn, *, critical, marker=_MACHINE_BYTES, also_ours=False):
+    """A chain-valid leaf built BY HAND in a retired or anomalous wire shape —
     the product's own mint no longer writes these, which is exactly why the
-    cells need hand material signed with the real CA key."""
+    cells need hand material signed with the real CA key.
+
+    ``marker=None`` writes no marker at all; ``also_ours=True`` adds the
+    registered arc alongside the foreign one (the combined shape).
+    """
     ca_cert, ca_key = _ca_pair(admin_ca)
     key = ec.generate_private_key(SECP256R1())
     now = datetime.now(UTC)
@@ -392,9 +517,7 @@ def _admin_ca_signed_legacy_leaf(admin_ca, cn, *, critical, marker=_MACHINE_BYTE
         .add_extension(x509.SubjectAlternativeName([x509.RFC822Name(cn)]), critical=False)
     )
     if marker is not None:
-        builder = builder.add_extension(
-            x509.UnrecognizedExtension(VENYA_PLANE_MARKER_OID_LEGACY, marker), critical=critical
-        )
-    if both_arcs:
+        builder = builder.add_extension(x509.UnrecognizedExtension(_FOREIGN_ARC, marker), critical=critical)
+    if also_ours:
         builder = builder.add_extension(_plane_marker_extension("machine"), critical=False)
     return builder.sign(ca_key, hashes.SHA256())
