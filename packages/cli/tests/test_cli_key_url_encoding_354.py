@@ -13,6 +13,7 @@ byte-identically (zero drift on the common path).
 
 from unittest.mock import MagicMock
 
+from venya_cli import commands
 from venya_cli.commands import (
     cmd_admin_configure,
     cmd_admin_issue_token,
@@ -49,14 +50,18 @@ class TestPathEncoding354:
         cmd_update_metadata(client, _args(key="a/b", metadata=["purpose=t"], shape=None, usage=None))
         assert client.patch.call_args[0][0] == "/api/v1/secrets/a%2Fb/metadata"
 
-    def test_admin_user_paths_encode_user_id(self):
+    def test_admin_user_paths_encode_user_id(self, monkeypatch):
         client = MagicMock()
         client.get.return_value = {}
         client.post.return_value = {}
         client.delete.return_value = {}
         cmd_admin_remove(client, _args(user_id="a/b"))
         assert client.delete.call_args[0][0] == "/api/v1/admin/users/a%2Fb"
-        cmd_admin_configure(client, _args(user_id="x y", timeout=None, roles=None))
+        # #625 leaves `configure-user` with no shipped setting, and an empty setting map refuses
+        # LOCALLY — it never reaches the path builder this cell is about. One entry is injected
+        # for the duration of this test so the PUT half of the #354 sweep stays covered.
+        monkeypatch.setattr(commands, "_CONFIGURE_SETTINGS", (("display_name", "display_name"),))
+        cmd_admin_configure(client, _args(user_id="x y", display_name="Ops", roles=None))
         assert client.put.call_args[0][0] == "/api/v1/admin/users/x%20y"
         cmd_admin_list_tokens(client, _args(user_id="a/b"))
         assert client.get.call_args[0][0] == "/api/v1/admin/users/a%2Fb/enrollment-tokens"
