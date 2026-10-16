@@ -408,6 +408,14 @@ def test_removal_still_works_on_a_real_session(session):
 # --------------------------------------------------------------------------------
 
 _PG_URL_ENV = "VENYA_TEST_PG_URL"
+# R1 (#614): one deadline, one name, shared by every PostgreSQL-gated cell in this file.
+# `lock_timeout` is the fix for the s105 shape — a read transaction left open pins the next
+# cell's DDL forever, and this gives that wait a ceiling so it reports instead of hanging.
+# `statement_timeout` is the backstop for a stall that is not a lock wait, set far above the
+# milliseconds these cells actually take: a cap that could abort the row-lock wait the race
+# cells depend on (the loser blocks until the winner commits) would test a different
+# statement than production runs.
+_PG_DEADLINE = {"options": "-c lock_timeout=5000 -c statement_timeout=60000"}
 
 
 @pytest.mark.skipif(
@@ -431,7 +439,7 @@ class TestConcurrentMixedGrantPostgresql:
         return sessionmaker(bind=engine)
 
     def test_one_of_two_concurrent_mixed_grants_is_refused(self):
-        engine = create_engine(os.environ[_PG_URL_ENV])
+        engine = create_engine(os.environ[_PG_URL_ENV], connect_args=_PG_DEADLINE)
         Base.metadata.drop_all(engine)
         Base.metadata.create_all(engine)
         factory = self._factory(engine)
@@ -447,7 +455,8 @@ class TestConcurrentMixedGrantPostgresql:
 
             outcomes: list[str] = []
             outcomes_lock = threading.Lock()
-            barrier = threading.Barrier(2)
+            # Bounded: a peer that dies before the barrier must not hang this one forever.
+            barrier = threading.Barrier(2, timeout=10)
 
             def worker(role_id: int) -> None:
                 session = factory()
