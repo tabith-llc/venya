@@ -197,7 +197,9 @@ def create_parser() -> argparse.ArgumentParser:
     # admin configure-user
     configure_parser = admin_sub.add_parser("configure-user", help="Configure user settings")
     configure_parser.add_argument("user_id", help="User ID to configure")
-    configure_parser.add_argument("--timeout", type=int, help="Session timeout in seconds")
+    # #625: the `--timeout` option is gone. It wrote `users.session_timeout`, a column
+    # no expiry decision reads, and the command refuses locally until a settings flag
+    # that reaches a READ field joins `cmd_admin_configure` (see that function).
 
     # admin list
     admin_list_parser = admin_sub.add_parser("list", help="List all registered users")

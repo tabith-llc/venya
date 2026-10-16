@@ -796,13 +796,58 @@ def cmd_admin_remove(client: APIClient, args: Any) -> int:
         return 1
 
 
-def cmd_admin_configure(client: APIClient, args: Any) -> int:
-    """Configure user settings."""
-    try:
-        config = {}
-        if args.timeout:
-            config["session_timeout"] = args.timeout
+#: The user settings `venya admin configure-user` can send, as `(argparse dest, server
+#: field)` pairs. One line joins this map per setting that clears all three checks:
+#: (a) `cli.py` ships the option, (b) `AdminConfigureUserRequest` declares the field, and
+#: (c) some shipped code path READS that field and changes behaviour on it.
+#:
+#: #625 removed the one entry this map had. `--timeout` wrote `users.session_timeout`, a
+#: column no expiry decision reads — the live idle window comes from the core's own
+#: `session.session_timeout` / `VENYA_SESSION__SESSION_TIMEOUT`, and `create_session`
+#: (`packages/core/src/core/iam/session_manager.py:139`) computes expiry from that global
+#: even though the `User` row is loaded one statement earlier. So the value had no reader.
+#: Checks (a) and (c) are pinned by `packages/cli/tests/test_cli_configure_user_625.py`
+#: (the option is a usage error, and no `session_timeout` pair may join this map); check
+#: (b) is pinned across the package boundary in the same file and again in
+#: `packages/server/tests/test_admin_session_timeout_dead_write_625.py`. Empty is the
+#: honest state today, and `cmd_admin_configure` refuses below rather than PUTting `{}`.
+_CONFIGURE_SETTINGS: tuple[tuple[str, str], ...] = ()
 
+
+def _configure_payload(args: Any) -> dict[str, Any]:
+    """The settings this call asks to change, from `_CONFIGURE_SETTINGS`.
+
+    An unset option contributes nothing, and the test is `is not None`, not truthiness:
+    #625 found the shipped form (`if args.timeout:`) dropped `--timeout 0` in silence and
+    then reported success anyway.
+    """
+    payload: dict[str, Any] = {}
+    for dest, field in _CONFIGURE_SETTINGS:
+        value = getattr(args, dest, None)
+        if value is not None:
+            payload[field] = value
+    return payload
+
+
+def cmd_admin_configure(client: APIClient, args: Any) -> int:
+    """Configure user settings.
+
+    #625: with no settings on offer this command refuses HERE, before any request.
+    It used to PUT whatever it had, which for the shipped build meant an empty body:
+    the route answered `configured: true` and wrote a `user_updated` audit row whose
+    `changed_fields` was `[]` — a success claim and an audit record for a change that
+    did not happen. The refusal exits non-zero and names itself.
+    """
+    config = _configure_payload(args)
+    if not config:
+        print(
+            f"Configure refused for '{args.user_id}': no user setting was given, and this build offers "
+            "none — `--timeout` was removed (#625) because nothing read the value it wrote. Nothing was sent.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
         client.put(
             f"/api/v1/admin/users/{quote(args.user_id, safe='')}",
             json=config,
@@ -832,7 +877,7 @@ def cmd_admin_list(client: APIClient, args: Any) -> int:
             return 0
 
         # Calculate column widths
-        headers = ["USER_ID", "DISPLAY_NAME", "STATUS", "AUTH_MODE", "ENROLLED_AT", "SESSION_TIMEOUT"]
+        headers = ["USER_ID", "DISPLAY_NAME", "STATUS", "AUTH_MODE", "ENROLLED_AT"]
         rows = []
         for u in users:
             rows.append(
@@ -842,7 +887,6 @@ def cmd_admin_list(client: APIClient, args: Any) -> int:
                     u.get("status", ""),
                     u.get("auth_mode", ""),
                     u.get("enrolled_at") or "-",
-                    str(u.get("session_timeout", "")),
                 ]
             )
 

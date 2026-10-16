@@ -337,18 +337,17 @@ venya admin remove jsmith  # remove a user
 Configure user settings
 
 ```
-venya admin configure-user <USER_ID> [OPTIONS]
+venya admin configure-user <USER_ID>
 ```
 
 | Argument | Required | Type / choices | Default | Description |
 |----------|----------|----------------|---------|-------------|
 | `USER_ID` (positional) | **yes** | string | — | User ID to configure |
-| `--timeout` | no | int | — | Session timeout in seconds |
 
 **Examples**
 
 ```bash
-venya admin configure-user jsmith --timeout 1800  # session timeout in seconds
+venya admin configure-user jsmith  # this build offers no user setting, so the command refuses and names why (#625)
 ```
 
 ### `venya admin list`
