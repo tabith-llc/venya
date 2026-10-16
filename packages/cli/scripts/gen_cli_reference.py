@@ -112,7 +112,10 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
         (["admin", "remove", "jsmith"], "remove a user"),
     ],
     ("admin", "configure-user"): [
-        (["admin", "configure-user", "jsmith", "--timeout", "1800"], "session timeout in seconds"),
+        (
+            ["admin", "configure-user", "jsmith"],
+            "this build offers no user setting, so the command refuses and names why (#625)",
+        ),
     ],
     ("admin", "list"): [
         (["admin", "list"], "all registered users"),

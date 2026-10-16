@@ -459,12 +459,20 @@ class TestAdminEnrollConfigureNoModeSurface:
         client.close()
         config_file.unlink()
 
-    def test_configure_payload_has_no_auth_mode(self):
+    def test_configure_sends_nothing_without_a_setting(self):
+        """#625: a bare `configure-user` refuses locally instead of PUTting `{}`.
+
+        The shipped form built a dict from the one flag it had and sent whatever
+        came out, so with no `--timeout` the call PUT an empty body, got
+        `configured: true`, and audited a `user_updated` row whose
+        `changed_fields` was `[]`. A stale `timeout` attribute on the Namespace
+        cannot resurrect it either: the settings map is the only source of keys.
+        The paired positive (a mapped setting still PUTs) lives in
+        `test_cli_configure_user_625.py`.
+        """
         client, config_file = _make_client()
         mock_http = MagicMock()
-        mock_response = _make_mock_response(status_code=200, json_data={"configured": True})
-        mock_response.raise_for_status.return_value = None
-        mock_http.request.return_value = mock_response
+        mock_http.request.return_value = _make_mock_response(status_code=200, json_data={"configured": True})
         client._http = mock_http
 
         args = MagicMock()
@@ -472,10 +480,7 @@ class TestAdminEnrollConfigureNoModeSurface:
         args.timeout = 1800
 
         result = cmd_admin_configure(client, args)
-        assert result == 0
-
-        call_args = mock_http.request.call_args
-        assert call_args[0][0] == "PUT"
-        assert call_args[1]["json"] == {"session_timeout": 1800}
+        assert result == 1
+        mock_http.request.assert_not_called()
         client.close()
         config_file.unlink()

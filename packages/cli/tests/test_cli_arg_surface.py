@@ -343,10 +343,19 @@ class TestRemovedPlatformModeArg:
         assert ns.user_id == "jsmith"
         assert not hasattr(ns, "mode")
 
-    def test_configure_user_timeout_survives_without_mode(self):
-        ns = _parse(["admin", "configure-user", "jsmith", "--timeout", "60"])
-        assert ns.timeout == 60
-        assert not hasattr(ns, "mode")
+    def test_configure_user_timeout_rejected_too(self):
+        """#625: `--timeout` joined `--mode` as a hard removal.
+
+        It wrote `users.session_timeout`, a column no expiry decision reads, so
+        accepting it was a silent no-op with a success claim on top. The rule is
+        the same one this class exists for: a removed knob dies with a usage
+        error (exit 2), never a quiet accept.
+        """
+        _assert_exit2(["admin", "configure-user", "jsmith", "--timeout", "60"])
+        ns = _parse(["admin", "configure-user", "jsmith"])
+        assert ns.user_id == "jsmith"
+        assert not hasattr(ns, "timeout")
+        assert "--timeout" not in PARSER_BY_PATH[("admin", "configure-user")].format_help()
 
     def test_mode_absent_from_help(self):
         assert "--mode" not in PARSER_BY_PATH[("admin", "enroll")].format_help()

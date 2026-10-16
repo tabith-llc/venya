@@ -156,7 +156,13 @@ class AdminConfigureUserRequest(BaseModel):
     display_name: str | None = Field(None, max_length=128)
     status: UserStatus | None = None
     auth_mode: AdminAuthMode | None = None
-    session_timeout: int | None = None
+    # #625: the `session_timeout` field is gone from this model and from the write below.
+    # The `users.session_timeout` COLUMN stays (per the ruling): it is `NOT NULL
+    # server_default="900"` (001_initial_schema.py:37), so it cannot express "unset", and
+    # dropping it is not worth a migration in the beta window. Nothing reads it — see
+    # packages/server/tests/test_admin_session_timeout_dead_write_625.py for the sweep that
+    # keeps it that way. An operator who PUTs the old key now gets a 422 (extra="forbid",
+    # #357), never a silent no-op.
 
 
 class AdminConfigureUserResponse(BaseModel):
@@ -709,9 +715,10 @@ async def admin_configure_user(
         if req.auth_mode is not None:
             user.auth_mode = req.auth_mode
             changed_fields.append("auth_mode")
-        if req.session_timeout is not None:
-            user.session_timeout = req.session_timeout
-            changed_fields.append("session_timeout")
+        # #625: no `session_timeout` write here. The column is stored but read by no
+        # expiry decision (`create_session` takes the GLOBAL session config at
+        # core/iam/session_manager.py:139 while holding the User row), so writing it
+        # produced a real DB write and an audit claim of a change with no effect.
 
         audit_lifecycle(
             db,

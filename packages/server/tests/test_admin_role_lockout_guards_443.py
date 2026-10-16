@@ -404,13 +404,15 @@ class TestConfigureUserStatusGuard:
         assert _status(session, "admin1") == "active"
 
     def test_non_status_fields_on_the_last_admin_are_allowed(self, session):
-        """Regression: the guard answers the status write only — display name,
-        auth mode and session timeout on the last admin stay the ordinary
-        operation (no req.status, no guard call)."""
+        """Regression: the guard answers the status write only — display name and
+        auth mode on the last admin stay the ordinary operation (no req.status,
+        no guard call). #625 dropped `session_timeout` from this payload: the
+        field no longer exists on the request model, so sending it would be a
+        422 by #357's extra=forbid, not a pass-through."""
         _join(session, "admin1")
         client = _client(session, caller_id="admin1")
 
-        resp = self._configure(client, "admin1", {"display_name": "Ops", "session_timeout": 1800})
+        resp = self._configure(client, "admin1", {"display_name": "Ops", "auth_mode": "security-key"})
 
         assert resp.status_code == 200, resp.text
         assert _status(session, "admin1") == "active"

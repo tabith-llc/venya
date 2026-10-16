@@ -283,7 +283,7 @@ class TestAdminConfigureUser:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.put(
             "/api/v1/admin/users/user1",
-            json={"auth_mode": "webauthn", "session_timeout": 1800},
+            json={"auth_mode": "webauthn", "display_name": "Ops"},
         )
         assert resp.status_code == 200
         assert resp.json()["configured"] is True
