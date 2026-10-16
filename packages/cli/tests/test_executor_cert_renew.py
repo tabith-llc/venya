@@ -566,6 +566,41 @@ class TestRenewErrors:
         captured = capsys.readouterr()
         assert "Connection failed" in captured.err
 
+    def test_renew_unresolved_name_says_the_name_did_not_resolve(self, tmp_path, capsys):
+        """#633 paired positive for this site: the cell above proves a refusal still
+        reads as a connection fault; this proves a name that does not resolve HERE
+        does not get that sentence. Both halves travel together or the distinction
+        is untested."""
+        import socket
+
+        import httpx2
+
+        cert_path, key_path, _ = _setup_cert_files(tmp_path)
+
+        args = MagicMock()
+        args.cert_path = str(cert_path)
+        args.key_path = str(key_path)
+        args.core_url = "https://venya-core-3"
+
+        bottom = socket.gaierror(-2, "Name or service not known")
+        middle = httpx2.NetworkError(str(bottom))
+        middle.__cause__ = bottom
+        outer = httpx2.ConnectError(str(middle))
+        outer.__cause__ = middle
+
+        mock_client = _make_mock_httpx_client(post_error=outer)
+
+        with patch("venya_cli.commands.httpx2.Client", return_value=mock_client):
+            from venya_cli.commands import executor_cert_renew
+
+            result = executor_cert_renew(args)
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert "venya-core-3" in captured.err
+        assert "did not resolve" in captured.err
+        assert "Connection failed" not in captured.err
+
     def test_renew_invalid_cert(self, tmp_path, capsys):
         """Corrupt cert file returns exit code 1."""
         cert_path = tmp_path / "executor.crt"
