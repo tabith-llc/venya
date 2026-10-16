@@ -23,6 +23,13 @@ the inertness on SQLite as a tripwire instead of hiding it.
 
 What each class here can prove, stated plainly:
 
+``TestVenueGateHonesty``           — runs anywhere, no server. The gate's own truth table, added by the s125 follow-on
+                                    leg: an UNREACHABLE ``VENYA_TEST_PG_URL`` must refuse loudly out of the driver
+                                    (``OperationalError``) rather than take the skip branch, and the shipped ``skipif``
+                                    decorators are read on the AST to prove each gate keys on the variable's PRESENCE
+                                    and its skip reason names the variable. A gate that connected-and-swallowed would
+                                    turn a misconfigured venue GREEN — the shape #613/#614/#630 all exist to stop.
+
 ``TestExecutorIdFilterStatement``  — runs anywhere, no server. A capturing query reads the criteria the
                                     ROUTE built and compiles them against the **postgresql** dialect, so
                                     these cells name the exact statement the PostgreSQL class below
@@ -62,13 +69,18 @@ UNVERIFIED, not green. Point the variable at a SCRATCH database — the class dr
 ``postgresql+psycopg2://<user>@/<db>?host=<socket-dir>&port=<port>`` for a unix-socket cluster, or
 ``postgresql+psycopg2://<user>:<pw>@127.0.0.1:5432/<db>`` for a TCP one. A ``postgresql+psycopg://`` (psycopg 3)
 URL neither skips nor passes: it raises ``ModuleNotFoundError`` inside the SQLAlchemy dialect and the three
-PostgreSQL cells go RED. Measured both ways on one tree against one fixture: psycopg2 → ``7 passed``;
-psycopg3 → ``3 failed, 4 passed``. That red is a venue wiring error, not a product result.
+PostgreSQL cells go RED. Measured both ways at leg 1 (a 7-cell file against one fixture): psycopg2 gave
+``7 passed``, psycopg3 gave ``3 failed, 4 passed``. Re-measured at this tip (same fixture, now a 10-cell file
+after the gate-honesty class landed): psycopg2 gives ``10 passed``, psycopg3 gives ``3 failed, 7 passed``. The
+counts differ only in how many always-run cells sat beside the gated three when each reading was taken — the
+gated three are RED either way. That red is a venue wiring error, not a product result.
 """
 
+import ast
 import json
 import os
 from datetime import UTC, datetime
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -255,6 +267,125 @@ def _pg_sql(criteria):
 
 def _executor_clauses(criteria):
     return [c for c in criteria if "->> 'executor_id'" in _pg_sql([c])]
+
+
+class TestVenueGateHonesty:
+    """The gate's own truth table, so a broken engine path cannot read as a skip-that-looks-green.
+
+    #614 gated the timeout of these cells and #630 hunts gated tests that hide where they cannot run. This is the
+    property next to them, pinned here because #613's class is the one a reviewer re-runs first. The gate keys on the
+    variable BEING SET, never on whether a connection happened to succeed. So:
+
+    * no variable at all        -> SKIPPED, with the reason naming the variable, so CI on a box without postgres stays
+                                   honest, and stays honest for the right reason;
+    * variable set, unreachable -> **RED**, an ``OperationalError`` from the driver — never a skip, never a pass.
+
+    Two of these three cells need no server: the refusal IS the assertion.
+    """
+
+    # A socket path with nothing behind it, and a port with nothing listening — both fail before reading any row.
+    UNREACHABLE: ClassVar[list] = [
+        (
+            "postgresql+psycopg2://agent@/venya_gate_honesty?host=/tmp/tabichat/no-such-sock-dir&port=59999",
+            "no socket",
+        ),
+        ("postgresql+psycopg2://agent@127.0.0.1:59999/venya_gate_honesty", "connection refused"),
+    ]
+
+    @pytest.mark.parametrize("url,label", UNREACHABLE, ids=["no-socket", "refused"])
+    def test_an_unreachable_gated_url_refuses_loudly_rather_than_skipping(self, url, label):
+        from sqlalchemy.exc import OperationalError
+
+        engine = create_engine(url, connect_args=_PG_DEADLINE)
+        try:
+            with pytest.raises(OperationalError) as caught:
+                engine.connect()
+            detail = str(caught.value)
+            assert label in detail or "OperationalError" in detail, detail[:200]
+        finally:
+            engine.dispose()
+
+    def test_the_gate_keys_on_presence_of_the_variable_not_on_reachability(self):
+        """Every PostgreSQL-gated class in this suite skips on the mere ABSENCE of the variable.
+
+        That is what gives the two cells above meaning. A gate written as "try to connect, skip if it fails" would
+        turn a misconfigured venue GREEN — the failure mode #613 and #630 both name — so the condition has to be a pure
+        presence test. Checked on the AST, not on a run, so it holds on a venue with no postgres at all.
+        """
+        from pathlib import Path
+
+        here = Path(__file__).resolve()
+        root = here.parent
+        scanned = 0
+        for path in sorted(root.glob("*.py")):
+            if path.resolve() == here:
+                continue
+            text = path.read_text(encoding="utf-8")
+            if PG_URL_ENV not in text:
+                continue
+            tree = ast.parse(text)
+            # Files spell the variable as a module constant (`PG_URL_ENV = "VENYA_TEST_PG_URL"`) or as the literal.
+            names = _env_var_names(tree)
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.ClassDef) and node.name.endswith("Postgresql")):
+                    continue
+                gates = [d for d in node.decorator_list if isinstance(d, ast.Call) and _callee_name(d.func) == "skipif"]
+                assert gates, f"{path.name}:{node.name} — a gated class with no skipif decorator"
+                gate = gates[0]
+                condition = ast.unparse(gate.args[0]) if gate.args else ast.unparse(_kw(gate, "condition"))
+                assert condition.startswith("not "), f"{path.name}:{node.name} skips on {condition!r}, not on absence"
+                assert _reads_the_gate_variable(condition, names), (
+                    f"{path.name}:{node.name} skips on {condition!r}, which reads no os.environ[{PG_URL_ENV}] — a gate "
+                    "probing reachability or another variable can silence a misconfigured venue"
+                )
+                reason = ast.unparse(_kw(gate, "reason"))
+                # The reason may spell the variable or interpolate a name bound to it; both read at a console.
+                assert PG_URL_ENV in reason or any(n in reason for n in names), (
+                    f"{path.name}:{node.name}: the skip reason {reason!r} never names the gate variable, so a skip"
+                    f" here is not diagnosable to {PG_URL_ENV}"
+                )
+                scanned += 1
+
+        assert scanned >= 4, f"only {scanned} gated classes inspected — this check would be near-vacuous"
+
+
+def _env_var_names(tree: ast.Module) -> set:
+    """Module-level names bound to the exact gate variable, plus the literal itself."""
+    out = {PG_URL_ENV}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    try:
+                        if ast.literal_eval(node.value) == PG_URL_ENV:
+                            out.add(target.id)
+                    except (ValueError, TypeError):
+                        pass
+    return out
+
+
+def _kw(call: ast.Call, name: str):
+    for kw in call.keywords:
+        if kw.arg == name:
+            return kw.value
+    raise AssertionError(f"{name}= not found on {ast.dump(call)[:80]}")
+
+
+def _reads_the_gate_variable(condition: str, names: set) -> bool:
+    """True when the condition is a read of `os.environ`, keyed on the gate variable.
+
+    Deliberately dumb: the point is not to parse Python, it is to prove the gate keys on the VARIABLE (presence). A gate
+    that instead probed reachability — a connect-and-swallow helper, another variable, a hard-coded False — holds no
+    `environ` read of one of these names, and fails this check.
+    """
+    if "environ" not in condition:
+        return False
+    return any(name in condition for name in names)
+
+
+def _callee_name(func) -> str:
+    """``pytest.mark.skipif`` → ``skipif``; a bare ``skipif`` → ``skipif``."""
+    return getattr(func, "attr", None) or getattr(func, "id", "")
 
 
 class TestExecutorIdFilterStatement:
