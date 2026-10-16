@@ -1119,7 +1119,24 @@ EOF
 # Install Venya CA into system trust store
 # Clean stale symlinks/files from previous installs
 rm -f /etc/ssl/certs/venya-*.pem
-rm -f /etc/ssl/certs/$(openssl x509 -in /var/lib/venya/ca/ca.crt -noout -subject_hash 2>/dev/null).*
+# --- #641 begin: stale CA-hash cleanup, guarded ---
+# The old form spliced an unquoted, error-silenced $(openssl -subject_hash)
+# straight into an rm glob: when the substitution returned nothing the operand
+# degraded to /etc/ssl/certs/.* and deleted every dotfile in the trust
+# directory (reproduced in #641). Resolve the hash, assert it is a bare hex
+# name, and clean only that. A missing/failing openssl now warns and continues;
+# it no longer silently wipes and no longer dies under set -e.
+# THE RULE THIS SITE EXISTS TO TEACH (owner ruling 2026-10-16, #641): a silenced
+# command plus a destructive argument is severity HIGH — never let a value whose
+# producer was told not to complain reach an rm/chmod/mv operand unchecked; test
+# the value and name the reason when it is absent.
+CA_SUBJECT_HASH="$(openssl x509 -in /var/lib/venya/ca/ca.crt -noout -subject_hash 2>/dev/null || true)"
+if [[ ! "$CA_SUBJECT_HASH" =~ ^[0-9a-f]{1,16}$ ]]; then
+    warn "CA subject hash unavailable or malformed (openssl x509 -subject_hash gave '${CA_SUBJECT_HASH:-<empty>}') — skipping the stale-hash cleanup in /etc/ssl/certs and continuing the install."
+else
+    rm -f "/etc/ssl/certs/${CA_SUBJECT_HASH}."*
+fi
+# --- #641 end ---
 rm -f /usr/local/share/ca-certificates/venya-*.crt /usr/local/share/ca-certificates/venya-*.der
 cp /var/lib/venya/ca/ca.crt /usr/local/share/ca-certificates/venya-root-ca.crt
 chmod 644 /usr/local/share/ca-certificates/venya-root-ca.crt
