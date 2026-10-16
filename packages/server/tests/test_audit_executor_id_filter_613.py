@@ -69,8 +69,11 @@ UNVERIFIED, not green. Point the variable at a SCRATCH database — the class dr
 ``postgresql+psycopg2://<user>@/<db>?host=<socket-dir>&port=<port>`` for a unix-socket cluster, or
 ``postgresql+psycopg2://<user>:<pw>@127.0.0.1:5432/<db>`` for a TCP one. A ``postgresql+psycopg://`` (psycopg 3)
 URL neither skips nor passes: it raises ``ModuleNotFoundError`` inside the SQLAlchemy dialect and the three
-PostgreSQL cells go RED. Re-measured both ways at this tip against the s125 fixture: psycopg2 →
-``10 passed``; psycopg3 → ``3 failed, 7 passed``. That red is a venue wiring error, not a product result.
+PostgreSQL cells go RED. Measured both ways at leg 1 (a 7-cell file against one fixture): psycopg2 gave
+``7 passed``, psycopg3 gave ``3 failed, 4 passed``. Re-measured at this tip (same fixture, now a 10-cell file
+after the gate-honesty class landed): psycopg2 gives ``10 passed``, psycopg3 gives ``3 failed, 7 passed``. The
+counts differ only in how many always-run cells sat beside the gated three when each reading was taken — the
+gated three are RED either way. That red is a venue wiring error, not a product result.
 """
 
 import ast

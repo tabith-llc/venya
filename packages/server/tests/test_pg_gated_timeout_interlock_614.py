@@ -1,11 +1,20 @@
 """R1 (#614) interlock — every PostgreSQL-gated test cell carries a bounded timeout.
 
-**Why this file exists.** The eight `*Postgresql` classes in this repo had never run on the
-shipping engine (no venue sets ``VENYA_TEST_PG_URL``), and when one finally did run (#607,
-s105) it hung: a read transaction left open holds an ``AccessShareLock`` on the table, the
-next cell's ``DROP TABLE``/``drop_all`` asks for ``AccessExclusiveLock`` on the same table,
-and with no deadline PostgreSQL waits forever. Both backends were the test process's own two
-connections, so nothing external could clear it.
+**Why this file exists.** The eight `*Postgresql` classes in this repo were written before any
+venue could run them on the shipping engine, and the first one that did run (#607, s105) hung:
+a read transaction left open holds an ``AccessShareLock`` on the table, the next cell's ``DROP
+TABLE``/``drop_all`` asks for ``AccessExclusiveLock`` on the same table, and with no deadline
+PostgreSQL waits forever. Both backends were the test process's own two connections, so
+nothing external could clear it.
+
+**The gate is an opt-in URL, not a closed door.** Every class here skips on one condition:
+``VENYA_TEST_PG_URL`` is unset. That is a property of the host, not of the cell — a machine
+with no reachable PostgreSQL has nothing to point the variable at, so the skip is the honest
+report. A venue that DOES have a reachable scratch database can and should set it and run the
+cells; that is the intended state, not an exception to be apologised for. This interlock exists
+to catch a gated cell that skips *silently* — one whose engine carries no deadline, or a new
+file whose class the scan cannot see — and it must never be read as a claim that the door can
+only ever stay shut.
 
 **What this file pins (three claims, one cell each).**
 
@@ -19,12 +28,13 @@ connections, so nothing external could clear it.
    it. Runs against a spy module, so it needs no server.
 
 **What this file does NOT pin (stated so nobody over-reads it).** It proves the knob is
-present and sent, not that a live server *fired* it. The firing proof needs a scratch database
-and is a different instrument: seed a table, hold a conflicting ``ACCESS EXCLUSIVE`` lock from
-a second connection, run the cell, and expect ``psycopg2.errors.LockNotAvailable`` ("canceling
-statement due to lock timeout") in roughly ``lock_timeout`` ms instead of a hang. The #614
-report records that half as NOT RUN wherever no venue existed — do not read green here as a
-firing proof there.
+present and sent, not that a live server *fired* it. The firing proof needs a reachable scratch
+database — the same opt-in URL above, pointed at it — and is a different instrument: seed a
+table, hold a conflicting ``ACCESS EXCLUSIVE`` lock from a second connection, run the cell, and
+expect ``psycopg2.errors.LockNotAvailable`` ("canceling statement due to lock timeout") in
+roughly ``lock_timeout`` ms instead of a hang. Where no such database was reachable the #614
+report recorded that half as NOT RUN; setting the URL on a venue that has one is how this
+cell's result stops being a hypothesis — do not read green HERE as a firing proof there.
 """
 
 import ast
