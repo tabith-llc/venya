@@ -286,7 +286,7 @@ fast (idempotent: apt/Docker/sbx steps skip or cache):
 
 ```bash
 # re-mint on a core (admin mTLS), then re-run the executor installer with the fresh token
-venya admin executor-enroll <executor-id>          # add --bundle for offline/air-gapped CA copy
+venya admin executor-enroll <executor-id>          # add --output-dir for offline/air-gapped CA copy
 ```
 
 The core
