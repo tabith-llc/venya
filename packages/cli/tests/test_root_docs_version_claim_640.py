@@ -32,17 +32,28 @@ filename-list scan of the same tree reporting **clean** while the glob scan repo
 cell is the bug recorded as a test, and it fails if someone reintroduces the name list.
 """
 
+import ast
 import re
 import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+#: A version-shaped token anywhere in a string. Used by the self-pinning cell below to catch THIS file
+#: reintroducing a literal plate, which is the defect #640 is about.
+VERSION_LIKE = re.compile(r"\d+\.\d+\.\d+(?:alpha|beta|rc|dev)?\d*")
+
 #: The widening. One pattern, root-level markdown, resolved at run time.
 ROOT_DOC_GLOB = "*.md"
 
 #: What the historical shape looks like: `0.1.0beta1`, `v0.1.0alpha16`.
-VERSION_TOKEN = re.compile(r"v?(\d+\.\d+\.\d+(?:alpha|beta)\d*)", re.IGNORECASE)
+VERSION_TOKEN = re.compile(
+    # The pre-release suffix is OPTIONAL. Requiring it meant a root page claiming a STABLE version
+    # ("the current version is 1.2.3") matched nothing and read green on a lie — found by running this
+    # gate against a synthetic suffixless tree, and pinned by test_a_stable_version_claim_is_red_too.
+    r"v?(\d+\.\d+\.\d+(?:[-.]?(?:alpha|beta|rc|dev)\d*)?)",
+    re.IGNORECASE,
+)
 
 #: A version token is only a CLAIM when it sits next to one of these. Everything else is a dated
 #: record ("validated on 0.1.0alpha16, 2026-09-30") and checking it would be prose interpretation,
@@ -53,7 +64,7 @@ _CLAIM_MARKERS = re.compile(
 )
 
 #: Newest real version heading in CHANGELOG.md. `[Unreleased]` is a section, not a version claim.
-_CHANGELOG_HEAD = re.compile(r"^## \[(\d+\.\d+\.\d+(?:alpha|beta)\d*)\]", re.MULTILINE)
+_CHANGELOG_HEAD = re.compile(r"^## \[v?(\d+\.\d+\.\d+(?:[-.]?(?:alpha|beta|rc|dev)\d*)?)\]", re.MULTILINE)
 
 
 def dist_version(root: Path = REPO_ROOT) -> str:
@@ -94,6 +105,64 @@ def violations(root: Path = REPO_ROOT) -> list[str]:
 
 
 # --- AC: the scan must actually be looking -------------------------------------------------------
+
+
+class TestGuardDoesNotCarryItsOwnDefect:
+    """#640 is a story about a version statement that quietly stopped matching reality. A test file
+    that hardcodes the plate tells the same story about itself, so this cell makes that impossible.
+
+    It reads THIS file's AST and rejects a version-shaped literal in any executable string — comments
+    and docstrings are allowed, because they describe the defect rather than depend on it. When the two
+    hardcoded falsifiers were found (they went red on a second tree whose plate differed), this cell is
+    what stops the third one from arriving quietly.
+    """
+
+    def _executable_strings(self, tree: ast.AST) -> list[tuple[int, str]]:
+        """String constants that are NOT docstrings — i.e. data the tests actually compare against."""
+        docstrings: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                body = getattr(node, "body", [])
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                    docstrings.add(id(body[0].value))
+        out = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+                out.append((getattr(node, "lineno", 0), node.value))
+        return out
+
+    def test_no_hardcoded_plate_in_executable_strings(self):
+        src = Path(__file__).resolve().read_text(encoding="utf-8")
+        offenders = []
+        for lineno, text in self._executable_strings(ast.parse(src)):
+            for m in VERSION_LIKE.finditer(text):
+                offenders.append(f"{Path(__file__).name}:{lineno}: {m.group(0)!r} in {text[:60]!r}")
+        assert offenders == [], (
+            "this gate hardcodes a version in executable code — derive it from dist_version() instead; "
+            "it rot on the next bump exactly like the page #640 was filed over:\n" + "\n".join(offenders)
+        )
+
+    def test_the_pinning_cell_itself_can_fail(self, tmp_path: Path):
+        """Falsifier for the falsifier: a copy of this file with a literal plate injected must be
+        rejected by the cell above. A self-pinning check that cannot fail is the thing we are fixing.
+
+        The injected value is DERIVED, not typed — a test that hardcodes the very thing it is looking
+        for would fail its own sibling cell, and did: this cell's first version carried a literal
+        `0.1.0beta9` in the payload and `test_no_hardcoded_plate_in_executable_strings` caught it. That
+        red was the check working, so the payload went through `wrong_version()` rather than the
+        assertion going soft.
+        """
+        src = Path(__file__).resolve().read_text(encoding="utf-8")
+        bait = wrong_version(dist_version())
+        marker = '    (root / "README.md").write_text("# Venya\\n", encoding="utf-8")'
+        assert marker in src, "injection site moved: this cell is no longer testing anything"
+        infected = src.replace(marker, marker.replace("# Venya\\n", f"# Venya {bait}\\n"), 1)
+        assert bait != dist_version()
+        offenders = []
+        for lineno, text in self._executable_strings(ast.parse(infected)):
+            for m in VERSION_LIKE.finditer(text):
+                offenders.append(f"{m.group(0)} at :{lineno}")
+        assert offenders, f"a planted version literal ({bait}) slipped past the pinning check"
 
 
 class TestScanIsNotVacuous:
@@ -142,7 +211,9 @@ class TestPlantedClaim:
 
     def test_planted_false_claim_turns_the_gate_red(self, tmp_path: Path):
         shutil_tree(tmp_path)
-        lie = wrong_version(dist_version())
+        truth = dist_version()
+        lie = wrong_version(truth)
+        assert lie != truth, "derivation returned the plate unchanged: this cell can no longer be red"
         (tmp_path / "SUPPORT.md").write_text(
             f"# Support\n\nThe current version is {lie} and it ships weekly.\n", encoding="utf-8"
         )
@@ -170,6 +241,7 @@ class TestPlantedClaim:
         shutil_tree(tmp_path)
         truth = dist_version()
         bump = wrong_version(truth)
+        assert bump != truth, "derivation returned the plate unchanged: this cell can no longer be red"
         cl = tmp_path / "CHANGELOG.md"
         cl.write_text(cl.read_text(encoding="utf-8").replace(f"## [{truth}]", f"## [{bump}]", 1), encoding="utf-8")
         got = violations(tmp_path)
@@ -183,13 +255,60 @@ class TestPlantedClaim:
 
     def test_historical_version_note_is_not_treated_as_a_claim(self, tmp_path: Path):
         """The paired negative on the NARROW class: a dated record naming an old plate is not a claim
-        about the current one, and checking it would be reading prose."""
+        about the current one, and checking it would be reading prose.
+
+        The past plate is DERIVED and asserted to differ from the current one. On a branch where the
+        literal happened to equal the plate, the cell would prove nothing — it would read clean whether
+        or not the guard distinguished the two shapes.
+        """
         shutil_tree(tmp_path)
+        truth = dist_version()
+        past = historical_version(truth)
+        assert past != truth, "derived past plate equals the current plate: this cell is vacuous here"
         (tmp_path / "NOTES.md").write_text(
-            "# Notes\n\nRestore procedure validated by physical drill, 2026-09-30, on 0.1.0alpha16.\n",
+            f"# Notes\n\nRestore procedure validated by physical drill, 2026-09-30, on {past}.\n",
             encoding="utf-8",
         )
         assert violations(tmp_path) == []
+
+    def test_a_stable_version_claim_is_red_too(self, tmp_path: Path):
+        """The gap a suffixless tree exposed.
+
+        The first VERSION_TOKEN required an `alpha|beta` suffix, so on a tree whose plate is a plain
+        `0.1.0` a planted claim like `0.1.7` matched NOTHING and the gate reported clean — green over a
+        lie, which is the exact failure #640 is about. This cell builds a pre-release-free tree and
+        demands the red.
+        """
+        root = tmp_path / "stable"
+        root.mkdir(parents=True)
+        shutil_tree(root)
+        # A plate with no pre-release suffix, written as a shape rather than a literal so this file
+        # stays free of hardcoded plates (see TestGuardDoesNotCarryItsOwnDefect).
+        plate = re.sub(r"(alpha|beta|rc|dev)\d*$", "", dist_version())
+        (root / "packages" / "cli" / "pyproject.toml").write_text(
+            f'[project]\nname = "venya-cli"\nversion = "{plate}"\n', encoding="utf-8"
+        )
+        (root / "CHANGELOG.md").write_text(
+            f"# Changelog\n\n## [Unreleased]\n\n- x\n\n## [{plate}] - 2026-10-15\n\n- y\n", encoding="utf-8"
+        )
+        assert plate != dist_version(), "the tree under test already had a stable plate; pick another shape"
+        assert dist_version(root) == plate
+        assert violations(root) == [], f"a clean stable tree must read green: {violations(root)}"
+
+        lie = wrong_version(plate)
+        assert lie != plate, lie
+        (root / "SUPPORT.md").write_text(f"# Support\n\nThe current version is {lie}.\n", encoding="utf-8")
+        got = violations(root)
+        assert any("SUPPORT.md" in v and lie in v for v in got), f"stable-version claim slipped past: {got}"
+
+        # and the CHANGELOG head is compared on a stable plate too, not just a pre-release one
+        (root / "SUPPORT.md").unlink()
+        head_lie = wrong_version(plate)
+        (root / "CHANGELOG.md").write_text(
+            f"# Changelog\n\n## [Unreleased]\n\n- x\n\n## [{head_lie}] - 2026-11-01\n\n- y\n", encoding="utf-8"
+        )
+        got = violations(root)
+        assert any("CHANGELOG.md" in v for v in got), f"suffixless CHANGELOG head went unchecked: {got}"
 
 
 class TestBlindSpotIsRecorded:
@@ -248,16 +367,40 @@ class TestShippedTree:
 # --- fixture -----------------------------------------------------------------------------------
 
 
-def wrong_version(truth: str) -> str:
-    """A version token guaranteed to differ from `truth`, built from it.
+def _shift_last_number(truth: str, delta: int) -> str:
+    """Move the final numeric run of a version by `delta`, leaving the rest identical."""
+    m = re.search(r"(\d+)\s*$", truth)
+    if not m:
+        return ""
+    return truth[: m.start()] + str(int(m.group(1)) + delta)
 
-    Every planted lie in this file goes through here. A literal like `0.9.9beta9` happens to differ
-    from the plate on this branch and would not necessarily differ on another one, and a falsifier
-    that stops being false when the version moves is a falsifier that quietly stopped testing.
+
+def wrong_version(truth: str) -> str:
+    """A version token guaranteed to differ from `truth`, built from `truth`.
+
+    Every planted lie in this file goes through here. Two failure modes this closes:
+      * a literal like `0.9.9beta9` differs from the plate on one branch and might not on another, so a
+        "false claim" fixture can quietly stop being false when the version moves;
+      * `0.1.0` ends in a zero, so naively subtracting from it hands back the plate unchanged. The first
+        delta that produces a different string wins, and callers assert the inequality.
     """
-    if m := re.search(r"(\d+)$", truth):
-        return truth[: m.start()] + str(int(m.group(1)) + 7)
-    return truth + "-nope"
+    for delta in (7, 11, 3, 1):
+        cand = _shift_last_number(truth, delta)
+        if cand and cand != truth:
+            return cand
+    raise AssertionError(f"cannot derive a version differing from {truth!r}")
+
+
+def historical_version(truth: str) -> str:
+    """A token that reads like a PAST release and is not the current plate.
+
+    Same reason as `wrong_version`: the historical-note cell only distinguishes "claim" from "dated
+    record" if the token it plants differs from the plate on whichever tree runs it.
+    """
+    cand = _shift_last_number(truth, -3)
+    if cand and cand != truth:
+        return cand
+    return wrong_version(truth)
 
 
 def shutil_tree(root: Path) -> None:
