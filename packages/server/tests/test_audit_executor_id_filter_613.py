@@ -56,6 +56,14 @@ What each class here can prove, stated plainly:
 (house pattern, ``test_init_concurrent_admin_510.py``); on such a venue the matching half is
 UNVERIFIED, not green. Point the variable at a SCRATCH database — the class drops and recreates
 ``audit_events`` only; never point it at anything live.
+
+**Driver shape, because a wrong URL here is loud but misleading:** use the psycopg2 form the repo depends on
+(``packages/core/pyproject.toml`` → ``psycopg2-binary>=2.9.0``; nothing in ``uv.lock`` declares psycopg 3) —
+``postgresql+psycopg2://<user>@/<db>?host=<socket-dir>&port=<port>`` for a unix-socket cluster, or
+``postgresql+psycopg2://<user>:<pw>@127.0.0.1:5432/<db>`` for a TCP one. A ``postgresql+psycopg://`` (psycopg 3)
+URL neither skips nor passes: it raises ``ModuleNotFoundError`` inside the SQLAlchemy dialect and the three
+PostgreSQL cells go RED. Measured both ways on one tree against one fixture: psycopg2 → ``7 passed``;
+psycopg3 → ``3 failed, 4 passed``. That red is a venue wiring error, not a product result.
 """
 
 import json
