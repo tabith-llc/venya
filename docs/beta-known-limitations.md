@@ -399,7 +399,7 @@ as they are renewed — one re-mint per affected credential, not a fleet-wide ac
 
 ### The root certificate authority expires on a fixed day, ten years out, and nothing warns before it
 
-Status: known limitation in beta · Target: no date set · Tracked as: `features/root-ca-ten-year-expiry-alarm-and-reroot.md` (s132 filing; no GitLab row — capability item, defects-only board)
+Status: known limitation in beta · Target: no date set · Tracked as: `features/root-ca-ten-year-expiry-alarm-and-reroot.md` (s132 filing — warn-before-expiry and rotate-in-place, a capability item on a defects-only board, so it correctly has no GitLab row) · and GitLab **#661** (`root-ca-validity-duplicated-installer-literal-vs-constant`, `severity/medium`), which is the one *shipped* defect in this area: the same lifetime number is written at four mint sites with no interlock
 
 **Who is affected:** every deployment, on a day that is set the moment the certificate authority
 is first minted. It is not an edge case and it is not rare — it is only far away, and it is the
@@ -440,9 +440,13 @@ Plan against your own install date, not against any date written here.
 **What changes at beta+:** the capability filing now exists —
 `features/root-ca-ten-year-expiry-alarm-and-reroot.md` carries the alarm and the rotate-before-the-date
 expectation, with four owner decisions left unruled and no target date. **No GitLab issue row was created for
-it, and none is owed**: the board takes defects only, and a decade-horizon maintenance gap is a capability item.
-The limit is still disclosed on this page rather than left to the filing alone, so the day is not discovered
-by a partner first.
+that alarm capability, and none is owed**: the board takes defects only, and a decade-horizon maintenance gap is a
+capability item. One adjacent thing *does* have a row, and it is not this limitation: GitLab **#661**
+(`root-ca-validity-duplicated-installer-literal-vs-constant`) tracks the lifetime value being duplicated across
+mint sites with no interlock, so changing the constant moves some roots and not others. The two are different
+questions — #661 is about which value a mint uses today, this entry is about nobody warning you a decade out —
+and closing #661 does not retire this limitation. The limit is still disclosed on this page rather than left to the
+filing alone, so the day is not discovered by a partner first.
 
 ### Two paths still handle private key material without a passphrase
 
