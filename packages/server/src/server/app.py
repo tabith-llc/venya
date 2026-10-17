@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from . import revocation_snapshot
 from .config import CASecurityConfig, ServerConfig
+from .revocation_read import configure_lock_timeout
 
 logger = logging.getLogger("venya.server")
 
@@ -132,6 +133,26 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     # _validation_error_handler) — a surrogate-bearing argv must surface as a
     # clean 422, never as a 500 from the error responder itself.
     app.add_exception_handler(RequestValidationError, _validation_error_handler)
+
+    # #603 AC1: the ONE refusal arm for a bounded revocation read that could not answer. Every
+    # request-path site funnels through `executor_revocation_state` (or the two direct CRL /
+    # rotation reads), and without this handler a `RevocationReadUnavailable` would escape as an
+    # unlabeled 500 — the #551 defect class (an HTTP-shaped fault that unwinds the caller) in
+    # new clothes. It answers the shipped stale-class 503 with the ONE imported sentence, so ops
+    # read "the revocation plane is unavailable", never "this credential is revoked", and the
+    # daemon's tri-state counts it as UNREACHABLE rather than as an all-clear. It is registered
+    # beside the validation handler rather than per-route, because a refusal arm that has to be
+    # remembered at fourteen sites is a refusal arm that will be missing at one.
+    from .revocation_read import REVOCATION_UNAVAILABLE_DETAIL as _READ_UNAVAILABLE_DETAIL
+    from .revocation_read import RevocationReadUnavailable as _ReadUnavailable
+
+    # `_request` is typed `Any` to match the shipped handler beside it at :26 — `Request` is
+    # not imported at module scope in this file, and a second handler must not add an import
+    # just to name a parameter it never reads.
+    async def _revocation_read_unavailable_handler(_request: Any, _exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": _READ_UNAVAILABLE_DETAIL})
+
+    app.add_exception_handler(_ReadUnavailable, _revocation_read_unavailable_handler)
 
     # Register routes at creation time (needed for OpenAPI docs)
     from .routes import (
@@ -412,6 +433,12 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         except Exception:
             logger.exception("Failed to load admin CA PEM bundle from %s", config.admin_mtls.ca_cert)
             raise
+
+    # #603 AC1: install the bounded revocation-read deadline from config BEFORE the first
+    # request can be served, so a stalled lock wait is bounded from the very first beat. The
+    # matcher reads one module-level value (it is reached from fourteen sites, most with no
+    # Request in hand), and this is the single place that value is set.
+    configure_lock_timeout(getattr(config.crl, "revocation_read_lock_timeout_ms", None))
 
     # Periodic session cleanup
     from .maintenance import run_maintenance

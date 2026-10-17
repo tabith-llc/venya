@@ -144,6 +144,20 @@ class CRLConfig(BaseModel):
         default=None,
         description="CRL Distribution Point URL for CDP extension (e.g., https://crl.venya.internal/api/v1/executors/certs/crl)",
     )
+    revocation_read_lock_timeout_ms: int = Field(
+        default=300,
+        ge=1,
+        le=30000,
+        description=(
+            "#603 AC1 bounded-time revocation read: max milliseconds a request-path read of the "
+            "lockable revocation population will WAIT on a table lock before the read is refused "
+            "in the shipped stale class (503, 'no revocation asserted'). Bounds the LOCK WAIT, not "
+            "a slow scan — statement_timeout stays as it ships and is not this knob. A read that "
+            "refuses is an availability fault, never an all-clear and never a revocation. "
+            "Uncontended baseline measured 29 ms; 300 ms is ~10x headroom. Env override: "
+            "VENYA_CRL__REVOCATION_READ_LOCK_TIMEOUT_MS. (refs #603)"
+        ),
+    )
 
 
 class CASecurityConfig(BaseModel):

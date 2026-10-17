@@ -33,6 +33,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import JSONResponse, Response
 
 from ..ca import PLANE_MACHINE, parse_plane_marker
+from ..revocation_read import REVOCATION_UNAVAILABLE_DETAIL, RevocationReadUnavailable, for_site
 
 logger = logging.getLogger("venya.server")
 
@@ -728,6 +729,22 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 )
         return response
 
+    @staticmethod
+    def _revocation_site(path: str) -> str:
+        """Stable metric/log label for which executor path asked (#603 AC1).
+
+        A fixed vocabulary of known paths, never a raw caller-supplied string: the label lands
+        on a Prometheus label, and a path with an attacker-controlled segment would make that
+        label unbounded. Unknown executor-session paths collapse to one name.
+        """
+        if path == "/api/v1/heartbeat":
+            return "heartbeat"
+        if path == "/api/v1/audit/ingest":
+            return "audit-ingest"
+        if path.startswith("/api/v1/sessions/"):
+            return "executor-session"
+        return "executor-mtls"
+
     async def _validate_executor_mtls(self, request: Request, reject_revoked: bool = True) -> JSONResponse | None:
         """Validate executor mTLS identity for executor session paths.
 
@@ -830,7 +847,28 @@ class SessionMiddleware(BaseHTTPMiddleware):
                 )
 
             presented_serial = canonical_serial(cert.serial_number)
-            rev = executor_revocation_state(db, executor_id, presented_serial=presented_serial, executor_row=row)
+            # #603 AC1: this is the read that a held ACCESS EXCLUSIVE lock on
+            # executor_cert_revocations parks, and it runs inside `async def dispatch`, so on
+            # the single-worker core one stalled beat froze the whole loop (measured: 57 s with
+            # zero access-log lines; poll/health/ready all 000). The read now carries a bounded
+            # lock deadline and, when it cannot answer in time, is REFUSED here in the shipped
+            # stale class — a 503 that names the LIST STATE and never a revocation. Not a 403:
+            # `_PERMANENT_REGISTER_STATUSES` (daemon.py:319) treats 403 as permanent rejection,
+            # so a capacity fault wearing 403 would read to the executor as a revocation that
+            # never happened. Not a 500 either: ops must be able to tell "authz unavailable"
+            # from an internal bug, and the refusal is counted cumulatively at
+            # `venya_revocation_read_refusals_total{site=…}`.
+            try:
+                with for_site(self._revocation_site(path)):
+                    rev = executor_revocation_state(
+                        db, executor_id, presented_serial=presented_serial, executor_row=row
+                    )
+            except RevocationReadUnavailable as e:
+                logger.warning("Executor session path %s: revocation read unavailable — refusing: %s", path, e)
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={"detail": REVOCATION_UNAVAILABLE_DETAIL},
+                )
             if rev.revoked:
                 if reject_revoked:
                     logger.warning(
