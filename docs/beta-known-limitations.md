@@ -399,8 +399,7 @@ as they are renewed — one re-mint per affected credential, not a fleet-wide ac
 
 ### The root certificate authority expires on a fixed day, ten years out, and nothing warns before it
 
-Status: known limitation in beta · Target: no date set · Tracked as: **no row exists** — see the
-filing note at the end of this entry
+Status: known limitation in beta · Target: no date set · Tracked as: `features/root-ca-ten-year-expiry-alarm-and-reroot.md` (s132 filing; no GitLab row — capability item, defects-only board)
 
 **Who is affected:** every deployment, on a day that is set the moment the certificate authority
 is first minted. It is not an edge case and it is not rare — it is only far away, and it is the
@@ -438,11 +437,12 @@ it. The retirement path is the certificate-authority rotation in
 so it is a scheduled maintenance event, not something to reach for on the afternoon the root dies.
 Plan against your own install date, not against any date written here.
 
-**What changes at beta+:** this entry is filed against **no tracked row** — no issue covers the
-root's own expiry day, and there is no alarm row for it. A filing is owed for a root-CA expiry
-alarm and for a documented rotate-before-the-date expectation. This page does not invent an issue
-number for either; it discloses the limit here so the day is not discovered alone, and the entry
-is replaced by a row reference the moment one exists.
+**What changes at beta+:** the capability filing now exists —
+`features/root-ca-ten-year-expiry-alarm-and-reroot.md` carries the alarm and the rotate-before-the-date
+expectation, with four owner decisions left unruled and no target date. **No GitLab issue row was created for
+it, and none is owed**: the board takes defects only, and a decade-horizon maintenance gap is a capability item.
+The limit is still disclosed on this page rather than left to the filing alone, so the day is not discovered
+by a partner first.
 
 ### Two paths still handle private key material without a passphrase
 
