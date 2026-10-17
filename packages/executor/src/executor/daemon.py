@@ -2389,6 +2389,42 @@ def _daemonize_detach() -> None:
         os.close(devnull_fd)
 
 
+# #647: the shipped ``--log-level`` surface as ONE constant, so the flag and the carriers
+# below it cannot advertise different sets of names. The keys are the exact lowercase
+# spellings argparse's ``choices`` has always taken, and ``choices=list(_LOG_LEVELS)`` keeps
+# the two from drifting apart.
+_LOG_LEVELS: dict[str, int] = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
+
+#: The level this daemon runs at when a carrier names one it cannot use. Deliberately the
+#: same value ``ExecutorConfig.log_level`` defaults to in ``config.py``, so "the built-in
+#: default" means one thing across the planes. A cell pins the two against each other.
+LOG_LEVEL_DEFAULT = "info"
+
+
+def resolve_log_level(name: str) -> int | None:
+    """Map a configured ``log_level`` name onto a ``logging`` level; None if unusable (#647).
+
+    This guard exists because #647 makes the config-file and environment spellings REACH the
+    logger for the first time. Before it the only value that ever got here was argparse's
+    own, already constrained by ``choices``, so an unusable name written into
+    ``/etc/venya/executor.toml`` was discarded unread and never had to be checked. Honouring
+    the file inherits the duty to say what happens when the file is wrong.
+
+    None, rather than a raise, for the same reason: the caller turns it into a WARNING, and
+    ``venya-executor.service`` carries ``Restart=always`` — raising here would park a whole
+    executor in failed state over a typo in a verbosity knob. Case is NOT folded, because the
+    flag refuses ``DEBUG`` today and a carrier that accepted it would make one plane more
+    permissive than another, which is how a written value stops working the moment somebody
+    moves it.
+    """
+    return _LOG_LEVELS.get(name)
+
+
 def _log_precedence_conflicts(config: ExecutorConfig) -> None:
     """Announce every file-versus-environment conflict once, at start (#598).
 
@@ -2401,6 +2437,30 @@ def _log_precedence_conflicts(config: ExecutorConfig) -> None:
     """
     for note in config.precedence_conflict_notes():
         logger.warning("Config precedence: %s", note)
+
+
+def _log_cli_level_override(config: ExecutorConfig) -> None:
+    """Name the winner the #598 note cannot see, for the one key that has a flag (#647 AC3).
+
+    ``precedence_conflicts`` reports a file-versus-environment contest and states that the
+    file won. It is computed in ``ExecutorConfig.from_file``, where the command line does not
+    exist — so when an operator ALSO passed ``--log-level``, that note names a value this
+    daemon does not run, which is the same false operator-facing statement #598 was opened
+    for, one plane up. Correcting it at its source means editing ``config.py``'s template and
+    the cells that pin it, outside this leg's fence, so ``main()`` qualifies the note here,
+    after it, where the flag is actually known.
+
+    It fires only when a ``log_level`` note was really emitted above. If nothing claimed a
+    winner for this key there is nothing to correct, and announcing a contest nobody entered
+    is the noise #598's agreement rule already refuses.
+    """
+    if not any(note.startswith("log_level:") for note in config.precedence_conflict_notes()):
+        return
+    logger.warning(
+        "Config precedence: log_level: --log-level was also given on the command line, so the flag "
+        "value is in use and neither the file value nor the environment spelling named above is — "
+        "flag > file > env > default (#647)"
+    )
 
 
 def main() -> None:
@@ -2426,9 +2486,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--log-level",
-        choices=["debug", "info", "warning", "error"],
-        default="info",
-        help="Logging level",
+        choices=list(_LOG_LEVELS),
+        # #647: ``None`` means "the operator did not ask", and only that value does. The old
+        # ``default="info"`` left this attribute populated on EVERY start, so the override
+        # below overwrote the config file with a built-in default nobody passed — and the
+        # default is the LAST plane, not a CLI choice. argparse does not check a default
+        # against ``choices``, so a value that IS passed is guarded exactly as strictly as it
+        # was; nothing about the flag's own door widened.
+        default=None,
+        help=f"Logging level (default: the value in the config file, else {LOG_LEVEL_DEFAULT})",
     )
     args = parser.parse_args()
 
@@ -2440,26 +2506,62 @@ def main() -> None:
         print("Using defaults (may not work without server connection)", file=sys.stderr)
         config = ExecutorConfig()
 
-    # Apply CLI overrides
-    config.log_level = args.log_level
+    # Apply CLI overrides — only the layer the operator actually asked for. #647: this
+    # assignment used to be unconditional, which is the line that made argparse's default
+    # outrank the config file a moment after the file was read. ``--daemonize`` below already
+    # had the guarded shape (a store_true is only true when passed), so the guard is the
+    # house form on this very block, not a new invention. The name is kept because both the
+    # logger and the precedence qualifier below need to know whether the flag was given.
+    cli_log_level = args.log_level
+    if cli_log_level is not None:
+        config.log_level = cli_log_level
     if args.daemonize:
         config.daemonize = True
 
     # Setup logging
     from core.utils.sensitive_log import RedactingFormatter
 
+    # #647: the level is read from the RESOLVED config, not from the argparse namespace — the
+    # value the daemon carries and the value the logger runs must be the same one, and a cell
+    # that asserted only on ``config.log_level`` would pass green while the logger still read
+    # ``args``. An unusable name falls back to the built-in default, says so below (once
+    # ``basicConfig`` exists to carry the line through the journal's real formatter), and the
+    # config the daemon is handed is corrected to match, so nothing downstream reads a name
+    # that is not what is running.
+    level_name = config.log_level
+    log_level = resolve_log_level(level_name)
+    unusable_level = log_level is None
+    if unusable_level:
+        log_level = _LOG_LEVELS[LOG_LEVEL_DEFAULT]
+        config.log_level = LOG_LEVEL_DEFAULT
+
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper()),
+        level=log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     for handler in logging.root.handlers:
         handler.setFormatter(RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+
+    if unusable_level:
+        logger.warning(
+            "log_level: %r is not a level this daemon can use, so it runs at %s instead — accepted "
+            "names are %s, lowercase, whether the name came from --log-level, the config file, or "
+            "VENYA_EXECUTOR_LOG_LEVEL (#647)",
+            level_name,
+            LOG_LEVEL_DEFAULT,
+            ", ".join(_LOG_LEVELS),
+        )
 
     # #598: say it once, loudly, before any work is done. An operator who set a key in the
     # environment while the installer wrote the same key into the file is not making a
     # mistake — it is the ruled order — but it was invisible, and an operator who believes
     # the env spelling took effect is running a configuration they did not choose.
     _log_precedence_conflicts(config)
+
+    # #647 AC3: only when the flag supplied a value, and only if a note above claimed a
+    # winner for this key. This is the plane the note's own source cannot see.
+    if cli_log_level is not None:
+        _log_cli_level_override(config)
 
     # Create and start daemon
     daemon = ExecutorDaemon(config)
