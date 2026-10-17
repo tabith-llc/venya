@@ -10,6 +10,67 @@ from cryptography.hazmat.primitives.asymmetric import ec as _ec
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.x509.oid import NameOID
 
+# --- #650: the PostgreSQL test door's pre-flight -------------------------------------------------
+#
+# One shared implementation, in ``scripts/pg_door_preflight.py``, wired here and in
+# ``packages/core/tests/conftest.py`` — the alternative was two copies of the cause table, which is
+# the split-brain shape this plane keeps booking. Added on the lead's ruling
+# (`wren-650-conftest-ruling-flash1-s134`), which also set the condition this wiring is held to: it
+# is ADDITIVE. It registers no fixture, shadows none, and re-orders nothing — the existing
+# ``_executor_ids_resolvable`` autouse fixture below is untouched and keeps running exactly as it
+# did, and the two hooks here (``pytest_report_header``, ``pytest_runtest_setup``) are the only
+# thing this block contributes to collection. Core's report carries the collected-count proof that
+# the same claim needed there.
+#
+# WHY IT BINDS HERE: a leg that sets the door variable is asking for the PostgreSQL cells to run.
+# When the host cannot give them, the suite used to answer with psycopg2's "Is the server running
+# on that host…" — a red product cell whose actual cause was a full tmpfs, and indistinguishable
+# from a fixture nobody started. The pre-flight reads the door, names the cause, prints the number.
+
+
+def _load_pg_door_preflight():
+    """Load the shared pre-flight by path, the way core's baseline interlock loads its guard.
+
+    A missing file aborts the session rather than passing quietly: a pre-flight that cannot run must
+    never present as a clean run — that is the silence #650 exists to end, one layer down.
+    """
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[3] / "scripts" / "pg_door_preflight.py"
+    if not script.is_file():
+        pytest.exit(
+            f"pg-door-pre-flight CANNOT RUN: {script} is missing, so no door check is in force in "
+            "this package. Restore it before trusting any PostgreSQL-gated result here.",
+            returncode=1,
+        )
+    spec = importlib.util.spec_from_file_location("pg_door_preflight_server", script)
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec: the module declares a @dataclass, which resolves its owning module
+    # through sys.modules at class-creation time. Without this line the import dies on
+    # "'NoneType' object has no attribute '__dict__'" and takes collection with it.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_pg_door_preflight = _load_pg_door_preflight()
+
+
+def pytest_report_header(config) -> list[str]:
+    """State what the pre-flight found, on every run — #650 AC1 wants it where it binds."""
+    return [_pg_door_preflight.door_report_header(config)]
+
+
+def pytest_runtest_setup(item) -> None:
+    """Abort a door-gated cell loudly when the door was requested and this host cannot answer it.
+
+    A no-op for every other cell, and a no-op for gated cells when the door is healthy or not asked
+    for — that is the paired negative the row is half made of.
+    """
+    _pg_door_preflight.abort_unusable_door(item)
+
 
 @pytest.fixture(autouse=True)
 def _executor_ids_resolvable(monkeypatch):
