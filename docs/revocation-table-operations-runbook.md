@@ -88,7 +88,7 @@ Order of preference. Every step is idempotent-safe and reversible.
    refused during it, on the core host itself (§6 names the endpoint):
 
    ```bash
-   curl -s http://127.0.0.1:9091/metrics | grep '^venya_revocation_read_refusals_total'
+   curl -s http://127.0.0.1:10011/metrics | grep '^venya_revocation_read_refusals_total'
    ```
 
 ## 4. Alembic migrations — the specific rule this repo needs
@@ -168,8 +168,8 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
   causes, distinguishable — and a Counter, never a gauge, because the question an operator asks
   afterwards is how much was lost, not only whether something is losing right now. Read it from
   the scrape endpoint, which is loopback-only and open by default on an installed core
-  (`Environment=VENYA_METRICS_PORT=9091` in the shipped unit; #653):
-  `curl -s http://127.0.0.1:9091/metrics`, run **on the core** — the endpoint binds `127.0.0.1` only
+  (`Environment=VENYA_METRICS_PORT=10011` in the shipped unit; #653):
+  `curl -s http://127.0.0.1:10011/metrics`, run **on the core** — the endpoint binds `127.0.0.1` only
   and is plain unauthenticated HTTP, so a remote Prometheus reads it through a collector on that
   host rather than over the network. The port, the override procedure, and the listens are in
   [deployment-config.md](deployment-config.md) and [FIREWALL.md](FIREWALL.md). Before #653 landed
