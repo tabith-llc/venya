@@ -13,10 +13,6 @@ Secrets are written to host tmpfs (/dev/shm) and injected into
 the sandbox over stdin (`sbx exec -i ... tee`) so the in-sandbox
 file is owned by the secret-reading user. Network access is
 restricted via `sbx policy allow/deny` rules.
-
-For HTTP-based API keys, `sbx secret set` can be used to have
-the proxy inject credentials into HTTP headers — the raw value
-never enters the VM.
 """
 
 import logging
@@ -1158,27 +1154,3 @@ class SbxStrategy(InjectionStrategy):
             self._workspace_dir = None
 
         return rc
-
-    def store_http_secret(self, secret_id: str, value: str) -> None:
-        """Store an HTTP API key in sbx's proxy for header injection.
-
-        The secret is injected into outbound HTTP requests by the
-        host-side proxy. The raw value NEVER enters the sandbox VM.
-
-        Args:
-            secret_id: Service name (e.g., "openai", "github").
-            value: The API key value.
-        """
-        # Write value to stdin for non-interactive storage
-        result = subprocess.run(  # nosec
-            ["sbx", "secret", "set", secret_id],
-            input=value,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to store HTTP secret {secret_id}: {result.stderr}")
-
-        logger.info("Injected HTTP secret via proxy (never enters VM): %s", secret_id)
