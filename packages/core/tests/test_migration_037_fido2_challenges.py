@@ -104,7 +104,9 @@ def test_chain_is_linear_with_one_head():
     # pin the CURRENT head deliberately: adding a migration must make a seat
     # advance this line on purpose — the invariant (one head, no forks) is
     # what the cell guards, the identifier is the acknowledgement.
-    assert heads == ["039"], f"expected exactly one head (039), got {heads}"
+    # head history: 037 -> 038 (attestation store) -> 039 (#591 cascade parity)
+    # -> 040 (#597 core relay credential registry).
+    assert heads == ["040"], f"expected exactly one head (040), got {heads}"
 
     # walk back from the head: everything reachable, no cycle
     seen = set()
