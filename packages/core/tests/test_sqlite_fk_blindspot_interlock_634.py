@@ -56,12 +56,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 
 #: Files that build a sqlite engine and do NOT install ``PRAGMA foreign_keys=ON``, **generated from the
-#: scanner at ``dev 492fe4e`` BEFORE tranche 1 (66 entries) — not hand-typed** (the first draft of this list
+#: scanner at ``dev 492fe4e`` BEFORE tranche 1 (66 entries); tranche 1 cleared one, so this list is 65 from that commit forward — not hand-typed** (the first draft of this list
 #: was hand-written and the guard immediately caught three wrong paths and two files that do install
 #: enforcement, which is the argument for generating it). Shrinks one file per tranche;
 #: must never grow.
 #:
-#: # shortcut: 66 grandfathered blind engine-builders remain, upgrade one per tranche; tranches after
+#: # shortcut: 65 grandfathered blind engine-builders remain, upgrade one per tranche; tranches after
 #: tranche 1 are gated on flash1/#645, ultra/#612-594 and flash3/#649 clearing the shared test surface,
 #: per the lead's s134 ruling (wave30-specs-20261017/wren-634-ruling-flash2-s134.md §1).
 #: Re-derive with: ``uv run -p 3.14 python -c "import importlib.util; ..."`` — see §Regenerating this
@@ -110,7 +110,6 @@ BASELINE: frozenset[str] = frozenset(
         "packages/server/tests/test_enroll_label_width_518.py",
         "packages/server/tests/test_enrollment_used_at_462.py",
         "packages/server/tests/test_execute_session_replay_513.py",
-        "packages/server/tests/test_executor_revocation_identity.py",
         "packages/server/tests/test_fail_open_elevation_442.py",
         "packages/server/tests/test_fido2_attestation_store_leg1.py",
         "packages/server/tests/test_fido2_manager.py",

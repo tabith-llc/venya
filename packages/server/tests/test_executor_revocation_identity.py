@@ -28,6 +28,23 @@ Ticket executor-revocation-by-identity, user rulings 2026-09-20 (hybrid):
 Real SQLite (precedent: test_secrets/test_init) — multi-table state
 (Executor, ExecutorCert, ExecutorCertRevocation, tokens, roles) is the
 subject under test; mock DBs would pin the mocks, not the semantics.
+
+#634 TRANCHE 1 — this file is the engine-builder that had the largest blind surface on the board: 40
+cells went red the moment `PRAGMA foreign_keys=ON` was installed, every one of them the same
+`INSERT INTO executor_certs` whose parent `users.user_id` had never been seeded. Two things follow, and
+both are in this file now:
+
+1. **The engine enforces.** `env` attaches the shipped connect-listener shape
+   (`test_secret_delete_fk.py:56-61`), so the declared `executor_certs.executor_id -> users.user_id`
+   constraint is actually consulted instead of merely present in the DDL.
+2. **The seeds are honest.** A cert row now cannot exist without the machine identity it points at —
+   which is exactly what production does at registration (`routes/executors.py:1090`,
+   `User(user_id=…, auth_mode="mtls", status="active")`). The seeds were not made to pass by deleting
+   the constraint or the assertion; they were made to pass by supplying the parent, which is the
+   failure mode #634 exists to close.
+
+`TestEnforcementIsLive` at the bottom of this file is the AC2 paired negative: it proves the
+enforcement is what refuses, and that the refusal is not an unrelated constraint or a mock.
 """
 
 import hashlib
@@ -60,7 +77,7 @@ from server.dependencies import get_backend, get_current_user, require_admin
 from server.revocation import executor_revocation_state
 from server.routes import admin as admin_routes
 from server.routes import executors as executors_routes
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 PEPPER = "test-pepper-12345"
@@ -113,8 +130,21 @@ def _make_mock_ca(real_manager=None):
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
-    """Real-SQLite app environment: routes wired, auth overridden, roles seeded."""
+    """Real-SQLite app environment: routes wired, auth overridden, roles seeded.
+
+    #634: this engine ENFORCES foreign keys. Before tranche 1 it was built with no
+    ``PRAGMA foreign_keys`` listener, so SQLite consulted the declared constraints never and 40
+    cells here were inserting ``executor_certs`` rows whose ``users.user_id`` parent did not exist.
+    """
     engine = create_engine(f"sqlite:///{tmp_path / 'rev.db'}")
+
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_conn, _rec):
+        # Shipped shape, copied from the file that already does this (test_secret_delete_fk.py:56-61).
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine)
 
@@ -185,7 +215,33 @@ def env(tmp_path, monkeypatch):
     engine.dispose()
 
 
+def _seed_machine_identity(SessionLocal, executor_id="exec-a"):
+    """Create the parent `users` row an executor credential points at, as registration does.
+
+    #634: `executor_certs.executor_id` is `ForeignKey("users.user_id", ondelete="CASCADE")`, and with
+    enforcement installed a cert row cannot exist without it. Production creates that identity during
+    registration (`routes/executors.py:1084-1094`: `auth_mode="mtls"`, and `status="active"` because
+    there is no WebAuthn ceremony for an mTLS machine identity to wait on), so the seed says the same
+    thing rather than inventing a shape that only a test would accept.
+    """
+    s = SessionLocal()
+    # Look it up by user_id, NOT by s.get(User, executor_id): `id` is the integer primary key here and
+    # `user_id` is the unique natural key, so a get() by that name silently misses and double-inserts.
+    if s.query(User).filter_by(user_id=executor_id).first() is None:
+        s.add(
+            User(
+                user_id=executor_id,
+                auth_mode="mtls",
+                status="active",
+                enrolled_at=datetime.now(UTC),
+            )
+        )
+        s.commit()
+    s.close()
+
+
 def _seed_executor(SessionLocal, executor_id="exec-a", revoked_at=None, enrolled=True):
+    _seed_machine_identity(SessionLocal, executor_id)
     s = SessionLocal()
     s.add(
         Executor(
@@ -201,6 +257,9 @@ def _seed_executor(SessionLocal, executor_id="exec-a", revoked_at=None, enrolled
 
 
 def _seed_cert(SessionLocal, executor_id="exec-a", serial="0000000000001000"):
+    # #634: the parent first. Every one of this file's 40 FK violations was an executor_certs row
+    # inserted with no users row behind it.
+    _seed_machine_identity(SessionLocal, executor_id)
     s = SessionLocal()
     s.add(
         ExecutorCert(
@@ -1003,3 +1062,106 @@ class TestIncumbentExemption:
         _seed_cert(SessionLocal, serial="0000000000001000")
         resp = _register(client, headers=_foreign_ca_headers(client.app, "0000000000001000"))
         assert resp.status_code == 400
+
+
+class TestEnforcementIsLive:
+    """#634 AC2 — the paired negative that makes tranche 1 a fix instead of a decoration.
+
+    The row's load-bearing criterion is not "add the pragma", it is "show a cell that FAILS if the
+    pragma were silently off". A file can carry a listener nobody's engine uses, or a cell that refuses
+    for a reason that has nothing to do with foreign keys (a NOT NULL, a unique index, a mock). Both
+    read green forever. These cells are written so that cannot happen here: the SAME insert is made
+    against two engines differing in exactly one line — the listener — and the outcomes must differ.
+
+    Re-runnable proof of the dependency, from a clean tree::
+
+        # enforcement installed (this file as committed): 40 cells green, the orphan refused
+        # delete the 3-line listener from `env` and re-run:  the 40 come back RED
+
+    That second command is the mutation #634 exists to make expensive, and it is what the interlock in
+    ``packages/core/tests/test_sqlite_fk_blindspot_interlock_634.py`` now holds shut.
+    """
+
+    def test_the_declared_constraint_actually_refuses_an_orphan_row(self, env):
+        """POSITIVE: an executor_certs row with no parent users row is REFUSED.
+
+        Asserted on the real exception the constraint produces, not on a broad ``except``: SQLAlchemy
+        wraps the sqlite driver error, and the driver names the class ("FOREIGN KEY constraint failed").
+        If enforcement were off this insert would silently succeed and the cell would fail here, not
+        somewhere friendlier.
+        """
+        _client, SessionLocal = env
+        from sqlalchemy.exc import IntegrityError
+
+        s = SessionLocal()
+        with pytest.raises(IntegrityError) as excinfo:
+            s.add(
+                ExecutorCert(
+                    executor_id="exec-never-registered",  # no users.user_id by this name exists
+                    serial_number="000000000000dead",
+                    not_before=datetime.now(UTC),
+                    not_after=datetime.now(UTC) + timedelta(days=30),
+                    fingerprint="AA:BB:CC",
+                )
+            )
+            s.commit()
+        assert "FOREIGN KEY constraint failed" in str(excinfo.value), str(excinfo.value)
+        s.rollback()
+        s.close()
+
+    def test_the_same_insert_is_accepted_when_the_pragma_is_off(self, tmp_path):
+        """NEGATIVE: same DDL, same row, no listener — and it is ACCEPTED. This is the dependency proof.
+
+        Without this half the positive cell could be passing on an unrelated constraint and the row
+        would re-create its own defect while looking fixed. The only difference between the two engines
+        is the three-line ``PRAGMA foreign_keys=ON`` listener.
+        """
+        blind_engine = create_engine(f"sqlite:///{tmp_path / 'blind.db'}")
+        Base.metadata.create_all(blind_engine)
+        BlindLocal = sessionmaker(bind=blind_engine)
+
+        s = BlindLocal()
+        s.add(
+            ExecutorCert(
+                executor_id="exec-never-registered",
+                serial_number="000000000000dead",
+                not_before=datetime.now(UTC),
+                not_after=datetime.now(UTC) + timedelta(days=30),
+                fingerprint="AA:BB:CC",
+            )
+        )
+        s.commit()  # must NOT raise: the constraint is declared and not consulted
+        assert (
+            s.query(ExecutorCert).filter_by(executor_id="exec-never-registered").first() is not None
+        ), "a blind engine accepted nothing — the negative half is not exercising what it claims"
+        s.close()
+        blind_engine.dispose()
+
+    def test_the_enforced_engine_is_the_one_the_fixture_hands_out(self, env):
+        """Third leg of the triangle: the pragma is live ON the fixture's own connection.
+
+        Proving the two outcomes differ is not quite proving THIS engine is the enforcing one — an
+        inherited global listener would also do it. So read the pragma back off the live connection and
+        assert the value, the same way the shipped factory-policy file reads it.
+        """
+        _client, SessionLocal = env
+        s = SessionLocal()
+        row = s.exec_driver_sql("PRAGMA foreign_keys").first() if hasattr(s, "exec_driver_sql") else None
+        if row is None:  # a ORM Session exposes the connectable, not the driver cursor
+            row = s.connection().exec_driver_sql("PRAGMA foreign_keys").first()
+        assert row is not None and int(row[0]) == 1, f"PRAGMA foreign_keys reads {row!r} on the fixture engine"
+        s.close()
+
+    def test_seeding_a_cert_still_works_because_the_parent_is_created(self, env):
+        """Guard on the fix itself: the 40 cells went green by ADDING the parent, not by dropping rows.
+
+        If a later seat "fixes" a red here by removing the seed or skipping the assert, this cell is
+        the one that says the FK is satisfied by real state.
+        """
+        _client, SessionLocal = env
+        _seed_executor(SessionLocal, executor_id="exec-a")
+        _seed_cert(SessionLocal, executor_id="exec-a", serial="0000000000001000")
+        s = SessionLocal()
+        assert s.query(ExecutorCert).filter_by(executor_id="exec-a").count() == 1
+        assert s.query(User).filter_by(user_id="exec-a").first() is not None, "the cert has no machine identity"
+        s.close()
