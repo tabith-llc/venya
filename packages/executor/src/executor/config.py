@@ -148,8 +148,14 @@ class CertificateRotationConfig(BaseModel):
     )
     max_revocation_failures: int = Field(
         default=3,
+        ge=1,
+        le=1000,
         description="Consecutive revocation check failures with no answer before the executor stops "
-        "service (a fault, not a revocation: the core has neither confirmed nor revoked the credential)",
+        "service (a fault, not a revocation: the core has neither confirmed nor revoked the credential). "
+        "Valid range 1-1000: below 1 the executor would stop before any answer arrived, because the "
+        "daemon's threshold test is >= against a counter that starts at 0; above 1000 the outage stop "
+        "the #442 posture depends on stops meaning anything (1000 ticks at the 30 s beat is ~8.3 hours "
+        "of unanswered revocation questions). Out of range refuses at load, it is never clamped.",
     )
 
 

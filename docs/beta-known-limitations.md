@@ -167,7 +167,7 @@ refuses a revoked EXECUTOR serial per request, on the inbound plane, in
 `packages/server/src/server/middleware/auth.py:863`). Second, the executor daemon stops
 cooperatively on a bounded outage rather than serving on an unanswered question —
 `max_revocation_failures`, default 3
-(`packages/executor/src/executor/config.py:149-152`), fed at
+(`packages/executor/src/executor/config.py`, `CertificateRotationConfig.max_revocation_failures`), fed at
 `packages/executor/src/executor/daemon.py:2148`. Neither of those is peer revocation at `:8443`
 and neither is claimed as such here; they are the controls that exist while #597 is open.
 
