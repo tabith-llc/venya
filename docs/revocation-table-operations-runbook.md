@@ -156,8 +156,19 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
   permanent rejection) and never an "all clear".
 - The refusal is counted, cumulatively, per site: `venya_revocation_read_refusals_total{site=…}`.
   The log line is latched to one per process; **the counter is the alerting surface** — alert on
-  its rate, not on the log. Read it from the scrape endpoint, which is loopback-only and open by
-  default on an installed core (`Environment=VENYA_METRICS_PORT=10011` in the shipped unit; #653):
+  its rate, not on the log. **That sentence is now true of both arms of the shipped 503 (#657):**
+  before it, only the lock-deadline arm counted, and the stale-snapshot arm — what a starved pool
+  or a dead publisher actually produces — raised the same refusal with no increment at all. Read
+  the `site` label to tell the causes apart. A lock-deadline refusal carries the path that asked
+  (`heartbeat`, `crl`, `dial/execute`, `admin/list-executors`, `register/…`, `audit-ingest`,
+  `executor-session`, `executor-mtls`); a snapshot-stale refusal carries
+  **`site="poll/revocation-list"`**. A rate climbing on that label is not a DDL convoy — it is the
+  publisher or the pool, so escalate on §5 and §7 (look for the publisher's own exit line in
+  `journalctl -u venya-core`) instead of hunting for a held lock. One series, one alert rule, two
+  causes, distinguishable — and a Counter, never a gauge, because the question an operator asks
+  afterwards is how much was lost, not only whether something is losing right now. Read it from
+  the scrape endpoint, which is loopback-only and open by default on an installed core
+  (`Environment=VENYA_METRICS_PORT=10011` in the shipped unit; #653):
   `curl -s http://127.0.0.1:10011/metrics`, run **on the core** — the endpoint binds `127.0.0.1` only
   and is plain unauthenticated HTTP, so a remote Prometheus reads it through a collector on that
   host rather than over the network. The port, the override procedure, and the listens are in
@@ -168,6 +179,34 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
 - The deadline is scoped to the read inside a savepoint, never to the connection or the engine,
   because a blanket engine deadline was measured refusing a legitimate beat write at 2,033 ms that
   shipped completes at 4,037 ms.
+
+**The admin plane carries the same bound, on its own table (#658).**
+`_validate_admin_mtls` reads `admin_cert_revocations` — a different table, with its own retention
+purge (`AdminCAManager.purge_expired_revocations`, a `DELETE`, so `ROW EXCLUSIVE` and safe as
+shipped) — and that read used to be synchronous and unbonded inside an `async def` on the ordinary
+pool. It now runs through the SAME seam and the SAME knob (`crl.revocation_read_lock_timeout_ms`);
+there is no second deadline mechanism and no second config key. It is labelled separately, so a
+stall on one plane is never misread as a stall on the other:
+`venya_revocation_read_refusals_total{site="admin-mtls"}` against the executor plane's
+`{site="heartbeat"|"executor-mtls"|"audit-ingest"|"executor-session"|"crl"|"register/…"|"dial/…"}`.
+
+Three arms on that path, and **all three refuse**:
+
+| What happened | Answer | Detail the operator reads |
+|---|---|---|
+| the serial is on the admin list | `403` | `Admin certificate revoked` — unchanged by #658 |
+| the read could not answer inside the deadline | `503` | the shared list-state sentence, `… request refused (no revocation asserted)` |
+| any other backend/lookup fault | `403` | `Admin access requires valid client certificate` — unchanged by #658 |
+
+The middle row is the only new arm, and it is availability, not policy: a stalled check reports
+itself as unavailable rather than as a revocation, and rather than as a credential problem the
+operator would "fix" by re-issuing a good certificate. Nothing about a lock stall admits a caller.
+
+Why `admin_cert_revocations` is not in §2's measured table: those numbers were taken against
+`executor_cert_revocations` on `venya-core-3`, and this seat did not re-run a lock cell on the admin
+table. The lock classes are the same for any PostgreSQL table (§2 facts 1–3 are about `ACCESS
+EXCLUSIVE` and the queue, not about that one relation), so treat §3–§5 as applying here too —
+including fact 3, that merely **asking** for the exclusive lock is the hazard.
 
 ## 7. Deciding to stop the daemons for a window
 
