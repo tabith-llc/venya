@@ -8,6 +8,17 @@ User=venya
 Group=venya
 ExecStart=/opt/venya/.venv/bin/venya-server
 Environment=VENYA_ENV_DIR=/opt/venya
+# #653: open the operator-readable Prometheus scrape door. The server binds this port on
+# 127.0.0.1 ONLY (server/app.py: start_metrics_server -> start_http_server(addr="127.0.0.1")),
+# it is plain unauthenticated HTTP, and it never leaves the host — do NOT routify it by
+# changing the address in code; that is a separate ruling. 9091 is the first port in the
+# Prometheus 909x band that nothing here uses: 9090 is Prometheus itself and 9100 is
+# node_exporter, both of which an operator plausibly runs on a monitoring host, and the
+# venya surface already owns 443 (nginx), 8080 (the backend), 8443 (relay) and 5432 (DB).
+# Not a secret, so it belongs in this unit and NOT in the 0640 /etc/venya/venya-core.env,
+# which stays passphrase-only. Override in a drop-in (`systemctl edit venya-core`), never
+# by editing the installed copy — the core installer rewrites this unit on every re-run.
+Environment=VENYA_METRICS_PORT=9091
 # Admin CA key passphrase (os.environ-visible; the only thing ca.py reads).
 # Leading '-' = optional: absent when admin mTLS is disabled, so the unit still
 # starts. When enabled, the installer writes this file 0640 root:venya. Never

@@ -182,6 +182,38 @@ incumbent credential — clean revocation state plus serial == current record).
 
 Installer-level input variables (e.g. `VENYA_DB_PASSWORD`, `VENYA_DB_PASSPHRASE`, `VENYA_RECOVERY_PEPPER`, `CORE_HOSTNAME`) are consumed by `install-venya-core.sh`, which writes the correctly-named server variables into `/opt/venya/.env`. Setting an installer var in the server's environment does nothing. `VENYA_DB_PASSPHRASE` is checked on the way in: the installer refuses a value under the **15-Unicode-code-point floor** named in [`db.passphrase`](#dbpassphrase-production-only) before it mutates anything, so a short passphrase never reaches `.env`.
 
+### Metrics scrape port — `VENYA_METRICS_PORT` (not a `ServerConfig` field)
+
+One core-side name is deliberately **outside** the table above: `VENYA_METRICS_PORT`. It is read
+straight off the process environment by `start_metrics_server` in
+`packages/server/src/server/app.py` (`os.environ.get(METRICS_PORT_ENV_VAR)`), not by
+`ServerConfig`, and that difference is what decides where you set it.
+
+| Field | Value |
+|---|---|
+| What it opens | The Prometheus scrape endpoint that publishes the shipped `venya_*` counters, histograms and gauge. Without it the metrics exist in the process and no one outside can read them. |
+| Shipped default | **`9091`**, set by `Environment=VENYA_METRICS_PORT=9091` in `systemd/venya-core.service` (#653), so a freshly installed core answers a scrape with no operator step. |
+| Bind address | **`127.0.0.1` only, hardcoded.** The endpoint is plain unauthenticated HTTP; it is listed with the other localhost-only listens in [FIREWALL.md](FIREWALL.md). |
+| Reachable from | The core host itself. A remote Prometheus scrapes it by running on that host or through a collector placed there — not by opening the port. |
+| Read the counters | On the core: `curl -s http://127.0.0.1:9091/metrics` (pipe to `grep venya_` to see the families). |
+| Change the port | `sudo systemctl edit venya-core` and set a different `Environment=VENYA_METRICS_PORT=<port>` in the `[Service]` drop-in, then `sudo systemctl daemon-reload && sudo systemctl restart venya-core`. Never edit `/etc/systemd/system/venya-core.service` by hand: the core installer rewrites that file from the shipped template on every re-run, and your edit is gone the next time it runs. |
+| Close the door | Same drop-in, set it empty (`Environment=VENYA_METRICS_PORT=`). An empty or absent value binds nothing and logs nothing — the pre-#653 default, kept working on purpose. |
+
+**Do not put this name in `$VENYA_ENV_DIR/.env`.** A `pydantic-settings` env file is loaded into
+the model, never into `os.environ`, so `VENYA_METRICS_PORT` sitting in `/opt/venya/.env` is read
+by nobody: the variable has to be in the service's actual environment, which is what the unit's
+`Environment=` line (or a drop-in) provides. A port set in a file nothing binds to looks
+configured and is not (#653 is exactly that failure — the code path was always there, and until
+the unit carried the name no default install ever opened it).
+
+**A value that is not a number aborts startup.** `int()` on the variable is not wrapped: a typo
+in the drop-in makes the service exit rather than serve quietly without telemetry. That is the
+shipped posture, not a bug, and `packages/server/tests/test_metrics_scrape_door_653.py` pins it.
+
+The executor plane has **no** equivalent endpoint: nothing in `packages/executor/src` reads
+`VENYA_METRICS_PORT` and `systemd/venya-executor.service` sets none. This asymmetry is a recorded
+scope boundary (#653 AC5), pinned by that same test, not an oversight to fill in quietly.
+
 ---
 
 ## Validation Timing
