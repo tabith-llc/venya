@@ -195,6 +195,57 @@ class TestDoorStateIsRead:
             assert not state.reachable
 
 
+class TestBothParsersAgree:
+    """The door URL is read two ways — SQLAlchemy when it answers, plain text when it does not.
+
+    This is not decoration: the first cut's text fallback read ``…@/nodb`` as a HOST and never looked
+    for a port in the query, so a unix door became a bogus TCP probe of "/nodb" on 5432 and the
+    stopped-but-present fixture was reported as "never started". A fallback nobody runs is a fallback
+    nobody tests, and the bug is exactly the mislabelled-cause failure #650 exists to stop.
+    """
+
+    _UNIX = "postgresql+psycopg2://agent@/venya_test_x?host=/tmp/tabichat/pg/sock&port=55902"
+    _TCP = "postgresql+psycopg2://agent@127.0.0.1:55903/venya_test_x"
+
+    @pytest.mark.parametrize(
+        ("url", "want"),
+        [
+            (_UNIX, {"host": None, "port": 55902, "socket_dir": "/tmp/tabichat/pg/sock", "database": "venya_test_x"}),
+            (_TCP, {"host": "127.0.0.1", "port": 55903, "socket_dir": None, "database": "venya_test_x"}),
+        ],
+    )
+    def test_the_plain_text_path_reads_the_same_parts(self, url, want):
+        got = pdp._parse_plain(url)
+        assert got == want, f"plain path read {got}, wanted {want}"
+
+    def test_both_parsers_classify_one_door_identically(self, tmp_path):
+        """Force the fallback by breaking the import, and require the same answer either way."""
+        sock_dir = tmp_path / "sock"
+        _make_stale_socket(sock_dir, 55904)
+        url = _unix_url(sock_dir, 55904)
+        via_sqlalchemy = pdp.read_door(url)
+
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _no_sqlalchemy(name, *args, **kwargs):
+            if name.startswith("sqlalchemy"):
+                raise ImportError("simulated: the door must still be readable without it")
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = _no_sqlalchemy
+        try:
+            via_plain = pdp.read_door(url)
+        finally:
+            builtins.__import__ = real_import
+
+        assert (
+            via_plain.cause == via_sqlalchemy.cause == pdp.CAUSE_DIED_MID_RUN
+        ), f"sqlalchemy said {via_sqlalchemy.cause!r}, the text path said {via_plain.cause!r}"
+        assert via_plain.kind == via_sqlalchemy.kind == "unix"
+
+
 class TestSpaceIsPartOfTheDoor:
     """The half that would have caught 2026-10-16 while it was still only a disk."""
 

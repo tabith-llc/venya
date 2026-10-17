@@ -136,13 +136,47 @@ def _is_postgres_scheme(url: str) -> bool:
     return "://" in url and url.split("://", 1)[0].lower().startswith("postgres")
 
 
+def _parse_plain(url: str) -> dict:
+    """The no-SQLAlchemy path, as its own function so it can be tested rather than hoped for.
+
+    This exists because a pre-flight that dies with the door is worse than the silence it replaces, so
+    it must keep working in an environment where the import fails. It is also where a real bug hid:
+    the first cut read the host out of the netloc and never looked for a port in the query, which made
+    it ask for ``.s.PGSQL.5432`` on a unix door and report ``never started`` about a fixture that had
+    died mid-run. The port-in-query shape is the common one (``?host=/sock&port=N``), so it is now read
+    first, and two cells drive this function directly instead of relying on sqlalchemy being absent.
+    """
+    rest = url.partition("://")[2]
+    _userinfo, sep, tail = rest.rpartition("@")
+    if not sep:
+        tail = rest
+    authority_and_path, has_query, query = tail.partition("?")
+    authority, _slash, path = authority_and_path.partition("/")
+    params = dict(part.split("=", 1) for part in query.split("&") if "=" in part) if has_query else {}
+    socket_dir = params.get("host") if params.get("host", "").startswith("/") else None
+    host_part, colon, port_text = authority.rpartition(":")
+    host = host_part if colon else authority
+    raw_port = params.get("port") or (port_text if colon else None)
+    if socket_dir:
+        # A unix door puts the database in the path position ("/db"), not a host: reading it as a
+        # host is how the first cut tried to TCP-probe an address called "/nodb".
+        host, dbname = None, path or None
+    else:
+        dbname = path or params.get("dbname")
+    return {
+        "host": host or None,
+        "port": int(raw_port) if raw_port is not None and str(raw_port).isdigit() else None,
+        "socket_dir": socket_dir,
+        "database": dbname,
+    }
+
+
 def _parse(url: str) -> dict:
-    """Split the door URL into the parts a probe needs, without importing SQLAlchemy at module load.
+    """Split the door URL into the parts a probe needs — SQLAlchemy when it answers, plain text when not.
 
     A local import is deliberate: this file is loaded by a conftest before collection, and a heavy
-    import there is a cost on every run of the package. SQLAlchemy's own URL parser is used when it
-    is available (it is, in both packages) and a plain-text fallback keeps the pre-flight working if
-    it ever is not.
+    import there is a cost on every run of the package. When SQLAlchemy is missing or refuses the
+    string, ``_parse_plain`` answers — and it is a tested path, not a hopeful one.
     """
     try:
         from sqlalchemy.engine import make_url
@@ -166,19 +200,7 @@ def _parse(url: str) -> dict:
         # outage. Recorded rather than swallowed — a bare `except: pass` is the shape of a silenced
         # alarm, which is the thing this whole row is about.
         logger.debug("sqlalchemy could not parse the door URL (%r); using the text path", parse_fault)
-    scheme, _, rest = url.partition("://")
-    if not scheme.lower().startswith("postgres"):
-        return {"host": None, "port": None, "socket_dir": None, "database": None}
-    _, _, tail = rest.rpartition("@")
-    netloc, _, query = tail.partition("?")
-    host, _, port = netloc.partition(":")
-    params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
-    return {
-        "host": host or None,
-        "port": int(port) if port.isdigit() else None,
-        "socket_dir": params.get("host"),
-        "database": params.get("dbname"),
-    }
+        return _parse_plain(url)
 
 
 def _socket_path(socket_dir: str, port: int) -> str:
@@ -313,9 +335,9 @@ def abort_message(state: DoorState) -> str:
     elif state.cause == CAUSE_DIED_MID_RUN:
         because = (
             f"a socket file exists at {state.target} and nothing answers it — the fixture was "
-            f"running and STOPPED, which on this box is how a filled tmpfs leaves it "
-            f"({space}); read the fixture's own log for what it actually said before filing "
-            "anything against the tree"
+            f"running and has STOPPED. Read its own log for the reason it gave; the volume under it "
+            f"reports {space}, so a full disk is a candidate only if that number says so — and file "
+            "nothing against the tree until the log has been read"
         )
     elif state.cause == CAUSE_REFUSED:
         because = (
