@@ -49,6 +49,12 @@ from ..middleware.auth import (
 )
 from ..rate_limit import rate_limit_registration
 from ..revocation import executor_revocation_state
+from ..revocation_read import (
+    REVOCATION_UNAVAILABLE_DETAIL,
+    RevocationReadUnavailable,
+    bounded_read,
+    for_site,
+)
 from ..utils.executor_id import EXECUTOR_ID_PATTERN
 from ..utils.time import effective_expiry_check_time, is_expired
 from .secrets import wrap_with_sentinel
@@ -684,7 +690,13 @@ _X509_V_ERR_UNABLE_TO_GET_CRL = 3
 _X509_V_ERR_CRL_HAS_EXPIRED = 12
 _X509_V_ERR_CERT_REVOKED = 23
 
-_STALE_LIST_DETAIL = "Revocation list stale or unavailable — request refused (no revocation asserted)"
+#: The ONE refusal sentence for a revocation-plane read that could not be answered. It is
+#: defined once in `revocation_read.py` (shared with the bounded-read refusal) and imported by
+#: reference here — the shipped name `_STALE_LIST_DETAIL` is kept as the alias every existing
+#: cell and daemon arm already reads. Retyping it is the class this ticket has a written law
+#: about: a leg that re-flows the sentence lets a revocation-shaped message name an event that
+#: never happened.
+_STALE_LIST_DETAIL = REVOCATION_UNAVAILABLE_DETAIL
 
 
 def _ensure_dial_crl_store(request: Request, db: Session) -> str:
@@ -832,7 +844,9 @@ def _incumbent_exemption_applies(db: Session, executor_id: str, presented_serial
     cert-serial-canonicalization-mismatch #481) so a legacy record row spelled
     without padding is still recognized as the same credential.
     """
-    if executor_revocation_state(db, executor_id, presented_serial=presented_serial).revoked:
+    with for_site("register/incumbent-exemption"):
+        revoked = executor_revocation_state(db, executor_id, presented_serial=presented_serial).revoked
+    if revoked:
         return False
     cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
     return cert is not None and serials_equal(cert.serial_number, presented_serial)
@@ -1040,7 +1054,8 @@ async def register_executor(
     # executor_id). Fires before cert issuance and any identity DB write.
     # Serial-history revocation does NOT block here: killing a credential must
     # not kill re-enrollment (that is what the identity form is for).
-    _terminal = executor_revocation_state(db, resolved_executor_id)
+    with for_site("register/terminal-check"):
+        _terminal = executor_revocation_state(db, resolved_executor_id)
     if _terminal.reason == "identity":
         metrics.EXECUTOR_REGISTERED.labels(result="identity_revoked").inc()
         logger.warning("Registration rejected — executor identity revoked (terminal): %s", resolved_executor_id)
@@ -1140,11 +1155,20 @@ async def register_executor(
         if old_key and old_key != serial_match_key(serial_hex):
             from core.iam.models import ExecutorCertRevocation
 
-            prior = (
-                db.query(ExecutorCertRevocation)
-                .filter(serial_match_clause(ExecutorCertRevocation.serial_number, existing_cert.serial_number))
-                .first()
-            )
+            # #603 AC1: a direct read of the lockable population on the register path, inside
+            # an `async def`. Bounded like the matcher; a refusal here is the shipped 503
+            # register arm, never a silent skip that would mint the off-record orphan this block
+            # exists to prevent. The caller's own pending writes are flushed BEFORE the
+            # savepoint by the seam, so the refusal rolls back the read and not the registration.
+            try:
+                with bounded_read(db, site="register/rotation-prior-serial"):
+                    prior = (
+                        db.query(ExecutorCertRevocation)
+                        .filter(serial_match_clause(ExecutorCertRevocation.serial_number, existing_cert.serial_number))
+                        .first()
+                    )
+            except RevocationReadUnavailable as e:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=_STALE_LIST_DETAIL) from e
             if prior is None:
                 db.add(
                     ExecutorCertRevocation(
@@ -1305,13 +1329,24 @@ async def get_crl(
     # never omit a revocation the ETag claims is present. History beyond the
     # ceiling is refused SILENTLY no more: count-vs-cap trips a loud warning,
     # a metric, and response headers on every path (200 and 304).
-    crl_rows = (
-        db.query(ExecutorCertRevocation)
-        .order_by(desc(ExecutorCertRevocation.revoked_at), asc(ExecutorCertRevocation.serial_number))
-        .limit(MAX_CRL_ENTRIES)
-        .all()
-    )
-    total_revocations = int(db.query(ExecutorCertRevocation).count())
+    # #603 AC1 (the site this ticket did not name): this is a PUBLIC path (PUBLIC_PATHS,
+    # middleware/auth.py:256) and both fetches below read the lockable revocation population
+    # synchronously inside an `async def`. Measured: one unauthenticated GET of this endpoint
+    # during a held ACCESS EXCLUSIVE froze the core loop and took /health and /register down
+    # behind it. Same savepoint-scoped deadline as the matcher, same stale-class refusal; the
+    # rows and the count are read inside ONE bounded scope so the body and the ETag still
+    # describe the SAME population (#337 law preserved).
+    try:
+        with bounded_read(db, site="crl"):
+            crl_rows = (
+                db.query(ExecutorCertRevocation)
+                .order_by(desc(ExecutorCertRevocation.revoked_at), asc(ExecutorCertRevocation.serial_number))
+                .limit(MAX_CRL_ENTRIES)
+                .all()
+            )
+            total_revocations = int(db.query(ExecutorCertRevocation).count())
+    except RevocationReadUnavailable as e:
+        raise HTTPException(status_code=503, detail=_STALE_LIST_DETAIL) from e
     crl_der = ca_manager.generate_crl(db, revocations=crl_rows)
     metrics.CA_CRL_GENERATED_TOTAL.inc()
 
@@ -1434,7 +1469,18 @@ async def heartbeat(
         # Revoked-ness comes from the SHARED state (executor-revocation-by-identity
         # condition 2 — this computation was a second, record-pointer-only
         # implementation; the helper adds the identity flag).
-        revoked = executor_revocation_state(db, executor_id).revoked
+        #
+        # #603 AC1 refusal arm, and the reason it is written here rather than left to the app
+        # handler: `revoked` is initialized False two lines above, so a raise that escaped this
+        # block would be caught nowhere and a partially-handled beat would answer
+        # "not revoked" — the most permissive reading available, and the exact fail-open #603
+        # exists to close. The beat REFUSES in the shipped stale class instead; the executor
+        # keeps its last confirmed state and retries on its own cadence.
+        with for_site("heartbeat"):
+            try:
+                revoked = executor_revocation_state(db, executor_id).revoked
+            except RevocationReadUnavailable as e:
+                raise HTTPException(status_code=503, detail=_STALE_LIST_DETAIL) from e
 
         # Rotation hint still reads the record's expiry
         current_cert = db.query(ExecutorCert).filter(ExecutorCert.executor_id == executor_id).first()
@@ -1528,7 +1574,8 @@ async def list_executors(
         # — no second revoked-ness implementation). Note: this also surfaces
         # serial-form revocation of the CURRENT record serial as "revoked",
         # consistent with the dial refusal.
-        _rev = executor_revocation_state(db, exec_rec.id, executor_row=exec_rec)
+        with for_site("admin/list-executors"):
+            _rev = executor_revocation_state(db, exec_rec.id, executor_row=exec_rec)
         if _rev.revoked:
             status = "revoked"
         elif exec_rec.enrolled_at:
@@ -1592,7 +1639,8 @@ async def create_execution_session(
     # point that actually stops an uncooperative daemon): shared revocation
     # state governs — identity flag OR current-record serial in the CRL
     # (condition 1: a serial-form revocation of the record serial refuses too).
-    _rev = executor_revocation_state(db, req.executor_id, executor_row=executor)
+    with for_site("dial/create-session"):
+        _rev = executor_revocation_state(db, req.executor_id, executor_row=executor)
     if _rev.revoked:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1737,7 +1785,8 @@ async def execute_command_on_executor(
 
     # Dial gate #2 (execute): the session may predate the revocation — the
     # shared state is re-checked at relay time, not only at session create.
-    _rev = executor_revocation_state(db, id, executor_row=executor)
+    with for_site("dial/execute"):
+        _rev = executor_revocation_state(db, id, executor_row=executor)
     if _rev.revoked:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

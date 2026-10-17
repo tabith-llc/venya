@@ -145,6 +145,16 @@ CRL_TRUNCATED_TOTAL = Counter(
     [],
 )
 
+# #603 AC1: the alerting surface for a bounded revocation read that could not answer inside its
+# lock deadline. CUMULATIVE BY DESIGN — the #651 defect shape was a per-emit WARNING with no
+# counter, so a losing component could never later state how much it lost. The log line is
+# latched (once per process); this counter is never latched, so the count survives the latch.
+REVOCATION_READ_REFUSALS_TOTAL = Counter(
+    "venya_revocation_read_refusals_total",
+    "Revocation-plane reads refused under the bounded lock deadline (refs #603 AC1)",
+    ["site"],
+)
+
 # --- Core metrics ---
 
 CORE_OPERATIONS_TOTAL = Counter(
