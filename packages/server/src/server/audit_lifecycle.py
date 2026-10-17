@@ -63,6 +63,11 @@ ADMIN_CERT_REVOKED = "admin_cert_revoked"
 # requesting user_id, mint reason. NEVER the CSR bytes, the public key, or the
 # cert PEM: the audit row is readable by non-admin auditors.
 ADMIN_CERT_ISSUED = "admin_cert_issued"
+# #597: the core's own relay client credential, minted outside the product by the
+# installer, is now a registry row with a revoke path. Two names, issued-side first,
+# matching the ADMIN_CERT_ISSUED/ADMIN_CERT_REVOKED pair shape.
+CORE_RELAY_CERT_REGISTERED = "core_relay_cert_registered"
+CORE_RELAY_CERT_REVOKED = "core_relay_cert_revoked"
 USER_REENROLLED = "user_reenrolled"
 CORE_RESET_REFUSED = "core_reset_refused"  # #511: a reset the in-transaction guard stopped
 ENROLLMENT_TOKEN_ISSUED = "enrollment_token_issued"  # nosec B105 — audit event name, not a password
@@ -140,6 +145,8 @@ def audit_lifecycle(
         EXECUTOR_CERT_REVOKED,
         ADMIN_CERT_REVOKED,
         ADMIN_CERT_ISSUED,
+        CORE_RELAY_CERT_REGISTERED,
+        CORE_RELAY_CERT_REVOKED,
         USER_REENROLLED,
         CORE_RESET_REFUSED,
         ENROLLMENT_TOKEN_ISSUED,
