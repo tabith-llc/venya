@@ -142,6 +142,12 @@ def test_the_factory_never_answers_the_foreign_keys_question(sqlite_url: str) ->
 # ------------------------------------------------------------------- the injection route
 
 
+# #634 AC3 NAMED EXEMPTION — this cell deliberately exercises a BLIND engine, and that is the point of
+# it: it exists to prove the injection route answers ``PRAGMA foreign_keys`` with a silent 0. Installing
+# enforcement here, or adding this file to the ratchet's blind baseline, would destroy the proof rather
+# than fix a defect. It is exempted by name (with its reason) in
+# ``packages/core/tests/test_sqlite_fk_blindspot_interlock_634.py`` -> ``EXEMPT``, per the lead's s134
+# ruling: wave30-specs-20261017/wren-634-ruling-flash2-s134.md section 4.
 def test_the_injection_route_bypasses_the_factory_and_yields_a_blind_engine(
     sqlite_url: str, factory_calls: list[str]
 ) -> None:
