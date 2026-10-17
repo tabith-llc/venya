@@ -489,6 +489,25 @@ class TestSeriesAreSeparate:
         assert _scan_refusals(site) == scan_before
         assert _lock_refusals(site) == lock_before
 
+    @pytest.mark.parametrize(
+        ("sqlstate", "why"),
+        [("40P01", "deadlock_detected, row H"), ("08006", "connection_good, row G's class")],
+    )
+    def test_a_backend_fault_that_is_neither_lock_nor_scan_stays_unnamed(self, sqlstate, why):
+        """Rows G and H, stated as what they still are. This leg bounds a lock wait and a slow scan;
+        a deadlock victim and a connection fault are NOT converted into either named class, because
+        naming them would be exactly the folding AC1 forbids. The paired negative of the two new
+        classes is that everything else still escapes untouched — and counted nowhere."""
+        site = "heartbeat"
+        orig = SimpleNamespace(pgcode=sqlstate, args=(), sqlstate=sqlstate)
+        fault = DBAPIError("SELECT 1", {}, orig)
+        scan_before, lock_before = _scan_refusals(site), _lock_refusals(site)
+        with pytest.raises(DBAPIError):
+            with bounded_read(_ScanSession(raise_on_read=fault), site=site):
+                raise fault
+        assert _scan_refusals(site) == scan_before, f"{why} was folded into the scan class"
+        assert _lock_refusals(site) == lock_before, f"{why} was folded into the lock class"
+
     def test_no_existing_series_gained_a_label(self):
         """A label added to a shipped series re-splits every operator query built on it. The #603
         counter is still labelled by site and nothing else, whatever this leg added beside it."""
