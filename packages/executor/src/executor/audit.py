@@ -92,6 +92,82 @@ def _spool_lock_for(path: Path) -> threading.Lock:
         return lock
 
 
+# #651 — the observability half of the same problem, keyed the same way.
+#
+# Two facts from the row, both true at once: the capacity WARNING fired once per
+# audit event while the spool sat in the alert band (journal growth that buries
+# the one line that matters), and a discard left no cumulative record anywhere,
+# so after log rotation a losing executor could not state that it had ever lost
+# audit records (issue 307 R2's "crossing is logged but not counted").
+#
+# The state is keyed by the RESOLVED spool path for the SAME reason the lock is
+# (#468): the shipped daemon runs a per-session logger and a session-less boot
+# forwarder over ONE file, so a per-instance latch would fire twice per event and
+# a per-instance counter would halve the truth. Sharing it by path is what makes
+# "exactly once per band entry" a statement about the spool, not about an object.
+#
+# The journal is the surface, per the lead's ruling of 2026-10-17: an executor-side
+# scrape port is foreclosed by #653 AC5 (``test_executor_plane_ships_no_door`` pins
+# that no file in this plane names the metrics-port env variable), and `server.metrics`
+# counters are unreachable from this process. Nothing here opens a door or moves a
+# wire field; the numbers land in the log the operator already reads.
+
+#: Re-statement interval for a parked spool, in audit events (band) or drops. The edge
+#: trigger logs the crossing; this logs "still there" every N events so a long
+#: stall is not invisible between boots. 1,000 events at the shipped default
+#: capacity (10,000 lines, `config.py` ``max_buffer_size``) is ~10% of the spool
+#: per line — bounded journal growth, still a live signal. It is a constant, not a
+#: config knob: a knob an operator can set to 0 reintroduces the flood this row
+#: exists to stop.
+_SPOOL_RESTATE_EVERY_EVENTS = 1_000
+
+
+@dataclass
+class _SpoolObservability:
+    """Process-wide, per-spool-path alert latch + cumulative drop count (#651).
+
+    ``dropped_total`` is monotonic for the life of the PROCESS, not the file: a
+    restart forgets it, and that limit is stated rather than hidden, because the
+    row's honesty claim is "the fact of loss is recoverable while the process is
+    up", and a counter that implied durability it did not have would be a worse
+    lie than the journal line it replaces.
+    """
+
+    dropped_total: int = 0
+    band_latched: bool = False
+    events_since_statement: int = 0
+    #: #651: the drop line gets the SAME edge-trigger treatment as the band line.
+    #: Without it the flood is not removed, only relocated — a spool pinned at the
+    #: ceiling drops exactly one line per emit, so a per-drop warning is one WARNING
+    #: per audit event forever, which is the harm this row names. ``dropped_total``
+    #: still counts every single drop; only the log line is bounded.
+    drop_latched: bool = False
+    drops_since_statement: int = 0
+
+
+_SPOOL_OBSERVABILITY: dict[Path, _SpoolObservability] = {}
+_SPOOL_OBSERVABILITY_GUARD = threading.Lock()
+
+
+def _spool_observability_for(path: Path) -> _SpoolObservability:
+    """Return the one observability record shared by all in-process loggers
+    writing ``path``. Keyed by the fully resolved path exactly like
+    `_spool_lock_for` — two spellings of one file must not land on two latches."""
+    key = path.resolve()
+    with _SPOOL_OBSERVABILITY_GUARD:
+        record = _SPOOL_OBSERVABILITY.get(key)
+        if record is None:
+            record = _SpoolObservability()
+            _SPOOL_OBSERVABILITY[key] = record
+        return record
+
+
+def spool_drop_total(path: str | Path) -> int:
+    """Cumulative audit events discarded by drop-oldest since this process started,
+    for the spool at ``path``. 0 for a spool this process has never written."""
+    return _spool_observability_for(Path(path)).dropped_total
+
+
 @dataclass
 class AuditEvent:
     """Single audit event."""
@@ -140,8 +216,12 @@ class AuditLogger:
          client_cert is a loud fail-closed refusal, never a silent 401 loop
          (#307 D1).
       3. When the spool exceeds max_buffer_size lines the oldest lines are
-         dropped (with a warning) so a long outage cannot grow it without
-         bound.
+         dropped so a long outage cannot grow it without bound. The discards are
+         COUNTED, not merely narrated (#651): ``dropped_total`` accumulates on the
+         shared per-path record and every drop line states it, so "this process lost
+         N audit events" survives journal rotation. Both the band alert and the drop
+         alert are edge-triggered with a periodic re-statement, because an unlatched
+         warning is one line per audit event and buries the record it is meant to be.
 
     Lock scope (#468 — read this before constructing another instance):
     ``self._lock`` is NOT per-instance. It is the process-wide lock
@@ -178,6 +258,11 @@ class AuditLogger:
         # object — two instances over one file MUST share one lock (see
         # _spool_lock_for and the class docstring's lock-scope note).
         self._lock = _spool_lock_for(self._spool_path)
+        # #651: the alert latch and the cumulative drop counter are keyed by the SAME
+        # resolved path as the lock, because the shipped daemon holds two AuditLogger
+        # instances over this one file (per-session logger + boot forwarder). A
+        # per-instance record would alert twice per event and split the drop count.
+        self._obs = _spool_observability_for(self._spool_path)
         self._spool_path.parent.mkdir(parents=True, exist_ok=True)
         # The spool holds FULL command lines (a caller inlining credentials
         # puts plaintext here) — create it 0600 and REPAIR a legacy
@@ -189,6 +274,29 @@ class AuditLogger:
         with self._spool_append_handle():
             pass
         os.chmod(self._spool_path, 0o600)
+        # #651 AC1/AC3, the boot statement: the depth of the spool THIS process is
+        # now sharing, and any loss already counted by an earlier logger instance on
+        # the same path. This is also the first-crossing guarantee in the open — a
+        # spool that boots past the band is named here, on the first line, without
+        # waiting for an emit to trip an edge nobody can see.
+        with self._lock:
+            boot_depth = self._count_lines()
+        boot_capacity = self._config.max_buffer_size
+        boot_band = boot_capacity * self._config.alert_threshold
+        logger.info(
+            "Audit spool open: depth %d of %d (%.0f%%), alert band at >= %.0f%%, cumulative dropped "
+            "this process: %d%s",
+            boot_depth,
+            boot_capacity,
+            (boot_depth / boot_capacity * 100) if boot_capacity else 0.0,
+            self._config.alert_threshold * 100,
+            self._obs.dropped_total,
+            " — ALREADY IN THE ALERT BAND" if boot_depth >= boot_band else "",
+        )
+        if boot_depth >= boot_band:
+            # Arm the latch so this boot does not also fire the per-event warning on
+            # its first emit — the state has just been stated, once, out loud.
+            self._obs.band_latched = True
         self._forwarder = threading.Thread(target=self._forward_loop, daemon=True)
         self._forwarder.start()
 
@@ -254,22 +362,58 @@ class AuditLogger:
                 f.write(line + "\n")
             count = self._count_lines()
             capacity = self._config.max_buffer_size
+            obs = self._obs
             if count >= capacity:
-                logger.warning(
-                    "Audit buffer at %.0f%% capacity (%d/%d)",
-                    100.0,
-                    count,
-                    capacity,
-                )
+                # Over capacity is the top of the band, not a separate alert: the
+                # drop below is logged with its own cumulative count, and the band
+                # statement here is edge-triggered like the one under it, so a spool
+                # pinned at the ceiling costs a bounded number of lines too.
+                self._statement_band(capacity_pct=100.0, count=count, capacity=capacity, obs=obs)
                 self._drop_oldest(count - capacity)
             elif count >= capacity * self._config.alert_threshold:
-                logger.warning(
-                    "Audit buffer at %.0f%% capacity (%d/%d)",
-                    (count / capacity) * 100,
-                    count,
-                    capacity,
-                )
+                self._statement_band(capacity_pct=(count / capacity) * 100, count=count, capacity=capacity, obs=obs)
+            else:
+                # Below the band: re-arm. This half is the reason the latch is not
+                # simply "warned once ever" — a spool that drains and fills again
+                # must alert again, and a cell that only tests the fill path cannot
+                # tell those two shapes apart.
+                obs.band_latched = False
+                obs.events_since_statement = 0
+            if count < capacity:
+                # The drop statement re-arms on any emit that did not hit the ceiling,
+                # so the next time the spool starts discarding, the FIRST drop is
+                # logged out loud again rather than buried under a latch from a
+                # previous stall.
+                obs.drop_latched = False
+                obs.drops_since_statement = 0
         self._wakeup.set()
+
+    def _statement_band(self, *, capacity_pct: float, count: int, capacity: int, obs: _SpoolObservability) -> None:
+        """Emit the capacity statement for one band crossing, and re-state it at the
+        shipped interval while the spool stays parked (#651 AC1).
+
+        Edge-triggered by the latch, never by a timer: `emit` is the only caller, so
+        an executor that stops taking work also stops writing journal lines, and the
+        first crossing ALWAYS logs even if the spool booted already past the band (a
+        latch that started armed would strand that state silent forever — the failure
+        the lead's ruling names). Caller must hold the lock.
+        """
+        if obs.band_latched:
+            obs.events_since_statement += 1
+            if obs.events_since_statement < _SPOOL_RESTATE_EVERY_EVENTS:
+                return
+        obs.band_latched = True
+        obs.events_since_statement = 0
+        logger.warning(
+            "Audit buffer at %.0f%% capacity (%d/%d) — spool depth %d, cumulative dropped %d "
+            "(this line re-states every %d events while the spool stays in the band; #651)",
+            capacity_pct,
+            count,
+            capacity,
+            count,
+            obs.dropped_total,
+            _SPOOL_RESTATE_EVERY_EVENTS,
+        )
 
     def _count_lines(self) -> int:
         """Number of lines in the spool. Caller must hold the lock."""
@@ -279,11 +423,40 @@ class AuditLogger:
             return sum(1 for _ in f)
 
     def _drop_oldest(self, n: int) -> None:
-        """Drop the n oldest spool lines. Caller must hold the lock."""
+        """Drop the n oldest spool lines. Caller must hold the lock.
+
+        #651 AC2: the drop is COUNTED, not only narrated. ``obs.dropped_total`` is
+        incremented here — at the decision, not inferred from a band warning — so the
+        journal line after it and `spool_drop_total()` agree, and an operator can state
+        how much was lost rather than that one batch lost something. The durability
+        contract is unchanged: at-least-once below capacity, lossy above it (issue 307
+        R2), and AC5 of this row is explicit that this adds observability only.
+        """
         if n <= 0:
             return
         self._truncate_prefix(n)
-        logger.warning("Audit spool full — dropped %d oldest event(s)", n)
+        obs = self._obs
+        # Counted unconditionally — this is the number AC2 exists for, and it is the
+        # one thing that must stay exact even when the journal line is being bounded.
+        obs.dropped_total += n
+        obs.drops_since_statement += 1
+        if obs.drop_latched and obs.drops_since_statement < _SPOOL_RESTATE_EVERY_EVENTS:
+            return
+        obs.drop_latched = True
+        obs.drops_since_statement = 0
+        logger.warning(
+            "Audit spool full — dropped %d oldest event(s) (cumulative dropped this process: %d; "
+            "this line re-states every %d drops while the spool stays at the ceiling; #651)",
+            n,
+            obs.dropped_total,
+            _SPOOL_RESTATE_EVERY_EVENTS,
+        )
+
+    def spool_depth(self) -> int:
+        """Current spool depth in lines, without the operator opening the file
+        (#651 AC3). Takes the same path-keyed lock every other spool read takes."""
+        with self._lock:
+            return self._count_lines()
 
     # -- forward path (background thread + on-demand) -----------------------
 
