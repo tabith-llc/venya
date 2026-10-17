@@ -22,6 +22,15 @@ from .revocation_read import configure_lock_timeout
 
 logger = logging.getLogger("venya.server")
 
+#: The one environment name that opens the metrics scrape door (#653). The shipped
+#: ``systemd/venya-core.service`` sets it with an ``Environment=`` line; the two spellings
+#: are pinned equal by ``packages/server/tests/test_metrics_scrape_door_653.py``.
+METRICS_PORT_ENV_VAR = "VENYA_METRICS_PORT"
+
+#: Loopback, always, and not a setting. The scrape endpoint is plain unauthenticated HTTP,
+#: so binding anything else would publish operator telemetry onto the routable network.
+_METRICS_BIND_ADDR = "127.0.0.1"
+
 
 async def _validation_error_handler(request: Any, exc: RequestValidationError) -> JSONResponse:
     """Sanitized 422 body for request-validation failures (ticket
@@ -568,6 +577,50 @@ def build_uvicorn_kwargs(app: Any, config: ServerConfig) -> dict:
     return kwargs
 
 
+def start_metrics_server(metrics_port: str | None = None) -> tuple[Any, Any] | None:
+    """Open the operator-readable Prometheus scrape endpoint on loopback (#653).
+
+    The endpoint exists only when ``VENYA_METRICS_PORT`` names a port: with no value the
+    process binds nothing and the shipped counters — including the #603 refusal counter
+    ``venya_revocation_read_refusals_total{site}`` — are readable by nobody outside the
+    process. The shipped ``systemd/venya-core.service`` carries the ``Environment=`` line
+    that sets it, which is what makes a default installed core scrapable with no operator
+    step; that line and the name read here are pinned against each other by
+    ``tests/test_metrics_scrape_door_653.py``, because a port named by one side and bound
+    by the other is the whole defect class this row closes.
+
+    ``addr`` is loopback and is NOT configurable: the scrape endpoint is plain HTTP with
+    no auth, so a non-loopback bind would publish operator telemetry to anyone who can
+    route to the core. Widening it is a separate ruling, not a setting.
+
+    Args:
+        metrics_port: the value to bind; ``None`` reads the process environment. A test
+            passes a port it chose itself, so the physical check never depends on 9091
+            being free on the box that runs the suite.
+
+    Returns:
+        ``(httpd, thread)`` from ``prometheus_client`` when the endpoint was started, or
+        ``None`` when it is dark. Callers that started it own shutting it down.
+    """
+    import os
+
+    if metrics_port is None:
+        metrics_port = os.environ.get(METRICS_PORT_ENV_VAR)
+    if not metrics_port:
+        return None
+
+    from prometheus_client import start_http_server
+
+    port = int(metrics_port)
+    httpd, thread = start_http_server(port, addr=_METRICS_BIND_ADDR)
+    logger.info(
+        "Prometheus metrics server started on %s:%d (loopback only — never expose; scrape /metrics)",
+        _METRICS_BIND_ADDR,
+        port,
+    )
+    return httpd, thread
+
+
 def main() -> None:
     """Run the server."""
     import logging
@@ -599,13 +652,9 @@ def main() -> None:
 
     app = create_app(config)
 
-    # Start Prometheus metrics HTTP server on loopback (if configured)
-    metrics_port = os.environ.get("VENYA_METRICS_PORT")
-    if metrics_port:
-        from prometheus_client import start_http_server
-
-        port = int(metrics_port)
-        start_http_server(port, addr="127.0.0.1")
-        logger.info("Prometheus metrics server started on 127.0.0.1:%d", port)
+    # Operator-readable metrics (#653): dark unless VENYA_METRICS_PORT names a port, and
+    # the shipped unit does. The returned handle is not kept — the process lives as long
+    # as the listener does, and uvicorn.run() below never returns except at shutdown.
+    start_metrics_server()
 
     uvicorn.run(**build_uvicorn_kwargs(app, config))

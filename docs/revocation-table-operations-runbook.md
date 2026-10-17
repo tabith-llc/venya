@@ -85,7 +85,11 @@ Order of preference. Every step is idempotent-safe and reversible.
 
    A `200` and a non-zero line count is healthy. A gap in the access log is the incident in §2
    row 2 — check `venya_revocation_read_refusals_total` to see how many liveness reads were
-   refused during it.
+   refused during it, on the core host itself (§6 names the endpoint):
+
+   ```bash
+   curl -s http://127.0.0.1:9091/metrics | grep '^venya_revocation_read_refusals_total'
+   ```
 
 ## 4. Alembic migrations — the specific rule this repo needs
 
@@ -152,7 +156,15 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
   permanent rejection) and never an "all clear".
 - The refusal is counted, cumulatively, per site: `venya_revocation_read_refusals_total{site=…}`.
   The log line is latched to one per process; **the counter is the alerting surface** — alert on
-  its rate, not on the log.
+  its rate, not on the log. Read it from the scrape endpoint, which is loopback-only and open by
+  default on an installed core (`Environment=VENYA_METRICS_PORT=9091` in the shipped unit; #653):
+  `curl -s http://127.0.0.1:9091/metrics`, run **on the core** — the endpoint binds `127.0.0.1` only
+  and is plain unauthenticated HTTP, so a remote Prometheus reads it through a collector on that
+  host rather than over the network. The port, the override procedure, and the listens are in
+  [deployment-config.md](deployment-config.md) and [FIREWALL.md](FIREWALL.md). Before #653 landed
+  nothing set that variable on a default install, so the endpoint never bound and this instruction
+  could not be followed — on an older installed core, check first with
+  `systemctl cat venya-core | grep VENYA_METRICS_PORT`.
 - The deadline is scoped to the read inside a savepoint, never to the connection or the engine,
   because a blanket engine deadline was measured refusing a legitimate beat write at 2,033 ms that
   shipped completes at 4,037 ms.
