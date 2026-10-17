@@ -175,8 +175,9 @@ If you must take an unavoidable `ACCESS EXCLUSIVE`, stop the executors first
 (`sudo systemctl stop venya-executor` on each executor, or halt the fleet), run the DDL, restart.
 Stopped executors serve nothing, which is a smaller harm than a core that answers `000` to
 everything while keeping nominally-live state. The executor's own fault tri-state means a stalled
-core costs retries up to `max_revocation_failures` (default 3, `config.py:149`) and then the
-executor **stops serving** rather than proceeding unverified — so a long window converts into a
+core costs retries up to `max_revocation_failures` (default 3, valid range 1-1000, `config.py`,
+`CertificateRotationConfig`) and then the executor **stops serving** rather than proceeding
+unverified — so a long window converts into a
 fleet that has to be brought back, not a fleet that kept working. Plan for the recovery, not just
 the outage.
 
