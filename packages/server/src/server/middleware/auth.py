@@ -48,8 +48,9 @@ logger = logging.getLogger("venya.server")
 #: reading ``venya_revocation_read_refusals_total{site=…}`` can tell *admin plane, locked* from
 #: *executor plane, locked* at a glance. The refusal WORDING stays the one shared list-state
 #: sentence (``REVOCATION_UNAVAILABLE_DETAIL``, pinned by
-#: ``test_revocation_read_bound_603.py::TestRefusalClass``), because planes are told apart by this
-#: label and by the log line — never by two competing sentences about the same fault.
+#: ``test_revocation_read_bound_603.py::TestAlerting::test_refusal_detail_is_one_constant_shared_by_both_stale_arms``),
+#: because planes are told apart by this label and by the log line — never by two competing
+#: sentences about the same fault.
 ADMIN_MTLS_REVOCATION_SITE = "admin-mtls"
 
 
