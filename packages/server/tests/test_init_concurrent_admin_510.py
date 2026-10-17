@@ -807,13 +807,17 @@ class TestConcurrentBootstrapPostgresql:
         that is taken and then RELEASED before the route decides — a ``commit``/``rollback`` inserted
         between the lock and the re-check, or a session whose next statement lands on a second
         connection — and by a session-scoped ``pg_advisory_lock``, which holds the key past the commit
-        and leaks it onto a pooled connection's next borrower. Measured on this leg against the
-        shipped 19-cell file at ``492fe4e`` (battery: ``flash1-645-mutation-battery-s134.py``):
+        and leaks it onto a pooled connection's next borrower. Measured on this leg against the shipped 19-cell
+        file at ``492fe4e``, 8 runs per face (battery: ``flash1-645-mutation-battery-s134.py``; a single run of a
+        timing red is an anecdote, so the cell ships with its repeat count):
 
-        * guard taken, then committed away (M5b) — 2 red, both OUTCOME-shaped (``[201, 201]``), and the
-          causal-wait cell read GREEN: the request still parks on the key while a holder has it, because
-          the statement is still there. Nothing deterministic caught it.
-        * session-scoped lock (M6) — 3 red, and again not the causal cell.
+        * guard taken, then released by a commit before the decision (M5b) — the shipped file read FULLY GREEN in
+          2 of 8 runs. Its reds elsewhere were the barrier outcome cell (3/8) and the wire witness's ``codes``
+          assertion (4/8): both schedule-shaped, both already disclaimed by this class's docstring. The causal-wait
+          cell — the one that claims serialization — was red in 0 of 8.
+        * session-scoped lock (M6) — 3 red cells, steady 8/8, and again not the causal one.
+
+        This cell is red in 8 of 8 on M5b and 8 of 8 on M6, and on M5b it is the only cell that gets there.
 
         HOW THIS PINS IT WITHOUT A TIMING ARGUMENT. A ``before_cursor_execute`` witness asks the issuing
         BACKEND, on a raw DBAPI cursor of that same connection, two things at every statement: your pid,
