@@ -156,8 +156,19 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
   permanent rejection) and never an "all clear".
 - The refusal is counted, cumulatively, per site: `venya_revocation_read_refusals_total{site=…}`.
   The log line is latched to one per process; **the counter is the alerting surface** — alert on
-  its rate, not on the log. Read it from the scrape endpoint, which is loopback-only and open by
-  default on an installed core (`Environment=VENYA_METRICS_PORT=9091` in the shipped unit; #653):
+  its rate, not on the log. **That sentence is now true of both arms of the shipped 503 (#657):**
+  before it, only the lock-deadline arm counted, and the stale-snapshot arm — what a starved pool
+  or a dead publisher actually produces — raised the same refusal with no increment at all. Read
+  the `site` label to tell the causes apart. A lock-deadline refusal carries the path that asked
+  (`heartbeat`, `crl`, `dial/execute`, `admin/list-executors`, `register/…`, `audit-ingest`,
+  `executor-session`, `executor-mtls`); a snapshot-stale refusal carries
+  **`site="poll/revocation-list"`**. A rate climbing on that label is not a DDL convoy — it is the
+  publisher or the pool, so escalate on §5 and §7 (look for the publisher's own exit line in
+  `journalctl -u venya-core`) instead of hunting for a held lock. One series, one alert rule, two
+  causes, distinguishable — and a Counter, never a gauge, because the question an operator asks
+  afterwards is how much was lost, not only whether something is losing right now. Read it from
+  the scrape endpoint, which is loopback-only and open by default on an installed core
+  (`Environment=VENYA_METRICS_PORT=9091` in the shipped unit; #653):
   `curl -s http://127.0.0.1:9091/metrics`, run **on the core** — the endpoint binds `127.0.0.1` only
   and is plain unauthenticated HTTP, so a remote Prometheus reads it through a collector on that
   host rather than over the network. The port, the override procedure, and the listens are in
