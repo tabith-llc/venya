@@ -16,7 +16,7 @@ so the register and the hook cannot drift apart. If a marker is ever legitimatel
 needed in a non-src file (e.g. an alembic version or a script), it must land with
 this register regenerated in the SAME commit — the drift interlock is RED until it is.
 
-**64 suppression lines across 22 files.**
+**63 suppression lines across 22 files.**
 
 | File | Source line (verbatim) |
 |------|------------------------|
@@ -64,7 +64,6 @@ this register regenerated in the SAME commit — the drift interlock is RED unti
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `os.fchmod(fh.fileno(), 0o555)  # nosec B103 — read+exec for the` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `cp_result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec B603 B607` |
-| `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/executor/src/executor/strategies/sbx_strategy.py` | `result = subprocess.run(  # nosec` |
 | `packages/server/src/server/audit_lifecycle.py` | `ENROLLMENT_TOKEN_ISSUED = "enrollment_token_issued"  # nosec B105 — audit event name, not a password` | <!-- pragma: allowlist secret -->
