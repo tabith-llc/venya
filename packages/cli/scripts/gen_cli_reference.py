@@ -145,6 +145,25 @@ EXAMPLES: dict[tuple[str, ...], list[tuple[list[str], str]]] = {
     ("admin", "key-version", "list"): [
         (["admin", "key-version", "list", "--json"], "all key-encryption-key versions and their states"),
     ],
+    ("admin", "core-relay-cert", "list"): [
+        (["admin", "core-relay-cert", "list"], "every registered core relay credential and whether it is revoked"),
+    ],
+    ("admin", "core-relay-cert", "revoke"): [
+        (
+            ["admin", "core-relay-cert", "revoke", "--serial", "000000000000abcd"],
+            ("revoke one relay credential by serial; a serial the registry does not name is REFUSED, not accepted"),
+        ),
+        (
+            ["admin", "core-relay-cert", "revoke", "--cert-file", "/etc/venya/relay/relay-client.crt"],
+            "revoke the credential READ from that file, so no serial is hand-typed",
+        ),
+    ],
+    ("admin", "core-relay-cert", "register"): [
+        (
+            ["admin", "core-relay-cert", "register", "--cert-file", "/etc/venya/relay/relay-client.crt"],
+            "add the core's own relay credential to the registry from its certificate",
+        ),
+    ],
     ("admin", "key-version", "deactivate"): [
         (
             ["admin", "key-version", "deactivate", "3"],

@@ -238,6 +238,17 @@ class RevocationListResponse(BaseModel):
             "Additive field (executor-revocation-by-identity); older daemons ignore it."
         ),
     )
+    revoked_relay_serials: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Serials of REVOKED core relay client credentials — the credential the CORE "
+            "presents when it dials an executor at :8443 (#597). Additive field: older "
+            "daemons ignore it. Distinct from revoked_serials on purpose — that list "
+            "names EXECUTOR credentials, this one names the peer an executor would match "
+            "its incoming client certificate against. Merging them would let an executor "
+            "serial refuse a core credential that shared its spelling."
+        ),
+    )
 
 
 class HeartbeatRequest(BaseModel):
@@ -1293,20 +1304,30 @@ async def get_revocation_list(
     # the shipped stale-class constant, imported by reference, never retyped.
     try:
         serials, identities = revocation_snapshot.read_populations(db)
+        # #597: the peer population, from the SAME snapshot and the SAME freshness ceiling.
+        # A failure of this read must not answer empty either — read_relay_populations
+        # raises exactly like read_populations does, so one stale snapshot refuses the
+        # whole poll rather than answering a partial truth.
+        relay_serials = revocation_snapshot.read_relay_populations(db)
     except revocation_snapshot.RevocationSnapshotUnavailable as e:
         raise HTTPException(status_code=503, detail=_STALE_LIST_DETAIL) from e
 
     # Payload and ETag stay computed together, off the ONE population this request
     # decided to answer from (#337: a stored ETag beside a separately-built body is
     # the divergence class; the snapshot therefore never carries an etag).
-    payload = json.dumps({"s": serials, "i": identities}, sort_keys=True).encode()
+    # #597: the relay population is INSIDE the hashed payload, not appended after it —
+    # an ETag that ignored it would answer 304 to a daemon whose only change was that
+    # its peer got revoked, which is the #337 class re-opened one field over.
+    payload = json.dumps({"s": serials, "i": identities, "r": relay_serials}, sort_keys=True).encode()
     etag = f'"{hashlib.sha256(payload).hexdigest()}"'
 
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers={"ETag": etag})
 
     return Response(
-        content=json.dumps({"revoked_serials": serials, "revoked_identities": identities}).encode(),
+        content=json.dumps(
+            {"revoked_serials": serials, "revoked_identities": identities, "revoked_relay_serials": relay_serials}
+        ).encode(),
         media_type="application/json",
         headers={
             "ETag": etag,

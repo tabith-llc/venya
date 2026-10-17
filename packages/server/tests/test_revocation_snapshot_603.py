@@ -169,9 +169,16 @@ def _publish(SessionLocal, serial: str | None = None) -> rs.RevocationSnapshot:
         s.close()
 
 
-def _etag_of(serials, identities) -> str:
-    """The ETag the route would compute for this population — the same derivation."""
-    payload = json.dumps({"s": list(serials), "i": list(identities)}, sort_keys=True).encode()
+def _etag_of(serials, identities, relay_serials=()) -> str:
+    """The ETag the route would compute for this population — the same derivation.
+
+    #597: the relay population joins the hashed payload (key ``r``). This helper is a
+    MIRROR of the route's own derivation, so when the route's payload grows the mirror
+    must grow with it — the cells below still assert an exact tag, not a looser one.
+    """
+    payload = json.dumps(
+        {"s": list(serials), "i": list(identities), "r": list(relay_serials or ())}, sort_keys=True
+    ).encode()
     return f'"{hashlib.sha256(payload).hexdigest()}"'
 
 
@@ -213,7 +220,7 @@ class TestTT1bStaleBeforeEtag:
         fresh = client.get(POLL_PATH)
         assert fresh.status_code == 200
         etag = fresh.headers["etag"]
-        assert etag == _etag_of(snapshot.serials, snapshot.identities)
+        assert etag == _etag_of(snapshot.serials, snapshot.identities, snapshot.relay_serials)
 
         clock.advance(CEILING + 1)
 
@@ -223,7 +230,7 @@ class TestTT1bStaleBeforeEtag:
         assert stale.json()["detail"] == _STALE_LIST_DETAIL
         # And the match was real: the tag still describes the published population, so
         # the refusal cannot be explained by a header mismatch.
-        assert etag == _etag_of(snapshot.serials, snapshot.identities)
+        assert etag == _etag_of(snapshot.serials, snapshot.identities, snapshot.relay_serials)
 
     def test_fresh_snapshot_with_a_matching_etag_still_answers_304(self, env, clock):
         """Paired positive for TT1b: the gate is staleness, not the conditional GET.
@@ -531,7 +538,7 @@ class TestTT5PositiveGuardRail:
         assert "exec-id" in resp.json()["revoked_identities"]
         # And the ETag moved with it: an identity change invalidates the cached list.
         etag = resp.headers["etag"]
-        assert etag == _etag_of(snapshot.serials, snapshot.identities)
+        assert etag == _etag_of(snapshot.serials, snapshot.identities, snapshot.relay_serials)
 
 
 class TestTT6PositiveServe:
@@ -560,7 +567,9 @@ class TestTT6PositiveServe:
         first = client.get(POLL_PATH)
         assert first.status_code == 200
         body = first.json()
-        assert set(body) == {"revoked_serials", "revoked_identities"}
+        # #597 added the peer population to the answer; the assertion stays an EXACT key
+        # set, so a fourth unannounced field would still redden this cell.
+        assert set(body) == {"revoked_serials", "revoked_identities", "revoked_relay_serials"}
         assert "00000000000000ff" not in body["revoked_serials"]
 
         second = client.get(POLL_PATH, headers={"If-None-Match": first.headers["etag"]})
@@ -612,7 +621,15 @@ class TestSnapshotReadsNoDbOnTheRequestPath:
 
         resp = client.get(POLL_PATH)
         assert resp.status_code == 200
-        assert resp.json() == {"revoked_serials": ["00000000000000c1"], "revoked_identities": ["exec-c"]}
+        assert resp.json() == {
+            "revoked_serials": ["00000000000000c1"],
+            "revoked_identities": ["exec-c"],
+            # #597: empty here because this publish named no relay serial — and the
+            # tripwire below is the point of the cell: the relay population answers from
+            # the SAME in-memory snapshot, so adding it did not put a DB read back on the
+            # request path (#603 AC2 holds across all three populations).
+            "revoked_relay_serials": [],
+        }
         tripwire.query.assert_not_called()
 
     def test_the_stale_refusal_also_touches_no_session(self, clock):

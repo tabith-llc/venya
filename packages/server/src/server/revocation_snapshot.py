@@ -131,6 +131,15 @@ class RevocationSnapshot:
     serials: tuple[str, ...]
     identities: tuple[str, ...]
     published_mono: float
+    #: #597: revoked CORE RELAY credential serials — the peer population at executor :8443.
+    #: Kept beside the other two rather than merged into ``serials``, because ``serials``
+    #: answers "which EXECUTOR credential is dead" and a listener matching its peer needs
+    #: "which CORE relay credential is dead". One list for both would let an executor
+    #: serial refuse a core's client certificate that happens to share its spelling.
+    #: LAST and defaulted, so the required-ness of ``published_mono`` above is unchanged
+    #: (a silent 0.0 would make any direct construction read as infinitely stale) and every
+    #: pre-#597 call site keeps compiling untouched.
+    relay_serials: tuple[str, ...] = ()
 
 
 # --- module state (one process — the shipped app is single-worker) ----------------
@@ -284,10 +293,29 @@ def revocation_populations(db: Session) -> tuple[list[str], list[str]]:
     return serials, identities
 
 
+def relay_revocation_populations(db: Session) -> list[str]:
+    """Read the revoked core-relay serials — the third population (#597).
+
+    Own function, own single read, deliberately NOT folded into
+    ``revocation_populations``: that one is the #603-protected pair whose arity other
+    cells pin, and mixing a core-credential population into the executor population list
+    is exactly the vocabulary error the snapshot field comment refuses.
+
+    Canonical stored form; readers compare with ``serial_match_key`` (#481), so a legacy
+    spelling in a row still matches the credential it names.
+    """
+    from core.iam.models import CoreRelayCredential
+
+    return sorted(
+        r.serial_number for r in db.query(CoreRelayCredential).filter(CoreRelayCredential.revoked_at.isnot(None)).all()
+    )
+
+
 def publish_populations(
     serials: list[str] | tuple[str, ...],
     identities: list[str] | tuple[str, ...],
     *,
+    relay_serials: list[str] | tuple[str, ...] | None = None,
     published_mono: float | None = None,
 ) -> RevocationSnapshot:
     """Swap in one whole population — the publish step, with no read.
@@ -301,6 +329,13 @@ def publish_populations(
         serials=tuple(serials),
         identities=tuple(identities),
         published_mono=time.monotonic() if published_mono is None else published_mono,
+        # None means "this publisher does not know about relay credentials" (every
+        # pre-#597 caller). It carries the PREVIOUS tick's value rather than an empty
+        # tuple: a partial publish must not silently un-revoke a relay credential the
+        # last good snapshot named. Same law as the paragraph below about failures.
+        relay_serials=(
+            _published.relay_serials if relay_serials is None and _published is not None else tuple(relay_serials or ())
+        ),
     )
     _published = snapshot
     return snapshot
@@ -314,7 +349,35 @@ def publish_snapshot(db: Session) -> RevocationSnapshot:
     permissive answer the publisher could fabricate out of a failure.
     """
     serials, identities = revocation_populations(db)
-    return publish_populations(serials, identities)
+    return publish_populations(serials, identities, relay_serials=relay_revocation_populations(db))
+
+
+def read_relay_populations(db: Session) -> list[str]:
+    """Answer the peer-serial question from the SAME snapshot the executor poll uses.
+
+    Mirrors ``read_populations`` exactly: publisher running -> answer from the published
+    snapshot only, and a missing/stale snapshot raises
+    ``RevocationSnapshotUnavailable`` (the caller turns it into the shipped stale-class
+    503); no publisher running -> the inline read, so a router mounted without the core
+    lifespan behaves as before. One ceiling, one publisher, one refusal sentence for all
+    three populations — a second staleness rule would be a second answer to the same
+    question.
+
+    NOTE for #586: this is the population a relay listener can match its PEER against.
+    It is keyed on registry MEMBERSHIP, and nothing here makes list age a stop condition
+    at that door — the availability trade stays #586's and the owner's.
+    """
+    if not _publisher_running:
+        with bounded_read(db, site="poll/fallback-read"):
+            return relay_revocation_populations(db)
+    snapshot = _published
+    if snapshot is None or snapshot_is_stale(snapshot, now_mono=time.monotonic()):
+        note_stale_refusal()
+        raise RevocationSnapshotUnavailable(
+            "no revocation snapshot inside the freshness ceiling "
+            f"({REVOCATION_SNAPSHOT_MAX_AGE_SECONDS} s): the relay-credential poll must refuse, not answer live"
+        )
+    return list(snapshot.relay_serials)
 
 
 def read_populations(db: Session) -> tuple[list[str], list[str]]:

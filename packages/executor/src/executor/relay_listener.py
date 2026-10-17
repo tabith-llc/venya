@@ -306,6 +306,11 @@ REFUSE_NO_ANSWER = (
 REFUSE_NOT_WIRED = (
     "503 OPERATIONAL FAULT — the relay listener holds no daemon state, so revocation " "cannot be consulted at all"
 )
+# #597: the peer class this door can now actually name. Distinct from REFUSE_REVOKED,
+# which is about THIS executor's own credential — a message that said "your credential
+# is revoked" to a CORE whose relay cert was revoked would describe an event that did
+# not happen to it.
+REFUSE_PEER_REVOKED = "403 REVOKED — the peer's core relay credential is revoked (registry membership, #597)"
 
 
 def revocation_accept_reason(state: Any) -> str | None:
@@ -337,6 +342,37 @@ def revocation_accept_reason(state: Any) -> str | None:
         return REFUSE_NO_ANSWER
     if not getattr(state, "revocation_answered", False):
         return REFUSE_NO_ANSWER
+    return None
+
+
+def peer_revocation_refusal(state: Any, peer_serial: str | None) -> str | None:
+    """#597: refuse a NEW :8443 connection whose PEER credential is revoked; None admits.
+
+    Keyed on REGISTRY MEMBERSHIP and nothing else. There is deliberately no staleness
+    arm here: the list this matches against is refreshed by the same ~30 s poll that
+    answers the executor's own revocation question, and adding an age-based stop to a
+    door whose revocation source is a 1-hour-stamped artifact is the fleet-wide outage
+    #586 measured and the owner has not agreed to. Refusing an unknown peer would be the
+    other failure: the CN allowlist, not this set, decides who may connect at all.
+
+    ``peer_serial`` is the presented client certificate's serial in ANY spelling; both
+    sides go through ``serial_match_key`` (#481), so a padded row and an unpadded
+    certificate still meet.
+
+    None state, no population yet, and no peer serial each ADMIT — this function only
+    ever removes a connection the registry has named dead. It cannot be the reason a
+    healthy core is refused, which is the exact property that made #586 option 3
+    unacceptable.
+    """
+    if state is None or peer_serial is None:
+        return None
+    revoked = getattr(state, "revoked_relay_serials", None)
+    if not revoked:
+        return None
+    from core.utils.cert_serial import serial_match_key
+
+    if serial_match_key(peer_serial) in {serial_match_key(s) for s in revoked}:
+        return REFUSE_PEER_REVOKED
     return None
 
 
@@ -385,6 +421,22 @@ class _RelayHTTPServer(ThreadingHTTPServer):
             conn.close()
             raise
         reason = revocation_accept_reason(self.revocation_state)
+        if reason is None:
+            # #597: the door may also refuse because the PEER is dead, not because this
+            # daemon cannot tell. Read off the established connection's client
+            # certificate, so it is the credential that was actually presented — never a
+            # header and never a name lookup. Placed after the state gate so an
+            # unanswered daemon refuses first: that answer is about this executor, and
+            # claiming to know about the peer while not knowing about ourselves would be
+            # the louder lie of the two.
+            peer_serial = None
+            try:
+                peer_serial = tls_conn.getpeercert().get("serialNumber")
+            except (OSError, ValueError):
+                # No readable peer serial admits (see peer_revocation_refusal): this
+                # function's only power is to refuse a serial the registry named.
+                peer_serial = None
+            reason = peer_revocation_refusal(self.revocation_state, peer_serial)
         if reason is None:
             return tls_conn, addr
         # Post-handshake refusal — the owner's option 3, and its named window: the
