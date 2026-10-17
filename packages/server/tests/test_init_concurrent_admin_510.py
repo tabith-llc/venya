@@ -40,6 +40,20 @@ from sqlalchemy.orm import sessionmaker
 from starlette.testclient import TestClient
 
 PG_URL_ENV = "VENYA_TEST_PG_URL"
+#: The statement the #510 guard sends, and the write it exists to cover. Matched on purpose
+#: (substring, not line numbers) so a reformat of the route cannot silently un-pin the #645 cells.
+_ADVISORY_LOCK = "pg_advisory_xact_lock"
+_ENROLLMENT_WRITE = "INSERT INTO webauthn_credentials"
+
+
+def _shape(log):
+    """A per-caller statement sketch for a failure message — pid, held-face, statement label only."""
+    return {
+        ident: [(pid, "HELD" if held else "NOT-HELD", stmt[:44]) for pid, held, stmt in rows]
+        for ident, rows in log.items()
+    }
+
+
 # R1 (#614): every engine a PostgreSQL cell builds is tracked and disposed when that cell
 # ends, so a connection left checked out (and whatever transaction it still holds) cannot pin
 # the NEXT file's drop_all. Disposal is part of the ordering, not cleanup for tidiness: the
@@ -545,9 +559,13 @@ class TestConcurrentBootstrapPostgresql:
     Which cell proves which half (#645): the barrier race below proves the OUTCOME — one enrolled
     admin, the loser refused, on two real connections. It is NOT by itself the paired negative: it
     measured 2-of-3 GREEN with the ``db.execute(...)`` at routes/init.py:122-125 neutered, because
-    thread timing alone can also produce [201, 409]. The two #645 cells under it are the paired
-    negative — one watches the statement arrive on the wire, the other watches PostgreSQL refuse to
-    let the bootstrap pass while another transaction holds the key.
+    thread timing alone can also produce [201, 409]. The #645 cells under it are the paired negative:
+    one watches the statement arrive on the wire, one watches PostgreSQL refuse to let the bootstrap
+    pass while another transaction holds the key, and one watches the key stay GRANTED to its own
+    backend across the decision read and the enrollment write (and gone once that transaction ends).
+    The third is the scope half, and it is the one that reddens on a lock that is taken and then
+    released before the route decides — a shape the first two read green (see
+    ``test_the_guard_is_held_across_the_decision_and_the_write``).
 
     This is the cell the SQLite suite cannot substitute: two Session objects on
     two connections released together by a barrier, so both step-2 re-checks
@@ -643,7 +661,8 @@ class TestConcurrentBootstrapPostgresql:
         finally:
             s.close()
 
-    # ---- #645 AC2: the paired negative. Both cells below FAIL if the advisory lock leaves the route.
+    # ---- #645 AC2: the paired negative. All three cells below FAIL if the advisory lock leaves the route,
+    # ---- and each of the three catches a face the others cannot (sent / waited-on / held-over-the-write).
 
     def test_the_route_sends_the_advisory_statement_from_both_connections(self):
         """AC2, first half — the statement arrives on the WIRE, once per racing connection.
@@ -777,6 +796,134 @@ class TestConcurrentBootstrapPostgresql:
             holder.close()
 
         with SessionLocal() as s:
+            assert len(_enrolled_admins(s)) == 1, _enrolled_admins(s)
+            assert s.query(WebAuthnCredential).count() == 1
+
+    def test_the_guard_is_held_across_the_decision_and_the_write(self):
+        """AC2, third half (SCOPE) — the key is HELD over the decision and the write, not merely sent.
+
+        WHAT THE TWO CELLS ABOVE DO NOT PROVE. The wire witness pins that the statement arrives; the
+        causal wait pins that PostgreSQL parks a caller behind the key. Both are satisfied by a guard
+        that is taken and then RELEASED before the route decides — a ``commit``/``rollback`` inserted
+        between the lock and the re-check, or a session whose next statement lands on a second
+        connection — and by a session-scoped ``pg_advisory_lock``, which holds the key past the commit
+        and leaks it onto a pooled connection's next borrower. Measured on this leg against the
+        shipped 19-cell file at ``492fe4e`` (battery: ``flash1-645-mutation-battery-s134.py``):
+
+        * guard taken, then committed away (M5b) — 2 red, both OUTCOME-shaped (``[201, 201]``), and the
+          causal-wait cell read GREEN: the request still parks on the key while a holder has it, because
+          the statement is still there. Nothing deterministic caught it.
+        * session-scoped lock (M6) — 3 red, and again not the causal cell.
+
+        HOW THIS PINS IT WITHOUT A TIMING ARGUMENT. A ``before_cursor_execute`` witness asks the issuing
+        BACKEND, on a raw DBAPI cursor of that same connection, two things at every statement: your pid,
+        and whether ``pg_locks`` shows the key GRANTED to that pid right now. The assertions then read
+        one caller's own statement log in that caller's own order, which no scheduler can change: the
+        guard is the FIRST statement, every statement after it is sampled with the key granted, and
+        every one of them runs on the SAME backend the guard was taken on. Release-early, key-drift and
+        connection-migration each break a row with no race and no sleep. The last assertion is the other
+        half of scope: once both responses are back, NO backend may still hold the key — read from the
+        server, so swapping the function name cannot walk past it.
+
+        The two-connection race is driven because AC2 asks for the two-caller outcome specifically;
+        nothing here depends on how the two interleave.
+        """
+        import threading
+
+        engine, SessionLocal = self._engine_and_factory()
+        client, _ = self._pg_stack(SessionLocal)
+        key = init_routes.INIT_BOOTSTRAP_LOCK_KEY
+
+        # One predicate, two spellings, on purpose: the probe runs on a raw psycopg2 cursor (`%s`)
+        # because it must not re-enter SQLAlchemy inside its own execute hook; the read-back runs
+        # through a Session (`:key`). hashtext() returns a signed int4 while pg_locks stores the key as
+        # an oid, so the low 32 bits are what a granted row can match — masked, never assumed positive.
+        probe_sql = (
+            "SELECT pg_backend_pid(), EXISTS ("
+            "  SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted"
+            "    AND pid = pg_backend_pid()"
+            "    AND objid::bigint = (hashtext(%s)::bigint & 4294967295))"
+        )
+        left_sql = text(
+            "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted"
+            "   AND objid::bigint = (hashtext(:key)::bigint & 4294967295)"
+        )
+
+        log: dict = {}
+        tally = threading.Lock()
+
+        def witness(conn, cursor, statement, parameters, context, executemany):
+            probe = cursor.connection.cursor()
+            try:
+                probe.execute(probe_sql, (key,))
+                pid, held = probe.fetchone()
+            finally:
+                probe.close()
+            with tally:
+                log.setdefault(threading.get_ident(), []).append((pid, bool(held), statement.replace("\n", " ")))
+
+        event.listen(engine, "before_cursor_execute", witness)
+        codes, bodies = {}, {}
+        try:
+            barrier = threading.Barrier(2, timeout=10)
+
+            def run(uid):
+                barrier.wait(timeout=10)
+                resp = _complete(client, uid)
+                codes[uid] = resp.status_code
+                bodies[uid] = resp.text[:160]
+
+            threads = [threading.Thread(target=run, args=(uid,)) for uid in ("alice", "bob")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+        finally:
+            event.remove(engine, "before_cursor_execute", witness)
+
+        # AC3 first: codes before any lock table or row count, so a harness fault reads as a code.
+        assert sorted(codes.values()) == [201, 409], f"codes={codes} bodies={bodies}"
+        assert len(log) == 2, f"both callers must reach the engine, saw {len(log)} logs: {_shape(log)}"
+
+        for ident, rows in log.items():
+            guards = [i for i, (_, _, stmt) in enumerate(rows) if _ADVISORY_LOCK in stmt]
+            assert len(guards) == 1, f"{ident}: expected exactly one guard statement, saw indexes {guards}"
+            gi = guards[0]
+            assert gi == 0, (
+                f"{ident}: the guard is the {gi + 1}th statement of its own transaction, not the first — the "
+                f"route decided before PostgreSQL could park it: {_shape(log)}"
+            )
+            guard_pid = rows[gi][0]
+            covered = rows[gi + 1 :]
+            assert covered, f"{ident}: nothing followed the guard, so it covers no decision: {_shape(log)}"
+            # The guard's own row is sampled BEFORE it executes, so it is legitimately unheld there;
+            # everything it exists to protect comes after it.
+            unheld = [stmt[:70] for _, held, stmt in covered if not held]
+            assert not unheld, (
+                f"{ident}: the key was NOT granted to its own backend at {len(unheld)} statement(s) taken after "
+                f"the guard — it left the transaction early, or never covered the decision: {unheld}"
+            )
+            moved = [(pid, stmt[:60]) for pid, _, stmt in covered if pid != guard_pid]
+            assert not moved, (
+                f"{ident}: the guard was taken on backend {guard_pid} but {len(moved)} statement(s) it is "
+                f"supposed to cover ran on another backend: {moved}"
+            )
+            assert any(
+                "FOR UPDATE" in stmt.upper() for _, _, stmt in covered
+            ), f"{ident}: no guarded decision read reached the wire, so the held rows prove nothing: {_shape(log)}"
+
+        writers = [ident for ident, rows in log.items() if any(_ENROLLMENT_WRITE in stmt for _, _, stmt in rows)]
+        assert (
+            len(writers) == 1
+        ), f"exactly one caller may write the credential inside a guard, saw {len(writers)}: {_shape(log)}"
+
+        with SessionLocal() as s:
+            leftovers = s.execute(left_sql, {"key": key}).fetchall()
+            assert leftovers == [], (
+                f"advisory key {key!r} is still granted to backend pid(s) {[r[0] for r in leftovers]} after the "
+                "bootstrap committed — the production guard is transaction-scoped, and a session-scoped lock "
+                "would follow the pooled connection to its next borrower"
+            )
             assert len(_enrolled_admins(s)) == 1, _enrolled_admins(s)
             assert s.query(WebAuthnCredential).count() == 1
 
