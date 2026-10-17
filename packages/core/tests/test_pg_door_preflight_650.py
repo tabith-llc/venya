@@ -123,6 +123,33 @@ class TestDoorStateIsRead:
         assert "STOPPED" in message and "log" in message
         assert state.cause != pdp.CAUSE_NEVER_STARTED, "the two causes collapsed into one"
 
+    @pytest.mark.parametrize(
+        ("maker", "want"),
+        [
+            (lambda tp: _unix_url(tp / "absent", 55913), pdp.CAUSE_NEVER_STARTED),
+            (
+                lambda tp: (_make_stale_socket(tp / "sock", 55914), _unix_url(tp / "sock", 55914))[1],
+                pdp.CAUSE_DIED_MID_RUN,
+            ),
+            (lambda tp: "postgresql+psycopg2://agent@127.0.0.1:59995/db", pdp.CAUSE_REFUSED),
+        ],
+    )
+    def test_an_unreachable_door_on_a_healthy_disk_names_the_reach_not_the_disk(self, tmp_path, maker, want):
+        """Condition 3 of the lead's ruling, stated as a refusal to blame the tmpfs.
+
+        The three states must not collapse into one "PG door unavailable": a lane that is told the
+        disk is short when 4.8 GiB is free goes and frees a disk that was never the problem, which is
+        a false-green wearing a louder font. So the space words appear ONLY in the space cause.
+        """
+        state = pdp.read_door(maker(tmp_path))
+        assert state.cause == want
+        message = pdp.abort_message(state)
+        assert (
+            "floor" not in message and "space low" not in message
+        ), f"cause {want!r} was reported with disk language: {message}"
+        assert f"{state.free_mib} MiB free" in message, "the number still belongs in the line"
+        assert state.free_bytes > pdp.MIN_FREE_BYTES, "precondition: this disk really is healthy"
+
     def test_tcp_door_with_no_listener_reads_as_refused(self):
         state = pdp.read_door("postgresql+psycopg2://agent@127.0.0.1:59997/venya_test")
         assert state.kind == "tcp"
@@ -188,7 +215,8 @@ class TestSpaceIsPartOfTheDoor:
         monkeypatch.setattr(pdp, "MIN_FREE_BYTES", 10**15)  # a floor no tmpfs on this box clears
         state = pdp.read_door(_unix_url(sock_dir, 55906))
         assert state.cause == pdp.CAUSE_SPACE_LOW
-        assert "floor" in pdp.abort_message(state)
+        message = pdp.abort_message(state)
+        assert "floor" in message and "MiB free" in message, message
 
     def test_a_space_reading_that_fails_is_not_reported_as_a_full_disk(self, monkeypatch):
         """An unreadable volume answers -1 free and must NOT trip the floor.

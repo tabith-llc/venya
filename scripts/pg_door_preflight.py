@@ -313,8 +313,9 @@ def abort_message(state: DoorState) -> str:
     elif state.cause == CAUSE_DIED_MID_RUN:
         because = (
             f"a socket file exists at {state.target} and nothing answers it — the fixture was "
-            f"running and STOPPED, which is what an ENOSPC self-shut looks like from outside "
-            f"({space}); read the fixture's own log before filing anything"
+            f"running and STOPPED, which on this box is how a filled tmpfs leaves it "
+            f"({space}); read the fixture's own log for what it actually said before filing "
+            "anything against the tree"
         )
     elif state.cause == CAUSE_REFUSED:
         because = (
