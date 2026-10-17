@@ -867,27 +867,6 @@ class TestSbxStrategyRemoveSandbox:
             mock_run.assert_not_called()
 
 
-class TestSbxStrategyStoreHttpSecret:
-    def test_store_http_secret_calls_sbx_secret_set(self):
-        strategy = SbxStrategy()
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stderr="")
-            strategy.store_http_secret("openai", "sk-test123")
-            mock_run.assert_called_once()
-            call_args = mock_run.call_args[0][0]
-            assert call_args[0] == "sbx"
-            assert "secret" in call_args
-            assert "set" in call_args
-            assert "openai" in call_args
-
-    def test_store_http_secret_raises_on_failure(self):
-        strategy = SbxStrategy()
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stderr="auth failed")
-            with pytest.raises(RuntimeError, match="Failed to store HTTP secret"):
-                strategy.store_http_secret("openai", "sk-test123")
-
-
 class TestSbxStrategyExecuteEnvCwd:
     """env/cwd thread-through (ticket executor-env-override-cwd-sbx-noop;
     transport REPLACED per secret-shape-env-injection option (ii), spike-ruled
