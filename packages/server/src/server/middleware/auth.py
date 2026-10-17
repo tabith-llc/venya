@@ -33,9 +33,25 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import JSONResponse, Response
 
 from ..ca import PLANE_MACHINE, parse_plane_marker
-from ..revocation_read import REVOCATION_UNAVAILABLE_DETAIL, RevocationReadUnavailable, for_site
+from ..revocation_read import (
+    REVOCATION_UNAVAILABLE_DETAIL,
+    RevocationReadUnavailable,
+    bounded_read,
+    current_lock_timeout_ms,
+    for_site,
+)
 
 logger = logging.getLogger("venya.server")
+
+#: #658 — the admin plane's own bounded-read site label. The executor plane collapses to
+#: ``heartbeat`` / ``audit-ingest`` / ``executor-session`` / ``executor-mtls``, so an operator
+#: reading ``venya_revocation_read_refusals_total{site=…}`` can tell *admin plane, locked* from
+#: *executor plane, locked* at a glance. The refusal WORDING stays the one shared list-state
+#: sentence (``REVOCATION_UNAVAILABLE_DETAIL``, pinned by
+#: ``test_revocation_read_bound_603.py::TestAlerting::test_refusal_detail_is_one_constant_shared_by_both_stale_arms``),
+#: because planes are told apart by this label and by the log line — never by two competing
+#: sentences about the same fault.
+ADMIN_MTLS_REVOCATION_SITE = "admin-mtls"
 
 
 def _extract_identity_from_cert(cert: x509.Certificate) -> str:
@@ -363,10 +379,16 @@ class SessionMiddleware(BaseHTTPMiddleware):
            known_admin_ids — an EMPTY allowlist FAILS CLOSED (ticket
            sec-admin-mtls-allowlist-revocation #15)
         3. Check the verified certificate's serial against
-           AdminCertRevocation — in-process revocation enforcement,
-           fail-closed on backend / lookup error (ticket
-           sec-admin-mtls-allowlist-revocation #16; a forwarded cert always
-           carries a serial, so the former missing-header branch is gone).
+           AdminCertRevocation — in-process revocation enforcement, under the
+           bounded revocation-read deadline (#658) and through the same
+           savepoint-scoped seam #603 shipped for the executor plane. THREE arms,
+           all refusals: a matching row fails closed 403 "Admin certificate
+           revoked" (ticket sec-admin-mtls-allowlist-revocation #16; a forwarded
+           cert always carries a serial, so the former missing-header branch is
+           gone); a read that cannot answer inside its lock deadline refuses 503
+           with the shared list-state sentence — UNAVAILABLE, never an all-clear
+           and never a revocation claim; any other lookup/backend fault fails
+           closed 403 exactly as it does today.
 
         Args:
             request: The FastAPI request.
@@ -515,22 +537,56 @@ class SessionMiddleware(BaseHTTPMiddleware):
         try:
             from core.iam.models import AdminCertRevocation
 
-            revoked = (
-                db.query(AdminCertRevocation)
-                .filter(serial_match_clause(AdminCertRevocation.serial_number, presented_serial))
-                .first()
-            )
-            if revoked is None:
-                # One line at the enforcement point, naming WHICH no-match this
-                # is: an empty table is a fresh install, a non-empty table that
-                # missed is where a failed revocation would hide (#481).
-                rows_exist = db.query(AdminCertRevocation.serial_number).first() is not None
-                logger.info(
-                    "Admin route %s: serial %s admitted — %s",
-                    path,
-                    presented_serial,
-                    "no revocation row matched the rows on file" if rows_exist else "no revocation rows exist",
+            # #658: this read is now BOUNDED, through the same savepoint-scoped lock deadline the
+            # executor plane got in #603 — not a second implementation of it. A held
+            # ACCESS EXCLUSIVE on admin_cert_revocations (its own purge path is
+            # ``server/ca.py::AdminCAManager.purge_expired_revocations``) used to park this
+            # synchronous SQLAlchemy call inside an ``async def``, on the ordinary pool, on the SAME
+            # single-worker core event loop #603 measured freezing for 57 s. Both SELECTs below share
+            # one deadline window, because the seam's ``SET LOCAL`` spans the savepoint, not the
+            # statement.
+            #
+            # What is NOT changed: the decision. A row that matches still answers 403
+            # "Admin certificate revoked" byte-for-byte, and an unrelated fault still answers the
+            # shipped fail-closed 403 below it. Only the LOCK-WAIT arm is new, and it refuses too —
+            # with the list-state 503, because "the server could not check" is not the same claim as
+            # "this credential is not authorized", and an operator who reads the second one will go
+            # and rotate a perfectly good certificate. It is never an all-clear and never a
+            # pass-through: the request is REFUSED either way.
+            with bounded_read(db, site=ADMIN_MTLS_REVOCATION_SITE):
+                revoked = (
+                    db.query(AdminCertRevocation)
+                    .filter(serial_match_clause(AdminCertRevocation.serial_number, presented_serial))
+                    .first()
                 )
+                if revoked is None:
+                    # One line at the enforcement point, naming WHICH no-match this
+                    # is: an empty table is a fresh install, a non-empty table that
+                    # missed is where a failed revocation would hide (#481).
+                    rows_exist = db.query(AdminCertRevocation.serial_number).first() is not None
+                    logger.info(
+                        "Admin route %s: serial %s admitted — %s",
+                        path,
+                        presented_serial,
+                        "no revocation row matched the rows on file" if rows_exist else "no revocation rows exist",
+                    )
+        except RevocationReadUnavailable as e:
+            # ORDER MATTERS: this arm must stay ABOVE the fail-closed ``except Exception`` below.
+            # RevocationReadUnavailable is a RuntimeError, so a generic arm placed first swallows it
+            # and the bounded refusal silently becomes a 403 about the credential — the collision
+            # #658's truth table exists to prevent. Pinned structurally AND behaviorally by
+            # tests/test_admin_revocation_read_bound_658.py.
+            logger.warning(
+                "Admin route %s: revocation read refused under the %d ms lock deadline — failing "
+                "closed as UNAVAILABLE, not as a revocation: %s",
+                path,
+                current_lock_timeout_ms(),
+                e,
+            )
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"detail": REVOCATION_UNAVAILABLE_DETAIL},
+            )
         except Exception:
             logger.exception("Admin route %s: revocation lookup failed — failing closed", path)
             return JSONResponse(
