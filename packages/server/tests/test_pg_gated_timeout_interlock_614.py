@@ -16,7 +16,7 @@ to catch a gated cell that skips *silently* — one whose engine carries no dead
 file whose class the scan cannot see — and it must never be read as a claim that the door can
 only ever stay shut.
 
-**What this file pins (seven claims).**
+**What this file pins (eight claims).**
 
 1. ``test_pg_gated_file_declares_an_inspected_class`` — every file naming the env var
    declares a ``*Postgresql`` class. Without this, the scan below could be silently blind to
@@ -45,9 +45,21 @@ only ever stay shut.
    ``_pg_gated_files()`` globs ``*.py``, which is NON-RECURSIVE, so a gated file dropped into a
    subdirectory of either root would be read by nothing and still report a clean tree. The claim
    compares the glob against a recursive walk.
+8. ``test_every_pg_engine_in_a_gated_file_is_bounded_whatever_its_class_name`` (#649, blind spot
+   5) — claims 1/2/5 key on the class NAME, so a PG engine written in a gated FILE from a class
+   named otherwise sat outside every one of them. This claim keys on the FILE: it walks every
+   ``create_engine`` in the source, exempts SQLite BY VALUE exactly as claim 4 rules, and demands
+   ``lock_timeout`` of everything else — including an engine with no ``connect_args`` at all,
+   which is reported as a finding rather than raised through. The site #649 names (613's
+   ``TestVenueGateHonesty``, unreachable-URL cells) is now COVERED, not exempted.
 
 Claims 2 and 3 are byte-untouched: #630 is a guard STRENGTHENING, and the class-body walk was
-not relaxed to accommodate the gap — it was joined by a second walker. Non-vacuity of 5 and 6 is
+not relaxed to accommodate the gap — it was joined by a second walker. #649 follows the same
+rule: claim 1/2/5's class-name predicate is byte-unchanged, and ``_file_engine_findings`` is a
+THIRD walker over the whole module, which is why
+``test_control_e_shape_is_invisible_to_the_class_name_claims`` exists — it proves the older
+claims still miss the shape, so the new claim adds reach and is not a duplicate of what was
+already there. Non-vacuity of 5 and 6 is
 pinned IN-TREE by ``test_control_c_fixture_is_caught_by_the_helper_walk``,
 ``test_control_c_unbound_helper_fails_closed`` and
 ``test_control_d_fixture_is_caught_by_the_barrier_walk``: controls C and D are the shapes
@@ -55,19 +67,20 @@ pinned IN-TREE by ``test_control_c_fixture_is_caught_by_the_helper_walk``,
 functions the shipped claims run. Revert the helper walk or the barrier claim and those cells
 fail loudly instead of quietly agreeing with the tree.
 
-**Counts, re-derived at dev ``04eb349`` on 2026-10-16 (#630 AC4 — counts rot, so re-run this;**
+**Counts, re-derived at dev ``492fe4e`` on 2026-10-17 (#630 AC4 — counts rot, so re-run this;**
 ``git grep -ln 'VENYA_TEST_PG_URL' -- 'packages/*/tests/*' | wc -l`` **and the scan-target count
 below, then the AST tallies this file's own helpers print):** ``git grep -ln 'VENYA_TEST_PG_URL'
--- 'packages/*/tests/*'`` → 10 files, minus this scanner = 9 scan targets (a whole-tree grep
-returns the same 10, and ``rglob`` over the two roots finds no extra — which is what claim 7 now
-enforces); 9 ``*Postgresql`` classes; 15 gated cells inside them; 21 ``create_engine`` calls
-across the 9 files — 10 PG and 11 SQLite. Nine of the ten PG engines sit inside a gated class
-body; the tenth is named as blind spot 5 below and is bounded by hand-check, not by a claim, so
-claim 5 has no work to do on the current tree and is proven by its fixtures and by the live
-control C run (see the #630 report); 7 ``threading.Barrier`` constructions and 8 ``.wait()``
-calls, all inside gated classes; 23 helper defs the closure binds across the 9 files, the
-``MIN_BOUND_HELPERS`` floor. This file collects 52 cells at that tip (9 files x 5 parametrised
-claims + the shared-deadline cell + 1 subdirectory cell + 5 non-parametrised cells). The same
+-- 'packages/*/tests/*'`` → 11 files, minus this scanner = 10 scan targets (a whole-tree grep
+returns the same 11, and ``rglob`` over the two roots finds no extra — which is what claim 7 now
+enforces); 10 ``*Postgresql`` classes; 24 gated cells inside them; **24 ``create_engine`` calls
+across the 10 files — 12 PG and 12 SQLite.** All 12 PG engines sit inside a gated class body or
+inside a gated FILE that the #649 file walk now reads, and every one of them is bounded — so
+claims 1/2/5/8 have no work to do on the current tree and are proven by their fixtures and by the
+live control C run (see the #630 report); 8 ``threading.Barrier`` constructions and 9 ``.wait()``
+calls, all inside gated classes; 24 helper defs the closure binds across the 10 files, the
+``MIN_BOUND_HELPERS`` floor (23) sitting one below it. This file collects 71 cells at that tip
+(10 files x 6 parametrised claims + the shared-deadline cell + 1 subdirectory cell + the
+non-parametrised claim, control-fixture and vacuity cells). The same
 figures at the pre-re-anchor base ``59cf8ef`` were 9 files / 8 targets / 8 classes / 12 cells /
 18 engines (8 PG, 10 SQLite) / 19 helper defs / 47 cells; the move is #613's gated file joining
 the tree, not a count that was ever wrong.
@@ -92,14 +105,20 @@ the tree, not a count that was ever wrong.
 4. SQLite engines are exempt BY VALUE wherever they sit, including inside a helper: demanding a
    PostgreSQL GUC of a SQLite URL would be a wrong test, not a stronger one. That exemption is
    exercised by ``test_control_sqlite_helper_stays_exempt`` so it cannot be quietly widened.
-5. An engine in a gated FILE whose enclosing class is NOT named ``*Postgresql`` is read by no
-   claim. Found re-deriving these counts at ``04eb349``: 613:299 (``TestVenueGateHonesty``, the
-   unreachable-URL cells) opens a real PG engine outside every gated class body and outside any
-   helper a gated class reaches. It DOES carry ``connect_args=_PG_DEADLINE`` — read at this tip,
-   not inferred — so the tree is correct today, but claim 2 cannot see it and claim 5 does not
-   reach it: dropping that deadline there would pass every cell in this file. Closing it means
-   widening the class-name test or walking every engine in a gated file, which is a larger
-   change than #630 ruled and is NOT made here; this row names what still escapes.
+5. CLOSED at #649, was: an engine in a gated FILE whose enclosing class is NOT named
+   ``*Postgresql`` read by no claim. Found re-deriving these counts at ``04eb349``: 613:299
+   (``TestVenueGateHonesty``, the unreachable-URL cells) opens a real PG engine outside every
+   gated class body and outside any helper a gated class reaches. It DID carry
+   ``connect_args=_PG_DEADLINE`` — read at that tip, not inferred — so the tree was correct,
+   but claim 2 could not see it and claim 5 did not reach it: dropping that deadline passed
+   every cell in this file. **#649 closed it by COVERING the site, not by exempting it** —
+   ``_file_engine_findings`` walks every ``create_engine`` in a gated file and keys on the FILE,
+   not the class name, asserted by
+   ``test_every_pg_engine_in_a_gated_file_is_bounded_whatever_its_class_name``. The mutation was
+   run, not asserted: dropping the deadline at 613:299 (M1) and keeping ``connect_args`` but
+   losing ``lock_timeout`` (M2) each redden that one cell with DISTINCT text, and
+   ``test_control_e_shape_is_invisible_to_the_class_name_claims`` proves the pre-existing claims
+   still cannot see this shape, so the file walk is load-bearing and not redundant.
 """
 
 import ast
@@ -731,7 +750,223 @@ CONTROL_UNBOUND_SOURCE = CONTROL_C_SOURCE.replace(
 #: closure stopped FOLLOWING calls, and claim 5 would then pass by seeing nothing (#630 AC4).
 #: Measured at dev ``04eb349``: 23 across the 9 gated files (19 across 8 at the pre-re-anchor
 #: base ``59cf8ef``) — re-run ``test_the_helper_walk_is_not_vacuous_on_the_shipped_tree``.
+#: Floor on the PG engines the FILE walk must classify on the shipped tree (#649 AC2 pairing).
+#: Measured at dev ``492fe4e``: 12 PG + 12 SQLite = 24 ``create_engine`` calls across the 10
+#: gated files, every PG one already bounded — so this floor is set BELOW the measured 12 to
+#: catch a classifier that starts answering "sqlite" to everything, which would report zero
+#: findings and look exactly like a clean tree. Re-derive with ``test_the_file_walk_is_not_
+#: vacuous_on_the_shipped_tree``.
+MIN_FILE_WALK_PG_ENGINES = 8
+
+#: Control E: the #649 escape shape — a PG engine in a gated file, in a class whose name does
+#: not end in ``*Postgresql``, with the deadline dropped. Invisible to claims 1/2/5 by name.
+CONTROL_E_SOURCE = '''
+"""Throwaway gated file, control E shape (#649)."""
+import os
+from sqlalchemy import create_engine
+
+PG_URL_ENV = "VENYA_TEST_PG_URL"
+_PG_DEADLINE = {"options": "-c lock_timeout=5000 -c statement_timeout=60000"}
+
+
+class TestVenueHonestyPlainName:
+    def test_one(self):
+        assert create_engine(os.environ[PG_URL_ENV]) is not None
+'''
+
+#: The same file with the deadline restored — the compliant half, which must stay clean.
+CONTROL_E_COMPLIANT = CONTROL_E_SOURCE.replace(
+    "create_engine(os.environ[PG_URL_ENV])",
+    "create_engine(os.environ[PG_URL_ENV], connect_args=_PG_DEADLINE)",
+)
+
 MIN_BOUND_HELPERS = 23
+
+
+def _enclosing_class(tree: ast.Module, lineno: int) -> str:
+    """Innermost class holding ``lineno``, or ``"<module>"``. Names the scope in a finding so a
+    reader can tell an escape (a non-``*Postgresql`` class) from an ordinary class body."""
+    best = "<module>"
+    best_span: tuple[int, int] = (0, 1 << 30)
+    for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+        lo = min((n.lineno for n in ast.walk(cls) if hasattr(n, "lineno")), default=cls.lineno)
+        hi = max((n.lineno for n in ast.walk(cls) if hasattr(n, "lineno")), default=cls.lineno)
+        if lo <= lineno <= hi and (hi - lo) < (best_span[1] - best_span[0]):
+            best, best_span = cls.name, (lo, hi)
+    return best
+
+
+def _file_engine_findings(text: str, label: str) -> list[str]:
+    """Every PG engine constructed ANYWHERE in this source that carries no ``lock_timeout``.
+
+    #649: claims 1/2 scope the walk to ``*Postgresql`` CLASS BODIES and claim 5 follows helpers
+    out of those bodies. A PG engine in a gated FILE whose enclosing class is named anything
+    else is inside neither set, and the shipped tree has exactly one: 613's
+    ``TestVenueGateHonesty`` opens a real PG engine per ``UNREACHABLE`` parameterisation from a
+    class name the predicate never matches. Dropping that deadline was invisible to every cell
+    in this guard — the escape this row names, measured at ``492fe4e``: the bound removed at
+    613:299 left all 57 cells green.
+
+    This walk keys on the FILE, so it closes the hole by COVERING the site rather than by
+    exempting it. Three properties it must not lose: SQLite engines stay exempt BY VALUE exactly
+    as claim 4 rules (demanding a PG GUC of a SQLite URL is a wrong test); an URL the walk
+    cannot resolve is answered PG by ``_url_kind``, so a name that binds nothing becomes a
+    FINDING rather than a silent pass; and an engine with NO ``connect_args`` at all is the
+    unbounded shape this guard exists to catch, so it is reported, not raised through —
+    ``_connect_args_value`` asserts the keyword exists, which is right for the class-body claim
+    (those engines all carry it today) and wrong for a walk whose whole job is to find the ones
+    that do not.
+    """
+    tree = ast.parse(text)
+    constants = _module_constants(tree)
+    assigns = _file_assigns(tree)
+    findings: list[str] = []
+    for call in _create_engine_calls(tree):
+        kind, why = _url_kind(_url_expr(call), constants, assigns)
+        if kind == "sqlite":
+            continue
+        scope = _enclosing_class(tree, call.lineno)
+        if not any(kw.arg == "connect_args" for kw in call.keywords):
+            findings.append(
+                f"{label}:{call.lineno} opens a PG engine ({why}) in {scope} with NO connect_args "
+                f"at all (so no lock_timeout and no statement_timeout) — the #607 s105 hang "
+                "shape, missed by the class-name claims"
+            )
+            continue
+        options = _connect_args_value(call, constants).get("options", "")
+        if "lock_timeout" not in options:
+            findings.append(
+                f"{label}:{call.lineno} opens a PG engine ({why}) in {scope} with no lock_timeout "
+                f"in connect_args — the #607 s105 hang shape, missed by the class-name claims "
+                "because this engine sits outside every *Postgresql body"
+            )
+    return findings
+
+
+@pytest.mark.parametrize("path", _pg_gated_files(), ids=_scan_id)
+def test_every_pg_engine_in_a_gated_file_is_bounded_whatever_its_class_name(path: Path) -> None:
+    """#649 AC1: the net covers every PG engine in a gated file, not only the ones sitting in
+    a class whose name ends in ``Postgresql``.
+
+    Claim 1 bounded engines inside gated CLASS BODIES; claim 5 widened that to helpers those
+    bodies call. Both still key on the class NAME, so a PG engine written in a gated file from
+    a class named otherwise was unclaimed — and the code under that hole was correct, which is
+    why nothing noticed. Pairing: ``test_control_e_fixture_is_caught_by_the_file_walk`` proves
+    this walk can see the shape, and ``test_the_file_walk_is_not_vacuous_on_the_shipped_tree``
+    proves it is not passing by inspecting nothing.
+    """
+    findings = _file_engine_findings(path.read_text(encoding="utf-8"), _scan_id(path))
+    assert findings == [], "a PG engine in a gated file is unbounded and no class-name claim reads it:\n" + "\n".join(
+        findings
+    )
+
+
+def test_control_e_fixture_is_caught_by_the_file_walk() -> None:
+    """#649 AC2's mutation, run as a fixture so it is re-runnable rather than history.
+
+    Control E is the 613 shape: a PG engine inside a gated file, in a class whose name does NOT
+    end in ``*Postgresql``, with no deadline. It must be caught exactly once, and its compliant
+    twin — the same file with ``connect_args=_PG_DEADLINE`` restored — must stay clean, so the
+    walk is not simply reporting every engine it sees.
+    """
+    offenders = _file_engine_findings(CONTROL_E_SOURCE, "control_e.py")
+    assert len(offenders) == 1, f"control E must be caught once, got {offenders}"
+    assert "lock_timeout" in offenders[0] and "TestVenueHonestyPlainName" in offenders[0], offenders[0]
+    assert _file_engine_findings(CONTROL_E_COMPLIANT, "control_e_ok.py") == [], "compliant control E flagged"
+
+
+def test_control_e_shape_is_invisible_to_the_class_name_claims() -> None:
+    """Why #649 was a real hole and not a paperwork one: the SAME source that control E reddens
+    passes every pre-existing claim, because none of them enters a non-``*Postgresql`` class.
+
+    If a future edit widens claim 1 or claim 5 until this cell reddens, that is the pair
+    tightening correctly and this row's premise retiring — update this cell to say so rather
+    than deleting it, because it is the proof that the file walk is not redundant.
+    """
+    tree = ast.parse(CONTROL_E_SOURCE)
+    constants = _module_constants(tree)
+    gated_classes = _pg_class_nodes(tree)
+    assert gated_classes == [], "control E must carry no *Postgresql class, or it is not the escape shape"
+    for cls in gated_classes:
+        for call in _create_engine_calls(cls):
+            if "lock_timeout" not in _connect_args_value(call, constants).get("options", ""):
+                raise AssertionError("control E became visible to the class-body claim")
+    resolved, unresolved = _gated_helper_closure(CONTROL_E_SOURCE, "control_e.py", None)
+    assert (
+        resolved == [] and unresolved == []
+    ), f"control E must be outside the helper walk too, or claim 5 already covered it: {resolved, unresolved}"
+    assert _file_engine_findings(
+        CONTROL_E_SOURCE, "control_e.py"
+    ), "the file walk is the ONLY claim that sees this shape, so it must find it"
+
+
+def test_the_file_walk_is_not_vacuous_on_the_shipped_tree() -> None:
+    """The green-that-proves-nothing guard, in the shape #630 AC4 already established.
+
+    Counting FILES is not enough: a walk that classified every engine as SQLite would report
+    zero findings and look identical to a healthy tree. This asserts the walk actually resolves
+    PG engines on the shipped tree, at a floor, so a future classifier that starts answering
+    "sqlite" to everything reddens here instead of hiding behind claim 1's green.
+    """
+    pg_seen = 0
+    for path in _pg_gated_files():
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        constants = _module_constants(tree)
+        assigns = _file_assigns(tree)
+        for call in _create_engine_calls(tree):
+            kind, _ = _url_kind(_url_expr(call), constants, assigns)
+            if kind == "pg":
+                pg_seen += 1
+    assert pg_seen >= MIN_FILE_WALK_PG_ENGINES, (
+        f"the file walk classified only {pg_seen} PG engines across the gated files; below the "
+        f"floor of {MIN_FILE_WALK_PG_ENGINES} it is reporting nothing because it sees nothing"
+    )
+
+
+def test_the_exemption_list_is_sqlite_by_value_and_nothing_else() -> None:
+    """#649 AC3: the exemption is ASSERTED, not implied by whichever cells happen to pass.
+
+    Two halves. (a) Every engine the file walk skips on the shipped tree skips because its URL
+    resolves to a ``sqlite`` head — there is no name-based, class-based or location-based pass.
+    (b) 613's ``TestVenueGateHonesty`` unreachable-URL cells are PG-dialect engines that fail at
+    connect, NOT SQLite engines, and they are now inside the bound requirement rather than
+    outside it: this cell names them so nobody re-exempts them by their failing behaviour.
+    """
+    exempt: list[str] = []
+    for path in _pg_gated_files():
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+        constants = _module_constants(tree)
+        assigns = _file_assigns(tree)
+        for call in _create_engine_calls(tree):
+            kind, why = _url_kind(_url_expr(call), constants, assigns)
+            if kind == "sqlite":
+                exempt.append(why if isinstance(why, str) else str(why))
+    assert exempt, "no SQLite engine found anywhere: the exemption list is asserted against nothing"
+    assert all(
+        str(h).startswith("sqlite") for h in exempt
+    ), f"an engine was exempt for a reason that is not a SQLite URL: {exempt}"
+
+    site = _repo_root() / "packages" / "server" / "tests" / "test_audit_executor_id_filter_613.py"
+    venue = _file_site_kinds(site)
+    assert venue, f"{site}: found no engine in TestVenueGateHonesty — the site this row names is gone, update #649"
+    assert all(
+        k == "pg" for k, in venue
+    ), f"the 613 venue-honesty cells must classify as PG-dialect engines, got {venue}"
+
+
+def _file_site_kinds(path: Path) -> list[tuple[str]]:
+    """The URL class of every ``create_engine`` inside ``TestVenueGateHonesty`` by name."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    constants = _module_constants(tree)
+    assigns = _file_assigns(tree)
+    out: list[tuple[str]] = []
+    for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "TestVenueGateHonesty"):
+        for call in _create_engine_calls(cls):
+            kind, _why = _url_kind(_url_expr(call), constants, assigns)
+            out.append((kind,))
+    return out
 
 
 def test_the_scan_roots_are_not_blind_to_a_subdirectory() -> None:
