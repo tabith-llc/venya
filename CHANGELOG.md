@@ -122,6 +122,29 @@ Notable changes to Venya will be documented in this file.
   resolved once, asserted to be a bare hex name, and used only for that one prefix; an openssl that
   is missing or fails warns, names what it gave back, and continues the install without the
   cleanup.
+- **The plane marker reads one arc now (#601).** Venya's plane marker moved to the project's registered
+  enterprise number at 0.1.0alpha17, and the reader accepted the arc it used to sit on alongside it so
+  credentials already minted kept resolving while each plane was re-minted. That window is now closed:
+  `1.3.6.1.4.1.67159.1.1` is the only marker the reader consults, and a plane-shaped extension on any
+  other arc is read as no marker at all — the certificate is refused the way an unmarked one is, through
+  the executor-mTLS path included. This follows the owner's ruling of 2026-10-16 that nothing alpha-era is
+  supported, which removes the precondition the second read was kept for. `docs/cert-rotation-runbook.md`
+  now says the same thing the code does, and the paired negative that pins the closure is
+  `packages/server/tests/test_plane_marker_pen_arc_601.py`, class `TestAnyOtherArcIsNoLongerRead`.
+- **A locked revocation read now answers in the stale class instead of waiting (#603, AC1).** The
+  revocation population is read on the executor request path — the per-request mTLS check, the heartbeat
+  and register routes, the two dial gates, audit ingest, the admin lists, and the public CRL route. When a
+  lock was held over that table the wait was unbounded; the read now runs inside a savepoint carrying a
+  `SET LOCAL lock_timeout`, and a read that cannot finish in time is refused with the same `503` and the
+  same `no revocation asserted` sentence a stale snapshot already answers — never as an all-clear and never
+  as a revocation claim. The bound ships as `crl.revocation_read_lock_timeout_ms` = 300 ms
+  (`VENYA_CRL__REVOCATION_READ_LOCK_TIMEOUT_MS`); it bounds the LOCK WAIT, not a slow scan, and
+  `statement_timeout` stands as it ships. A refusal is counted by `venya_revocation_read_refusals_total`,
+  labelled by site, and `docs/revocation-table-operations-runbook.md` is new and covers the operations that
+  can take that table and what each one costs. Because a deadline set on a pooled connection would follow
+  onto an unrelated later request, the seam reverts it explicitly, and a refusal cannot discard the
+  caller's own pending write — three savepoint properties, each pinned by a cell in
+  `packages/server/tests/test_revocation_read_bound_603.py`.
 
 ## [0.1.0alpha17] - 2026-10-13
 
