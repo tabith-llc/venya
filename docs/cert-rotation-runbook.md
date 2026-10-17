@@ -15,7 +15,7 @@
 | Root CA keypair | core: `/var/lib/venya/ca/ca.key` (0600), `ca.crt` | manual break-glass only (§5) | key ENCRYPTED at rest since fix `4218ec1` (ticket `root-ca-key-plaintext-at-rest`, CLOSED 2026-09-20); passphrase `VENYA_CA_KEY_PASSPHRASE` in `/etc/venya/venya-core.env` (0640 root:venya), reused on re-run — an explicit wrong value fails loudly at decrypt |
 | Admin CA keypair | core: `/var/lib/venya/ca/admin-ca/` | manual (§7) | key ENCRYPTED; passphrase in `/etc/venya/venya-core.env` (0640 root:venya) |
 | Server TLS leaf | core: `/etc/venya/tls/server.crt|.key` | 365 days; re-signed on every installer run (`install-venya-core.sh`, the `Server TLS certificate signed with Venya CA` block) | CN + SAN DNS = `CORE_HOSTNAME` |
-| Relay client cert | core: `/etc/venya/relay/relay-client.crt|.key` | regenerated on installer run (the `Relay client certificate signed and verified` block) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids` |
+| Relay client cert | core: `/etc/venya/relay/relay-client.crt|.key` | regenerated on installer run (the `Relay client certificate signed and verified` block) | CN `<core-hostname>-relay`; must appear in executors' `relay_client_ids`. Registered in `core_relay_credentials` at core boot and revocable — see § Revoking the core's relay client credential (#597) |
 | Executor client cert | executor: `/etc/venya/executor/executor.crt|.key` (ca.crt alongside) | 30 days (`EXECUTOR_VALIDITY_DAYS = 30`, server `ca.py`); auto-rotation attempted 3 days before expiry (`rotate_before_days`, executor `config.py`) | Auto-rotation persistence FIXED 2026-09-19 (ticket `executor-cert-rotation-erofs`, §1); pre-fix hosts need the unit refresh; manual path: §2 |
 | Admin client certs | core (machine plane): `/etc/venya/admin/admin.crt|.key` · person (human plane): a workstation path you choose | core pair: 90 days (`ADMIN_CERT_VALIDITY_DAYS`, `server/ca.py`), re-minted every installer run · person's certificate: 60 minutes, minted by ceremony (note below) | manual rotation: §7; the two credentials are different things and rotate differently |
 | Secret-encryption KEK + key versions | core: database + server config | `venya admin rotate-key` (§6) | independent of the TLS CA hierarchy |
@@ -97,6 +97,58 @@ channel: uvicorn serves TLS on the loopback bind only and nginx presents the
 relay client certificate (`install-venya-core.sh`, the nginx site config block
 with `proxy_pass https://127.0.0.1:8080`). The port is unreachable from other
 hosts; all verification curls below go through `https://<core-host>/…`.
+
+## Revoking the core's relay client credential (#597)
+
+The same relay client certificate is used in two places, and they are not the same
+exposure: nginx presents it on the **loopback** inner-mTLS hop above, and the core
+presents it when it **dials an executor's :8443** listener
+(`routes/executors.py`, inside `execute_command_on_executor` — the dial URL is
+`https://<executor-hostname>:8443/execute`). Losing the second one means a stolen
+credential can keep relaying commands, so it now has a revocation path.
+
+It did not used to. The credential is minted by `install-venya-core.sh` with `openssl`
+and historically entered no table, so there was nothing to revoke it *in* — a
+compromised core relay credential had no kill switch, and no list could name it at the
+executor door.
+
+1. **See what the deployment holds.** The registry is populated by the core itself at
+   boot (`server/relay_registry.py`, the function `ingest_relay_credential`), which
+   registers the certificate the process actually presents:
+
+   ```
+   venya admin core-relay-cert list
+   ```
+
+   The serial printed there is what you revoke. Do not copy a serial out of `openssl x509
+   -serial` off a disk file and assume it is registered — if the core has not booted since
+   the file changed, it will not be.
+
+2. **Revoke it, by serial or straight off the file:**
+
+   ```
+   venya admin core-relay-cert revoke --serial <hex-serial> --reason "host decommissioned"
+   venya admin core-relay-cert revoke --cert-file /etc/venya/relay/relay-client.crt
+   ```
+
+   The second form reads the serial off the certificate, which is the safer one when you
+   are standing on the core.
+
+3. **A serial the registry does not name is REFUSED**, with `REFUSE_UNREGISTERED` and the
+   remedy in the message. This is deliberate: accepting a revocation for a credential the
+   store cannot name would let "revoked" mean nothing, and an empty store must never act
+   as an allowlist. Register it first (`venya admin core-relay-cert register --cert-file
+   <path>`) or restart the core, then revoke.
+
+4. **Propagation is not instantaneous.** The executor learns revoked peers from the
+   revocation poll it already runs (~30 s, `REVOCATION_LIST_PATH` in `executor/daemon.py`),
+   and the refusal lands on **new** connections only — a relay call already in flight is
+   not terminated. That boundary is the owner's ruling and is not a knob.
+
+5. **Revocation is terminal.** There is no un-revoke; the credential's row keeps its
+   `revoked_at` across a reboot, and re-minting the file (a fresh installer run) creates a
+   row for the NEW serial and leaves the revoked one revoked. Re-enrolment means a new
+   credential, same law as an executor identity.
 
 ## 1. Executor certificate auto-rotation (design + deployment caveat)
 

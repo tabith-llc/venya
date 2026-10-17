@@ -18,7 +18,7 @@ per CA-material surface", which also covers `/etc/venya/admin/`.
 
 | # | What | Path / command | Replaceable? | Why it matters |
 |---|------|----------------|--------------|----------------|
-| 1 | **PostgreSQL `venya` database** | `sudo -u postgres pg_dump -Fc venya` | **No** | Secrets (ciphertext), the **KEK salt** (`venya_config`), users, WebAuthn credentials, roles, executors + cert records, enrollment tokens (hashed), execution sessions, audit log. |
+| 1 | **PostgreSQL `venya` database** | `sudo -u postgres pg_dump -Fc venya` | **No** | Secrets (ciphertext), the **KEK salt** (`venya_config`), users, WebAuthn credentials, roles, executors + cert records, the core relay credential registry (`core_relay_credentials`, #597 — revoking a stolen relay credential lives only here), enrollment tokens (hashed), execution sessions, audit log. |
 | 2 | **Server env file** | `/opt/venya/.env` (mode `0600`, `venya:venya`) | **No** | Holds `VENYA_DB__PASSPHRASE` (the KEK input that decrypts every secret), `VENYA_RECOVERY_CODE_PEPPER`, and the DB URL+password. |
 | 3 | **CA passphrase env file** | `/etc/venya/venya-core.env` (mode `0640`, `root:venya`) | **No** | Holds `VENYA_CA_KEY_PASSPHRASE` and `VENYA_ADMIN_CA_KEY_PASSPHRASE` — the only things that can decrypt the CA private keys. |
 | 4 | **CA material** | `/var/lib/venya/ca/` (mode `0700`) — `ca.crt` (mode `0644`) + **encrypted** `ca.key` (mode `0600`), and `admin-ca/` (mode `0700`) — `admin-ca.crt` (mode `0644`) + **encrypted** `admin-ca.key` (mode `0600`) | **No** | The root CA signs server TLS certs, relay client certs, and every executor cert. The Admin CA signs admin mTLS certs. Lose the CA → every certificate is unverifiable and nothing can be re-issued. |

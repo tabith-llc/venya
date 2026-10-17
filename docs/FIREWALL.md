@@ -28,7 +28,7 @@ install steps see [installation.md](installation.md).
 | Dir | Port | Proto | From / To | Purpose |
 |-----|------|-------|-----------|---------|
 | **inbound** | **443/tcp** | HTTPS (the installer-generated site config floors the handshake at TLS 1.2/1.3 — `ssl_protocols TLSv1.2 TLSv1.3`, so the protocol floor is ours, not inherited) | workstations, executors, admins | The only inbound service. nginx terminates TLS and proxies to the local backend. Admin API paths additionally require an mTLS **client certificate** (`ssl_verify_client optional` at the listener; enforced per-path) chained to the per-install Admin CA. |
-| **outbound** | **8443/tcp** | HTTPS (mTLS) | core → each executor | The relay: the core **dials** the executor's relay listener to run a command, presenting its `<core-host>-relay` client certificate. |
+| **outbound** | **8443/tcp** | HTTPS (mTLS) | core → each executor | The relay: the core **dials** the executor's relay listener to run a command, presenting its `<core-host>-relay` client certificate. That credential is registered (`core_relay_credentials`, #597) and is revocable: `venya admin core-relay-cert revoke --serial <hex>`. A revoked one is refused at the executor's handshake — the registry row, not a CRL, is what makes it nameable there. |
 
 **Localhost-only — never expose these:**
 
