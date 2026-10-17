@@ -993,6 +993,73 @@ class TestScanBoundPostgresql:
             db.rollback()
             db.close()
 
+    def test_the_scan_deadline_is_gone_after_the_savepoint_exits(self):
+        """The door-ON half of the §4a claim, read off the server rather than off a double.
+
+        The seam's success path reverts both GUCs explicitly because ``RELEASE SAVEPOINT`` does not
+        undo ``SET LOCAL`` — measured on PostgreSQL 16.15 for the lock half and recorded in the seam's
+        own module docstring, and asserted in the unit suite only against a double that agrees. This
+        asks the engine what it actually holds after the read, and the answer is what matters twice
+        over: a leftover narrowing would put the caller's NEXT statement under a deadline it never
+        asked for, and a leftover ``'0'`` on the scan GUC would remove a bound the product believes it
+        installed. Both readings come from ``current_setting``, not from the seam's own statements.
+        """
+        revocation_read.configure_scan_timeout(200)
+        db = self._session()
+        try:
+            lock_before = db.execute(text("SHOW lock_timeout")).scalar()
+            scan_before = db.execute(text("SHOW statement_timeout")).scalar()
+            with bounded_read(db, site="crl"):
+                assert db.execute(text("SELECT 1")).scalar() == 1
+            lock_after = db.execute(text("SHOW lock_timeout")).scalar()
+            scan_after = db.execute(text("SHOW statement_timeout")).scalar()
+            # Inside the savepoint the seam holds 300 ms / 200 ms; outside it, both are back to what
+            # the session says. Pinned against the captured values rather than literals, because the
+            # fixture's session numbers are the harness's choice, not the product's.
+            assert scan_after == scan_before, f"scan bound leaked: {scan_before!r} -> {scan_after!r}"
+            assert (
+                lock_after == lock_before or lock_after == "0"
+            ), f"lock deadline after the read is {lock_after!r}, session said {lock_before!r}"
+            # The narrowing must have been real while it lasted: a sleep past the 200 ms budget but
+            # inside the session's own bound answers now, and refused inside the seam.
+            assert db.execute(text("SELECT pg_sleep(0.3)")).scalar() is not None
+        finally:
+            db.rollback()
+            db.close()
+
+    def test_the_shipped_lock_revert_restores_zero_not_the_session_value(self):
+        """A fact about the shipped half, pinned because it is easy to mistake for a defect and
+        easy to break while 'fixing' it symmetrically.
+
+        ``_CLEAR_DEADLINE`` sets ``lock_timeout = '0'``, which is parity on EVERY shipping face because
+        the product sets no session ``lock_timeout`` at all — only ``statement_timeout = '300s'``,
+        ``synchronous_commit`` and ``enable_partition_pruning`` on the connect listener. This test
+        engine is different by construction: the house ``_PG_DEADLINE`` that the #614/#630 interlock
+        REQUIRES on every gated cell passes ``-c lock_timeout=5000``, so on the harness the revert to
+        ``'0'`` drops that guard for the rest of the transaction. That is a harness property, not a
+        product one, and it is the reason the scan half may not copy the lock revert: on the product
+        ``statement_timeout``'s session value is 300 s, so a ``'0'`` there would remove a real bound.
+        If a later seat 'tidies' the lock revert into a capture-and-restore, this cell fires and they
+        make the choice deliberately, on both faces.
+        """
+        db = self._session()
+        try:
+            session_lock = db.execute(text("SHOW lock_timeout")).scalar()
+            assert session_lock not in ("0",), (
+                f"this fixture's session lock_timeout is {session_lock!r}; the cell below describes a "
+                "harness that DOES set one (the required _PG_DEADLINE), so re-read it before editing"
+            )
+            with bounded_read(db, site="crl"):
+                inside = db.execute(text("SHOW lock_timeout")).scalar()
+                assert inside == "300ms", f"the seam did not hold its own deadline, saw {inside!r}"
+            assert db.execute(text("SHOW lock_timeout")).scalar() == "0"
+            # And the scan GUC on the SAME connection after the SAME read is back to the session value,
+            # which is the whole asymmetry this leg exists to get right.
+            assert db.execute(text("SHOW statement_timeout")).scalar() != "0"
+        finally:
+            db.rollback()
+            db.close()
+
     def test_a_held_access_exclusive_on_the_poll_population_now_refuses(self):
         """#656 site 2, physical, both halves.
 
