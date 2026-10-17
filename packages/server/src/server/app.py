@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 
 from . import revocation_snapshot
 from .config import CASecurityConfig, ServerConfig
-from .revocation_read import configure_lock_timeout
+from .revocation_read import configure_lock_timeout, configure_scan_timeout
 
 logger = logging.getLogger("venya.server")
 
@@ -448,6 +448,12 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     # matcher reads one module-level value (it is reached from fourteen sites, most with no
     # Request in hand), and this is the single place that value is set.
     configure_lock_timeout(getattr(config.crl, "revocation_read_lock_timeout_ms", None))
+    # #654: the scan (statement) deadline beside it, installed the same way for the same reason —
+    # one module-level value, one startup site, and a config that omits the key keeps the shipped
+    # default rather than removing the bound. The pair itself is checked where it is declared
+    # (`config.CRLConfig`), so a scan bound at or below the lock bound stops the startup, not the
+    # vocabulary.
+    configure_scan_timeout(getattr(config.crl, "revocation_read_scan_timeout_ms", None))
 
     # Periodic session cleanup
     from .maintenance import run_maintenance

@@ -4,6 +4,27 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
+- **A revocation read that runs slowly is now refused, counted and visible (#654, #656).** The
+  bounded read shipped under #603 AC1 bounds the wait for a lock; it never said how long a statement
+  could take once it had one, so the only ceiling on execution time was the `statement_timeout` both
+  engines set at the session level — 300 s against a read whose caller waits 10 s. A slow read that
+  answered late was invisible everywhere: no exception, no refusal, no counter, no log line, a parked
+  core event loop, and a caller that had already given up and counted a failure the core recorded as
+  a 200. Request-path revocation reads now also carry their own execution deadline,
+  `crl.revocation_read_scan_timeout_ms` (default 2 000 ms, env
+  `VENYA_CRL__REVOCATION_READ_SCAN_TIMEOUT_MS`), set inside the same savepoint as the lock deadline
+  and reverted with it. A read that misses it is refused in the stale class the plane already uses —
+  the same `503` and the same "no revocation asserted" wording, never a `403` and never an all-clear
+  — and it is counted on a new cumulative series, `venya_revocation_read_scan_refusals_total{site=…}`,
+  deliberately kept apart from `venya_revocation_read_refusals_total` so a lock convoy and a slow scan
+  stay two different diagnoses. A slow read that still answers is now an observation on
+  `venya_revocation_read_duration_seconds{site=…}`, bucketed up to the 300 s that actually governed
+  these reads, because the shipped request histogram stops at 10 s. Two more reads of the same
+  lockable population joined the seam: the CRL the dial mints on its own path, and the
+  whole-population read the public poll falls back to when the snapshot publisher is not running
+  (#656) — both of them still answering, which is the half that keeps a freeze fix from becoming a
+  refusal the fleet cannot recover from.
+
 ## [0.1.0beta1] - 2026-10-15
 
 - **The executor's revocation poll is answered from a freshness-bounded snapshot
