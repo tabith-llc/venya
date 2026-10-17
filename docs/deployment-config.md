@@ -216,6 +216,36 @@ scope boundary (#653 AC5), pinned by that same test, not an oversight to fill in
 
 ---
 
+## Bounded Executor Knobs
+
+### `cert_rotation.max_revocation_failures` (executor)
+
+**Config key:** `[cert_rotation] max_revocation_failures` in `/etc/venya/executor.toml`; env
+`VENYA_EXECUTOR_CERT_ROTATION__MAX_REVOCATION_FAILURES` (read only when the file does not carry the key — precedence is
+`file > env > default`, #598). Field: `CertificateRotationConfig.max_revocation_failures` in
+`packages/executor/src/executor/config.py`.
+
+| | |
+|---|---|
+| Shipped default | **`3`** — consecutive revocation checks that get no answer before the executor stops serving. A fault, never a revocation: the core has neither confirmed nor revoked the credential (#442, #603). |
+| Valid range | **`1`–`1000`, inclusive.** Set by `ge=1` / `le=1000` on the field (#660). |
+| Out of range | **Refused at config load** with a Pydantic `ValidationError` naming the field and the bound it broke — for either spelling, the TOML file and the environment. Never clamped, never silently accepted, never a traceback at the daemon. |
+
+**Why a floor at 1.** The daemon's threshold test is `>=` (`packages/executor/src/executor/daemon.py`, in `_main_loop`)
+against a failure counter that starts at `0`. A setting of `0` therefore trips that comparison on a **healthy**
+executor's very first tick, before any revocation answer has had a chance to arrive — the outage stop becomes a
+self-stop, and the fleet halts with a core that is answering fine. Before #660 nothing refused that value.
+
+**Why a ceiling at 1000.** The same main loop beats once every 30 s, so 1000 unanswered checks is roughly **8.3 hours**
+of serving on an credential nobody has confirmed — long past the point where the ruled outage stop means anything. An
+operator who needs more than that does not have a tuning request, they have a typo, a copy-paste, or a hostile TOML.
+
+**Pinned by:** `packages/executor/tests/test_config.py`, `TestCertificateRotationConfig` — both bounds loadable, both
+ends refused, and the refusal reached through `ExecutorConfig.from_file` on a real TOML shape, not only by building the
+model in a test.
+
+---
+
 ## Validation Timing
 
 Two layers:

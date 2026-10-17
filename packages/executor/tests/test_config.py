@@ -59,6 +59,71 @@ class TestCertificateRotationConfig:
         assert not hasattr(cfg, "rotation_days")
         assert not hasattr(cfg, "revocation_poll_seconds")
 
+    # #660 — the revocation-fault counter needs BOTH ends bounded. Paired
+    # negatives per the filter/gate law: each refusal is asserted with the field
+    # named, and each bound is asserted loadable, so a fence that only rejects
+    # (or only accepts) cannot pass this file.
+
+    def test_default_and_floor_load_green(self):
+        """Positive halves: the shipped default and the floor value itself."""
+        assert CertificateRotationConfig().max_revocation_failures == 3
+        assert CertificateRotationConfig(max_revocation_failures=1).max_revocation_failures == 1
+
+    def test_ceiling_loads_green(self):
+        """Positive half of the ceiling: the bound is inclusive, 1000 loads."""
+        assert CertificateRotationConfig(max_revocation_failures=1000).max_revocation_failures == 1000
+
+    @pytest.mark.parametrize("value", [0, -1], ids=["zero", "negative"])
+    def test_below_floor_refuses_naming_field_and_floor(self, value):
+        """THE 0 END (#660): daemon.py starts the counter at 0 and tests `>=`, so
+        a floor of 0 would stop a HEALTHY executor on its first tick — before any
+        revocation answer arrived at all. Refused at load, never clamped."""
+        with pytest.raises(ValidationError, match="greater than or equal to 1") as excinfo:
+            CertificateRotationConfig(max_revocation_failures=value)
+        assert "max_revocation_failures" in str(excinfo.value)
+
+    @pytest.mark.parametrize("value", [1001, 100_000], ids=["just-over", "typo-sized"])
+    def test_above_ceiling_refuses_naming_field_and_ceiling(self, value):
+        """THE ABSENT-CEILING END (#660): a huge value silently disables the
+        ruled outage stop the owner's #442 posture depends on. Refused at load,
+        never clamped, and the field is named so an operator can find the knob."""
+        with pytest.raises(ValidationError, match="less than or equal to 1000") as excinfo:
+            CertificateRotationConfig(max_revocation_failures=value)
+        assert "max_revocation_failures" in str(excinfo.value)
+
+    def test_out_of_range_toml_refuses_at_file_load_not_construct_only(self, tmp_path):
+        """The end-to-end negative this row exists for: the refusal must be
+        reachable through the CONFIG DOOR an operator actually uses —
+        `ExecutorConfig.from_file` on a real `executor.toml` shape — not only
+        when a test builds the model directly. The old shape (no `ge`) accepted
+        `max_revocation_failures = 0` here and shipped a self-stopping executor.
+        """
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text("[cert_rotation]\nmax_revocation_failures = 0\n")
+        with pytest.raises(ValidationError, match="greater than or equal to 1"):
+            ExecutorConfig.from_file(toml_path)
+
+    def test_in_range_toml_loads_at_the_file_door(self, tmp_path):
+        """Positive half of the file door: a legal value on the same spelling
+        still loads, so the fence is a bound and not an accidental ban."""
+        toml_path = tmp_path / "executor.toml"
+        toml_path.write_text("[cert_rotation]\nmax_revocation_failures = 1\n")
+        cfg = ExecutorConfig.from_file(toml_path)
+        assert cfg.cert_rotation.max_revocation_failures == 1
+
+    def test_bounds_are_stated_in_the_shipped_field_description(self):
+        """The description used to state neither bound. A fence an operator
+        cannot read about is a fence they will fight, so this pins the prose to
+        the numbers instead of trusting the two to stay in step by luck."""
+        field = CertificateRotationConfig.model_fields["max_revocation_failures"]
+        description = field.description or ""
+        assert "1-1000" in description
+        bounds = {type(b).__name__ for b in field.metadata}
+        assert {"Ge", "Le"} <= bounds, bounds
+        ge = next(b for b in field.metadata if type(b).__name__ == "Ge")
+        le = next(b for b in field.metadata if type(b).__name__ == "Le")
+        assert (ge.ge, le.le) == (1, 1000), (ge.ge, le.le)
+
     def test_legacy_toml_with_removed_keys_still_loads(self, tmp_path):
         """Deployed executor.toml files may still carry the removed keys —
         they must load (ignored), not fail (negative half of the removal)."""
