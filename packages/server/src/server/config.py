@@ -158,6 +158,47 @@ class CRLConfig(BaseModel):
             "VENYA_CRL__REVOCATION_READ_LOCK_TIMEOUT_MS. (refs #603)"
         ),
     )
+    revocation_read_scan_timeout_ms: int = Field(
+        default=2000,
+        ge=50,
+        le=10000,
+        description=(
+            "#654: max milliseconds one request-path read of the lockable revocation population "
+            "may take to EXECUTE before PostgreSQL cancels it (the read's own "
+            "``statement_timeout``, set inside the same savepoint as the lock deadline above and "
+            "reverted with it). This bounds the SLOW SCAN, which the lock knob does not: a read "
+            "that takes 12 s to answer raises nothing, counts nowhere, and parks the core's single "
+            "event loop for all 12 s while the executor polling it gave up at 10 s. A refusal is "
+            "the same availability fault as the lock refusal — same 503, same 'no revocation "
+            "asserted' sentence — but it is counted on its own series, "
+            "`venya_revocation_read_scan_refusals_total`. Floor 50 ms stays above the measured 29 ms "
+            "uncontended baseline; ceiling 10 s is the daemon's own request timeout, because a bound "
+            "above it would let the core answer after the caller had left, which is the disagreement "
+            "this knob exists to close. It must stay strictly ABOVE "
+            "`revocation_read_lock_timeout_ms`: ``statement_timeout`` also counts the time a "
+            "statement spends waiting for a lock, so a scan bound below the lock bound would report "
+            "every lock convoy as a slow scan and take #603 AC1's vocabulary away from it. Env "
+            "override: VENYA_CRL__REVOCATION_READ_SCAN_TIMEOUT_MS. (refs #654, #656)"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _scan_deadline_above_lock_deadline(self) -> CRLConfig:
+        """The pairing the two knobs need, not a decoration: see the field description above.
+
+        With a scan bound at or below the lock bound, a held ``ACCESS EXCLUSIVE`` would trip
+        ``statement_timeout`` before ``lock_timeout`` could answer 55P03, and every lock convoy on
+        the plane would be journalled and counted as a slow scan.
+        """
+        if self.revocation_read_scan_timeout_ms <= self.revocation_read_lock_timeout_ms:
+            raise ValueError(
+                f"crl.revocation_read_scan_timeout_ms ({self.revocation_read_scan_timeout_ms} ms) "
+                f"must stay above crl.revocation_read_lock_timeout_ms "
+                f"({self.revocation_read_lock_timeout_ms} ms): statement_timeout counts lock waits "
+                "too, so a scan bound at or below the lock bound reports every lock convoy as a "
+                "slow scan and empties the #603 refusal series it must feed"
+            )
+        return self
 
 
 class CASecurityConfig(BaseModel):

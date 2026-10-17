@@ -93,6 +93,10 @@ def executor_revocation_state(
             (``daemon.py:319/_PERMANENT_REGISTER_STATUSES``), so answering a capacity
             fault with 403 would read to the executor as a revocation that never
             happened.
+            Since #654 the same arm also catches ``RevocationReadScanTimeout``, its
+            subclass: a read that answered too LATE rather than waiting too long. One
+            ``except`` still covers the plane, the two are counted on two series, and
+            nothing about the verdict path changed.
     """
     from core.iam.models import Executor, ExecutorCert, ExecutorCertRevocation
     from core.utils.cert_serial import canonical_serial, serial_match_clause

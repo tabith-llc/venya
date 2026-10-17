@@ -69,7 +69,11 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+# Two imports landed here in the same window, and both are load-bearing: #657's metrics handle for the
+# stale-arm counter at the raise, and #654's seam for the fallback read below. Kept in the tip's
+# alphabetical order; neither side's behavior is contingent on the other.
 from . import metrics
+from .revocation_read import bounded_read
 
 logger = logging.getLogger("venya.server")
 
@@ -343,7 +347,22 @@ def read_populations(db: Session) -> tuple[list[str], list[str]]:
                 "#603 AC2 exists to take it off — on a shipped core the lifespan starts the publisher "
                 "before the first request, so this line means the app was built without it."
             )
-        return revocation_populations(db)
+        # #656 site 2: the fallback is the row shape A never covered — AC1 put the deadline inside
+        # ``bounded_read`` and this read never entered it, so a held ACCESS EXCLUSIVE here parked the
+        # core's single event loop on a PUBLIC, unauthenticated route polled by every executor, with
+        # one latched line as the only trace. It now runs inside the SAME seam as the matcher and the
+        # bounded GET: same two deadlines, same shared refusal sentence, and — the half that matters
+        # for #626 — the fallback still ANSWERS. Refusing every poll until a publisher came back
+        # would starve the fleet on one dead task; bounding the read and answering from it does not.
+        # A refusal here is ``RevocationReadUnavailable``, which the one central arm in ``app.py``
+        # already answers in the shipped stale class; no new arm was added and no sentence retyped.
+        #
+        # The publisher's OWN read (``publish_snapshot``) is deliberately still unbonded: it runs on
+        # a worker thread off the loop, where a slow tick costs a late snapshot and AC2's 45 s ceiling
+        # is the ruled answer. Bounding it would turn a slow publish into a fleet-wide refusal, which
+        # is that ceiling's decision to make, not this row's.
+        with bounded_read(db, site="poll/fallback-read"):
+            return revocation_populations(db)
     snapshot = _published
     if snapshot_is_stale(snapshot, now_mono=time.monotonic()):
         # #657: this arm is the LOAD case — a starved pool or a dead publisher lands here, not in

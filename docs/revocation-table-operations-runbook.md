@@ -149,8 +149,9 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
 
 - Request-path revocation reads carry a bounded **lock** deadline —
   `crl.revocation_read_lock_timeout_ms`, default **300 ms**, env
-  `VENYA_CRL__REVOCATION_READ_LOCK_TIMEOUT_MS`. It is the lock wait that is bounded;
-  `statement_timeout` stays as it ships and is a different failure with a different name.
+  `VENYA_CRL__REVOCATION_READ_LOCK_TIMEOUT_MS`. That is the lock wait. The read's own execution time
+  is bounded separately by `crl.revocation_read_scan_timeout_ms` (#654, below), and the two are
+  different failures with different names, different counters and different things to fix.
 - A read that cannot answer in time is **refused**, in the shipped stale-class `503` whose detail
   names list state and never a revocation. It is never a `403` (the daemon reads `403` as
   permanent rejection) and never an "all clear".
@@ -178,7 +179,33 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
   `systemctl cat venya-core | grep VENYA_METRICS_PORT`.
 - The deadline is scoped to the read inside a savepoint, never to the connection or the engine,
   because a blanket engine deadline was measured refusing a legitimate beat write at 2,033 ms that
-  shipped completes at 4,037 ms.
+  shipped completes at 4,037 ms. Both deadlines are set that way and both are reverted the same way,
+  with one asymmetry worth knowing before you tune either: reverting `lock_timeout` to `0` restores
+  the session value, while reverting `statement_timeout` to `0` would REMOVE the bound, so the seam
+  restores whatever the session actually reported instead (#654).
+- A revocation read that is merely SLOW — no lock held, the table just expensive to scan — now gets
+  refused too, by its own execution deadline: `crl.revocation_read_scan_timeout_ms`, default
+  **2 000 ms**, env `VENYA_CRL__REVOCATION_READ_SCAN_TIMEOUT_MS`. Before this, the only ceiling on
+  execution time was the session-wide `statement_timeout = '300s'` both engines set: five hundred
+  times the read's budget, and long enough that the executor polling the route had already given up
+  at its own 10 s timeout — the caller recorded a failure while the core recorded a 200, and the
+  event loop was parked for the whole time with nothing to show for it. Read the ceiling literally:
+  a value above 10 s re-creates that disagreement, and a value at or below the lock deadline makes
+  every lock convoy read as a slow scan, so the pair is checked when the core starts.
+- The slow-scan refusal is the **same** `503` with the **same** "no revocation asserted" wording, and
+  it is counted on its own cumulative series, `venya_revocation_read_scan_refusals_total{site=…}` —
+  never merged into `venya_revocation_read_refusals_total`, because a slow scan and a lock convoy are
+  two different diagnoses. If the SCAN counter is what is moving, the table is being read too slowly:
+  the fix is the size of the population (the retention knob `crl.crl_retention_days` and the purge it
+  drives, and the unindexed `executors.revoked_at` scan the poll fallback performs) or an index, not a
+  bigger number here.
+- A slow read that still ANSWERS is visible rather than silent: `venya_revocation_read_duration_seconds{site=…}`,
+  bucketed up to 300 s. `venya_request_duration_seconds` tops out at a 10 s bucket, so a 12 s read and
+  a 300 s read were one observation there — which is exactly how this row stayed undiscovered.
+- Two more reads are inside the seam (#656): the CRL mint the **dial** performs on its own path
+  (`site=dial/crl-mint`) and the whole-population read the public poll falls back to when the snapshot
+  publisher is not running (`site=poll/fallback-read`). Both were unbonded, and the second one sits on a
+  public, unauthenticated endpoint every executor polls.
 
 **The admin plane carries the same bound, on its own table (#658).**
 `_validate_admin_mtls` reads `admin_cert_revocations` — a different table, with its own retention

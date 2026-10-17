@@ -162,6 +162,29 @@ REVOCATION_READ_REFUSALS_TOTAL = Counter(
     ["site"],
 )
 
+# #654: the SLOW-SCAN refusal, on its own cumulative counter. Deliberately a NEW family rather than
+# a new label value on the #603 series above — a label added to an existing series silently
+# re-splits every operator query and dashboard built on it — and deliberately not folded into it
+# either, because #603 AC1's first criterion is that a lock wait and a read that merely ran long
+# are two different failures an operator chases two different ways. Same site vocabulary.
+REVOCATION_READ_SCAN_REFUSALS_TOTAL = Counter(
+    "venya_revocation_read_scan_refusals_total",
+    "Revocation-plane reads cancelled by their own statement deadline (refs #654)",
+    ["site"],
+)
+
+# #654's visibility half. A read that runs slowly and then SUCCEEDS raises nothing, so no counter can
+# ever see it — and `venya_request_duration_seconds` above cannot express it either, because its top
+# bucket is 10.0 s while the bound that actually governed these reads was the 300 s session
+# statement_timeout: a 12 s read and a 300 s read were the same `+Inf` observation. These buckets
+# reach 300 s so the histogram is a measurement of the quantity the row is about.
+REVOCATION_READ_DURATION_SECONDS = Histogram(
+    "venya_revocation_read_duration_seconds",
+    "Time spent inside one bounded revocation read, by site (refs #654)",
+    ["site"],
+    buckets=(0.025, 0.05, 0.1, 0.3, 1.0, 2.5, 5.0, 10.0, 30.0, 300.0),
+)
+
 # --- Core metrics ---
 
 CORE_OPERATIONS_TOTAL = Counter(

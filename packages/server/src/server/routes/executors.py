@@ -728,7 +728,12 @@ def _ensure_dial_crl_store(request: Request, db: Session) -> str:
 
     shortcut: reads the shared revocations table on the dial path; moving the
     staleness decision off the lockable DB path is ruled follow-on work (#586
-    slice-1 follow-on (c), the #603 family), upgrade when that slice lands.
+    slice-1 follow-on (c), the #603 family), upgrade when that slice lands. What
+    changed at #656 site 1 is the SHAPE of that read, not its existence: it now runs
+    inside the same bounded seam as the bounded GET route (revocation_read.bounded_read
+    via CAManager.generate_crl), so a held ACCESS EXCLUSIVE here costs a refusal in the
+    shipped stale class instead of parking the core loop. The remaining deferral is the
+    one this sentence has always named — taking the decision off the table entirely.
     """
     ca_manager = _get_ca_manager(request)
     config = getattr(request.app.state, "config", None)
@@ -736,7 +741,12 @@ def _ensure_dial_crl_store(request: Request, db: Session) -> str:
         raise RuntimeError("no server config — cannot locate the CA dir for the dial CRL store")
     ca_dir = Path(config.ca_dir)
     ca_bytes = (ca_dir / "ca.crt").read_bytes()
-    crl_der = ca_manager.generate_crl(db)
+    # #656 site 1: the site label travels in the ``for_site`` scope, not as an argument — the seam
+    # CAManager.generate_crl opens reads its label from the ContextVar, so a refusal on this path
+    # counts as ``dial/crl-mint`` instead of the anonymous plane default. Same reason the matcher
+    # takes its label out of band: the shipped parameter lists on this plane are pinned by cells.
+    with for_site("dial/crl-mint"):
+        crl_der = ca_manager.generate_crl(db)
     if not isinstance(crl_der, bytes) or not crl_der:
         raise RuntimeError("generate_crl returned no bytes — refusing to dial without a real list")
 

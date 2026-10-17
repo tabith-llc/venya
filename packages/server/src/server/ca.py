@@ -32,6 +32,7 @@ from cryptography.hazmat.primitives.serialization import (
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from .config import CASecurityConfig
+from .revocation_read import bounded_read
 from .utils.ca_key_probe import encrypted_key_is_parseable
 
 logger = logging.getLogger("venya.ca")
@@ -745,12 +746,22 @@ class CAManager:
             # asc(serial_number) makes the order total; it is the same secondary
             # key the sibling production fetch already uses
             # (routes/executors.py:1109), so this is drift-to-precedent.
-            revocations = (
-                db_session.query(ExecutorCertRevocation)
-                .order_by(desc(ExecutorCertRevocation.revoked_at), asc(ExecutorCertRevocation.serial_number))
-                .limit(max_entries)
-                .all()
-            )
+            #
+            # #656 site 1: this self-queried fetch reads the SAME lockable population the bounded
+            # GET route reads inside `bounded_read(db, site="crl")` one function over, and until now
+            # it was the one face of that read with no seam at all — a held ACCESS EXCLUSIVE here
+            # parked the core's single event loop on the DIAL path, which is the #603 AC1 freeze
+            # shape at a site AC1 did not bound. So the read gets the existing seam, not a second
+            # one: same savepoint, same two deadlines, same shared refusal sentence, same site
+            # label carried in by the caller's `for_site` scope. The mint below it stays OUTSIDE the
+            # bound on purpose — `statement_timeout` bounds SQL, never the cryptography.
+            with bounded_read(db_session):
+                revocations = (
+                    db_session.query(ExecutorCertRevocation)
+                    .order_by(desc(ExecutorCertRevocation.revoked_at), asc(ExecutorCertRevocation.serial_number))
+                    .limit(max_entries)
+                    .all()
+                )
 
         builder = x509.CertificateRevocationListBuilder()
         builder = builder.issuer_name(ca_cert.subject)
