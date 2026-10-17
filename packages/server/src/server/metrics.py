@@ -149,9 +149,16 @@ CRL_TRUNCATED_TOTAL = Counter(
 # lock deadline. CUMULATIVE BY DESIGN — the #651 defect shape was a per-emit WARNING with no
 # counter, so a losing component could never later state how much it lost. The log line is
 # latched (once per process); this counter is never latched, so the count survives the latch.
+# #657: the SAME series now also carries the snapshot-stale arm — the refusal a starved pool or a
+# dead publisher actually produces — under its own ``site`` value
+# (``revocation_snapshot.POLL_REFUSAL_SITE`` = ``poll/revocation-list``). The name and the label
+# set are unchanged; the help text names both arms so a reader of the scrape is not told a lie.
+# Adding a second series here would be wrong in the other direction: an alert pointed at a name
+# that does not exist is the defect this plane keeps re-fixing.
 REVOCATION_READ_REFUSALS_TOTAL = Counter(
     "venya_revocation_read_refusals_total",
-    "Revocation-plane reads refused under the bounded lock deadline (refs #603 AC1)",
+    "Revocation-plane reads refused with no answer: lock deadline (#603 AC1) or stale/missing "
+    "snapshot (#657); 'site' names which path refused",
     ["site"],
 )
 

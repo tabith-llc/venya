@@ -302,7 +302,7 @@ dies within one poll.
   immediately zeroed by this path; the tmpfs reaper (TTL, default 300 s) and
   the next daemon start's sweep clean up.
 - Fail-loud: 3 consecutive unreachable-server revocation checks
-  (`max_revocation_failures`, `config.py:149-152`) → the executor STOPS as an
+  (`max_revocation_failures`, `config.py`, `CertificateRotationConfig`, valid range 1-1000) → the executor STOPS as an
   operational fault. #603: this is not a self-revocation — the core asserted
   nothing about the credential, and the refusal it produces is the 503 class
   below, never `403 REVOKED`.

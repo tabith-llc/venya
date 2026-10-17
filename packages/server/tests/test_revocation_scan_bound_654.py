@@ -75,8 +75,16 @@ _PG_DEADLINE = {"options": "-c lock_timeout=5000 -c statement_timeout=60000"}
 #: is only what a double pretends the server said.
 _SESSION_SCAN_BOUND = "300s"
 
-#: The closed vocabulary a refusal may be labelled with (#656 AC4: no second rulebook, and never an
-#: attacker-shaped path on a Prometheus label — ``middleware/auth.py``'s own docstring says why).
+#: The closed vocabulary that may appear on a revocation-plane refusal series (#656 AC4: no second
+#: rulebook, and never an attacker-shaped path on a Prometheus label — ``middleware/auth.py``'s own
+#: docstring says why). Re-derived against the MERGED tip, not against this leg's own base: #657
+#: landed ``poll/revocation-list`` (the STALE arm, a counter label, never a seam label — it is applied
+#: at the raise, not by ``bounded_read``) and #658 landed ``admin-mtls`` (the admin plane's seam
+#: label) while this branch was open. Two of them are module constants rather than inline
+#: ``site="…"`` literals, which is why the cell below resolves constants. This leg's own fallback
+#: label was ``revocation-poll`` at the first cut; with ``poll/revocation-list`` now on the SAME
+#: series from the SAME route, two near-identical strings would tell an operator nothing about which
+#: arm refused, so it is ``poll/fallback-read``.
 _SHIPPED_SITE_LABELS = frozenset(
     {
         "revocation-plane",
@@ -91,9 +99,12 @@ _SHIPPED_SITE_LABELS = frozenset(
         "admin/list-executors",
         "dial/create-session",
         "dial/execute",
+        # landed on dev while this branch was open (#657 stale arm, #658 admin plane)
+        "poll/revocation-list",
+        "admin-mtls",
         # the two this leg adds, one per #656 site
         "dial/crl-mint",
-        "revocation-poll",
+        "poll/fallback-read",
     }
 )
 
@@ -432,7 +443,7 @@ class TestThirdOutcome:
         answer the new fault without a single new ``except`` anywhere."""
         db = _ScanSession(raise_on_read=_canceled_fault())
         with pytest.raises(RevocationReadUnavailable):
-            with bounded_read(db, site="revocation-poll"):
+            with bounded_read(db, site="poll/fallback-read"):
                 db.execute("SELECT 1")
 
     def test_query_canceled_is_still_not_the_lock_class(self):
@@ -472,7 +483,7 @@ class TestSeriesAreSeparate:
         ), "a slow scan moved the LOCK counter — ops would chase a convoy that never happened"
 
     def test_lock_refusal_counts_only_the_lock_series(self):
-        site = "revocation-poll"
+        site = "poll/fallback-read"
         lock_before, scan_before = _lock_refusals(site), _scan_refusals(site)
         with pytest.raises(RevocationReadUnavailable):
             with bounded_read(_ScanSession(raise_on_read=_lock_timeout_fault()), site=site):
@@ -562,7 +573,7 @@ class TestTheFourthStateIsObservable:
     """A read that succeeds slowly raises nothing, so it can only ever be an observation."""
 
     def test_the_seam_observes_its_own_site(self):
-        site = "revocation-poll"
+        site = "poll/fallback-read"
         before = _hist_count(site)
         with bounded_read(_ScanSession(), site=site):
             pass
@@ -668,12 +679,20 @@ class TestNoSecondRulebook:
         )
 
     def test_the_dial_mint_read_enters_the_seam_and_the_admin_mint_does_not(self):
-        """Site 1 bounded, and the boundary stated: the ADMIN plane's identical unbonded read is
-        #658, filed separately and deliberately NOT swept into this leg."""
+        """Site 1 bounded, and the boundary stated where it still stands. #658 landed while this branch
+        was open and bounded the admin plane's mTLS revocation LOOKUP (`middleware/auth.py`, label
+        ``admin-mtls``) — it did NOT touch the admin CRL mint, and this leg does not either, so the
+        mint half of the admin plane is still #658's row's own business and stays out of this diff."""
         executor = self._func("ca.py", "CAManager", "generate_crl")
         assert self._bounded_with_nodes(executor), "CAManager.generate_crl queries its population outside the seam"
         admin = self._func("ca.py", "AdminCAManager", "generate_crl")
-        assert not self._bounded_with_nodes(admin), "#658 (admin plane) was swept into this leg"
+        assert not self._bounded_with_nodes(admin), "the admin CRL mint was swept into this leg (that is #658's plane)"
+
+    def test_the_admin_plane_lookup_is_bounded_by_its_own_row(self):
+        """Re-derived at the merged tip rather than inherited: #658 put the seam on the admin mTLS
+        read. Pinned here so this leg's boundary claim cannot rot into a stale description of dev."""
+        src = (_server_src_root() / "middleware" / "auth.py").read_text(encoding="utf-8")
+        assert "bounded_read(db, site=ADMIN_MTLS_REVOCATION_SITE)" in src
 
     def test_the_publisher_read_stays_outside_the_seam_by_ruling(self):
         """The asymmetry is a decision, so it gets pinned. ``publish_snapshot`` reads on a worker
@@ -683,23 +702,59 @@ class TestNoSecondRulebook:
         assert not self._bounded_with_nodes(func)
 
     def test_every_site_label_the_seam_can_receive_is_in_the_closed_vocabulary(self):
-        """A Prometheus label must never be reachable from a request path. Every literal the seam can
-        take is enumerated from the AST here, so a new label is an explicit, reviewable act."""
+        """A Prometheus label must never be reachable from a request path. Every label the seam can
+        take is enumerated from the AST here, resolving module constants the way the #614 interlock
+        does — because two of the five live labels are named constants, not inline literals, and a
+        literal-only scan would silently under-report the vocabulary it claims to pin."""
         found: set[str] = set()
         for path in _server_src_root().rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
+            constants: dict[str, object] = {}
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            try:
+                                constants[target.id] = ast.literal_eval(node.value)
+                            except (ValueError, TypeError):
+                                pass
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
                 fname = getattr(node.func, "id", getattr(node.func, "attr", None))
-                if fname == "for_site" and node.args and isinstance(node.args[0], ast.Constant):
-                    found.add(str(node.args[0].value))
+                if fname == "for_site" and node.args:
+                    value = node.args[0]
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                        found.add(value.value)
                 for kw in node.keywords:
-                    if kw.arg == "site" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    if kw.arg != "site":
+                        continue
+                    if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                         found.add(kw.value.value)
+                    elif isinstance(kw.value, ast.Name) and isinstance(constants.get(kw.value.id), str):
+                        found.add(constants[kw.value.id])
         assert found <= _SHIPPED_SITE_LABELS, f"labels outside the vocabulary: {sorted(found - _SHIPPED_SITE_LABELS)}"
-        assert {"dial/crl-mint", "revocation-poll"} <= found, "a #656 site lost its label"
+        assert {"dial/crl-mint", "poll/fallback-read"} <= found, "a #656 site lost its label"
+        assert "admin-mtls" in found, (
+            "#658's admin-plane label is no longer reachable from the seam — either it moved under "
+            "this branch or this cell stopped reading the plane, and both need saying out loud"
+        )
         assert not any(label.startswith("/api") for label in found), "a raw path reached a metric label"
+
+    def test_the_two_poll_labels_name_different_arms_of_one_route(self):
+        """#657 counts the STALE arm of the poll; this leg bounds the READ arm of the same route. Two
+        strings, two arms, one series — and an operator must be able to tell them apart, which is the
+        reason this leg's label is ``poll/fallback-read`` and not something that reads like #657's.
+
+        It also pins the half that the seam-vocabulary cell cannot see: ``POLL_REFUSAL_SITE`` reaches
+        the counter at the raise, never through ``bounded_read``, so a scan of seam labels alone would
+        report a smaller vocabulary than the series actually holds.
+        """
+        from server.revocation_snapshot import POLL_REFUSAL_SITE
+
+        assert POLL_REFUSAL_SITE == "poll/revocation-list"
+        assert POLL_REFUSAL_SITE in _SHIPPED_SITE_LABELS
+        assert "poll/fallback-read" != POLL_REFUSAL_SITE
 
     def test_the_matcher_still_wraps_its_own_reads_in_the_seam(self):
         """Neighbour guard: this leg added statements INSIDE bounded_read and must not have moved the
@@ -726,9 +781,9 @@ class TestSite2PollFallback:
         loop, not a 403, and never 'nothing revoked'."""
         revocation_snapshot.disarm_publisher()
         with pytest.raises(RevocationReadUnavailable) as got:
-            with bounded_read(_ScanSession(raise_on_read=_lock_timeout_fault()), site="revocation-poll"):
+            with bounded_read(_ScanSession(raise_on_read=_lock_timeout_fault()), site="poll/fallback-read"):
                 raise _lock_timeout_fault()
-        assert "revocation-poll" in str(got.value)
+        assert "poll/fallback-read" in str(got.value)
         assert got.value.__class__ is RevocationReadUnavailable
         assert "no revocation asserted" in REVOCATION_UNAVAILABLE_DETAIL.lower()
 
@@ -1078,7 +1133,7 @@ class TestScanBoundPostgresql:
             revocation_read.configure_lock_timeout(100)
             revocation_read.configure_scan_timeout(2000)
             with pytest.raises(RevocationReadUnavailable) as got:
-                with bounded_read(db, site="revocation-poll"):
+                with bounded_read(db, site="poll/fallback-read"):
                     db.query(ExecutorCertRevocation).all()
             assert revocation_read.is_lock_timeout(got.value), "a convoy must still read as a convoy"
             assert not isinstance(got.value, RevocationReadScanTimeout)

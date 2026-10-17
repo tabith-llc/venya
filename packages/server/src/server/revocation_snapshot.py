@@ -49,6 +49,14 @@ What this module does NOT own — the law that keeps it honest:
   tick is guarded again at the call site behind a bounded, doubling backoff, and every exit is
   journalled — the lifespan's shutdown cancel quietly at INFO, anything else at ERROR with its
   reason. The journal is the evidence surface; no new module state carries it.
+* THE STALE ARM COUNTS ITS OWN REFUSAL (#657). This module raises the refusal, so this is the
+  one place that records it — ``note_stale_refusal`` at the raise, not at the route's ``except``,
+  because an arm that must be remembered at every caller is an arm missing at one. It writes the
+  EXISTING series ``venya_revocation_read_refusals_total`` under its own ``site`` value; it adds
+  no metric and renames nothing, and it is a Counter, not a Gauge: #651's shape was a per-emit
+  line with no cumulative record, so a losing component could not later state how much it lost.
+  The single piece of new module state here is the warning latch — the counter itself is never
+  latched, and ``reset_snapshot_state`` re-arms the latch so no cell inherits another's trace.
 """
 
 from __future__ import annotations
@@ -61,6 +69,10 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+# Two imports landed here in the same window, and both are load-bearing: #657's metrics handle for the
+# stale-arm counter at the raise, and #654's seam for the fallback read below. Kept in the tip's
+# alphabetical order; neither side's behavior is contingent on the other.
+from . import metrics
 from .revocation_read import bounded_read
 
 logger = logging.getLogger("venya.server")
@@ -129,6 +141,67 @@ _publisher_running = False
 # polls every ~30 s, so an un-latched warning would be journal noise — which is how
 # real alarms get ignored. Re-armed only by ``reset_snapshot_state``.
 _unarmed_warned = False
+
+
+#: The site label this arm records refusals under (#657). It is a module constant in the shape
+#: of the existing closed vocabulary — ``heartbeat``, ``crl``, ``audit-ingest``, ``executor-session``,
+#: ``executor-mtls``, ``register/terminal-check``, ``register/incumbent-exemption``,
+#: ``register/rotation-prior-serial``, ``admin/list-executors``, ``dial/create-session``,
+#: ``dial/execute`` — and it is NEVER built from the request: the label lands on a Prometheus
+#: series, so a caller-influenced value there would be unbounded (the #603 AC1 reasoning, kept).
+#: It is also what keeps the two refusal arms SEPARATE series: an operator reading
+#: ``venya_revocation_read_refusals_total`` can tell "refused because the read was locked" from
+#: "refused because the snapshot was stale or missing" (#657 AC3), which is the distinction the
+#: runbook's alert needs — one is a DDL convoy, the other is a starved pool or a dead publisher.
+POLL_REFUSAL_SITE = "poll/revocation-list"
+
+# One-shot latch on the stale-refusal warning, the same shape as ``_unarmed_warned`` and as
+# ``revocation_read._refusal_warned``: a fleet polls every ~30 s, so an un-latched warning is
+# journal noise. The COUNTER is never latched — #651's defect shape was a per-emit line with no
+# cumulative record, so a losing component could not later state how much it lost.
+_stale_warned = False
+
+# shortcut: the count covers the two REQUEST-PATH refusal arms on this plane (the lock-timeout
+#   arm in revocation_read and the snapshot-stale arm here); the dial-gate CRL refusals in
+#   routes/executors.py — _dial_crl_verdict_for's X509 codes 3 and 12, and the store-preparation
+#   arm — answer the SAME stale-class sentence and are deliberately not counted, because they are
+#   handshake-surface failures, not revocation reads, and folding them in would make the site
+#   vocabulary lie about which path refused. Upgrade trigger: a row that rules dial-gate refusals
+#   into the alert (it must then declare its own site value, not reuse this one).
+
+
+def is_stale_refusal_warned() -> bool:
+    """True once a snapshot refusal has been journalled this process (the latch has fired)."""
+    return _stale_warned
+
+
+def note_stale_refusal(site: str = POLL_REFUSAL_SITE) -> None:
+    """Count a snapshot refusal (cumulative, never latched) and WARN once (latched).
+
+    The stale arm of the shipped 503 — a missing snapshot or one at/past the freshness
+    ceiling — is the shape a starved pool or a dead publisher actually produces, and until
+    #657 it raised uncounted while the lock arm counted. One counter, two arms, distinct
+    ``site`` values: this is the arm that makes the runbook's "the counter is the alerting
+    surface" line true for a LOAD event rather than only for a lock hold.
+
+    The wording is its own, deliberately: it must not claim a lock deadline the read never
+    hit, and it must never assert a revocation. ``site`` has a default and no caller passes
+    the request path — the label vocabulary stays closed.
+    """
+    metrics.REVOCATION_READ_REFUSALS_TOTAL.labels(site=site).inc()
+    global _stale_warned
+    if not _stale_warned:
+        _stale_warned = True
+        logger.warning(
+            "Revocation poll refused at '%s': no snapshot inside the %d s freshness ceiling. "
+            "That is not a revocation and not an all-clear — callers answer the shipped "
+            "stale-class 503 and executors keep their last confirmed state and retry. This "
+            "line fires ONCE per process by design; the alerting surface is the cumulative "
+            "counter venya_revocation_read_refusals_total{site=} (refs #657; the lock-deadline "
+            "arm counts the same series under its own site name, refs #603 AC1).",
+            site,
+            REVOCATION_SNAPSHOT_MAX_AGE_SECONDS,
+        )
 
 
 def snapshot_is_stale(snapshot: RevocationSnapshot | None, *, now_mono: float) -> bool:
@@ -288,10 +361,18 @@ def read_populations(db: Session) -> tuple[list[str], list[str]]:
         # a worker thread off the loop, where a slow tick costs a late snapshot and AC2's 45 s ceiling
         # is the ruled answer. Bounding it would turn a slow publish into a fleet-wide refusal, which
         # is that ceiling's decision to make, not this row's.
-        with bounded_read(db, site="revocation-poll"):
+        with bounded_read(db, site="poll/fallback-read"):
             return revocation_populations(db)
     snapshot = _published
     if snapshot_is_stale(snapshot, now_mono=time.monotonic()):
+        # #657: this arm is the LOAD case — a starved pool or a dead publisher lands here, not in
+        # the lock-timeout arm — and until now it raised its 503 uncounted. Counted HERE, at the
+        # single place the decision is made, so every caller of this function is covered and a
+        # future second call site cannot re-open the under-report. The label is the module
+        # constant, deliberately NOT ``current_site()``: the poll runs unlabelled, and the
+        # ContextVar default is the lock arm's own "revocation-plane" — inheriting it would
+        # merge the two arms into one series and break the #657 AC3 distinction.
+        note_stale_refusal()
         raise RevocationSnapshotUnavailable(
             "no revocation snapshot inside the freshness ceiling "
             f"({REVOCATION_SNAPSHOT_MAX_AGE_SECONDS} s): the poll must refuse, not answer live"
@@ -456,7 +537,8 @@ def reset_snapshot_state() -> None:
     poll cell observes — the same reason ``health._reset_health_cache`` exists. The #626
     retry counter is local to the task and needs no clearing for the same reason.
     """
-    global _published, _publisher_running, _unarmed_warned
+    global _published, _publisher_running, _unarmed_warned, _stale_warned
     _published = None
     _publisher_running = False
     _unarmed_warned = False
+    _stale_warned = False

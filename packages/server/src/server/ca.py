@@ -865,9 +865,19 @@ ADMIN_LEAF_EKU = [ExtendedKeyUsageOID.CLIENT_AUTH]
 # foreign arc is then only a foreign registration kept alive in our source plus
 # a path that resolves bytes we never mint. The earlier per-plane re-mint
 # precondition, the dual-arc HOW it gated, and the owner's sentence are on
-# #601; clerk holds the ticket pen. The paired negative that pins the closure —
-# an old-arc extension is NO LONGER read as ours — lives at
-# tests/test_plane_marker_pen_arc_601.py, class TestLegacyArcIsNoLongerRead.
+# #601; clerk holds the ticket pen. The paired negative that pins the closure
+# lives at tests/test_plane_marker_pen_arc_601.py, class
+# TestAnyOtherArcIsNoLongerRead, and that class name IS the claim: a marker on
+# ANY arc not ours collapses into the same missing-marker refusal. It drives the
+# invented stand-in _FOREIGN_ARC (1.3.6.1.4.1.99999.1.1), not the retired
+# number, whose digits and holder stay on #601 and out of this tree by the
+# design named just above. The substitution is sound because nothing
+# arc-specific is left to exercise: the parser reads one OID, and
+# test_the_parser_source_names_one_arc_only (same class) plus
+# test_the_module_declares_one_plane_marker_arc pin that structurally. No cell
+# in that file names the retired arc, and none may: its digits stay out of the
+# tree by the ruling above, so the closure is pinned by the arc CLASS, not by
+# the retired number — which is what the class name already says.
 # The comment's own original wait-condition — provisional until Tabith LLC
 # holds a registered PEN — was met, and the move to the registered arc is it
 # acting on that.

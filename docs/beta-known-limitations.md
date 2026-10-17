@@ -167,7 +167,7 @@ refuses a revoked EXECUTOR serial per request, on the inbound plane, in
 `packages/server/src/server/middleware/auth.py:863`). Second, the executor daemon stops
 cooperatively on a bounded outage rather than serving on an unanswered question —
 `max_revocation_failures`, default 3
-(`packages/executor/src/executor/config.py:149-152`), fed at
+(`packages/executor/src/executor/config.py`, `CertificateRotationConfig.max_revocation_failures`), fed at
 `packages/executor/src/executor/daemon.py:2148`. Neither of those is peer revocation at `:8443`
 and neither is claimed as such here; they are the controls that exist while #597 is open.
 
@@ -399,8 +399,7 @@ as they are renewed — one re-mint per affected credential, not a fleet-wide ac
 
 ### The root certificate authority expires on a fixed day, ten years out, and nothing warns before it
 
-Status: known limitation in beta · Target: no date set · Tracked as: **no row exists** — see the
-filing note at the end of this entry
+Status: known limitation in beta · Target: no date set · Tracked as: `features/root-ca-ten-year-expiry-alarm-and-reroot.md` (s132 filing — warn-before-expiry and rotate-in-place, a capability item on a defects-only board, so it correctly has no GitLab row) · and GitLab **#661** (`root-ca-validity-duplicated-installer-literal-vs-constant`, `severity/medium`), which is the one *shipped* defect in this area: the same lifetime number is written at four mint sites with no interlock
 
 **Who is affected:** every deployment, on a day that is set the moment the certificate authority
 is first minted. It is not an edge case and it is not rare — it is only far away, and it is the
@@ -438,11 +437,16 @@ it. The retirement path is the certificate-authority rotation in
 so it is a scheduled maintenance event, not something to reach for on the afternoon the root dies.
 Plan against your own install date, not against any date written here.
 
-**What changes at beta+:** this entry is filed against **no tracked row** — no issue covers the
-root's own expiry day, and there is no alarm row for it. A filing is owed for a root-CA expiry
-alarm and for a documented rotate-before-the-date expectation. This page does not invent an issue
-number for either; it discloses the limit here so the day is not discovered alone, and the entry
-is replaced by a row reference the moment one exists.
+**What changes at beta+:** the capability filing now exists —
+`features/root-ca-ten-year-expiry-alarm-and-reroot.md` carries the alarm and the rotate-before-the-date
+expectation, with four owner decisions left unruled and no target date. **No GitLab issue row was created for
+that alarm capability, and none is owed**: the board takes defects only, and a decade-horizon maintenance gap is a
+capability item. One adjacent thing *does* have a row, and it is not this limitation: GitLab **#661**
+(`root-ca-validity-duplicated-installer-literal-vs-constant`) tracks the lifetime value being duplicated across
+mint sites with no interlock, so changing the constant moves some roots and not others. The two are different
+questions — #661 is about which value a mint uses today, this entry is about nobody warning you a decade out —
+and closing #661 does not retire this limitation. The limit is still disclosed on this page rather than left to the
+filing alone, so the day is not discovered by a partner first.
 
 ### Two paths still handle private key material without a passphrase
 

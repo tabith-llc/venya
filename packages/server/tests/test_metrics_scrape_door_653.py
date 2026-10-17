@@ -22,7 +22,9 @@ Two halves, and the second is the load-bearing one.
 
 The port number is read from the unit, never hardcoded, except in the cells that check that
 choice is unprivileged and collides with nothing shipped. The physical cells bind an ephemeral
-port, so the suite never depends on 9091 being free on the runner.
+port, so the suite never depends on the shipped default being free on the runner. What a refused
+bind does — log loudly and keep the core up — is pinned beside this file, in
+``test_metrics_bind_failsoft_653.py``, not here.
 """
 
 import http.client
@@ -186,7 +188,12 @@ class TestShippedChannel:
         )
 
     def test_non_integer_port_value_fails_loudly(self):
-        """A typo must abort startup, not leave the door quietly dark — never silence the alarm."""
+        """A typo must abort startup, not leave the door quietly dark — never silence the alarm.
+
+        The digits are a value, not the shipped default: this cell is about a string ``int()``
+        cannot read, and it stays green only while the fail-soft ``except`` stays narrow. The
+        negative half that proves that is in ``test_metrics_bind_failsoft_653.py``.
+        """
         with pytest.raises(ValueError):
             server_app.start_metrics_server("9091tcp")
 
