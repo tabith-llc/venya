@@ -192,10 +192,10 @@ straight off the process environment by `start_metrics_server` in
 | Field | Value |
 |---|---|
 | What it opens | The Prometheus scrape endpoint that publishes the shipped `venya_*` counters, histograms and gauge. Without it the metrics exist in the process and no one outside can read them. |
-| Shipped default | **`9091`**, set by `Environment=VENYA_METRICS_PORT=9091` in `systemd/venya-core.service` (#653), so a freshly installed core answers a scrape with no operator step. |
+| Shipped default | **`10011`**, set by `Environment=VENYA_METRICS_PORT=10011` in `systemd/venya-core.service` (#653), so a freshly installed core answers a scrape with no operator step. The number is derived, not habitual: it is unprivileged, it is unassigned on both tcp and udp in the IANA port registry, it sits below the Linux ephemeral floor, and it is outside the Prometheus/Grafana/Kubernetes bands a co-tenant on a monitoring host is likely to hold. The earlier default was `9091`, which is a Prometheus pushgateway's own port. |
 | Bind address | **`127.0.0.1` only, hardcoded.** The endpoint is plain unauthenticated HTTP; it is listed with the other localhost-only listens in [FIREWALL.md](FIREWALL.md). |
 | Reachable from | The core host itself. A remote Prometheus scrapes it by running on that host or through a collector placed there — not by opening the port. |
-| Read the counters | On the core: `curl -s http://127.0.0.1:9091/metrics` (pipe to `grep venya_` to see the families). |
+| Read the counters | On the core: `curl -s http://127.0.0.1:10011/metrics` (pipe to `grep venya_` to see the families). |
 | Change the port | `sudo systemctl edit venya-core` and set a different `Environment=VENYA_METRICS_PORT=<port>` in the `[Service]` drop-in, then `sudo systemctl daemon-reload && sudo systemctl restart venya-core`. Never edit `/etc/systemd/system/venya-core.service` by hand: the core installer rewrites that file from the shipped template on every re-run, and your edit is gone the next time it runs. |
 | Close the door | Same drop-in, set it empty (`Environment=VENYA_METRICS_PORT=`). An empty or absent value binds nothing and logs nothing — the pre-#653 default, kept working on purpose. |
 
@@ -206,9 +206,20 @@ by nobody: the variable has to be in the service's actual environment, which is 
 configured and is not (#653 is exactly that failure — the code path was always there, and until
 the unit carried the name no default install ever opened it).
 
-**A value that is not a number aborts startup.** `int()` on the variable is not wrapped: a typo
-in the drop-in makes the service exit rather than serve quietly without telemetry. That is the
-shipped posture, not a bug, and `packages/server/tests/test_metrics_scrape_door_653.py` pins it.
+**A value that is not a usable port number aborts startup.** `int()` on the variable is not
+wrapped, and an out-of-range or negative one raises before the bind: a typo in the drop-in makes
+the service exit rather than serve quietly without telemetry. That is the shipped posture, not a
+bug, and `packages/server/tests/test_metrics_bind_failsoft_653.py` pins it from both sides.
+
+**A port the host will not give up does NOT abort startup.** Two failures are a fact about the
+machine, not about your value — `EADDRINUSE` (something else already holds the port) and `EACCES`
+(a port below 1024, which the unit cannot grant because it adds only `CAP_IPC_LOCK`) — and the
+service carries `Restart=always`, so a refused bind that raised would put the whole core into a
+crash loop over an observability surface. It is instead logged at `ERROR` on every boot that hits
+it, naming the port, the OS reason, what you lose (`venya_*` counters unreadable) and the drop-in
+above that fixes it, and the core serves with the door dark. `packages/server/tests/test_metrics_bind_failsoft_653.py`
+pins the loud-and-serving half; the cell that drives a negative value pins that the `except` was
+not widened to swallow the misconfiguration with it.
 
 The executor plane has **no** equivalent endpoint: nothing in `packages/executor/src` reads
 `VENYA_METRICS_PORT` and `systemd/venya-executor.service` sets none. This asymmetry is a recorded

@@ -7,6 +7,7 @@
 """FastAPI app factory + lifespan."""
 
 import asyncio
+import errno
 import logging
 import time
 from typing import Any
@@ -30,6 +31,18 @@ METRICS_PORT_ENV_VAR = "VENYA_METRICS_PORT"
 #: Loopback, always, and not a setting. The scrape endpoint is plain unauthenticated HTTP,
 #: so binding anything else would publish operator telemetry onto the routable network.
 _METRICS_BIND_ADDR = "127.0.0.1"
+
+#: The bind refusals that are a CONTENTION or a PERMISSION fact about this host, not a fact
+#: about the configured value, and therefore must not take the core down (#653 follow-on:
+#: the shipped ``systemd/venya-core.service`` carries ``Restart=always``, so a raise out of
+#: this boot path is a crash loop over an observability surface — a customer running a
+#: Prometheus pushgateway on the old default could never start a core at all).
+#: ``EADDRINUSE`` is the port taken; ``EACCES`` is a port below the unprivileged floor the
+#: unit's ``AmbientCapabilities`` cannot grant. Every other error — ``ValueError`` from a
+#: non-numeric value, ``OverflowError`` from one outside 0-65535, ``socket.gaierror`` from a
+#: negative one — still aborts, because a misconfiguration is not a contention. See
+#: ``tests/test_metrics_bind_failsoft_653.py``.
+_METRICS_BIND_REFUSALS = frozenset({errno.EADDRINUSE, errno.EACCES})
 
 
 async def _validation_error_handler(request: Any, exc: RequestValidationError) -> JSONResponse:
@@ -595,12 +608,18 @@ def start_metrics_server(metrics_port: str | None = None) -> tuple[Any, Any] | N
 
     Args:
         metrics_port: the value to bind; ``None`` reads the process environment. A test
-            passes a port it chose itself, so the physical check never depends on 9091
-            being free on the box that runs the suite.
+            passes a port it chose itself, so the physical cells never depend on the shipped
+            default being free on the box that runs the suite.
 
     Returns:
         ``(httpd, thread)`` from ``prometheus_client`` when the endpoint was started, or
-        ``None`` when it is dark. Callers that started it own shutting it down.
+        ``None`` when it is dark — including when it is dark because the bind was refused.
+        Callers that started it own shutting it down.
+
+    A refused bind is LOUD and not fatal: one ``ERROR`` line names the port, the OS cause,
+    what the operator loses, and the drop-in that fixes it, and the core keeps serving. A
+    value that is not a usable port number still raises — see ``_METRICS_BIND_REFUSALS``
+    above for exactly which errors are refused and why.
     """
     import os
 
@@ -611,8 +630,27 @@ def start_metrics_server(metrics_port: str | None = None) -> tuple[Any, Any] | N
 
     from prometheus_client import start_http_server
 
+    # int() is deliberately OUTSIDE the try: a non-numeric value is a misconfiguration and
+    # must abort, which is the behaviour #653 shipped and the paired negative pins.
     port = int(metrics_port)
-    httpd, thread = start_http_server(port, addr=_METRICS_BIND_ADDR)
+    try:
+        httpd, thread = start_http_server(port, addr=_METRICS_BIND_ADDR)
+    except OSError as exc:
+        if exc.errno not in _METRICS_BIND_REFUSALS:
+            raise
+        logger.error(
+            "Metrics scrape endpoint is dark: could not bind %s:%d (%s). The core is serving "
+            "and its counters keep working, but no one outside this process can read them "
+            "until the port is free. If another service on this host holds it, name a "
+            "different one in a drop-in: `sudo systemctl edit venya-core` -> [Service] -> "
+            "Environment=VENYA_METRICS_PORT=<port>, then `sudo systemctl daemon-reload && "
+            "sudo systemctl restart venya-core` (docs/deployment-config.md). This refusal is "
+            "logged on every boot that hits it; nothing here is latched. (refs #653)",
+            _METRICS_BIND_ADDR,
+            port,
+            exc,
+        )
+        return None
     logger.info(
         "Prometheus metrics server started on %s:%d (loopback only — never expose; scrape /metrics)",
         _METRICS_BIND_ADDR,
@@ -653,8 +691,11 @@ def main() -> None:
     app = create_app(config)
 
     # Operator-readable metrics (#653): dark unless VENYA_METRICS_PORT names a port, and
-    # the shipped unit does. The returned handle is not kept — the process lives as long
-    # as the listener does, and uvicorn.run() below never returns except at shutdown.
+    # the shipped unit does. A bind the host refuses (port taken, or privileged without the
+    # capability) is logged at ERROR and the core serves anyway — this call cannot raise for
+    # that reason, because `Restart=always` in the unit would turn it into a crash loop.
+    # The returned handle is not kept: the process lives as long as the listener does, and
+    # uvicorn.run() below never returns except at shutdown.
     start_metrics_server()
 
     uvicorn.run(**build_uvicorn_kwargs(app, config))

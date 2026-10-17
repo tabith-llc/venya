@@ -104,11 +104,11 @@ The metrics scrape endpoint is open on the same fresh install with no further st
 **on the core host**, because it binds loopback only (#653):
 
 ```bash
-curl -s http://127.0.0.1:9091/metrics | grep -c '^# TYPE venya_'
+curl -s http://127.0.0.1:10011/metrics | grep -c '^# TYPE venya_'
 ```
 
 A non-zero count is the counters being operator-readable; the `venya-core` journal carries one
-`Prometheus metrics server started on 127.0.0.1:9091` line at boot. The port, how to change it,
+`Prometheus metrics server started on 127.0.0.1:10011` line at boot. The port, how to change it,
 and how to close it are in [deployment-config.md](deployment-config.md).
 
 `/api/v1/health` is the canonical liveness endpoint (public, unauthenticated, version-only — it must never grow into a config dump). Bare `/health` is served as an alias returning the identical payload, for monitoring tools and load balancers that probe `/health` by convention. Both are unauthenticated and counted under the generic per-IP rate-limit tier (no health-specific exemption); every other unknown path still returns 401, so route existence is not disclosed to unauthenticated callers.
@@ -635,12 +635,16 @@ only, not a security boundary.
 
 - `502` from nginx immediately after core install: give the backend a few
   seconds to bind; re-probe `api/v1/health`.
-- **`venya-core` will not stay up and the journal ends in `Address already in use` on port
-  9091:** something else on this host holds the metrics scrape port. The bind is not optional
-  once the unit names it, so the core exits rather than serving with telemetry silently dark
-  (`Restart=always` then loops it). Name a free port in a drop-in and the service comes back:
+- **The metrics scrape door is closed on a core that is otherwise healthy:** a journal line
+  `Metrics scrape endpoint is dark: could not bind 127.0.0.1:<port>` names the port the unit
+  asks for and the OS reason. This is not a failed install and the core is serving — the port is
+  held by something else on this host (`EADDRINUSE`), or it is below 1024 and the unit grants no
+  `CAP_NET_BIND_SERVICE` (`EACCES`). Both are facts about the host, so the service does not exit
+  over them (`Restart=always` would loop it for an observability surface) and the refusal is
+  logged on every boot that hits it. Free the port, or name another in a drop-in:
   `sudo systemctl edit venya-core` → `[Service]` → `Environment=VENYA_METRICS_PORT=<port>`, then
-  `sudo systemctl daemon-reload && sudo systemctl restart venya-core`. See
+  `sudo systemctl daemon-reload && sudo systemctl restart venya-core`. A `VENYA_METRICS_PORT`
+  that is not a usable port number at all is different and does stop the service — see
   [deployment-config.md](deployment-config.md).
 - **First** `run_command`/`venya run` after an executor install is
   seconds-scale: the installer warms the sbx agent template at install time
