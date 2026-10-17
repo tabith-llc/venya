@@ -122,6 +122,7 @@ set, the file still owns it.
 | Key class | File wins? | Environment spelling the daemon reads | Announced when both are set |
 |---|---|---|---|
 | top-level field (`dns_resolver`, `log_level`, `server_url`, `sandbox_memory_mb`, …) | yes | `VENYA_EXECUTOR_<KEY>` | yes, one line per key |
+| `log_level` when `--log-level` is also on the command line | no — the flag wins (the built-in default no longer counts as given, so an unset flag leaves the file in charge — #647) | `VENYA_EXECUTOR_LOG_LEVEL`, still read below the file | yes — when the file and the environment differ, one further line names the flag as the actual winner |
 | key inside a table (`[mtls] cert`, `[audit] remote_url`, …) | yes | `VENYA_EXECUTOR_<TABLE>__<KEY>` | yes |
 | `[executor] max_concurrent_commands` (RF-3) | yes | `VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS` — the aliased form only | yes |
 | key the file does not carry | n/a | environment (then `.env`, then default) | no — nothing is being overridden |

@@ -212,7 +212,7 @@ Keep it true; everything hostname-based depends on it.)
 | `VENYA_CLOCK_SKEW__*` tolerances | hosts without tight time sync stop failing token/cert checks | expired tokens/certs are accepted a little longer | `/opt/venya/.env` | 60 s tokens / 60 s certs |
 | `VENYA_EXECUTION_TIMEOUT` | slow first runs finish instead of timing out at the client | you wait longer on a genuinely dead path | workstation environment | 340 s |
 | `VENYA_SBX_CREATE_TIMEOUT` | a cold sandbox image pull completes instead of aborting | same, on the executor | executor environment | 240 s |
-| `log_level = "debug"` / `VENYA_DEBUG` | full exception detail when diagnosing | noisier logs; internal detail lands in log files | executor config / environment | `info`, unset |
+| `log_level = "debug"` / `VENYA_DEBUG` | full exception detail when diagnosing | noisier logs; internal detail lands in log files | executor config / environment — an explicit `--log-level` on the command line outranks both (#647) | `info`, unset |
 | `VENYA_CORS__ORIGINS` | your own browser app can call the API | the cross-origin deny-by-default that protects browser callers | `/opt/venya/.env` | `http://localhost` |
 | `VENYA_MAX_REQUEST_BODY_BYTES` | larger request payloads (bulk operations) | the memory-exhaustion floor the cap provides | `/opt/venya/.env` | 1 MiB |
 | `VENYA_TRUSTED_PROXIES` | correct client IPs (and accurate rate-limiting/audit IPs) behind your proxy | any host you add may assert client IPs via forwarded headers | `/opt/venya/.env` | `127.0.0.1` only |
