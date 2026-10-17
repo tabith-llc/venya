@@ -362,15 +362,24 @@ class TestGateSignatureContractIsTrueOfTheTree:
             f"see them: {offenders}"
         )
 
-    def test_the_two_conftests_wire_the_same_script(self):
-        """One rulebook, two wirings — asserted as text so a third copy cannot appear quietly."""
-        wired = []
-        for package in ("core", "server"):
-            conftest = _REPO_ROOT / "packages" / package / "tests" / "conftest.py"
-            if conftest.is_file() and "pg_door_preflight" in conftest.read_text(encoding="utf-8"):
-                wired.append(package)
-        assert "core" in wired, "the core conftest stopped wiring the pre-flight"
-        assert len(wired) <= 2
+    @pytest.mark.parametrize("package", ["core", "server"])
+    def test_each_package_wires_the_shared_script_in_its_tests_dir(self, package):
+        """One rulebook, two thin wirings, both in ``packages/<pkg>/tests/conftest.py``.
+
+        Asserted as text, so a third copy of the rule cannot appear quietly in a conftest and a
+        wiring that was deleted cannot pass as coverage. The location is the lead's ruling
+        (``wren-650-conftest-ruling-flash1-s134``), and the file must stay a wiring: if a cause table
+        or an ENOSPC string ever appears in it, someone grew a second implementation.
+        """
+        conftest = _REPO_ROOT / "packages" / package / "tests" / "conftest.py"
+        assert conftest.is_file(), f"{package} lost its door wiring: {conftest} is not there"
+        source = conftest.read_text(encoding="utf-8")
+        assert "pg_door_preflight" in source, f"{package}'s conftest stopped loading the shared script"
+        assert "abort_unusable_door" in source, f"{package}'s conftest stopped calling the hook"
+        assert "pytest_report_header" in source, f"{package}'s conftest stopped stating the finding"
+        assert (
+            "CAUSE_" not in source and "ENOSPC" not in source
+        ), f"{package}'s conftest grew its own copy of the cause table"
 
     def test_the_script_is_the_only_copy_of_the_rule(self):
         """No second implementation of the door's causes in a conftest or a test."""

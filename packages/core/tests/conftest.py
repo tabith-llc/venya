@@ -4,7 +4,13 @@
 # Change Date listed there, the work is available under MPL 2.0.
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Core-suite collection glue.
+"""Core-suite collection glue — the PostgreSQL test door's pre-flight (#650).
+
+NEW file, created by #650 on the lead's ruling (`wren-650-conftest-ruling-flash1-s134`), and wired in
+``tests/`` because that is where pytest's own collection root for the package's cells is. Condition 2
+of that ruling is the reason the file must stay inert for everything that is not a door cell: a
+conftest here is a collection-surface change for every core cell, so the collected count is proved
+identical before and after (both numbers and the command are in the leg's report).
 
 Created for #650. Until now core had no ``conftest.py`` at all, and it holds three of the files
 gated on the door variable (443, 514, 515 — the name lives in ``pg_door_preflight.DOOR_ENV``) — so
@@ -44,7 +50,7 @@ def _load_preflight():
             "Restore it before trusting any PostgreSQL-gated result in this package.",
             returncode=1,
         )
-    spec = importlib.util.spec_from_file_location("pg_door_preflight", _SCRIPT)
+    spec = importlib.util.spec_from_file_location("pg_door_preflight_core", _SCRIPT)
     module = importlib.util.module_from_spec(spec)
     # Register before exec: the module uses @dataclass, whose machinery resolves the owning module
     # through sys.modules at class-creation time. Without this line the import dies with
