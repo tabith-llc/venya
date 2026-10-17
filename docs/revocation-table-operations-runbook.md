@@ -169,6 +169,34 @@ against `venya` by hand, keep it short and end it with `ROLLBACK`, and set
   because a blanket engine deadline was measured refusing a legitimate beat write at 2,033 ms that
   shipped completes at 4,037 ms.
 
+**The admin plane carries the same bound, on its own table (#658).**
+`_validate_admin_mtls` reads `admin_cert_revocations` — a different table, with its own retention
+purge (`AdminCAManager.purge_expired_revocations`, a `DELETE`, so `ROW EXCLUSIVE` and safe as
+shipped) — and that read used to be synchronous and unbonded inside an `async def` on the ordinary
+pool. It now runs through the SAME seam and the SAME knob (`crl.revocation_read_lock_timeout_ms`);
+there is no second deadline mechanism and no second config key. It is labelled separately, so a
+stall on one plane is never misread as a stall on the other:
+`venya_revocation_read_refusals_total{site="admin-mtls"}` against the executor plane's
+`{site="heartbeat"|"executor-mtls"|"audit-ingest"|"executor-session"|"crl"|"register/…"|"dial/…"}`.
+
+Three arms on that path, and **all three refuse**:
+
+| What happened | Answer | Detail the operator reads |
+|---|---|---|
+| the serial is on the admin list | `403` | `Admin certificate revoked` — unchanged by #658 |
+| the read could not answer inside the deadline | `503` | the shared list-state sentence, `… request refused (no revocation asserted)` |
+| any other backend/lookup fault | `403` | `Admin access requires valid client certificate` — unchanged by #658 |
+
+The middle row is the only new arm, and it is availability, not policy: a stalled check reports
+itself as unavailable rather than as a revocation, and rather than as a credential problem the
+operator would "fix" by re-issuing a good certificate. Nothing about a lock stall admits a caller.
+
+Why `admin_cert_revocations` is not in §2's measured table: those numbers were taken against
+`executor_cert_revocations` on `venya-core-3`, and this seat did not re-run a lock cell on the admin
+table. The lock classes are the same for any PostgreSQL table (§2 facts 1–3 are about `ACCESS
+EXCLUSIVE` and the queue, not about that one relation), so treat §3–§5 as applying here too —
+including fact 3, that merely **asking** for the exclusive lock is the hazard.
+
 ## 7. Deciding to stop the daemons for a window
 
 If you must take an unavoidable `ACCESS EXCLUSIVE`, stop the executors first
