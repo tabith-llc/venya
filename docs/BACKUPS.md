@@ -11,7 +11,8 @@
 Venya splits its critical state across **four** places, and they only work **together**. A
 database backup alone is worthless: the secrets in it are ciphertext that cannot be
 decrypted without the passphrase in `/opt/venya/.env`. Read "The pairings" before you back
-up anything.
+up anything. Per-surface file *modes* are stated in their own table — see "Delivered modes,
+per CA-material surface", which also covers `/etc/venya/admin/`.
 
 ## What must be backed up (core server)
 
@@ -20,7 +21,45 @@ up anything.
 | 1 | **PostgreSQL `venya` database** | `sudo -u postgres pg_dump -Fc venya` | **No** | Secrets (ciphertext), the **KEK salt** (`venya_config`), users, WebAuthn credentials, roles, executors + cert records, enrollment tokens (hashed), execution sessions, audit log. |
 | 2 | **Server env file** | `/opt/venya/.env` (mode `0600`, `venya:venya`) | **No** | Holds `VENYA_DB__PASSPHRASE` (the KEK input that decrypts every secret), `VENYA_RECOVERY_CODE_PEPPER`, and the DB URL+password. |
 | 3 | **CA passphrase env file** | `/etc/venya/venya-core.env` (mode `0640`, `root:venya`) | **No** | Holds `VENYA_CA_KEY_PASSPHRASE` and `VENYA_ADMIN_CA_KEY_PASSPHRASE` — the only things that can decrypt the CA private keys. |
-| 4 | **CA material** | `/var/lib/venya/ca/` (mode `0700`) — `ca.crt` + **encrypted** `ca.key`, and `admin-ca/` (`admin-ca.crt` + encrypted `admin-ca.key`) | **No** | The root CA signs server TLS certs, relay client certs, and every executor cert. The Admin CA signs admin mTLS certs. Lose the CA → every certificate is unverifiable and nothing can be re-issued. |
+| 4 | **CA material** | `/var/lib/venya/ca/` (mode `0700`) — `ca.crt` (mode `0644`) + **encrypted** `ca.key` (mode `0600`), and `admin-ca/` (mode `0700`) — `admin-ca.crt` (mode `0644`) + **encrypted** `admin-ca.key` (mode `0600`) | **No** | The root CA signs server TLS certs, relay client certs, and every executor cert. The Admin CA signs admin mTLS certs. Lose the CA → every certificate is unverifiable and nothing can be re-issued. |
+
+### Delivered modes, per CA-material surface
+
+One figure for the tree is not a promise a customer can check, so every CA-material surface states
+its own delivered mode below — including `/etc/venya/admin/`, the machine-plane admin-credential
+directory, which this document did not previously list. Each row names the pin that writes it.
+
+| Surface | Delivered mode | Owner | Pinned by | Re-asserted on a re-run? |
+|---|---|---|---|---|
+| `/var/lib/venya/ca/` | **`0700`** | `venya:venya` | `chmod 700 /var/lib/venya/ca` in `venya_create_directories` (`venya-common.sh`), plus `os.chmod(str(ca_dir), 0o700)` in the CA-generation step (`install-venya-core.sh`) | **yes, unconditionally** — neither pin is inside the admin-mTLS block |
+| `/var/lib/venya/ca/admin-ca/` | **`0700`** | `venya:venya` | `install -d -m 0700 -o venya -g venya "$ADMIN_CA_DIR"` (`install-venya-core.sh`) | every admin-mTLS run — `install -d` re-applies the mode to an existing directory. Skipped when admin mTLS is off. |
+| `/etc/venya/admin/` | **`0700`** | `venya:venya` | `install -d -m 0700 -o venya -g venya "$ADMIN_CERT_DIR"` (`install-venya-core.sh`); inside it the mint writes `admin.crt` `0644` and `admin.key` `0600` | every admin-mTLS run. Skipped when admin mTLS is off. |
+| `/opt/venya/.env` | `0600` | `venya:venya` | item 2 above (`chmod 600`) | every run |
+| `/etc/venya/venya-core.env` | `0640` | `root:venya` | item 3 above (`chmod 0640`) | every run |
+
+**Two parent directories are deliberately wider, and they are not CA material.** `/var/lib/venya/`
+is `0750` on a default install (`install -d -m 0750 -g venya /var/lib/venya`, inside the admin-mTLS
+block) and `0700` when admin mTLS is off, where `venya_create_directories` creates it under the
+installer's entry `umask 077`. `/etc/venya/` is `0755` on every install (`install -d -m 0755
+/etc/venya`, which appears in both `install-venya-core.sh` and `venya-common.sh`). Both are
+group-*readable* so the `venya` service account can traverse to the leaves; **neither is ever
+group-writable**. The secret leaves are the `0700` rows above and the `0600` key files inside them.
+
+No CA-material directory is group-writable. Prove it on your own host — this predicate prints
+nothing when the posture holds, and prints the offending directory when it does not:
+
+```bash
+sudo find /var/lib/venya /etc/venya -type d -perm -0020
+```
+
+**Scoping, and it is load-bearing.** The `admin-ca/` and `/etc/venya/admin/` pins sit *inside* the
+`if [ "$ADMIN_MTLS_ENABLED" = "true" ]` block of `install-venya-core.sh`, so an install run with
+`VENYA_ADMIN_MTLS_ENABLED=false` neither creates nor re-asserts those two directories at all —
+their `0700` describes a default (admin-mTLS **on**) install, not every install. The **root** CA
+directory is not conditional: `venya_create_directories` (`mkdir -p /var/lib/venya/ca` then
+`chmod 700 /var/lib/venya/ca`) and the CA-generation step's `os.chmod(str(ca_dir), 0o700)` both run
+outside that block, so `/var/lib/venya/ca` is `0700` on every install either way. Where this page
+and your live host disagree (`ls -ld`, the `find` above), the host wins.
 
 **Regenerable — do not rely on backing these up** (the installer re-derives them from the
 CA **at install time**): server TLS cert/key (`/etc/venya/tls/`), relay client cert
@@ -59,7 +98,9 @@ re-issue them from the restored CAs — see step 5 of "Restore".
   previously-issued recovery codes stop working.
 
 Net: back up **#1 + #2 + #3 + #4 together, every time.** A DB dump without `.env` and
-`venya-core.env` is encrypted noise.
+`venya-core.env` is encrypted noise. `/etc/venya/admin/` is deliberately **not** a fifth artifact:
+the installer re-mints that pair on every admin-mTLS run (see "Delivered modes" above), so a
+reinstall replaces it and an off-site copy of it buys nothing.
 
 ## How to back up (core server)
 
