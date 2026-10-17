@@ -285,6 +285,35 @@ def create_parser() -> argparse.ArgumentParser:
     # admin rotate-key
     admin_sub.add_parser("rotate-key", help="Rotate the key encryption key")
 
+    # admin core-relay-cert  (#597: the core's own relay client credential registry)
+    crc_parser = admin_sub.add_parser(
+        "core-relay-cert",
+        help="Manage the core relay client credentials (the certificate the core presents at executor :8443)",
+    )
+    crc_sub = crc_parser.add_subparsers(dest="core_relay_cert_command")
+    crc_list_parser = crc_sub.add_parser("list", help="List registered core relay credentials")
+    crc_list_parser.add_argument("--json", action="store_true", help="Output in JSON format")
+    crc_revoke_parser = crc_sub.add_parser("revoke", help="Revoke a core relay credential by serial")
+    crc_revoke_parser.add_argument(
+        "--serial",
+        default=None,
+        help=(
+            "Hex serial of the relay credential to revoke (up to 16 chars, any case/padding). "
+            "Give this OR --cert-file. A serial the registry does not name is REFUSED, not accepted."
+        ),
+    )
+    crc_revoke_parser.add_argument("--reason", default="unspecified", help="Revocation reason (default: unspecified)")
+    crc_revoke_parser.add_argument(
+        "--cert-file",
+        default=None,
+        help=(
+            "Revoke the serial READ from this certificate instead of typing one. "
+            "Mutually exclusive with --serial; one of the two is required."
+        ),
+    )
+    crc_register_parser = crc_sub.add_parser("register", help="Register a core relay credential from its certificate")
+    crc_register_parser.add_argument("--cert-file", required=True, help="Path to the relay client certificate (PEM)")
+
     # admin revoke-executor
     revoke_executor_parser = admin_sub.add_parser("revoke-executor", help="Revoke an executor certificate")
     revoke_executor_parser.add_argument("executor_id", help="Executor ID to revoke")
