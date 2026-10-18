@@ -321,6 +321,18 @@ those bytes._
   sandbox output carries the in-band marker the direct path already used (#409); and a policy
   rejection returns `422` with the reason rather than a transport-shaped error (#410).
 
+
+- **CLI secret handling and dead code, from the same wave (recorded late; same range).** A security
+  key or CA material the CLI holds in memory now lives in one protected buffer that is zeroed on
+  release, with the pinning outcome reported as it was measured rather than as a promise (#538);
+  files and directories that carry secrets are created at their final mode — atomic
+  write-then-rename at seven write sites including the enrollment token, `0700` at the ten secret
+  directories — so no value is briefly readable under the process umask, and the redundant
+  after-the-fact `chmod`s are gone (#15-class wave, `fix(cli): create secret-bearing files and dirs
+  at their final mode`); two zero-caller methods found dead were removed (#15); the injector helpers
+  nothing called and the shared-memory prose that outlived them were removed (#471); the deploy
+  record refuses a dirty source tree (#16); and the browser-auth router's module docstring now
+  states what is mounted instead of what was disabled in August (#312, documentation).
 ## [0.1.0alpha17] - 2026-10-13
 
 There is no backwards compatibility during alpha. Three changes in this window are
