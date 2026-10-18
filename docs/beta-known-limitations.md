@@ -28,12 +28,12 @@ and only pointed at:
 
 ## Revocation
 
-### The relay checks revocation on the core's dial; the executor's listener refuses a revoked peer from its registry, and consults no list at all
+### The relay checks revocation on the core's dial; the executor's listener refuses a revoked peer from the registry and the revocation list, and consults no CRL at all
 
-Status: known limitation in beta · Target: no date set · Tracked as: #586 (open — the remedy
-is BOTH doors; the dial landed, and the listener's door now refuses a revoked **core-relay** peer via
-#597's registry, while a revoked **executor-serial** peer presenting at `:8443` is still named by
-nothing there)
+Status: known limitation in beta · Target: no date set · Tracked as: #586 (open on its **physical**
+half only — the dial landed, and the listener door now names a revoked peer in BOTH populations: the
+core-relay registry via #597 and the executor-serial list via Gap A at `c7a4075`. What has never been
+produced is a revoke-then-refuse observed on a served fleet, which needs a guest)
 
 **What is enforced today.** One door: the DIAL, which is the core connecting OUT to an
 executor. The relay context is built by `_build_relay_ssl_context`
@@ -63,13 +63,19 @@ executor's own leaf, the CA anchor and `verify_mode = ssl.CERT_REQUIRED`
 `VERIFY_CRL` flag anywhere in the executor's shipped source** — re-derivable with
 `git grep -i crl -- packages/executor/src`, which returns nothing at this tip, and
 `git grep VERIFY_CRL -- packages/`, whose only hits in the product are the dial line above and
-the unit cell that asserts it. The two relay surfaces are also **not symmetric in any verify
+the unit cell that asserts it. Its published re-derivation command is deliberately a call shape and
+not the bare word — `git grep -n 'VERIFY_CRL_CHECK' -- packages/executor/src` and
+`git grep -n 'load_verify_locations(capath' -- packages/executor/src` both return **nothing** at this
+tip, while `git grep -i crl -- packages/executor/src` now returns the #586 Gap A docstring that
+*disclaims* the flag, so a seat re-deriving with the loose pattern must read the hit, not count it.
+The two relay surfaces are also **not symmetric in any verify
 flag**: the file sets no `verify_flags` line at all, so it lacks the
 `VERIFY_X509_STRICT | VERIFY_X509_PARTIAL_CHAIN` the dial sets deliberately
 (`packages/server/src/server/routes/executors.py:663`). Chain handling differs between the two
-doors, not just list handling. **Since #597 this door is not blind, though — it refuses a revoked
-core-relay peer by registry match after the handshake; see `peer_revocation_refusal`,
-`packages/executor/src/executor/relay_listener.py`, and the #597 entry.**
+doors, not just list handling. **Since #597 and #586 Gap A this door is not blind — it refuses a
+revoked core-relay peer by registry match and a revoked executor-class peer by revocation-list match,
+both after the handshake and before any request byte: `peer_revocation_refusal` and
+`peer_executor_revocation_refusal`, `packages/executor/src/executor/relay_listener.py`.**
 
 What the listener DOES have is a post-handshake accept gate
 (`revocation_accept_reason`, `packages/executor/src/executor/relay_listener.py:311`, fired at
@@ -85,10 +91,12 @@ executor has been revoked or has received no revocation answer since boot; it ho
 any list and does no serial or identity matching of the peer in front of it **at this gate** — and its own
 contract comment says why — at `:8443` the peer is the core's relay-client credential, which
 the executor-serial list never describes
-(`packages/executor/src/executor/relay_listener.py:319`). **A SECOND gate now sits beside this one and
-does match the peer** — `peer_revocation_refusal`, `packages/executor/src/executor/relay_listener.py` —
-reading the registry population `revoked_relay_serials` rather than any list; it is described in full in
-the #597 entry, and it is the reason this paragraph says "at this gate" rather than "here at all".
+(`packages/executor/src/executor/relay_listener.py:319`). **TWO further gates now sit beside this one
+and do match the peer** — `peer_revocation_refusal` (the #597 registry population) and
+`peer_executor_revocation_refusal` (#586 Gap A, the executor-serial population),
+`packages/executor/src/executor/relay_listener.py` — both reading the ONE serial already taken off the
+established connection; the reason this paragraph still says "at this gate" is that it describes the
+self-only arm, which is exactly what it is.
 
 The shape of the exposure, stated plainly: **a credential the CA has revoked can still
 complete a TLS handshake at an executor listener.** Nothing on that side asks the list. What
@@ -98,27 +106,26 @@ IDENTITY test, not a revocation test, and is answered after the handshake has al
 succeeded.
 
 And the stronger thing, which the page has to say rather than imply: **at this surface the listener
-can name a revoked peer today, but only from the population its registry carries — and bolting a list
-consult onto it would still not name the executor-serial peer.** The service CA that signs the core's
+can name a revoked peer today, from two populations and from no CRL at all.** The service CA that signs the core's
 relay-client credential
 (`-CA /var/lib/venya/ca/ca.crt`, `install-venya-core.sh:1020`) is the same CA that signs executor
 leaves (`CAManager.ca_cert_path`, `packages/server/src/server/ca.py:394`, leaf mint at
-`packages/server/src/server/ca.py:621`), and the list that CA mints is populated from
+`packages/server/src/server/ca.py:621`), and the CRL that CA mints is populated from
 `ExecutorCertRevocation` alone (`CAManager.generate_crl`,
 `packages/server/src/server/ca.py:715`, query at `packages/server/src/server/ca.py:749`; the model
 is titled "Revoked executor certificate serial numbers",
-`packages/core/src/core/iam/models.py:380`). The peer that legitimately dials `:8443` is the
-core's relay-client credential, and since #597 that credential **is** recorded — `CoreRelayCredential`
-(`packages/core/src/core/iam/models.py:665`) — and the listener refuses it by serial at the accept
-point (`peer_revocation_refusal`, `packages/executor/src/executor/relay_listener.py`). But it is
-refused from **registry membership**, not from the CRL: a revoked relay serial has no row in
-`ExecutorCertRevocation` and never will, so the list this CA mints cannot name it. Same issuer,
-different population: the gap that remains is at serial level, not at chain level. **A
-`VERIFY_CRL_CHECK_LEAF` added to the listener today would still be a no-op against the peer it is
-aimed at** — a green test could be written for the flag and no *additional* revocation would be
-enforced by it, because that door already refuses that peer by a different route. What the listener
-still cannot do is consult the **executor-serial** population about its peer: the only shipped
-`VERIFY_CRL_CHECK_LEAF` is the core's dial, and that is the half of #586 that stays open.
+`packages/core/src/core/iam/models.py:380`). The consequence for a **core relay** credential is that
+this list can never name it — and that is no longer a hole in the door, because #597 gave that class
+its own registry (`CoreRelayCredential`, `packages/core/src/core/iam/models.py:665`) and the door
+matches against it (`peer_revocation_refusal`). For an **executor-class** peer the list already named
+the serial; what was missing was anyone at `:8443` asking, and #586 Gap A added that ask
+(`peer_executor_revocation_refusal`, fed by `revoked_executor_serials` on the daemon state, carried on
+the same poll branch that answers the executor's own revocation question). **So a
+`VERIFY_CRL_CHECK_LEAF` bolted onto the listener would still enforce nothing new** — a green test
+could be written for the flag and the refusals it claims to add are already made, by a route that
+does not need a distribution point the default install never advertises. The honest residue here is
+not a missing mechanism but a missing **observation**: no physical revoke-then-refuse has ever been
+run on a served fleet, at either door or either population.
 
 **Who is affected in the shipped posture.** Reachability, not theory. The listener binds
 `:8443` (`RELAY_PORT`, `packages/executor/src/executor/relay_listener.py:46`) on the executor
@@ -161,10 +168,12 @@ match, not a list consult: `peer_revocation_refusal`
 handshake and before any request byte, and its own physical proof is unrun too.**
 
 **Plan — what is NOT planned.** This entry does not promise a listener CRL consult, and a reader
-should not read one into it. The half that is open here cannot be closed by adding two flags at
-the listener, for the population reason above: **the enforcement gap that remains is the
-executor-serial population at this door, and #597's registry carries only the core-relay one.**
-#586 stays open past beta on this half.
+should not read one into it. What the row is still open on is no longer a mechanism: the dial landed,
+the #597 registry match landed, and the executor-serial peer ask (#586 Gap A) landed at `c7a4075`, so
+the two-door remedy this row describes is **built in both populations**. **What remains is the
+physical certificate** — a revoke-then-refuse observed on a served fleet, at either door, which needs
+a guest and has never been produced. Unit-green is necessary and not sufficient, and #586 stays open
+past beta on that half, not on a missing consult.
 
 One alternative exists and is **the owner's call, not this page's plan, and not a scheduled
 item**: build the transport consult anyway. It would buy the wording "a CRL is consulted at every
@@ -189,8 +198,11 @@ refuses a revoked EXECUTOR serial per request, on the inbound plane, in
 cooperatively on a bounded outage rather than serving on an unanswered question —
 `max_revocation_failures`, default 3
 (`packages/executor/src/executor/config.py`, `CertificateRotationConfig.max_revocation_failures`), fed at
-`packages/executor/src/executor/daemon.py:2148`. Neither of those is peer revocation at `:8443`
-and neither is claimed as such here; they are the controls that exist while #597 is open.
+`packages/executor/src/executor/daemon.py:2148`. The first of those is an application-plane gate on
+the core's inbound side, not a peer refusal at `:8443`, and the second is a cooperative stop; neither
+is claimed as peer revocation here. **They are the controls that were load-bearing while the peer arms
+were being built, and they still are — the door's own refusals now sit beside them, not instead of
+them.**
 
 **What an operator can do now.** Four things are in the shipped product, and one common
 assumption is not:
@@ -285,7 +297,11 @@ core's relay credential "does not" work. All three are false at this tip:
    can only ever remove a connection the registry has already named dead.
 3. **an unreadable peer serial admits.** Where the listener cannot read a serial off the established
    connection the refusal returns None. That is the one true fail-open on this surface; turning it
-   into a refusal would lock out cores whose certificates this host cannot parse.
+   into a refusal would lock out cores whose certificates this host cannot parse. **The same three
+   shapes apply unchanged to the executor-population arm added at `c7a4075`
+   (`peer_executor_revocation_refusal`) — it is deliberately the same discipline, not a second
+   policy: an empty population admits and an unreadable serial admits, so the arm can only ever
+   remove a connection the list has already named dead.**
 
 **And the short-lifetime assumption is still wrong, in the opposite direction from before.** The 30-day
 lifetime is the EXECUTOR leaf (`EXECUTOR_VALIDITY_DAYS = 30`,
@@ -294,11 +310,23 @@ lifetime is the EXECUTOR leaf (`EXECUTOR_VALIDITY_DAYS = 30`,
 expiry is not the mechanism here — revocation is, and it now works.
 
 **What is NOT claimed.** No CRL is consulted at `:8443`, and none is promised; the executor package
-carries no `VERIFY_CRL` flag at all (re-derive: `git grep -i crl -- packages/executor/src` → nothing).
-The freshness of this door is the ~30-second poll, not a handshake-time fetch. And **no physical
-revoke-then-refuse has ever been observed on a served fleet** — what exists is unit-level
-(`packages/executor/tests/test_relay_peer_revocation_597.py`, which drives a real loopback handshake
-at the accept point but runs no daemon). Unit-green is not a fleet result.
+carries no `VERIFY_CRL` flag at all — re-derive with the call shapes
+(`git grep -n 'VERIFY_CRL_CHECK' -- packages/executor/src` and
+`git grep -n 'load_verify_locations(capath' -- packages/executor/src`), both of which return nothing
+at this tip. Do **not** re-derive with the bare word: `git grep -i crl -- packages/executor/src` now
+returns the #586 Gap A docstring, which names the flag in order to **disclaim** it — a seat counting
+that hit would read a shipped CRL consult where there is none. The freshness of this door is the
+~30-second poll, not a handshake-time fetch. And **no physical revoke-then-refuse has ever been
+observed on a served fleet** — what exists is unit-level
+(`packages/executor/tests/test_relay_peer_revocation_597.py` for the relay population and
+`packages/executor/tests/test_relay_peer_executor_serial_586.py` for the executor population, each
+driving a real loopback handshake at the accept point but running no daemon). Unit-green is not a
+fleet result, and that is why this row and #586 both stay open.
+
+**Workaround for the never-ingested shape:** boot the core once after the migration before trying to
+retire a relay credential, so the ingest has a chance to write the row. If the serial you hold is
+refused as unregistered, contain the host and the network, or rotate the certificate authority, which
+retires every derived credential including this one.
 
 ### A copied administrator credential stays usable until it expires — up to one hour — while revocation itself lands within about a minute
 
