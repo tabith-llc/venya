@@ -4,26 +4,9 @@ Notable changes to Venya will be documented in this file.
 
 ## [Unreleased]
 
-- **A revocation read that runs slowly is now refused, counted and visible (#654, #656).** The
-  bounded read shipped under #603 AC1 bounds the wait for a lock; it never said how long a statement
-  could take once it had one, so the only ceiling on execution time was the `statement_timeout` both
-  engines set at the session level — 300 s against a read whose caller waits 10 s. A slow read that
-  answered late was invisible everywhere: no exception, no refusal, no counter, no log line, a parked
-  core event loop, and a caller that had already given up and counted a failure the core recorded as
-  a 200. Request-path revocation reads now also carry their own execution deadline,
-  `crl.revocation_read_scan_timeout_ms` (default 2 000 ms, env
-  `VENYA_CRL__REVOCATION_READ_SCAN_TIMEOUT_MS`), set inside the same savepoint as the lock deadline
-  and reverted with it. A read that misses it is refused in the stale class the plane already uses —
-  the same `503` and the same "no revocation asserted" wording, never a `403` and never an all-clear
-  — and it is counted on a new cumulative series, `venya_revocation_read_scan_refusals_total{site=…}`,
-  deliberately kept apart from `venya_revocation_read_refusals_total` so a lock convoy and a slow scan
-  stay two different diagnoses. A slow read that still answers is now an observation on
-  `venya_revocation_read_duration_seconds{site=…}`, bucketed up to the 300 s that actually governed
-  these reads, because the shipped request histogram stops at 10 s. Two more reads of the same
-  lockable population joined the seam: the CRL the dial mints on its own path, and the
-  whole-population read the public poll falls back to when the snapshot publisher is not running
-  (#656) — both of them still answering, which is the half that keeps a freeze fix from becoming a
-  refusal the fleet cannot recover from.
+_No entries. The work that landed after the 0.1.0beta1 section was written on
+2026-10-15 has been folded into that section below, because the tag now being cut ships
+those bytes._
 
 ## [0.1.0beta1] - 2026-10-15
 
@@ -167,6 +150,154 @@ Notable changes to Venya will be documented in this file.
   caller's own pending write — three savepoint properties, each pinned by a cell in
   `packages/server/tests/test_revocation_read_bound_603.py`.
 
+- **A revocation read that runs slowly is now refused, counted and visible (#654, #656).** The
+  bounded read shipped under #603 AC1 bounds the wait for a lock; it never said how long a statement
+  could take once it had one, so the only ceiling on execution time was the `statement_timeout` both
+  engines set at the session level — 300 s against a read whose caller waits 10 s. A slow read that
+  answered late was invisible everywhere: no exception, no refusal, no counter, no log line, a parked
+  core event loop, and a caller that had already given up and counted a failure the core recorded as
+  a 200. Request-path revocation reads now also carry their own execution deadline,
+  `crl.revocation_read_scan_timeout_ms` (default 2 000 ms, env
+  `VENYA_CRL__REVOCATION_READ_SCAN_TIMEOUT_MS`), set inside the same savepoint as the lock deadline
+  and reverted with it. A read that misses it is refused in the stale class the plane already uses —
+  the same `503` and the same "no revocation asserted" wording, never a `403` and never an all-clear
+  — and it is counted on a new cumulative series, `venya_revocation_read_scan_refusals_total{site=…}`,
+  deliberately kept apart from `venya_revocation_read_refusals_total` so a lock convoy and a slow scan
+  stay two different diagnoses. A slow read that still answers is now an observation on
+  `venya_revocation_read_duration_seconds{site=…}`, bucketed up to the 300 s that actually governed
+  these reads, because the shipped request histogram stops at 10 s. Two more reads of the same
+  lockable population joined the seam: the CRL the dial mints on its own path, and the
+  whole-population read the public poll falls back to when the snapshot publisher is not running
+  (#656) — both of them still answering, which is the half that keeps a freeze fix from becoming a
+  refusal the fleet cannot recover from.
+
+- **A stale or missing revocation snapshot is now counted where operators read it (#657).** The
+  poll that answers `GET /api/v1/executors/certs/revocation-list` already refused with the
+  `503` "no revocation asserted" answer when its snapshot was older than 45 s or not there yet;
+  it did not increment anything, so the arm an operator was being refused by was absent from the
+  scrape the runbook points at. That refusal now increments the shipped
+  `venya_revocation_read_refusals_total` under its own site label, `poll/revocation-list`, on the
+  same series as the lock-deadline refusals, and the family's help text names both arms. A reader
+  of `site=…` can tell "the pool or the publisher is starving" from "a lock is held over the
+  revocation table" without a second metric being introduced, and `docs/revocation-table-operations-runbook.md`
+  names the arm it documents.
+- **The admin request path's revocation read carries the same bound (#658).** The admin-mTLS path
+  checks the revocation table on every admin request; that read waited on a lock over the table
+  for as long as the holder kept it. It now runs inside the shipped bounded seam with its own site
+  label, `admin-mtls`, reusing the existing `crl.revocation_read_lock_timeout_ms` knob. The
+  decision is unchanged: a row that matches still answers `403` and still fails closed, and any
+  other fault keeps the generic `403` it answers today. What is new is the lock-wait arm, which
+  answers `503` in the "no revocation asserted" class and is counted, so a held lock on the
+  revocation table is a visible refusal on the admin plane rather than a stalled request.
+- **The metrics scrape door is open by default on an installed core (#653).**
+  `systemd/venya-core.service` now ships `Environment=VENYA_METRICS_PORT=10011`, so a freshly
+  installed core answers `curl -s http://127.0.0.1:10011/metrics` with no operator step and no
+  extra unit to enable. The server binds that port on `127.0.0.1` only and the address is not
+  configurable, because the endpoint is plain unauthenticated HTTP and carries telemetry only —
+  never payload, and never the high-cardinality labels (`executor_id`, `user_id`, `ip`,
+  `session_id`). Change it with `systemctl edit venya-core`; unset it there to close the door.
+  `docs/FIREWALL.md`, `docs/installation.md` and the runbook name the port and the read path.
+- **A taken metrics port is a named line, not a stopped core (#653 follow-on).** If the OS refuses
+  the bind — the port is already in use, or this host will not grant it — the core now logs one
+  `ERROR` line naming the port, the OS reason, and the fix, and serves on. Exactly those two
+  reasons are caught; a value that is not a usable port number still refuses at the config door,
+  so a typo is not quietly absorbed. Before this the `Environment=` line was the only place the
+  port was mentioned, and a refused bind left the scrape surface dark with nothing saying why.
+- **The audit spool keeps its own count (#651).** A spool that reaches its capacity logged its
+  warning once per band entry and re-stated it per audit event while it sat there, and every drop
+  emitted its own line on top — so a full spool moved the log flood onto the drop path. Both lines
+  are now edge-triggered, the band line re-states on an interval rather than per event, and a new
+  cumulative `dropped_total` counts every drop behind that single line. The count is monotonic for
+  the life of the process. What an operator reads is one line per condition and one number that
+  says how much was lost, instead of a journal whose size is the only hint.
+- **The executor's `--log-level` flag only wins when it is actually given (#647).** Passing no flag
+  now leaves the configured value in charge; previously the flag's built-in default was applied on
+  every start and overwrote `/etc/venya/executor.toml` one moment after the file had been read, so
+  `log_level` in the file — and `VENYA_EXECUTOR_LOG_LEVEL` below it — were set and ignored. The two
+  surfaces also share one list of accepted names now, so the flag and the file cannot advertise
+  different sets. A file or environment value that names no level is not fatal: the daemon logs one
+  `WARNING` naming the key and the value it could not use, and starts at the built-in default,
+  because a typo in a verbosity knob must not park a whole executor in a restart loop. When a flag
+  does override a value the precedence note had already claimed for the file, one further line
+  names the flag as the actual winner.
+- **The revocation-failure threshold has a floor and a ceiling (#660).**
+  `revocation.max_revocation_failures` is now bounded to 1–1000 at the config door and refuses by
+  name outside that range; it is never clamped. A `0` previously stopped a healthy executor on its
+  very first poll, before the core had had any chance to answer, and a very large value silently
+  disabled the stop-on-no-answer posture the operators are told about — 1 000 consecutive
+  unanswered checks at the 30 s beat is roughly 8.3 hours. `docs/deployment-config.md` states the
+  range where an operator reads the knob.
+- **The core's own relay client credential now has a registry row and a revoke path (#597).** The
+  certificate the core presents when it dials an executor's `:8443` listener was minted by the
+  installer outside the product, so it appeared in no revocation table and the CRL drawn from those
+  tables could never name it. It is recorded in a new `core_relay_credentials` table at core
+  startup (migration `040`), read from the same file the core loads, and two admin commands act on
+  it: `venya admin core-relay-cert list` and `venya admin core-relay-cert revoke --serial …`,
+  backed by `POST /api/v1/admin/core-relay-certs/revoke`. A revoke against a serial the registry
+  does not name is refused and writes nothing. Membership is carried on the revocation feed, so an
+  executor's listener can act on it: a new `:8443` connection presenting a serial the registry
+  names as revoked is refused with `403 REVOKED` on the peer's credential. A registry with no rows
+  admits at that door — refusing there would stop every healthy executor — so the refusal is at the
+  verb, and the door's own behavior is described in `docs/beta-known-limitations.md`.
+- **The executor's relay door can now name a revoked PEER, not only itself (#586).** The accept
+  gate on `:8443` already refused a new connection while this daemon's own credential was revoked
+  or unanswered. It now also consults the executor-serial population the core publishes about the
+  credential arriving on the other side of the socket: a peer whose executor serial is on the
+  revoked population is refused `403 REVOKED` naming the peer's credential, and the refusal is
+  keyed on that population alone, so it cannot be tangled with the freshness question this daemon
+  asks about itself. The self-check still runs first, and a peer serial the population does not
+  name is admitted — the door refuses what is known revoked and asserts nothing else.
+
+
+
+- **Installer and CLI-surface fixes from the field-reports wave (recorded late).** These landed on
+  `dev` between `v0.1.0alpha16` and this release and were not named individually in a release note;
+  per-item detail is `git log --first-parent --merges 54c0b5b..c7a4075`. What an operator sees:
+  the generated nginx site config and the core's relay TLS context state the protocol floor
+  explicitly (TLS 1.2 / 1.3) instead of inheriting what the OS offers (#323); a tarball source that
+  is not HTTPS requires the operator's pin before anything is fetched or written, in the shell and
+  PowerShell installers alike (#328, #375); the CLI uninstaller removes the `uv` tool environments
+  and shims at the sites that created them (#390); the executor's key file keeps the mode it was
+  written at, and the installer verifies the mode rather than assuming it (#457); `docker.list` is
+  left readable by the unprivileged sandbox reader after the repository is set up (#434); an
+  install directory whose name contains shell metacharacters is passed through without being
+  re-interpreted (#489); a server URL given once on the command line stays out of the config file,
+  so a later save cannot persist it (#423); shape help lists every built-in shape, including the
+  `sudo-stdin` form (#484); a ruled `< ` redirect in a sudo-remote command works again, through one
+  shared renderer (#332); the core install creates the `venya_audit` database role and trust map the
+  append-only audit trail needs (#66); the interactive install banner is safe to run with no
+  terminal, the CLI's stderr tee honors isolation, an executor with a ghost identity refuses at boot
+  with the re-enroll path named, and the Docker gate runs after enrollment (#360, #361, #362, #363,
+  #365); and the secret-bearing files and directories the CLI creates are written at their final
+  mode instead of tightened afterwards.
+
+- **Authorization, session, audit and timekeeping fixes from the same wave (recorded late; same
+  range).** Secret writes are scoped to the caller's own groups, and the secret and session
+  authorization checks read the caller rather than the request; the role member roster reads to
+  members and their oversight tiers (#448); the server-minted root CA carries the key identifiers
+  strict verifiers expect (#522); an account-status write can no longer strand the last usable
+  admin, and the lockout guards count the roster under a row lock so a concurrent request cannot
+  slip past them (#486, #487); a reset needs admin authority once the core is initialized, and it
+  re-checks that precondition under the bootstrap lock (#450, #511); a break-glass recovery code is
+  claimed atomically so one code cannot be spent twice, and an executed command session cannot be
+  replayed (#512, #513); a secret upsert takes a locking read on its own key, and the account rate
+  limiter keeps its counters consistent under concurrency (#515, #516); admin user delete completes
+  for a user who still holds credentials or roles, and deleting a non-empty role returns the
+  dependency message instead of failing (#425); rate-limit lockout answers `429` with `Retry-After`
+  and a failed secret retrieval arms the account limiter the way a failed login does (#385, #421);
+  a stored FIDO2 challenge expires with the ceremony lifetime instead of lingering (#408);
+  session-demanding admin routes verify the certificate and the session (#340); the command wire
+  carries argument lists, and a NUL byte in an argument is refused at the structural gate (#322);
+  the direct path's inner guard and the ruled gate now share one bound-path helper (#374); the
+  disk-encryption check reads the mount it was asked about and that mount's own device lineage
+  (#444, #488); the close-on-exec sweep steps over a descriptor that closed while it was being read
+  instead of reporting a failure (#535); the database key-encryption key has one protected owner in
+  the backend cache, which the filter and sentinel paths read (#472); the audit spool's FIFO writer
+  logs the path it gave up on (#420); rate-limit windows come from the shared database clock, age
+  gates that could go backwards are clamped, and the expiry-clock relabel applies only to a naive
+  input, so a clock step neither shortens nor lengthens a session (#460, #464, #465, #549); and a
+  paginated list carries a tiebreaker, so two reads in the same instant return the same page
+  (#463).
 ## [0.1.0alpha17] - 2026-10-13
 
 There is no backwards compatibility during alpha. Three changes in this window are
