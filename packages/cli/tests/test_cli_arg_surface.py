@@ -266,8 +266,14 @@ EXPECTED_SUBCOMMAND_COUNTS: dict[tuple[str, ...], int] = {
     # commit; the leaf is `admin cert status`, read-local, no network).
     # (`admin cert renew`, RF-8b) rides the level BELOW, so this count stays 26 — see
     # the ("admin", "cert") entry.
-    ("admin",): 26,
+    # admin 26->27: `admin core-relay-cert` group added by #597 (the core relay
+    # credential registry — the credential the core presents at executor :8443 was
+    # minted by the installer and named by no table, so it had no revocation path).
+    # Its three leaves ride the level below, so this count moves by one, not four.
+    ("admin",): 27,
     ("admin", "key-version"): 5,
+    # #597: new nesting level — list / revoke / register.
+    ("admin", "core-relay-cert"): 3,
     # New nesting level: RF-8a shipped `status`; RF-8b added `renew` (the mint a
     # session + elevation ceremony drives), so this level is 1 -> 2 — deliberate
     # interlock update, cli-reference regenerated in the same commit.

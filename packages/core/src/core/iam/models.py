@@ -660,3 +660,94 @@ class KekSentinel(Base):
     key = Column(String(64), primary_key=True, nullable=False)
     wrapped_sentinel = Column(LargeBinary, nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+
+
+class CoreRelayCredential(Base):
+    """Registry of the core's own relay CLIENT credential presented at executor :8443 (#597).
+
+    Before this row the credential did not exist in the store. ``install-venya-core.sh``
+    mints it with ``openssl`` straight to ``/etc/venya/relay/relay-client.crt``
+    (CN ``${CORE_HOSTNAME}-relay``, ``-days 365``), and the only revocation tables in
+    the tree are ``executor_cert_revocations`` and ``admin_cert_revocations`` — so a
+    compromised or retired relay credential had no revocation path at all, and the CRL
+    that the same CA mints could never name it (drawn from
+    ``ExecutorCertRevocation`` alone, ``server/ca.py:generate_crl``). That population
+    gap, not the TLS flag, is what made #586's listener door a no-op against its real
+    peer; measured live in ``wave30-specs-20261017/flash5-586-listener-door-s134-report.md``.
+
+    One row per credential, ``serial_number`` unique. Revocation is a column on the
+    registry row rather than a second table, because a relay credential that is not in
+    this table cannot be revoked at all: the revoke verb refuses an unregistered serial
+    (``REFUSE_UNREGISTERED``, default-deny — issue 263's fail-open lesson), so there is
+    never a revocation row without a registry row to hang it on. ``revoked_at`` NULL
+    means live; the row itself is the registration fact.
+
+    Written by ``server/relay_registry.py`` at core startup from the credential on
+    disk, so the invariant "exists on disk => exists here" is held by the process that
+    uses the credential, not by the installer step that created it. The mint step can
+    pre-date the product's own database being reachable, and the installer script is
+    owner-gated per change; boot-ingest covers a credential minted by an OLDER
+    installer too, which an installer-only write never would.
+    """
+
+    __tablename__ = "core_relay_credentials"
+
+    id = Column(Integer, primary_key=True)
+    serial_number = Column(
+        String(64),
+        unique=True,
+        nullable=False,
+        comment="Certificate serial in the ONE canonical WRITE form (lowercase hex, zero-padded to >=16) per #481",
+    )
+    common_name = Column(
+        String(128),
+        nullable=False,
+        comment="Subject CN as presented, e.g. 'idaho-relay' — matched against relay_client_ids",
+    )
+    hostname = Column(
+        String(128),
+        nullable=True,
+        comment="Core host the credential belongs to (CN with the '-relay' suffix removed, when derivable)",
+    )
+    cert_fingerprint = Column(
+        String(64),
+        nullable=True,
+        comment="sha256 of the DER certificate, lowercase hex — identifies the credential across a re-mint",
+    )
+    public_key_hash = Column(
+        String(64),
+        nullable=True,
+        comment="sha256 of the SubjectPublicKeyInfo DER — the re-mint-tied identity when the serial moves",
+    )
+    signing_ca_subject = Column(
+        String(255),
+        nullable=True,
+        comment="Issuer name of the CA that signed this credential (which CA minted it)",
+    )
+    signing_ca_aki = Column(
+        String(64),
+        nullable=True,
+        comment="Authority Key Identifier hex of the signing CA, when the credential carries one",
+    )
+    issued_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="notBefore of the credential",
+    )
+    not_after = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="notAfter of the credential — 365 days at the shipped mint (install-venya-core.sh:1022)",
+    )
+    registered_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+        comment="When this registry row was first written",
+    )
+    revoked_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Revocation time; NULL = live. Terminal for alpha: no un-revoke, same law as Executor.revoked_at",
+    )
+    revoke_reason = Column(Text, nullable=True)

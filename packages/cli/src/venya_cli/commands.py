@@ -725,6 +725,8 @@ def cmd_admin(client: APIClient, args: Any) -> int:
         return cmd_admin_add_command(client, args)
     elif admin_command == "key-version":
         return cmd_admin_key_version(client, args)
+    elif admin_command == "core-relay-cert":
+        return cmd_admin_core_relay_cert(client, args)
     elif admin_command == "rotate-key":
         return cmd_admin_rotate_key(client, args)
     elif admin_command == "revoke-executor":
@@ -5292,6 +5294,160 @@ def cmd_admin_revoke_admin_cert(client: APIClient, args: Any) -> int:
     except Exception as e:
         print(f"Revocation failed: {e}", file=sys.stderr)
         return 1
+
+
+def cmd_admin_core_relay_cert(client: APIClient, args: Any) -> int:
+    """Manage the core relay credential registry (#597).
+
+    The credential the core presents at executor :8443 is minted by the installer with
+    openssl and, before #597, appeared in no table — so it had no revocation path. This
+    is the operator's verb against that registry: `list`, `revoke`, `register`.
+
+    `revoke --cert-file` reads the serial OFF the certificate rather than trusting a
+    typed one, using the same canonical form (`format(serial, "016x")`) the admin mint
+    print already emits — the CLI is barred from importing core.utils.cert_serial
+    (test_capability_isolation), so the spelling is repeated deliberately and stays
+    byte-identical to the sibling site above.
+    """
+    import os
+    import sys
+
+    sub = getattr(args, "core_relay_cert_command", None)
+    if not sub:
+        print("Error: specify a core-relay-cert subcommand: list, revoke, register", file=sys.stderr)
+        return 1
+
+    server_url = getattr(args, "server_url", None) or os.environ.get("VENYA_SERVER_URL", "") or client.config.server_url
+    if not server_url:
+        print("Error: server URL required. Pass --server-url or set VENYA_SERVER_URL", file=sys.stderr)
+        return 1
+    url = server_url.rstrip("/")
+    base = f"{url}/api/v1/admin/core-relay-certs"
+
+    try:
+        if sub == "list":
+            rows = client.get(base)
+            return _print_core_relay_rows(rows, as_json=getattr(args, "json", False))
+
+        if sub == "register":
+            cert_file = getattr(args, "cert_file", None)
+            pem_text = _read_cert_pem(cert_file)
+            if pem_text is None:
+                return 1
+            created = client.post(base, json={"certificate_pem": pem_text})
+            print(
+                f"Registered relay credential {created.get('serial_number', '?')} "
+                f"(CN {created.get('common_name', '?')}) — {'new row' if created.get('created') else 'already present'}"
+            )
+            return 0
+
+        if sub == "revoke":
+            serial = getattr(args, "serial", None)
+            cert_file = getattr(args, "cert_file", None)
+            if serial and cert_file:
+                print("Error: pass either --serial or --cert-file, not both", file=sys.stderr)
+                return 1
+            if cert_file:
+                pem_text = _read_cert_pem(cert_file)
+                if pem_text is None:
+                    return 1
+                serial = _serial_from_pem(pem_text)
+                if serial is None:
+                    return 1
+                print(f"Revoking the credential in {cert_file} — serial {serial}")
+            if not serial:
+                print("Error: revoke needs --serial or --cert-file", file=sys.stderr)
+                return 1
+            try:
+                int(serial, 16)
+                if len(serial) > 16:
+                    raise ValueError("serial too long")
+            except ValueError as e:
+                print(f"Error: invalid serial format — must be hex string (up to 16 chars): {e}", file=sys.stderr)
+                return 1
+            reason = getattr(args, "reason", "unspecified")
+            result = client.post(f"{base}/revoke", json={"serial": serial, "reason": reason})
+            if result.get("already_revoked"):
+                print(f"Relay credential {result.get('serial_number', serial)} was already revoked (no change)")
+            else:
+                print(f"Relay credential {result.get('serial_number', serial)} revoked (reason: {reason})")
+            return 0
+
+        print(f"Error: unknown core-relay-cert subcommand {sub!r}", file=sys.stderr)
+        return 1
+    except APIClientAuthenticationError as e:
+        print(f"Authentication failed: {e}", file=sys.stderr)
+        return 1
+    except APIClientError as e:
+        # A REFUSE_UNREGISTERED refusal lands here: the server 403s it, so the operator
+        # reads the server's own remedy sentence rather than a bare "failed".
+        print(f"Core relay credential request failed: {e}", file=sys.stderr)
+        return 1
+
+
+def _read_cert_pem(cert_file: str | None) -> str | None:
+    """Read a certificate file, or print the problem and return None."""
+    import sys
+    from pathlib import Path
+
+    if not cert_file:
+        print("Error: --cert-file is required", file=sys.stderr)
+        return None
+    path = Path(cert_file)
+    if not path.is_file():
+        print(f"Error: no certificate at {path}", file=sys.stderr)
+        return None
+    try:
+        return path.read_text()
+    except OSError as e:
+        print(f"Error: cannot read {path}: {e}", file=sys.stderr)
+        return None
+
+
+def _serial_from_pem(pem_text: str) -> str | None:
+    """The canonical serial of a certificate, read off the certificate itself.
+
+    Same `format(serial, "016x")` the admin-mint print emits, deliberately re-typed:
+    packages/cli/tests/test_capability_isolation.py bars this package from importing
+    core.utils.cert_serial, so the CLI keeps its own writer of the canonical form.
+    """
+    import sys
+
+    try:
+        from cryptography.x509 import load_pem_x509_certificate
+
+        cert = load_pem_x509_certificate(pem_text.encode())
+    except Exception as e:
+        print(f"Error: {type(e).__name__}: could not read a certificate from the file ({e})", file=sys.stderr)
+        return None
+    return format(cert.serial_number, "016x")
+
+
+def _print_core_relay_rows(rows: Any, as_json: bool) -> int:
+    """Print the registry. JSON first because a script reading it wants the timestamps whole."""
+    import json as _json
+    import sys
+
+    if as_json:
+        print(_json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+
+    items = rows if isinstance(rows, list) else []
+    if not items:
+        print(
+            "No core relay credentials registered. A core that relays with nothing registered "
+            "has an unrevocable relay credential — restart it (its boot ingests the credential it "
+            "presents) or run: venya admin core-relay-cert register --cert-file <path>",
+            file=sys.stderr,
+        )
+        return 0
+    for r in items:
+        state = "REVOKED" if r.get("revoked") else "live"
+        print(
+            f"  {r.get('serial_number', '?')}  CN={r.get('common_name', '?')}  {state}  "
+            f"not_after={str(r.get('not_after'))[:10]}  reason={r.get('revoke_reason') or '-'}"
+        )
+    return 0
 
 
 def cmd_admin_reissue_recovery_code(client: APIClient, args: Any) -> int:

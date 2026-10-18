@@ -68,7 +68,9 @@ from executor.daemon import CertificateManager, ExecutorDaemon, RevocationStatus
 from executor.relay_listener import (
     REFUSE_NO_ANSWER,
     REFUSE_NOT_WIRED,
+    REFUSE_PEER_REVOKED,
     REFUSE_REVOKED,
+    peer_revocation_refusal,
     revocation_accept_reason,
 )
 
@@ -81,11 +83,19 @@ TICK_TIMEOUT = 1  # NetworkConfig floor is ge=1; 3 ticks x 1 s keeps the leg at 
 # Named by the product's own constant names so a parametrisation can report WHICH class moved.
 RULED_CLASSES_BY_NAME = {
     "REFUSE_REVOKED": REFUSE_REVOKED,
+    "REFUSE_PEER_REVOKED": REFUSE_PEER_REVOKED,
     "REFUSE_NO_ANSWER": REFUSE_NO_ANSWER,
     "REFUSE_NOT_WIRED": REFUSE_NOT_WIRED,
 }
 RULED_CLASSES = set(RULED_CLASSES_BY_NAME.values())
 RULED_CLASS_PREFIXES = ("403 REVOKED", "503 OPERATIONAL FAULT")
+#: #597 added a SECOND revocation-claiming class, about a different subject: REFUSE_REVOKED
+#: is "THIS executor's credential is dead" and REFUSE_PEER_REVOKED is "the CORE's relay
+#: credential that walked in is dead". Both assert a revocation that really happened; a
+#: single-claimer rule would have had to word the peer one as a fault to pass, which is
+#: the laundering this file's whole vocabulary exists to prevent. Kept as an explicit set
+#: so a THIRD claimer still has to be chosen on purpose rather than absorbed silently.
+REVOCATION_CLAIMING_CLASSES = {"REFUSE_REVOKED", "REFUSE_PEER_REVOKED"}
 
 
 def _config(threshold: int = THRESHOLD) -> ExecutorConfig:
@@ -355,7 +365,14 @@ class TestCellD_FourthRowGuard:
     """(d) — no silent fourth row: enumerate every class the accept point can emit."""
 
     def _emitted_classes(self) -> set:
-        """Drive the gate across the whole state space it reads and collect what it emits."""
+        """Drive the gate across the whole state space it reads and collect what it emits.
+
+        #597 widened this to BOTH halves of the accept point: ``revocation_accept_reason``
+        (is THIS executor's credential dead / can it even tell) and
+        ``peer_revocation_refusal`` (is the CORE that walked in dead). A class emitted only
+        by the peer half would otherwise be unreachable to this guard, and the paired
+        negative below is precisely what catches a class that stops being reachable.
+        """
         emitted: set = set()
         for state in (
             None,
@@ -369,9 +386,25 @@ class TestCellD_FourthRowGuard:
             reason = revocation_accept_reason(state)
             if reason is not None:
                 emitted.add(reason)
+
+        # The peer half: a live registry naming one revoked relay serial, driven against
+        # a matching and a non-matching presented serial (the negative pair).
+        peer_states = (
+            SimpleNamespace(revoked_relay_serials=frozenset({"000000000000abcd"})),
+            SimpleNamespace(revoked_relay_serials=frozenset()),
+            None,
+        )
+        for state in peer_states:
+            # ABCD is what a certificate presents, 000000000000abcd is what the row
+            # stores — that pair IS the #481 property at this door. AABBCC is the
+            # non-matching negative.
+            for presented in ("ABCD", "000000000000abcd", "AABBCC", None):
+                reason = peer_revocation_refusal(state, presented)
+                if reason is not None:
+                    emitted.add(reason)
         return emitted
 
-    def test_every_emitted_class_is_one_of_the_ruled_three(self):
+    def test_every_emitted_class_is_one_of_the_ruled_classes(self):
         emitted = self._emitted_classes()
         assert emitted, "the gate emitted nothing at all — this cell would pass vacuously"
         extra = emitted - RULED_CLASSES
@@ -401,8 +434,8 @@ class TestCellD_FourthRowGuard:
         """
         assert text.startswith(RULED_CLASS_PREFIXES), f"{name}: {text!r} lost its class prefix"
         claims_revocation = "REVOKED" in text.split("—")[0]
-        if name == "REFUSE_REVOKED":
-            assert claims_revocation, "the revoked class must still assert revocation"
+        if name in REVOCATION_CLAIMING_CLASSES:
+            assert claims_revocation, f"{name} must still assert a revocation"
         else:
             assert not claims_revocation, f"{name} asserts a revocation it has no answer for"
 
@@ -417,4 +450,9 @@ class TestCellD_FourthRowGuard:
         refusal_names = {
             name for name, value in vars(relay_module).items() if name.startswith("REFUSE_") and isinstance(value, str)
         }
-        assert refusal_names == {"REFUSE_REVOKED", "REFUSE_NO_ANSWER", "REFUSE_NOT_WIRED"}, refusal_names
+        assert refusal_names == {
+            "REFUSE_REVOKED",
+            "REFUSE_PEER_REVOKED",  # #597: the revoked CORE relay peer at :8443
+            "REFUSE_NO_ANSWER",
+            "REFUSE_NOT_WIRED",
+        }, refusal_names

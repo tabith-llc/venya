@@ -59,12 +59,17 @@ ORPHANS = {
 # server.routes (admin 11, auth_browser 6, executors 4, roles 3, secrets 3,
 # auth 2, credentials 2, enroll 2, init 2, filter 1, recovery 1,
 # auth_elevation 1). Drift in EITHER direction trips this pin before the
-# behavior pins can silently absorb it.
+# behavior pins can silently absorb it. (#597 adds a thirteenth module,
+# core_relay_certs, carrying 2 of these.)
 # RF-7 chunk 2 (refs RF-6 §2.7) added ONE model to the surface:
 # AdminIssueCertRequest (routes/admin_certs.py), shipped with extra="forbid"
 # because the §2.6 no-self-described-identity rule IS that field's absence.
 # 38 -> 39 defined, 37 -> 38 forbidden; the 2 ruled exemptions are unchanged.
-EXPECTED_DEFINED_REQUEST_MODELS = 39
+# #597 added TWO, both shipped forbid (routes/core_relay_certs.py:
+# CoreRelayCertRevokeRequest + CoreRelayCertRegisterRequest) — a typo'd flag on a
+# revocation verb must die at the schema, not be silently dropped and leave the
+# caller believing they revoked something. 39 -> 41 defined, 38 -> 40 forbidden.
+EXPECTED_DEFINED_REQUEST_MODELS = 41
 
 
 def _route_modules():
@@ -161,11 +166,11 @@ def test_inventory_count_pin():
     defined = _defined_request_models()
     assert len(defined) == EXPECTED_DEFINED_REQUEST_MODELS
     # #371 re-sweep pinned the split at 37 of 38; RF-7 chunk 2 added one
-    # forbid-shipped model, so 38 of 39. The ruled exemptions stay exactly
-    # SecretMetadata + FilterRequest (2).
+    # forbid-shipped model, so 38 of 39; #597 added two more, so 40 of 41. The
+    # ruled exemptions stay exactly SecretMetadata + FilterRequest (2).
     assert len(EXEMPT) == 2, "exemption list grew/shrank — new candidates are STOP-and-report, not list edits"
     forbidden = [n for n, m in defined.items() if m.model_config.get("extra") == "forbid"]
-    assert len(forbidden) == 38, f"forbidden defined models: {len(forbidden)} != 38 (post-RF-7 chunk 2)"
+    assert len(forbidden) == 40, f"forbidden defined models: {len(forbidden)} != 40 (post-#597)"
 
 
 def test_orphan_flag_still_listed():

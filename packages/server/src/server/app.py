@@ -184,6 +184,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         auth,
         auth_browser,
         auth_elevation,
+        core_relay_certs,
         credentials,
         debug,
         enroll,
@@ -214,6 +215,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     app.include_router(secrets.router, prefix="/api/v1")
     app.include_router(roles.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
+    # #597: the core relay credential registry. Own module, own router — routes/admin.py
+    # is another lane's live file at this seat (s134 batch, #662).
+    app.include_router(core_relay_certs.router, prefix="/api/v1")
     app.include_router(admin_certs.router, prefix="/api/v1")
     app.include_router(debug.router, prefix="/api/v1/admin")
     app.include_router(credentials.router, prefix="/api/v1")
@@ -374,6 +378,26 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         "Database initialized: %s", secret(config.db.database_url) if config.db.database_url else "not configured"
     )
     app.state.backend = backend  # type: ignore[attr-defined]
+
+    # #597: register the relay CLIENT credential this core presents at executor :8443.
+    # It is minted by the installer with openssl and historically entered no table, so
+    # it had no revocation path. Placed here — after the DB is up, before anything can
+    # serve — because the invariant is "on disk => in the store", and the process that
+    # uses the credential is the one that can guarantee it. Kept non-fatal on purpose:
+    # the relay mTLS material itself is already hard-validated above
+    # (_validate_relay_mtls_config), so a registry write failure is a lost revocation
+    # path, not a reason to take a working core down; it logs a warning naming the file
+    # and the operator can see it in the boot lines.
+    try:
+        from .relay_registry import ingest_relay_credential
+
+        ingest_relay_credential(config, backend)
+    except Exception:
+        logger.warning(
+            "Relay credential registry ingest raised unexpectedly — this core's relay credential may not be "
+            "revocable until the next successful boot (#597).",
+            exc_info=True,
+        )
 
     # Unconditional: a missing passphrase is a hard failure in every mode.
     # The former `not config.debug` exemption was a dead letter — init_db

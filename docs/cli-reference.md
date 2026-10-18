@@ -44,6 +44,10 @@ and exits `1`.
     - [`venya admin key-version rotate-status`](#venya-admin-key-version-rotate-status)
     - [`venya admin key-version rollback`](#venya-admin-key-version-rollback)
   - [`venya admin rotate-key`](#venya-admin-rotate-key)
+  - [`venya admin core-relay-cert`](#venya-admin-core-relay-cert) *(group)*
+    - [`venya admin core-relay-cert list`](#venya-admin-core-relay-cert-list)
+    - [`venya admin core-relay-cert revoke`](#venya-admin-core-relay-cert-revoke)
+    - [`venya admin core-relay-cert register`](#venya-admin-core-relay-cert-register)
   - [`venya admin revoke-executor`](#venya-admin-revoke-executor)
   - [`venya admin remove-executor`](#venya-admin-remove-executor)
   - [`venya admin executor-enroll`](#venya-admin-executor-enroll)
@@ -279,6 +283,7 @@ Subcommands:
 - [`venya admin add-allowed-command`](#venya-admin-add-allowed-command) — Add a command to the strict allowlist
 - [`venya admin key-version`](#venya-admin-key-version) — Key version management
 - [`venya admin rotate-key`](#venya-admin-rotate-key) — Rotate the key encryption key
+- [`venya admin core-relay-cert`](#venya-admin-core-relay-cert) — Manage the core relay client credentials (the certificate the core presents at executor :8443)
 - [`venya admin revoke-executor`](#venya-admin-revoke-executor) — Revoke an executor certificate
 - [`venya admin remove-executor`](#venya-admin-remove-executor) — Remove an executor row (revokes its current certificate; refused while execution sessions are retained)
 - [`venya admin executor-enroll`](#venya-admin-executor-enroll) — Generate an enrollment token for an executor
@@ -567,6 +572,77 @@ venya admin rotate-key
 
 ```bash
 venya admin rotate-key  # rotate the key-encryption key (server generates the new KEK)
+```
+
+### `venya admin core-relay-cert`
+
+Manage the core relay client credentials (the certificate the core presents at executor :8443)
+
+```
+venya admin core-relay-cert
+```
+
+Subcommands:
+
+- [`venya admin core-relay-cert list`](#venya-admin-core-relay-cert-list) — List registered core relay credentials
+- [`venya admin core-relay-cert revoke`](#venya-admin-core-relay-cert-revoke) — Revoke a core relay credential by serial
+- [`venya admin core-relay-cert register`](#venya-admin-core-relay-cert-register) — Register a core relay credential from its certificate
+
+#### `venya admin core-relay-cert list`
+
+List registered core relay credentials
+
+```
+venya admin core-relay-cert list [OPTIONS]
+```
+
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `--json` | no | flag | false (flag) | Output in JSON format |
+
+**Examples**
+
+```bash
+venya admin core-relay-cert list  # every registered core relay credential and whether it is revoked
+```
+
+#### `venya admin core-relay-cert revoke`
+
+Revoke a core relay credential by serial
+
+```
+venya admin core-relay-cert revoke [OPTIONS]
+```
+
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `--serial` | no | string | — | Hex serial of the relay credential to revoke (up to 16 chars, any case/padding). Give this OR --cert-file. A serial the registry does not name is REFUSED, not accepted. |
+| `--reason` | no | string | `unspecified` | Revocation reason (default: unspecified) |
+| `--cert-file` | no | string | — | Revoke the serial READ from this certificate instead of typing one. Mutually exclusive with --serial; one of the two is required. |
+
+**Examples**
+
+```bash
+venya admin core-relay-cert revoke --serial 000000000000abcd  # revoke one relay credential by serial; a serial the registry does not name is REFUSED, not accepted
+venya admin core-relay-cert revoke --cert-file /etc/venya/relay/relay-client.crt  # revoke the credential READ from that file, so no serial is hand-typed
+```
+
+#### `venya admin core-relay-cert register`
+
+Register a core relay credential from its certificate
+
+```
+venya admin core-relay-cert register --cert-file CERT_FILE
+```
+
+| Argument | Required | Type / choices | Default | Description |
+|----------|----------|----------------|---------|-------------|
+| `--cert-file` | **yes** | string | — | Path to the relay client certificate (PEM) |
+
+**Examples**
+
+```bash
+venya admin core-relay-cert register --cert-file /etc/venya/relay/relay-client.crt  # add the core's own relay credential to the registry from its certificate
 ```
 
 ### `venya admin revoke-executor`

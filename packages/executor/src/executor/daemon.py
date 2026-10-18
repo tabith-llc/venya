@@ -253,6 +253,15 @@ class DaemonState:
         # False is "we do not know", never "we know it is live" — the same honesty the
         # tri-state poll was built for (#442 site 4).
         self.revocation_answered = False
+        # #597: the peer population — serials of REVOKED core relay client credentials,
+        # read off the same poll answer. The relay listener matches its INCOMING client
+        # certificate against this set, which is the thing it could not do before #597
+        # (there was no list that named the peer). Keyed on registry MEMBERSHIP only:
+        # nothing here makes the age of the list a stop condition at that door, because
+        # that availability trade is #586's and the owner's, not this row's.
+        # A frozenset of canonical serial strings; empty means "the registry names no
+        # revoked relay credential", which admits — it does not refuse.
+        self.revoked_relay_serials: frozenset[str] = frozenset()
         # #603: WHY the fault arm stopped service, carried BESIDE the bool instead
         # of being asserted through it. The consecutive-failure threshold means the
         # core never ANSWERED — it is not a server-side revocation, and saying so at
@@ -465,7 +474,8 @@ def parse_revocation_payload(response: httpx2.Response) -> dict[str, Any]:
 
     The accepted shape is the endpoint's own contract — ``RevocationListResponse``
     in the server's ``routes/executors.py``: a JSON object, optional
-    ``revoked_identities`` and ``revoked_serials`` fields, each a list. Anything
+    ``revoked_identities``, ``revoked_serials`` and ``revoked_relay_serials`` (#597, the
+    revoked CORE RELAY peer population) fields, each a list. Anything
     else is refused here, at the parse site, rather than being read downstream.
 
     Returns:
@@ -490,7 +500,7 @@ def parse_revocation_payload(response: httpx2.Response) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise RevocationPayloadError(f"revocation body is a {type(data).__name__}, not a JSON object")
 
-    for field in ("revoked_identities", "revoked_serials"):
+    for field in ("revoked_identities", "revoked_serials", "revoked_relay_serials"):
         value = data.get(field, [])
         if not isinstance(value, list):
             raise RevocationPayloadError(f"revocation field {field!r} is a {type(value).__name__}, not a list")
@@ -512,6 +522,11 @@ class CertificateManager:
         self.key_path = config.mtls.key
         self.ca_cert_path = config.mtls.ca_cert
         self.serial: str | None = None
+        # #597: the revoked CORE RELAY peer serials from the last parsed poll body.
+        # Empty means "nothing named", which ADMITS at the listener — never refuse. Only
+        # a tick whose body passed the shape guard writes it (see ``check_revocation``),
+        # so an outage cannot clear it. ``_main_loop`` publishes it onto DaemonState.
+        self.last_relay_serials: frozenset[str] = frozenset()
         self._not_after: datetime | None = None
         self._last_revocation_etag: str | None = None
 
@@ -1124,6 +1139,15 @@ class CertificateManager:
             # live. A malformed 200 keeps the last GOOD etag instead, so the
             # next poll re-asks for the whole list.
             data = parse_revocation_payload(response)
+            # #597: record the PEER population on this answered tick, here on the
+            # CertificateManager, which is the object that actually holds the parsed
+            # body. ``_main_loop`` (the owner of DaemonState) copies it across on the
+            # NEXT line of its dispatch — this class has no ``state`` attribute, and
+            # writing one here would be an AttributeError on every poll.
+            # Set only after the shape guard accepted the body, so a malformed 200
+            # cannot replace a good population with a partial one; an UNREACHABLE tick
+            # never reaches here, so an outage leaves the last good set standing.
+            self.last_relay_serials = frozenset(serial_match_key(s) for s in data.get("revoked_relay_serials", []))
             self._last_revocation_etag = response.headers.get("etag")
             # Identity-level revocation FIRST (ticket executor-revocation-by-identity,
             # ruling 2): the server revoked the whole executor_id — terminal, matches
@@ -2132,6 +2156,12 @@ class ExecutorDaemon:
                     # does NOT assert revocation).
                     # Clearing it here would refuse live work on a single dropped poll.
                     self.state.revocation_answered = True
+                    # #597: carry the peer population onto the state the relay listener
+                    # reads. Copy happens only on a NOT_REVOKED/REVOKED answer — the two
+                    # cases where the body parsed — so a dropped poll (UNREACHABLE, the
+                    # branch below) leaves the last known peer set standing instead of
+                    # silently admitting a credential it had already refused.
+                    self.state.revoked_relay_serials = self.cert_manager.last_relay_serials
             except TimeoutError:
                 logger.debug("Revocation check timed out")
                 self.state._consecutive_revocation_failures += 1
