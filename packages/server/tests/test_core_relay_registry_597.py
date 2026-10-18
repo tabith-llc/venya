@@ -613,6 +613,27 @@ class TestRegisterVerbDerivesFactsFromTheCertificate:
         assert not left, f"register left submitted credential material on disk: {left}"
 
 
+def _fk_engine(url: str = "sqlite:///:memory:"):
+    """An sqlite engine that ENFORCES the constraints its schema declares (#634).
+
+    SQLite leaves ``foreign_keys`` OFF per connection, so a bare engine accepts an orphan child row
+    and honours no declared cascade: the DDL is present and never consulted, which makes any
+    FK-shaped claim in a test green by accident. The connect-listener is the shape already shipped
+    in ``packages/core/tests/test_migration_039_fk_cascade.py`` and ``test_secret_delete_fk.py``.
+    """
+    from sqlalchemy import create_engine, event
+
+    eng = create_engine(url)
+
+    @event.listens_for(eng, "connect")
+    def _fk_on(dbapi_conn, _rec):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    return eng
+
+
 class TestMigrationAndModelAgree:
     """Alembic 040 must build exactly what models.py declares — the repo's model-is-truth law."""
 
@@ -650,7 +671,6 @@ class TestMigrationAndModelAgree:
 
         from alembic.migration import MigrationContext
         from alembic.operations import Operations
-        from sqlalchemy import create_engine
         from sqlalchemy import inspect as sqlinspect
 
         spec = importlib.util.spec_from_file_location(
@@ -661,8 +681,13 @@ class TestMigrationAndModelAgree:
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
 
-        engine = create_engine("sqlite:///:memory:")
+        engine = _fk_engine()
         conn = engine.connect()
+        # The listener must be PROVEN live, not merely present: a connect hook that never fired, or
+        # fired on a different connection, leaves every FK-shaped cell below green by accident.
+        assert (
+            int(conn.exec_driver_sql("PRAGMA foreign_keys").scalar()) == 1
+        ), "connect-listener did not fire — foreign_keys is OFF on this connection"
         m.op = Operations(MigrationContext.configure(conn))
         m.upgrade()
         assert "core_relay_credentials" in sqlinspect(conn).get_table_names()
@@ -670,6 +695,34 @@ class TestMigrationAndModelAgree:
         m.downgrade()
         assert "core_relay_credentials" not in sqlinspect(conn).get_table_names(), "downgrade left the table behind"
         conn.close()
+        engine.dispose()
+
+    def test_enforcement_arm_actually_rejects_an_orphan_child(self) -> None:
+        """#634 — the arm is load-bearing, not decoration: a real orphan row is refused.
+
+        Migration 040 declares zero foreign keys, so a listener attached to an engine that only ever
+        runs 040 can never fail — which is exactly the shape this row calls theatre. The proof therefore
+        runs against a probe pair on the SAME engine builder: the connection reports the pragma ON, and
+        the database itself rejects a child whose parent does not exist.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        engine = _fk_engine()
+        with engine.connect() as conn:
+            assert (
+                int(conn.exec_driver_sql("PRAGMA foreign_keys").scalar()) == 1
+            ), "connect-listener did not fire — foreign_keys is OFF on this connection"
+            conn.exec_driver_sql("CREATE TABLE fk_probe_parent (id INTEGER PRIMARY KEY)")
+            conn.exec_driver_sql(
+                "CREATE TABLE fk_probe_child ("
+                "id INTEGER PRIMARY KEY, "
+                "parent_id INTEGER NOT NULL REFERENCES fk_probe_parent (id))"
+            )
+            conn.exec_driver_sql("INSERT INTO fk_probe_parent (id) VALUES (1)")
+            conn.commit()
+            with pytest.raises(IntegrityError):
+                conn.exec_driver_sql("INSERT INTO fk_probe_child (id, parent_id) VALUES (2, 99)")
+        engine.dispose()
 
     def test_migration_chains_to_the_head_it_was_cut_against(self) -> None:
         import importlib.util
