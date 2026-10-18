@@ -526,13 +526,93 @@ class TestPinnedWording:
         with pytest.raises(ValidationError):
             CRLConfig(revocation_read_lock_timeout_ms=999_999)
 
+    def _arm_probe(self):
+        """Build the shipped app (same bare-config shape the rf7 cells use) and hand back
+        the FastAPI app plus two TestClients driven through the REAL dispatch mechanism —
+        ``starlette.middleware.exceptions.ExceptionMiddleware`` fed with the app's own
+        ``exception_handlers`` registry, the same object ``build_middleware_stack()``
+        passes at first request. One endpoint raises the NAMED fault the arm must answer;
+        the other raises an unrelated fault the arm must NOT claim. A full-stack TestClient
+        is not usable here: the auth middleware answers 401 before any route runs, which is
+        why the neighbouring 657 cells build bare apps too.
+        """
+        from server.app import create_app
+        from server.config import ServerConfig
+        from starlette.middleware.exceptions import ExceptionMiddleware
+        from starlette.testclient import TestClient
+
+        wrapped = create_app(ServerConfig(recovery_code_pepper="p"))
+        # create_app hands back the pure-ASGI size-limit wrapper (app.py:253); the FastAPI
+        # app that owns exception_handlers is its inner ``.app`` — the same unwrap the rf7
+        # cells use (test_admin_cert_issue_rf7.py:462).
+        fastapi_app = wrapped.app
+        handlers = dict(fastapi_app.exception_handlers)
+
+        class _Raise:
+            """Minimal ASGI endpoint that fails with the given fault."""
+
+            def __init__(self, exc: Exception) -> None:
+                self.exc = exc
+
+            async def __call__(self, scope, receive, send) -> None:
+                raise self.exc
+
+        named = TestClient(
+            ExceptionMiddleware(
+                _Raise(RevocationReadUnavailable("#603 probe: bounded read could not answer")), handlers=handlers
+            ),
+            raise_server_exceptions=False,
+        )
+        unrelated = TestClient(
+            ExceptionMiddleware(_Raise(RuntimeError("#603 probe: a fault outside the named class")), handlers=handlers),
+            raise_server_exceptions=False,
+        )
+        return fastapi_app, named, unrelated
+
     def test_app_registers_one_central_refusal_arm(self):
         """A refusal arm that must be remembered at fourteen sites is a refusal arm missing
-        at one; the app owns one handler, so no site can leak the fault as an unlabeled 500."""
-        import inspect
+        at one; the app owns one handler, so no site can leak the fault as an unlabeled 500.
 
-        import server.app as app_module
+        Rewritten at s137 (refs #603): the shipped form asserted ``inspect.getsource``
+        substrings, and the ``or`` was satisfied by the import line beside the
+        registration — deleting the registration itself read GREEN (reproduced verbatim
+        in ``wave31-specs-20261018/flash6-603-arm-cell-s137-report.md``, Act 0). What is
+        observed now is the behaviour the registration PRODUCES: a request that raises the
+        named fault is answered by the shipped arm with the shipped 503 + sentence, and
+        the dispatch table carries exactly one entry for that fault class.
+        """
+        fastapi_app, named, _unrelated = self._arm_probe()
 
-        src = inspect.getsource(app_module)
-        assert "add_exception_handler(_ReadUnavailable" in src or "RevocationReadUnavailable" in src
-        assert src.count("REVOCATION_UNAVAILABLE_DETAIL") >= 1
+        # The registration's observable state change: the named class is in the app's
+        # dispatch table, bound to exactly one handler. M-A (registration deleted) lands
+        # here, not on a string.
+        assert RevocationReadUnavailable in fastapi_app.exception_handlers, (
+            "the app-wide refusal arm is not registered: a bounded-read refusal would "
+            "escape as an unlabeled 500 — the #551 class this arm exists to close"
+        )
+        arm_handler = fastapi_app.exception_handlers[RevocationReadUnavailable]
+        bound_keys = [k for k, h in fastapi_app.exception_handlers.items() if h is arm_handler]
+        assert bound_keys == [RevocationReadUnavailable], (
+            "the ONE central arm must be exactly one binding on exactly the named class; "
+            f"observed bindings: {bound_keys!r}"
+        )
+
+        # And the behaviour that binding produces: the named fault, dispatched through the
+        # real ExceptionMiddleware, answers with the shipped stale-class 503 + sentence.
+        resp = named.get("/")
+        assert resp.status_code == 503, "the named fault must reach the arm and answer 503, never 403/500"
+        assert (
+            resp.json()["detail"] == REVOCATION_UNAVAILABLE_DETAIL
+        ), "ops must read the stale-class sentence, not a per-site string"
+
+    def test_arm_answers_only_the_named_fault(self):
+        """Paired negative (#603, s137): the SAME registry, an unrelated fault. It must NOT
+        be answered with the arm's 503 + sentence — if a broad or mis-targeted registration
+        ever claims every exception, ops would read "revocation plane unavailable" for
+        every server fault. Rejects a mutation that rebinds the arm to a wrong class
+        (M-B) while the named-fault binding alone would still look plausible.
+        """
+        _app, _named, unrelated = self._arm_probe()
+        resp = unrelated.get("/")
+        assert resp.status_code == 500, "an unrelated fault must escape the arm as a plain 500"
+        assert REVOCATION_UNAVAILABLE_DETAIL not in resp.text
