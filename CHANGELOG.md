@@ -298,6 +298,29 @@ those bytes._
   input, so a clock step neither shortens nor lengthens a session (#460, #464, #465, #549); and a
   paginated list carries a tiebreaker, so two reads in the same instant return the same page
   (#463).
+
+- **Executor concurrency, certificate issuance cadence, and the boot-cleanups (recorded late; same
+  range).** Two new settings an operator can set: the executor now admits relay commands under one
+  named ceiling — `[executor] max_concurrent_commands`, env
+  `VENYA_EXECUTOR__MAX_CONCURRENT_COMMANDS`, shipped default 1 which is the old sequential posture,
+  with no fixed ceiling because the honest maximum is the machine's memory (RF-3); and admin
+  certificate mints are rate-limited per key per hour by `rate_limit.cert_issuance_requests_per_hour`
+  (env `VENYA_RATE_LIMIT__CERT_ISSUANCE_REQUESTS_PER_HOUR`, shipped default 5), so a script cannot
+  out-mint an operator's willingness to touch a security key (RF-7). The workstation CLI rebuilds
+  its admin TLS context when the certificate file's content changes rather than when its timestamp
+  changes, so a restore that preserves `mtime`, a `cp`, or a re-download of an identical file all
+  get the new material presented instead of the old (RF-8c). At boot the executor reaps the leftovers of
+  earlier runs: sandboxes no teardown claimed (#474), and shared-memory directories under either
+  prefix the sandbox strategy writes, older than the session lifetime (#469). The static askpass
+  helper is copied to a path that allows execution before the sandbox calls it, keeping mode 0555
+  and the no-secret-in-argv posture (#426); the core installer picks the active PostgreSQL cluster
+  head rather than an inactive one (#496); each installer code fix verifies its own post-condition
+  and says so, instead of reporting success on the `sed` exit status alone (#519); the core
+  installer confirms the nginx restart it asked for instead of assuming it (#454); a sandbox
+  teardown that fails is logged and no longer allowed to replace the command's own outcome (#417); a truncated
+  sandbox output carries the in-band marker the direct path already used (#409); and a policy
+  rejection returns `422` with the reason rather than a transport-shaped error (#410).
+
 ## [0.1.0alpha17] - 2026-10-13
 
 There is no backwards compatibility during alpha. Three changes in this window are
