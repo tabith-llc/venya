@@ -32,6 +32,10 @@ What the cells pin, in order:
   inside the SAME seam, and both STILL ANSWERING: the paired negatives are what keep a freeze fix
   from becoming a fail-open or a fleet-wide starvation.
 * ONE RULEBOOK — the shared refusal sentence, the one central arm, and a closed site vocabulary.
+* THE VOCABULARY CHECK CAN SEE A LABEL IN EVERY SHAPE IT IS WRITTEN IN — literal, module or class
+  constant, ``for_site(Name)``, a local bound to a resolvable value, an f-string chunk — and reports
+  every site it cannot resolve by name instead of skipping it (``_UNRESOLVED_SITE_BASELINE``). #662
+  found the hole: the closed set was only ever as wide as a literal-only reader could notice.
 
 The doubles offer no method the real object lacks: the savepoint double has ``commit``/``rollback``
 and no ``release()``, because that asymmetry is how the #603 first draft stayed green in units and
@@ -80,11 +84,28 @@ _SESSION_SCAN_BOUND = "300s"
 #: docstring says why). Re-derived against the MERGED tip, not against this leg's own base: #657
 #: landed ``poll/revocation-list`` (the STALE arm, a counter label, never a seam label — it is applied
 #: at the raise, not by ``bounded_read``) and #658 landed ``admin-mtls`` (the admin plane's seam
-#: label) while this branch was open. Two of them are module constants rather than inline
-#: ``site="…"`` literals, which is why the cell below resolves constants. This leg's own fallback
-#: label was ``revocation-poll`` at the first cut; with ``poll/revocation-list`` now on the SAME
-#: series from the SAME route, two near-identical strings would tell an operator nothing about which
-#: arm refused, so it is ``poll/fallback-read``.
+#: label) while this branch was open. Some of these are module constants rather than inline
+#: ``site="…"`` literals, which is why ``_seam_site_labels_from_source`` resolves names through
+#: module/class constants, a local bound to a resolvable value, and an f-string chunk — #662 proved
+#: that a literal-only ``for_site`` arm reports a smaller vocabulary than the seam actually holds.
+#: This leg's own fallback label was ``revocation-poll`` at the first cut; with
+#: ``poll/revocation-list`` now on the SAME series from the SAME route, two near-identical strings
+#: would tell an operator nothing about which arm refused, so it is ``poll/fallback-read``.
+#:
+#: THE FOUR ``admin/*`` ROWS BELOW ARE WIDENED AHEAD OF THEIR MERGE, and each carries the proof the
+#: guard's owner demanded — an entry enters only on a shipped call site in
+#: ``packages/server/src/**``, never from a test double. All four are #662's, read at
+#: ``7e64d5d21d41`` (branch ``bug/662-admin-sites-bounded-flash4-s133``, which is NOT an ancestor of
+#: ``origin/dev`` at this base), each a module constant that is then passed at a real call site in
+#: ``packages/server/src/server/routes/admin.py`` (symbol, not line, is the durable half):
+#:   ``admin/certs-revoke``      ``ADMIN_CERT_REVOKE_SITE``     → ``bounded_read(db, site=…)`` in ``admin_revoke_admin_cert``
+#:   ``admin/executor-revoke``   ``ADMIN_EXECUTOR_REVOKE_SITE`` → ``bounded_read(db, site=…)`` AND ``for_site(…)`` in ``admin_revoke_executor``
+#:   ``admin/remove-executor``   ``ADMIN_REMOVE_EXECUTOR_SITE`` → ``for_site(…)`` in ``admin_remove_executor``
+#:   ``admin/executors-certs``   ``ADMIN_EXECUTORS_CERTS_SITE`` → ``for_site(…)`` in ``admin_list_executors``
+#: Two of those four were INVISIBLE to this check before the leg that adds them (they arrive only as
+#: ``for_site(Name)``, and that arm read literals) — the blind spot act 2 of this leg closes.
+#: If #662 is reworked or never lands, these four entries are dead vocabulary and the next
+#: re-derivation must prune them: widening ahead of a merge is stated here, not hidden.
 _SHIPPED_SITE_LABELS = frozenset(
     {
         "revocation-plane",
@@ -105,7 +126,201 @@ _SHIPPED_SITE_LABELS = frozenset(
         # the two this leg adds, one per #656 site
         "dial/crl-mint",
         "poll/fallback-read",
+        # #662's four admin-plane sites: provenanced above, UNMERGED at this base (7e64d5d)
+        "admin/certs-revoke",
+        "admin/executor-revoke",
+        "admin/remove-executor",
+        "admin/executors-certs",
     }
+)
+
+#: The same four, named again so a PARTIAL landing cannot pass quietly. See the guard in
+#: ``test_every_site_label_the_seam_can_receive_is_in_the_closed_vocabulary``.
+_ADMIN_662_LABELS = frozenset(
+    {
+        "admin/certs-revoke",
+        "admin/executor-revoke",
+        "admin/remove-executor",
+        "admin/executors-certs",
+    }
+)
+
+
+def _resolve_site_expr(node: ast.AST | None, scopes: list[dict[str, str]]) -> str | None:
+    """The string a site argument evaluates to, or ``None`` when it genuinely cannot be known here.
+
+    Resolves the forms a static reader can honour — a literal, a name bound to a resolvable value in
+    scope (module constant, class constant, a local assigned earlier in this same function), a
+    concatenation of those, and an f-string whose chunks all resolve. Deliberately does NOT guess at
+    an attribute (``self.CONST``), a call, a subscript or a format spec: those are run-time values,
+    and a guard that invents a label it cannot see is worse than one that reports the site as
+    unresolved.
+    """
+    if node is None:
+        return None
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.Name):
+        for scope in reversed(scopes):
+            if node.id in scope:
+                return scope[node.id]
+        return None
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant):
+                if not isinstance(value.value, str):
+                    return None
+                parts.append(value.value)
+            elif isinstance(value, ast.FormattedValue):
+                if value.format_spec is not None:
+                    return None
+                chunk = _resolve_site_expr(value.value, scopes)
+                if chunk is None:
+                    return None
+                parts.append(chunk)
+            else:
+                return None
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _resolve_site_expr(node.left, scopes)
+        right = _resolve_site_expr(node.right, scopes)
+        if left is None or right is None:
+            return None
+        return left + right
+    return None
+
+
+def _seam_site_labels_from_source(source: str, relname: str = "<source>") -> tuple[set[str], list[str]]:
+    """The seam's site labels in ONE file: ``(resolved, unresolved-descriptors)``.
+
+    Two arms, unchanged in shape from the cell that first shipped them: a ``for_site`` name argument,
+    and a ``site=`` keyword on any call — the second also covers the ``labels(site=…)`` emission
+    points, because a narrower arm would stop counting the places a label really does reach a
+    Prometheus series. #662 exposed the asymmetry this function used to carry: ``site=NAME`` resolved
+    a module constant while ``for_site(NAME)`` resolved nothing, so two of four shipped labels sat
+    outside the closed vocabulary unnoticed and the check still read green.
+
+    A site whose label cannot be resolved statically is reported as ``"<file> <callee>(<source>)
+    [n sites]"`` and pinned by ``_UNRESOLVED_SITE_BASELINE``. Silently skipping is the lie; counting
+    is the #634 two-bucket shape.
+    """
+    tree = ast.parse(source)
+    found: set[str] = set()
+    counted: dict[tuple[str, str], int] = {}
+
+    def take(callee: str, arg: ast.expr, scopes: list[dict[str, str]], *, keyword: str | None = None) -> None:
+        label = _resolve_site_expr(arg, scopes)
+        if label is not None:
+            found.add(label)
+            return
+        shown = f"{keyword}={ast.unparse(arg)}" if keyword else ast.unparse(arg)
+        key = (callee, shown)
+        counted[key] = counted.get(key, 0) + 1
+
+    def scan_expr(node: ast.AST, scopes: list[dict[str, str]]) -> None:
+        if isinstance(node, ast.Call):
+            callee = getattr(node.func, "id", None) or getattr(node.func, "attr", None) or "<expr>"
+            if callee == "for_site" and node.args:
+                take(callee, node.args[0], scopes)
+            for kw in node.keywords:
+                if kw.arg == "site":
+                    take(callee, kw.value, scopes, keyword="site")
+        for child in ast.iter_child_nodes(node):
+            # A nested def inside an expression is read in the ENCLOSING scope, so a constant bound
+            # only inside it can surface as unresolved here. Conservative and named, never dropped.
+            scan_expr(child, scopes)
+
+    def scan_body(body: list[ast.stmt], scopes: list[dict[str, str]]) -> None:
+        for stmt in body:
+            scan_stmt(stmt, scopes)
+
+    def bind(stmt: ast.stmt, scopes: list[dict[str, str]]) -> None:
+        target_nodes = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        value = _resolve_site_expr(stmt.value, scopes)
+        if value is None:
+            return
+        for target in target_nodes:
+            if isinstance(target, ast.Name):
+                scopes[-1][target.id] = value
+
+    def scan_stmt(stmt: ast.stmt, scopes: list[dict[str, str]]) -> None:
+        if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            scan_body(stmt.body, scopes + [{}])
+            return
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            if stmt.value is not None:
+                scan_expr(stmt.value, scopes)
+                bind(stmt, scopes)
+            return
+        if isinstance(stmt, ast.With | ast.AsyncWith):
+            for item in stmt.items:
+                scan_expr(item.context_expr, scopes)
+            scan_body(stmt.body, scopes)
+            return
+        if isinstance(stmt, (ast.Import, ast.ImportFrom, ast.Pass)):
+            return
+        for child in ast.iter_child_nodes(stmt):
+            if isinstance(child, ast.stmt):
+                scan_stmt(child, scopes)
+            elif isinstance(child, ast.excepthandler):
+                scan_body(child.body, scopes)
+            else:
+                scan_expr(child, scopes)
+
+    module_scope: dict[str, str] = {}
+    # Pre-pass: hoist module- and class-level string constants so a function may name a constant
+    # declared below it (legal Python, and legal here — the scan is not an execution).
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            class_scope: dict[str, str] = {}
+            for inner in node.body:
+                if isinstance(inner, (ast.Assign, ast.AnnAssign)) and inner.value is not None:
+                    resolved = _resolve_site_expr(inner.value, [module_scope, class_scope])
+                    if resolved is not None:
+                        for target in inner.targets if isinstance(inner, ast.Assign) else [inner.target]:
+                            if isinstance(target, ast.Name):
+                                class_scope[target.id] = resolved
+                                module_scope.setdefault(target.id, resolved)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            resolved = _resolve_site_expr(node.value, [module_scope])
+            if resolved is not None:
+                for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                    if isinstance(target, ast.Name):
+                        module_scope[target.id] = resolved
+
+    scan_body(tree.body, [module_scope])
+
+    unresolved = [
+        f"{relname} {callee}({arg_src}) [{count} site{'s' if count != 1 else ''}]"
+        for (callee, arg_src), count in sorted(counted.items())
+    ]
+    return found, unresolved
+
+
+def _seam_site_labels_in_root(src_root: Path) -> tuple[set[str], list[str]]:
+    """Every seam site label under ``src_root``, and every site whose label could not be resolved."""
+    found: set[str] = set()
+    unresolved: list[str] = []
+    for path in sorted(src_root.rglob("*.py")):
+        file_found, file_unresolved = _seam_site_labels_from_source(
+            path.read_text(encoding="utf-8"), str(path.relative_to(src_root))
+        )
+        found |= file_found
+        unresolved += file_unresolved
+    return found, unresolved
+
+
+#: Every site in the shipped tree whose label this collector cannot resolve statically, by name.
+#: Three of these are the seam's own metric emission points (``labels(site=site)`` — the value is a
+#: function parameter, chosen by the caller at run time), and one is the middleware's computed
+#: executor-path label, whose four possible outputs are pinned by the cell beside the baseline.
+#: A NEW entry means a new way to hand the seam a label, and it must be added here with that reason,
+#: or written as a literal/constant instead. Removing one silently is not an option either.
+_UNRESOLVED_SITE_BASELINE = (
+    "middleware/auth.py for_site(self._revocation_site(path)) [1 site]",
+    "revocation_read.py labels(site=site) [3 sites]",
+    "revocation_snapshot.py labels(site=site) [1 site]",
 )
 
 
@@ -704,37 +919,25 @@ class TestNoSecondRulebook:
     def test_every_site_label_the_seam_can_receive_is_in_the_closed_vocabulary(self):
         """A Prometheus label must never be reachable from a request path. Every label the seam can
         take is enumerated from the AST here, resolving module constants the way the #614 interlock
-        does — because two of the five live labels are named constants, not inline literals, and a
-        literal-only scan would silently under-report the vocabulary it claims to pin."""
-        found: set[str] = set()
-        for path in _server_src_root().rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            constants: dict[str, object] = {}
-            for node in tree.body:
-                if isinstance(node, ast.Assign):
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            try:
-                                constants[target.id] = ast.literal_eval(node.value)
-                            except (ValueError, TypeError):
-                                pass
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                fname = getattr(node.func, "id", getattr(node.func, "attr", None))
-                if fname == "for_site" and node.args:
-                    value = node.args[0]
-                    if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                        found.add(value.value)
-                for kw in node.keywords:
-                    if kw.arg != "site":
-                        continue
-                    if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                        found.add(kw.value.value)
-                    elif isinstance(kw.value, ast.Name) and isinstance(constants.get(kw.value.id), str):
-                        found.add(constants[kw.value.id])
+        does — and counting, not dropping, whatever it cannot resolve (see
+        ``_seam_site_labels_from_source``)."""
+        found, unresolved = _seam_site_labels_in_root(_server_src_root())
         assert found <= _SHIPPED_SITE_LABELS, f"labels outside the vocabulary: {sorted(found - _SHIPPED_SITE_LABELS)}"
+        assert sorted(unresolved) == list(_UNRESOLVED_SITE_BASELINE), (
+            "the seam's label set moved in a way this check cannot read. An unresolved site is not "
+            "a free pass: add it to the baseline with the file, the callee and the reason, or (if it "
+            "can be written as a literal or a constant) fix the call site instead."
+        )
         assert {"dial/crl-mint", "poll/fallback-read"} <= found, "a #656 site lost its label"
+        # #662 is unmerged at this base, so none of its four labels is in the tree yet. The moment it
+        # lands, ALL FOUR must appear: one missing means a call site lost its label while the
+        # vocabulary still permits it, which is a silent narrowing of an operator's alert surface.
+        # The empty half of this test is TODAY's face, and it is stated rather than assumed.
+        seen_662 = frozenset(_ADMIN_662_LABELS & found)
+        assert seen_662 in (frozenset(), _ADMIN_662_LABELS), (
+            f"partial #662 label set at this face: {sorted(seen_662)} — either #662 is unmerged "
+            "(expect none of the four) or it landed with a call site missing (expect all four)"
+        )
         assert "admin-mtls" in found, (
             "#658's admin-plane label is no longer reachable from the seam — either it moved under "
             "this branch or this cell stopped reading the plane, and both need saying out loud"
@@ -761,6 +964,208 @@ class TestNoSecondRulebook:
         shipped seam off the single matcher."""
         func = self._func("revocation.py", "", "executor_revocation_state")
         assert len(self._bounded_with_nodes(func)) == 1
+
+
+class TestCollectorBlindSpot654:
+    """The blind spot INSIDE this guard, proven before it is closed (s137 act 2).
+
+    The closed vocabulary is only as honest as the scanner that feeds it. The shipped scanner read
+    literal arguments and module-level constants on the ``site=`` arm only, so a label reaching the
+    seam through a local variable, or through ``for_site(SOME_CONST)``, was never counted — it was
+    silently skipped, which is the failure the #634 interlock names: a guard whose coverage depends
+    on how the call site was written is a guard that can be defeated by a variable.
+
+    These cells drive the collector on SYNTHETIC source, not on the shipped tree, so the control
+    measures the instrument rather than the code it happens to be pointed at today.
+    """
+
+    #: mirrors #662's real shapes: a label assigned to a local, then handed to both arms.
+    _LOCAL_VAR_SOURCE = """
+from server.revocation_read import bounded_read, for_site
+
+
+async def admin_revoke_thing(db, body):
+    label = "control/local-var"
+    with for_site(label):
+        with bounded_read(db, site=label):
+            pass
+"""
+
+    _MODULE_CONST_SOURCE = """
+from server.revocation_read import for_site
+
+CONTROL_CONST = "control/module-const"
+
+
+def read_it(db):
+    with for_site(CONTROL_CONST):
+        pass
+"""
+
+    _FSTRING_SOURCE = """
+from server.revocation_read import bounded_read
+
+PLANE = "control"
+
+
+def read_it(db):
+    with bounded_read(db, site=f"{PLANE}/computed-chunk"):
+        pass
+"""
+
+    _COMPUTED_SOURCE = """
+from server.revocation_read import for_site
+
+
+class Middleware:
+    def _revocation_site(self, path):
+        return path
+
+    def dispatch(self, db, path):
+        with for_site(self._revocation_site(path)):
+            pass
+"""
+
+    def test_positive_control__a_label_routed_through_a_local_variable_is_seen(self):
+        """THE CONTROL. This cell is the evidence, and it must go RED before the collector changes.
+
+        If it ever passes without the collector resolving locals, the control is measuring nothing
+        and the fix it justifies is not a fix.
+        """
+        found, unresolved = _seam_site_labels_from_source(self._LOCAL_VAR_SOURCE, "<control-local>")
+        assert (
+            "control/local-var" in found
+        ), f"the collector read {sorted(found)} and skipped the local; unresolved={unresolved}"
+        assert unresolved == [], f"a resolvable site was left in the unresolved bucket: {unresolved}"
+
+    def test_positive_control__for_site_taking_a_module_constant_is_seen(self):
+        """The exact 2-of-4 gap #662 exposed: ``for_site(NAME)`` resolved nothing on the positional
+        arm while ``site=NAME`` resolved the module constant on the keyword arm."""
+        found, unresolved = _seam_site_labels_from_source(self._MODULE_CONST_SOURCE, "<control-const>")
+        assert "control/module-const" in found, f"for_site(Name) was invisible: found={sorted(found)}"
+        assert unresolved == [], f"a resolvable site was left in the unresolved bucket: {unresolved}"
+
+    def test_positive_control__an_f_string_chunk_built_from_a_constant_is_seen(self):
+        found, unresolved = _seam_site_labels_from_source(self._FSTRING_SOURCE, "<control-fstring>")
+        assert "control/computed-chunk" in found, f"f-string chunk was invisible: found={sorted(found)}"
+        assert unresolved == [], f"a resolvable site was left in the unresolved bucket: {unresolved}"
+
+    def test_paired_negative__a_computed_label_is_counted_not_dropped(self):
+        """The other half of the same rule, and the half that keeps the fix from being a quiet
+        over-claim. A label produced by a function call at run time CANNOT be resolved statically —
+        the shipped ``middleware/auth.py`` does exactly this — so it must arrive in the unresolved
+        bucket by name instead of vanishing from the check."""
+        found, unresolved = _seam_site_labels_from_source(self._COMPUTED_SOURCE, "<control-computed>")
+        assert found == set(), f"a computed label was guessed at: {sorted(found)}"
+        assert unresolved == [
+            "<control-computed> for_site(self._revocation_site(path)) [1 site]"
+        ], f"unresolved descriptor wrong or missing: {unresolved}"
+
+    def test_the_four_662_entries_are_justified_by_a_seam_that_can_actually_see_them(self):
+        """The paired negative on this leg's OWN act 1, and the half that makes the widening a claim
+        rather than a courtesy to the lane that benefits from it.
+
+        A closed vocabulary can be widened for two very different reasons: because the seam can now
+        reach four more labels and the check must count them (true), or because the scanner still
+        cannot see the shape they arrive in and someone made the red go away by moving the goalposts
+        (the fail-loudly violation class). The way to tell those apart is to drive the instrument on
+        the bytes it will meet AFTER the merge, not on the tree it stands in, so this cell does not
+        care which side of #662's merge its base sits on:
+
+        1. the collector resolves all four labels in BOTH shapes #662 uses — ``site=NAME`` and
+           ``for_site(NAME)`` — which is precisely what the literal-only arm could not do;
+        2. the same four are then permitted by the closed set (an entry the seam can reach must be
+           in the vocabulary, or the merged face reads red); and
+        3. whatever the tree under test actually contains, the check cannot be quiet about a partial
+           set — the guard beside this cell covers that, and it is the reason this cell is written
+           against synthetic bytes instead of a checkout of a branch this venue must not build on.
+        """
+        merged_face = """
+from server.revocation_read import bounded_read, for_site
+
+ADMIN_CERT_REVOKE_SITE = "admin/certs-revoke"
+ADMIN_EXECUTOR_REVOKE_SITE = "admin/executor-revoke"
+ADMIN_REMOVE_EXECUTOR_SITE = "admin/remove-executor"
+ADMIN_EXECUTORS_CERTS_SITE = "admin/executors-certs"
+
+
+async def admin_revoke_admin_cert(db):
+    with bounded_read(db, site=ADMIN_CERT_REVOKE_SITE):
+        pass
+
+
+async def admin_revoke_executor(db):
+    with bounded_read(db, site=ADMIN_EXECUTOR_REVOKE_SITE):
+        pass
+    with for_site(ADMIN_EXECUTOR_REVOKE_SITE):
+        pass
+
+
+async def admin_remove_executor(db):
+    with for_site(ADMIN_REMOVE_EXECUTOR_SITE):
+        pass
+
+
+async def admin_list_executors(db):
+    with for_site(ADMIN_EXECUTORS_CERTS_SITE):
+        pass
+"""
+        found, unresolved = _seam_site_labels_from_source(merged_face, "<merged-662-face>")
+        assert found == _ADMIN_662_LABELS, f"the merged face read {sorted(found)}"
+        assert unresolved == [], f"a #662 site the collector cannot read: {unresolved}"
+        assert found <= _SHIPPED_SITE_LABELS, (
+            f"the seam can reach {sorted(found - _SHIPPED_SITE_LABELS)} and the closed set does not "
+            "permit them — the merged face would read red, which is the outcome a widening is "
+            "supposed to prevent"
+        )
+
+    def test_the_one_computed_seam_site_still_has_a_closed_vocabulary(self):
+        """The unresolved bucket is a NAME, not an excuse. ``middleware/auth.py`` hands the seam
+        ``self._revocation_site(path)``, which no static reader can evaluate — so the closed set must
+        be justified against what that function can actually RETURN, read off its own AST.
+
+        This is the paired negative the baseline would otherwise lack: a new ``return`` in the
+        matcher, or a ``path`` value reaching a label without collapsing to a fixed name, reddens
+        here instead of slipping past a check that admitted it could not see the site.
+        """
+        src = (_server_src_root() / "middleware" / "auth.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        func = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_revocation_site"
+        )
+        returned = {
+            n.value.value
+            for n in ast.walk(func)
+            if isinstance(n, ast.Return) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
+        }
+        assert returned == {"heartbeat", "audit-ingest", "executor-session", "executor-mtls"}, (
+            f"the computed executor-path label vocabulary changed: {sorted(returned)} — a name that "
+            "reaches a Prometheus series from a request path must be reviewed, not just recorded"
+        )
+        assert returned <= _SHIPPED_SITE_LABELS, f"outside the closed set: {sorted(returned - _SHIPPED_SITE_LABELS)}"
+        # The site the baseline claims is still the site that exists — a renamed argument or a moved
+        # call must update the baseline in the same change, not delete this guard.
+        found, unresolved = _seam_site_labels_from_source(src, "middleware/auth.py")
+        assert (
+            "middleware/auth.py for_site(self._revocation_site(path)) [1 site]" in unresolved
+        ), f"the computed site changed shape and this cell did not notice: {unresolved}"
+        assert "self._revocation_site(path)" not in found, "a computed label was guessed at"
+
+    def test_the_shipped_tree_has_no_second_rulebook_after_the_fix(self):
+        """The scanner's own truth table against real product bytes: the labels it resolves are a
+        subset of the closed vocabulary, and every site it cannot resolve is one of the named,
+        counted shapes in ``_UNRESOLVED_SITE_BASELINE`` — not zero, and not silent."""
+        found, unresolved = _seam_site_labels_in_root(_server_src_root())
+        assert found <= _SHIPPED_SITE_LABELS, f"{sorted(found - _SHIPPED_SITE_LABELS)}"
+        assert set(unresolved) == set(
+            _UNRESOLVED_SITE_BASELINE
+        ), f"unresolved set moved: {sorted(set(unresolved) ^ set(_UNRESOLVED_SITE_BASELINE))}"
+        assert sorted(unresolved) == sorted(_UNRESOLVED_SITE_BASELINE), (
+            "an unresolved shape appeared twice in one file and was counted as one — the site count "
+            "is part of the claim, not decoration"
+        )
 
 
 class TestSite2PollFallback:
