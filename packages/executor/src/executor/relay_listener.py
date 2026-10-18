@@ -311,6 +311,16 @@ REFUSE_NOT_WIRED = (
 # is revoked" to a CORE whose relay cert was revoked would describe an event that did
 # not happen to it.
 REFUSE_PEER_REVOKED = "403 REVOKED — the peer's core relay credential is revoked (registry membership, #597)"
+# #586 Gap A (lead ruling, mechanism option (b) extended to the executor plane): the SECOND
+# peer class this door can name. Distinct from REFUSE_PEER_REVOKED on SUBJECT, not on status:
+# that one is the CORE's relay credential named by the registry, this one is an EXECUTOR
+# credential named by the revocation list the core already publishes in
+# ``revoked_serials``. Executor leaves are dual-purpose (SERVER_AUTH and CLIENT_AUTH,
+# ``server/ca.py:52``), so an executor credential can legitimately present as a CLIENT at
+# another executor's :8443 — and until now nothing at that door asked the list about it.
+REFUSE_PEER_EXECUTOR_REVOKED = (
+    "403 REVOKED — the peer's executor credential is revoked (executor-serial population, #586)"
+)
 
 
 def revocation_accept_reason(state: Any) -> str | None:
@@ -376,6 +386,44 @@ def peer_revocation_refusal(state: Any, peer_serial: str | None) -> str | None:
     return None
 
 
+def peer_executor_revocation_refusal(state: Any, peer_serial: str | None) -> str | None:
+    """#586 Gap A: refuse a NEW :8443 connection whose PEER is a revoked EXECUTOR credential.
+
+    The same shape as ``peer_revocation_refusal``, pointed at the OTHER population — the
+    executor-serial list the core already answers with (``revoked_serials``), carried onto
+    ``DaemonState`` by the same poll branch that opens the accept gate. Mechanism is the
+    lead's ruling (option (b), extended): per-connection serial verification against
+    revocation state carried to the executor. There is NO CRL fetch here, no
+    ``VERIFY_CRL`` flag, no handshake-layer knob, and no staleness arm — the first two are
+    rejected by the ruling on three measured grounds (the default install advertises no CDP
+    at all), and the third is the fleet-wide outage class #586 measured.
+
+    Why this half is real and not a duplicate of the self gate: the self gate answers about
+    THIS executor's own credential. A peer that walks in presenting an executor-class
+    credential is a DIFFERENT credential on a DIFFERENT host, and until this arm the door
+    consulted nothing about it — chain validation plus the CN allowlist, which is an
+    identity test, not a revocation test.
+
+    ``peer_serial`` is the presented client certificate's serial in ANY spelling; both sides
+    go through ``serial_match_key`` (#481), so a padded row and an unpadded certificate meet.
+
+    None state, no population yet, and no readable peer serial each ADMIT — exactly the
+    shipped discipline at #597. This function only ever removes a connection the list has
+    named dead; it cannot be the reason a healthy executor is refused, and the unreadable-
+    serial admit is deliberately NOT widened into a refusal by this change.
+    """
+    if state is None or peer_serial is None:
+        return None
+    revoked = getattr(state, "revoked_executor_serials", None)
+    if not revoked:
+        return None
+    from core.utils.cert_serial import serial_match_key
+
+    if serial_match_key(peer_serial) in {serial_match_key(s) for s in revoked}:
+        return REFUSE_PEER_EXECUTOR_REVOKED
+    return None
+
+
 class _RelayHTTPServer(ThreadingHTTPServer):
     """Threaded HTTP server that TLS-wraps each ACCEPTED connection.
 
@@ -437,6 +485,12 @@ class _RelayHTTPServer(ThreadingHTTPServer):
                 # function's only power is to refuse a serial the registry named.
                 peer_serial = None
             reason = peer_revocation_refusal(self.revocation_state, peer_serial)
+            if reason is None:
+                # #586 Gap A: the SECOND peer consult, beside the #597 one and after it, so a
+                # serial the registry names is still answered by the relay sentence first. Both
+                # arms read the ONE peer serial already taken off the established connection —
+                # no second ``getpeercert()``, because a second read is a second answer.
+                reason = peer_executor_revocation_refusal(self.revocation_state, peer_serial)
         if reason is None:
             return tls_conn, addr
         # Post-handshake refusal — the owner's option 3, and its named window: the

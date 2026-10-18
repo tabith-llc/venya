@@ -262,6 +262,14 @@ class DaemonState:
         # A frozenset of canonical serial strings; empty means "the registry names no
         # revoked relay credential", which admits — it does not refuse.
         self.revoked_relay_serials: frozenset[str] = frozenset()
+        # #586 Gap A: the revoked EXECUTOR serials, carried beside the relay population and
+        # written on the SAME branch as ``revocation_answered`` above — so the door can never
+        # consult an executor population the core has not answered with. A frozenset of
+        # canonical serial strings; empty means "the list names no revoked executor
+        # credential", which admits — it does not refuse. Read by the second peer consult at
+        # the accept point; the age of the list is not a stop condition there, for the same
+        # availability reason stated on ``revoked_relay_serials``.
+        self.revoked_executor_serials: frozenset[str] = frozenset()
         # #603: WHY the fault arm stopped service, carried BESIDE the bool instead
         # of being asserted through it. The consecutive-failure threshold means the
         # core never ANSWERED — it is not a server-side revocation, and saying so at
@@ -527,6 +535,15 @@ class CertificateManager:
         # a tick whose body passed the shape guard writes it (see ``check_revocation``),
         # so an outage cannot clear it. ``_main_loop`` publishes it onto DaemonState.
         self.last_relay_serials: frozenset[str] = frozenset()
+        # #586 Gap A: the revoked EXECUTOR serials from the same parsed poll body. The
+        # wire already carries them (``revoked_serials``) and the poll has always read them
+        # to answer the SELF question; this attribute is the same population kept for the
+        # door, so an executor credential presenting as a CLIENT at another executor's
+        # :8443 (executor leaves are dual-purpose — ``ca.py:52``) can be refused by serial
+        # instead of only by chain and name. Same discipline as ``last_relay_serials``:
+        # only a tick whose body passed the shape guard writes it, so an outage cannot
+        # clear it, and ``_main_loop`` publishes it onto DaemonState.
+        self.last_executor_serials: frozenset[str] = frozenset()
         self._not_after: datetime | None = None
         self._last_revocation_etag: str | None = None
 
@@ -1148,6 +1165,11 @@ class CertificateManager:
             # cannot replace a good population with a partial one; an UNREACHABLE tick
             # never reaches here, so an outage leaves the last good set standing.
             self.last_relay_serials = frozenset(serial_match_key(s) for s in data.get("revoked_relay_serials", []))
+            # #586 Gap A: record the PEER-side executor population at the SAME site, from the
+            # same accepted body, BEFORE the identity check below can return early. Written
+            # here and nowhere else, so the door's population and the self answer always
+            # come off one parsed body — never two reads of a table that can disagree.
+            self.last_executor_serials = frozenset(serial_match_key(s) for s in data.get("revoked_serials", []))
             self._last_revocation_etag = response.headers.get("etag")
             # Identity-level revocation FIRST (ticket executor-revocation-by-identity,
             # ruling 2): the server revoked the whole executor_id — terminal, matches
@@ -2162,6 +2184,10 @@ class ExecutorDaemon:
                     # branch below) leaves the last known peer set standing instead of
                     # silently admitting a credential it had already refused.
                     self.state.revoked_relay_serials = self.cert_manager.last_relay_serials
+                    # #586 Gap A: carry the executor population on the SAME line's branch — one
+                    # write site, same tick, same answered body — so a dropped poll leaves the
+                    # last known set standing here exactly as it does above.
+                    self.state.revoked_executor_serials = self.cert_manager.last_executor_serials
             except TimeoutError:
                 logger.debug("Revocation check timed out")
                 self.state._consecutive_revocation_failures += 1

@@ -68,8 +68,10 @@ from executor.daemon import CertificateManager, ExecutorDaemon, RevocationStatus
 from executor.relay_listener import (
     REFUSE_NO_ANSWER,
     REFUSE_NOT_WIRED,
+    REFUSE_PEER_EXECUTOR_REVOKED,
     REFUSE_PEER_REVOKED,
     REFUSE_REVOKED,
+    peer_executor_revocation_refusal,
     peer_revocation_refusal,
     revocation_accept_reason,
 )
@@ -78,12 +80,16 @@ DAEMON_LOGGER = "venya.executor.daemon"
 THRESHOLD = 3
 TICK_TIMEOUT = 1  # NetworkConfig floor is ge=1; 3 ticks x 1 s keeps the leg at seconds
 
-# The three classes the accept point is allowed to emit, straight off the ruling's table. A fourth
-# entry here is a product decision the ruling has not made, which is exactly what cell (d) catches.
+# The classes the accept point is allowed to emit, straight off the ruling's table. A new
+# entry here is a product decision, which is exactly what cell (d) catches — and #586 Gap A
+# IS such a decision, taken on the record in
+# wave31-specs-20261018/wren-586-mechanism-ruling-s137.md (mechanism option (b), extended to
+# the executor plane), so the class is named here by the ruling it came from, not absorbed.
 # Named by the product's own constant names so a parametrisation can report WHICH class moved.
 RULED_CLASSES_BY_NAME = {
     "REFUSE_REVOKED": REFUSE_REVOKED,
     "REFUSE_PEER_REVOKED": REFUSE_PEER_REVOKED,
+    "REFUSE_PEER_EXECUTOR_REVOKED": REFUSE_PEER_EXECUTOR_REVOKED,
     "REFUSE_NO_ANSWER": REFUSE_NO_ANSWER,
     "REFUSE_NOT_WIRED": REFUSE_NOT_WIRED,
 }
@@ -95,7 +101,12 @@ RULED_CLASS_PREFIXES = ("403 REVOKED", "503 OPERATIONAL FAULT")
 #: single-claimer rule would have had to word the peer one as a fault to pass, which is
 #: the laundering this file's whole vocabulary exists to prevent. Kept as an explicit set
 #: so a THIRD claimer still has to be chosen on purpose rather than absorbed silently.
-REVOCATION_CLAIMING_CLASSES = {"REFUSE_REVOKED", "REFUSE_PEER_REVOKED"}
+#: #586 Gap A chooses it on purpose: REFUSE_PEER_EXECUTOR_REVOKED is a third SUBJECT — the
+#: EXECUTOR credential that walked in, named by the executor-serial list the core already
+#: publishes. It claims a revocation because the list really asserted one; wording it as a
+#: fault would hide a kill that happened, which is the same laundering class in the other
+#: direction. Still no class here claims a revocation the server never asserted (#603).
+REVOCATION_CLAIMING_CLASSES = {"REFUSE_REVOKED", "REFUSE_PEER_REVOKED", "REFUSE_PEER_EXECUTOR_REVOKED"}
 
 
 def _config(threshold: int = THRESHOLD) -> ExecutorConfig:
@@ -402,6 +413,20 @@ class TestCellD_FourthRowGuard:
                 reason = peer_revocation_refusal(state, presented)
                 if reason is not None:
                     emitted.add(reason)
+
+        # #586 Gap A: the THIRD arm, same drive, same negative pair. A class emitted only by
+        # this half is otherwise unreachable to the guard, which is why the enumeration is
+        # driven rather than asserted from the constant list alone.
+        executor_peer_states = (
+            SimpleNamespace(revoked_executor_serials=frozenset({"000000000000abcd"})),
+            SimpleNamespace(revoked_executor_serials=frozenset()),
+            None,
+        )
+        for state in executor_peer_states:
+            for presented in ("ABCD", "000000000000abcd", "AABBCC", None):
+                reason = peer_executor_revocation_refusal(state, presented)
+                if reason is not None:
+                    emitted.add(reason)
         return emitted
 
     def test_every_emitted_class_is_one_of_the_ruled_classes(self):
@@ -453,6 +478,7 @@ class TestCellD_FourthRowGuard:
         assert refusal_names == {
             "REFUSE_REVOKED",
             "REFUSE_PEER_REVOKED",  # #597: the revoked CORE relay peer at :8443
+            "REFUSE_PEER_EXECUTOR_REVOKED",  # #586 Gap A: the revoked EXECUTOR peer at :8443
             "REFUSE_NO_ANSWER",
             "REFUSE_NOT_WIRED",
         }, refusal_names
