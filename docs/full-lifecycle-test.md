@@ -353,7 +353,10 @@ not take effect.
 Core env vars (beyond the common three): `VENYA_DB_PASSWORD` (PostgreSQL),
 `VENYA_DB_PASSPHRASE` (server encryption passphrase — NO default, and a hard
 floor of 15 Unicode code points the installer checks before any mutation; the
-former dev-only default was removed 2026-09-19 (`803acd9`, first shipped 2026-09-20 in v0.1.0alpha12), `CORE_HOSTNAME` (server name
+former dev-only default was removed 2026-09-19 (`803acd9`, first shipped 2026-09-20 on
+the pre-beta alpha line, tag `v0.1.0alpha12` — that line is withdrawn by owner order
+2026-10-18, so the tag is the record of the proof, not a release to install from),
+`CORE_HOSTNAME` (server name
 + TLS cert SAN; default `$(hostname)`), `VENYA_ADMIN_MTLS_ENABLED` /
 `VENYA_ADMIN_IDENTITY` / `VENYA_ADMIN_CA_PASSPHRASE` (admin mTLS; enabled by
 default, passphrase auto-generated unattended and delivered via
