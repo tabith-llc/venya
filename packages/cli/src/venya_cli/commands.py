@@ -196,7 +196,25 @@ def run_command(args: Any) -> int:
         or os.environ.get("VENYA_SERVER_URL")
         or None
     )
-    client = APIClient(server_url=server_url)
+    # RF-8b: `admin cert renew` is the one admin command that must NOT be waved
+    # through on the admin certificate — the mint it calls refuses a
+    # certificate-shaped caller (RF-6 §2.2; routes/admin_certs.py::_require_human_session),
+    # so the exemption is narrowed for this subcommand only and the existing
+    # authenticate-with-security-key branch below establishes the session bearer the
+    # route requires. Every other `admin` command keeps the headless exemption
+    # byte-identically.
+    # #667: the SAME resolved-subcommand keying is computed BEFORE the client is
+    # constructed, because `renew` names VENYA_ADMIN_CERT/KEY as the OUTPUT paths
+    # it writes — the constructor must not demand files that only this command can
+    # create. The flag is existence-only, default OFF, and no other dispatch site
+    # passes it; every other command keeps the refusal byte-identically.
+    command = args.command
+    admin_cert_renew = (
+        command == "admin"
+        and getattr(args, "admin_command", None) == "cert"
+        and getattr(args, "admin_cert_command", None) == "renew"
+    )
+    client = APIClient(server_url=server_url, allow_missing_admin_pair=admin_cert_renew)
 
     # Authenticate if no token is available (init, setup, enroll, login,
     # recovery, config, exec are public — setup is pre-bootstrap: it exists to
@@ -207,19 +225,6 @@ def run_command(args: Any) -> int:
     # "admin" ONLY -- role-gated commands (list/store/audit/...) still require
     # FIDO2/token, matching the server, which 401s cert-only callers on
     # require_role routes.
-    command = args.command
-    # RF-8b: `admin cert renew` is the one admin command that must NOT be waved
-    # through on the admin certificate — the mint it calls refuses a
-    # certificate-shaped caller (RF-6 §2.2; routes/admin_certs.py::_require_human_session),
-    # so the exemption is narrowed for this subcommand only and the existing
-    # authenticate-with-security-key branch below establishes the session bearer the
-    # route requires. Every other `admin` command keeps the headless exemption
-    # byte-identically.
-    admin_cert_renew = (
-        command == "admin"
-        and getattr(args, "admin_command", None) == "cert"
-        and getattr(args, "admin_cert_command", None) == "renew"
-    )
     # #590: purely-local admin commands never reach the transport, so a
     # ceremony can neither authenticate them nor succeed on a core with an
     # empty user table (users=0 — no credential to assert). The skip is
