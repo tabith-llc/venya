@@ -282,10 +282,9 @@ class TestRebuildPresentsTheNewMaterial:
         then writes a fresh certificate at that same path (renew itself dials
         session-only — see N4 — so it is done on its own client). The NEXT dial on the
         original live client must notice the changed material: the fingerprint fires,
-        the superseded client is closed, and the rebuild runs. Since #547a the rebuilt
-        pair carries an ENCRYPTED key and the current TLS path cannot load one, so the
-        rebuild refuses loudly instead of presenting anything — the pickup mechanism is
-        proven here, and the read-side gap with it (see §4 N4 for the byte-level half).
+        the superseded client is closed, and the rebuild runs. The rebuilt pair carries an ENCRYPTED key and, since
+        #565 Part B, the TLS layer opens it with the configured passphrase — so the
+        rebuild stages a transport, which is what this cell pins.
         """
         from venya_cli.commands import cmd_admin_cert_renew
 
@@ -321,18 +320,14 @@ class TestRebuildPresentsTheNewMaterial:
             # what the handler wrote is a different certificate at the SAME path — the
             # identity the readout printed is the mint's, not the fixture's
             assert x509.load_pem_x509_certificate(cert.read_bytes()).serial_number == 0x5000_0000 + 11
-            # #547a changed this cell's honest ending, and the change is recorded here
-            # rather than papered over: the renew now writes the key ENCRYPTED, and the
-            # CLI has no path that loads an encrypted admin key for mTLS (Part B). So
-            # the fingerprint DOES fire — the pickup half of RF-8c still works, and the
-            # superseded client is still closed — but the rebuild refuses instead of
-            # staging a transport. This is the same fact §4 N4 asserts on the written
-            # bytes; here it is shown at the choke point, which is where an operator
-            # would meet it.
-            with pytest.raises(APIClientError) as refused:
-                assert live._http is not None
-            assert "Failed to load the admin mTLS client cert/key pair" in str(refused.value)
-            assert len(registry) == 1, "the refusal must not stage a transport either"
+            # #547a wrote the key ENCRYPTED and #565 Part B gave the TLS layer the
+            # passphrase to open it, so this cell ends the way an operator's run does: the
+            # fingerprint fires, the superseded transport is closed, and the rebuild STAGES
+            # a transport instead of refusing. (Before Part B the rebuild refused; that
+            # ending is retired here, not deleted — the pickup mechanism is unchanged, only
+            # the read side caught up with the write side.)
+            assert live._http is not None
+            assert len(registry) == 2, "the rebuild did not stage a transport"
             assert registry[0].closed is True, "the superseded client was still closed"
             assert live._cert_fingerprint != old_fp, "the renewed certificate was not picked up"
         live.close()

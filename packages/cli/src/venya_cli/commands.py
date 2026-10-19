@@ -1970,9 +1970,9 @@ def cmd_admin_cert_renew(client: APIClient, args: Any) -> int:
     refusal on stderr with a non-zero code, and no private key material in either. The
     key is written ENCRYPTED with `VENYA_ADMIN_CA_KEY_PASSPHRASE` (#547a — the owner
     ruled the passphrase requirement extends to the admin's private key), and both the
-    refusal and the success readout say plainly that the CLI cannot yet load an
-    encrypted admin key for mTLS, so the pair is not usable until that read-side work
-    lands.
+    refusal and the success readout say so plainly. The dial that presents the pair opens
+    that encrypted key with the same variable (#565 Part B), so a renewed pair is usable
+    for admin mTLS wherever the variable is set.
     """
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -4883,12 +4883,12 @@ def _admin_leaf_key_passphrase_or_none() -> str | None:
 def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
     """The ONE refusal for writing an admin private key without a passphrase (#547a).
 
-    Says what to set, then what to run, then what was NOT done — and states the
-    consequence the read side has not caught up with yet, as plain fact (§3.3: an
-    operator silently handed an encrypted key will file the next mTLS failure as a
-    crash, and they would be right). No severity language, no invented deadline: the
-    CLI has no path today to load a passphrase-protected admin key for admin mTLS, and
-    that is exactly what the text says.
+    Says what to set, then what to run, then what was NOT done. The read side is now
+    symmetric with the write side (#565 Part B): the CLI opens an encrypted admin key at
+    dial time through ``api_client._build_ssl_context``, reading the same variable through
+    the same predicate, so the clause that used to live here — "the venya CLI cannot yet
+    load an encrypted admin key for admin mTLS" — is FALSE and has been replaced by the
+    fact. No severity language.
     """
     return (
         f"REFUSED: the admin private key written by {site} must never be stored unencrypted.\n"
@@ -4899,11 +4899,9 @@ def _admin_leaf_key_no_passphrase_refusal(site: str) -> str:
         # cells hold. Layout carries the tone; the bytes stay theirs.
         "To fix it:\n"
         f"  {ADMIN_CA_SETUP_FRAGMENT}\n"
-        "Note: the key is written encrypted at rest with that passphrase. The venya CLI\n"
-        "cannot yet load an encrypted admin key for admin mTLS — it hands the certificate\n"
-        "and key paths straight to the TLS layer, which is never given a passphrase — so an\n"
-        "admin pair written by this command is not usable for mTLS until that read-side\n"
-        "work lands. To read the key back by hand, supply the same passphrase:\n"
+        "Note: the key is written encrypted at rest with that passphrase, and the CLI opens\n"
+        "it the same way when it dials for admin mTLS — set the variable in the environment\n"
+        "of both commands. To read the key back by hand, supply the same passphrase:\n"
         "  openssl pkey -in <key-file> -passin env:VENYA_ADMIN_CA_KEY_PASSPHRASE\n"
         "Reference: docs/cert-rotation-runbook.md and docs/BACKUPS.md (CA file locations and rotation)."
     )
@@ -4913,12 +4911,14 @@ def _admin_leaf_key_encrypted_notice(key_path: Path) -> str:
     """The success-side statement of the same fact — one wording, both writers.
 
     The operator learns this from the command that succeeded, not from the next command
-    that fails.
+    that fails. #565 Part B: the pair IS usable for admin mTLS now, and the statement
+    tells the operator which variable has to be set for the dial that reads it.
     """
     return (
         f"  Key encryption:  encrypted at rest with VENYA_ADMIN_CA_KEY_PASSPHRASE ({key_path})\n"
-        "  Not yet usable for admin mTLS: the venya CLI cannot load an encrypted admin\n"
-        "  key for the TLS layer today, so this pair waits on that read-side work."
+        "  Admin mTLS:      the CLI opens this key with that variable at dial time, so keep\n"
+        "                   VENYA_ADMIN_CA_KEY_PASSPHRASE set in the environment of every\n"
+        "                   admin command that presents this pair."
     )
 
 

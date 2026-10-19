@@ -202,9 +202,9 @@ shape serves admin commands only where an install turns admin mTLS off. The one 
 exception is the mint itself: `POST /api/v1/admin/certs/issue` is session-shaped by ruling
 (RF-6 §2.2), which is why `venya admin cert renew` runs from a login session and nothing
 else in the admin set does. The certificate
-`venya admin cert renew` mints is written with its key encrypted at rest, and the
-CLI cannot yet load an encrypted administrator key for admin mTLS — §3 states that
-pairing rule once, and #565 Part B owns the read-side work that closes it.
+`venya admin cert renew` mints is written with its key encrypted at rest, and the CLI
+opens that encrypted key for admin mTLS with the passphrase from
+`VENYA_ADMIN_CA_KEY_PASSPHRASE` (#565 Part B) — §3 states that pairing rule once.
 
 Two lifetimes, because the two credentials are not the same credential:
 
@@ -258,13 +258,16 @@ mints is written **unencrypted at rest** (`AdminCAManager.sign_admin_cert`,
 that row: site 1 is exempt by design, the `0600` root-owned mode is the control,
 and the exemption is retired only by the CSR or TPM-sealing changeset, never
 inherited elsewhere. The CLI's admin mTLS read path
-(`api_client.py::_build_ssl_context`) supplies no passphrase, so a key of that
-shape loads and a renewed one does not: `venya admin cert renew` and
-`venya admin generate-admin-cert` write their leaf key **encrypted** (#547a), and
-until the read-side work lands (#565 Part B) that pair cannot serve these
-commands. Measured on the shipped code at this file's base: the installer-minted
-key loads; the renewed shape raises `APIClientError` at the context build. The
-renewal-side limit is written up once in
+(`api_client.py::_build_ssl_context`) hands the TLS layer a passphrase callback that
+reads `VENYA_ADMIN_CA_KEY_PASSPHRASE` (#565 Part B), so both shapes load: the
+installer-minted key is plaintext and needs no passphrase at all, and
+`venya admin cert renew` and `venya admin generate-admin-cert` write their leaf key
+**encrypted** (#547a) and are presented by any command whose environment carries that
+variable. With the variable unset, empty or whitespace-only the dial REFUSES before
+anything is sent and names the key file — it never falls back to storing or asking for
+plaintext. Measured on the shipped code at this file's base: both keys load through the
+same builder, and an encrypted key with no configured passphrase raises `APIClientError`
+at the context build. The renewal-side rule is written up once in
 [cert-rotation-runbook.md](cert-rotation-runbook.md) §0; this section points at it
 rather than restating it.
 

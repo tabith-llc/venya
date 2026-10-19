@@ -444,11 +444,11 @@ it, on the core, as the `venya` user, with the stored passphrase delivered from
 
 For a person's short-lived workstation certificate the path is `venya admin cert renew`, and
 one thing about it belongs in the same breath: the renewed key is written **encrypted at rest**,
-and the command-line cannot yet load an encrypted administrator key for administrator
-mutual-TLS. So a renewed pair fixes the proxy refusal and lands in the separate, already
-documented read-side limit — see [installation.md](installation.md) §3, which states that
-pairing rule once. Use the machine-plane pair for headless work until that read-side work
-lands.
+and the command-line opens it for administrator mutual-TLS with the passphrase from
+`VENYA_ADMIN_CA_KEY_PASSPHRASE` (#565 Part B) — that variable has to be in the environment of
+every admin command that presents the pair, or the dial refuses before anything is sent. So a
+renewed pair fixes the proxy refusal and serves the admin commands on that condition; see
+[installation.md](installation.md) §3, which states that pairing rule once.
 
 **What changes at beta+:** nothing further is planned for this one. Every certificate issued
 from here carries the marker the accepted way, so the limit ages out credential by credential
@@ -548,7 +548,8 @@ tree full of them.
 the backup set in [BACKUPS.md](BACKUPS.md) already does, and that pair is not copied off its
 core — and run the export/restore custody commands on the core itself rather than on a host
 whose process memory you do not control. An administrator credential that renews into an
-encrypted key is a separate, known read-side gap, documented once in
+encrypted key is opened at dial time with `VENYA_ADMIN_CA_KEY_PASSPHRASE` (#565 Part B),
+documented once in
 [installation.md](installation.md) §3.
 
 **Scope of the word "paths", so this entry is not read as an inventory of every unencrypted key

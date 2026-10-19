@@ -34,8 +34,8 @@ Truth table, both halves per site:
 |                                                          | refuses with nothing written          |
 | renew dialing with an ENCRYPTED incumbent key             | succeeds (read half)                  |
 | renew dialing with a LEGACY plaintext key, nothing set     | succeeds unchanged (no-regression)    |
-| admin mTLS path                                            | still passphrase-blind — Part B's     |
-|                                                          | gap, pinned, not closed by this leg   |
+| admin mTLS path                                          | separate plane: its own passphrase  |
+|                                                          | (#565 Part B), never this variable    |
 +----------------------------------------------------------+--------------------------------------+
 """
 
@@ -490,15 +490,22 @@ class TestEnvelopeParity:
             assert exec_plane.configured_passphrase() == expect, "the two planes answered differently"
 
 
-class TestAdminReadPathUntouched:
-    """Part B is NOT this leg's to solve, and this leg must not pretend to have
-    solved it: the ADMIN mTLS dial stays passphrase-blind. The gap is already
-    pinned by cell N4 of ``test_cli_admin_leaf_key_passphrase_547a.py``; these two
-    cells pin that nothing here closed or widened it."""
+class TestAdminReadPathSeparatePlane:
+    """The EXECUTOR envelope and the ADMIN pair read two different variables, and these
+    cells pin that separation.
 
-    def test_default_call_still_takes_no_password(self, tmp_path) -> None:
-        """The admin-shaped call (no key_password) still loads a plaintext pair and
-        still refuses an encrypted one — exactly as before this changeset."""
+    Written when Part B was still open (the admin dial was passphrase-blind, and cell N4 of
+    ``test_cli_admin_leaf_key_passphrase_547a.py`` pinned that). #565 Part B has since given
+    the admin path its own passphrase callback, so the encrypted half below refuses for a
+    DIFFERENT and still correct reason: the executor passphrase in this file's environment
+    is not the admin variable, and a key is never opened with the wrong plane's value. The
+    plaintext half is unchanged. Handshake proof for the admin plane lives in
+    ``test_admin_key_load_565_partb.py``."""
+
+    def test_default_call_still_takes_no_password(self, tmp_path, monkeypatch) -> None:
+        """A plaintext pair loads with no passphrase at all; an encrypted one refuses
+        because THIS host has no admin passphrase configured — not because the executor
+        value happens to be present in the environment."""
         import datetime
 
         from cryptography import x509
@@ -535,8 +542,13 @@ class TestAdminReadPathUntouched:
                 encoding=_PEM, format=_PKCS8, encryption_algorithm=serialization.BestAvailableEncryption(enc_pw)
             )
         )
-        with pytest.raises(APIClientError):
-            _build_ssl_context(str(ca), str(crt), str(k))  # Part B's known gap, still open
+        monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
+        with pytest.raises(APIClientError) as refused:
+            _build_ssl_context(str(ca), str(crt), str(k))
+        # a NAMED read-door refusal, not the bare OpenSSL text — and it never opens the
+        # key with the executor plane's value
+        assert "no passphrase is" in str(refused.value)
+        assert "VENYA_ADMIN_CA_KEY_PASSPHRASE" in str(refused.value)
 
     def test_executor_callers_do_pass_the_callback(self) -> None:
         """The positive half of the pair: the EXECUTOR dial sites are the ones that
