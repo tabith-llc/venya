@@ -26,11 +26,11 @@ workstation with `venya admin cert renew`, which generates a fresh keypair
 locally and writes the new certificate and its private key to the configured
 pair. The mint rides a login session plus one security-key ceremony and never
 presents the old certificate, so an expired leaf does not block the request.
-One limit is stated here because operator text should carry it rather than hide
-it: the private key is written encrypted at rest, and the CLI cannot yet load an
-encrypted admin key for admin mTLS, so the renewed pair does not serve
-certificate-authenticated admin commands until that read-side work lands
-(#565, Part B). Exact flags: `cli-reference.md` (generated). What an interactive
+One fact travels with every successful renewal: the private key is written
+encrypted at rest, and the CLI opens it with the same variable when it dials —
+`VENYA_ADMIN_CA_KEY_PASSPHRASE` must be set in the environment of every admin
+command that presents the renewed pair, or the dial refuses before anything is
+sent (#565 Part B). Exact flags: `cli-reference.md` (generated). What an interactive
 desktop ceremony requires, including on Windows, is covered in `faq.md` and
 `installation.md` and is deliberately not restated here.
 

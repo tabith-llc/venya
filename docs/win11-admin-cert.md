@@ -37,15 +37,16 @@ cannot drift unremembered — `packages/server/tests/test_clock_skew_fraction_rf
 at the next request, **certificate lifetime is not the revocation mechanism — it is purely
 the theft window.** This page does not restate that argument; read it there.
 
-**What the renewed pair can serve today.** One limit travels with every successful renewal,
-and the CLI prints it: `venya admin cert renew` writes the private key ENCRYPTED with
-`VENYA_ADMIN_CA_KEY_PASSPHRASE`, and the CLI cannot yet load an encrypted administrator key
-for admin mTLS (`_admin_leaf_key_encrypted_notice`,
-`packages/cli/src/venya_cli/commands.py:4806-4816`). So a renewed pair does not serve the
-certificate-authenticated admin commands today, and a login session alone does not either:
-with admin mTLS enabled (the default) an admin request without a client certificate is
-refused 403. Until that read-side work lands (#565 Part B), the credential for those
-commands is the core's own machine-plane pair on the core — see
+**What the renewed pair can serve today.** One requirement travels with every successful
+renewal, and the CLI prints it: `venya admin cert renew` writes the private key ENCRYPTED with
+`VENYA_ADMIN_CA_KEY_PASSPHRASE`, and the dial that presents that key opens it with the same
+variable (`_admin_leaf_key_encrypted_notice` in
+`packages/cli/src/venya_cli/commands.py`, and `api_client.py::_build_ssl_context`, #565 Part B).
+So a renewed pair serves the certificate-authenticated admin commands wherever that variable is
+set in the command's environment; where it is not set the dial refuses before anything is sent,
+naming the key file. A login session alone does not either: with admin mTLS enabled (the
+default) an admin request without a client certificate is refused 403. The other credential for
+those commands is the core's own machine-plane pair on the core — see
 [installation.md](installation.md) §2 and §3. The renewal call itself is the session-shaped
 exception (§5 step 6 still works): `POST /api/v1/admin/certs/issue` is authorized by the
 person's session by ruling, RF-6 §2.2. The full statement lives in the opening note of

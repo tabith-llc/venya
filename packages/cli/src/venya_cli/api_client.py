@@ -226,6 +226,98 @@ def _admin_cert_fingerprint(cert_path: str) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _admin_key_no_passphrase_refusal(keyfile: str) -> str:
+    """#565 Part B, read door: the admin key is encrypted and this host has no passphrase.
+
+    Names the variable, names the file, and says nothing was sent. It is NOT the "neither
+    VENYA_ADMIN_CERT nor VENYA_ADMIN_KEY is set" text — the pair IS configured; what is
+    missing is the thing that opens it. ``ADMIN_CA_SETUP_FRAGMENT`` is the shipped repair
+    line and is READ from ``commands`` at call time (that module imports this one, so a
+    module-level import would be a cycle) — never retyped here.
+    """
+    from .commands import ADMIN_CA_SETUP_FRAGMENT
+
+    return (
+        f"REFUSED: the admin client key at {keyfile!r} is encrypted and no passphrase is\n"
+        "configured, so it cannot be presented for admin mTLS. Nothing was sent.\n"
+        "To fix it:\n"
+        f"  {ADMIN_CA_SETUP_FRAGMENT}\n"
+        "  Then re-run the command — the passphrase is read from that variable at dial time.\n"
+        "Reference: docs/cert-rotation-runbook.md (certificate rotation and key locations)."
+    )
+
+
+def _admin_key_decrypt_refusal(keyfile: str) -> str:
+    """#565 Part B, read door: a passphrase WAS given and the key did not open with it.
+
+    A distinct answer from "no passphrase configured" (#572's shape: name the key, say
+    what failed, point at the doc). OpenSSL's own text here is the bare ``PEM lib`` line,
+    which names neither the file nor the cause, so it is carried as the underlying error
+    rather than as the headline.
+    """
+    return (
+        f"failed to decrypt the admin client key at {keyfile!r} with the provided "
+        "passphrase. Nothing was sent.\n"
+        "Reference: docs/cert-rotation-runbook.md (certificate rotation and key locations)."
+    )
+
+
+def _admin_key_password_callback(keyfile: str, offered: dict[str, bool]) -> Callable[[], bytes]:
+    """The passphrase door ``load_cert_chain`` knocks on for an ADMIN client key (#565 Part B).
+
+    OpenSSL invokes it ONLY when the key file really is encrypted, which is what makes a
+    plaintext pair load exactly as it did before this change — no branch, no probe, no
+    rewrite of the file. The passphrase is read through ``_admin_ca_passphrase_or_none()``,
+    the ONE predicate the admin writers already use (#554's shared-helper law), so a
+    blankness rule can never land on the write side and miss the read side; it is imported
+    at call time because ``commands.py`` imports this module.
+
+    Args:
+        keyfile: the key this dial presents, named in every refusal.
+        offered: mutated to ``{"supplied": True}`` when a passphrase actually reached
+            OpenSSL. The caller reads it back to tell "wrong passphrase" apart from
+            "nothing configured" — the two refusals must not collapse into one.
+    """
+
+    def _password() -> bytes:
+        from .commands import _admin_ca_passphrase_or_none
+
+        passphrase = _admin_ca_passphrase_or_none()
+        if passphrase is None:
+            raise APIClientError(_admin_key_no_passphrase_refusal(keyfile))
+        offered["supplied"] = True
+        return passphrase.encode("utf-8")
+
+    return _password
+
+
+def _configured_passphrase_opens(keyfile: str) -> bool:
+    """True when the configured passphrase opens this key file ON ITS OWN.
+
+    Asked only AFTER ``load_cert_chain`` has already failed, because OpenSSL's text for "the
+    passphrase did not open the key" and for "this certificate and this key are not a pair"
+    is the same bare ``PEM lib`` line — guessing from that string would send an operator to
+    the wrong file. The key is opened in memory and discarded: no plaintext is written, and
+    no passphrase is ever printed.
+    """
+    from cryptography.hazmat.primitives import serialization
+
+    from .commands import _admin_ca_passphrase_or_none
+
+    passphrase = _admin_ca_passphrase_or_none()
+    if passphrase is None:
+        return False
+    try:
+        data = Path(keyfile).read_bytes()
+    except OSError:
+        return False
+    try:
+        serialization.load_pem_private_key(data, password=passphrase.encode("utf-8"))
+    except (ValueError, TypeError, OSError):
+        return False
+    return True
+
+
 def _build_ssl_context(
     cafile: str | None,
     certfile: str | None,
@@ -237,13 +329,14 @@ def _build_ssl_context(
     ``key_password`` (#565) is an OPTIONAL callback handed to
     ``SSLContext.load_cert_chain`` for a client key stored in the encrypted
     at-rest envelope. OpenSSL invokes it only when the key file really is
-    encrypted, so passing None — the admin path today, and every existing
-    caller — behaves exactly as before: a plaintext key loads, an encrypted one
-    raises. The executor commands pass the callback because their
-    ``executor.key`` is now written encrypted by the same product that reads it
-    (``venya_cli/executor_key.py``); the admin pair stays passphrase-blind, a
-    known gap pinned by cell N4 of ``test_cli_admin_leaf_key_passphrase_547a.py``
-    and owned by Part B, not widened or closed here.
+    encrypted, so a plaintext key loads either way. The executor commands pass
+    their own callback (``venya_cli/executor_key.py``); the ADMIN pair used to
+    arrive with none, which is the gap #565 Part B closed — when a caller hands
+    over a cert/key pair and NO callback, this builder supplies
+    ``_admin_key_password_callback()``, which reads the passphrase from
+    ``VENYA_ADMIN_CA_KEY_PASSPHRASE`` through the same predicate the writers use
+    and refuses by name when it is absent. Every CA-only caller (``certfile=None``)
+    is untouched.
 
     Ticket cli-admin-mtls-verify-cert-conflict (option (a)): httpx2 >= 2.12
     rejects `cert=` combined with a string `verify` — the natural admin flow
@@ -283,9 +376,18 @@ def _build_ssl_context(
             f"to a valid bundle. Underlying OpenSSL error: {e}"
         ) from e
     if certfile and keyfile:
+        offered: dict[str, bool] = {}
+        password = key_password or _admin_key_password_callback(keyfile, offered)
         try:
-            ctx.load_cert_chain(certfile=certfile, keyfile=keyfile, password=key_password)
+            ctx.load_cert_chain(certfile=certfile, keyfile=keyfile, password=password)
         except (ssl.SSLError, OSError) as e:
+            # A passphrase that reached OpenSSL and still left the load failing is a WRONG
+            # passphrase — but only if the key itself opens with it. A cert/key that are not
+            # a pair fails the same way with a correct passphrase, and that is the pair-load
+            # answer, not a passphrase answer (asked of the key alone, because OpenSSL's own
+            # text cannot tell the two apart).
+            if key_password is None and offered.get("supplied") and not _configured_passphrase_opens(keyfile):
+                raise APIClientError(_admin_key_decrypt_refusal(keyfile)) from e
             raise APIClientError(
                 f"Failed to load the admin mTLS client cert/key pair " f"({certfile!r} / {keyfile!r}): {e}"
             ) from e

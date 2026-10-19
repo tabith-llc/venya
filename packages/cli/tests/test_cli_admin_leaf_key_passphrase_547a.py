@@ -15,12 +15,11 @@ refusal lands before ANY filesystem work, so a passphrase-less invocation create
 directory and no file.
 
 **And this file records the consequence rather than hiding it.** Part A is the write
-side only. `api_client.py` has no `password=` handling at all: it hands the TLS layer a
-bare cert/key path pair, and OpenSSL is never given a passphrase. So a key written by
-these commands is encrypted at rest and **not loadable for admin mTLS by this CLI yet**
-— that read-side work is Part B, and it is not this leg's to solve. Cell N4 proves the
-gap at the real path (`_build_ssl_context`), because a suite that only asserts "the
-bytes say ENCRYPTED" would let the next reader assume the credential works.
+side only. At the time these cells were written `api_client.py` had no `password=` handling
+for the ADMIN pair: a key written here was encrypted at rest and not loadable for admin
+mTLS. Cell N4 proved that gap at the real builder — and #565 Part B closed it, so N4 now
+proves the opposite shape (the same call LOADS, and still refuses by name when no
+passphrase is configured). The handshake proof lives in `test_admin_key_load_565_partb.py`.
 
 The wording is part of the deliverable: both the refusal and the success readout state
 the fact, so an operator is never surprised twice.
@@ -216,7 +215,7 @@ class TestPositiveWritesEncrypted:
         # the fact is stated in the SUCCESS output too, not only in a refusal (§3.3)
         out_text = capsys.readouterr().out
         assert "encrypted at rest with VENYA_ADMIN_CA_KEY_PASSPHRASE" in out_text
-        assert "Not yet usable for admin mTLS" in out_text
+        assert "Admin mTLS:      the CLI opens this key with that variable" in out_text
         # and no key material leaked
         assert "PRIVATE KEY" not in out_text.replace("ENCRYPTED PRIVATE KEY", "")
 
@@ -241,7 +240,7 @@ class TestPositiveWritesEncrypted:
         self._assert_encrypted_key(kp, kp.parent)
         out_text = capsys.readouterr().out
         assert "encrypted at rest with VENYA_ADMIN_CA_KEY_PASSPHRASE" in out_text
-        assert "Not yet usable for admin mTLS" in out_text
+        assert "Admin mTLS:      the CLI opens this key with that variable" in out_text
 
     def test_p2b_renew_refuses_before_any_write_when_the_passphrase_is_missing(self, tmp_path, capsys):
         """The ordering that protects the operator: no ceremony, no mint, no file touched."""
@@ -327,42 +326,57 @@ class TestRefusalOrdering:
         assert "venya admin init-admin-ca" in err
 
 
-class TestThePartBGapIsVisible:
-    """N4 — the cell that keeps the next reader honest.
+class TestThePartBReadSide:
+    """N4 — flipped by #565 Part B, and the flip is recorded here rather than papered over.
 
-    A key written by P1 is encrypted at rest, and the CLI's admin mTLS path hands
-    OpenSSL a cert/key file pair with NO passphrase callback it can answer. So that key
-    is not loadable for mTLS today. Asserted at the real builder, not paraphrased.
+    This class used to prove the GAP: a key written by P1 was encrypted at rest and the
+    admin mTLS path handed OpenSSL no passphrase, so the key was not loadable. Part B
+    installed the passphrase callback in `_build_ssl_context`, so the same call now LOADS.
+    The two halves kept below are the ones that stay true: the bytes really are encrypted,
+    and the refusal when no passphrase is configured names the variable.
     """
 
-    def test_n4_a_key_written_by_p1_is_not_loadable_by_the_current_mtls_path(self, tmp_path):
+    def test_n4_a_key_written_by_p1_loads_at_the_mtls_path(self, tmp_path):
         ca_dir = _admin_ca(tmp_path)
         out = tmp_path / "leaf"
         assert cmd_admin_generate_admin_cert(_generate_args(ca_dir, out)) == 0
         cert_path, key_path = out / "admin.crt", out / "admin.key"
+        # still encrypted — Part B did not relax the write side to make the read work
+        assert key_path.read_bytes().split(b"\n", 1)[0] == b"-----BEGIN ENCRYPTED PRIVATE KEY-----"
 
-        # The exact call the dial seam makes (`api_client.py`, `_http` build branch).
+        # The exact call the dial seam makes (`api_client.py`, `_http` build branch), with
+        # the passphrase configured: it BUILDS. The handshake half lives in
+        # tests/test_admin_key_load_565_partb.py, which proves presentation at a real server.
+        assert _build_ssl_context(cafile=str(cert_path), certfile=str(cert_path), keyfile=str(key_path))
+
+    def test_n4b_the_same_key_still_refuses_without_a_passphrase(self, tmp_path, monkeypatch):
+        """The negative half of the cell above: no plaintext fallback, and a refusal BY NAME."""
+        ca_dir = _admin_ca(tmp_path)
+        out = tmp_path / "leaf"
+        assert cmd_admin_generate_admin_cert(_generate_args(ca_dir, out)) == 0
+        cert_path, key_path = out / "admin.crt", out / "admin.key"
+        monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
         with pytest.raises(APIClientError) as excinfo:
             _build_ssl_context(cafile=str(cert_path), certfile=str(cert_path), keyfile=str(key_path))
         msg = str(excinfo.value)
-        assert "Failed to load the admin mTLS client cert/key pair" in msg
-        # ...and the reason is the encryption, not a broken file: the same key loads
-        # fine when a passphrase is supplied, which is precisely what Part B must add.
-        assert serialization.load_pem_private_key(key_path.read_bytes(), password=LEAF_PASSPHRASE.encode())
+        assert "REFUSED" in msg and "no passphrase is" in msg, msg
+        assert "VENYA_ADMIN_CA_KEY_PASSPHRASE" in msg
 
-    def test_the_refusal_and_the_success_output_both_state_the_gap(self, tmp_path, capsys):
-        """§3.3: the wording is the bridge between Part A and Part B."""
+    def test_the_refusal_and_the_success_output_both_state_the_pairing(self, tmp_path, capsys, monkeypatch):
+        """§3.3: the wording is the bridge between Part A and Part B — and after Part B it
+        states the PAIRING (write encrypted, read with the same variable), not a gap."""
         ca_dir = _admin_ca(tmp_path)
-        os.environ.pop("VENYA_ADMIN_CA_KEY_PASSPHRASE", None)
+        monkeypatch.delenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", raising=False)
         assert cmd_admin_generate_admin_cert(_generate_args(ca_dir, tmp_path / "a")) == 1
         refusal = capsys.readouterr().err
-        assert "cannot yet load an encrypted admin key for admin mTLS" in refusal
+        assert "the CLI opens" in refusal
+        assert "cannot yet load an encrypted admin key" not in refusal
 
-        os.environ["VENYA_ADMIN_CA_KEY_PASSPHRASE"] = LEAF_PASSPHRASE
+        monkeypatch.setenv("VENYA_ADMIN_CA_KEY_PASSPHRASE", LEAF_PASSPHRASE)
         assert cmd_admin_generate_admin_cert(_generate_args(ca_dir, tmp_path / "b")) == 0
         success = capsys.readouterr().out
         assert "encrypted at rest with VENYA_ADMIN_CA_KEY_PASSPHRASE" in success
-        assert "Not yet usable for admin mTLS" in success
+        assert "Admin mTLS:      the CLI opens this key with that variable at dial time" in success
 
     def test_the_wording_carries_no_severity_language(self, tmp_path, capsys):
         """ALPHA-tone discipline on operator-facing text: state the mechanism, not a
