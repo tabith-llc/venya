@@ -1304,17 +1304,39 @@ def cmd_admin_issue_token(client: APIClient, args: Any) -> int:
 
 
 def cmd_admin_revoke_token(client: APIClient, args: Any) -> int:
-    """Revoke a single enrollment token."""
+    """Revoke a single user enrollment token.
+
+    #666: success is reported only when the core CONFIRMS a row was revoked. The route
+    answers 200 with ``revoked: false`` for any id it did not touch — an unknown id, one
+    already used or revoked, or an id that names the separate executor enrollment-token
+    table — so here transport success is not semantic success and the body decides.
+    """
     try:
-        client.delete(f"/api/v1/admin/enrollment-tokens/{args.token_id}")
-        print(f"Token '{args.token_id}' revoked.")
-        return 0
+        result = client.delete(f"/api/v1/admin/enrollment-tokens/{args.token_id}")
     except APIClientError as e:
         print(f"Revoke token failed: {e}", file=sys.stderr)
         return 1
     except Exception as e:
         print(f"Revoke token failed: {e}", file=sys.stderr)
         return 1
+
+    if result.get("revoked") is True:
+        # Names the plane, not just the id: user and executor enrollment tokens are different
+        # tables with independent integer id sequences, so the same number can name a row in
+        # each, and this verb only ever acts on the user one.
+        print(f"User enrollment token '{args.token_id}' revoked.")
+        return 0
+
+    print(
+        f"Nothing was revoked: the core did not confirm revocation of user enrollment token '{args.token_id}'.",
+        file=sys.stderr,
+    )
+    print(
+        "  The id may be unknown, already used or revoked, or belong to the executor enrollment-token table. "
+        "Executor enrollment tokens have no revoke command; they expire at their TTL.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def cmd_admin_re_enroll(client: APIClient, args: Any) -> int:
